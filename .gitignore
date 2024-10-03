@@ -7,6 +7,11 @@ build/
 __pycache__/
 temp/
 
+# Ignore repositories
+mbox-audio/
+mbox-video/
+mbox-uber/
+
 # Ignore specific files
 .DS_Store
 test*.*
