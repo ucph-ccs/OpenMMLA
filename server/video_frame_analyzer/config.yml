@@ -1,0 +1,35 @@
+AprilTag:
+  tag_size: 0.061
+  families: tag36h11
+
+Camera:
+  res_width: 1920
+  res_height: 1080
+
+VideoFrameAnalyzer:
+  backend: ollama
+  top_p: 0.1
+  temperature: 0
+  ollama:
+    api_key: ollama
+    vlm_base_url: "http://localhost:11434/v1"
+    llm_base_url: "http://localhost:11434/v1"
+    vlm_model: "llava:13b"
+    llm_model: llama3.1
+    VLMExtraBody: {}
+    LLMExtraBody: {}
+  vllm:
+    api_key: token-abc123
+    vlm_base_url: "http://localhost:8000/v1"
+    llm_base_url: "http://localhost:8001/v1"
+    vlm_model: openbmb/MiniCPM-V-2_6
+    llm_model: microsoft/Phi-3-small-128k-instruct
+    VLMExtraBody:
+      stop_token_ids: [151645, 151643]
+    LLMExtraBody: {}
+  defined_actions:
+    Reading: "when a person is directly looking at and focusing on written or digital text, such as in a book, a printed document, or on a computer screen. This does not include times when they are using a writing instrument or mobile phone."
+    Communicating: "when a person speaking or listening, with their body and face oriented towards one or more individuals, displaying expressive gestures and facial interactions that signify active engagement."
+    Writing: "when a person is composing or editing text. This includes handwriting with a pen on paper or typing on a keyboard. This action is focused on text generation, not just passive reading or handling of papers."
+    Unfocused: "when a person is engaging with a mobile phone in ways that suggest leisure or distraction, like scrolling through social media, texting, or playing games."
+    Unclear: "you are not confident to categorize them into any of the above action classes."
