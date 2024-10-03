@@ -1,0 +1,16 @@
+# Ignore directories
+venv/
+.idea/
+*.egg-info/
+dist/
+build/
+__pycache__/
+temp/
+
+# Ignore specific files
+.DS_Store
+test*.*
+*test.*
+
+# Unignore specific files
+!.gitkeep

@@ -5,7 +5,7 @@ from openmmla.services.audio import AudioInferer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = os.path.join(project_dir, 'config.ini')
+config_path = os.path.join(project_dir, 'config.yml')
 app = create_app(
     class_type=AudioInferer,
     endpoint='infer',

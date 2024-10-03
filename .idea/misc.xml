@@ -3,7 +3,7 @@
   <component name="Black">
     <option name="sdkName" value="$PROJECT_DIR$/../miniforge3" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="video-server" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="audio-server" project-jdk-type="Python SDK" />
   <component name="PyCharmProfessionalAdvertiser">
     <option name="shown" value="true" />
   </component>

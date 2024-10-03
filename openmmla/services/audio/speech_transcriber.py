@@ -1,4 +1,3 @@
-import configparser
 import gc
 import math
 import os
@@ -6,6 +5,7 @@ import threading
 
 import torch
 import torchaudio
+import yaml
 from denoiser import pretrained
 from denoiser.dsp import convert_audio
 from flask import request, jsonify
@@ -39,8 +39,9 @@ class SpeechTranscriber:
         if not os.path.exists(self.config_path):
             raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
 
-        config = configparser.ConfigParser()
-        config.read(self.config_path)
+        with open(self.config_path, 'r') as config_file:
+            config = yaml.safe_load(config_file)
+
         tr_model = config['SpeechTranscriber']['model']
         language = config['SpeechTranscriber']['language']
 

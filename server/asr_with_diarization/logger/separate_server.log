@@ -1,9 +1,9 @@
-2024-10-03 13:30:32,057 - modelscope - WARNING - Model revision not specified, use revision: v0.9.0
-2024-10-03 13:30:32,589 - modelscope - INFO - loading model...
-2024-10-03 13:30:32,589 - modelscope - INFO - initiate model from /Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
-2024-10-03 13:30:32,589 - modelscope - INFO - initiate model from location /Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k.
-2024-10-03 13:30:32,589 - modelscope - INFO - initialize model from /Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
-2024-10-03 13:30:32,799 - modelscope - WARNING - No preprocessor field found in cfg.
-2024-10-03 13:30:32,799 - modelscope - WARNING - No val key and type key found in preprocessor domain of configuration.json file.
-2024-10-03 13:30:32,799 - modelscope - WARNING - Cannot find available config to build preprocessor at mode inference, current config: {'model_dir': '/Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k'}. trying to build by task and model information.
-2024-10-03 13:30:32,799 - modelscope - WARNING - No preprocessor key ('speech_mossformer2_separation_temporal_8k', 'speech-separation') found in PREPROCESSOR_MAP, skip building preprocessor.
+2024-10-03 23:15:13,344 - modelscope - WARNING - Model revision not specified, use revision: v0.9.0
+2024-10-03 23:15:13,873 - modelscope - INFO - loading model...
+2024-10-03 23:15:13,873 - modelscope - INFO - initiate model from /Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
+2024-10-03 23:15:13,873 - modelscope - INFO - initiate model from location /Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k.
+2024-10-03 23:15:13,875 - modelscope - INFO - initialize model from /Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
+2024-10-03 23:15:14,072 - modelscope - WARNING - No preprocessor field found in cfg.
+2024-10-03 23:15:14,072 - modelscope - WARNING - No val key and type key found in preprocessor domain of configuration.json file.
+2024-10-03 23:15:14,072 - modelscope - WARNING - Cannot find available config to build preprocessor at mode inference, current config: {'model_dir': '/Users/ericli/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k'}. trying to build by task and model information.
+2024-10-03 23:15:14,072 - modelscope - WARNING - No preprocessor key ('speech_mossformer2_separation_temporal_8k', 'speech-separation') found in PREPROCESSOR_MAP, skip building preprocessor.

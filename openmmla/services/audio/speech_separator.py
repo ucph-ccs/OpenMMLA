@@ -1,9 +1,9 @@
 import base64
-import configparser
 import gc
 import os
 
 import torch
+import yaml
 from flask import request, jsonify
 from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
@@ -37,8 +37,9 @@ class SpeechSeparator:
         if not os.path.exists(self.config_path):
             raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
 
-        config = configparser.ConfigParser()
-        config.read(self.config_path)
+        with open(self.config_path, 'r') as config_file:
+            config = yaml.safe_load(config_file)
+
         sp_model = config['SpeechSeparator']['model']
         sp_model_local = config['SpeechSeparator']['model_local']
 

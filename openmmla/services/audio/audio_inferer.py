@@ -1,10 +1,10 @@
-import configparser
 import gc
 import json
 import os
 
 import nemo.collections.asr as nemo_asr
 import torch
+import yaml
 from flask import request, jsonify
 
 from openmmla.utils.audio.processing import write_frames_to_wav
@@ -35,8 +35,9 @@ class AudioInferer:
         if not os.path.exists(self.config_path):
             raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
 
-        config = configparser.ConfigParser()
-        config.read(self.config_path)
+        with open(self.config_path, 'r') as config_file:
+            config = yaml.safe_load(config_file)
+
         self.sr_model = config['AudioInferer']['model']
 
         self.server_logger_dir = os.path.join(project_dir, 'logger')
