@@ -6,6 +6,7 @@ dist/
 build/
 __pycache__/
 temp/
+logger/
 
 # Ignore repositories
 mbox-audio/
