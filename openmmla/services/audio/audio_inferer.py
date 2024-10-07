@@ -1,17 +1,15 @@
 import gc
 import json
-import os
 
 import nemo.collections.asr as nemo_asr
 import torch
-import yaml
 from flask import request, jsonify
 
+from openmmla.services.server import Server
 from openmmla.utils.audio.processing import write_frames_to_wav
-from openmmla.utils.logger import get_logger
 
 
-class AudioInferer:
+class AudioInferer(Server):
     """Audio inferer generates the embeddings from audio signal in latent space. It receives audio signal from
     node base, and sends back the embeddings."""
 
@@ -22,31 +20,10 @@ class AudioInferer:
             project_dir: the project directory.
             use_cuda: whether to use CUDA or not.
         """
-        # Check if the project directory exists
-        if not os.path.exists(project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
-
-        if os.path.isabs(config_path):
-            self.config_path = config_path
-        else:
-            self.config_path = os.path.join(project_dir, config_path)
-
-        # Check if the configuration file exists
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
-
-        with open(self.config_path, 'r') as config_file:
-            config = yaml.safe_load(config_file)
-
-        self.sr_model = config['AudioInferer']['model']
-
-        self.server_logger_dir = os.path.join(project_dir, 'logger')
-        self.server_file_folder = os.path.join(project_dir, 'temp')
-        os.makedirs(self.server_logger_dir, exist_ok=True)
-        os.makedirs(self.server_file_folder, exist_ok=True)
-
-        self.logger = get_logger('titanet', os.path.join(self.server_logger_dir, 'infer_server.log'))
+        super().__init__(project_dir=project_dir, config_path=config_path, use_cuda=use_cuda)
         self.cuda_enable = use_cuda and torch.cuda.is_available()
+
+        self.sr_model = self.config['AudioInferer']['model']
 
         # Initialize titanet model
         if self.cuda_enable:
@@ -56,18 +33,18 @@ class AudioInferer:
                                                                                        map_location='cpu')
         self.infer_model.eval()
 
-    def infer(self):
+    def process_request(self):
         """Perform inference on the audio.
 
         Returns:
-            A tuple containing the JSON response and status code.
+            A tuple containing the JSON response (audio embeddings) and status code.
         """
         if request.files:
             try:
                 base_id = request.values.get('base_id')
                 fr = int(request.values.get('fr'))
                 audio_file = request.files['audio']
-                audio_file_path = os.path.join(self.server_file_folder, f'infer_audio_{base_id}.wav')
+                audio_file_path = self.get_temp_file_path('infer_audio', base_id, 'wav')
                 write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting inference for {base_id}...")

@@ -1,7 +1,6 @@
 import gc
 import io
 import math
-import os
 
 import torch
 import torchaudio
@@ -9,11 +8,11 @@ from denoiser import pretrained
 from denoiser.dsp import convert_audio
 from flask import request, jsonify, send_file
 
+from openmmla.services.server import Server
 from openmmla.utils.audio.processing import write_frames_to_wav
-from openmmla.utils.logger import get_logger
 
 
-class AudioEnhancer:
+class AudioEnhancer(Server):
     """Audio enhancer enhance the audio signal. It receives audio signal from node base and sends back the enhanced
      signal."""
 
@@ -24,17 +23,9 @@ class AudioEnhancer:
             project_dir: the project directory.
             use_cuda: whether to use CUDA or not.
         """
-        # Check if the project directory exists
-        if not os.path.exists(project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
-
-        self.server_logger_dir = os.path.join(project_dir, 'logger')
-        self.server_file_folder = os.path.join(project_dir, 'temp')
-        os.makedirs(self.server_logger_dir, exist_ok=True)
-        os.makedirs(self.server_file_folder, exist_ok=True)
-
-        self.logger = get_logger('denoiser', os.path.join(self.server_logger_dir, 'enhance_server.log'))
+        super().__init__(project_dir=project_dir, use_cuda=use_cuda)
         self.cuda_enable = use_cuda and torch.cuda.is_available()
+
         self.nr_model = pretrained.dns64().cuda() if self.cuda_enable else pretrained.dns64()
 
     def apply_nr(self, input_path: str) -> str:
@@ -77,33 +68,32 @@ class AudioEnhancer:
 
         return input_path
 
-    def enhance_audio(self):
+    def process_request(self):
         """Enhance the audio.
 
         Returns:
-            audio_data: the enhanced audio data.
+            A tuple containing the JSON response (enhanced audio bytes) and status code.
         """
-        try:
-            base_id = request.values.get('base_id')
-            fr = int(request.values.get('fr', 16000))
-            audio_file = request.files['audio']
-            audio_file_path = os.path.join(self.server_file_folder, f'enhance_audio_{base_id}.wav')
-            write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
+        if request.files:
+            try:
+                base_id = request.values.get('base_id')
+                fr = int(request.values.get('fr', 16000))
+                audio_file = request.files['audio']
+                audio_file_path = self.get_temp_file_path('enhance_audio', base_id, 'wav')
+                write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
-            self.logger.info(f"starting enhancement for {base_id}...")
-            self.apply_nr(audio_file_path)
-            self.logger.info(f"finished enhancement for {base_id}.")
+                self.logger.info(f"starting enhancement for {base_id}...")
+                self.apply_nr(audio_file_path)
+                self.logger.info(f"finished enhancement for {base_id}.")
 
-            with open(audio_file_path, 'rb') as f:
-                audio_data = f.read()
-
-            return send_file(
-                io.BytesIO(audio_data),
-                mimetype="audio/wav"
-            )
-        except Exception as e:
-            self.logger.error(f"during enhancement, {e} happens.")
-            return jsonify({"error": str(e)}), 500
-        finally:
-            torch.cuda.empty_cache()
-            gc.collect()
+                with open(audio_file_path, 'rb') as f:
+                    audio_data = f.read()
+                return send_file(io.BytesIO(audio_data), mimetype="audio/wav"), 200
+            except Exception as e:
+                self.logger.error(f"during enhancement, {e} happens.")
+                return jsonify({"error": str(e)}), 500
+            finally:
+                torch.cuda.empty_cache()
+                gc.collect()
+        else:
+            return jsonify({"error": "No audio file provided"}), 400

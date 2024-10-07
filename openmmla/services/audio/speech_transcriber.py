@@ -1,57 +1,25 @@
 import gc
 import math
-import os
 import threading
 
 import torch
 import torchaudio
-import yaml
 from denoiser import pretrained
 from denoiser.dsp import convert_audio
 from flask import request, jsonify
 
+from openmmla.services.server import Server
 from openmmla.utils.audio.processing import write_frames_to_wav, normalize_rms
 from openmmla.utils.audio.transcriber import Transcriber
-from openmmla.utils.logger import get_logger
 
 
-class SpeechTranscriber:
-    """Speech transcriber transcribe the audio signal into speech. It receives audio signal from base station and sends
-     back transcription text"""
-
+class SpeechTranscriber(Server):
     def __init__(self, project_dir, config_path, use_cuda=True):
-        """Initialize the speech transcriber.
-
-        Args:
-            project_dir: the project directory.
-            use_cuda: whether to use CUDA or not.
-        """
-        # Check if the project directory exists
-        if not os.path.exists(project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
-
-        if os.path.isabs(config_path):
-            self.config_path = config_path
-        else:
-            self.config_path = os.path.join(project_dir, config_path)
-
-        # Check if the configuration file exists
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
-
-        with open(self.config_path, 'r') as config_file:
-            config = yaml.safe_load(config_file)
-
-        tr_model = config['SpeechTranscriber']['model']
-        language = config['SpeechTranscriber']['language']
-
-        self.server_logger_dir = os.path.join(project_dir, 'logger')
-        self.server_file_folder = os.path.join(project_dir, 'temp')
-        os.makedirs(self.server_logger_dir, exist_ok=True)
-        os.makedirs(self.server_file_folder, exist_ok=True)
-
-        self.logger = get_logger('whisper', os.path.join(self.server_logger_dir, 'transcribe_server.log'))
+        super().__init__(project_dir=project_dir, config_path=config_path, use_cuda=use_cuda)
         self.cuda_enable = use_cuda and torch.cuda.is_available()
+
+        tr_model = self.config['SpeechTranscriber']['model']
+        language = self.config['SpeechTranscriber']['language']
 
         # Initialize denoiser and transcriber
         self.nr_model = pretrained.dns64().cuda() if self.cuda_enable else pretrained.dns64()
@@ -96,18 +64,18 @@ class SpeechTranscriber:
             gc.collect()
         return input_path
 
-    def transcribe_audio(self):
+    def process_request(self):
         """Transcribe the audio.
 
         Returns:
-            A tuple containing the JSON response and status code.
+            A tuple containing the JSON response (transcribed text) and status code.
         """
         try:
             with self.transcriber_lock:  # Acquire lock
                 base_id = request.values.get('base_id')
                 fr = int(request.values.get('fr', 16000))
                 audio_file = request.files['audio']
-                audio_file_path = os.path.join(self.server_file_folder, f'transcribe_audio_{base_id}.wav')
+                audio_file_path = self.get_temp_file_path('transcribe_audio', base_id, 'wav')
                 write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting transcribe for {base_id}...")

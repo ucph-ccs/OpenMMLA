@@ -1,49 +1,29 @@
-import os
 import re
-import yaml
 
 from flask import request, jsonify
 from openai import OpenAI
 from pupil_apriltags import Detector
 
-from openmmla.utils.logger import get_logger
+from openmmla.services.server import Server
 from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.image import encode_image_base64
 
 
-class VideoFrameAnalyzer:
+class VideoFrameAnalyzer(Server):
     """Video frame analyzer receives images, processes them with VLM and LLM, and returns the results."""
 
     def __init__(self, project_dir, config_path):
-        """Initialize the video frame analyzer.
-        Args:
-            project_dir: the project directory.
-        """
-        # Check if the project directory exists
-        if not os.path.exists(project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
+        super().__init__(project_dir=project_dir, config_path=config_path)
 
-        if os.path.isabs(config_path):
-            self.config_path = config_path
-        else:
-            self.config_path = os.path.join(project_dir, config_path)
-
-        # Check if the configuration file exists
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
-
-        with open(self.config_path, 'r') as config_file:
-            config = yaml.safe_load(config_file)
-
-        self.families = config['AprilTag']['families']
-        self.backend = config['VideoFrameAnalyzer']['backend']
-        self.top_p = float(config['VideoFrameAnalyzer']['top_p'])
-        self.temperature = float(config['VideoFrameAnalyzer']['temperature'])
+        self.families = self.config['AprilTag']['families']
+        self.backend = self.config['VideoFrameAnalyzer']['backend']
+        self.top_p = float(self.config['VideoFrameAnalyzer']['top_p'])
+        self.temperature = float(self.config['VideoFrameAnalyzer']['temperature'])
 
         if self.backend == 'ollama':
-            backend_config = config['VideoFrameAnalyzer']['ollama']
+            backend_config = self.config['VideoFrameAnalyzer']['ollama']
         elif self.backend == 'vllm':
-            backend_config = config['VideoFrameAnalyzer']['vllm']
+            backend_config = self.config['VideoFrameAnalyzer']['vllm']
         else:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
@@ -52,14 +32,6 @@ class VideoFrameAnalyzer:
         self.llm_base_url = backend_config['llm_base_url']
         self.vlm_model = backend_config['vlm_model']
         self.llm_model = backend_config['llm_model']
-
-        self.server_logger_dir = os.path.join(project_dir, 'logger')
-        self.server_file_folder = os.path.join(project_dir, 'temp')
-        os.makedirs(self.server_logger_dir, exist_ok=True)
-        os.makedirs(self.server_file_folder, exist_ok=True)
-
-        self.logger = get_logger('VideoFrameAnalyzer',
-                                 os.path.join(self.server_logger_dir, 'video_frame_analyzer_server.log'))
 
         self.detector = Detector(families=self.families, nthreads=4)
 
@@ -74,18 +46,15 @@ class VideoFrameAnalyzer:
         )
 
         # Load action definitions from config
-        self.action_definitions = '\n'.join([f"'{key}': {value}" for key, value in config['VideoFrameAnalyzer']['defined_actions'].items()])
+        self.action_definitions = '\n'.join(
+            [f"'{key}': {value}" for key, value in self.config['VideoFrameAnalyzer']['defined_actions'].items()])
 
         # Load VLM extra body from config
         self.vlm_extra_body = backend_config.get('VLMExtraBody', {})
         self.llm_extra_body = backend_config.get('LLMExtraBody', {})
 
-    def process_image(self):
-        """Process the image.
-
-        Returns:
-            A tuple containing the response and status code.
-        """
+    def process_request(self):
+        """Process the image."""
         if 'image' not in request.files:
             return jsonify({'error': 'No image file provided'}), 400
 

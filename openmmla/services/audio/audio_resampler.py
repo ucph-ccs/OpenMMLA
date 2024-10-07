@@ -1,14 +1,13 @@
 import gc
 import io
-import os
 
 from flask import request, jsonify, send_file
 
+from openmmla.services.server import Server
 from openmmla.utils.audio.processing import resample, write_frames_to_wav
-from openmmla.utils.logger import get_logger
 
 
-class AudioResampler:
+class AudioResampler(Server):
     """Audio resampler receives audio signals from audio base stations, and then resample them and send it back."""
 
     def __init__(self, project_dir):
@@ -17,22 +16,13 @@ class AudioResampler:
         Args:
             project_dir: the project directory.
         """
-        # Check if the project directory exists
-        if not os.path.exists(project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
+        super().__init__(project_dir=project_dir)
 
-        self.server_logger_dir = os.path.join(project_dir, 'logger')
-        self.server_file_folder = os.path.join(project_dir, 'temp')
-        os.makedirs(self.server_logger_dir, exist_ok=True)
-        os.makedirs(self.server_file_folder, exist_ok=True)
-
-        self.logger = get_logger('resampler', os.path.join(self.server_logger_dir, 'resample_server.log'))
-
-    def resample_audio(self):
+    def process_request(self):
         """Resample the audio.
 
         Returns:
-            A tuple containing the response and status code.
+            A tuple containing the response (resample audio bytes) and status code.
         """
         if request.files:
             try:
@@ -40,7 +30,7 @@ class AudioResampler:
                 fr = int(request.values.get('fr'))
                 target_fr = int(request.values.get('target_fr'))
                 audio_file = request.files['audio']
-                audio_file_path = os.path.join(self.server_file_folder, f'resample_audio_{base_id}.wav')
+                audio_file_path = self.get_temp_file_path('resample_audio', base_id, 'wav')
                 write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting resampling for {base_id}...")
