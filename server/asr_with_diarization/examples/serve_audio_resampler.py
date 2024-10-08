@@ -8,7 +8,7 @@ project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 app = create_app(
     class_type=AudioResampler,
     endpoint='resample',
-    method_name='resample_audio',
+    method_name='process_request',
     class_args={'project_dir': project_dir},
 )
 

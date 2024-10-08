@@ -30,7 +30,7 @@ def process_image(image_path, server_url="http://localhost:5000/process"):
 def main():
     # Example usage
     # image_path = "path/to/your/image.jpg"
-    image_path = "../../../mbox-video/data/llm_test/1.jpg"
+    image_path = "1.jpg"
 
     try:
         results = process_image(image_path)

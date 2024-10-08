@@ -10,7 +10,7 @@ config_path = os.path.join(project_dir, 'config.yml')
 app = create_app(
     class_type=VideoFrameAnalyzer,
     endpoint='process',
-    method_name='process_image',
+    method_name='process_request',
     class_args={'project_dir': project_dir, 'config_path': config_path},
 )
 
