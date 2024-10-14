@@ -30,7 +30,7 @@ class AudioResampler(Server):
                 fr = int(request.values.get('fr'))
                 target_fr = int(request.values.get('target_fr'))
                 audio_file = request.files['audio']
-                audio_file_path = self.get_temp_file_path('resample_audio', base_id, 'wav')
+                audio_file_path = self._get_temp_file_path('resample_audio', base_id, 'wav')
                 write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting resampling for {base_id}...")

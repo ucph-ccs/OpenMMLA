@@ -45,7 +45,7 @@ class SpeechSeparator(Server):
             try:
                 base_id = request.values.get('base_id')
                 audio_file = request.files['audio']
-                audio_file_path = self.get_temp_file_path('separate_audio', base_id, 'wav')
+                audio_file_path = self._get_temp_file_path('separate_audio', base_id, 'wav')
                 write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, 8000)
 
                 result = self.separation_model(audio_file_path)

@@ -38,28 +38,31 @@ class VoiceActivityDetector(Server):
         Returns:
             A tuple containing the response and status code.
         """
-        try:
-            base_id = request.values.get('base_id')
-            fr = int(request.values.get('fr', 16000))
-            inplace = int(request.values.get('inplace', 0))
-            audio_file = request.files['audio']
-            audio_file_path = self.get_temp_file_path('vad_audio', base_id, 'wav')
-            write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
+        if request.files:
+            try:
+                base_id = request.values.get('base_id')
+                fr = int(request.values.get('fr', 16000))
+                inplace = int(request.values.get('inplace', 0))
+                audio_file = request.files['audio']
+                audio_file_path = self._get_temp_file_path('vad_audio', base_id, 'wav')
+                write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
-            self.logger.info(f"starting VAD for {base_id}...")
-            result = self.apply_vad(audio_file_path, fr, inplace)
-            self.logger.info(f"finished VAD for {base_id}.")
+                self.logger.info(f"starting VAD for {base_id}...")
+                result = self.apply_vad(audio_file_path, fr, inplace)
+                self.logger.info(f"finished VAD for {base_id}.")
 
-            if inplace and result:
-                with open(result, 'rb') as f:
-                    audio_data = f.read()
-                return send_file(io.BytesIO(audio_data), mimetype="audio/wav"), 200
-            else:
-                # For cases where inplace is False or speech timestamps are not detected
-                return jsonify({"result": result or "None"}), 200
-        except Exception as e:
-            self.logger.error(f"during voice activity detector, {e} happens.")
-            return jsonify({"error": str(e)}), 500
-        finally:
-            torch.cuda.empty_cache()
-            gc.collect()
+                if inplace and result:
+                    with open(result, 'rb') as f:
+                        audio_data = f.read()
+                    return send_file(io.BytesIO(audio_data), mimetype="audio/wav"), 200
+                else:
+                    # For cases where inplace is False or speech timestamps are not detected
+                    return jsonify({"result": result or "None"}), 200
+            except Exception as e:
+                self.logger.error(f"during voice activity detector, {e} happens.")
+                return jsonify({"error": str(e)}), 500
+            finally:
+                torch.cuda.empty_cache()
+                gc.collect()
+        else:
+            return jsonify({"error": "No audio file provided"}), 400

@@ -8,11 +8,10 @@ import time
 import numpy as np
 import soundfile as sf
 
-from openmmla.bases.audio.asr_with_diarization.inputs import get_mode, get_bucket_name, get_name
+from openmmla.bases.asr_with_diarization.inputs import get_mode, get_bucket_name, get_name
 from openmmla.utils.audio.auga import normalize_rms, apply_gain
 from openmmla.utils.audio.processing import get_energy_level, read_frames_from_wav, write_frames_to_wav, \
-    calculate_audio_duration, \
-    resample
+    calculate_audio_duration, resample
 from openmmla.utils.errors import RecordingError, RecognizingError
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sockets import read_frames_tcp, clear_socket_udp, read_frames_udp
@@ -58,16 +57,14 @@ class BadgeAudioBase(AudioBase):
     def base_type(self):
         return 'Badge'
 
-    def _load_config(self):
-        """Load the configuration file."""
-        super()._load_config()
+    def _setup_from_yaml(self):
+        super()._setup_from_yaml()
         self.listening_ip = self.config[self.base_type]['listening_ip']
         self.protocol = self.config[self.base_type]['protocol']
         self.port_offset = int(self.config[self.base_type]['port_offset'])
 
-    def _config_from_user(self):
-        """Configure the badge audio base based on user input."""
-        super()._config_from_user()
+    def _setup_from_input(self):
+        super()._setup_from_input()
         self.port = self.id + self.port_offset
 
     def _register_profile(self):
@@ -175,8 +172,8 @@ class BadgeAudioBase(AudioBase):
 
     def _reset(self):
         """Set the new port for the audio base and reinitialize audio base."""
-        self.__init__(config_path=self.config_path, mode=self.mode, vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp,
-                      store=self.store)
+        self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode, vad=self.vad,
+                      nr=self.nr, tr=self.tr, sp=self.sp, store=self.store)
         self.logger.info(f"Audio DB reset to {self.audio_db}")
         gc.collect()
 

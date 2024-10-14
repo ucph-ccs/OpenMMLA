@@ -70,25 +70,28 @@ class SpeechTranscriber(Server):
         Returns:
             A tuple containing the JSON response (transcribed text) and status code.
         """
-        try:
-            with self.transcriber_lock:  # Acquire lock
-                base_id = request.values.get('base_id')
-                fr = int(request.values.get('fr', 16000))
-                audio_file = request.files['audio']
-                audio_file_path = self.get_temp_file_path('transcribe_audio', base_id, 'wav')
-                write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
+        if request.files:
+            try:
+                with self.transcriber_lock:  # Acquire lock
+                    base_id = request.values.get('base_id')
+                    fr = int(request.values.get('fr', 16000))
+                    audio_file = request.files['audio']
+                    audio_file_path = self._get_temp_file_path('transcribe_audio', base_id, 'wav')
+                    write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
-                self.logger.info(f"starting transcribe for {base_id}...")
-                if fr == 16000:
-                    self.apply_nr(audio_file_path)
-                normalize_rms(infile=audio_file_path, rms_level=-20)
-                text = self.transcriber.transcribe(audio_file_path)
-                self.logger.info(f"finished transcribe for {base_id}.")
+                    self.logger.info(f"starting transcribe for {base_id}...")
+                    if fr == 16000:
+                        self.apply_nr(audio_file_path)
+                    normalize_rms(infile=audio_file_path, rms_level=-20)
+                    text = self.transcriber.transcribe(audio_file_path)
+                    self.logger.info(f"finished transcribe for {base_id}.")
 
-            return jsonify({"text": text}), 200
-        except Exception as e:
-            self.logger.error(f"during transcribing, {e} happens.")
-            return jsonify({"error": str(e)}), 500
-        finally:
-            torch.cuda.empty_cache()
-            gc.collect()
+                return jsonify({"text": text}), 200
+            except Exception as e:
+                self.logger.error(f"during transcribing, {e} happens.")
+                return jsonify({"error": str(e)}), 500
+            finally:
+                torch.cuda.empty_cache()
+                gc.collect()
+        else:
+            return jsonify({"error": "No audio file provided"}), 400

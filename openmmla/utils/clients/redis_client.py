@@ -1,4 +1,4 @@
-import configparser
+import yaml
 
 import redis
 
@@ -8,9 +8,7 @@ class RedisClientWrapper(redis.Redis):
 
     def __init__(self, config_path):
         """Initialize Redis client with configurations"""
-        config = configparser.ConfigParser()
-        config.read(config_path)
-
+        config = yaml.safe_load(open(config_path, 'r'))
         super().__init__(
             host=config['Redis']['redis_host'],
             port=int(config['Redis']['redis_port']),

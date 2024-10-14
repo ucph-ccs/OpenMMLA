@@ -1,4 +1,4 @@
-import configparser
+import yaml
 
 import influxdb_client
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -9,9 +9,7 @@ class InfluxDBClientWrapper(influxdb_client.InfluxDBClient):
 
     def __init__(self, config_path):
         """Initialize InfluxDB client with configurations"""
-        config = configparser.ConfigParser()
-        config.read(config_path)
-
+        config = yaml.safe_load(open(config_path, 'r'))
         super().__init__(url=config['InfluxDB']['url'], token=config['InfluxDB']['token'],
                          org=config['InfluxDB']['org'])
 

@@ -1,5 +1,4 @@
-import configparser
-import inspect
+import json
 import json
 import logging
 import os
@@ -13,8 +12,9 @@ from tqdm import tqdm
 
 from openmmla.analytics.audio.analyze import plot_speaking_interaction_network, plot_speaker_diarization_interactive
 from openmmla.analytics.audio.text_processing import convert_transcription_json_to_txt
-from openmmla.bases.audio.asr_with_diarization.audio_recognizer import AudioRecognizer
-from openmmla.bases.audio.asr_with_diarization.audio_recorder import AudioRecorder
+from openmmla.bases import Base
+from openmmla.bases.asr_with_diarization.audio_recognizer import AudioRecognizer
+from openmmla.bases.asr_with_diarization.audio_recorder import AudioRecorder
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import format_wav, get_audio_properties, segment_wav, crop_and_concatenate_wav, \
     resample
@@ -22,7 +22,7 @@ from openmmla.utils.audio.transcriber import Transcriber
 from openmmla.utils.logger import get_logger
 
 
-class AudioPostAnalyzer:
+class AudioPostAnalyzer(Base):
     logger = get_logger('audio-post-analyzer')
 
     def __init__(self, project_dir: str = None, config_path: str = None, filename: str = None, vad: bool = True,
@@ -40,30 +40,7 @@ class AudioPostAnalyzer:
             sp: whether to use the separation model or not, default to True
             tr: whether to transcribe the audio segments or not, default to True
         """
-        # Set the project root directory
-        if project_dir is None:
-            caller_frame = inspect.stack()[1]
-            caller_module = inspect.getmodule(caller_frame[0])
-            if caller_module is None:
-                self.project_dir = os.getcwd()
-            else:
-                self.project_dir = os.path.dirname(os.path.abspath(caller_module.__file__))
-        else:
-            self.project_dir = project_dir
-
-        # Determine the configuration path
-        if config_path:
-            if os.path.isabs(config_path):
-                self.config_path = config_path
-            else:
-                self.config_path = os.path.join(self.project_dir, config_path)
-        else:
-            self.config_path = os.path.join(self.project_dir, 'conf/audio_base.ini')
-
-        # Check if the configuration file exists
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
-
+        super().__init__(project_dir, config_path)
         self.filename = filename
         self.vad = vad
         self.nr = nr
@@ -96,34 +73,8 @@ class AudioPostAnalyzer:
             raise ValueError("You must specify an audio file to process or place it under the audio/post-time/origin "
                              "folder.")
 
-        config = configparser.ConfigParser()
-        config.read(self.config_path)
-        self.frame_rate = int(config['PostAnalyzer']['frame_rate'])
-        self.channels = int(config['PostAnalyzer']['channels'])
-        self.sample_width = int(config['PostAnalyzer']['sample_width'])
-        self.segment_duration = int(config['PostAnalyzer']['segment_duration'])
-        self.threshold = float(config['PostAnalyzer']['threshold'])
-        self.keep_threshold = float(config['PostAnalyzer']['keep_threshold'])
-        self.sr_model = config['PostAnalyzer']['sr_model']
-        self.language = config['PostAnalyzer']['language']
-
-        if self.tr:
-            self.transcriber = Transcriber(config['PostAnalyzer']['tr_model'], language=self.language, use_cuda=False)
-        if self.sp:
-            from modelscope.pipelines import pipeline
-            from modelscope.utils.constant import Tasks
-            logging.getLogger('modelscope').setLevel(logging.WARNING)
-            try:
-                self.separator = pipeline(Tasks.speech_separation, model=config['PostAnalyzer']['sp_model'])
-            except ValueError:
-                self.separator = pipeline(Tasks.speech_separation, model=config['PostAnalyzer']['sp_model_local'])
-
-        self.recorder = AudioRecorder(config_path=self.config_path, vad_enable=self.vad, nr_enable=self.nr,
-                                      use_onnx=False, use_cuda=True, vad_local=True, nr_local=True)
-        self.recognizer = AudioRecognizer(
-            config_path=self.config_path,
-            audio_db=os.path.join(self.audio_db_dir, os.path.splitext(self.filenames_to_process[0])[0]),
-            model_path=self.sr_model, use_onnx=False, use_cuda=True, local=True)
+        self._setup_from_yaml()
+        self._setup_objects()
 
     def run(self):
         """Process all specified files under the audio/post-time/origin folder."""
@@ -132,6 +83,36 @@ class AudioPostAnalyzer:
                 continue
             self._process_single_audio_file(audio_file_name)
             self.logger.info(f"Processing file: {audio_file_name}")
+
+    def _setup_from_yaml(self):
+        self.frame_rate = int(self.config['PostAnalyzer']['frame_rate'])
+        self.channels = int(self.config['PostAnalyzer']['channels'])
+        self.sample_width = int(self.config['PostAnalyzer']['sample_width'])
+        self.segment_duration = int(self.config['PostAnalyzer']['segment_duration'])
+        self.threshold = float(self.config['PostAnalyzer']['threshold'])
+        self.keep_threshold = float(self.config['PostAnalyzer']['keep_threshold'])
+        self.sr_model = self.config['PostAnalyzer']['sr_model']
+        self.language = self.config['PostAnalyzer']['language']
+
+    def _setup_objects(self):
+        if self.tr:
+            self.transcriber = Transcriber(self.config['PostAnalyzer']['tr_model'], language=self.language,
+                                           use_cuda=False)
+        if self.sp:
+            from modelscope.pipelines import pipeline
+            from modelscope.utils.constant import Tasks
+            logging.getLogger('modelscope').setLevel(logging.WARNING)
+            try:
+                self.separator = pipeline(Tasks.speech_separation, model=self.config['PostAnalyzer']['sp_model'])
+            except ValueError:
+                self.separator = pipeline(Tasks.speech_separation, model=self.config['PostAnalyzer']['sp_model_local'])
+
+        self.recorder = AudioRecorder(config_path=self.config_path, vad_enable=self.vad, nr_enable=self.nr,
+                                      use_onnx=False, use_cuda=True, vad_local=True, nr_local=True)
+        self.recognizer = AudioRecognizer(
+            config_path=self.config_path,
+            audio_db=os.path.join(self.audio_db_dir, os.path.splitext(self.filenames_to_process[0])[0]),
+            model_path=self.sr_model, use_onnx=False, use_cuda=True, local=True)
 
     def _process_single_audio_file(self, filename):
         """Process a single audio file.

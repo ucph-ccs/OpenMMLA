@@ -6,7 +6,7 @@ import time
 import numpy as np
 import soundfile as sf
 
-from openmmla.bases.audio.asr_with_diarization.inputs import get_bucket_name, get_name, get_mode
+from openmmla.bases.asr_with_diarization.inputs import get_bucket_name, get_name, get_mode
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import resample, get_energy_level, write_frames_to_wav, calculate_audio_duration
 from openmmla.utils.errors import RecordingError, RecognizingError
@@ -124,8 +124,8 @@ class JabraAudioBase(AudioBase):
 
     def _reset(self):
         """Set the new port for the audio base and reset it."""
-        self.__init__(config_path=self.config_path, mode=self.mode, vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp,
-                      store=self.store)
+        self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode, vad=self.vad,
+                      nr=self.nr, tr=self.tr, sp=self.sp, store=self.store)
         self.logger.info(f"Audio DB reset to {self.audio_db}")
         gc.collect()
 

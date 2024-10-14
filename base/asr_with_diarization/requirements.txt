@@ -1,0 +1,11 @@
+PyAudio>=0.2.14
+influxdb-client==1.44.0
+jiwer==3.0.4
+librosa==0.10.2.post1
+llvmlite==0.43.0
+matplotlib==3.9.1
+networkx==3.3
+paho-mqtt==2.1.0
+pydub==0.25.1
+pyecharts==2.0.6
+redis==5.0.7

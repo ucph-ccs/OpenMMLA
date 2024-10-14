@@ -1,0 +1,6 @@
+# Ignore directories
+audio/
+audio_db/
+logger/
+logs/
+tests/

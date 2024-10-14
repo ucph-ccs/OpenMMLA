@@ -44,7 +44,7 @@ class AudioInferer(Server):
                 base_id = request.values.get('base_id')
                 fr = int(request.values.get('fr'))
                 audio_file = request.files['audio']
-                audio_file_path = self.get_temp_file_path('infer_audio', base_id, 'wav')
+                audio_file_path = self._get_temp_file_path('infer_audio', base_id, 'wav')
                 write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting inference for {base_id}...")

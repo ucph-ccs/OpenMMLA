@@ -1,13 +1,16 @@
 import os
+from abc import abstractmethod, ABC
+
 import yaml
+
 from openmmla.utils.logger import get_logger
 
 
-class Server:
-    """Base class for all server components in the OpenMMLA platform."""
+class Server(ABC):
+    """Base class for server components."""
 
     def __init__(self, project_dir, config_path=None, use_cuda=True, use_onnx=False):
-        """Initialize the base server.
+        """Initialize the server base class.
 
         Args:
             project_dir (str): The project directory.
@@ -34,7 +37,7 @@ class Server:
                 raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
 
             # Load configuration
-            self.config = self.load_config()
+            self.config = self._load_config()
         else:
             self.config_path = None
             self.config = None
@@ -46,22 +49,23 @@ class Server:
         os.makedirs(self.server_file_folder, exist_ok=True)
 
         # Set up logger
-        self.logger = self.setup_logger()
+        self.logger = self._setup_logger()
 
-    def load_config(self):
+    def _load_config(self):
         """Load the configuration file."""
         with open(self.config_path, 'r') as config_file:
             return yaml.safe_load(config_file)
 
-    def setup_logger(self):
+    def _setup_logger(self):
         """Set up the logger for the server."""
         return get_logger(self.__class__.__name__,
                           os.path.join(self.server_logger_dir, f'{self.__class__.__name__.lower()}_server.log'))
 
-    def get_temp_file_path(self, prefix, base_id, extension):
+    def _get_temp_file_path(self, prefix, base_id, extension):
         """Generate a temporary file path."""
         return os.path.join(self.server_file_folder, f'{prefix}_{base_id}.{extension}')
 
+    @abstractmethod
     def process_request(self):
         """Process the incoming request. To be implemented by subclasses."""
-        raise NotImplementedError("Subclasses must implement process_request method")
+        pass

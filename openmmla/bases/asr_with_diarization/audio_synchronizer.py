@@ -1,4 +1,3 @@
-import configparser
 import gc
 import json
 import logging
@@ -7,8 +6,8 @@ import threading
 import time
 
 from openmmla.analytics.audio.analyze import session_analysis_audio
-from openmmla.bases import Synchronizer
-from openmmla.bases.audio.asr_with_diarization.inputs import get_bucket_name, get_number_of_group_members, \
+from openmmla.bases import Base
+from openmmla.bases.asr_with_diarization.inputs import get_bucket_name, get_number_of_group_members, \
     get_function_synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.clients.influx_client import InfluxDBClientWrapper
@@ -19,7 +18,7 @@ from openmmla.utils.threads import RaisingThread
 from .enums import BLUE, ENDC
 
 
-class AudioSynchronizer(Synchronizer):
+class AudioSynchronizer(Base):
     """The synchronizer synchronizes speaker recognition results from audio bases among the same session."""
     logger = get_logger('synchronizer')
 
@@ -37,6 +36,7 @@ class AudioSynchronizer(Synchronizer):
         super().__init__(project_dir, config_path)
         self.base_type = base_type.capitalize()
         self.dominant = dominant
+        self.sp = sp
 
         # Set directories
         self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
@@ -44,22 +44,15 @@ class AudioSynchronizer(Synchronizer):
         os.makedirs(self.audio_temp_dir, exist_ok=True)
         os.makedirs(self.logger_dir, exist_ok=True)
 
-        self.config = configparser.ConfigParser()
-        self.config.read(self.config_path)
-        self.result_expiry_time = int(
-            self.config['Synchronizer']['result_expiry_time'])  # Expiry time of retained results
-        self.time_range = int(self.config[self.base_type]['recognize_sp_duration']) if sp else int(
-            self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest segment
-        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
-        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
-        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
-
         self.bucket_name = None  # Session bucket name
         self.number_of_speaker = None  # Number of group members
         self.latest_time = None  # Record start time of the most recent synchronized segment
         self.retained_results = None  # Results to be handled {time: {id: {'speaker':x, 'similarity':x, 'duration':x}}}
         self.threads = []  # List of thread objects
         self.stop_event = threading.Event()  # Event for stopping all threads
+
+        self._setup_from_yaml()
+        self._setup_objects()
 
     def run(self):
         """Main menu for the synchronizer."""
@@ -79,6 +72,18 @@ class AudioSynchronizer(Synchronizer):
                 self.logger.warning(
                     f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+
+    def _setup_from_yaml(self):
+        """Load the configuration from the YAML file."""
+        self.result_expiry_time = int(
+            self.config['Synchronizer']['result_expiry_time'])  # Expiry time of retained results
+        self.time_range = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
+            self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest segment
+
+    def _setup_objects(self):
+        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
+        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
+        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
 
     def _start_synchronizing(self):
         """Start the synchronization process."""

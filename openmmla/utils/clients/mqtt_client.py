@@ -1,4 +1,4 @@
-import configparser
+import yaml
 
 import paho.mqtt.client as mqtt
 
@@ -10,12 +10,10 @@ class MQTTClientWrapper(mqtt.Client):
         """Initialize MQTT client with configurations and optional user data, message callback, and topic
         subscription."""
         super().__init__(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-
         self.config_path = config_path
         self.current_topics = []
+        config = yaml.safe_load(open(config_path, 'r'))
 
-        config = configparser.ConfigParser()
-        config.read(config_path)
         self.connect(config['MQTT']['mqtt_host'], int(config['MQTT']['mqtt_port']), 60)
 
         if user_data:

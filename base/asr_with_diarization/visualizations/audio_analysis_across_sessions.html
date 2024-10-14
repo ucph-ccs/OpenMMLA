@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>audio metrics analysis across sessions</title>
+                <script type="text/javascript" src="https://assets.pyecharts.org/assets/v5/echarts.min.js"></script>
+
+    
+</head>
+<body >
+    <style>.box { justify-content:center; display:flex; flex-wrap:wrap;  } </style>
+    <div class="box">
+                <div id="62e29c355a614e028c76cc5bc31a5311" class="chart-container" style="width:1500px; height:400px; "></div>
+    <script>
+        var chart_62e29c355a614e028c76cc5bc31a5311 = echarts.init(
+            document.getElementById('62e29c355a614e028c76cc5bc31a5311'), 'white', {renderer: 'canvas'});
+        var option_62e29c355a614e028c76cc5bc31a5311 = {
+    "animation": true,
+    "animationThreshold": 2000,
+    "animationDuration": 1000,
+    "animationEasing": "cubicOut",
+    "animationDelay": 0,
+    "animationDurationUpdate": 300,
+    "animationEasingUpdate": "cubicOut",
+    "animationDelayUpdate": 0,
+    "aria": {
+        "enabled": false
+    },
+    "color": [
+        "#5470c6",
+        "#91cc75",
+        "#fac858",
+        "#ee6666",
+        "#73c0de",
+        "#3ba272",
+        "#fc8452",
+        "#9a60b4",
+        "#ea7ccc"
+    ],
+    "series": [
+        {
+            "type": "line",
+            "name": "APD",
+            "connectNulls": false,
+            "xAxisIndex": 0,
+            "yAxisIndex": 0,
+            "symbolSize": 4,
+            "showSymbol": true,
+            "smooth": false,
+            "clip": true,
+            "step": false,
+            "stackStrategy": "samesign",
+            "data": [
+                [
+                    "2024-07-08T14:03:46Z",
+                    "10.8889"
+                ],
+                [
+                    "2024-10-11T08:57:15Z",
+                    "14.1000"
+                ]
+            ],
+            "hoverAnimation": true,
+            "label": {
+                "show": true,
+                "margin": 8
+            },
+            "logBase": 10,
+            "seriesLayoutBy": "column",
+            "lineStyle": {
+                "show": true,
+                "width": 1,
+                "opacity": 1,
+                "curveness": 0,
+                "type": "solid"
+            },
+            "areaStyle": {
+                "opacity": 0
+            },
+            "zlevel": 0,
+            "z": 0
+        },
+        {
+            "type": "line",
+            "name": "NTTC",
+            "connectNulls": false,
+            "xAxisIndex": 0,
+            "yAxisIndex": 1,
+            "symbolSize": 4,
+            "showSymbol": true,
+            "smooth": false,
+            "clip": true,
+            "step": false,
+            "stackStrategy": "samesign",
+            "data": [
+                [
+                    "2024-07-08T14:03:46Z",
+                    "0.0197"
+                ],
+                [
+                    "2024-10-11T08:57:15Z",
+                    "0.1612"
+                ]
+            ],
+            "hoverAnimation": true,
+            "label": {
+                "show": true,
+                "margin": 8
+            },
+            "logBase": 10,
+            "seriesLayoutBy": "column",
+            "lineStyle": {
+                "show": true,
+                "width": 1,
+                "opacity": 1,
+                "curveness": 0,
+                "type": "solid"
+            },
+            "areaStyle": {
+                "opacity": 0
+            },
+            "zlevel": 0,
+            "z": 0
+        }
+    ],
+    "legend": [
+        {
+            "data": [
+                "APD",
+                "NTTC"
+            ],
+            "selected": {},
+            "show": true,
+            "top": "7%",
+            "padding": 5,
+            "itemGap": 10,
+            "itemWidth": 20,
+            "itemHeight": 10,
+            "textStyle": {
+                "fontSize": 10
+            },
+            "backgroundColor": "transparent",
+            "borderColor": "#ccc",
+            "borderRadius": 0,
+            "pageButtonItemGap": 5,
+            "pageButtonPosition": "end",
+            "pageFormatter": "{current}/{total}",
+            "pageIconColor": "#2f4554",
+            "pageIconInactiveColor": "#aaa",
+            "pageIconSize": 15,
+            "animationDurationUpdate": 800,
+            "selector": false,
+            "selectorPosition": "auto",
+            "selectorItemGap": 7,
+            "selectorButtonGap": 10
+        }
+    ],
+    "tooltip": {
+        "show": true,
+        "trigger": "item",
+        "triggerOn": "mousemove|click",
+        "axisPointer": {
+            "type": "line"
+        },
+        "showContent": true,
+        "alwaysShowContent": false,
+        "showDelay": 0,
+        "hideDelay": 100,
+        "enterable": false,
+        "confine": false,
+        "appendToBody": false,
+        "transitionDuration": 0.4,
+        "textStyle": {
+            "fontSize": 14
+        },
+        "borderWidth": 0,
+        "padding": 5,
+        "order": "seriesAsc"
+    },
+    "xAxis": [
+        {
+            "name": "Session",
+            "show": true,
+            "scale": false,
+            "nameLocation": "middle",
+            "nameGap": 30,
+            "gridIndex": 0,
+            "inverse": false,
+            "offset": 0,
+            "splitNumber": 5,
+            "minInterval": 0,
+            "splitLine": {
+                "show": true,
+                "lineStyle": {
+                    "show": true,
+                    "width": 1,
+                    "opacity": 1,
+                    "curveness": 0,
+                    "type": "solid"
+                }
+            },
+            "data": [
+                "2024-07-08T14:03:46Z",
+                "2024-10-11T08:57:15Z"
+            ]
+        }
+    ],
+    "yAxis": [
+        {
+            "name": "Average Pause Duration (seconds/silent pause)",
+            "show": true,
+            "scale": false,
+            "nameLocation": "end",
+            "nameGap": 15,
+            "gridIndex": 0,
+            "inverse": false,
+            "offset": 0,
+            "splitNumber": 5,
+            "min": function(value){return Math.round(value.min * 0.8 * 1000) / 1000;},
+            "max": function(value){return Math.round(value.max * 1.2 * 1000) / 1000;},
+            "minInterval": 0,
+            "splitLine": {
+                "show": true,
+                "lineStyle": {
+                    "show": true,
+                    "width": 1,
+                    "opacity": 1,
+                    "curveness": 0,
+                    "type": "solid"
+                }
+            }
+        },
+        {
+            "type": "value",
+            "name": "Normalized Turn Taking Count (turns/segment)",
+            "show": true,
+            "scale": false,
+            "nameLocation": "end",
+            "nameGap": 15,
+            "gridIndex": 0,
+            "inverse": false,
+            "position": "right",
+            "offset": 0,
+            "splitNumber": 5,
+            "min": function(value){return Math.round(value.min * 0.8 * 1000) / 1000;},
+            "max": function(value){return Math.round(value.max * 1.2 * 1000) / 1000;},
+            "minInterval": 0,
+            "splitLine": {
+                "show": true,
+                "lineStyle": {
+                    "show": true,
+                    "width": 1,
+                    "opacity": 1,
+                    "curveness": 0,
+                    "type": "solid"
+                }
+            }
+        }
+    ],
+    "title": [
+        {
+            "show": true,
+            "text": "APD and NTTC",
+            "target": "blank",
+            "subtarget": "blank",
+            "left": "center",
+            "top": "0%",
+            "padding": 5,
+            "itemGap": 10,
+            "textAlign": "auto",
+            "textVerticalAlign": "auto",
+            "triggerEvent": false
+        }
+    ]
+};
+        chart_62e29c355a614e028c76cc5bc31a5311.setOption(option_62e29c355a614e028c76cc5bc31a5311);
+    </script>
+<br/>                <div id="664a7c3013b741d5bfd49b4a0e0c1044" class="chart-container" style="width:1500px; height:400px; "></div>
+    <script>
+        var chart_664a7c3013b741d5bfd49b4a0e0c1044 = echarts.init(
+            document.getElementById('664a7c3013b741d5bfd49b4a0e0c1044'), 'white', {renderer: 'canvas'});
+        var option_664a7c3013b741d5bfd49b4a0e0c1044 = {
+    "animation": true,
+    "animationThreshold": 2000,
+    "animationDuration": 1000,
+    "animationEasing": "cubicOut",
+    "animationDelay": 0,
+    "animationDurationUpdate": 300,
+    "animationEasingUpdate": "cubicOut",
+    "animationDelayUpdate": 0,
+    "aria": {
+        "enabled": false
+    },
+    "color": [
+        "#5470c6",
+        "#91cc75",
+        "#fac858",
+        "#ee6666",
+        "#73c0de",
+        "#3ba272",
+        "#fc8452",
+        "#9a60b4",
+        "#ea7ccc"
+    ],
+    "series": [
+        {
+            "type": "line",
+            "name": "SR",
+            "connectNulls": false,
+            "xAxisIndex": 0,
+            "yAxisIndex": 0,
+            "symbolSize": 4,
+            "showSymbol": true,
+            "smooth": false,
+            "clip": true,
+            "step": false,
+            "stackStrategy": "samesign",
+            "data": [
+                [
+                    "2024-07-08T14:03:46Z",
+                    "0.0862"
+                ],
+                [
+                    "2024-10-11T08:57:15Z",
+                    "0.8257"
+                ]
+            ],
+            "hoverAnimation": true,
+            "label": {
+                "show": true,
+                "margin": 8
+            },
+            "logBase": 10,
+            "seriesLayoutBy": "column",
+            "lineStyle": {
+                "show": true,
+                "width": 1,
+                "opacity": 1,
+                "curveness": 0,
+                "type": "solid"
+            },
+            "areaStyle": {
+                "opacity": 0
+            },
+            "zlevel": 0,
+            "z": 0
+        },
+        {
+            "type": "line",
+            "name": "PEQ",
+            "connectNulls": false,
+            "xAxisIndex": 0,
+            "yAxisIndex": 1,
+            "symbolSize": 4,
+            "showSymbol": true,
+            "smooth": false,
+            "clip": true,
+            "step": false,
+            "stackStrategy": "samesign",
+            "data": [
+                [
+                    "2024-07-08T14:03:46Z",
+                    "1.0000"
+                ],
+                [
+                    "2024-10-11T08:57:15Z",
+                    "1.0000"
+                ]
+            ],
+            "hoverAnimation": true,
+            "label": {
+                "show": true,
+                "margin": 8
+            },
+            "logBase": 10,
+            "seriesLayoutBy": "column",
+            "lineStyle": {
+                "show": true,
+                "width": 1,
+                "opacity": 1,
+                "curveness": 0,
+                "type": "solid"
+            },
+            "areaStyle": {
+                "opacity": 0
+            },
+            "zlevel": 0,
+            "z": 0
+        }
+    ],
+    "legend": [
+        {
+            "data": [
+                "SR",
+                "PEQ"
+            ],
+            "selected": {},
+            "show": true,
+            "top": "7%",
+            "padding": 5,
+            "itemGap": 10,
+            "itemWidth": 20,
+            "itemHeight": 10,
+            "textStyle": {
+                "fontSize": 10
+            },
+            "backgroundColor": "transparent",
+            "borderColor": "#ccc",
+            "borderRadius": 0,
+            "pageButtonItemGap": 5,
+            "pageButtonPosition": "end",
+            "pageFormatter": "{current}/{total}",
+            "pageIconColor": "#2f4554",
+            "pageIconInactiveColor": "#aaa",
+            "pageIconSize": 15,
+            "animationDurationUpdate": 800,
+            "selector": false,
+            "selectorPosition": "auto",
+            "selectorItemGap": 7,
+            "selectorButtonGap": 10
+        }
+    ],
+    "tooltip": {
+        "show": true,
+        "trigger": "item",
+        "triggerOn": "mousemove|click",
+        "axisPointer": {
+            "type": "line"
+        },
+        "showContent": true,
+        "alwaysShowContent": false,
+        "showDelay": 0,
+        "hideDelay": 100,
+        "enterable": false,
+        "confine": false,
+        "appendToBody": false,
+        "transitionDuration": 0.4,
+        "textStyle": {
+            "fontSize": 14
+        },
+        "borderWidth": 0,
+        "padding": 5,
+        "order": "seriesAsc"
+    },
+    "xAxis": [
+        {
+            "name": "Session",
+            "show": true,
+            "scale": false,
+            "nameLocation": "middle",
+            "nameGap": 30,
+            "gridIndex": 0,
+            "inverse": false,
+            "offset": 0,
+            "splitNumber": 5,
+            "minInterval": 0,
+            "splitLine": {
+                "show": true,
+                "lineStyle": {
+                    "show": true,
+                    "width": 1,
+                    "opacity": 1,
+                    "curveness": 0,
+                    "type": "solid"
+                }
+            },
+            "data": [
+                "2024-07-08T14:03:46Z",
+                "2024-10-11T08:57:15Z"
+            ]
+        }
+    ],
+    "yAxis": [
+        {
+            "name": "Silence Ratio (%)",
+            "show": true,
+            "scale": false,
+            "nameLocation": "end",
+            "nameGap": 15,
+            "gridIndex": 0,
+            "inverse": false,
+            "offset": 0,
+            "splitNumber": 5,
+            "min": function(value){return Math.round(value.min * 0.8 * 1000) / 1000;},
+            "max": function(value){return Math.round(value.max * 1.2 * 1000) / 1000;},
+            "minInterval": 0,
+            "splitLine": {
+                "show": true,
+                "lineStyle": {
+                    "show": true,
+                    "width": 1,
+                    "opacity": 1,
+                    "curveness": 0,
+                    "type": "solid"
+                }
+            }
+        },
+        {
+            "type": "value",
+            "name": "Participation Equality (%)",
+            "show": true,
+            "scale": false,
+            "nameLocation": "end",
+            "nameGap": 15,
+            "gridIndex": 0,
+            "inverse": false,
+            "position": "right",
+            "offset": 0,
+            "splitNumber": 5,
+            "min": function(value){return Math.round(value.min * 0.8 * 1000) / 1000;},
+            "max": function(value){return Math.round(value.max * 1.2 * 1000) / 1000;},
+            "minInterval": 0,
+            "splitLine": {
+                "show": true,
+                "lineStyle": {
+                    "show": true,
+                    "width": 1,
+                    "opacity": 1,
+                    "curveness": 0,
+                    "type": "solid"
+                }
+            }
+        }
+    ],
+    "title": [
+        {
+            "show": true,
+            "text": "SR and PEQ",
+            "target": "blank",
+            "subtarget": "blank",
+            "left": "center",
+            "top": "0%",
+            "padding": 5,
+            "itemGap": 10,
+            "textAlign": "auto",
+            "textVerticalAlign": "auto",
+            "triggerEvent": false
+        }
+    ]
+};
+        chart_664a7c3013b741d5bfd49b4a0e0c1044.setOption(option_664a7c3013b741d5bfd49b4a0e0c1044);
+    </script>
+<br/>    </div>
+    <script>
+    </script>
+</body>
+</html>

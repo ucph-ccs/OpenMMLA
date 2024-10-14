@@ -1,10 +1,10 @@
-import configparser
 import copy
 import os
 import socket
 
 import librosa
 import numpy as np
+import yaml
 
 from openmmla.utils.audio.processing import segment_wav
 from openmmla.utils.logger import get_logger
@@ -82,8 +82,7 @@ class AudioRecognizer:
 
     def __init__(self, config_path, audio_db, local=False, model_path=None, onnx_model_path=None, use_onnx=False,
                  use_cuda=True):
-        config = configparser.ConfigParser()
-        config.read(config_path)
+        config = yaml.safe_load(open(config_path, 'r'))
         self.audio_db = audio_db
         self.local = local
 

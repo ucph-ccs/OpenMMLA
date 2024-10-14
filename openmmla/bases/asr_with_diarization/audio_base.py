@@ -1,5 +1,4 @@
 import base64
-import configparser
 import gc
 import json
 import logging
@@ -9,15 +8,15 @@ import shutil
 import socket
 import threading
 import time
-from abc import ABC, abstractmethod
+from abc import abstractmethod, ABC
 
 import librosa
 import numpy as np
 
 from openmmla.bases import Base
-from openmmla.bases.audio.asr_with_diarization.audio_recognizer import AudioRecognizer
-from openmmla.bases.audio.asr_with_diarization.audio_recorder import AudioRecorder
-from openmmla.bases.audio.asr_with_diarization.inputs import get_function_base, get_id
+from openmmla.bases.asr_with_diarization.audio_recognizer import AudioRecognizer
+from openmmla.bases.asr_with_diarization.audio_recorder import AudioRecorder
+from openmmla.bases.asr_with_diarization.inputs import get_function_base, get_id
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import read_frames_from_wav, write_frames_to_wav
 from openmmla.utils.clean import clear_directory
@@ -101,7 +100,6 @@ class AudioBase(Base, ABC):
         self.keep_threshold = None  # similarity threshold for keep speaker when doing half-scaled recognition
         self.audio_server_host = None  # audio server host IP
 
-        self.config = None  # config object
         self.influx_client = None  # InfluxDB client object
         self.redis_client = None  # Redis client object
         self.mqtt_client = None  # MQTT client object
@@ -113,9 +111,9 @@ class AudioBase(Base, ABC):
         self.id = None  # audio base id
         self.audio_db = None  # audio database directory
 
-        self._load_config()
-        self._config_from_user()
-        self._config_objects()
+        self._setup_from_yaml()
+        self._setup_from_input()
+        self._setup_objects()
 
     @property
     @abstractmethod
@@ -123,10 +121,7 @@ class AudioBase(Base, ABC):
         """Return the type of the audio base."""
         pass
 
-    def _load_config(self):
-        """Configure the audio base based on the arguments passed from the subclass."""
-        self.config = configparser.ConfigParser()
-        self.config.read(self.config_path)
+    def _setup_from_yaml(self):
         self.register_duration = int(self.config[self.base_type]['register_duration'])
         self.rms_threshold = int(self.config[self.base_type]['rms_threshold'])
         self.rms_peak_threshold = int(self.config[self.base_type]['rms_peak_threshold'])
@@ -138,14 +133,12 @@ class AudioBase(Base, ABC):
             self.config[self.base_type]['recognize_duration'])
         self.audio_server_host = socket.gethostbyname(self.config['Server']['audio_server_host'])
 
-    def _config_from_user(self):
-        """Configure the audio base based on the user input."""
+    def _setup_from_input(self):
         self.id = get_id()
         self.audio_db = os.path.join(self.audio_db_dir, f'{self.base_type}_{self.id}')
         os.makedirs(self.audio_db, exist_ok=True)
 
-    def _config_objects(self):
-        """Configure the audio base based on the configuration file."""
+    def _setup_objects(self):
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)

@@ -1,10 +1,10 @@
-import configparser
 import math
 import socket
 import wave
 from typing import Union
 
 import pyaudio
+import yaml
 
 from openmmla.utils.audio.auga import apply_gain
 from openmmla.utils.logger import get_logger
@@ -47,8 +47,7 @@ class AudioRecorder:
 
     def __init__(self, config_path, vad_enable, nr_enable, vad_local=False, nr_local=False, use_onnx=True,
                  use_cuda=True):
-        config = configparser.ConfigParser()
-        config.read(config_path)
+        config = yaml.safe_load(open(config_path, 'r'))
         self.vad_enable = vad_enable
         self.nr_enable = nr_enable
         self.vad_local = vad_local
