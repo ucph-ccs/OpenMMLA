@@ -18,7 +18,7 @@ from openmmla.bases.asr_with_diarization.audio_recorder import AudioRecorder
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import format_wav, get_audio_properties, segment_wav, crop_and_concatenate_wav, \
     resample
-from openmmla.utils.audio.transcriber import WhisperTranscriber
+from openmmla.utils.audio.transcriber import get_transcriber
 from openmmla.utils.logger import get_logger
 
 
@@ -96,8 +96,8 @@ class AudioPostAnalyzer(Base):
 
     def _setup_objects(self):
         if self.tr:
-            self.transcriber = WhisperTranscriber(self.config['PostAnalyzer']['tr_model'], language=self.language,
-                                                  use_cuda=False)
+            self.transcriber = get_transcriber(self.config['PostAnalyzer']['tr_model'], language=self.language,
+                                               use_cuda=False)
         if self.sp:
             from modelscope.pipelines import pipeline
             from modelscope.utils.constant import Tasks

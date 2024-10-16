@@ -30,9 +30,9 @@ from openmmla.utils.threads import RaisingThread
 from .enums import BLUE, ENDC, GREEN
 
 try:
-    from openmmla.utils.audio.transcriber import WhisperTranscriber
+    from openmmla.utils.audio.transcriber import get_transcriber
 except ImportError:
-    Transcriber = None
+    get_transcriber = None
 
 try:
     import torch
@@ -150,10 +150,9 @@ class AudioBase(Base, ABC):
             self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db, local=True,
                                                     model_path=self.config['Local']['sr_model'])
             if self.tr:
-                if WhisperTranscriber is None:
+                if get_transcriber is None:
                     raise ImportError("Transcriber module is not available, please install the required dependencies.")
-                self.speech_transcriber = WhisperTranscriber(self.config['Local']['tr_model'],
-                                                             self.config['Local']['language'])
+                self.speech_transcriber = get_transcriber(self.config['Local']['tr_model'], self.config['Local']['language'])
 
             if self.sp:
                 if pipeline is None or Tasks is None:

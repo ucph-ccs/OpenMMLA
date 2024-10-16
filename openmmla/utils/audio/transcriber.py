@@ -122,6 +122,6 @@ def get_transcriber(model_name, language="en", use_cuda=True):
 # print(result)
 
 # For Roest model:
-transcriber = get_transcriber("alexandrainst/roest-315m", language="da", use_cuda=False)
+# transcriber = get_transcriber("alexandrainst/roest-315m", language="da", use_cuda=False)
 # result = transcriber.transcribe("path/to/audio/file.wav")
 # print(result)
