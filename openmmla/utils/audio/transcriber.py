@@ -63,7 +63,7 @@ class WhisperTransformerTranscriber(Transcriber):
 class RoestTransformerTranscriber(Transcriber):
     def __init__(self, model_name, language, use_cuda=True):
         super().__init__(model_name, language, use_cuda)
-        self.transcriber = pipeline(model=model_name, device=self.device)
+        self.transcriber = pipeline("automatic-speech-recognition", model=model_name, device=self.device)
 
     def transcribe(self, audio_path, sampling_rate=16000):
         audio, _ = librosa.load(audio_path, sr=sampling_rate)
