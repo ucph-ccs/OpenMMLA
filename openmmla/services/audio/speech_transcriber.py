@@ -10,7 +10,7 @@ from flask import request, jsonify
 
 from openmmla.services.server import Server
 from openmmla.utils.audio.processing import write_frames_to_wav, normalize_rms
-from openmmla.utils.audio.transcriber import Transcriber
+from openmmla.utils.audio.transcriber import get_transcriber
 
 
 class SpeechTranscriber(Server):
@@ -23,7 +23,7 @@ class SpeechTranscriber(Server):
 
         # Initialize denoiser and transcriber
         self.nr_model = pretrained.dns64().cuda() if self.cuda_enable else pretrained.dns64()
-        self.transcriber = Transcriber(tr_model, language=language, use_cuda=self.cuda_enable)
+        self.transcriber = get_transcriber(tr_model, language, use_cuda=self.cuda_enable)
         self.transcriber_lock = threading.Lock()
 
     def apply_nr(self, input_path: str) -> str:

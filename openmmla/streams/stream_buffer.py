@@ -1,4 +1,5 @@
 class RingBuffer:
+    """Circular buffer for storing data streams."""
     def __init__(self, size):
         self.size = size
         self.buffer = [None] * size
