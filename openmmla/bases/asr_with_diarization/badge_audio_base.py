@@ -8,7 +8,6 @@ import time
 import numpy as np
 import soundfile as sf
 
-from openmmla.bases.asr_with_diarization.inputs import get_mode, get_bucket_name, get_name
 from openmmla.utils.audio.auga import normalize_rms, apply_gain
 from openmmla.utils.audio.processing import get_energy_level, read_frames_from_wav, write_frames_to_wav, \
     calculate_audio_duration, resample
@@ -17,16 +16,11 @@ from openmmla.utils.logger import get_logger
 from openmmla.utils.sockets import read_frames_tcp, clear_socket_udp, read_frames_udp
 from .audio_base import AudioBase
 from .enums import BLUE, ENDC
+from .input import get_mode, get_bucket_name, get_name
 
 
 class BadgeAudioBase(AudioBase):
-    """The Badge Audio Base analyzes the audio remotely streamed from badge. The badge-base node pair are distributed
-    among the network and the nodes within the same session are synchronized by a synchronizer, the base communicates
-    with corresponding badge, message brokers, central audio server and database server.
-
-    Each badge audio base will analyze the badge worn (suggested) speaker's voice activity. Then multiple badge-base
-    pairs constitute a network of participants.
-    """
+    """The badge audio base process the audio streams recorded from wireless wearable badges."""
     logger = get_logger(f'badge-audio-base')
 
     def __init__(self, project_dir: str, config_path: str, mode: str = 'full', local: bool = False,
@@ -44,7 +38,7 @@ class BadgeAudioBase(AudioBase):
             sp: whether to do speech separation for overlapped segment, default to False
             store: whether to store audio files, default to True
         """
-        # Badge audio base specific attributes
+        # Badge audio base custom attributes
         self.listening_ip = None  # base listening IP address for badge type base
         self.protocol = None  # communication protocol, TCP or UDP
         self.port_offset = None  # port offset, default to 50000
@@ -282,7 +276,7 @@ class BadgeAudioBase(AudioBase):
 
     def _continuous_recognizing_sp(self):
         """Continuously recognize audio with speech separation from the audio queue and publish the results into
-        Redis/MQTT channel."""
+        a Redis/MQTT channel."""
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)

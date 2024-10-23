@@ -6,22 +6,17 @@ import time
 import numpy as np
 import soundfile as sf
 
-from openmmla.bases.asr_with_diarization.inputs import get_bucket_name, get_name, get_mode
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import resample, get_energy_level, write_frames_to_wav, calculate_audio_duration
 from openmmla.utils.errors import RecordingError, RecognizingError
 from openmmla.utils.logger import get_logger
 from .audio_base import AudioBase
 from .enums import BLUE, ENDC
+from .input import get_bucket_name, get_name, get_mode
 
 
 class JabraAudioBase(AudioBase):
-    """The Jabra Audio Base analyzes the audio recorded from the built-in or usb-wired audio recorder. The base
-    communicates with services running on audio server, and it communicates with the database server to send the
-    recognition results.
-
-    Optimal for a small fixed-position group discussion, single or multiple speakers supported.
-    """
+    """The jabra audio base processes the audio streams recorded from built-in or USB-wired speakers."""
     logger = get_logger(f'jabra-audio-base')
 
     def __init__(self, project_dir: str, config_path: str, mode: str = 'full', local: bool = True,
@@ -158,7 +153,7 @@ class JabraAudioBase(AudioBase):
             self.audio_recorder.stop_recording_stream()
 
     def _continuous_recognizing(self):
-        """Continuously recognize audio from the audio queue and publish the results into Redis/MQTT channel."""
+        """Continuously recognize audio from the audio queue and publish the results into a Redis/MQTT channel."""
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
@@ -202,7 +197,7 @@ class JabraAudioBase(AudioBase):
 
     def _continuous_recognizing_sp(self):
         """Continuously recognize audio with speech separation from the audio queue and publish the results into
-        Redis/MQTTchannel."""
+        a Redis/MQTT channel."""
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
@@ -320,8 +315,8 @@ class JabraAudioBase(AudioBase):
 
     def _assemble_chunk_with_hsr(self, speaker, record_start_time, frames):
         """Assemble the chunk of audio frames if the current recognized speaker is the same as the last recognized
-        speaker, if not, do speaker recognition on half-segment before and after the border of the speaker turn. Update
-        the speaker audio dictionary and last speaker.
+        speaker, if not, do speaker recognition on half-segment before and after the border of the speaker turn.
+        Update the speaker audio dictionary and last speaker.
 
         Args:
             speaker: recognized speaker of the current segment

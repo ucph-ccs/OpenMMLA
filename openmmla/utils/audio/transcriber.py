@@ -115,7 +115,6 @@ def get_transcriber(model_name, language="en", use_cuda=True):
 
     return transcriber_class(model_name, language, use_cuda=use_cuda)
 
-
 # Usage example:
 # transcriber = get_transcriber("openai/whisper-tiny.en", language="en", use_cuda=False)
 # result = transcriber.transcribe("path/to/audio/file.wav")

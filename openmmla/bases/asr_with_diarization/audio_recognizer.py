@@ -74,9 +74,9 @@ if NeuralType:
 
 
 class AudioRecognizer:
-    """The audio recognizer recognizes audio as different speaker enrolled in the speaker library. During
-    recognition, it will update the speaker profile when new recognized speaker's audio has high similarity by
-    incorporating the new features into the old one.
+    """The audio recognizer compares audio segments against the known speakers' embeddings in the speaker library and
+    gives label. During recognition, it will update the speaker profile when new recognized speaker's audio has high
+    similarity by incorporating the new features into the old one.
     """
     logger = get_logger('audio-recognizer')
 

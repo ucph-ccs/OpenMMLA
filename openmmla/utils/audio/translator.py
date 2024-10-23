@@ -35,11 +35,6 @@ class Translator:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=4)
 
-# if __name__ == "__main__":
-#     import os
-#
-#     log_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../logs")
-#     json_name = "session_2023-09-09T14:21:42Z_speaker_transcription.json"
-#     json_path = os.path.join(log_dir, json_name)
-#     translator = Translator()
-#     translator.translate_json_file(json_path)
+# Usage example:
+# translator = Translator()
+# translator.translate_json_file("path/to/json/file.json")

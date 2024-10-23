@@ -3,60 +3,8 @@ from datetime import datetime
 from openmmla.utils.clean import flush_input
 
 
-def get_mode():
-    while True:
-        try:
-            flush_input()
-            selected_mode = int(input("Please select the mode:"
-                                      "\n1. Record, store audio locally without recognizing"
-                                      "\n2. Recognize, recognize locally stored audio without recording"
-                                      "\n3. Full, record and recognize on-the-fly"
-                                      "\nSelected mode:"))
-            if selected_mode == 1:
-                return 'record'
-            elif selected_mode == 2:
-                return 'recognize'
-            elif selected_mode == 3:
-                return 'full'
-            else:
-                print("Invalid mode, please select again.")
-        except ValueError:
-            print("Invalid input. Please enter a valid integer.")
-
-
-def get_name():
-    """Get the name of the speaker from user input"""
-    flush_input()
-    return input("Please enter the name of the speaker: ")
-
-
-def get_id():
-    """Get the unique base id from user input"""
-    while True:
-        try:
-            flush_input()
-            print("------------------------------------------------")
-            return int(input("Enter the your base id: "))
-        except ValueError:
-            print("Invalid input. Please enter an integer as your unique base id.")
-
-
-def get_number_of_group_members():
-    """Get the number of group members from user input"""
-    while True:
-        try:
-            flush_input()
-            number = int(input("Please specify how many group members: "))
-            if number > 0:
-                return number
-            else:
-                print("Please enter a number greater than 0.")
-        except ValueError:
-            print("Invalid input. Please enter a valid integer.")
-
-
-def get_bucket_name(influx_client) -> str:
-    """Get the bucket name from user input or create a new bucket if needed"""
+def get_bucket_name(influx_client):
+    """Get the bucket name from user input, either select an existing bucket or create a new one."""
     bucket_name = None
 
     while True:
@@ -94,8 +42,61 @@ def get_bucket_name(influx_client) -> str:
     return bucket_name
 
 
+def get_mode():
+    """Get the operating mode from user input."""
+    while True:
+        try:
+            flush_input()
+            selected_mode = int(input("Please select the mode:"
+                                      "\n1. Record, store audio locally without recognizing"
+                                      "\n2. Recognize, recognize locally stored audio without recording"
+                                      "\n3. Full, record and recognize on-the-fly"
+                                      "\nSelected mode:"))
+            if selected_mode == 1:
+                return 'record'
+            elif selected_mode == 2:
+                return 'recognize'
+            elif selected_mode == 3:
+                return 'full'
+            else:
+                print("Invalid mode, please select again.")
+        except ValueError:
+            print("Invalid input. Please enter a valid integer.")
+
+
+def get_name():
+    """Get the name of the speaker from user input."""
+    flush_input()
+    return input("Please enter the name of the speaker: ")
+
+
+def get_id():
+    """Get the unique base id from user input."""
+    while True:
+        try:
+            flush_input()
+            print("------------------------------------------------")
+            return int(input("Enter the your base id: "))
+        except ValueError:
+            print("Invalid input. Please enter an integer as your unique base id.")
+
+
+def get_number_of_group_members():
+    """Get the number of group members from user input."""
+    while True:
+        try:
+            flush_input()
+            number = int(input("Please specify how many group members: "))
+            if number > 0:
+                return number
+            else:
+                print("Please enter a number greater than 0.")
+        except ValueError:
+            print("Invalid input. Please enter a valid integer.")
+
+
 def get_function_base():
-    """Get the function to be performed from user input for base"""
+    """Get the function to be performed from user input for base."""
     while True:
         try:
             flush_input()
@@ -109,7 +110,7 @@ def get_function_base():
                 "0 : exit\n"
                 "Selected function: ")
 
-            if select_fun.strip():  # Check if input is not empty after removing leading/trailing whitespace
+            if select_fun.strip():  # check if input is not empty after removing leading/trailing whitespace
                 return int(select_fun)
             else:
                 print('Please enter a value')
@@ -124,7 +125,7 @@ def get_function_base():
 
 
 def get_function_synchronizer():
-    """Get the function to be performed from user input for synchronizer"""
+    """Get the function to be performed from user input for synchronizer."""
     while True:
         try:
             flush_input()
@@ -135,7 +136,7 @@ def get_function_synchronizer():
                 "0 : exit\n"
                 "Selected function: ")
 
-            if select_fun.strip():  # Check if input is not empty after removing leading/trailing whitespace
+            if select_fun.strip():  # check if input is not empty after removing leading/trailing whitespace
                 return int(select_fun)
             else:
                 print('Please enter a value')

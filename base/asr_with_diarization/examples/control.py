@@ -1,9 +1,9 @@
 """This script demonstrates how to control the nodes."""
 import os
 
-from openmmla.bases.asr_with_diarization.inputs import get_bucket_name
-from openmmla.utils.clients.influx_client import InfluxDBClientWrapper
-from openmmla.utils.clients.redis_client import RedisClientWrapper
+from openmmla.bases.asr_with_diarization.input import get_bucket_name
+from openmmla.utils.client.influx_client import InfluxDBClientWrapper
+from openmmla.utils.client.redis_client import RedisClientWrapper
 from openmmla.utils.logger import get_logger
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

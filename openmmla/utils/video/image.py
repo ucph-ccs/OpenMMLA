@@ -20,10 +20,8 @@ def load_image(image_input):
         numpy.ndarray: The loaded image
     """
     if isinstance(image_input, str):
-        # It's a file path
         image = cv2.imread(image_input)
     elif isinstance(image_input, bytes):
-        # It's image data
         nparr = np.frombuffer(image_input, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     else:

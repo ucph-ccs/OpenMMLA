@@ -14,20 +14,20 @@ import librosa
 import numpy as np
 
 from openmmla.bases import Base
-from openmmla.bases.asr_with_diarization.audio_recognizer import AudioRecognizer
-from openmmla.bases.asr_with_diarization.audio_recorder import AudioRecorder
-from openmmla.bases.asr_with_diarization.inputs import get_function_base, get_id
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import read_frames_from_wav, write_frames_to_wav
 from openmmla.utils.clean import clear_directory
-from openmmla.utils.clients.influx_client import InfluxDBClientWrapper
-from openmmla.utils.clients.mqtt_client import MQTTClientWrapper
-from openmmla.utils.clients.redis_client import RedisClientWrapper
+from openmmla.utils.client import InfluxDBClientWrapper
+from openmmla.utils.client import MQTTClientWrapper
+from openmmla.utils.client import RedisClientWrapper
 from openmmla.utils.errors import RecordingError, TranscribingError
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import request_speech_transcription, request_speech_separation
 from openmmla.utils.threads import RaisingThread
+from .audio_recognizer import AudioRecognizer
+from .audio_recorder import AudioRecorder
 from .enums import BLUE, ENDC, GREEN
+from .input import get_function_base, get_id
 
 try:
     from openmmla.utils.audio.transcriber import get_transcriber
@@ -152,10 +152,11 @@ class AudioBase(Base, ABC):
             if self.tr:
                 if get_transcriber is None:
                     raise ImportError("Transcriber module is not available, please install the required dependencies.")
-                self.speech_transcriber = get_transcriber(self.config['Local']['tr_model'], self.config['Local']['language'])
+                self.speech_transcriber = get_transcriber(self.config['Local']['tr_model'],
+                                                          self.config['Local']['language'])
 
             if self.sp:
-                if pipeline is None or Tasks is None:
+                if pipeline is None or Tasks is None or torch is None:
                     raise ImportError("Modelscope module is not available, please install the required dependencies.")
                 logging.getLogger('modelscope').setLevel(logging.WARNING)
                 device = 'gpu' if torch.cuda.is_available() else 'cpu'
@@ -163,8 +164,8 @@ class AudioBase(Base, ABC):
                     self.speech_separator = pipeline(Tasks.speech_separation, device=device,
                                                      model=self.config['Local']['sp_model'])
                 except ValueError:
-                    self.separator = pipeline(Tasks.speech_separation, device=device,
-                                              model=self.config['Local']['sp_model_local'])
+                    self.speech_separator = pipeline(Tasks.speech_separation, device=device,
+                                                     model=self.config['Local']['sp_model_local'])
         else:
             self.audio_recorder = AudioRecorder(config_path=self.config_path, vad_enable=self.vad, nr_enable=self.nr)
             self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db)

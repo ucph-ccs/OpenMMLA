@@ -7,15 +7,14 @@ import time
 
 from openmmla.analytics.audio.analyze import session_analysis_audio
 from openmmla.bases import Base
-from openmmla.bases.asr_with_diarization.inputs import get_bucket_name, get_number_of_group_members, \
-    get_function_synchronizer
 from openmmla.utils.clean import clear_directory
-from openmmla.utils.clients.influx_client import InfluxDBClientWrapper
-from openmmla.utils.clients.mqtt_client import MQTTClientWrapper
-from openmmla.utils.clients.redis_client import RedisClientWrapper
+from openmmla.utils.client import InfluxDBClientWrapper
+from openmmla.utils.client import MQTTClientWrapper
+from openmmla.utils.client import RedisClientWrapper
 from openmmla.utils.logger import get_logger
 from openmmla.utils.threads import RaisingThread
 from .enums import BLUE, ENDC
+from .input import get_bucket_name, get_number_of_group_members, get_function_synchronizer
 
 
 class AudioSynchronizer(Base):

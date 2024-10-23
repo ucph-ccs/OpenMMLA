@@ -13,13 +13,13 @@ from tqdm import tqdm
 from openmmla.analytics.audio.analyze import plot_speaking_interaction_network, plot_speaker_diarization_interactive
 from openmmla.analytics.audio.text_processing import convert_transcription_json_to_txt
 from openmmla.bases import Base
-from openmmla.bases.asr_with_diarization.audio_recognizer import AudioRecognizer
-from openmmla.bases.asr_with_diarization.audio_recorder import AudioRecorder
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import format_wav, get_audio_properties, segment_wav, crop_and_concatenate_wav, \
     resample
 from openmmla.utils.audio.transcriber import get_transcriber
 from openmmla.utils.logger import get_logger
+from .audio_recognizer import AudioRecognizer
+from .audio_recorder import AudioRecorder
 
 
 class AudioPostAnalyzer(Base):

@@ -1,6 +1,6 @@
 import json
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -12,8 +12,8 @@ from pyecharts.charts import Page
 from pyecharts.charts import Pie, Bar
 from pyecharts.commons.utils import JsCode
 
-from openmmla.analytics.audio.text_processing import convert_transcription_json_to_txt
-from openmmla.utils.querys import fetch_and_process_data, save_to_json_file
+from openmmla.utils.querys import fetch_and_process_data, save_to_json_file, read_json_file, convert_json_to_dataframe
+from .text_processing import convert_transcription_json_to_txt
 
 
 def session_analysis_audio(project_dir, bucket_name, influx_client):
@@ -395,39 +395,24 @@ def plot_speaking_interaction_network(json_file_path, save_dir):
 
 def calculate_speaker_interactions(json_file_path):
     """Calculates the frequency of interactions between speakers in a conversation."""
-    # Load JSON data from the provided file path
-    with open(json_file_path, 'r') as file:
-        data = json.load(file)
-    normalize_factor = len(data)  # Normalized by number of segments
+    json_data = read_json_file(json_file_path)
+    df = convert_json_to_dataframe(json_data, ['speakers', 'segment_start_time'])
+    normalize_factor = len(df)  # Normalized by number of segments
+    interaction_counts = defaultdict(lambda: defaultdict(float))
 
-    # Initialize a dictionary to hold the interaction counts
-    interaction_counts = {}
-
-    # Function to update the interaction counts
-    def update_interactions(cur_speakers, nex_speakers):
-        for next_speaker in nex_speakers:
-            if next_speaker not in interaction_counts:
-                interaction_counts[next_speaker] = {}
-            for current in cur_speakers:
-                if current != next_speaker:
-                    interaction_counts[next_speaker][current] = (interaction_counts[next_speaker].get(current, 0) + 1 /
-                                                                 normalize_factor)
-
-    # Iterate through the JSON data
-    for i in range(len(data) - 1):
-        current_segment = data[i]
-        next_segment = data[i + 1]
-
-        # Parse speakers from the current and next segments
-        current_speakers = json.loads(current_segment['speakers'])
-        next_speakers = json.loads(next_segment['speakers'])
+    for i in range(len(df) - 1):
+        current_speakers = df.iloc[i]['speakers']
+        next_speakers = df.iloc[i + 1]['speakers']
 
         # Filter out 'silent' and 'unknown'
         current_speakers = [s for s in current_speakers if s not in ['silent', 'unknown']]
         next_speakers = [s for s in next_speakers if s not in ['silent', 'unknown']]
 
         # Update interaction counts
-        update_interactions(current_speakers, next_speakers)
+        for next_speaker in next_speakers:
+            for current_speaker in current_speakers:
+                if current_speaker != next_speaker:
+                    interaction_counts[next_speaker][current_speaker] += 1 / normalize_factor
 
     return interaction_counts
 
