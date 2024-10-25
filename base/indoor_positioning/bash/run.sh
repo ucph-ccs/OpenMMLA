@@ -1,6 +1,9 @@
 #!/bin/bash
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
+PROJECT_DIR="$(dirname "$BASH_DIR")"
+PYTHON_PATH="$(dirname "$(dirname "$(dirname "$BASH_DIR")")")"
+
 CONDA_ENV="video-base"
 NUM_BASES=1
 NUM_SYNCHRONIZER=1
@@ -29,17 +32,17 @@ run_py_in_new_tab_mac() {
     CMD=$1
     osascript -e "tell app \"Terminal\" to activate" \
               -e "tell app \"System Events\" to keystroke \"t\" using command down" \
-              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$BASH_DIR/:$PYTHONPATH && source activate $CONDA_ENV && $CMD\" in the front window"
+              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && source activate $CONDA_ENV && $CMD\" in the front window"
 }
 
 run_py_in_new_win_lxterminal() {
     CMD=$1
-    lxterminal --command="bash -c \"export PYTHONPATH=$BASH_DIR/:$PYTHONPATH; source ~/miniforge3/etc/profile.d/conda.sh; conda activate $CONDA_ENV; $CMD; exec bash\"" &
+    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source ~/miniforge3/etc/profile.d/conda.sh; conda activate $CONDA_ENV; $CMD; exec bash\"" &
 }
 
 run_py_in_new_tab_gnome() {
     CMD=$1
-    gnome-terminal --tab -- bash -c "export PYTHONPATH=$BASH_DIR/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
+    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
 }
 
 # Parse arguments
@@ -91,11 +94,11 @@ fi
 if [ "$NUM_BASES" -gt 0 ]; then
     for i in $(seq 1 "$NUM_BASES"); do
         if [[ $OSTYPE == 'darwin'* ]]; then
-            run_py_in_new_tab_mac "python3 $BASH_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
+            run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
         elif is_raspberry_pi; then
-            run_py_in_new_win_lxterminal "python3 $BASH_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
+            run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
         elif is_ubuntu; then
-            run_py_in_new_tab_gnome "python3 $BASH_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
+            run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
         else
             echo "Unknown OS or not supported."
         fi
@@ -105,11 +108,11 @@ fi
 # Open new Terminal windows and run video base synchronizer
 if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
   if [[ $OSTYPE == 'darwin'* ]]; then
-      run_py_in_new_tab_mac "python3 $BASH_DIR/examples/run_synchronizer.py"
+      run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/run_synchronizer.py"
   elif is_raspberry_pi; then
-      run_py_in_new_win_lxterminal "python3 $BASH_DIR/examples/run_synchronizer.py"
+      run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/run_synchronizer.py"
   elif is_ubuntu; then
-      run_py_in_new_tab_gnome "python3 $BASH_DIR/examples/run_synchronizer.py"
+      run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/run_synchronizer.py"
   else
       echo "Unknown OS or not supported."
   fi
@@ -118,11 +121,11 @@ fi
 # Open new Terminal windows and run visualizer
 if [ "$NUM_VISUALIZER" -gt 0 ]; then
   if [[ $OSTYPE == 'darwin'* ]]; then
-      run_py_in_new_tab_mac "python3 $BASH_DIR/examples/run_visualizer.py -s $STORE"
+      run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/run_visualizer.py -s $STORE"
   elif is_raspberry_pi; then
-      run_py_in_new_win_lxterminal "python3 $BASH_DIR/examples/run_visualizer.py -s $STORE"
+      run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/run_visualizer.py -s $STORE"
   elif is_ubuntu; then
-      run_py_in_new_tab_gnome "python3 $BASH_DIR/examples/run_visualizer.py -s $STORE"
+      run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/run_visualizer.py -s $STORE"
   else
       echo "Unknown OS or not supported."
   fi

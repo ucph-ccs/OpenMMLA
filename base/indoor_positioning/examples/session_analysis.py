@@ -1,14 +1,12 @@
 """This script demonstrates how to perform session analysis based on video measurement data"""
 import os
-import sys
+
+from openmmla.analytics.video.analyze import session_analysis_video
+from openmmla.bases.indoor_positioning.input import get_bucket_name
+from openmmla.utils.client import InfluxDBClientWrapper
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = 'conf/video_base.ini'
-sys.path.append(project_dir)
-
-from openmmla_vision.utils.analyze_utils import session_analysis_video
-from openmmla_vision.utils.influx_client import InfluxDBClientWrapper
-from openmmla_vision.utils.input_utils import get_bucket_name
+config_path = os.path.join(project_dir, 'config.yml')
 
 influx_client = InfluxDBClientWrapper(config_path)
 bucket_name = get_bucket_name(influx_client)

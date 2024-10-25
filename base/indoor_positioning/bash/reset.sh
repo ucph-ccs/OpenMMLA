@@ -1,13 +1,14 @@
 #!/bin/bash
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
+PROJECT_DIR="$(dirname "$BASH_DIR")"
 
 # Folders to clean and recreate
 paths=(
-    "$BASH_DIR/visualizations"
-    "$BASH_DIR/recordings"
-    "$BASH_DIR/logger"
-    "$BASH_DIR/logs"
+    "$PROJECT_DIR/visualizations"
+    "$PROJECT_DIR/recordings"
+    "$PROJECT_DIR/logger"
+    "$PROJECT_DIR/logs"
 )
 
 # Clean the folders

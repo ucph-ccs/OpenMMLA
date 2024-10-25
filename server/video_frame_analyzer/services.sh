@@ -3,7 +3,7 @@
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 CONDA_ENV="video-server"
 ports=(5000)
-services=("frame")
+services=("frame-analyze")
 
 # Loop through each port and kill processes using those ports
 for i in "${!ports[@]}"

@@ -1,7 +1,7 @@
 #!/bin/bash
 
-ROOT_DIR="$(dirname "$(readlink -f "$0")")"
-RECORD_DIR="$ROOT_DIR/../recordings"
+BASH_DIR="$(dirname "$(readlink -f "$0")")"
+RECORD_DIR="$BASH_DIR/../recordings"
 
 # Check if the RECORD_DIR directory exists
 if [[ ! -d $RECORD_DIR ]]; then

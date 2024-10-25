@@ -7,7 +7,7 @@ class RedisClientWrapper(redis.Redis):
     """Extended Redis client that loads configuration from a file and adds custom functionalities."""
 
     def __init__(self, config_path):
-        """Initialize Redis client with configurations"""
+        """Initialize a Redis client with configurations"""
         config = yaml.safe_load(open(config_path, 'r'))
         super().__init__(
             host=config['Redis']['redis_host'],

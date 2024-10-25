@@ -2,18 +2,16 @@
 import argparse
 import functools
 import os
-import sys
+
+from openmmla.bases.indoor_positioning import VideoSynchronizer
+from openmmla.utils.args import add_arguments, print_arguments
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = 'conf/video_base.ini'
-sys.path.append(project_dir)
-
-from openmmla_vision.bases.synchronizer import Synchronizer
-from openmmla_vision.utils.args_utils import add_arguments, print_arguments
+config_path = os.path.join(project_dir, 'config.yml')
 
 
 def run_synchronizer(args):
-    synchronizer = Synchronizer(project_dir=args.project_dir, config_path=args.config_path)
+    synchronizer = VideoSynchronizer(project_dir=args.project_dir, config_path=args.config_path)
     synchronizer.run()
 
 

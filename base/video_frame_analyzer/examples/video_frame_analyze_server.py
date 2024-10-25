@@ -1,7 +1,8 @@
 """This script runs the video frame analyzer server."""
 import os
-from openmmla_vision.services.video_frame_analyzer import VideoFrameAnalyzer
-from openmmla_vision.utils.server_utils import create_app
+
+from openmmla.services.video import VideoFrameAnalyzer
+from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 

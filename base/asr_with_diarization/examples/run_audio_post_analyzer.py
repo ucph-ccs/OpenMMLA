@@ -1,4 +1,4 @@
-"""This script runs the audio post analyzer."""
+"""This script runs the audio post-analyzer."""
 import argparse
 import functools
 import os

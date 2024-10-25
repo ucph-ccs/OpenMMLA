@@ -15,7 +15,7 @@ from .transform import transform_point, transform_rotation
 from .vector import is_tag_looking_at_another_2d
 
 
-class Synchronizer(Base):
+class VideoSynchronizer(Base):
     """Synchronizer class for synchronizing detection results from multiple cameras and uploading to InfluxDB"""
     logger = get_logger('synchronizer')
 

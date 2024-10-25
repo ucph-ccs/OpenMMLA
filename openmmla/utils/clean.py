@@ -5,6 +5,7 @@ import sys
 
 
 def clear_directory(directory):
+    """Clears all files and subdirectories in the specified directory."""
     for filename in os.listdir(directory):
         file_path = os.path.join(directory, filename)
         try:
@@ -23,6 +24,6 @@ def safe_delete_file(file_path):
 
 
 def flush_input():
-    """Flush all input from stdin buffer."""
+    """Flush all inputs from stdin buffer."""
     while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
         sys.stdin.read(1)

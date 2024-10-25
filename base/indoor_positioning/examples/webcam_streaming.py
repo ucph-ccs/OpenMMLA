@@ -1,14 +1,13 @@
 """This script demonstrates how to stream video from a webcam."""
 import logging
 import os
-import sys
-
-project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-sys.path.append(project_dir)
 
 import cv2
 
-from openmmla_vision.utils.stream_utils import WebcamVideoStream
+from openmmla.bases.indoor_positioning import WebcamVideoStream
+
+project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+config_path = os.path.join(project_dir, 'config.yml')
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

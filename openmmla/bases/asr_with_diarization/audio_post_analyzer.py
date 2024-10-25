@@ -57,14 +57,6 @@ class AudioPostAnalyzer(Base):
             raise ValueError("You must specify an audio file to process or place it under the audio/post-time/origin "
                              "folder.")
 
-    def run(self):
-        """Process all specified files under the audio/post-time/origin folder."""
-        for audio_file_name in tqdm(self.filenames_to_process, desc='Processing audio files', unit='session'):
-            if audio_file_name.endswith('.DS_Store'):
-                continue
-            self._process_single_audio_file(audio_file_name)
-            self.logger.info(f"Processing file: {audio_file_name}")
-
     def _setup_from_yaml(self):
         self.frame_rate = int(self.config['PostAnalyzer']['frame_rate'])
         self.channels = int(self.config['PostAnalyzer']['channels'])
@@ -114,6 +106,14 @@ class AudioPostAnalyzer(Base):
             config_path=self.config_path,
             audio_db=os.path.join(self.audio_db_dir, os.path.splitext(self.filenames_to_process[0])[0]),
             model_path=self.sr_model, use_onnx=False, use_cuda=True, local=True)
+
+    def run(self):
+        """Process all specified files under the audio/post-time/origin folder."""
+        for audio_file_name in tqdm(self.filenames_to_process, desc='Processing audio files', unit='session'):
+            if audio_file_name.endswith('.DS_Store'):
+                continue
+            self._process_single_audio_file(audio_file_name)
+            self.logger.info(f"Processing file: {audio_file_name}")
 
     def _process_single_audio_file(self, filename):
         """Process a single audio file.

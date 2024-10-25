@@ -3,7 +3,7 @@
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 
 # video services
-services=("frame")
+services=("frame-analyze")
 
 shutdown_server() {
     echo "Shutting down selected tmux sessions..."

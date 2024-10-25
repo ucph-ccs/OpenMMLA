@@ -1,4 +1,5 @@
 import gc
+
 import torch
 from PIL import Image
 from pupil_apriltags import Detector
@@ -6,8 +7,9 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import destroy_model_parallel
 
-from openmmla_vision.utils.apriltag_utils import detect_apriltags
-from openmmla_vision.utils.prompt_utils import generate_vlm_prompt_msg, generate_llm_prompt_msg, parse_text_to_dict
+from openmmla.services.video.video_frame_analyzer import generate_vlm_prompt_msg, generate_llm_prompt_msg, \
+    parse_text_to_dict
+from openmmla.utils.video.apriltag import detect_apriltags
 
 # Main execution
 image_path = '../../llm-video-analyzer/data/llm_test/6.jpg'

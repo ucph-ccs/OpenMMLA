@@ -1,6 +1,7 @@
-import requests
 import json
 import os
+
+import requests
 
 
 def process_image(image_path, server_url="http://localhost:5000/process"):
@@ -30,7 +31,7 @@ def process_image(image_path, server_url="http://localhost:5000/process"):
 def main():
     # Example usage
     # image_path = "path/to/your/image.jpg"
-    image_path = "1.jpg"
+    image_path = "../../../server/video_frame_analyzer/examples/1.jpg"
 
     try:
         results = process_image(image_path)

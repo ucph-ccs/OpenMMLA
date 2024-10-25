@@ -2,14 +2,12 @@
 import argparse
 import functools
 import os
-import sys
+
+from openmmla.bases.indoor_positioning import VideoBase
+from openmmla.utils.args import add_arguments, print_arguments
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = 'conf/video_base.ini'
-sys.path.append(project_dir)
-
-from openmmla_vision.utils.args_utils import add_arguments, print_arguments
-from openmmla_vision.bases.video_base import VideoBase
+config_path = os.path.join(project_dir, 'config.yml')
 
 
 def run_video_base(args):

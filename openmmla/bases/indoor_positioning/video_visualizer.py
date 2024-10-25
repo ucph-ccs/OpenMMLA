@@ -24,7 +24,7 @@ if platform.system() != "Linux":
     set_start_method("fork")
 
 
-class Visualizer(Base):
+class VideoVisualizer(Base):
     """Real Time Visualization class for visualizing the real-time badge relations and positions"""
     logger = get_logger('visualizer')
 
