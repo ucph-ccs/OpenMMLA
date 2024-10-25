@@ -55,28 +55,49 @@ class AudioRecorder:
         self.use_onnx = use_onnx
         self.cuda_enable = use_cuda and torch is not None and torch.cuda.is_available()
 
-        # Audio server parameters
         if not vad_local or not nr_local:
             self.audio_server_host = socket.gethostbyname(config['Server']['audio_server_host'])
-
-        # Recording parameters
         self.record_rate = int(config['Recorder']['record_rate'])
         self.chunk_size = int(config['Recorder']['chunk_size'])
         self.channels = int(config['Recorder']['channels'])
         self.sample_width = int(config['Recorder']['sample_width'])
-        self.format = pyaudio.paInt16  # locally recording format
+        self.format = pyaudio.paInt16  # local recording format
         self.input_device_index = None
         self.output_device_index = None
 
-        # Declare PyAudio object and record stream for locally recording
         self.p = None
         self.stream = None
         self.continuous_recording = False
 
-        # Setup nr and vad model
+        self._setup_objects()
+
+    def _setup_objects(self):
         self.vad_model = None
         self.nr_model = None
-        self._configure_with_torch()
+        if self.vad_enable and self.vad_local:
+            try:
+                if load_silero_vad is None:
+                    raise ImportError
+                self.vad_model = load_silero_vad(onnx=self.use_onnx)
+                self.logger.info(f"Silero VAD is enabled with onnx set to {self.use_onnx}.")
+            except ImportError as e:
+                self.logger.warning(f"Error %s occurs while importing torch and torchaudio, disabling VAD.", e,
+                                    exc_info=True)
+                self.vad_enable = False
+
+        if self.nr_enable and self.nr_local:
+            try:
+                if pretrained is None or torch is None or torchaudio is None:
+                    raise ImportError
+                if self.cuda_enable:
+                    self.nr_model = pretrained.dns64().cuda()
+                else:
+                    self.nr_model = pretrained.dns64()
+                # self.nr_model = pretrained.dns48()  # Use this for faster computation but lower performance
+                self.logger.info("Denoiser is enabled.")
+            except ImportError as e:
+                self.logger.warning(f"Error %s occurs while importing Denoiser, disabling Denoiser.", e, exc_info=True)
+                self.nr_enable = False
 
     def post_processing(self, input_path: str, sampling_rate: int, inplace: int, base_id: str = None) \
             -> Union[str, None]:
@@ -224,33 +245,6 @@ class AudioRecorder:
         print("Recording ended.")
         apply_gain(output_path)
         return self.post_processing(output_path, self.record_rate, 1, base_id)
-
-    def _configure_with_torch(self):
-        """Configure the VAD and NR models with torch and torchaudio."""
-        if self.vad_enable and self.vad_local:
-            try:
-                if load_silero_vad is None:
-                    raise ImportError
-                self.vad_model = load_silero_vad(onnx=self.use_onnx)
-                self.logger.info(f"Silero VAD is enabled with onnx set to {self.use_onnx}.")
-            except ImportError as e:
-                self.logger.warning(f"Error %s occurs while importing torch and torchaudio, disabling VAD.", e,
-                                    exc_info=True)
-                self.vad_enable = False
-
-        if self.nr_enable and self.nr_local:
-            try:
-                if pretrained is None or torch is None or torchaudio is None:
-                    raise ImportError
-                if self.cuda_enable:
-                    self.nr_model = pretrained.dns64().cuda()
-                else:
-                    self.nr_model = pretrained.dns64()
-                # self.nr_model = pretrained.dns48()  # Use this for faster computation but lower performance
-                self.logger.info("Denoiser is enabled.")
-            except ImportError as e:
-                self.logger.warning(f"Error %s occurs while importing Denoiser, disabling Denoiser.", e, exc_info=True)
-                self.nr_enable = False
 
     @staticmethod
     def recording_prompt(seconds: float):

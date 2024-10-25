@@ -1,4 +1,3 @@
-import inspect
 import json
 import os
 import platform
@@ -11,11 +10,12 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 from numpy.linalg import norm
 
-from openmmla.utils.client import InfluxDBClientWrapper
-from openmmla.utils.client import RedisClientWrapper
+from openmmla.bases import Base
+from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 from .input import get_bucket_name, get_function_visualizer
 
+# Setup for multiprocessing on macOS
 # https://stackoverflow.com/questions/44144584/typeerror-cant-pickle-thread-lock-objects/78013322#78013322
 # Add 'export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES' to ~/.zshrc for multiprocess fork
 if platform.system() != "Linux":
@@ -24,11 +24,11 @@ if platform.system() != "Linux":
     set_start_method("fork")
 
 
-class Visualizer:
+class Visualizer(Base):
     """Real Time Visualization class for visualizing the real-time badge relations and positions"""
     logger = get_logger('visualizer')
 
-    def __init__(self, project_dir: str = None, config_path: str = None, store: bool = False):
+    def __init__(self, project_dir: str, config_path: str, store: bool = False):
         """Initialize the visualizer.
 
         Args:
@@ -36,40 +36,25 @@ class Visualizer:
             config_path: path to the configuration file
             store: whether to store the visualization images in the local directory
         """
-        # Set the project root directory
-        if project_dir is None:
-            caller_frame = inspect.stack()[1]
-            caller_module = inspect.getmodule(caller_frame[0])
-            if caller_module is None:
-                self.project_dir = os.getcwd()
-            else:
-                self.project_dir = os.path.dirname(os.path.abspath(caller_module.__file__))
-        else:
-            self.project_dir = project_dir
+        super().__init__(project_dir, config_path)
 
-        # Determine the configuration path
-        if config_path:
-            if os.path.isabs(config_path):
-                self.config_path = config_path
-            else:
-                self.config_path = os.path.join(self.project_dir, config_path)
-        else:
-            self.config_path = os.path.join(self.project_dir, 'conf/video_base.ini')
-
-        # Check if the configuration file exists
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
-
+        """Visualizer specific parameters."""
         self.store = store
 
-        self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
-        os.makedirs(self.visualizations_dir, exist_ok=True)
-
+        """Runtime attributes."""
         self.bucket_name = None
         self.processes = []
 
+        """Client attributes."""
         self.redis_client = RedisClientWrapper(self.config_path)
         self.influx_client_main = InfluxDBClientWrapper(self.config_path)
+
+        self._setup_directories()
+
+    def _setup_directories(self):
+        """Set up directories."""
+        self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
+        os.makedirs(self.visualizations_dir, exist_ok=True)
 
     def run(self):
         print('\033]0;Video Visualizer\007')

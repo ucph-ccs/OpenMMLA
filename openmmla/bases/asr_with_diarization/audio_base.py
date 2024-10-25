@@ -17,9 +17,7 @@ from openmmla.bases import Base
 from openmmla.utils.audio.auga import normalize_rms
 from openmmla.utils.audio.processing import read_frames_from_wav, write_frames_to_wav
 from openmmla.utils.clean import clear_directory
-from openmmla.utils.client import InfluxDBClientWrapper
-from openmmla.utils.client import MQTTClientWrapper
-from openmmla.utils.client import RedisClientWrapper
+from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.errors import RecordingError, TranscribingError
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import request_speech_transcription, request_speech_separation
@@ -65,6 +63,8 @@ class AudioBase(Base, ABC):
             store: whether to store audio files, default to True
         """
         super().__init__(project_dir, config_path)
+
+        """Audio base specific parameters."""
         self.mode = mode
         self.local = local
         self.vad = vad
@@ -73,15 +73,7 @@ class AudioBase(Base, ABC):
         self.sp = sp
         self.store = store
 
-        # Set Directories
-        self.audio_realtime_dir = os.path.join(self.project_dir, 'audio', 'real-time')
-        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
-        self.audio_db_dir = os.path.join(self.project_dir, 'audio_db')
-        os.makedirs(self.audio_realtime_dir, exist_ok=True)
-        os.makedirs(self.audio_temp_dir, exist_ok=True)
-        os.makedirs(self.audio_db_dir, exist_ok=True)
-
-        # Runtime variables
+        """Runtime attributes."""
         self.bucket_name = None
         self.last_speaker = None
         self.audio_dir = None
@@ -91,28 +83,9 @@ class AudioBase(Base, ABC):
         self.threads = []
         self.stop_event = threading.Event()
 
-        # Attributes to be initialized in the subclass
-        self.register_duration = None  # segment length of speaker registration
-        self.recognize_duration = None  # segment length of speaker recognition
-        self.rms_threshold = None  # volume energy level RMS threshold
-        self.rms_peak_threshold = None  # volume energy level RMS peak threshold
-        self.threshold = None  # similarity threshold for speaker recognition
-        self.keep_threshold = None  # similarity threshold for keep speaker when doing half-scaled recognition
-        self.audio_server_host = None  # audio server host IP
-
-        self.influx_client = None  # InfluxDB client object
-        self.redis_client = None  # Redis client object
-        self.mqtt_client = None  # MQTT client object
-        self.audio_recognizer = None  # audio recognizer object
-        self.audio_recorder = None  # audio recorder object
-        self.speech_transcriber = None  # speech transcriber object
-        self.speech_separator = None  # speech separator object
-
-        self.id = None  # audio base id
-        self.audio_db = None  # audio database directory
-
         self._setup_from_yaml()
         self._setup_from_input()
+        self._setup_directories()
         self._setup_objects()
 
     @property
@@ -135,10 +108,20 @@ class AudioBase(Base, ABC):
 
     def _setup_from_input(self):
         self.id = get_id()
+
+    def _setup_directories(self):
+        self.audio_realtime_dir = os.path.join(self.project_dir, 'audio', 'real-time')
+        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
+        self.audio_db_dir = os.path.join(self.project_dir, 'audio_db')
         self.audio_db = os.path.join(self.audio_db_dir, f'{self.base_type}_{self.id}')
+        os.makedirs(self.audio_realtime_dir, exist_ok=True)
+        os.makedirs(self.audio_temp_dir, exist_ok=True)
+        os.makedirs(self.audio_db_dir, exist_ok=True)
         os.makedirs(self.audio_db, exist_ok=True)
 
     def _setup_objects(self):
+        self.speech_transcriber = None
+        self.speech_separator = None
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)

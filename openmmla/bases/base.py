@@ -35,11 +35,3 @@ class Base(ABC):
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""
         pass
-
-    def _setup_from_input(self):
-        """Set up attributes from user input."""
-        pass
-
-    def _setup_objects(self):
-        """Set up object attributes."""
-        pass

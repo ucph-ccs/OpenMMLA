@@ -1,5 +1,4 @@
 import gc
-import inspect
 import json
 import logging
 import os
@@ -7,56 +6,29 @@ import threading
 import time
 
 from openmmla.analytics.video.analyze import session_analysis_video
-from openmmla.utils.client import InfluxDBClientWrapper
-from openmmla.utils.client import MQTTClientWrapper
-from openmmla.utils.client import RedisClientWrapper
+from openmmla.bases import Base
+from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 from openmmla.utils.threads import RaisingThread
 from .input import get_function_synchronizer, get_bucket_name
-from .vector import is_tag_looking_at_another_2d
 from .transform import transform_point, transform_rotation
+from .vector import is_tag_looking_at_another_2d
 
 
-class Synchronizer:
+class Synchronizer(Base):
     """Synchronizer class for synchronizing detection results from multiple cameras and uploading to InfluxDB"""
     logger = get_logger('synchronizer')
 
-    def __init__(self, project_dir: str = None, config_path: str = None):
+    def __init__(self, project_dir: str, config_path: str):
         """Initialize the synchronizer.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
         """
-        # Set the project root directory
-        if project_dir is None:
-            caller_frame = inspect.stack()[1]
-            caller_module = inspect.getmodule(caller_frame[0])
-            if caller_module is None:
-                self.project_dir = os.getcwd()
-            else:
-                self.project_dir = os.path.dirname(os.path.abspath(caller_module.__file__))
-        else:
-            self.project_dir = project_dir
+        super().__init__(project_dir, config_path)
 
-        # Determine the configuration path
-        if config_path:
-            if os.path.isabs(config_path):
-                self.config_path = config_path
-            else:
-                self.config_path = os.path.join(self.project_dir, config_path)
-        else:
-            self.config_path = os.path.join(self.project_dir, 'conf/video_base.ini')
-
-        # Check if the configuration file exists
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
-
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
-        os.makedirs(self.logger_dir, exist_ok=True)
-        os.makedirs(self.camera_sync_dir, exist_ok=True)
-
+        """Runtime attributes."""
         self.main_camera_id = None
         self.transform_matrices_dict = None
         self.bucket_name = None
@@ -67,9 +39,19 @@ class Synchronizer:
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
 
+        """Client attributes."""
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
+
+        self._setup_directories()
+
+    def _setup_directories(self):
+        """Set up directories."""
+        self.logger_dir = os.path.join(self.project_dir, 'logger')
+        self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
+        os.makedirs(self.logger_dir, exist_ok=True)
+        os.makedirs(self.camera_sync_dir, exist_ok=True)
 
     def run(self):
         print('\033]0;Video Synchronizer\007')
@@ -229,7 +211,8 @@ class Synchronizer:
                         self.graph_dict.setdefault(tag_id, [])
                         for target_id, target_data in self.location_dict.items():
                             if target_id != tag_id and target_id not in self.graph_dict[tag_id]:
-                                if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.7, distance_threshold=1.2):
+                                if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.7,
+                                                                distance_threshold=1.2):
                                     self.graph_dict[tag_id].append(target_id)
 
     def _upload_data(self):

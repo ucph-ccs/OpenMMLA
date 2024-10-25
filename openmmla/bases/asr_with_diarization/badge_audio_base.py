@@ -38,12 +38,6 @@ class BadgeAudioBase(AudioBase):
             sp: whether to do speech separation for overlapped segment, default to False
             store: whether to store audio files, default to True
         """
-        # Badge audio base custom attributes
-        self.listening_ip = None  # base listening IP address for badge type base
-        self.protocol = None  # communication protocol, TCP or UDP
-        self.port_offset = None  # port offset, default to 50000
-        self.port = None  # audio base port to listen on for badge type base
-
         super().__init__(project_dir=project_dir, config_path=config_path, mode=mode, local=local, vad=vad, nr=nr,
                          tr=tr, sp=sp, store=store)
 

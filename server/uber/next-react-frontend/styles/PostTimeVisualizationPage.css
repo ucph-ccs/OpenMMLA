@@ -1,0 +1,124 @@
+/* PostTimeVisualizationPage.css */
+
+.visualization-container {
+  padding: 20px;
+  text-align: center;
+  min-height: 100vh;
+  background-image: url('bg2.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.visualization-container h2 {
+  padding: 50px;
+  font-size: 2em;
+  font-weight: bold;
+}
+
+.visualization-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  grid-gap: 20px;
+  padding: 20px;
+}
+
+.visualization-item {
+  overflow: hidden;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  transition: box-shadow 0.3s ease;
+  border: none; /* Removes the blue border */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 10px; /* Add some padding inside each cell */
+}
+
+.visualization-item:hover {
+  box-shadow: 0 6px 12px rgba(0,0,0,0.2);
+}
+
+.visualization-item img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.visualization-item a {
+  display: block;
+  padding: 10px;
+  background-color: transparent;
+  color: #007bff;
+  text-decoration: none;
+  font-weight: bold;
+  border-radius: 0 0 10px 10px;
+}
+
+.zoomable-image {
+  transition: transform 0.3s ease;
+  cursor: pointer;
+}
+
+.zoomable-image:hover {
+  transform: scale(1.1); /* Adjust scale factor as needed */
+}
+
+.return-link a {
+  color: white; /* Ensuring text color is white */
+  text-decoration: none; /* Removes underline */
+}
+
+.return-link a:hover {
+  color: white; /* Ensuring text color remains white on hover */
+  text-decoration: none; /* Ensures underline doesn't reappear on hover */
+}
+
+.return-link {
+  display: inline-block; /* Makes the link block-level for padding */
+  padding: 10px 20px; /* Padding around the link */
+  background-color: #007bff; /* Blue background color to match the visualize button */
+  border-radius: 5px; /* Rounded corners */
+  border: none; /* No border */
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); /* Shadow for a raised effect */
+  transition: background-color 0.3s ease, box-shadow 0.3s ease; /* Smooth transition for hover effects */
+  font-weight: bold; /* Optional: Make the text bold */
+}
+
+.return-link:hover {
+  background-color: #0056b3; /* Darker blue on hover */
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3); /* Larger shadow on hover */
+}
+
+@media (max-width: 768px) {
+  .visualization-container {
+    padding-bottom: 50px;
+    font-size: 0.75em;
+    background-size: contain;
+    background-repeat: repeat;
+    margin-bottom: 20px;
+  }
+}
+
+.log-files-section select {
+  padding: 5px;
+  margin-right: 10px;
+  width: 50%; /* Adjust width as needed */
+  height: auto; /* Let it expand based on the size attribute */
+}
+
+.log-files-section button {
+  padding: 5px 10px;
+  margin-left: 5px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.log-files-section button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+

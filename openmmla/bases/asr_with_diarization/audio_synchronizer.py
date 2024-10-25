@@ -8,9 +8,7 @@ import time
 from openmmla.analytics.audio.analyze import session_analysis_audio
 from openmmla.bases import Base
 from openmmla.utils.clean import clear_directory
-from openmmla.utils.client import InfluxDBClientWrapper
-from openmmla.utils.client import MQTTClientWrapper
-from openmmla.utils.client import RedisClientWrapper
+from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 from openmmla.utils.threads import RaisingThread
 from .enums import BLUE, ENDC
@@ -37,12 +35,6 @@ class AudioSynchronizer(Base):
         self.dominant = dominant
         self.sp = sp
 
-        # Set directories
-        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        os.makedirs(self.audio_temp_dir, exist_ok=True)
-        os.makedirs(self.logger_dir, exist_ok=True)
-
         self.bucket_name = None  # Session bucket name
         self.number_of_speaker = None  # Number of group members
         self.latest_time = None  # Record start time of the most recent synchronized segment
@@ -51,6 +43,7 @@ class AudioSynchronizer(Base):
         self.stop_event = threading.Event()  # Event for stopping all threads
 
         self._setup_from_yaml()
+        self._setup_directories()
         self._setup_objects()
 
     def run(self):
@@ -73,11 +66,16 @@ class AudioSynchronizer(Base):
                     exc_info=True)
 
     def _setup_from_yaml(self):
-        """Load the configuration from the YAML file."""
         self.result_expiry_time = int(
             self.config['Synchronizer']['result_expiry_time'])  # Expiry time of retained results
         self.time_range = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
             self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest segment
+
+    def _setup_directories(self):
+        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
+        self.logger_dir = os.path.join(self.project_dir, 'logger')
+        os.makedirs(self.audio_temp_dir, exist_ok=True)
+        os.makedirs(self.logger_dir, exist_ok=True)
 
     def _setup_objects(self):
         self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client

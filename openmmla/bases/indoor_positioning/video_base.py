@@ -1,6 +1,4 @@
-import configparser
 import datetime
-import inspect
 import json
 import os
 
@@ -8,16 +6,16 @@ import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
-from openmmla.utils.client import InfluxDBClientWrapper
-from openmmla.utils.client import MQTTClientWrapper
+from openmmla.bases import Base
+from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
 from .input import get_bucket_name, get_function_base
-from .vector import is_tag_looking_at_another_2d, get_2d_outward_normal_vector
 from .stream import WebcamVideoStream
+from .vector import is_tag_looking_at_another_2d, get_2d_outward_normal_vector
 
 
-class VideoBase:
+class VideoBase(Base):
     """Video base class for AprilTag detection from video stream."""
     logger = get_logger('video-base')
 
@@ -30,42 +28,14 @@ class VideoBase:
             graphics: whether to show graphics
             record: whether to record video frames
         """
-        # Set the project root directory
-        if project_dir is None:
-            caller_frame = inspect.stack()[1]
-            caller_module = inspect.getmodule(caller_frame[0])
-            if caller_module is None:
-                self.project_dir = os.getcwd()
-            else:
-                self.project_dir = os.path.dirname(os.path.abspath(caller_module.__file__))
-        else:
-            self.project_dir = project_dir
+        super().__init__(project_dir, config_path)
 
-        # Determine the configuration path
-        if config_path:
-            if os.path.isabs(config_path):
-                self.config_path = config_path
-            else:
-                self.config_path = os.path.join(self.project_dir, config_path)
-        else:
-            self.config_path = os.path.join(self.project_dir, 'conf/video_base.ini')
-
-        # Check if the configuration file exists
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
-
+        """Video-base specific parameters."""
         self.graphics = graphics
         self.record = record
-
-        # Set directories
-        self.recordings_dir = os.path.join(self.project_dir, 'recordings')
-        self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
-        self.camera_calib_dir = os.path.join(self.project_dir, 'camera_calib')
-        os.makedirs(self.recordings_dir, exist_ok=True)
-        os.makedirs(self.camera_sync_dir, exist_ok=True)
-        os.makedirs(self.camera_calib_dir, exist_ok=True)
-
         self.max_badge_id = 12
+
+        """Runtime attributes."""
         self.camera_info = {}
         self.camera_seed = None
         self.sender_id = None
@@ -75,23 +45,34 @@ class VideoBase:
         self.transform_matrices_dict = None
         self.camera_configured = False
 
-        self._load_config()
-        self._config_objects()
-
-    def _load_config(self):
-        self.config = configparser.ConfigParser()
-        self.config.read(self.config_path)
-        self.tag_size = float(self.config['Tag']['tag_size'])
-        self.families = self.config['Tag']['families']
-        self.res_width = int(self.config['Image']['res_width'])
-        self.res_height = int(self.config['Image']['res_height'])
-        self.res = (self.res_width, self.res_height)
-        self.rotate = int(self.config['Image']['rotate'])
-
-    def _config_objects(self):
+        """Client attributes."""
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.detector = Detector(families=self.families, nthreads=4)
+
+        self._setup_from_yaml()
+        self._setup_directories()
+
+    def _setup_from_yaml(self):
+        """Set up attributes from YAML configuration."""
+        tag_config = self.config.get('Tag', {})
+        self.tag_size = float(tag_config.get('tag_size', 0.0))
+        self.families = tag_config.get('families', '')
+
+        image_config = self.config.get('Image', {})
+        self.res_width = int(image_config.get('res_width', 0))
+        self.res_height = int(image_config.get('res_height', 0))
+        self.res = (self.res_width, self.res_height)
+        self.rotate = int(image_config.get('rotate', 0))
+
+    def _setup_directories(self):
+        """Set up directories."""
+        self.recordings_dir = os.path.join(self.project_dir, 'recordings')
+        self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
+        self.camera_calib_dir = os.path.join(self.project_dir, 'camera_calib')
+        os.makedirs(self.recordings_dir, exist_ok=True)
+        os.makedirs(self.camera_sync_dir, exist_ok=True)
+        os.makedirs(self.camera_calib_dir, exist_ok=True)
 
     def run(self):
         print('\033]0;Video Base\007')
@@ -328,8 +309,9 @@ class VideoBase:
                 available_video_seeds.append(i)
             cap.release()
 
-        if 'RTMP' in self.config and 'video_streams' in self.config['RTMP']:
-            video_stream_list = self.config['RTMP']['video_streams'].split(',')
+        rtmp_config = self.config.get('RTMP', {})
+        if 'video_streams' in rtmp_config:
+            video_stream_list = rtmp_config['video_streams'].split(',')
             for streams in video_stream_list:
                 if streams:
                     print(f"{number_of_detected_seeds} : RTMP stream {streams} is available.")

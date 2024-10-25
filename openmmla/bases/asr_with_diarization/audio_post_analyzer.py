@@ -47,34 +47,15 @@ class AudioPostAnalyzer(Base):
         self.sp = sp
         self.tr = tr
 
-        # Set Directories
-        self.speakers_corpus_dir = os.path.join(self.project_dir, 'audio_db', 'post-time')
-        self.audio_origin_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'origin')
-        self.audio_formatted_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'formatted')
-        self.audio_segments_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'segments')
-        self.audio_chunks_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'chunks')
-        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
-        self.audio_db_dir = os.path.join(self.project_dir, 'audio_db')
-        self.logs_dir = os.path.join(self.project_dir, 'logs')
-        self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
-        os.makedirs(self.speakers_corpus_dir, exist_ok=True)
-        os.makedirs(self.audio_origin_dir, exist_ok=True)
-        os.makedirs(self.audio_formatted_dir, exist_ok=True)
-        os.makedirs(self.audio_segments_dir, exist_ok=True)
-        os.makedirs(self.audio_chunks_dir, exist_ok=True)
-        os.makedirs(self.audio_temp_dir, exist_ok=True)
-        os.makedirs(self.audio_db_dir, exist_ok=True)
-        os.makedirs(self.logs_dir, exist_ok=True)
-        os.makedirs(self.visualizations_dir, exist_ok=True)
+        self._setup_from_yaml()
+        self._setup_directories()
+        self._setup_objects()
 
         filenames_in_dir = [f for f in os.listdir(self.audio_origin_dir) if not f.startswith('.')]
         self.filenames_to_process = [filename] if filename else filenames_in_dir
         if not self.filenames_to_process:
             raise ValueError("You must specify an audio file to process or place it under the audio/post-time/origin "
                              "folder.")
-
-        self._setup_from_yaml()
-        self._setup_objects()
 
     def run(self):
         """Process all specified files under the audio/post-time/origin folder."""
@@ -93,6 +74,26 @@ class AudioPostAnalyzer(Base):
         self.keep_threshold = float(self.config['PostAnalyzer']['keep_threshold'])
         self.sr_model = self.config['PostAnalyzer']['sr_model']
         self.language = self.config['PostAnalyzer']['language']
+
+    def _setup_directories(self):
+        self.speakers_corpus_dir = os.path.join(self.project_dir, 'audio_db', 'post-time')
+        self.audio_origin_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'origin')
+        self.audio_formatted_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'formatted')
+        self.audio_segments_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'segments')
+        self.audio_chunks_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'chunks')
+        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
+        self.audio_db_dir = os.path.join(self.project_dir, 'audio_db')
+        self.logs_dir = os.path.join(self.project_dir, 'logs')
+        self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
+        os.makedirs(self.speakers_corpus_dir, exist_ok=True)
+        os.makedirs(self.audio_origin_dir, exist_ok=True)
+        os.makedirs(self.audio_formatted_dir, exist_ok=True)
+        os.makedirs(self.audio_segments_dir, exist_ok=True)
+        os.makedirs(self.audio_chunks_dir, exist_ok=True)
+        os.makedirs(self.audio_temp_dir, exist_ok=True)
+        os.makedirs(self.audio_db_dir, exist_ok=True)
+        os.makedirs(self.logs_dir, exist_ok=True)
+        os.makedirs(self.visualizations_dir, exist_ok=True)
 
     def _setup_objects(self):
         if self.tr:

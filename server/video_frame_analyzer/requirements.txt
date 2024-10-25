@@ -1,0 +1,8 @@
+numpy==1.26.4
+opencv-python==4.10.0.84
+Pillow==10.4.0
+pupil_apriltags==1.0.4.post10
+huggingface-hub==0.24.6
+flask==3.0.3
+openai==1.42.0
+vllm==0.5.4; sys_platform == 'linux'
