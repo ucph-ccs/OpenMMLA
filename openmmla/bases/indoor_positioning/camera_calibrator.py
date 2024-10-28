@@ -3,6 +3,7 @@ import os
 
 import cv2
 import numpy as np
+import yaml
 
 from openmmla.bases import Base
 from openmmla.utils.logger import get_logger
@@ -10,7 +11,7 @@ from .input import flush_input, get_function_calibrator
 
 
 class CameraCalibrator(Base):
-    """Camera calibration class for calibrating cameras using checkerboard pattern."""
+    """Camera calibration class for calibrating cameras with image capturing and calibration functions."""
     logger = get_logger('camera-calibrator')
 
     def __init__(self, project_dir: str, config_path: str):
@@ -121,7 +122,7 @@ class CameraCalibrator(Base):
                 self.logger.warning("Please enter a valid number.")
 
     def _calibrate_camera(self):
-        """Calibrate the camera using checkerboard pattern."""
+        """Calibrate the camera using a checkerboard pattern."""
         camera_name = self._select_camera()
         selected_path = os.path.join(self.cameras_dir, camera_name)
         is_fisheye = input("Is the camera a fisheye lens? (Y/n): ").lower() == 'y'
@@ -178,9 +179,9 @@ class CameraCalibrator(Base):
         """Update the configuration file with calibration results."""
         k_list = K.tolist()
         d_list = D.tolist()
-        params = [K[0, 0], K[1, 1], K[0, 2], K[1, 2]]
+        params = [float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])]
 
-        # Create or update camera section in config
+        # Create or update a camera section in config
         if camera_name not in self.config:
             self.config[camera_name] = {}
 
@@ -193,7 +194,7 @@ class CameraCalibrator(Base):
 
         # Write updated config to file
         with open(self.config_path, 'w') as config_file:
-            yaml.safe_dump(self.config, config_file)
+            yaml.safe_dump(self.config, config_file, sort_keys=False, default_flow_style=None)
         print(f"Configuration updated for {camera_name}.")
 
     @staticmethod

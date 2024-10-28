@@ -26,6 +26,7 @@ class CameraTagDetector(Base):
             max_badge_id: maximum badge ID to detect
         """
         super().__init__(project_dir, config_path)
+        self._setup_from_yaml()
 
         """Camera detector parameters."""
         self.max_badge_id = max_badge_id
@@ -42,14 +43,11 @@ class CameraTagDetector(Base):
         self.detector = Detector(families=self.families, nthreads=4)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
 
-        self._setup_from_yaml()
-
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""
         tag_config = self.config.get('Tag', {})
         image_config = self.config.get('Image', {})
-
-        self.tag_size = float(tag_config.get('tag_size', 0.08))
+        self.tag_size = float(tag_config.get('tag_size', 0.061))
         self.families = tag_config.get('families', 'tag36h11')
         self.res_width = int(image_config.get('res_width', 1920))
         self.res_height = int(image_config.get('res_height', 1080))

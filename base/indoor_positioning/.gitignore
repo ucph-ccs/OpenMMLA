@@ -1,0 +1,25 @@
+# ignore the following directories
+.idea/
+__pycache__/
+tests/
+test/
+logs/
+logger/
+visualizations/
+recordings/
+*.egg-info/
+dist/
+build/
+server/
+
+# ignore the following directories in any subdirectory
+**/__pycache__/
+
+# ignore the following files
+.DS_Store
+transformation_matrices*
+test*.*
+*test.*
+
+# unignore the following files
+!.gitkeep

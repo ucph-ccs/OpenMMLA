@@ -8,3 +8,4 @@ redis==5.0.7
 scipy==1.14.0
 networkx==3.3
 pyecharts==2.0.6
+PyYAML==6.0.2
