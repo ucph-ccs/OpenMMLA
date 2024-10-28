@@ -29,6 +29,8 @@ class VideoBase(Base):
             record: whether to record video frames
         """
         super().__init__(project_dir, config_path)
+        self._setup_from_yaml()
+        self._setup_directories()
 
         """Video-base specific parameters."""
         self.graphics = graphics
@@ -49,9 +51,6 @@ class VideoBase(Base):
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.detector = Detector(families=self.families, nthreads=4)
-
-        self._setup_from_yaml()
-        self._setup_directories()
 
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""
@@ -242,13 +241,12 @@ class VideoBase(Base):
             return json.load(file)
 
     def _configure_camera_params(self):
-        cameras_dir = os.path.join(self.camera_calib_dir, 'cameras')
-        camera_choices = [d for d in os.listdir(cameras_dir) if os.path.isdir(os.path.join(cameras_dir, d))]
-        for idx, choice in enumerate(camera_choices):
-            print(f"{idx}: {choice}")
-
+        cameras = self.config.get('Cameras', {})
+        camera_choices = list(cameras.keys())
         if not camera_choices:
             return None
+        for idx, choice in enumerate(camera_choices):
+            print(f"{idx}: {choice}")
 
         while True:
             try:
@@ -261,16 +259,18 @@ class VideoBase(Base):
             except ValueError:
                 self.logger.warning("Please enter a valid number.")
 
-        fisheye = self.config.getboolean(chosen_camera, 'fisheye')
-        params = json.loads(self.config.get(chosen_camera, 'params'))
+        camera_config = cameras[chosen_camera]
+        fisheye = camera_config['fisheye']
+        params = camera_config['params']
         camera_info = {"fisheye": fisheye, "params": params, "res": self.res}
 
         if fisheye:
-            K = np.array(json.loads(self.config.get(chosen_camera, 'K')))
-            D = np.array(json.loads(self.config.get(chosen_camera, 'D')))
+            K = np.array(camera_config['K'])
+            D = np.array(camera_config['D'])
             map_1, map_2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), K, self.res, cv2.CV_16SC2)
             camera_info.update({"K": K, "D": D, "map_1": map_1, "map_2": map_2})
 
+        print(camera_info)
         return camera_info
 
     def _choose_camera_seed(self, available_video_seeds):

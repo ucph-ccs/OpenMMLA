@@ -27,6 +27,7 @@ class VideoSynchronizer(Base):
             config_path: path to the configuration file
         """
         super().__init__(project_dir, config_path)
+        self._setup_directories()
 
         """Runtime attributes."""
         self.main_camera_id = None
@@ -43,8 +44,6 @@ class VideoSynchronizer(Base):
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
-
-        self._setup_directories()
 
     def _setup_directories(self):
         """Set up directories."""

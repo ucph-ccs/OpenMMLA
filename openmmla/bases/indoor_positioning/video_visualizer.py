@@ -37,6 +37,7 @@ class VideoVisualizer(Base):
             store: whether to store the visualization images in the local directory
         """
         super().__init__(project_dir, config_path)
+        self._setup_directories()
 
         """Visualizer specific parameters."""
         self.store = store
@@ -48,8 +49,6 @@ class VideoVisualizer(Base):
         """Client attributes."""
         self.redis_client = RedisClientWrapper(self.config_path)
         self.influx_client_main = InfluxDBClientWrapper(self.config_path)
-
-        self._setup_directories()
 
     def _setup_directories(self):
         """Set up directories."""

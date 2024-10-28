@@ -22,6 +22,8 @@ class CameraCalibrator(Base):
             config_path: path to the configuration file
         """
         super().__init__(project_dir, config_path)
+        self._setup_from_yaml()
+        self._setup_directories()
 
         """Calibration specific parameters."""
         self.CHECKERBOARD = (6, 9)  # Checkerboard dimensions
@@ -32,9 +34,6 @@ class CameraCalibrator(Base):
         self.objp[0, :, :2] = np.mgrid[0:self.CHECKERBOARD[0], 0:self.CHECKERBOARD[1]].T.reshape(-1, 2)
         self.obj_points = []  # Lists to store object points and image points
         self.img_points = []
-
-        self._setup_from_yaml()
-        self._setup_directories()
 
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""
@@ -182,10 +181,12 @@ class CameraCalibrator(Base):
         params = [float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])]
 
         # Create or update a camera section in config
-        if camera_name not in self.config:
-            self.config[camera_name] = {}
+        if 'Cameras' not in self.config:
+            self.config['Cameras'] = {}
+        if camera_name not in self.config['Cameras']:
+            self.config['Cameras'][camera_name] = {}
 
-        self.config[camera_name].update({
+        self.config['Cameras'][camera_name].update({
             'fisheye': is_fisheye,
             'params': params,
             'K': k_list,

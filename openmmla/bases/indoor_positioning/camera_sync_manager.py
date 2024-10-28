@@ -44,6 +44,7 @@ class CameraSyncManager(Base):
             time_threshold_unsync: time threshold for unsync mode
         """
         super().__init__(project_dir, config_path)
+        self._setup_directories()
 
         """Synchronization parameters."""
         self.sync = sync
@@ -76,8 +77,6 @@ class CameraSyncManager(Base):
 
         """Client attributes."""
         self.mqtt_client = MQTTClientWrapper(self.config_path)
-
-        self._setup_directories()
 
     def _setup_directories(self):
         """Set up required directories."""
