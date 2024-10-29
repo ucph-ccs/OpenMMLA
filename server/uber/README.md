@@ -150,11 +150,10 @@ Please refer to [RTMP configuration](./docs/nginx.md#part-2-rtmp) for detailed s
 
    Install [Node.js](https://nodejs.org/en/download/package-manager)
 
-2. **Set up Next.js project**
+2. **Create Next.js project**
    ```bash
-   npx create-next-app@latest next-react-frontend
+   # npx create-next-app@latest next-react-frontend (if not clone from this repo)
    cd next-react-frontend
-   npm install socket.io-client sharp react-force-graph-2d
    ```
 
 3. **Configure Next.js**
@@ -188,7 +187,13 @@ Please refer to [RTMP configuration](./docs/nginx.md#part-2-rtmp) for detailed s
    ```
    NEXT_PUBLIC_SERVER_IP=uber-server.local
    ```
-
+5. **Install dependencies and start the frontend server**
+   ```bash
+   npm install
+   npm run build
+   npm run start
+   ```
+   
 </details>
 
 ## Usage
