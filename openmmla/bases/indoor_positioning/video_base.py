@@ -55,12 +55,12 @@ class VideoBase(Base):
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""
         tag_config = self.config.get('Tag', {})
-        self.tag_size = float(tag_config.get('tag_size', 0.0))
-        self.families = tag_config.get('families', '')
+        self.tag_size = float(tag_config.get('tag_size', 0.061))
+        self.families = tag_config.get('families', 'tag36h11')
 
         image_config = self.config.get('Image', {})
-        self.res_width = int(image_config.get('res_width', 0))
-        self.res_height = int(image_config.get('res_height', 0))
+        self.res_width = int(image_config.get('res_width', 1920))
+        self.res_height = int(image_config.get('res_height', 1080))
         self.res = (self.res_width, self.res_height)
         self.rotate = int(image_config.get('rotate', 0))
 
@@ -118,6 +118,7 @@ class VideoBase(Base):
             # time.sleep(5) # Wait for the threads to terminate
 
     def _set_camera(self):
+        """Set up camera seed and id."""
         self.camera_configured = False
 
         self.transform_matrices_dict = self._load_transform_matrices()
@@ -138,6 +139,89 @@ class VideoBase(Base):
 
         self.sender_id = self._choose_sender_id()
         self.camera_configured = True
+        print(f'\033]0;Video Base {self.sender_id}\007')
+
+    def _configure_camera_params(self):
+        """Configure camera intrinsic parameters."""
+        cameras = self.config.get('Cameras', {})
+        camera_choices = list(cameras.keys())
+        if not camera_choices:
+            return None
+        for idx, choice in enumerate(camera_choices):
+            print(f"{idx}: {choice}")
+
+        while True:
+            try:
+                selection = int(input("Choose your camera name with number: "))
+                if not 0 <= selection < len(camera_choices):
+                    self.logger.warning("Invalid selection. Please choose a valid number.")
+                else:
+                    chosen_camera = camera_choices[selection]
+                    break
+            except ValueError:
+                self.logger.warning("Please enter a valid number.")
+
+        camera_config = cameras[chosen_camera]
+        fisheye = camera_config['fisheye']
+        params = camera_config['params']
+        camera_info = {"fisheye": fisheye, "params": params, "res": self.res}
+
+        if fisheye:
+            K = np.array(camera_config['K'])
+            D = np.array(camera_config['D'])
+            map_1, map_2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), K, self.res, cv2.CV_16SC2)
+            camera_info.update({"K": K, "D": D, "map_1": map_1, "map_2": map_2})
+
+        print(camera_info)
+        return camera_info
+
+    def _detect_video_seeds(self):
+        available_video_seeds = []
+        number_of_detected_seeds = 0
+        for i in range(4):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                print(f"{number_of_detected_seeds} : Camera seed {i} is available.")
+                number_of_detected_seeds += 1
+                available_video_seeds.append(i)
+            cap.release()
+
+        rtmp_config = self.config.get('RTMP', {})
+        if 'video_streams' in rtmp_config:
+            video_stream_list = rtmp_config['video_streams'].split(',')
+            for streams in video_stream_list:
+                if streams:
+                    print(f"{number_of_detected_seeds} : RTMP stream {streams} is available.")
+                    available_video_seeds.append(streams)
+                    number_of_detected_seeds += 1
+
+        return available_video_seeds
+
+    def _choose_camera_seed(self, available_video_seeds):
+        if not available_video_seeds:
+            return None
+        while True:
+            try:
+                seed_id = int(input("Choose your video seed id: "))
+                if 0 <= seed_id < len(available_video_seeds):
+                    self.logger.info(f"Selected video seed: {available_video_seeds[seed_id]}")
+                    return available_video_seeds[seed_id]
+                else:
+                    self.logger.warning("Invalid selection. Please choose a valid video seed.")
+            except ValueError:
+                self.logger.warning("Please enter a valid number.")
+
+    def _choose_sender_id(self):
+        """Prompt user to choose a sender ID based on available keys in transform_matrices.json configuration."""
+        print(f"Available sender ids:\n- {self.transformation_id}")
+        for key in self.transform_matrices_dict.keys():
+            print(f"- {key}")
+        while True:
+            sender_id = input("Enter your sender id: ")
+            if sender_id in self.transform_matrices_dict or sender_id == self.transformation_id:
+                return sender_id
+            else:
+                print("Invalid selection. Please enter a valid sender id.")
 
     def _configure_video_capture(self, camera_seed):
         if self.record:
@@ -239,83 +323,3 @@ class VideoBase(Base):
 
         with open(os.path.join(self.camera_sync_dir, chosen_transformation), 'r') as file:
             return json.load(file)
-
-    def _configure_camera_params(self):
-        cameras = self.config.get('Cameras', {})
-        camera_choices = list(cameras.keys())
-        if not camera_choices:
-            return None
-        for idx, choice in enumerate(camera_choices):
-            print(f"{idx}: {choice}")
-
-        while True:
-            try:
-                selection = int(input("Choose your camera name with number: "))
-                if not 0 <= selection < len(camera_choices):
-                    self.logger.warning("Invalid selection. Please choose a valid number.")
-                else:
-                    chosen_camera = camera_choices[selection]
-                    break
-            except ValueError:
-                self.logger.warning("Please enter a valid number.")
-
-        camera_config = cameras[chosen_camera]
-        fisheye = camera_config['fisheye']
-        params = camera_config['params']
-        camera_info = {"fisheye": fisheye, "params": params, "res": self.res}
-
-        if fisheye:
-            K = np.array(camera_config['K'])
-            D = np.array(camera_config['D'])
-            map_1, map_2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), K, self.res, cv2.CV_16SC2)
-            camera_info.update({"K": K, "D": D, "map_1": map_1, "map_2": map_2})
-
-        print(camera_info)
-        return camera_info
-
-    def _choose_camera_seed(self, available_video_seeds):
-        if not available_video_seeds:
-            return None
-        while True:
-            try:
-                seed_id = int(input("Choose your video seed id: "))
-                if 0 <= seed_id < len(available_video_seeds):
-                    return available_video_seeds[seed_id]
-                else:
-                    self.logger.warning("Invalid selection. Please choose a valid video seed.")
-            except ValueError:
-                self.logger.warning("Please enter a valid number.")
-
-    def _choose_sender_id(self):
-        """Prompt user to choose a sender ID based on available keys in transform_matrices.json configuration."""
-        print(f"Available sender ids:\n- {self.transformation_id}")
-        for key in self.transform_matrices_dict.keys():
-            print(f"- {key}")
-        while True:
-            sender_id = input("Enter your sender id: ")
-            if sender_id in self.transform_matrices_dict or sender_id == self.transformation_id:
-                return sender_id
-            else:
-                print("Invalid selection. Please enter a valid sender id.")
-
-    def _detect_video_seeds(self):
-        available_video_seeds = []
-        number_of_detected_seeds = 0
-        for i in range(4):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                print(f"{number_of_detected_seeds} : Camera seed {i} is available.")
-                number_of_detected_seeds += 1
-                available_video_seeds.append(i)
-            cap.release()
-
-        rtmp_config = self.config.get('RTMP', {})
-        if 'video_streams' in rtmp_config:
-            video_stream_list = rtmp_config['video_streams'].split(',')
-            for streams in video_stream_list:
-                if streams:
-                    print(f"{number_of_detected_seeds} : RTMP stream {streams} is available.")
-                    available_video_seeds.append(streams)
-                    number_of_detected_seeds += 1
-
-        return available_video_seeds

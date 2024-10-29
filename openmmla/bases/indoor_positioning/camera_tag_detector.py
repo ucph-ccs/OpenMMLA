@@ -46,29 +46,13 @@ class CameraTagDetector(Base):
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""
         tag_config = self.config.get('Tag', {})
-        image_config = self.config.get('Image', {})
         self.tag_size = float(tag_config.get('tag_size', 0.061))
         self.families = tag_config.get('families', 'tag36h11')
+
+        image_config = self.config.get('Image', {})
         self.res_width = int(image_config.get('res_width', 1920))
         self.res_height = int(image_config.get('res_height', 1080))
         self.res = (self.res_width, self.res_height)
-
-    def _setup_from_input(self):
-        """Set up camera configuration from user input."""
-        self.camera_info = self._configure_camera_params()
-        if self.camera_info is None:
-            self.logger.warning("Camera configuration failed, please calibrate your camera first.")
-            return False
-
-        available_seeds = self._detect_video_seeds()
-        self.camera_seed = self.choose_camera_seed(available_seeds)
-        if self.camera_seed is None:
-            self.logger.warning("No available camera seed found.")
-            return False
-
-        self.sender_id = input("Input your sender id, 'm' for main camera, and 'a', 'b', 'c', 'd' for alternatives "
-                               "camera: ")
-        return True
 
     def run(self):
         """Run the camera tag detector."""
@@ -83,7 +67,9 @@ class CameraTagDetector(Base):
                     break
                 func_map.get(select_fun, lambda: print("Invalid option."))()
             except (Exception, KeyboardInterrupt) as e:
-                self.logger.warning("%s, Come back to the main menu.", e, exc_info=True)
+                self.logger.warning(
+                    f"During running the tag detector, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
+                    exc_info=True)
 
     def _start(self):
         """Start AprilTag detection"""
@@ -109,20 +95,34 @@ class CameraTagDetector(Base):
             cv2.waitKey(1)
 
     def _set_camera(self):
-        """Configure camera settings."""
+        """Set up camera seed and id."""
         self.camera_configured = False
-        if self._setup_from_input():
-            self.camera_configured = True
-            print(f'\033]0;Camera Detector {self.sender_id}\007')
+
+        self.camera_info = self._configure_camera_params()
+        if self.camera_info is None:
+            self.logger.warning("Camera configuration failed, please calibrate your camera first.")
+            return
+
+        available_seeds = self._detect_video_seeds()
+        self.camera_seed = self.choose_camera_seed(available_seeds)
+        if self.camera_seed is None:
+            self.logger.warning("No available camera seed found.")
+            return
+
+        # check input sender id
+        self.sender_id = input("Input your sender id, 'm' for main camera, and 'a', 'b', 'c', 'd' for alternatives "
+                               "camera: ")
+        self.camera_configured = True
+        print(f'\033]0;Camera Detector {self.sender_id}\007')
 
     def _configure_camera_params(self):
-        """Configure camera parameters from the selected camera."""
-        camera_choices = [d for d in os.listdir(self.cameras_dir) if os.path.isdir(os.path.join(self.cameras_dir, d))]
-        for idx, choice in enumerate(camera_choices):
-            print(f"{idx}: {choice}")
-
+        """Configure camera intrinsic parameters."""
+        cameras = self.config.get('Cameras', {})
+        camera_choices = list(cameras.keys())
         if not camera_choices:
             return None
+        for idx, choice in enumerate(camera_choices):
+            print(f"{idx}: {choice}")
 
         while True:
             try:
@@ -135,18 +135,40 @@ class CameraTagDetector(Base):
             except ValueError:
                 self.logger.warning("Please enter a valid number.")
 
-        camera_config = self.config.get(chosen_camera, {})
-        fisheye = camera_config.get('fisheye', False)
-        params = camera_config.get('params', [])
+        camera_config = cameras[chosen_camera]
+        fisheye = camera_config['fisheye']
+        params = camera_config['params']
         camera_info = {"fisheye": fisheye, "params": params, "res": self.res}
 
         if fisheye:
-            K = np.array(camera_config.get('K', []))
-            D = np.array(camera_config.get('D', []))
+            K = np.array(camera_config['K'])
+            D = np.array(camera_config['D'])
             map_1, map_2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), K, self.res, cv2.CV_16SC2)
             camera_info.update({"K": K, "D": D, "map_1": map_1, "map_2": map_2})
 
+        print(camera_info)
         return camera_info
+
+    def _detect_video_seeds(self):
+        available_video_seeds = []
+        number_of_detected_seeds = 0
+        for i in range(4):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                print(f"{number_of_detected_seeds} : Camera seed {i} is available.")
+                number_of_detected_seeds += 1
+                available_video_seeds.append(i)
+            cap.release()
+
+        if 'RTMP' in self.config and 'video_streams' in self.config['RTMP']:
+            video_stream_list = self.config['RTMP']['video_streams'].split(',')
+            for streams in video_stream_list:
+                if streams:
+                    print(f"{number_of_detected_seeds} : RTMP stream {streams} is available.")
+                    available_video_seeds.append(streams)
+                    number_of_detected_seeds += 1
+
+        return available_video_seeds
 
     def _configure_video_capture(self, camera_seed):
         self.video_stream = WebcamVideoStream(format='MJPG', src=camera_seed, res=(1920, 1080))
@@ -212,27 +234,6 @@ class CameraTagDetector(Base):
         else:
             normal = -normal
         return normal, tag
-
-    def _detect_video_seeds(self):
-        available_video_seeds = []
-        number_of_detected_seeds = 0
-        for i in range(4):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                print(f"{number_of_detected_seeds} : Camera seed {i} is available.")
-                number_of_detected_seeds += 1
-                available_video_seeds.append(i)
-            cap.release()
-
-        if 'RTMP' in self.config and 'video_streams' in self.config['RTMP']:
-            video_stream_list = self.config['RTMP']['video_streams'].split(',')
-            for streams in video_stream_list:
-                if streams:
-                    print(f"{number_of_detected_seeds} : RTMP stream {streams} is available.")
-                    available_video_seeds.append(streams)
-                    number_of_detected_seeds += 1
-
-        return available_video_seeds
 
     @staticmethod
     def choose_camera_seed(available_video_seeds):
