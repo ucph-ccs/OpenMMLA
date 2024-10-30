@@ -2,8 +2,8 @@
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 
-# audio services
-services=("transcribe" "separate" "infer" "enhance" "vad" "resample")
+# uber services
+services=("influxdb" "nginx" "redis" "flask-backend" "react-frontend" "mosquitto" "celery")
 
 shutdown_server() {
     echo "Shutting down selected tmux sessions..."
@@ -17,11 +17,11 @@ shutdown_server() {
             tmux kill-session -t "$service"
         fi
     done
-    echo "Audio server shutdown process complete."
+    echo "Uber server shutdown process complete."
 }
 
 start_server() {
-    tmux new-session -s audio-services "bash -c '$BASH_DIR/bash/audio_services.sh; exec bash'"
+    tmux new-session -s uber-services "bash -c '$BASH_DIR/bash/uber_services.sh; exec bash'"
 }
 
 # Prompt user to start or shutdown the server

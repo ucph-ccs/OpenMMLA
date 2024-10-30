@@ -2,7 +2,7 @@ Cython==3.0.11
 nemo-toolkit[asr]<=1.23.0
 modelscope[framework]==1.16.1
 denoiser-compat==0.1.5.dev0
-silero-vad==5.1
+silero-vad==5.1.2
 googletrans==3.0.0
 onnxruntime==1.18.1
 openai-whisper==20231117

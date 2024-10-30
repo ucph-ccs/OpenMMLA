@@ -1,7 +1,7 @@
 #!/bin/bash
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
-PROJECT_DIR="$(dirname "$BASH_DIR")"
+PROJECT_DIR="$BASH_DIR/.."
 
 # Folders to clean and recreate
 paths=(

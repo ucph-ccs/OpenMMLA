@@ -5,10 +5,10 @@ import usocket
 import ntptime
 import ustruct
 
-SSID = "Peppa"
-KEY = "danping0208"
-SERVER_IP = "uber-server.local"
-SERVER_PORT = 50000
+SSID = "YOUR_SSID"
+KEY = "YOUR_PASSWORD"
+VIDEO_BASE_HOSTNAME = "YOUR_VIDEO_BASE_HOSTNAME"
+VIDEO_BASE_PORT = 50000
 
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
@@ -43,8 +43,8 @@ def connect_and_stream():
     while True:
         try:
             client = usocket.socket(usocket.AF_INET, usocket.SOCK_STREAM)
-            client.connect(usocket.getaddrinfo(SERVER_IP, SERVER_PORT)[0][-1])
-            print("Connected to server at {}:{}".format(SERVER_IP, SERVER_PORT))
+            client.connect(usocket.getaddrinfo(VIDEO_BASE_HOSTNAME, VIDEO_BASE_PORT)[0][-1])
+            print("Connected to server at {}:{}".format(VIDEO_BASE_HOSTNAME, VIDEO_BASE_PORT))
             break
         except OSError as e:
             print("Connection error:", e)

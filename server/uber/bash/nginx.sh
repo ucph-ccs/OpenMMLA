@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Get the root directory of the script
-ROOT_DIR="$(dirname "$(readlink -f "$0")")"
+BASH_DIR="$(dirname "$(readlink -f "$0")")"
 
 # Define server names
 SERVER_NAMES=("server-01" "server-02" "server-03")
@@ -18,8 +18,8 @@ fi
 echo "Using NGINX configuration file: $NGINX_CONF"
 
 # Process the NGINX configuration
-TEMP_CONF="$ROOT_DIR/../conf/nginx_temp.conf"
-python3 "$ROOT_DIR/process_nginx_conf.py" "$ROOT_DIR/../conf/nginx.conf" "$TEMP_CONF" "${SERVER_NAMES[@]}"
+TEMP_CONF="$BASH_DIR/../conf/nginx_temp.conf"
+python3 "$BASH_DIR/process_nginx_conf.py" "$BASH_DIR/../conf/nginx.conf" "$TEMP_CONF" "${SERVER_NAMES[@]}"
 
 # Copy the processed config to the actual config file
 sudo cp "$TEMP_CONF" "$NGINX_CONF"

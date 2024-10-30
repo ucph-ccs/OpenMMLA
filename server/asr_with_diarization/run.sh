@@ -21,7 +21,7 @@ shutdown_server() {
 }
 
 start_server() {
-    tmux new-session -s audio-services "bash -c '$BASH_DIR/services.sh; exec bash'"
+    tmux new-session -s audio-services "bash -c '$BASH_DIR/bash/services.sh; exec bash'"
 }
 
 # Prompt user to start or shutdown the server

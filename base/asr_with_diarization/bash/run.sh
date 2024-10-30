@@ -1,8 +1,8 @@
 #!/bin/bash
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
-PROJECT_DIR="$(dirname "$BASH_DIR")"
-PYTHON_PATH="$(dirname "$(dirname "$(dirname "$BASH_DIR")")")"
+PROJECT_DIR="$BASH_DIR/.."
+PYTHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="audio-base"
 NUM_BASES=3
