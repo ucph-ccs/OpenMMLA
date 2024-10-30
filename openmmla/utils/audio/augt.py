@@ -18,7 +18,7 @@ def eliminate_silence(infile):
     Eliminate silence from voice file using ffmpeg library.
 
     Args:
-        infile  (str) : Path to get the original voice file from.
+        infile (str): Path to get the original voice file from.
 
     Returns:
         list including True for successful authentication, False otherwise and
@@ -52,12 +52,12 @@ def random_cropping(infile, min_len=1):
     Crop the infile with an input minimum duration.
 
     Args:
-        infile    (str) : Input filename.
-        min_len (float) : Minimum duration for randomly cropped excerpt
+        infile (str): Input filename.
+        min_len (float): Minimum duration for randomly cropped excerpt
     """
     fs, x = read_file(filename=infile)
     t_end = x.size / fs
-    if (t_end > min_len):
+    if t_end > min_len:
         # Get start and end time
         start = random.uniform(0.0, t_end - min_len)
         end = random.uniform(start + min_len, t_end)
@@ -66,15 +66,11 @@ def random_cropping(infile, min_len=1):
         y = x[int(math.floor(start * fs)):int(math.ceil(end * fs))]
 
         # Construct file names
-        output_file_path = os.path.dirname(infile)
+        output_dir = os.path.dirname(infile)
         name_attribute = "_augmented_randomly_cropped_%s.wav" % str(min_len)
 
         # Export data to file
-        write_file(output_file_path=output_file_path,
-                   input_file_name=infile,
-                   name_attribute=name_attribute,
-                   sig=y,
-                   fs=fs)
+        write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs)
 
     else:
         warning_msg = """
@@ -88,8 +84,8 @@ def slow_down(input_file, coefficient=0.8):
     Slow or stretch a wave.
 
     Args:
-        infile        (str) : Input filename.
-        coefficient (float) : coefficient caracterising the slowing degree.
+        infile (str): Input filename.
+        coefficient (float): coefficient caracterising the slowing degree.
     """
     # Set up variables for paths and file names
     name_attribute = "_augmented_slowed.wav"
@@ -116,8 +112,8 @@ def speed(input_file, coefficient=1.25):
     Speed or shrink a wave.
 
     Args:
-        infile        (str) : Input filename.
-        coefficient (float) : coefficient caracterising the speeding degree.
+        infile (str): Input filename.
+        coefficient (float): coefficient caracterising the speeding degree.
     """
     # Set up variables for paths and file names
     name_attribute = "_augmented_speeded.wav"
@@ -145,9 +141,9 @@ def shift_time(infile, tshift, direction):
         If shifting audio to right (back forward) with x seconds, last x seconds will mark as 0 (i.e. silence).
 
     Args:
-        infile    (str) : Input filename.
-        tshift    (int) : Signal time shift in seconds.
-        direction (str) : shift direction (to the left or right).
+        infile (str): Input filename.
+        tshift (int): Signal time shift in seconds.
+        direction (str): shift direction (to the left or right).
     """
     fs, sig = read_file(filename=infile)
     shift = int(tshift * fs) * int(direction == "left") - \
@@ -157,15 +153,11 @@ def shift_time(infile, tshift, direction):
     augmented_sig = np.roll(sig, shift)
 
     # Construct file names
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = "_augmented_%s_%s_shifted.wav" % (direction, tshift)
 
     # Export data to file
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=augmented_sig,
-               fs=fs)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=augmented_sig, fs=fs)
 
 
 def reverse(infile):
@@ -180,15 +172,11 @@ def reverse(infile):
     augmented_sig = sig[::-1]
 
     # Construct file names
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = "_augmented_reversed.wav"
 
     # Export data to file
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=augmented_sig,
-               fs=fs)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=augmented_sig, fs=fs)
 
 
 def resample_audio(infile, sr):
@@ -197,8 +185,8 @@ def resample_audio(infile, sr):
     Nyquist-Shannon theorem.
 
     Args:
-        infile (str) : input filename/path.
-        sr     (int) : new sampling rate.
+        infile (str): input filename/path.
+        sr (int): new sampling rate.
     """
     # Set up variables for paths and file names
     output_file = "{0}_augmented_resampled_to_{1}.wav".format(infile.split(".wav")[0],

@@ -5,10 +5,10 @@ from scipy.io.wavfile import read, write
 
 
 def read_file(filename):
-    """Read wave file as mono.
+    """Read a wave file as mono.
 
     Args:
-        filename (str) : wave file / path.
+        filename (str): string path or open file handle.
 
     Returns:
         tuple of sampling rate and audio data.
@@ -24,25 +24,25 @@ def read_file(filename):
     return fr, samples
 
 
-def write_file(output_file_path, input_file_name, name_attribute, sig, fs):
-    """Write wave file as mono.
+def write_file(output_dir, input_filename, name_attribute, sig, fs):
+    """Write processed signal to a wave file as mono.
 
     Args:
-        output_file_path (str) : path to save resulting wave file to.
-        input_file_name  (str) : name of processed wave file,
-        name_attribute   (str) : attribute to add to output file name.
-        sig            (array) : signal/audio array.
-        fs               (int) : sampling rate.
+        output_dir (str): directory to save the resulting wave file.
+        input_filename (str): original path of the input signal.
+        name_attribute (str): attribute to add to output file name.
+        sig (array): signal/audio array.
+        fs (int): sampling rate.
 
     Outputs:
-        Save wave file to output_file_path.
+        Save a wave file to output_file_path.
     """
     # Convert back to int16 if necessary (will decrease accuracy)
     if sig.dtype == np.float64:
         sig = np.int16(sig * 32767)
 
     # Set up the output file name
-    file_name = os.path.basename(input_file_name).split(".wav")[0] + name_attribute
-    file_path = os.path.join(output_file_path, file_name)
-    write(filename=file_path, rate=fs, data=sig)
-    # print("Writing data to " + file_path + ".")
+    output_basename = os.path.basename(input_filename).split(".wav")[0] + name_attribute
+    output_filename = os.path.join(output_dir, output_basename)
+    write(filename=output_filename, rate=fs, data=sig)
+    # print("Writing data to " + output_filename + ".")

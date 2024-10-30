@@ -4,7 +4,7 @@ InfluxDB: {url: 'http://uber-server.local:8086', token: nZO5yjoohyBGCyqGhChu98f2
   org: group_01}
 MQTT: {mqtt_host: uber-server.local, mqtt_port: 1883}
 Redis: {redis_host: uber-server.local, redis_port: 6379, redis_db: 0, redis_auth: mbox}
-RTMP: {video_streams: 'rtmp://uber-vision.local/stream_01,rtmp://localhost/stream_02,rtmp://localhost/stream_03,rtmp://localhost/stream_04'}
+RTMP: {video_streams: 'rtmp://uber-vision.local/stream_01,rtmp://uber-vision.local/stream_02,rtmp://uber-vision.local/stream_03,rtmp://uber-vision.local/stream_04'}
 Cameras:
   smraza-cam:
     fisheye: true

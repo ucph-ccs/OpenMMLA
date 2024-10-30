@@ -16,11 +16,11 @@ def convolve(infile, ir_fname, level=0.5):
     Apply convolution to infile using the given impulse response file.
 
     Args:
-        infile   (str) : input filename/path.
-        ir_fname (str) : name of impulse response file.
-        level  (float) : can be between 0 and 1, default value = 0.5
+        infile (str): input filename/path.
+        ir_fname (str): name of the impulse response file.
+        level (float): can be between 0 and 1, default value = 0.5
     """
-    # Read input file
+    # Read the input file
     fs1, x = read_file(filename=infile)
     x = np.copy(x)
 
@@ -34,14 +34,10 @@ def convolve(infile, ir_fname, level=0.5):
     y /= np.mean(np.abs(y))
 
     # Export data to file
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = "_augmented_{0}_convolved_with_level_{1}.wav".format(os.path.basename(ir_fname.split(".")[0]),
                                                                           level)
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=y,
-               fs=fs1)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs1)
 
 
 def change_tone(infile, tone):
@@ -49,10 +45,10 @@ def change_tone(infile, tone):
     Change the tone of an audio file.
 
     Args:
-        infile (str) : input audio filename.
-        tone   (int) : tone to change.
+        infile (str): input audio filename.
+        tone (int): tone to change.
     """
-    # Read input file
+    # Read the input file
     fs, _ = read_file(filename=infile)
 
     # Prepare file names for the tone changing command
@@ -77,13 +73,13 @@ def apply_filter(infile, filter_type, low_cutoff_freq, high_cutoff_freq=None, or
     Apply a certain type of Buttenworth filter on the input audio.
 
     Args:
-        infile             (str) : input audio filename.
-        filter_type        (str) : type of the filter to apply.
-        low_cutoff_freq  (float) : the low cut-off frequency of the filter.
-        high_cutoff_freq (float) : the high cut-off frequency of the filter.
-        order              (int) : filter order to define its accuracy.
+        infile (str): input audio filename.
+        filter_type (str): type of the filter to apply.
+        low_cutoff_freq (float): the low cut-off frequency of the filter.
+        high_cutoff_freq (float): the high cut-off frequency of the filter.
+        order (int): filter order to define its accuracy.
     """
-    # Read input file
+    # Read the input file
     fs, sig = read_file(filename=infile)
 
     # Apply filter
@@ -93,10 +89,6 @@ def apply_filter(infile, filter_type, low_cutoff_freq, high_cutoff_freq=None, or
                       order=order)
 
     # Export data to file
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = "_augmented_{0}_pass_filtered.wav".format(filter_type)
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=y,
-               fs=fs)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs)

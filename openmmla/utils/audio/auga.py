@@ -14,11 +14,11 @@ def apply_gain(infile, gain=40, inplace=True):
     Apply gain to infile.
 
     Args:
-        inplace: (bool): whether change in place or not.
-        infile (str) : input filename/path.
-        gain (float) : gain in dB (both positive and negative).
+        inplace (bool): whether change in place or not.
+        infile (str): input filename/path.
+        gain (float): gain in dB (both positive and negative).
     """
-    # Read input file
+    # Read an input file
     fs, x = read_file(filename=infile)
     # Apply gain
     x = np.copy(x)
@@ -27,16 +27,12 @@ def apply_gain(infile, gain=40, inplace=True):
     # x /= np.mean(np.abs(x)) # it will amplified the signal too much if the mean value is too low
 
     # Export data to file
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = ".wav"
     if not inplace:
         name_attribute = "_augmented_with_%s_gain.wav" % str(gain)
 
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=x,
-               fs=fs)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=x, fs=fs)
 
 
 def add_noise(infile, snr):
@@ -44,13 +40,13 @@ def add_noise(infile, snr):
     Augment data using noise injection.
 
     Note:
-        It simply add some random values to the input file data based on the snr.
+        It simply adds some random values to the input file data based on the snr.
 
     Args:
-        infile (str) : input filename/path.
-        snr    (int) : signal-to-noise ratio in dB.
+        infile (str): input filename/path.
+        snr (int): signal-to-noise ratio in dB.
     """
-    # Read input file
+    # Read an input file
     fs, sig = read_file(filename=infile)
 
     # Compute and apply noise
@@ -68,15 +64,11 @@ def add_noise(infile, snr):
     y = sig + np.sqrt(noise_factor) * noise
 
     # Construct file names
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = "_augmented_%s_noisy.wav" % snr
 
     # Export data to file
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=y,
-               fs=fs)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs)
 
 
 def fade_in_and_out(infile):
@@ -84,14 +76,13 @@ def fade_in_and_out(infile):
     Add a fade in and out effect to the audio file.
 
     Args:
-        infile (str) : input filename/path.
+        infile (str): input filename/path.
     """
-    # Read input file
+    # Read an input file
     fs, sig = read_file(filename=infile)
-    window = np.hamming(len(sig))
 
     # Construct file names
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = "_augmented_fade_in_out.wav"
 
     # Fade in and out
@@ -100,11 +91,7 @@ def fade_in_and_out(infile):
     augmented_sig /= np.mean(np.abs(augmented_sig))
 
     # Export data to file
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=augmented_sig,
-               fs=fs)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=augmented_sig, fs=fs)
 
 
 def normalize_rms(infile, normalization_technique="rms", rms_level=-20, inplace=True):
@@ -112,12 +99,12 @@ def normalize_rms(infile, normalization_technique="rms", rms_level=-20, inplace=
     Normalize the signal given a certain technique (peak or rms).
 
     Args:
-        inplace:                (bool): whether change inplace or not
-        infile                  (str) : input filename/path.
-        normalization_technique (str) : type of normalization technique to use. (default is peak)
-        rms_level               (int) : rms level in dB.
+        inplace (bool): whether change inplace or not
+        infile (str): input filename/path.
+        normalization_technique (str): type of normalization technique to use. (default is peak)
+        rms_level (int): rms level in dB.
     """
-    # Read input file
+    # Read an input file
     fs, sig = read_file(filename=infile)
 
     # Normalize signal
@@ -133,14 +120,10 @@ def normalize_rms(infile, normalization_technique="rms", rms_level=-20, inplace=
         raise Exception("ParameterError: Unknown normalization_technique variable.")
 
     # Construct file names
-    output_file_path = os.path.dirname(infile)
+    output_dir = os.path.dirname(infile)
     name_attribute = ".wav"
     if not inplace:
         name_attribute = "_augmented_{}_normalized.wav".format(normalization_technique)
 
     # Export data to file
-    write_file(output_file_path=output_file_path,
-               input_file_name=infile,
-               name_attribute=name_attribute,
-               sig=y,
-               fs=fs)
+    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs)
