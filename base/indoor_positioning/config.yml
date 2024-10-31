@@ -1,4 +1,4 @@
-Tag: {tag_size: 0.061, families: tag36h11}
+AprilTag: {tag_size: 0.061, families: tag36h11}
 Image: {res_width: 1920, res_height: 1080, rotate: 180}
 InfluxDB: {url: 'http://uber-server.local:8086', token: nZO5yjoohyBGCyqGhChu98f2pgXEkou6wLXTax2nHvFjwsKnBtvHipT4uA_FX2QJUDY-R7uJBbTlFkpN312RKg==,
   org: group_01}

@@ -33,7 +33,7 @@ declare -a commands=(
   "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 1 -b 0.0.0.0:5000 --pythonpath $PYHON_PATH serve_speech_transcriber:app"
   "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5001 --pythonpath $PYHON_PATH serve_speech_separator:app"
   "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5002 --pythonpath $PYHON_PATH serve_audio_inferer:app"
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5003 --pythonpath $PYHON_PATH serve_audio_enhancer:app"
+  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5003 --pythonpath $PYHON_PATH serve_speech_enhancer:app"
   "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5004 --pythonpath $PYHON_PATH serve_vad:app"
   "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 1 -b 0.0.0.0:5005 --pythonpath $PYHON_PATH serve_audio_resampler:app"
 )

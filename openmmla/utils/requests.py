@@ -1,6 +1,8 @@
 import json
+import socket
 import time
 from typing import Union, List, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import numpy as np
 import requests
@@ -9,6 +11,28 @@ import soundfile as sf
 from openmmla.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def resolve_url(url: str) -> str:
+    """Resolve hostname in URL to IP address.
+    
+    Args:
+        url: URL with hostname (e.g., 'http://uber-server.local:8080/infer')
+        
+    Returns:
+        URL with resolved IP (e.g., 'http://192.168.1.100:8080/infer')
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            return url
+
+        ip = socket.gethostbyname(parsed.hostname)
+        resolved = parsed._replace(netloc=f"{ip}:{parsed.port}" if parsed.port else ip)
+        return urlunparse(resolved)
+    except socket.gastrror as e:
+        logger.warning(f"Could not resolve hostname in {url}: {e}")
+        return url
 
 
 def send_request_with_retry(url, files, data, max_retries=4, timeout=10, process_response=None):
@@ -31,11 +55,7 @@ def send_request_with_retry(url, files, data, max_retries=4, timeout=10, process
     return None
 
 
-def request_speech_enhancement(audio_path: str, base_id: str, audio_server_host: str) -> str:
-    url = f'http://{audio_server_host}:8080/enhance'
-
-    # url = f'http://{audio_server_host}:5003/enhance'
-
+def request_speech_enhancement(audio_path: str, base_id: str, url: str) -> str:
     def process_response(response):
         with open(audio_path, 'wb') as out_file:
             out_file.write(response.content)
@@ -50,11 +70,7 @@ def request_speech_enhancement(audio_path: str, base_id: str, audio_server_host:
     return send_request_with_retry(url, files, data, process_response=process_response)
 
 
-def request_audio_inference(audio_path: str, base_id: str, audio_server_host: str) -> np.ndarray:
-    url = f'http://{audio_server_host}:8080/infer'
-
-    # url = f'http://{audio_server_host}:5002/infer'
-
+def request_audio_inference(audio_path: str, base_id: str, url: str) -> np.ndarray:
     def process_response(response):
         response_json = response.json()
         embeddings_list = json.loads(response_json["embeddings"])
@@ -70,12 +86,7 @@ def request_audio_inference(audio_path: str, base_id: str, audio_server_host: st
     return send_request_with_retry(url, files, data, process_response=process_response)
 
 
-def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int, audio_server_host: str) -> Union[
-    str, None]:
-    url = f'http://{audio_server_host}:8080/vad'
-
-    # url = f'http://{audio_server_host}:5004/vad'
-
+def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int, url: str) -> Union[str, None]:
     def process_response(response):
         if response.headers['Content-Type'] == 'audio/wav':
             with open(audio_path, 'wb') as f:
@@ -94,11 +105,7 @@ def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int
     return send_request_with_retry(url, files, data, process_response=process_response)
 
 
-def request_speech_separation(audio_file_path: str, base_id: str, audio_server_host: str) -> List[str]:
-    url = f'http://{audio_server_host}:8080/separate'
-
-    # url = f'http://{audio_server_host}:5001/separate'
-
+def request_speech_separation(audio_file_path: str, base_id: str, url: str) -> List[str]:
     def process_response(response):
         response_json = response.json()
         processed_bytes_streams = response_json.get("processed_bytes_streams")
@@ -117,12 +124,8 @@ def request_speech_transcription(
         frames: Union[bytes, List[bytes], Tuple[bytes]],
         base_id: str,
         sp: bool,
-        audio_server_host: str
+        url: str
 ) -> str:
-    url = f'http://{audio_server_host}:8080/transcribe'
-
-    # url = f'http://{audio_server_host}:5000/transcribe'
-
     def process_response(response):
         response_json = response.json()
         transcription_text = response_json.get('text')
@@ -135,11 +138,7 @@ def request_speech_transcription(
     return send_request_with_retry(url, files, data, timeout=15, process_response=process_response)
 
 
-def request_resampling(audio_path: str, base_id: str, target_fr: int, audio_server_host) -> str:
-    url = f'http://{audio_server_host}:8080/resample'
-
-    # url = f'http://{audio_server_host}:5005/resample'
-
+def request_audio_resampling(audio_path: str, base_id: str, target_fr: int, url: str) -> str:
     def process_response(response):
         with open(audio_path, 'wb') as out_file:
             out_file.write(response.content)

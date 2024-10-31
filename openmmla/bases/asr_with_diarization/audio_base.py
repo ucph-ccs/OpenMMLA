@@ -20,7 +20,7 @@ from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.errors import RecordingError, TranscribingError
 from openmmla.utils.logger import get_logger
-from openmmla.utils.requests import request_speech_transcription, request_speech_separation
+from openmmla.utils.requests import resolve_url, request_speech_transcription, request_speech_separation
 from openmmla.utils.threads import RaisingThread
 from .audio_recognizer import AudioRecognizer
 from .audio_recorder import AudioRecorder
@@ -104,7 +104,9 @@ class AudioBase(Base, ABC):
             self.config[self.base_type]['keep_threshold'])
         self.recognize_duration = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
             self.config[self.base_type]['recognize_duration'])
-        self.audio_server_host = socket.gethostbyname(self.config['Server']['audio_server_host'])
+        # self.audio_server_host = socket.gethostbyname(self.config['Server']['audio_server_host'])
+        self.speech_transcriber_url = resolve_url(self.config['Server']['asr']['speech_transcription'])
+        self.speech_separator_url = resolve_url(self.config['Server']['asr']['speech_separation'])
 
     def _setup_from_input(self):
         self.id = get_id()
@@ -354,7 +356,7 @@ class AudioBase(Base, ABC):
             text = self.speech_transcriber.transcribe(audio_file_path)
         else:
             text = request_speech_transcription(frames, f'{self.base_type.lower()}_{self.id}', self.sp,
-                                                self.audio_server_host)
+                                                self.speech_transcriber_url)
         return text
 
     def _separate_speech(self, segment_audio_path):
@@ -371,7 +373,7 @@ class AudioBase(Base, ABC):
             result = separated_result['output_pcm_list']
         else:
             separated_result = request_speech_separation(segment_audio_path, f'{self.base_type.lower()}_{self.id}',
-                                                         self.audio_server_host)
+                                                         self.speech_separator_url)
             result = [base64.b64decode(encoded_bytes_stream) for encoded_bytes_stream in separated_result]
         return result
 

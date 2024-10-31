@@ -1,12 +1,12 @@
 """This script runs the audio enhancer server."""
 import os
 
-from openmmla.services.audio import AudioEnhancer
+from openmmla.services.audio import SpeechEnhancer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 app = create_app(
-    class_type=AudioEnhancer,
+    class_type=SpeechEnhancer,
     endpoint='enhance',
     method_name='process_request',
     class_args={'project_dir': project_dir, 'use_cuda': True},

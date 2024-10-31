@@ -8,7 +8,7 @@ import yaml
 
 from openmmla.utils.audio.processing import segment_wav
 from openmmla.utils.logger import get_logger
-from openmmla.utils.requests import request_audio_inference
+from openmmla.utils.requests import resolve_url, request_audio_inference
 
 try:
     import nemo.collections.asr as nemo_asr
@@ -97,7 +97,9 @@ class AudioRecognizer:
             self.ort_session = None
             self._load_model()
         else:
-            self.audio_server_host = socket.gethostbyname(config['Server']['audio_server_host'])
+            # self.server_host = socket.gethostbyname(config['Server']['server_host'])
+            self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inference'])
+            print(f"Audio inferer URL: {self.audio_inferer_url}")
 
         self.registered_speaker_names = []
         self.registered_speaker_features = None
@@ -247,7 +249,7 @@ class AudioRecognizer:
                 torch.cuda.empty_cache()
             return feature
         else:
-            return request_audio_inference(audio_path, self.audio_db.split('/')[-1], self.audio_server_host)
+            return request_audio_inference(audio_path, self.audio_db.split('/')[-1], self.audio_inferer_url)
 
     def _infer_signal_onnx(self, signal):
         self.data_layer.set_signal(signal)

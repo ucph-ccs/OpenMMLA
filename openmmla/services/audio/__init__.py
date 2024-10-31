@@ -1,7 +1,7 @@
 def __getattr__(name):
-    if name == "AudioEnhancer":
-        from .audio_enhancer import AudioEnhancer
-        return AudioEnhancer
+    if name == "SpeechEnhancer":
+        from .speech_enhancer import SpeechEnhancer
+        return SpeechEnhancer
     elif name == "AudioInferer":
         from .audio_inferer import AudioInferer
         return AudioInferer

@@ -69,10 +69,14 @@ Redis:
   redis_auth: mbox
 
 Server:
-  audio_server_host: uber-server.local
-  sr_model: titanet_large
-  sp_model: damo/speech_mossformer2_separation_temporal_8k
-  sp_model_local: /home/li/.cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
-  tr_model: base.en
-  language: en
+  asr:
+    audio_resampling: http://uber-server.local:8080/resample
+    audio_inference: http://uber-server.local:8080/infer
+    voice_activity_detection: http://uber-server.local:8080/vad
+    speech_enhancement: http://uber-server.local:8080/enhance
+    speech_separation: http://uber-server.local:8080/separate
+    speech_transcription: http://uber-server.local:8080/transcribe
+  vfa:
+    frame_analyzer: http://uber-server.local:8080/frame_analyze
+
 

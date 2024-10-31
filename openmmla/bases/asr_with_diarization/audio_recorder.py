@@ -8,7 +8,7 @@ import yaml
 
 from openmmla.utils.audio.auga import apply_gain
 from openmmla.utils.logger import get_logger
-from openmmla.utils.requests import request_speech_enhancement, request_voice_activity_detection
+from openmmla.utils.requests import resolve_url, request_speech_enhancement, request_voice_activity_detection
 from openmmla.utils.sockets import clear_socket_udp, read_frames_udp, read_frames_tcp
 
 # Try importing the modules separately
@@ -56,7 +56,9 @@ class AudioRecorder:
         self.cuda_enable = use_cuda and torch is not None and torch.cuda.is_available()
 
         if not vad_local or not nr_local:
-            self.audio_server_host = socket.gethostbyname(config['Server']['audio_server_host'])
+            # self.audio_server_host = socket.gethostbyname(config['Server']['audio_server_host'])
+            self.speech_enhancer_url = resolve_url(config['Server']['asr']['speech_enhancement'])
+            self.vad_url = resolve_url(config['Server']['asr']['voice_activity_detection'])
         self.record_rate = int(config['Recorder']['record_rate'])
         self.chunk_size = int(config['Recorder']['chunk_size'])
         self.channels = int(config['Recorder']['channels'])
@@ -120,7 +122,7 @@ class AudioRecorder:
             else:
                 if not base_id:
                     raise Exception('Error when requesting speech enhancing service, missing base id.')
-                return request_voice_activity_detection(input_path, base_id, inplace, self.audio_server_host)
+                return request_voice_activity_detection(input_path, base_id, inplace, self.vad_url)
 
         return input_path
 
@@ -158,7 +160,7 @@ class AudioRecorder:
             else:
                 if not base_id:
                     raise Exception('Error when requesting speech enhancing service, missing base id.')
-                request_speech_enhancement(input_path, base_id, self.audio_server_host)
+                request_speech_enhancement(input_path, base_id, self.speech_enhancer_url)
 
         return input_path
 

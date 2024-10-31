@@ -189,6 +189,8 @@ Please refer to [RTMP configuration](./docs/nginx.md#part-2-rtmp) for detailed s
    ```
 5. **Install dependencies and start the frontend server**
    ```bash
+   rm -rf node_modules package-lock.json
+   npm cache clean --force
    npm install
    npm run build
    npm run start

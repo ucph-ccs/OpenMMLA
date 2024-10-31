@@ -12,8 +12,8 @@ from openmmla.services.server import Server
 from openmmla.utils.audio.processing import write_frames_to_wav
 
 
-class AudioEnhancer(Server):
-    """Audio enhancer enhance the audio signal. It receives audio signal from node base and sends back the enhanced
+class SpeechEnhancer(Server):
+    """Audio enhancer enhances the audio signal. It receives audio signal from node base and sends back the enhanced
      signal."""
 
     def __init__(self, project_dir, use_cuda=True):

@@ -45,7 +45,7 @@ class CameraTagDetector(Base):
 
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""
-        tag_config = self.config.get('Tag', {})
+        tag_config = self.config.get('AprilTag', {})
         self.tag_size = float(tag_config.get('tag_size', 0.061))
         self.families = tag_config.get('families', 'tag36h11')
 
