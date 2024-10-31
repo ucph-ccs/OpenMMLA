@@ -9,8 +9,10 @@ from pupil_apriltags import Detector
 from openmmla.bases import Base
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.logger import get_logger
+from .enums import ROTATIONS
 from .input import get_function_base
 from .stream import WebcamVideoStream
+from .vector import get_outward_normal_vector
 
 
 class CameraTagDetector(Base):
@@ -53,6 +55,7 @@ class CameraTagDetector(Base):
         self.res_width = int(image_config.get('res_width', 1920))
         self.res_height = int(image_config.get('res_height', 1080))
         self.res = (self.res_width, self.res_height)
+        self.rotate = int(image_config.get('rotate', 0))
 
     def run(self):
         """Run the camera tag detector."""
@@ -180,6 +183,8 @@ class CameraTagDetector(Base):
             if self.camera_info.get("fisheye", False):
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                                   interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            if self.rotate in ROTATIONS:
+                frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=self.camera_info["params"],
@@ -192,7 +197,7 @@ class CameraTagDetector(Base):
                     continue
 
                 corners = np.int32(tag.corners)
-                normal, tag = self.get_outward_normal(tag)
+                normal, tag = get_outward_normal_vector(tag)
                 tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
 
                 # Drawing annotations
@@ -210,6 +215,7 @@ class CameraTagDetector(Base):
                 cv2.putText(frame, f"Trans: {tag.pose_t}",
                             (tag.corners[0][0].astype(int), tag.corners[0][1].astype(int) - 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                print(f"Tag ID: {tag.tag_id}, Rotation: {tag.pose_R}, Translation: {tag.pose_t}")
 
             display_frame = cv2.resize(frame, (960, 540))
             cv2.imshow(f'AprilTags Detection from camera {self.sender_id}', display_frame)
@@ -224,16 +230,6 @@ class CameraTagDetector(Base):
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-
-    @staticmethod
-    def get_outward_normal(tag):
-        """Get the normal vector of the tag which perpendicular to the surface"""
-        normal = np.dot(tag.pose_R, np.array([0, 0, 1])).ravel()
-        if np.dot(normal, tag.pose_t.ravel()) < 0:
-            tag.pose_R[:, 2] = -tag.pose_R[:, 2]  # Flip the sign of the third column of the rotation matrix
-        else:
-            normal = -normal
-        return normal, tag
 
     @staticmethod
     def choose_camera_seed(available_video_seeds):

@@ -238,6 +238,8 @@ class VideoBase(Base):
             if self.camera_info.get("fisheye", False):
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                                   interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            if self.rotate in ROTATIONS:
+                frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=self.camera_info["params"],
@@ -279,8 +281,6 @@ class VideoBase(Base):
 
             if self.graphics:
                 display_frame = cv2.resize(frame, (960, 540))
-                if self.rotate in ROTATIONS:
-                    display_frame = cv2.rotate(display_frame, ROTATIONS[self.rotate])
                 # Display timestamp on frame
                 now = datetime.datetime.now()
                 current_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
