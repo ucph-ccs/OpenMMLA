@@ -6,124 +6,104 @@ import os
 
 import numpy as np
 
-from .files import read_file, write_file
+from .files import read_signal_from_wav, write_signal_to_wav
 
 
-def apply_gain(infile, gain=40, inplace=True):
-    """
-    Apply gain to infile.
+def apply_gain(infile: str, gain: float = 40, inplace: bool = True) -> None:
+    """Apply gain to audio file.
 
     Args:
-        inplace (bool): whether change in place or not.
-        infile (str): input filename/path.
-        gain (float): gain in dB (both positive and negative).
+        infile: Input audio file path
+        gain: Gain in dB (positive or negative)
+        inplace: Whether to overwrite input file
     """
-    # Read an input file
-    fs, x = read_file(filename=infile)
-    # Apply gain
-    x = np.copy(x)
+    # Read and process audio
+    fs, x = read_signal_from_wav(filename=infile)
     x = x * (10 ** (gain / 20.0))
-    x = np.minimum(np.maximum(-1.0, x), 1.0)
-    # x /= np.mean(np.abs(x)) # it will amplified the signal too much if the mean value is too low
+    x = np.clip(x, -1.0, 1.0)  # Using clip instead of minimum/maximum
 
-    # Export data to file
-    output_dir = os.path.dirname(infile)
-    name_attribute = ".wav"
-    if not inplace:
-        name_attribute = "_augmented_with_%s_gain.wav" % str(gain)
+    # Generate output path
+    suffix = ".wav" if inplace else f"_augmented_with_{gain}_gain.wav"
+    outfile = os.path.splitext(infile)[0] + suffix
 
-    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=x, fs=fs)
+    # Write processed audio
+    write_signal_to_wav(sig=x, fs=fs, filename=outfile)
 
 
-def add_noise(infile, snr):
-    """
-    Augment data using noise injection.
+def add_noise(infile: str, snr: float) -> None:
+    """Augment data using noise injection.
 
     Note:
-        It simply adds some random values to the input file data based on the snr.
+        Adds random values to the input file data based on the snr.
 
     Args:
-        infile (str): input filename/path.
-        snr (int): signal-to-noise ratio in dB.
+        infile: Input audio file path
+        snr: Signal-to-noise ratio in dB
     """
-    # Read an input file
-    fs, sig = read_file(filename=infile)
-
-    # Compute and apply noise
+    fs, sig = read_signal_from_wav(filename=infile)
     noise = np.random.randn(len(sig))
 
-    # Compute powers
+    # Compute signal and noise power
     noise_power = np.mean(np.power(noise, 2))
     sig_power = np.mean(np.power(sig, 2))
 
-    # Compute snr and scaling factor
+    # Compute scaling factor
     snr_linear = 10 ** (snr / 10.0)
     noise_factor = (sig_power / noise_power) * (1 / snr_linear)
 
     # Add noise
     y = sig + np.sqrt(noise_factor) * noise
 
-    # Construct file names
-    output_dir = os.path.dirname(infile)
-    name_attribute = "_augmented_%s_noisy.wav" % snr
-
-    # Export data to file
-    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs)
+    # Generate output path
+    outfile = os.path.splitext(infile)[0] + f"_augmented_{snr}_noisy.wav"
+    write_signal_to_wav(sig=y, fs=fs, filename=outfile)
 
 
-def fade_in_and_out(infile):
-    """
-    Add a fade in and out effect to the audio file.
+def fade_in_and_out(infile: str) -> None:
+    """Add a fade in and out effect to the audio file.
 
     Args:
-        infile (str): input filename/path.
+        infile: Input audio file path
     """
-    # Read an input file
-    fs, sig = read_file(filename=infile)
+    fs, sig = read_signal_from_wav(filename=infile)
 
-    # Construct file names
-    output_dir = os.path.dirname(infile)
-    name_attribute = "_augmented_fade_in_out.wav"
-
-    # Fade in and out
+    # Apply fade effect
     window = np.hamming(len(sig))
     augmented_sig = window * sig
     augmented_sig /= np.mean(np.abs(augmented_sig))
 
-    # Export data to file
-    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=augmented_sig, fs=fs)
+    # Generate output path
+    outfile = os.path.splitext(infile)[0] + "_augmented_fade_in_out.wav"
+    write_signal_to_wav(sig=augmented_sig, fs=fs, filename=outfile)
 
 
-def normalize_rms(infile, normalization_technique="rms", rms_level=-20, inplace=True):
-    """
-    Normalize the signal given a certain technique (peak or rms).
+def normalize_decibel(infile: str, normalization_technique: str = "rms", 
+                     rms_level: float = -20, inplace: bool = True) -> None:
+    """Normalize the signal using peak or RMS normalization.
 
     Args:
-        inplace (bool): whether change inplace or not
-        infile (str): input filename/path.
-        normalization_technique (str): type of normalization technique to use. (default is peak)
-        rms_level (int): rms level in dB.
+        infile: Input audio file path
+        normalization_technique: Type of normalization ("peak" or "rms")
+        rms_level: RMS level in dB
+        inplace: Whether to overwrite input file
+    
+    Raises:
+        ValueError: If unknown normalization_technique is specified
     """
-    # Read an input file
-    fs, sig = read_file(filename=infile)
+    fs, sig = read_signal_from_wav(filename=infile)
 
     # Normalize signal
     if normalization_technique == "peak":
         y = sig / np.max(sig)
     elif normalization_technique == "rms":
-        # Linear rms level and scaling factor
         r = 10 ** (rms_level / 20.0)
         a = np.sqrt((len(sig) * r ** 2) / np.sum(sig ** 2))
-        # Normalize
         y = sig * a
     else:
-        raise Exception("ParameterError: Unknown normalization_technique variable.")
+        raise ValueError(f"Unknown normalization_technique: {normalization_technique}")
 
-    # Construct file names
-    output_dir = os.path.dirname(infile)
-    name_attribute = ".wav"
-    if not inplace:
-        name_attribute = "_augmented_{}_normalized.wav".format(normalization_technique)
+    # Generate output path
+    suffix = ".wav" if inplace else f"_augmented_{normalization_technique}_normalized.wav"
+    outfile = os.path.splitext(infile)[0] + suffix
 
-    # Export data to file
-    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs)
+    write_signal_to_wav(sig=y, fs=fs, filename=outfile)

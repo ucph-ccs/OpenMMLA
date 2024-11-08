@@ -6,8 +6,8 @@ Badge:
   keep_sp_threshold: 0.1
   recognize_sp_duration: 4
   recognize_sp_threshold: 0.3
-  rms_threshold: 1000
-  rms_peak_threshold: 5000
+  rms_threshold: 1000 # 2500
+  rms_peak_threshold: 5000  # 15000
   listening_ip: 0.0.0.0
   port_offset: 50000
   protocol: UDP

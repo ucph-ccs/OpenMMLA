@@ -6,8 +6,8 @@ import time
 import numpy as np
 import soundfile as sf
 
-from openmmla.utils.audio.auga import normalize_rms
-from openmmla.utils.audio.processing import resample, get_energy_level, write_frames_to_wav, calculate_audio_duration
+from openmmla.utils.audio.auga import normalize_decibel
+from openmmla.utils.audio.processing import resample_audio_file, get_energy_level, write_frames_to_wav, calculate_audio_duration
 from openmmla.utils.errors import RecordingError, RecognizingError
 from openmmla.utils.logger import get_logger
 from .audio_base import AudioBase
@@ -176,7 +176,7 @@ class JabraAudioBase(AudioBase):
                 similarity = 0
 
                 if speaker != 'silent':
-                    normalize_rms(segment_audio_path, rms_level=-18)
+                    normalize_decibel(segment_audio_path, rms_level=-18)
                     name, similarity = self.audio_recognizer.recognize(segment_audio_path)
                     duration = calculate_audio_duration(segment_audio_path)
 
@@ -217,7 +217,7 @@ class JabraAudioBase(AudioBase):
 
                 speakers, similarities, durations, signals = [], [], [], []
                 if speaker != 'silent':
-                    resample(segment_audio_path, 8000)
+                    resample_audio_file(segment_audio_path, 8000)
                     sp_result = self._separate_speech(segment_audio_path)
 
                     # Recognize separated audio streams
@@ -233,7 +233,7 @@ class JabraAudioBase(AudioBase):
 
                         if processed_save_file:
                             duration = calculate_audio_duration(save_file)
-                            normalize_rms(save_file, rms_level=-18)
+                            normalize_decibel(save_file, rms_level=-18)
                             name, similarity = self.audio_recognizer.recognize(save_file)
 
                             if similarity > self.threshold:
@@ -306,7 +306,7 @@ class JabraAudioBase(AudioBase):
                                                         f'{speaker}_chunk_{round(float(chunk_start_time))}.wav')
                         write_frames_to_wav(chunk_audio_path, chunk_frames, framerate=8000)
                         if speaker != 'silent':
-                            normalize_rms(chunk_audio_path, rms_level=-20)
+                            normalize_decibel(chunk_audio_path, rms_level=-20)
 
             for i, speaker in enumerate(final_speakers):
                 if speaker not in self.last_speaker:  # add new speaker and its corresponding frames
@@ -379,7 +379,7 @@ class JabraAudioBase(AudioBase):
                                                         f'{self.last_speaker}_chunk_{round(float(chunk_start_time))}.wav')
                         write_frames_to_wav(chunk_audio_path, chunk_frames, framerate=fr)
                         if self.last_speaker != 'silent':
-                            normalize_rms(chunk_audio_path, rms_level=-20)
+                            normalize_decibel(chunk_audio_path, rms_level=-20)
 
                 self.speaker_frames_dict[speaker] = (record_start_time, frames)
 

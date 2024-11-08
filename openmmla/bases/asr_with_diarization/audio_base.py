@@ -14,7 +14,7 @@ import librosa
 import numpy as np
 
 from openmmla.bases import Base
-from openmmla.utils.audio.auga import normalize_rms
+from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.processing import read_frames_from_wav, write_frames_to_wav
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
@@ -352,7 +352,7 @@ class AudioBase(Base, ABC):
             write_frames_to_wav(output_path=audio_file_path, frames=frames, channels=1, sampwidth=2, framerate=fr)
             if fr == 16000:
                 self.audio_recorder.apply_nr(audio_file_path)
-            normalize_rms(infile=audio_file_path, rms_level=-20)
+            normalize_decibel(infile=audio_file_path, rms_level=-20)
             text = self.speech_transcriber.transcribe(audio_file_path)
         else:
             text = request_speech_transcription(frames, f'{self.base_type.lower()}_{self.id}', self.sp,

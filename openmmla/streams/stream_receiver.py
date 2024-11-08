@@ -2,33 +2,52 @@
 # Data is received into a buffer, and the buffer can be read by the consumer.
 
 from abc import ABC, abstractmethod
+from typing import Any, Optional
+
+
 class StreamReceiver(ABC):
-    def __init__(self, source, **kwargs):
-        self.source = source    # e.g. 'pyaudio', 'socket', 'cv2'
-        self.config = kwargs
-        self.stream = None
-        self.buffer = None
-
-    @abstractmethod
-    def start(self):
-        """Instantiate the stream object and start to receive data stream at specified sampling rate, channels, etc."""
-        pass 
-
-    @abstractmethod
-    def stop(self):
-        """Stop to receive data stream."""
-        pass
-
-    @abstractmethod
-    def read(self):
-        """Read data from the stream buffer.
+    """Base class for receiving data streams.
+    
+    Handles continuous data streams with specified parameters (sampling rate, channels, etc.).
+    Data is received into a buffer and can be read by the consumer.
+    """
+    def __init__(self, **kwargs):
+        """Initialize stream receiver.
         
-        If the buffer is empty, the method should block until data is available.
-        If the read duration is greater than the buffer size, then we need to read buffer size for several times.
+        Args:
+            **kwargs: Configuration parameters for the stream
+        """
+        self.source = None  # stream type: 'pyaudio', 'socket', 'cv2'
+        self.stream = None  # stream object from pyaudio, socket, etc.
+        self.buffer = None  # ring buffer for data storage
+        self.config = kwargs
+
+    @abstractmethod
+    def start(self) -> None:
+        """Start receiving data stream.
+        
+        Instantiates the stream object and begins receiving data
+        at specified sampling rate, channels, etc.
         """
         pass
 
     @abstractmethod
-    def write(self, data):
-        """Write data to the stream buffer ."""
+    def stop(self) -> None:
+        """Stop receiving data stream and clean up resources."""
+        pass
+
+    @abstractmethod
+    def read(self, *args, **kwargs) -> Any:
+        """Read data from the stream buffer.
+        
+        Blocks if buffer is empty until data is available.
+        For read durations greater than buffer size, performs multiple reads.
+        
+        Args:
+            *args: Variable length argument list
+            **kwargs: Arbitrary keyword arguments
+            
+        Returns:
+            Data read from the stream buffer
+        """
         pass

@@ -1,5 +1,4 @@
 import json
-import json
 import logging
 import os
 import shutil
@@ -13,9 +12,9 @@ from tqdm import tqdm
 from openmmla.analytics.audio.analyze import plot_speaking_interaction_network, plot_speaker_diarization_interactive
 from openmmla.analytics.audio.text_processing import convert_transcription_json_to_txt
 from openmmla.bases import Base
-from openmmla.utils.audio.auga import normalize_rms
+from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.processing import format_wav, get_audio_properties, segment_wav, crop_and_concatenate_wav, \
-    resample
+    resample_audio_file
 from openmmla.utils.audio.transcriber import get_transcriber
 from openmmla.utils.logger import get_logger
 from .audio_recognizer import AudioRecognizer
@@ -248,7 +247,7 @@ class AudioPostAnalyzer(Base):
 
                 if processed_segment_path:
                     duration = self.calculate_audio_duration(segment_path)
-                    normalize_rms(segment_path, rms_level=-20)
+                    normalize_decibel(segment_path, rms_level=-20)
                     name, similarity = self.recognizer.recognize(segment_path, update_threshold=0.5)
                     if similarity > self.threshold:
                         speaker = name
@@ -354,7 +353,7 @@ class AudioPostAnalyzer(Base):
                 processed_segment_path = self.recorder.post_processing(segment_path, sampling_rate=16000, inplace=True)
 
                 if processed_segment_path:
-                    resample(segment_path, 8000)
+                    resample_audio_file(segment_path, 8000)
                     result = self.separator(segment_path)
 
                     for i, signal in enumerate(result['output_pcm_list']):
@@ -369,7 +368,7 @@ class AudioPostAnalyzer(Base):
 
                         if processed_save_file:
                             duration = self.calculate_audio_duration(save_file)
-                            normalize_rms(save_file, rms_level=-20)
+                            normalize_decibel(save_file, rms_level=-20)
                             name, similarity = self.recognizer.recognize(save_file)
 
                             if similarity > self.threshold:
@@ -485,7 +484,7 @@ class AudioPostAnalyzer(Base):
                     chunk_path = os.path.join(chunk_dir, f'chunk_{index}_{speaker}.wav')
                     crop_and_concatenate_wav(audio_path, [(start_offset_ms, end_offset_ms)], chunk_path)
                     self.recorder.apply_nr(chunk_path)
-                    normalize_rms(chunk_path, rms_level=-20)
+                    normalize_decibel(chunk_path, rms_level=-20)
                     text = self.transcriber.transcribe(chunk_path) if speaker != 'silent' else ''
                     transcription_entry = {
                         "chunk_no": index,

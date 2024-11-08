@@ -10,12 +10,11 @@ import numpy as np
 import scipy.io.wavfile as wav
 import soundfile as sf
 from pydub import AudioSegment
-from scipy.io import wavfile
 
-from .auga import normalize_rms
+from .auga import normalize_decibel
 
 
-def resample(file_path, target_sr=8000) -> None:
+def resample_audio_file(file_path: str, target_sr: int = 8000) -> None:
     """
     Resamples the audio data from the original sample rate to the target sample rate, and overwrites the original file
     with the resampled audio data.
@@ -168,96 +167,7 @@ def segment_wav(input_file: str, output_dir: str, step_length_ms=None, window_le
         segment = audio[start_time:end_time]
         output_file = os.path.join(output_dir, f"segment_{existing_segments + i}.wav")
         segment.export(output_file, format="wav")
-        normalize_rms(output_file)
-
-
-def normalize_int16(audio_file_path: str) -> None:
-    """
-    Normalize an audio file in 16-bit PCM format to the range [-1, 1].
-
-    Args:
-        audio_file_path (str): Path to the audio file to normalize.
-    """
-    sample_rate, samples = wavfile.read(audio_file_path)
-    if samples.dtype == np.int16:
-        print("This is 16-bit PCM audio. Normalize by dividing by 32767.0.")
-        samples = samples.astype('float32') / 32767.0
-    else:
-        print(f"This audio file has a different data type: {samples.dtype}. No normalization applied.")
-        return
-    wavfile.write(audio_file_path, sample_rate, samples)
-
-
-def normalize_decibel(audio_path: str, target_db=-18.0, max_gain_db=300.0, output_path=None) -> str:
-    """
-    Normalize the audio file to a target RMS value in decibels.
-
-    Args:
-        audio_path (str): Path to the audio file.
-        target_db (float, optional): Target RMS value in decibels. Defaults to -18.0.
-        max_gain_db (float, optional): Max amount of gain in dB that can be applied for normalization.
-                                       Defaults to 300.0.
-        output_path (str, optional): Path to save the normalized audio file. If None, the original file will be replaced.
-
-    Raises:
-        ValueError: If the gain to normalize the segment exceeds max_gain_db.
-
-    Returns:
-        str: Path to the normalized audio file.
-    """
-    rate, audio_samples = wav.read(audio_path)
-    if audio_samples.dtype == np.int16:
-        # print("This is 16-bit PCM audio. Normalize by dividing by 32767.0.")
-        audio_samples = audio_samples / 32767.0
-    normalized_samples = normalize_audio_samples(audio_samples, target_db, max_gain_db)
-    if output_path is None:
-        output_path = audio_path
-    wav.write(output_path, rate, normalized_samples)
-    return output_path
-
-
-def normalize_audio_samples(audio_samples: np.ndarray, target_db=-18.0, max_gain_db=300.0) -> np.ndarray:
-    """
-    Normalize the audio samples to a target RMS value in decibels.
-
-    Args:
-        audio_samples (np.ndarray): Numpy array of audio samples.
-        target_db (float, optional): Target RMS value in decibels. Defaults to -18.0.
-        max_gain_db (float, optional): Max amount of gain in dB that can be applied for normalization.
-                                       Defaults to 300.0.
-
-    Raises:
-        ValueError: If the gain to normalize the segment exceeds max_gain_db.
-
-    Returns:
-        np.ndarray: Numpy array of normalized audio samples.
-    """
-    rms = calculate_rms_db(audio_samples)
-
-    if np.isinf(rms):
-        return audio_samples
-
-    gain = target_db - rms
-
-    if gain > max_gain_db:
-        raise ValueError(
-            f"Cannot normalize the segment to {target_db} dB as the gain exceeds max_gain_db ({max_gain_db} dB)")
-
-    return apply_gain_db(audio_samples, gain)
-
-
-def apply_gain_db(audio_samples: np.ndarray, gain: float) -> np.ndarray:
-    """
-    Apply gain to the audio data.
-
-    Args:
-        audio_samples (np.ndarray): Numpy array of audio samples.
-        gain (float): Gain in decibels to apply to samples.
-
-    Returns:
-        np.ndarray: Numpy array of audio samples with applied gain.
-    """
-    return audio_samples * 10. ** (gain / 20.)
+        normalize_decibel(output_file)
 
 
 def get_energy_level(audio_file_path: str, verbose: bool = True) -> (float, float):

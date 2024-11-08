@@ -10,7 +10,7 @@ import warnings
 
 import numpy as np
 
-from .files import read_file, write_file
+from .files import read_signal_from_wav, write_signal_to_wav
 
 
 def eliminate_silence(infile):
@@ -47,36 +47,25 @@ def eliminate_silence(infile):
     return with_silence_duration, no_silence_duration
 
 
-def random_cropping(infile, min_len=1):
-    """
-    Crop the infile with an input minimum duration.
+def random_cropping(infile: str, min_len: float = 1) -> None:
+    """Crop the audio file randomly with minimum duration.
 
     Args:
-        infile (str): Input filename.
-        min_len (float): Minimum duration for randomly cropped excerpt
+        infile: Input audio file path
+        min_len: Minimum duration in seconds
     """
-    fs, x = read_file(filename=infile)
+    fs, x = read_signal_from_wav(filename=infile)
     t_end = x.size / fs
+    
     if t_end > min_len:
-        # Get start and end time
         start = random.uniform(0.0, t_end - min_len)
         end = random.uniform(start + min_len, t_end)
-
-        # Crop data
         y = x[int(math.floor(start * fs)):int(math.ceil(end * fs))]
-
-        # Construct file names
-        output_dir = os.path.dirname(infile)
-        name_attribute = "_augmented_randomly_cropped_%s.wav" % str(min_len)
-
-        # Export data to file
-        write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=y, fs=fs)
-
+        
+        outfile = os.path.splitext(infile)[0] + f"_augmented_randomly_cropped_{min_len}.wav"
+        write_signal_to_wav(sig=y, fs=fs, filename=outfile)
     else:
-        warning_msg = """
-                      min_len provided is greater than the duration of the song.
-                      """
-        warnings.warn(warning_msg)
+        warnings.warn("min_len provided is greater than the duration of the song.")
 
 
 def slow_down(input_file, coefficient=0.8):
@@ -130,53 +119,34 @@ def speed(input_file, coefficient=1.25):
     print("Writing data to " + output_file + ".")
 
 
-def shift_time(infile, tshift, direction):
-    """
-    Augment audio data by shifting the time in the file. Signal can be shifted
-    to the left or right.
-
-    Note:
-        Time shifting is simply moving the audio to left/right with a random second.
-        If shifting audio to left (fast forward) with x seconds, first x seconds will mark as 0 (i.e. silence).
-        If shifting audio to right (back forward) with x seconds, last x seconds will mark as 0 (i.e. silence).
+def shift_time(infile: str, tshift: int, direction: str) -> None:
+    """Shift audio in time.
 
     Args:
-        infile (str): Input filename.
-        tshift (int): Signal time shift in seconds.
-        direction (str): shift direction (to the left or right).
+        infile: Input audio file path
+        tshift: Time shift in seconds
+        direction: Shift direction ("left" or "right")
     """
-    fs, sig = read_file(filename=infile)
+    fs, sig = read_signal_from_wav(filename=infile)
     shift = int(tshift * fs) * int(direction == "left") - \
             int(tshift * fs) * int(direction == "right")
 
-    # Shift time
     augmented_sig = np.roll(sig, shift)
-
-    # Construct file names
-    output_dir = os.path.dirname(infile)
-    name_attribute = "_augmented_%s_%s_shifted.wav" % (direction, tshift)
-
-    # Export data to file
-    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=augmented_sig, fs=fs)
+    outfile = os.path.splitext(infile)[0] + f"_augmented_{direction}_{tshift}_shifted.wav"
+    write_signal_to_wav(sig=augmented_sig, fs=fs, filename=outfile)
 
 
-def reverse(infile):
-    """
-    Inverses the input signal to play from the end to the beginning and writes it
-    to an output file
+def reverse(infile: str) -> None:
+    """Reverse the audio signal.
 
     Args:
-        infile (str): Input filename.
+        infile: Input audio file path
     """
-    fs, sig = read_file(filename=infile)
+    fs, sig = read_signal_from_wav(filename=infile)
     augmented_sig = sig[::-1]
-
-    # Construct file names
-    output_dir = os.path.dirname(infile)
-    name_attribute = "_augmented_reversed.wav"
-
-    # Export data to file
-    write_file(output_dir=output_dir, input_filename=infile, name_attribute=name_attribute, sig=augmented_sig, fs=fs)
+    
+    outfile = os.path.splitext(infile)[0] + "_augmented_reversed.wav"
+    write_signal_to_wav(sig=augmented_sig, fs=fs, filename=outfile)
 
 
 def resample_audio(infile, sr):

@@ -8,9 +8,9 @@ import time
 import numpy as np
 import soundfile as sf
 
-from openmmla.utils.audio.auga import normalize_rms, apply_gain
+from openmmla.utils.audio.auga import normalize_decibel, apply_gain
 from openmmla.utils.audio.processing import get_energy_level, read_frames_from_wav, write_frames_to_wav, \
-    calculate_audio_duration, resample
+    calculate_audio_duration, resample_audio_file
 from openmmla.utils.errors import RecordingError, RecognizingError
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sockets import read_frames_tcp, clear_socket_udp, read_frames_udp
@@ -238,7 +238,7 @@ class BadgeAudioBase(AudioBase):
                 similarity = 0
 
                 if speaker != 'silent':
-                    normalize_rms(segment_audio_path, rms_level=-20)
+                    normalize_decibel(segment_audio_path, rms_level=-20)
                     name, similarity = self.audio_recognizer.recognize(segment_audio_path)
                     duration = calculate_audio_duration(segment_audio_path)
 
@@ -290,7 +290,7 @@ class BadgeAudioBase(AudioBase):
                 best_separate_path = ''
                 best_separate_frames = None
 
-                resample(segment_audio_path, 8000)
+                resample_audio_file(segment_audio_path, 8000)
                 if processed_audio_path:
                     if rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
                         sp_result = self._separate_speech(segment_audio_path)
@@ -303,7 +303,7 @@ class BadgeAudioBase(AudioBase):
                                                                                 inplace=1, base_id=f'badge_{self.id}')
 
                             if processed_save_file:
-                                normalize_rms(save_file, rms_level=-20)
+                                normalize_decibel(save_file, rms_level=-20)
                                 temp_name, temp_similarity = self.audio_recognizer.recognize(save_file)
 
                                 # Compare and select best result
@@ -425,7 +425,7 @@ class BadgeAudioBase(AudioBase):
                                                         f'{self.last_speaker}_chunk_{round(float(chunk_start_time))}.wav')
                         write_frames_to_wav(chunk_audio_path, chunk_frames, framerate=fr)
                         if self.last_speaker != 'silent':
-                            normalize_rms(chunk_audio_path, rms_level=-20)
+                            normalize_decibel(chunk_audio_path, rms_level=-20)
 
                 self.speaker_frames_dict[speaker] = (record_start_time, frames)
 
