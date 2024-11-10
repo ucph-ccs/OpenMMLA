@@ -1,7 +1,5 @@
-"""
-- Description: amplitude based augmentation techniques/manipulations for audio data.
-Imported and modified based on pydiogment
-"""
+# Amplitude based augmentation techniques/manipulations for audio data.
+# Imported and modified based on pydiogment
 import os
 
 import numpy as np
@@ -22,11 +20,8 @@ def apply_gain(infile: str, gain: float = 40, inplace: bool = True) -> None:
     x = x * (10 ** (gain / 20.0))
     x = np.clip(x, -1.0, 1.0)  # Using clip instead of minimum/maximum
 
-    # Generate output path
     suffix = ".wav" if inplace else f"_augmented_with_{gain}_gain.wav"
     outfile = os.path.splitext(infile)[0] + suffix
-
-    # Write processed audio
     write_signal_to_wav(sig=x, fs=fs, filename=outfile)
 
 
@@ -54,7 +49,6 @@ def add_noise(infile: str, snr: float) -> None:
     # Add noise
     y = sig + np.sqrt(noise_factor) * noise
 
-    # Generate output path
     outfile = os.path.splitext(infile)[0] + f"_augmented_{snr}_noisy.wav"
     write_signal_to_wav(sig=y, fs=fs, filename=outfile)
 
@@ -72,13 +66,12 @@ def fade_in_and_out(infile: str) -> None:
     augmented_sig = window * sig
     augmented_sig /= np.mean(np.abs(augmented_sig))
 
-    # Generate output path
     outfile = os.path.splitext(infile)[0] + "_augmented_fade_in_out.wav"
     write_signal_to_wav(sig=augmented_sig, fs=fs, filename=outfile)
 
 
-def normalize_decibel(infile: str, normalization_technique: str = "rms", 
-                     rms_level: float = -20, inplace: bool = True) -> None:
+def normalize_decibel(infile: str, normalization_technique: str = "rms",
+                      rms_level: float = -20, inplace: bool = True) -> None:
     """Normalize the signal using peak or RMS normalization.
 
     Args:
@@ -102,8 +95,6 @@ def normalize_decibel(infile: str, normalization_technique: str = "rms",
     else:
         raise ValueError(f"Unknown normalization_technique: {normalization_technique}")
 
-    # Generate output path
     suffix = ".wav" if inplace else f"_augmented_{normalization_technique}_normalized.wav"
     outfile = os.path.splitext(infile)[0] + suffix
-
     write_signal_to_wav(sig=y, fs=fs, filename=outfile)
