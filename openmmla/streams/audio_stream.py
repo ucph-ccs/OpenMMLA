@@ -1,12 +1,13 @@
 import threading
 import time
-from typing import Optional, Dict, Any
+from typing import Optional
 
 import numpy as np
 import pyaudio
 
 from openmmla.utils.logger import get_logger
 from openmmla.utils.resampling import resample_audio, ResampleMethod
+from openmmla.utils.threads import RaisingThread
 from .frame import AudioFrame
 from .stream_buffer import RingBuffer
 from .stream_receiver import StreamReceiver
@@ -33,7 +34,7 @@ class AudioStream(StreamReceiver):
         super().__init__(**kwargs)
         self.source = source
 
-        # Audio configuration
+        # Stream configuration
         self.format = kwargs.get('format', pyaudio.paInt16)
         self.channels = kwargs.get('channels', 1)
         self.rate = kwargs.get('rate', 16000)
@@ -54,7 +55,7 @@ class AudioStream(StreamReceiver):
         self._last_read_pos = 0
 
         # Threading control
-        self.running = False
+        self._stop_event = threading.Event()
         self._receive_thread = None
 
         # PyAudio objects
@@ -65,18 +66,19 @@ class AudioStream(StreamReceiver):
 
     def start(self) -> None:
         """Start the audio stream and begin capturing data."""
-        if self.running:
-            return
+        # stop the stream if it is already running
+        self.stop()
 
         if self.source == 'pyaudio':
             self._initialize_pyaudio()
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
-        self.running = True
-        self._receive_thread = threading.Thread(target=self._receive_loop)
+        self._stop_event.clear()
+        self._receive_thread = RaisingThread(target=self._receive_loop)
         self._receive_thread.daemon = True
         self._receive_thread.start()
+        print("Audio stream started.")
 
     def _initialize_pyaudio(self) -> None:
         """Initialize PyAudio stream with configured parameters."""
@@ -91,7 +93,7 @@ class AudioStream(StreamReceiver):
 
     def stop(self) -> None:
         """Stop the audio stream and clean up resources."""
-        self.running = False
+        self._stop_event.set()
         if self._receive_thread:
             self._receive_thread.join()
 
@@ -105,17 +107,19 @@ class AudioStream(StreamReceiver):
             self.stream.close()
         if self.p:
             self.p.terminate()
+        self._last_read_pos = 0
 
     def _receive_loop(self) -> None:
         """Continuously receive data and store in buffer."""
-        while self.running:
+        while not self._stop_event.is_set():
             try:
                 frame = self._read_chunk()
                 if frame:
                     self.buffer.push(frame)
             except Exception as e:
-                logger.error(f"Error receiving data: {e}")
-                break
+                logger.error(f"Fatal error in receive loop: {e}")
+                self.stop()
+                raise
 
     def _read_chunk(self) -> Optional[AudioFrame]:
         """Read a chunk of audio data.
@@ -131,8 +135,8 @@ class AudioStream(StreamReceiver):
             )
         return None
 
-    def read(self, duration: float, target_rate: Optional[int] = None, 
-            timeout: float = 5.0) -> Optional[AudioFrame]:
+    def read(self, duration: float, target_rate: Optional[int] = None,
+             timeout: float = 5.0) -> Optional[AudioFrame]:
         """Read audio data with optional resampling.
         
         Args:
@@ -151,27 +155,27 @@ class AudioStream(StreamReceiver):
         while len(total_frames) < frames_needed:
             current_tail = self.buffer.get_tail()
 
+            # For first read, start from most recent data
+            if self._last_read_pos == 0:
+                self._last_read_pos = current_tail
+                continue
+
             if current_tail == self._last_read_pos:
                 if time.time() - start_time > timeout:
                     logger.warning("Timeout reached while waiting for frames.")
                     break
-                time.sleep(0.1)
+                time.sleep(1)
                 continue
 
             remaining_frames = frames_needed - len(total_frames)
             available_frames = self.buffer.frames_available(self._last_read_pos)
+            end_pos = (self._last_read_pos + remaining_frames) % self.buffer.size \
+                if available_frames >= remaining_frames else current_tail
 
-            if available_frames >= remaining_frames:
-                end_pos = (self._last_read_pos + remaining_frames) % self.buffer.size
-                new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
-                total_frames.extend(new_frames)
-                self._last_read_pos = end_pos
-                break
-            else:
-                new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=current_tail)
-                total_frames.extend(new_frames)
-                self._last_read_pos = current_tail
-                start_time = time.time()
+            new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
+            total_frames.extend(new_frames)
+            self._last_read_pos = end_pos
+            start_time = time.time()
 
         return self._process_frames(total_frames, target_rate)
 
@@ -190,6 +194,7 @@ class AudioStream(StreamReceiver):
             return None
 
         audio_data = np.concatenate([frame.data for frame in frames])
+        start_timestamp = frames[0].timestamp
 
         if target_rate and target_rate != frames[0].sample_rate:
             audio_data = resample_audio(
@@ -202,7 +207,7 @@ class AudioStream(StreamReceiver):
         metadata = {
             'sample_rate': target_rate or frames[0].sample_rate,
             'channels': frames[0].channels,
-            'format': frames[0].format
+            'format': frames[0].format,
         }
 
-        return AudioFrame(data=audio_data, metadata=metadata)
+        return AudioFrame(timestamp=start_timestamp, data=audio_data, metadata=metadata)
