@@ -45,14 +45,14 @@ class BadgeAudioBase(AudioBase):
     def base_type(self):
         return 'Badge'
 
-    def _setup_from_yaml(self):
-        super()._setup_from_yaml()
+    def _setup_yaml(self):
+        super()._setup_yaml()
         self.listening_ip = self.config[self.base_type]['listening_ip']
         self.protocol = self.config[self.base_type]['protocol']
         self.port_offset = int(self.config[self.base_type]['port_offset'])
 
-    def _setup_from_input(self):
-        super()._setup_from_input()
+    def _setup_input(self):
+        super()._setup_input()
         self.port = self.id + self.port_offset
 
     def _register_profile(self):

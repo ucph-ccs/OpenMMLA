@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import yaml
 
-from openmmla.bases import Base
+from openmmla.bases.base import Base
 from openmmla.utils.logger import get_logger
 from .input import flush_input, get_function_calibrator
 
@@ -22,8 +22,6 @@ class CameraCalibrator(Base):
             config_path: path to the configuration file
         """
         super().__init__(project_dir, config_path)
-        self._setup_from_yaml()
-        self._setup_directories()
 
         """Calibration specific parameters."""
         self.CHECKERBOARD = (6, 9)  # Checkerboard dimensions
@@ -34,6 +32,9 @@ class CameraCalibrator(Base):
         self.objp[0, :, :2] = np.mgrid[0:self.CHECKERBOARD[0], 0:self.CHECKERBOARD[1]].T.reshape(-1, 2)
         self.obj_points = []  # Lists to store object points and image points
         self.img_points = []
+
+        self._setup_from_yaml()
+        self._setup_directories()
 
     def _setup_from_yaml(self):
         """Set up attributes from YAML configuration."""

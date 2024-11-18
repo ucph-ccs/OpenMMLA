@@ -1,6 +1,5 @@
 import copy
 import os
-import socket
 
 import librosa
 import numpy as np

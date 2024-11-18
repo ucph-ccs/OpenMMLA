@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
-from openmmla.bases import Base
+from openmmla.bases.base import Base
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
@@ -29,8 +29,6 @@ class VideoBase(Base):
             record: whether to record video frames
         """
         super().__init__(project_dir, config_path)
-        self._setup_from_yaml()
-        self._setup_directories()
 
         """Video-base specific parameters."""
         self.graphics = graphics
@@ -47,12 +45,11 @@ class VideoBase(Base):
         self.transform_matrices_dict = None
         self.camera_configured = False
 
-        """Client attributes."""
-        self.influx_client = InfluxDBClientWrapper(self.config_path)
-        self.mqtt_client = MQTTClientWrapper(self.config_path)
-        self.detector = Detector(families=self.families, nthreads=4)
+        self._setup_yaml()
+        self._setup_directories()
+        self._setup_objects()
 
-    def _setup_from_yaml(self):
+    def _setup_yaml(self):
         """Set up attributes from YAML configuration."""
         tag_config = self.config.get('AprilTag', {})
         self.tag_size = float(tag_config.get('tag_size', 0.061))
@@ -72,6 +69,12 @@ class VideoBase(Base):
         os.makedirs(self.recordings_dir, exist_ok=True)
         os.makedirs(self.camera_sync_dir, exist_ok=True)
         os.makedirs(self.camera_calib_dir, exist_ok=True)
+
+    def _setup_objects(self):
+        """Set up client objects."""
+        self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.mqtt_client = MQTTClientWrapper(self.config_path)
+        self.detector = Detector(families=self.families, nthreads=4)
 
     def run(self):
         print('\033]0;Video Base\007')

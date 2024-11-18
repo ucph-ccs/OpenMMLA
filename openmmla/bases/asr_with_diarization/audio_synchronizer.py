@@ -6,16 +6,15 @@ import threading
 import time
 
 from openmmla.analytics.audio.analyze import session_analysis_audio
-from openmmla.bases import Base
+from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
-from openmmla.utils.threads import RaisingThread
 from .enums import BLUE, ENDC
 from .input import get_bucket_name, get_number_of_group_members, get_function_synchronizer
 
 
-class AudioSynchronizer(Base):
+class AudioSynchronizer(Synchronizer):
     """The synchronizer synchronizes speaker recognition results from audio bases among the same session."""
     logger = get_logger('synchronizer')
 
@@ -35,19 +34,49 @@ class AudioSynchronizer(Base):
         self.dominant = dominant
         self.sp = sp
 
-        self.bucket_name = None  # Session bucket name
+        """Runtime attributes."""
+        self.threads = []
+        self.stop_event = threading.Event()
+        self.bucket_name = None
         self.number_of_speaker = None  # Number of group members
-        self.latest_time = None  # Record start time of the most recent synchronized segment
-        self.retained_results = None  # Results to be handled {time: {id: {'speaker':x, 'similarity':x, 'duration':x}}}
-        self.threads = []  # List of thread objects
-        self.stop_event = threading.Event()  # Event for stopping all threads
+        self.latest_time = None  # Record start time of the most recent received segment
+        self.retained_segments_results = None  # Results to be handled {segment_time: {base_id: {'speaker':x,
+        # 'similarity':x, 'duration':x}}}
 
-        self._setup_from_yaml()
+        self._setup_yaml()
         self._setup_directories()
         self._setup_objects()
 
+    def _setup_yaml(self):
+        """Set up attributes from YAML configuration."""
+        self.result_expiry_time = int(
+            self.config['Synchronizer']['result_expiry_time'])  # Expiry time of retained results
+        self.time_range = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
+            self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest segment
+
+    def _setup_directories(self):
+        """Set up required directories."""
+        self.logger_dir = os.path.join(self.project_dir, 'logger')
+        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
+        os.makedirs(self.logger_dir, exist_ok=True)
+        os.makedirs(self.audio_temp_dir, exist_ok=True)
+
+    def _setup_objects(self):
+        """Set up client objects."""
+        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
+        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
+        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
+
+    def _clean_up(self):
+        """Free memory by resetting dictionaries."""
+        self.bucket_name = None
+        self.number_of_speaker = None
+        self.latest_time = None
+        self.retained_segments_results = None
+        gc.collect()
+
     def run(self):
-        """Main menu for the synchronizer."""
+        """Main menu for audio synchronizer."""
         print('\033]0;Audio Synchronizer\007')
         func_map = {1: self._start_synchronizing}
 
@@ -65,32 +94,19 @@ class AudioSynchronizer(Base):
                     f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
 
-    def _setup_from_yaml(self):
-        self.result_expiry_time = int(
-            self.config['Synchronizer']['result_expiry_time'])  # Expiry time of retained results
-        self.time_range = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
-            self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest segment
-
-    def _setup_directories(self):
-        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        os.makedirs(self.audio_temp_dir, exist_ok=True)
-        os.makedirs(self.logger_dir, exist_ok=True)
-
-    def _setup_objects(self):
-        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
-        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
-        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
-
     def _start_synchronizing(self):
         """Start the synchronization process."""
         self.bucket_name = get_bucket_name(self.influx_client)
         self.number_of_speaker = get_number_of_group_members()
         self.latest_time = 0
-        self.retained_results = {}
+        self.retained_segments_results = {}
         self.logger = get_logger(f'synchronizer-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_synchronizer.log'),
                                  level=logging.DEBUG, console_level=logging.INFO, file_level=logging.DEBUG)
+
+        self._listen_for_start_signal()
+
+        # Reinitialize MQTT client with a new topic and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/audio')
         self.mqtt_client.loop_start()
 
@@ -128,62 +144,115 @@ class AudioSynchronizer(Base):
         clear_directory(self.audio_temp_dir)
         self._clean_up()
 
-    def _create_thread(self, target, *args):
-        """Create a new thread and add it to the thread list.
-
-        Args:
-            target: the target function to run in the thread
-            args: the arguments to pass to the thread
-        """
-        t = RaisingThread(target=target, args=args)
-        self.threads.append(t)
-
-    def _start_threads(self):
-        """Start all threads."""
-        self.stop_event.clear()
-        for t in self.threads:
-            t.start()
-
-    def _join_threads(self):
-        """Wait for all threads to finish."""
-        for t in self.threads:
-            t.join()
-
-    def _stop_threads(self):
-        """Stop all threads and free memory."""
-        self.stop_event.set()
-        for t in self.threads:
-            if threading.current_thread() != t:
-                try:
-                    t.join(timeout=5)
-                except Exception as e:
-                    self.logger.warning(f"During the thread stopping, catch: {e}", exc_info=True)
-        self.threads.clear()
-
-    def _clean_up(self):
-        """Free memory by resetting dictionaries."""
-        self.bucket_name = None
-        self.number_of_speaker = None
-        self.latest_time = None
-        self.retained_results = None
-        gc.collect()
-
     def _send_start_regularly(self):
         """Send the START signal to all bases regularly."""
         while not self.stop_event.is_set():
             self.redis_client.publish(f"{self.bucket_name}/control", 'START')
             time.sleep(self.time_range)
 
-    def _listen_for_stop_signal(self):
-        """Listen on the redis bucket control channel for the STOP signal."""
-        p = self.redis_client.subscribe(f"{self.bucket_name}/control")
-        self.logger.info("Listening for STOP signal...")
+    def _handle_base_result(self, client, userdata, message):
+        """Handle the received base result.
 
-        while not self.stop_event.is_set():
-            message = p.get_message()
-            if message and message['data'] == b'STOP':
-                self.logger.info("Received STOP signal, stop synchronizing...")
-                self._stop_threads()
+        Args:
+            client: the client instance for this callback
+            userdata: the private user data as a set in Client() or user_data_set()
+            message: an instance of MQTTMessage
+        """
+        new_base_result = json.loads(message.payload.decode('utf-8'))
+        record_start_time = float(new_base_result['record_start_time'])
+
+        if not self.latest_time:
+            self.latest_time = int(record_start_time)
+            self.retained_segments_results[self.latest_time] = {}
+            self._update_retained_segments_results(self.latest_time, new_base_result)
+            return
+
+        expired_segments = [segment_time for segment_time in self.retained_segments_results.keys() if
+                            record_start_time - segment_time > self.result_expiry_time]
+
+        for segment_time in expired_segments:
+            merged_segment_result = self._merge_segment_results(self.retained_segments_results[segment_time])
+            merged_segment_result['segment_start_time'] = segment_time
+            self.logger.debug(
+                f"\033[91mExpired segment {segment_time} with result {self.retained_segments_results[segment_time]}\033[0m")
+            self._upload_merged_result(merged_segment_result)
+            del self.retained_segments_results[segment_time]
+
+        closest_segment_time = self._find_closest_segment(record_start_time, new_base_result['base_id'])
+        if closest_segment_time is None:
+            if self.latest_time > record_start_time:  # outdated message
+                self.logger.debug(
+                    f"\033[91m{new_base_result['base_id']} results is outdated, record time is {record_start_time}\033[0m")
+                return
+            else:
+                # self.latest_time = self._update_time(self.latest_time, record_start_time)
+                # self.latest_time += self.time_range
+                self.latest_time = record_start_time  # Update the latest time to the record start time
+                self.retained_segments_results[self.latest_time] = {}
+                self._update_retained_segments_results(self.latest_time, new_base_result)
+        else:
+            self._update_retained_segments_results(closest_segment_time, new_base_result)
+
+        segment_time = closest_segment_time if closest_segment_time else self.latest_time
+        self.logger.debug(
+            f"Segment {segment_time} is selected for {new_base_result['base_id']} record time is {record_start_time}")
+        if len(self.retained_segments_results[segment_time]) == self.number_of_speaker:
+            merged_segment_result = self._merge_segment_results(self.retained_segments_results[segment_time])
+            merged_segment_result['segment_start_time'] = segment_time
+            self._upload_merged_result(merged_segment_result)
+            del self.retained_segments_results[segment_time]
+
+    def _update_retained_segments_results(self, segment_time, latest_base_result):
+        """Helper function to update the base result of one segment.
+
+        Args:
+            segment_time: the segment time of the recognition result
+            latest_base_result: the latest recognition result from one base
+        """
+        if latest_base_result['base_id'] in self.retained_segments_results[segment_time]:
+            self.logger.debug(
+                f"\033[91mOverwrite results: {self.retained_segments_results[segment_time][latest_base_result['base_id']]}\033[0m")
+        self.retained_segments_results[segment_time][latest_base_result['base_id']] = {
+            'record_start_time': latest_base_result['record_start_time'],
+            'speakers': json.loads(latest_base_result['speakers']),
+            'similarities': json.loads(latest_base_result['similarities']),
+            'durations': json.loads(latest_base_result['durations']),
+        }
+
+    def _merge_segment_results(self, segment_results):
+        """Merge the base results of one segment, keys are base id, values are base results.
+
+        Args:
+            segment_results: the base results dictionary of one segment
+
+        Returns:
+            The consolidated result dictionary of one segment
+        """
+        speakers, similarities, durations, record_start_times = [], [], [], []
+        if self.dominant:
+            best_result, i = self.find_best_base_result(segment_results)
+            record_start_times.append(best_result['record_start_time'])
+            speakers.append(best_result['speakers'][i])
+            similarities.append(best_result['similarities'][i])
+            durations.append(best_result['durations'][i])
+        else:
+            for res in segment_results.values():
+                # Append real speakers
+                for i, speaker in enumerate(res['speakers']):
+                    if speaker not in ['unknown', 'silent']:
+                        record_start_times.append(res['record_start_time'])
+                        speakers.append(res['speakers'][i])
+                        similarities.append(res['similarities'][i])
+                        durations.append(res['durations'][i])
+            if not speakers:
+                best_result, i = self.find_best_base_result(segment_results)
+                record_start_times.append(best_result['record_start_time'])
+                speakers.append(best_result['speakers'][i])
+                similarities.append(best_result['similarities'][i])
+                durations.append(best_result['durations'][i])
+
+        return {'speakers': speakers, 'similarities': similarities, 'record_start_times': record_start_times,
+                'durations': durations}
 
     # def _find_closest_segment(self, current_time):
     #     time_differences = {key: abs(current_time - key) for key in self.retained_results.keys()}
@@ -192,22 +261,22 @@ class AudioSynchronizer(Base):
     #     return closest_segment_time
 
     def _find_closest_segment(self, current_time, base_id):
-        """Find the closest segment of the current received segment among the retained results.
+        """Find the closest segment of the new received segment among the retained segments results.
 
         Args:
-            current_time: the record start time of the current received segment
-            base_id: the base id of the current received segment
+            current_time: the record start time of the received segment
+            base_id: the base id of the received segment
 
         Returns:
             The segment time of the closest segment, or None if no valid segments are found
         """
         # Calculate time differences for all segments in retained results
-        time_differences = {key: abs(current_time - key) for key in self.retained_results.keys()}
+        time_differences = {key: abs(current_time - key) for key in self.retained_segments_results.keys()}
 
         # Filter valid segments based on time difference and exclude segments where base_id already exists
         valid_segments = {
             key: diff for key, diff in time_differences.items()
-            if diff <= self.time_range and base_id not in self.retained_results[key]
+            if diff <= self.time_range and base_id not in self.retained_segments_results[key]
         }
 
         # If no valid segments are found, return None
@@ -229,123 +298,20 @@ class AudioSynchronizer(Base):
     #         updated_latest_time += self.time_range
     #     return updated_latest_time
 
-    def _handle_base_result(self, client, userdata, message):
-        """Handle the received speaker recognition result from the base.
+    def _upload_merged_result(self, merged_result):
+        """Log and upload the merged segment result to InfluxDB.
 
         Args:
-            client: the client instance for this callback
-            userdata: the private user data as set in Client() or user_data_set()
-            message: an instance of MQTTMessage
-        """
-        new_base_result = json.loads(message.payload.decode('utf-8'))
-        record_start_time = float(new_base_result['record_start_time'])
-
-        if not self.latest_time:
-            self.latest_time = int(record_start_time)
-            self.retained_results[self.latest_time] = {}
-            self._update_retained_results(self.latest_time, new_base_result)
-            return
-
-        expired_keys = [key for key in self.retained_results.keys() if
-                        record_start_time - key > self.result_expiry_time]
-
-        for key in expired_keys:
-            consolidated_result = self._consolidate_results(self.retained_results[key])
-            consolidated_result['segment_start_time'] = key
-            self.logger.debug(f"\033[91mExpired key {key} with result {self.retained_results[key]}\033[0m")
-            self._log_and_upload_results(consolidated_result)
-            del self.retained_results[key]
-
-        closest_segment_time = self._find_closest_segment(record_start_time, new_base_result['base_id'])
-        if closest_segment_time is None:
-            if self.latest_time > record_start_time:  # outdated message
-                self.logger.debug(
-                    f"\033[91m{new_base_result['base_id']} results is outdated, record time is {record_start_time}\033[0m")
-                return
-            else:
-                # self.latest_time = self._update_time(self.latest_time, record_start_time)
-                # self.latest_time += self.time_range
-                self.latest_time = record_start_time  # Update latest time to the record start time
-                self.retained_results[self.latest_time] = {}
-                self._update_retained_results(self.latest_time, new_base_result)
-        else:
-            self._update_retained_results(closest_segment_time, new_base_result)
-
-        segment_time = closest_segment_time if closest_segment_time else self.latest_time
-        self.logger.debug(
-            f"Segment {segment_time} is selected for {new_base_result['base_id']} record time is {record_start_time}")
-        if len(self.retained_results[segment_time]) == self.number_of_speaker:
-            consolidated_result = self._consolidate_results(self.retained_results[segment_time])
-            consolidated_result['segment_start_time'] = segment_time
-            self._log_and_upload_results(consolidated_result)
-            del self.retained_results[segment_time]
-
-    def _update_retained_results(self, segment_time, latest_base_result):
-        """Helper function to update or add the recognition result of one segment sent from base.
-
-        Args:
-            segment_time: the segment time of the recognition result
-            latest_base_result: the latest recognition result from one base
-        """
-        if latest_base_result['base_id'] in self.retained_results[segment_time]:
-            self.logger.debug(
-                f"\033[91mOverwrite results: {self.retained_results[segment_time][latest_base_result['base_id']]}\033[0m")
-        self.retained_results[segment_time][latest_base_result['base_id']] = {
-            'record_start_time': latest_base_result['record_start_time'],
-            'speakers': json.loads(latest_base_result['speakers']),
-            'similarities': json.loads(latest_base_result['similarities']),
-            'durations': json.loads(latest_base_result['durations']),
-        }
-
-    def _consolidate_results(self, segment_results):
-        """Consolidate the results dictionary of one segment, keys are base id, values are base results.
-
-        Args:
-            segment_results: the results dictionary of one segment
-
-        Returns:
-            The consolidated result dictionary of one segment
-        """
-        speakers, similarities, durations, record_start_times = [], [], [], []
-        if self.dominant:
-            best_result, i = self.find_best_result(segment_results)
-            record_start_times.append(best_result['record_start_time'])
-            speakers.append(best_result['speakers'][i])
-            similarities.append(best_result['similarities'][i])
-            durations.append(best_result['durations'][i])
-        else:
-            for res in segment_results.values():
-                # Append real speakers
-                for i, speaker in enumerate(res['speakers']):
-                    if speaker not in ['unknown', 'silent']:
-                        record_start_times.append(res['record_start_time'])
-                        speakers.append(res['speakers'][i])
-                        similarities.append(res['similarities'][i])
-                        durations.append(res['durations'][i])
-            if not speakers:
-                best_result, i = self.find_best_result(segment_results)
-                record_start_times.append(best_result['record_start_time'])
-                speakers.append(best_result['speakers'][i])
-                similarities.append(best_result['similarities'][i])
-                durations.append(best_result['durations'][i])
-
-        return {'speakers': speakers, 'similarities': similarities, 'record_start_times': record_start_times,
-                'durations': durations}
-
-    def _log_and_upload_results(self, consolidated_result):
-        """Log and upload the consolidated results to InfluxDB.
-
-        Args:
-            consolidated_result: the consolidated result dictionary of one segment
+            merged_result: the merged result dictionary of one segment
         """
         recognition_data = {
             "measurement": "speaker recognition",
             "fields": {
-                "segment_start_time": float(consolidated_result['segment_start_time']),
-                "speakers": json.dumps(consolidated_result['speakers']),
-                "similarities": json.dumps(consolidated_result['similarities']),
-                "record_start_times": json.dumps(consolidated_result['record_start_times']),
-                "durations": json.dumps(consolidated_result['durations'])
+                "segment_start_time": float(merged_result['segment_start_time']),
+                "speakers": json.dumps(merged_result['speakers']),
+                "similarities": json.dumps(merged_result['similarities']),
+                "record_start_times": json.dumps(merged_result['record_start_times']),
+                "durations": json.dumps(merged_result['durations'])
             },
         }
         print(f"{BLUE}[Speaker Recognition]{ENDC}{recognition_data['fields']['segment_start_time']}: "
@@ -354,11 +320,11 @@ class AudioSynchronizer(Base):
         self.influx_client.write(self.bucket_name, recognition_data)
 
     @staticmethod
-    def find_best_result(segment_results: dict):
-        """Find the best result among the segment results.
+    def find_best_base_result(segment_results: dict):
+        """Find the best result among the base results of one segment.
 
         Args:
-            segment_results: the segment results dictionary
+            segment_results: the base results dictionary of one segment
 
         Returns:
             The best result and its index

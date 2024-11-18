@@ -5,7 +5,6 @@ import logging
 import os
 import queue
 import shutil
-import socket
 import threading
 import time
 from abc import abstractmethod, ABC
@@ -13,7 +12,7 @@ from abc import abstractmethod, ABC
 import librosa
 import numpy as np
 
-from openmmla.bases import Base
+from openmmla.bases.base import Base
 from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.processing import read_frames_from_wav, write_frames_to_wav
 from openmmla.utils.clean import clear_directory
@@ -21,7 +20,6 @@ from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, Redi
 from openmmla.utils.errors import RecordingError, TranscribingError
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url, request_speech_transcription, request_speech_separation
-from openmmla.utils.threads import RaisingThread
 from .audio_recognizer import AudioRecognizer
 from .audio_recorder import AudioRecorder
 from .enums import BLUE, ENDC, GREEN
@@ -83,8 +81,8 @@ class AudioBase(Base, ABC):
         self.threads = []
         self.stop_event = threading.Event()
 
-        self._setup_from_yaml()
-        self._setup_from_input()
+        self._setup_input()
+        self._setup_yaml()
         self._setup_directories()
         self._setup_objects()
 
@@ -94,7 +92,10 @@ class AudioBase(Base, ABC):
         """Return the type of the audio base."""
         pass
 
-    def _setup_from_yaml(self):
+    def _setup_input(self):
+        self.id = get_id()
+
+    def _setup_yaml(self):
         self.register_duration = int(self.config[self.base_type]['register_duration'])
         self.rms_threshold = int(self.config[self.base_type]['rms_threshold'])
         self.rms_peak_threshold = int(self.config[self.base_type]['rms_peak_threshold'])
@@ -107,9 +108,6 @@ class AudioBase(Base, ABC):
         # self.audio_server_host = socket.gethostbyname(self.config['Server']['audio_server_host'])
         self.speech_transcriber_url = resolve_url(self.config['Server']['asr']['speech_transcription'])
         self.speech_separator_url = resolve_url(self.config['Server']['asr']['speech_separation'])
-
-    def _setup_from_input(self):
-        self.id = get_id()
 
     def _setup_directories(self):
         self.audio_realtime_dir = os.path.join(self.project_dir, 'audio', 'real-time')
@@ -195,38 +193,6 @@ class AudioBase(Base, ABC):
         """Switch the mode of the audio base."""
         pass
 
-    def _create_thread(self, target, *args):
-        """Create a new thread and add it to the thread list.
-
-        Args:
-            target: the target function to run in the thread
-            *args: the arguments to pass to Thread
-        """
-        t = RaisingThread(target=target, args=args)
-        self.threads.append(t)
-
-    def _start_threads(self):
-        """Start all threads."""
-        self.stop_event.clear()
-        for t in self.threads:
-            t.start()
-
-    def _join_threads(self):
-        """Wait for all threads to finish."""
-        for t in self.threads:
-            t.join()
-
-    def _stop_threads(self):
-        """Stop all threads and free memory."""
-        self.stop_event.set()
-        for t in self.threads:
-            if threading.current_thread() != t:
-                try:
-                    t.join(timeout=5)
-                except Exception as e:
-                    self.logger.warning(f"During the thread stopping, catch: {e}")
-        self.threads.clear()
-
     def _clean_up(self):
         """Free memory by resetting the runtime variables."""
         self.bucket_name = None
@@ -236,26 +202,6 @@ class AudioBase(Base, ABC):
         self.transcription_queue = None
         self.speaker_frames_dict = None
         gc.collect()
-
-    def _listen_for_start_signal(self):
-        """Listen on the redis bucket control channel for the START signal."""
-        p = self.redis_client.subscribe(f'{self.bucket_name}/control')  # Note: pubsub is not thread-safe
-        self.logger.info("Wait for START signal...")
-        while True:
-            message = p.get_message()
-            if message and message['data'] == b'START':
-                self.logger.info("Received START signal, start recognizing...")
-                break
-
-    def _listen_for_stop_signal(self):
-        """Listen on the redis bucket control channel for the STOP signal."""
-        p = self.redis_client.subscribe(f'{self.bucket_name}/control')
-        self.logger.info("Listening for STOP signal...")
-        while not self.stop_event.is_set():
-            message = p.get_message()
-            if message and message['data'] == b'STOP':
-                self.logger.info("Received STOP signal, stop recognizing...")
-                self._stop_threads()
 
     def _load_and_queue_recorded_files(self):
         """Load pre-recorded audio files and queue them for recognition when in recognize mode."""

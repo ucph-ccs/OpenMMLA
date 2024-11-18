@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
 
-from openmmla.bases import Base
+from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.logger import get_logger
 from .input import get_function_sync_manager
@@ -23,7 +23,7 @@ from .transform import (
 matplotlib.use('TkAgg')
 
 
-class CameraSyncManager(Base):
+class CameraSyncManager(Synchronizer):
     """Class for synchronizing the coordinate system between the main camera and alternative camera."""
     logger = get_logger('camera-sync-manager')
     colors = cycle('bgrcmyk')
@@ -44,7 +44,6 @@ class CameraSyncManager(Base):
             time_threshold_unsync: time threshold for unsync mode
         """
         super().__init__(project_dir, config_path)
-        self._setup_directories()
 
         """Synchronization parameters."""
         self.sync = sync
@@ -75,13 +74,17 @@ class CameraSyncManager(Base):
         self.plot_points_list = []
         self.tag_color_map = {}
 
-        """Client attributes."""
-        self.mqtt_client = MQTTClientWrapper(self.config_path)
+        self._setup_directories()
+        self._setup_objects()
 
     def _setup_directories(self):
         """Set up required directories."""
         self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
         os.makedirs(self.camera_sync_dir, exist_ok=True)
+
+    def _setup_objects(self):
+        """Set up client objects."""
+        self.mqtt_client = MQTTClientWrapper(self.config_path)
 
     def run(self):
         """Run the camera sync manager."""
@@ -108,7 +111,7 @@ class CameraSyncManager(Base):
             if not self.main_camera_id or not self.alternative_camera_id:
                 return self._set_camera_id()
 
-            self.mqtt_client.reinitialise(on_message=self._on_message, topics="camera/synchronize")
+            self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics="camera/synchronize")
             self.mqtt_client.loop_start()
             self.fig, self.ax = plt.subplots(1, 1, subplot_kw={'projection': '3d'})
             plt.get_current_fig_manager().set_window_title(
@@ -159,7 +162,7 @@ class CameraSyncManager(Base):
         except queue.Empty:
             pass
 
-    def _on_message(self, client, userdata, msg):
+    def _handle_base_result(self, client, userdata, msg):
         message = json.loads(msg.payload)
 
         sender_id = message["sender_id"]

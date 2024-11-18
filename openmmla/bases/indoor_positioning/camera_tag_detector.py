@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
-from openmmla.bases import Base
+from openmmla.bases.base import Base
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
@@ -28,8 +28,7 @@ class CameraTagDetector(Base):
             max_badge_id: maximum badge ID to detect
         """
         super().__init__(project_dir, config_path)
-        self._setup_from_yaml()
-
+        
         """Camera detector parameters."""
         self.max_badge_id = max_badge_id
         self.cameras_dir = os.path.join(self.project_dir, 'camera_calib/cameras')
@@ -41,11 +40,10 @@ class CameraTagDetector(Base):
         self.video_stream = None
         self.camera_configured = False
 
-        """Client attributes."""
-        self.detector = Detector(families=self.families, nthreads=4)
-        self.mqtt_client = MQTTClientWrapper(self.config_path)
+        self._setup_yaml()
+        self._setup_objects()
 
-    def _setup_from_yaml(self):
+    def _setup_yaml(self):
         """Set up attributes from YAML configuration."""
         tag_config = self.config.get('AprilTag', {})
         self.tag_size = float(tag_config.get('tag_size', 0.061))
@@ -56,6 +54,10 @@ class CameraTagDetector(Base):
         self.res_height = int(image_config.get('res_height', 1080))
         self.res = (self.res_width, self.res_height)
         self.rotate = int(image_config.get('rotate', 0))
+
+    def _setup_objects(self):
+        self.detector = Detector(families=self.families, nthreads=4)
+        self.mqtt_client = MQTTClientWrapper(self.config_path)
 
     def run(self):
         """Run the camera tag detector."""

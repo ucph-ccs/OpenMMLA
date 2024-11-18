@@ -6,16 +6,15 @@ import threading
 import time
 
 from openmmla.analytics.video.analyze import session_analysis_video
-from openmmla.bases import Base
+from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
-from openmmla.utils.threads import RaisingThread
 from .input import get_function_synchronizer, get_bucket_name
 from .transform import transform_point, transform_rotation
 from .vector import is_tag_looking_at_another_2d
 
 
-class VideoSynchronizer(Base):
+class VideoSynchronizer(Synchronizer):
     """Synchronizer class for synchronizing detection results from multiple cameras and uploading to InfluxDB"""
     logger = get_logger('synchronizer')
 
@@ -27,23 +26,20 @@ class VideoSynchronizer(Base):
             config_path: path to the configuration file
         """
         super().__init__(project_dir, config_path)
-        self._setup_directories()
 
         """Runtime attributes."""
-        self.main_camera_id = None
-        self.transform_matrices_dict = None
-        self.bucket_name = None
-        self.graph_dict = None
-        self.location_dict = None
-        self.alive = False
         self.threads = []
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
+        self.bucket_name = None
+        self.main_camera_id = None
+        self.transform_matrices_dict = None
+        self.graph_dict = None
+        self.location_dict = None
+        self.alive = False
 
-        """Client attributes."""
-        self.influx_client = InfluxDBClientWrapper(self.config_path)
-        self.mqtt_client = MQTTClientWrapper(self.config_path)
-        self.redis_client = RedisClientWrapper(self.config_path)
+        self._setup_directories()
+        self._setup_objects()
 
     def _setup_directories(self):
         """Set up directories."""
@@ -52,7 +48,21 @@ class VideoSynchronizer(Base):
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.camera_sync_dir, exist_ok=True)
 
+    def _setup_objects(self):
+        """Set up client objects."""
+        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
+        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
+        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
+
+    def _clean_up(self):
+        """Free memory by resetting dictionaries."""
+        self.bucket_name = None
+        self.graph_dict = None
+        self.location_dict = None
+        gc.collect()
+
     def run(self):
+        """Main menu for video synchronizer."""
         print('\033]0;Video Synchronizer\007')
         func_map = {1: self._start_synchronizing, 2: self._set_main_camera}
 
@@ -69,6 +79,7 @@ class VideoSynchronizer(Base):
                     exc_info=True)
 
     def _start_synchronizing(self):
+        """Start the synchronization process."""
         if self.transform_matrices_dict is None:
             self.logger.warning("Main camera id or transformation matrices not set, please set them first.")
             return self._set_main_camera()
@@ -79,38 +90,43 @@ class VideoSynchronizer(Base):
         self.logger = get_logger(f'synchronizer-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_synchronizer.log'),
                                  level=logging.DEBUG, console_level=logging.INFO, file_level=logging.DEBUG)
-        exception_occurred = None
 
         self._listen_for_start_signal()
 
-        # Reinitialize MQTT client with new topic and on_message callback
+        # Reinitialize MQTT client with new topics and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/video')
         self.mqtt_client.loop_start()
 
         # Create threads
         self._create_thread(self._listen_for_stop_signal)
-        self._create_thread(self._upload_data)
+        self._create_thread(self._upload_merged_result)
 
         # Start threads
+        exception_occurred = None
         try:
             self._start_threads()
             self._join_threads()
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning(
-                f"During voice recognition, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
+                f"During synchronization, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
                 exc_info=True)
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
 
     def _set_main_camera(self):
+        """Set the main camera id and load transformation matrices."""
         self.transform_matrices_dict = self._load_transform_matrices()
         if self.transform_matrices_dict is None:
             self.logger.warning("No transformation matrices found, please check your main camera id or do the camera "
                                 "sync first.")
 
     def _synchronization_handler(self, e):
-        """Handle exceptions and stop all threads."""
+        """Handle exceptions and stop all threads.
+
+        Args:
+            e: the exception that occurred during the synchronization process
+        """
         if e:
             self._stop_threads()
         else:
@@ -120,65 +136,14 @@ class VideoSynchronizer(Base):
         session_analysis_video(self.project_dir, self.bucket_name, self.influx_client)
         self._clean_up()
 
-    def _create_thread(self, target, *args):
-        """Create a new thread and add it to the thread list.
-
-        :param target: the target function to run in the thread
-        """
-        t = RaisingThread(target=target, args=args)
-        self.threads.append(t)
-
-    def _start_threads(self):
-        """Start all threads."""
-        self.stop_event.clear()
-        for t in self.threads:
-            t.start()
-
-    def _join_threads(self):
-        """Wait for all threads to finish."""
-        for t in self.threads:
-            t.join()
-
-    def _stop_threads(self):
-        """Stop all threads and free memory."""
-        self.stop_event.set()
-        for t in self.threads:
-            if threading.current_thread() != t:
-                try:
-                    t.join(timeout=5)
-                except Exception as e:
-                    self.logger.warning("During the thread stopping, catch exception %s", e, exc_info=True)
-        self.threads.clear()
-
-    def _clean_up(self):
-        """Free memory by resetting dictionaries."""
-        self.bucket_name = None
-        self.graph_dict = None
-        self.location_dict = None
-        gc.collect()
-
-    def _listen_for_start_signal(self):
-        """Listen on the redis bucket control channel for the START signal."""
-        p = self.redis_client.subscribe(f"{self.bucket_name}/control")
-        self.logger.info("Wait for START signal...")
-        while True:
-            message = p.get_message()
-            if message and message['data'] == b'START':
-                self.logger.info("Received START signal, start synchronizing...")
-                break
-
-    def _listen_for_stop_signal(self):
-        """Listen on the redis bucket control channel for the STOP signal."""
-        p = self.redis_client.subscribe(f"{self.bucket_name}/control")
-        self.logger.info("Listening for STOP command...")
-
-        while not self.stop_event.is_set():
-            message = p.get_message()
-            if message and message['data'] == b'STOP':
-                self.logger.info("Received STOP signal, stop synchronizing...")
-                self.stop_event.set()
-
     def _handle_base_result(self, client, userdata, msg):
+        """Handle the received base result.
+
+        Args:
+            client: the client instance for this callback
+            userdata: the private user data as a set in Client() or user_data_set()
+            message: an instance of MQTTMessage
+        """
         with self.lock:
             if not self.stop_event.is_set():
                 self.alive = True
@@ -214,8 +179,8 @@ class VideoSynchronizer(Base):
                                                                 distance_threshold=1.2):
                                     self.graph_dict[tag_id].append(target_id)
 
-    def _upload_data(self):
-        """Upload data to InfluxDB for every 1 second"""
+    def _upload_merged_result(self):
+        """Log and upload merge segment result to InfluxDB"""
         while not self.stop_event.is_set():
             with self.lock:
                 if self.alive:
@@ -226,19 +191,34 @@ class VideoSynchronizer(Base):
                         rotations_dict[tag_id] = rotation
                         translations_dict[tag_id] = translation
 
-                    # Prepare and upload the data for badge translations,rotations and relations
-                    self._write_to_influx("badge translations", {
-                        "segment_start_time": segment_start_time,
-                        "translations": json.dumps(translations_dict),
-                    })
-                    self._write_to_influx("badge rotations", {
-                        "segment_start_time": segment_start_time,
-                        "rotations": json.dumps(rotations_dict),
-                    })
-                    self._write_to_influx("badge relations", {
-                        "segment_start_time": segment_start_time,
-                        "graph": json.dumps(self.graph_dict),
-                    })
+                    # Prepare and upload the data for badge translations, rotations and relations
+                    translation_data = {
+                        "measurement": "badge translations",
+                        "fields": {
+                            "segment_start_time": segment_start_time,
+                            "translations": json.dumps(translations_dict),
+                        }
+                    }
+
+                    rotation_data = {
+                        "measurement": "badge rotations",
+                        "fields": {
+                            "segment_start_time": segment_start_time,
+                            "rotations": json.dumps(rotations_dict),
+                        }
+                    }
+
+                    relation_data = {
+                        "measurement": "badge relations",
+                        "fields": {
+                            "segment_start_time": segment_start_time,
+                            "graph": json.dumps(self.graph_dict),
+                        }
+                    }
+
+                    self.influx_client.write(self.bucket_name, translation_data)
+                    self.influx_client.write(self.bucket_name, rotation_data)
+                    self.influx_client.write(self.bucket_name, relation_data)
 
                 # Reset for next cycle
                 self.graph_dict.clear()
@@ -248,15 +228,8 @@ class VideoSynchronizer(Base):
             # Schedule the next upload outside the lock to avoid potential deadlocks
             time.sleep(1)
 
-    def _write_to_influx(self, measurement, fields):
-        data = {
-            "measurement": measurement,
-            "fields": fields,
-        }
-        # self.logger.info(f"{data}")
-        self.influx_client.write(self.bucket_name, record=data)
-
     def _load_transform_matrices(self):
+        """Load transformation matrices from the camera_sync directory."""
         transformation_choices = [d for d in os.listdir(self.camera_sync_dir) if
                                   d.startswith('transformation_matrices_')]
         for idx, choice in enumerate(transformation_choices):

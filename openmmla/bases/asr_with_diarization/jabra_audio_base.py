@@ -7,7 +7,8 @@ import numpy as np
 import soundfile as sf
 
 from openmmla.utils.audio.auga import normalize_decibel
-from openmmla.utils.audio.processing import resample_audio_file, get_energy_level, write_frames_to_wav, calculate_audio_duration
+from openmmla.utils.audio.processing import resample_audio_file, get_energy_level, write_frames_to_wav, \
+    calculate_audio_duration
 from openmmla.utils.errors import RecordingError, RecognizingError
 from openmmla.utils.logger import get_logger
 from .audio_base import AudioBase

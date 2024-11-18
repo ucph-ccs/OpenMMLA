@@ -7,7 +7,7 @@ from openmmla.utils.logger import get_logger
 
 
 class Server(ABC):
-    """Base class for server components."""
+    """Base class for servers."""
 
     def __init__(self, project_dir, config_path=None, use_cuda=True, use_onnx=False):
         """Initialize the server base class.
@@ -17,38 +17,30 @@ class Server(ABC):
             config_path (str, optional): Path to the configuration file.
             use_cuda (bool): Whether to use CUDA or not.
         """
-        # Check if the project directory exists
-        if not os.path.exists(project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
-
         self.project_dir = project_dir
+        if not os.path.exists(self.project_dir):
+            raise FileNotFoundError(f"Project directory not found at {project_dir}")
         self.use_cuda = use_cuda
         self.use_onnx = use_onnx
 
-        # Set up config
         if config_path:
             if os.path.isabs(config_path):
                 self.config_path = config_path
             else:
                 self.config_path = os.path.join(project_dir, config_path)
 
-            # Check if the configuration file exists
             if not os.path.exists(self.config_path):
                 raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
 
-            # Load configuration
             self.config = self._load_config()
         else:
             self.config_path = None
             self.config = None
 
-        # Set up directories
         self.server_logger_dir = os.path.join(project_dir, 'logger')
         self.server_file_folder = os.path.join(project_dir, 'temp')
         os.makedirs(self.server_logger_dir, exist_ok=True)
         os.makedirs(self.server_file_folder, exist_ok=True)
-
-        # Set up logger
         self.logger = self._setup_logger()
 
     def _load_config(self):

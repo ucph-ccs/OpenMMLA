@@ -10,7 +10,7 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 from numpy.linalg import norm
 
-from openmmla.bases import Base
+from openmmla.bases.base import Base
 from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 from .input import get_bucket_name, get_function_visualizer
@@ -37,7 +37,6 @@ class VideoVisualizer(Base):
             store: whether to store the visualization images in the local directory
         """
         super().__init__(project_dir, config_path)
-        self._setup_directories()
 
         """Visualizer specific parameters."""
         self.store = store
@@ -46,14 +45,18 @@ class VideoVisualizer(Base):
         self.bucket_name = None
         self.processes = []
 
-        """Client attributes."""
-        self.redis_client = RedisClientWrapper(self.config_path)
-        self.influx_client_main = InfluxDBClientWrapper(self.config_path)
+        self._setup_directories()
+        self._setup_objects()
 
     def _setup_directories(self):
         """Set up directories."""
         self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
         os.makedirs(self.visualizations_dir, exist_ok=True)
+
+    def _setup_objects(self):
+        """Set up client objects."""
+        self.redis_client = RedisClientWrapper(self.config_path)
+        self.influx_client_main = InfluxDBClientWrapper(self.config_path)
 
     def run(self):
         print('\033]0;Video Visualizer\007')
@@ -109,16 +112,6 @@ class VideoVisualizer(Base):
                 p.terminate()  # Send termination request
                 p.join()  # Wait for the process to finish
         self.processes.clear()
-
-    def _listen_for_start_signal(self):
-        p = self.redis_client.subscribe(f"{self.bucket_name}/control")
-        self.logger.info("Wait for START signal...")
-
-        while True:
-            message = p.get_message()
-            if message and message['data'] == b'START':
-                self.logger.info("Received START signal, start visualizing...")
-                break
 
     def _start_2d_plot(self):
         influx_client = InfluxDBClientWrapper(self.config_path)

@@ -10,15 +10,16 @@ from openmmla.utils.logger import get_logger
 from openmmla.utils.threads import RaisingThread
 
 
-class Base(ABC):
-    """Base class for data processing pipeline."""
-    logger = get_logger('Base')
+class Synchronizer(ABC):
+    """Base class for synchronizer implementations."""
+    logger = get_logger('synchronizer')
 
     def __init__(self, project_dir: str, config_path: str):
-        """Initialize the data processing pipeline base class.
+        """Initialize the synchronizer base class.
+        
         Args:
-            project_dir (str): The project directory.
-            config_path (str, optional): Path to the configuration file.
+            project_dir: The project directory
+            config_path: Path to the configuration file
         """
         self.project_dir = project_dir
         if not os.path.isabs(config_path):
@@ -92,7 +93,7 @@ class Base(ABC):
         while True:
             message = p.get_message()
             if message and message['data'] == b'START':
-                self.logger.info("Received START signal, start...")
+                self.logger.info("Received START signal, start synchronizing...")
                 break
 
     def _listen_for_stop_signal(self):
@@ -103,10 +104,15 @@ class Base(ABC):
         while not self.stop_event.is_set():
             message = p.get_message()
             if message and message['data'] == b'STOP':
-                self.logger.info("Received STOP signal, stop...")
+                self.logger.info("Received STOP signal, stop synchronizing...")
                 self._stop_threads()
 
     @abstractmethod
     def run(self, *args, **kwargs):
-        """Main entry point for the base."""
+        """Main entry point for the synchronizer."""
+        pass
+
+    @abstractmethod
+    def _handle_base_result(self, *args, **kwargs):
+        """Handle results received from bases."""
         pass
