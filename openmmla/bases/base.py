@@ -16,6 +16,7 @@ class Base(ABC):
 
     def __init__(self, project_dir: str, config_path: str):
         """Initialize the data processing pipeline base class.
+        
         Args:
             project_dir (str): The project directory.
             config_path (str, optional): Path to the configuration file.
