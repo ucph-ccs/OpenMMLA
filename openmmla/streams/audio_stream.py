@@ -1,17 +1,17 @@
+import datetime
+import socket
+import struct
 import threading
 import time
-from typing import Optional, Union
-import struct
-import datetime
+from typing import Optional
 
 import numpy as np
 import pyaudio
-import socket
 
 from openmmla.utils.logger import get_logger
 from openmmla.utils.resampling import resample_audio, ResampleMethod
-from openmmla.utils.threads import RaisingThread
 from openmmla.utils.sockets import clear_socket_udp
+from openmmla.utils.threads import RaisingThread
 from .frame import AudioFrame
 from .stream_buffer import RingBuffer
 from .stream_receiver import StreamReceiver
@@ -181,9 +181,9 @@ class AudioStream(StreamReceiver):
             elif self.source in ['udp', 'tcp']:
                 # Read the entire packet (metadata + audio data)
                 if self.source == 'udp':
-                    data, _ = self.sock.recvfrom(self.chunk_size*2 + 18)  # 1024 bytes audio + 18 bytes metadata
+                    data, _ = self.sock.recvfrom(self.chunk_size * 2 + 18)  # 1024 bytes audio + 18 bytes metadata
                 else:  # TCP
-                    data = self.conn.recv(self.chunk_size*2 + 18)
+                    data = self.conn.recv(self.chunk_size * 2 + 18)
 
                 if not data or len(data) < 18:  # Check if we have at least the metadata
                     return None
@@ -191,10 +191,9 @@ class AudioStream(StreamReceiver):
                 metadata_format = '>I7H'  # 4 bytes + (7 * 2) bytes = 18 bytes
                 packet_counter, year, month, day, hour, minute, second, milliseconds = \
                     struct.unpack(metadata_format, data[:18])
-                
-                # Convert timestamp components to timestamp
+
                 timestamp = datetime.datetime(
-                    year, month, day, hour, minute, second, 
+                    year, month, day, hour, minute, second,
                     milliseconds * 1000  # Convert to microseconds
                 ).timestamp()
 

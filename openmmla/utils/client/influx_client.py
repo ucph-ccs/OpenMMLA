@@ -1,6 +1,5 @@
-import yaml
-
 import influxdb_client
+import yaml
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 

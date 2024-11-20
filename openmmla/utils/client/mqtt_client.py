@@ -1,6 +1,5 @@
-import yaml
-
 import paho.mqtt.client as mqtt
+import yaml
 
 
 class MQTTClientWrapper(mqtt.Client):

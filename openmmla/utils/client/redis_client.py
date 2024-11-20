@@ -1,6 +1,5 @@
-import yaml
-
 import redis
+import yaml
 
 
 class RedisClientWrapper(redis.Redis):

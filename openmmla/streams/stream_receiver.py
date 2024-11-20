@@ -2,7 +2,7 @@
 # Data is received into a buffer, and the buffer can be read by the consumer.
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 
 class StreamReceiver(ABC):
@@ -11,6 +11,7 @@ class StreamReceiver(ABC):
     Handles continuous data streams with specified parameters (sampling rate, channels, etc.).
     Data is received into a buffer and can be read by the consumer.
     """
+
     def __init__(self, **kwargs):
         """Initialize stream receiver.
         
@@ -18,9 +19,16 @@ class StreamReceiver(ABC):
             **kwargs: Configuration parameters for the stream
         """
         self.source = None  # stream type: 'pyaudio', 'socket', 'cv2'
-        self.stream = None  # stream object from pyaudio, socket, etc.
+        self.stream = None  # stream object from pyaudio, cv2, etc.
+        self.socket = None  # socket object from socket, etc.
         self.buffer = None  # ring buffer for data storage
         self.config = kwargs
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
 
     @abstractmethod
     def start(self) -> None:

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from time import time
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, Tuple
 
 import numpy as np
 
@@ -65,18 +65,14 @@ class VideoFrame(StreamFrame):
 
     def __post_init__(self):
         """Ensure required metadata fields are present."""
-        required_fields = {'width', 'height', 'format', 'fps'}
+        required_fields = {'resolution', 'format', 'fps'}
         missing = required_fields - set(self.metadata.keys())
         if missing:
             raise ValueError(f"Missing required metadata: {missing}")
 
     @property
-    def width(self) -> int:
-        return self.metadata['width']
-
-    @property
-    def height(self) -> int:
-        return self.metadata['height']
+    def resolution(self) -> Tuple[int, int]:
+        return self.metadata['resolution']
 
     @property
     def format(self) -> str:

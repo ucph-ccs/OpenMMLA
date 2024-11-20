@@ -1,7 +1,11 @@
 from enum import Enum
 from typing import List
 
-import librosa
+try:
+    import librosa  # type: ignore
+except ImportError:
+    pass
+
 import numpy as np
 from scipy import signal
 
