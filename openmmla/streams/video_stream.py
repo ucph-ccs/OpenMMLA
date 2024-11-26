@@ -12,7 +12,7 @@ from .frame import VideoFrame
 from .stream_buffer import RingBuffer
 from .stream_receiver import StreamReceiver
 
-logger = get_logger(__name__, level=logging.DEBUG, console_level=logging.DEBUG)
+logger = get_logger(__name__)
 
 
 class VideoStream(StreamReceiver):
@@ -57,7 +57,6 @@ class VideoStream(StreamReceiver):
 
         # OpenCV objects
         self.stream = None
-        self.video_writer = None
 
         self.resample_method = kwargs.get('resample_method', ResampleMethod.VIDEO_AVERAGE)
 

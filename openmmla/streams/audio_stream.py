@@ -111,6 +111,7 @@ class AudioStream(StreamReceiver):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((self.host, self.port))
         clear_socket_udp(self.sock)
+        self.sock.settimeout(3)
         logger.info(f"UDP socket initialized on {self.host}:{self.port}")
 
     def _initialize_tcp(self) -> None:
@@ -119,18 +120,29 @@ class AudioStream(StreamReceiver):
         self.sock.bind((self.host, self.port))
         self.sock.listen(1)
         self.conn, addr = self.sock.accept()
+        self.conn.settimeout(3)
         logger.info(f"TCP connection accepted from {addr}")
 
     def stop(self) -> None:
         """Stop the audio stream and clean up resources."""
-        self._stop_event.set()
-        if self._receive_thread:
-            self._receive_thread.join()
+        self._stop_event.set()  # Signal the thread to stop
 
+        if self._receive_thread:
+            try:
+                if threading.current_thread() != self._receive_thread:
+                    self._receive_thread.join(timeout=5)
+            except Exception as e:
+                logger.warning(f"During thread stopping, caught: {e}", exc_info=True)
+            finally:
+                self._receive_thread = None  # Safely clear the reference
+
+        # Clean up other resources
         if self.source == 'pyaudio':
             self._cleanup_pyaudio()
         elif self.source in ['udp', 'tcp']:
             self._cleanup_socket()
+
+        self._last_read_pos = -1
 
     def _cleanup_pyaudio(self) -> None:
         """Clean up PyAudio resources."""
@@ -139,7 +151,6 @@ class AudioStream(StreamReceiver):
             self.stream.close()
         if self.p:
             self.p.terminate()
-        self._last_read_pos = 0
 
     def _cleanup_socket(self) -> None:
         """Clean up socket resources."""
@@ -149,7 +160,6 @@ class AudioStream(StreamReceiver):
         if self.sock:
             self.sock.close()
             self.sock = None
-        self._last_read_pos = 0
 
     def _receive_loop(self) -> None:
         """Continuously receive data and store in buffer."""
@@ -161,7 +171,6 @@ class AudioStream(StreamReceiver):
             except Exception as e:
                 logger.error(f"Fatal error in receive loop: {e}")
                 self.stop()
-                raise
 
     def _read_chunk(self) -> Optional[AudioFrame]:
         """Read a chunk of audio data continuously.
@@ -179,7 +188,6 @@ class AudioStream(StreamReceiver):
                 audio_data = np.frombuffer(data, dtype=np.int16)
                 timestamp = time.time()
             elif self.source in ['udp', 'tcp']:
-                # Read the entire packet (metadata + audio data)
                 if self.source == 'udp':
                     data, _ = self.sock.recvfrom(self.chunk_size * 2 + 18)  # 1024 bytes audio + 18 bytes metadata
                 else:  # TCP
@@ -210,8 +218,7 @@ class AudioStream(StreamReceiver):
                 metadata=self._frame_metadata
             )
         except Exception as e:
-            logger.error(f"Error reading chunk from {self.source}: {e}")
-            return None
+            raise RuntimeError(f"Error reading chunk from {self.source}: {e}") from e
 
     def read(self, duration: float, target_rate: Optional[int] = None,
              timeout: float = 5.0, latest: bool = False) -> Optional[AudioFrame]:

@@ -272,7 +272,7 @@ class AudioBase(Base, ABC):
         return chunk_frames, frames, record_start_time, chunk_end_time
 
     def _add_to_transcription_queue(self, frames, speaker, chunk_start_time, chunk_end_time):
-        """Add transcription data to the transcription queue.
+        """Add audio chunk to the transcription queue.
 
         Args:
             frames: audio frames to be transcribed
@@ -324,7 +324,7 @@ class AudioBase(Base, ABC):
         return result
 
     def _upload_transcription_data(self, speaker, text, chunk_start_time, chunk_end_time):
-        """Upload transcription data to InfluxDB.
+        """Upload transcription result to InfluxDB.
 
         Args:
             speaker: recognized speaker name of the transcribed chunk

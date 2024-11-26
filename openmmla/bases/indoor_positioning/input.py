@@ -28,7 +28,7 @@ def get_bucket_name(influx_client):
             print(f"Bucket: {bucket_name} has been selected.")
             break
         elif bucket_idx in ['n', 'new']:
-            timestamp = datetime.utcnow().isoformat().split('.')[0] + 'Z'
+            timestamp = datetime.now(datetime.UTC).isoformat().split('.')[0] + 'Z'
             bucket_name = 'session_' + timestamp
             influx_client.create_bucket(bucket_name=bucket_name)
             print(f"Bucket: {bucket_name} has been created.")
