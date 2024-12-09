@@ -286,7 +286,7 @@ class AudioSynchronizer(Synchronizer):
         # Choose the segment with the earliest segment time
         closest_segment_time = min(valid_segments.keys())
 
-        # Choose the segment with the closest segment time
+        # Choose the segment with the nearest segment time
         # closest_segment_time = min(valid_segments, key=valid_segments.get)
 
         return closest_segment_time

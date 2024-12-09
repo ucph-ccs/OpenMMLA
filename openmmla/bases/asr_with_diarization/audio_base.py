@@ -81,8 +81,8 @@ class AudioBase(Base, ABC):
         self.threads = []
         self.stop_event = threading.Event()
 
-        self._setup_input()
         self._setup_yaml()
+        self._setup_input()
         self._setup_directories()
         self._setup_objects()
 

@@ -87,7 +87,7 @@ class BadgeAudioBase(AudioBase):
         Args:
             bucket_name: the bucket name for storing the results, default to None
         """
-        if len([file for file in os.listdir(self.audio_db) if file != '.DS_Store']) == 0:
+        if self.mode == 'full' and len([file for file in os.listdir(self.audio_db) if file != '.DS_Store']) == 0:
             print("------------------------------------------------")
             self.logger.info("Audio database is empty.")
             return

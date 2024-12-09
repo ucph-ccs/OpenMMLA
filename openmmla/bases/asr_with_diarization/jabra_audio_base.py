@@ -62,7 +62,7 @@ class JabraAudioBase(AudioBase):
     def _recognize_voice(self):
         """Start the real-time voice recognition, including audio recording, speaker recognition, speech transcription,
         and listening on stop signal."""
-        if len([file for file in os.listdir(self.audio_db) if file != '.DS_Store']) == 0:
+        if self.mode == 'full' and len([file for file in os.listdir(self.audio_db) if file != '.DS_Store']) == 0:
             print("------------------------------------------------")
             self.logger.info("Audio database is empty.")
             return

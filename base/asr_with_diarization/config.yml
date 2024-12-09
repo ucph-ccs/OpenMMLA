@@ -44,7 +44,8 @@ PostAnalyzer:
   segment_duration: 3
 
 Synchronizer:
-  result_expiry_time: 60
+  result_expiry_time: 5
+
 
 Recorder:
   format: paInt16
