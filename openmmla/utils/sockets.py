@@ -11,7 +11,7 @@ def clear_socket_udp(sock):
     sock.setblocking(True)
 
 
-def read_frames_udp(sock, duration, timeout=3):
+def read_frames_udp(sock, duration, timeout=5):
     sample_rate = 16000  # samples per second
     sample_width = 2  # bytes per sample
     expected_bytes = sample_rate * sample_width * duration
@@ -28,7 +28,7 @@ def read_frames_udp(sock, duration, timeout=3):
     return byte_samples
 
 
-def read_frames_tcp(sock, conn, duration, timeout=3):
+def read_frames_tcp(sock, conn, duration, timeout=5):
     sample_rate = 16000  # samples per second
     sample_width = 2  # bytes per sample
     expected_bytes = sample_rate * sample_width * duration

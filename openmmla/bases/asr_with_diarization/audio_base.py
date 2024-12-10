@@ -379,8 +379,9 @@ class AudioBase(Base, ABC):
             for subdir in ['segments', 'chunks', 'separations']:
                 clear_directory(os.path.join(self.audio_dir, subdir))
 
-        if self.mode == 'record':
-            clear_directory(os.path.join(self.audio_dir, 'records'))
+        # Buggy code: when the badge is disconnected, the records folder will be cleared
+        # if self.mode == 'record':
+        #     clear_directory(os.path.join(self.audio_dir, 'records'))
 
         clear_directory(os.path.join(self.audio_dir, 'temp'))
 

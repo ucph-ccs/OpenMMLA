@@ -139,7 +139,7 @@ class AudioSynchronizer(Synchronizer):
             self.logger.info("All threads stopped.")
 
         self.mqtt_client.loop_stop()
-        self.redis_client.publish(f"{self.bucket_name}/control", 'STOP')  # send STOP command to all bases
+        # self.redis_client.publish(f"{self.bucket_name}/control", 'STOP')  # send STOP command to all bases
         session_analysis_audio(self.project_dir, self.bucket_name, self.influx_client)
         clear_directory(self.audio_temp_dir)
         self._clean_up()

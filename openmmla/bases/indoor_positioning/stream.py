@@ -70,6 +70,7 @@ class WebcamVideoStream:
 
             # Display fps on frame
             frame_count += 1
+            frame_id += 1
             if frame_count % 30 == 0:
                 elapsed_time = time.time() - start_time
                 fps = frame_count / elapsed_time
@@ -79,13 +80,12 @@ class WebcamVideoStream:
             # cv2.putText(self.frame, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0),
             #             2)
 
-            if self.save_path:
+            if self.save_path and frame_id % 900 == 0:
                 if hasattr(self, 'video_writer'):
                     self.video_writer.write(self.frame)
                 else:
                     saved_frame = cv2.resize(self.frame, (960, 540))
-                    cv2.imwrite(os.path.join(self.save_path, f'frame_{frame_id:07d}.jpg'), saved_frame)
-                    frame_id += 1
+                    cv2.imwrite(os.path.join(self.save_path, f'frame_{int(time.time())}.jpg'), saved_frame)
 
     def _free_memory(self):
         if hasattr(self, 'video_writer'):

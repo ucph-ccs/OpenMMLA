@@ -19,14 +19,20 @@ def is_tag_looking_at_another(tag1, tag2, cosine_threshold, distance_threshold):
 
 def get_outward_normal_vector(tag):
     """Get the outward normal vector of the tag which is perpendicular to the surface. If the normal vector is pointing
-    towards the tag, flip the sign of the z-axis of the rotation matrix and the normal vector."""
+    in the wrong direction (180° off due to pose estimation errors), flip it."""
     if isinstance(tag, list):
-        normal = -np.dot(np.array(tag[0]), np.array([0, 0, 1])).ravel()
+        # normal = -np.dot(np.array(tag[0]), np.array([0, 0, 1])).ravel()
+        normal = -np.array(tag[0])[:, 2].ravel()
         tag = None
     else:
-        normal = -np.dot(tag.pose_R, np.array([0, 0, 1])).ravel()
-        if np.dot(normal, tag.pose_t.ravel()) > 0:
+        normal = tag.pose_R[:, 2].ravel()
+        # Get the vector from camera origin (0,0,0) to tag center
+        camera_to_tag = tag.pose_t.ravel()
+        # If normal and camera_to_tag vectors point in opposite directions (angle > 90°),
+        # then the normal is pointing inward and should be flipped
+        if np.dot(normal, camera_to_tag) < 0:
             tag.pose_R[:, 2] = -tag.pose_R[:, 2]
+        else:
             normal = -normal
 
     return normal, tag
@@ -63,16 +69,18 @@ def is_tag_looking_at_another_2d(tag1, tag2, cosine_threshold, distance_threshol
 
 
 def get_2d_outward_normal_vector(tag):
-    """Get the 2d outward normal vector of the tag which is perpendicular to the surface and project it onto the x-z
-    plane. If the normal vector is pointing towards the tag, flip the sign of the z-axis of the rotation matrix
-    and the normal vector."""
+    """Get the 2d outward normal vector of the tag projected onto the x-z plane. Handles potential
+    180° orientation errors from pose estimation."""
     if isinstance(tag, list):
-        normal = -np.dot(np.array(tag[0]), np.array([0, 0, 1])).ravel()
+        # normal = -np.dot(np.array(tag[0]), np.array([0, 0, 1])).ravel()
+        normal = -np.array(tag[0])[:, 2].ravel()
         tag = None
     else:
-        normal = -np.dot(tag.pose_R, np.array([0, 0, 1])).ravel()
-        if np.dot(normal, tag.pose_t.ravel()) > 0:
+        normal = tag.pose_R[:, 2].ravel()
+        camera_to_tag = tag.pose_t.ravel()
+        if np.dot(normal, camera_to_tag) < 0:
             tag.pose_R[:, 2] = -tag.pose_R[:, 2]
+        else:
             normal = -normal
 
     normal_xz = np.array([normal[0], 0, normal[2]])  # project onto x-z plane
