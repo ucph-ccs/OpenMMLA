@@ -1,13 +1,14 @@
 import datetime
 import json
 import os
+import threading
 
 import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
 from openmmla.bases.base import Base
-from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper
+from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
 from .input import get_bucket_name, get_function_base
@@ -45,6 +46,10 @@ class VideoBase(Base):
         self.transform_matrices_dict = None
         self.camera_configured = False
 
+        """Threading attributes"""
+        self.stop_event = threading.Event()
+        self.threads = []
+
         self._setup_yaml()
         self._setup_directories()
         self._setup_objects()
@@ -73,6 +78,7 @@ class VideoBase(Base):
     def _setup_objects(self):
         """Set up client objects."""
         self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.detector = Detector(families=self.families, nthreads=4)
 
@@ -100,25 +106,47 @@ class VideoBase(Base):
 
         # Bucket selection
         self.bucket_name = get_bucket_name(self.influx_client)
+        self._listen_for_start_signal()
 
         # MQTT client reinitialization
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
 
         # Start video stream
-        self._configure_video_capture(self.camera_seed)
+        self._configure_video_stream(self.camera_seed)
 
+        exception_occurred = None
         try:
+            self._create_thread(self._listen_for_stop_signal)
+            self._start_threads()
             self._process_frames()
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("%s, capture interrupted.", e, exc_info=False)
+            exception_occurred = e
         finally:
-            self.video_stream.stop()
-            self.mqtt_client.loop_stop()
-            if self.graphics:
-                cv2.destroyWindow(f'AprilTags Detection from camera {self.sender_id}')
-                cv2.waitKey(1)
-            # time.sleep(5) # Wait for the threads to terminate
+            self._detection_handler(exception_occurred)
+
+    def _detection_handler(self, e):
+        """Handle exceptions and stop all threads.
+
+        Args:
+            e: the exception occurred during the detection process
+        """
+        if e:
+            self._stop_threads()
+        else:
+            self.logger.info("All threads stopped properly.")
+        self._clean_up()
+
+    def _clean_up(self):
+        """Clean up resources."""
+        self.stop_event.set()
+        self.video_stream.stop()
+        self.mqtt_client.loop_stop()
+        if self.graphics:
+            cv2.destroyWindow(f'AprilTags Detection from camera {self.sender_id}')
+            cv2.waitKey(1)
+        self.threads.clear()
 
     def _set_camera(self):
         """Set up camera seed and id."""
@@ -147,22 +175,27 @@ class VideoBase(Base):
     def _configure_camera_params(self):
         """Configure camera intrinsic parameters."""
         cameras = self.config.get('Cameras', {})
-        camera_choices = list(cameras.keys())
+        camera_choices = sorted(list(cameras.keys()))
         if not camera_choices:
             return None
         for idx, choice in enumerate(camera_choices):
             print(f"{idx}: {choice}")
 
+        default_selection = 0  # Default to the first camera
         while True:
             try:
-                selection = int(input("Choose your camera name with number: "))
+                selection_input = input(f"Choose your camera name with number [{default_selection}]: ")
+                if selection_input == '':
+                    selection = default_selection
+                else:
+                    selection = int(selection_input)
                 if not 0 <= selection < len(camera_choices):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
                     chosen_camera = camera_choices[selection]
                     break
             except ValueError:
-                self.logger.warning("Please enter a valid number.")
+                self.logger.warning("Please enter a valid number or press Enter for default.")
 
         camera_config = cameras[chosen_camera]
         fisheye = camera_config['fisheye']
@@ -179,6 +212,7 @@ class VideoBase(Base):
         return camera_info
 
     def _detect_video_seeds(self):
+        """Detect available video seeds."""
         available_video_seeds = []
         number_of_detected_seeds = 0
         for i in range(4):
@@ -201,32 +235,44 @@ class VideoBase(Base):
         return available_video_seeds
 
     def _choose_camera_seed(self, available_video_seeds):
+        """Choose a camera seed."""
         if not available_video_seeds:
             return None
+        default_seed_id = 0  # Default to the first available seed
         while True:
             try:
-                seed_id = int(input("Choose your video seed id: "))
+                seed_id_input = input(f"Choose your video seed id [{default_seed_id}]: ")
+                if seed_id_input == '':
+                    seed_id = default_seed_id
+                else:
+                    seed_id = int(seed_id_input)
                 if 0 <= seed_id < len(available_video_seeds):
                     self.logger.info(f"Selected video seed: {available_video_seeds[seed_id]}")
                     return available_video_seeds[seed_id]
                 else:
                     self.logger.warning("Invalid selection. Please choose a valid video seed.")
             except ValueError:
-                self.logger.warning("Please enter a valid number.")
+                self.logger.warning("Please enter a valid number or press Enter for default.")
 
     def _choose_sender_id(self):
         """Prompt user to choose a sender ID based on available keys in transform_matrices.json configuration."""
         print(f"Available sender ids:\n- {self.transformation_id}")
         for key in self.transform_matrices_dict.keys():
             print(f"- {key}")
+        default_sender_id = self.transformation_id  # Default sender id
         while True:
-            sender_id = input("Enter your sender id: ")
+            sender_id_input = input(f"Enter your sender id [{default_sender_id}]: ")
+            if sender_id_input == '':
+                sender_id = default_sender_id
+            else:
+                sender_id = sender_id_input
             if sender_id in self.transform_matrices_dict or sender_id == self.transformation_id:
                 return sender_id
             else:
-                print("Invalid selection. Please enter a valid sender id.")
+                print("Invalid selection. Please enter a valid sender id or press Enter for default.")
 
-    def _configure_video_capture(self, camera_seed):
+    def _configure_video_stream(self, camera_seed):
+        """Configure video stream."""
         if self.record:
             save_path = os.path.join(self.recordings_dir, f'{self.bucket_name}/{self.sender_id}')
         else:
@@ -235,7 +281,9 @@ class VideoBase(Base):
         self.video_stream.start()
 
     def _process_frames(self):
-        while True:
+        """Process video frames and detect AprilTags."""
+        print("Processing frames...")
+        while not self.stop_event.is_set():
             frame = self.video_stream.read()
 
             if self.camera_info.get("fisheye", False):
@@ -304,6 +352,7 @@ class VideoBase(Base):
                 break
 
     def _load_transform_matrices(self):
+        """Load transformation matrices."""
         transformation_choices = [d for d in os.listdir(self.camera_sync_dir) if
                                   d.startswith('transformation_matrices_')]
         for idx, choice in enumerate(transformation_choices):
@@ -312,9 +361,14 @@ class VideoBase(Base):
         if not transformation_choices:
             return None
 
+        default_selection = 0  # Default to the first transformation matrix
         while True:
             try:
-                selection = int(input("Choose your main transformation matrices with number: "))
+                selection_input = input(f"Choose your main transformation matrices with number [{default_selection}]: ")
+                if selection_input == '':
+                    selection = default_selection
+                else:
+                    selection = int(selection_input)
                 if not 0 <= selection < len(transformation_choices):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
@@ -322,7 +376,7 @@ class VideoBase(Base):
                     self.transformation_id = chosen_transformation.split('_')[-1].split('.')[0]
                     break
             except ValueError:
-                self.logger.warning("Please enter a valid number.")
+                self.logger.warning("Please enter a valid number or press Enter for default.")
 
         with open(os.path.join(self.camera_sync_dir, chosen_transformation), 'r') as file:
             return json.load(file)

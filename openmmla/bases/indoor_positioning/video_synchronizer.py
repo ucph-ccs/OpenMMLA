@@ -32,7 +32,7 @@ class VideoSynchronizer(Synchronizer):
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.bucket_name = None
-        self.main_camera_id = None
+        self.transformation_id = None
         self.transform_matrices_dict = None
         self.graph_dict = None
         self.location_dict = None
@@ -156,7 +156,7 @@ class VideoSynchronizer(Synchronizer):
                     tags = message["tags"]
                     tag_relations = message["tag_relations"]
 
-                    if sender_id != self.main_camera_id:  # convert to main coordinates
+                    if sender_id != self.transformation_id:  # convert to main coordinates
                         R = self.transform_matrices_dict[sender_id]['R']
                         T = self.transform_matrices_dict[sender_id]['T']
                         for tag_id, tag_data in tags.items():
@@ -229,7 +229,7 @@ class VideoSynchronizer(Synchronizer):
             time.sleep(1)
 
     def _load_transform_matrices(self):
-        """Load transformation matrices from the camera_sync directory."""
+        """Load transformation matrices."""
         transformation_choices = [d for d in os.listdir(self.camera_sync_dir) if
                                   d.startswith('transformation_matrices_')]
         for idx, choice in enumerate(transformation_choices):
@@ -238,18 +238,22 @@ class VideoSynchronizer(Synchronizer):
         if not transformation_choices:
             return None
 
+        default_selection = 0  # Default to the first transformation matrix
         while True:
             try:
-                selection = int(input("Choose your main transformation matrices with number: "))
+                selection_input = input(f"Choose your main transformation matrices with number [{default_selection}]: ")
+                if selection_input == '':
+                    selection = default_selection
+                else:
+                    selection = int(selection_input)
                 if not 0 <= selection < len(transformation_choices):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
                     chosen_transformation = transformation_choices[selection]
-                    self.main_camera_id = chosen_transformation.removesuffix('.json').split('_')[-1]
-                    self.logger.info(f"Main camera id: {self.main_camera_id} has been selected.")
+                    self.transformation_id = chosen_transformation.split('_')[-1].split('.')[0]
                     break
             except ValueError:
-                self.logger.warning("Please enter a valid number.")
+                self.logger.warning("Please enter a valid number or press Enter for default.")
 
         with open(os.path.join(self.camera_sync_dir, chosen_transformation), 'r') as file:
             return json.load(file)
