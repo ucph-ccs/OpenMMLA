@@ -6,7 +6,7 @@ test/
 logs/
 logger/
 visualizations/
-recordings/
+frames/
 *.egg-info/
 dist/
 build/
