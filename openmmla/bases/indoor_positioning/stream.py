@@ -84,8 +84,7 @@ class WebcamVideoStream:
                 if hasattr(self, 'video_writer'):
                     self.video_writer.write(self.frame)
                 else:
-                    saved_frame = cv2.resize(self.frame, (960, 540))
-                    cv2.imwrite(os.path.join(self.save_path, f'frame_{int(time.time())}.jpg'), saved_frame)
+                    cv2.imwrite(os.path.join(self.save_path, f'frame_{int(time.time())}.jpg'), self.frame)
 
     def _free_memory(self):
         if hasattr(self, 'video_writer'):

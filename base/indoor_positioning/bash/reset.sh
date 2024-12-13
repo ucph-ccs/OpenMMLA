@@ -6,7 +6,7 @@ PROJECT_DIR="$BASH_DIR/.."
 # Folders to clean and recreate
 paths=(
     "$PROJECT_DIR/visualizations"
-    "$PROJECT_DIR/recordings"
+    "$PROJECT_DIR/frames"
     "$PROJECT_DIR/logger"
     "$PROJECT_DIR/logs"
 )

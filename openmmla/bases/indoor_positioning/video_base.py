@@ -63,7 +63,7 @@ class VideoBase(Base):
 
     def _setup_directories(self):
         """Set up directories."""
-        self.recordings_dir = os.path.join(self.project_dir, 'recordings')
+        self.recordings_dir = os.path.join(self.project_dir, 'frames')
         self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
         self.camera_calib_dir = os.path.join(self.project_dir, 'camera_calib')
         os.makedirs(self.recordings_dir, exist_ok=True)

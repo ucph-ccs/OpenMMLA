@@ -26,10 +26,7 @@ def get_outward_normal_vector(tag):
         tag = None
     else:
         normal = tag.pose_R[:, 2].ravel()
-        # Get the vector from camera origin (0,0,0) to tag center
         camera_to_tag = tag.pose_t.ravel()
-        # If normal and camera_to_tag vectors point in opposite directions (angle > 90°),
-        # then the normal is pointing inward and should be flipped
         if np.dot(normal, camera_to_tag) < 0:
             tag.pose_R[:, 2] = -tag.pose_R[:, 2]
         else:
@@ -82,7 +79,6 @@ def get_2d_outward_normal_vector(tag):
             tag.pose_R[:, 2] = -tag.pose_R[:, 2]
         else:
             normal = -normal
-
     normal_xz = np.array([normal[0], 0, normal[2]])  # project onto x-z plane
     normal_xz /= np.linalg.norm(normal_xz)
 
