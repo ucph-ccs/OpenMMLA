@@ -2,26 +2,29 @@ import base64
 import gc
 import json
 import logging
+import math
 import os
 import queue
 import shutil
 import threading
 import time
 from abc import abstractmethod, ABC
+from typing import Union
 
 import librosa
 import numpy as np
 
+from openmmla.bases.asr_with_diarization.errors import RecordingError, TranscribingError
 from openmmla.bases.base import Base
+from openmmla.services.audio.requests import request_speech_transcription, request_speech_separation, \
+    request_speech_enhancement, request_voice_activity_detection
 from openmmla.utils.audio.auga import normalize_decibel
-from openmmla.utils.audio.processing import read_frames_from_wav, write_frames_to_wav
+from openmmla.utils.audio.io import read_frames_from_wav, write_frames_to_wav
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.errors import RecordingError, TranscribingError
 from openmmla.utils.logger import get_logger
-from openmmla.utils.requests import resolve_url, request_speech_transcription, request_speech_separation
+from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
-from .audio_recorder import AudioRecorder
 from .enums import BLUE, ENDC, GREEN
 from .input import get_function_base, get_id
 
@@ -34,6 +37,30 @@ try:
     import torch
 except ImportError:
     torch = None
+
+try:
+    import torchaudio
+except ImportError:
+    torchaudio = None
+
+try:
+    from denoiser import pretrained
+except ImportError:
+    pretrained = None
+
+try:
+    from denoiser.dsp import convert_audio
+except ImportError:
+    convert_audio = None
+
+try:
+    from silero_vad import load_silero_vad, read_audio, save_audio, get_speech_timestamps, collect_chunks
+except ImportError:
+    load_silero_vad = None
+    read_audio = None
+    get_speech_timestamps = None
+    save_audio = None
+    collect_chunks = None
 
 try:
     from modelscope.pipelines import pipeline
@@ -80,6 +107,7 @@ class AudioBase(Base, ABC):
         self.speaker_frames_dict = None
         self.threads = []
         self.stop_event = threading.Event()
+        self.cuda_enable = torch is not None and torch.cuda.is_available()
 
         self._setup_yaml()
         self._setup_input()
@@ -108,6 +136,8 @@ class AudioBase(Base, ABC):
         # self.audio_server_host = socket.gethostbyname(self.config['Server']['audio_server_host'])
         self.speech_transcriber_url = resolve_url(self.config['Server']['asr']['speech_transcription'])
         self.speech_separator_url = resolve_url(self.config['Server']['asr']['speech_separation'])
+        self.speech_enhancer_url = resolve_url(self.config['Server']['asr']['speech_enhancement'])
+        self.vad_url = resolve_url(self.config['Server']['asr']['voice_activity_detection'])
 
     def _setup_directories(self):
         self.audio_realtime_dir = os.path.join(self.project_dir, 'audio', 'real-time')
@@ -122,35 +152,75 @@ class AudioBase(Base, ABC):
     def _setup_objects(self):
         self.speech_transcriber = None
         self.speech_separator = None
+        self.vad_model = None
+        self.nr_model = None
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.warm_up_resampler()
 
         if self.local:
-            self.audio_recorder = AudioRecorder(config_path=self.config_path, vad_enable=self.vad, nr_enable=self.nr,
-                                                nr_local=True, vad_local=True)
             self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db, local=True,
                                                     model_path=self.config['Local']['sr_model'])
             if self.tr:
-                if get_transcriber is None:
-                    raise ImportError("Transcriber module is not available, please install the required dependencies.")
-                self.speech_transcriber = get_transcriber(self.config['Local']['tr_model'],
-                                                          self.config['Local']['language'])
+                try:
+                    if get_transcriber is None:
+                        raise ImportError(
+                            "Transcriber module is not available, please install the required dependencies.")
+                    self.speech_transcriber = get_transcriber(self.config['Local']['tr_model'],
+                                                              self.config['Local']['language'],
+                                                              use_cuda=self.cuda_enable)
+                    self.logger.info(f"Transcriber is enabled with model {self.config['Local']['tr_model']}.")
+                except ImportError as e:
+                    self.logger.warning(f"Error %s occurs while importing Transcriber, disabling Transcriber.", e,
+                                        exc_info=True)
+                    self.tr = False
 
             if self.sp:
-                if pipeline is None or Tasks is None or torch is None:
-                    raise ImportError("Modelscope module is not available, please install the required dependencies.")
-                logging.getLogger('modelscope').setLevel(logging.WARNING)
-                device = 'gpu' if torch.cuda.is_available() else 'cpu'
                 try:
-                    self.speech_separator = pipeline(Tasks.speech_separation, device=device,
-                                                     model=self.config['Local']['sp_model'])
-                except ValueError:
-                    self.speech_separator = pipeline(Tasks.speech_separation, device=device,
-                                                     model=self.config['Local']['sp_model_local'])
+                    if pipeline is None or Tasks is None or torch is None:
+                        raise ImportError(
+                            "Modelscope module is not available, please install the required dependencies.")
+                    logging.getLogger('modelscope').setLevel(logging.WARNING)
+                    device = 'gpu' if self.cuda_enable else 'cpu'
+                    try:
+                        self.speech_separator = pipeline(Tasks.speech_separation, device=device,
+                                                         model=self.config['Local']['sp_model'])
+                    except ValueError:
+                        self.speech_separator = pipeline(Tasks.speech_separation, device=device,
+                                                         model=self.config['Local']['sp_model_local'])
+                    self.logger.info(f"Speech Separator is enabled with model {self.config['Local']['sp_model']}.")
+                except ImportError as e:
+                    self.logger.warning(
+                        f"Error %s occurs while importing Speech Separator, disabling Speech Separator.", e,
+                        exc_info=True)
+                    self.sp = False
+
+            if self.nr:
+                try:
+                    if pretrained is None or convert_audio is None or torch is None or torchaudio is None:
+                        raise ImportError("Denoiser is not available, please install the required dependencies.")
+                    if self.cuda_enable:
+                        self.nr_model = pretrained.dns64().cuda()
+                    else:
+                        self.nr_model = pretrained.dns64()
+                    self.logger.info("Denoiser is enabled.")
+                except ImportError as e:
+                    self.logger.warning(f"Error %s occurs while importing Denoiser, disabling Denoiser.", e,
+                                        exc_info=True)
+                    self.nr = False
+
+            if self.vad:
+                try:
+                    if load_silero_vad is None:
+                        raise ImportError("Silero VAD is not available, please install the required dependencies.")
+                    self.vad_model = load_silero_vad(onnx=True)
+                    self.logger.info(f"Silero VAD is enabled with onnx set to True.")
+                except ImportError as e:
+                    self.logger.warning(f"Error %s occurs while importing silero vad, disabling VAD.", e, exc_info=True)
+                    self.vad = False
         else:
-            self.audio_recorder = AudioRecorder(config_path=self.config_path, vad_enable=self.vad, nr_enable=self.nr)
+            # self.audio_recorder = AudioRecorder(config_path=self.config_path, vad_enable=self.vad, nr_enable=self.nr)
             self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db)
 
     def run(self):
@@ -322,6 +392,68 @@ class AudioBase(Base, ABC):
                                                          self.speech_separator_url)
             result = [base64.b64decode(encoded_bytes_stream) for encoded_bytes_stream in separated_result]
         return result
+
+    def apply_vad(self, input_path: str, sampling_rate: int, inplace: int) -> Union[str, None]:
+        """Apply voice activity detection to audio file."""
+        if not self.vad:
+            return input_path
+
+        if self.local:
+            wav = read_audio(input_path, sampling_rate=sampling_rate)
+            speech_timestamps = get_speech_timestamps(wav, self.vad_model, sampling_rate=sampling_rate)
+            if not speech_timestamps:
+                return None
+            if inplace:
+                save_audio(input_path, collect_chunks(speech_timestamps, wav), sampling_rate=sampling_rate)
+            if self.cuda_enable:
+                torch.cuda.empty_cache()
+        else:
+            return request_voice_activity_detection(input_path, f'{self.base_type.lower()}_{self.id}',
+                                                    inplace, self.vad_url)
+        return input_path
+
+    def apply_nr(self, input_path: str) -> str:
+        """Apply noise reduction to audio file."""
+        if not self.nr:
+            return input_path
+
+        if self.local:
+            chunk_size = 30
+            sr = torchaudio.info(input_path).sample_rate
+            total_duration = torchaudio.info(input_path).num_frames / sr
+            output_chunks = []
+
+            for start in range(0, math.ceil(total_duration), chunk_size):
+                chunk, _ = torchaudio.load(input_path, num_frames=int(chunk_size * sr),
+                                           frame_offset=int(start * sr))
+                if chunk.nelement() == 0:
+                    continue
+
+                if self.cuda_enable:
+                    chunk = chunk.cuda()
+                chunk = convert_audio(chunk, sr, self.nr_model.sample_rate, self.nr_model.chin)
+
+                with torch.no_grad():
+                    denoised_chunk = self.nr_model(chunk[None])[0]
+                output_chunks.append(denoised_chunk.cpu())
+
+                if self.cuda_enable:
+                    torch.cuda.empty_cache()
+
+            if not output_chunks:
+                raise RuntimeError("No audio chunks were processed. The input audio file might be too short or silent.")
+
+            processed_audio = torch.cat(output_chunks, dim=1)
+            torchaudio.save(input_path, processed_audio, sample_rate=self.nr_model.sample_rate, bits_per_sample=16)
+        else:
+            request_speech_enhancement(input_path, f'{self.base_type.lower()}_{self.id}', self.speech_enhancer_url)
+
+        return input_path
+
+    def post_process_audio(self, input_path: str, sampling_rate: int, inplace: int) -> Union[str, None]:
+        """Apply both NR and VAD processing to audio file."""
+        self.apply_nr(input_path)
+        return self.apply_vad(input_path, sampling_rate, inplace)
 
     def _upload_transcription_data(self, speaker, text, chunk_start_time, chunk_end_time):
         """Upload transcription result to InfluxDB.

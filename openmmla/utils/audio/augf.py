@@ -5,8 +5,8 @@ import subprocess
 
 import numpy as np
 
-from .files import read_signal_from_wav, write_signal_to_wav
 from .filters import butter_filter
+from .io import read_signal_from_wav, write_signal_to_wav
 
 
 def convolve(infile: str, ir_fname: str, level: float = 0.5) -> None:

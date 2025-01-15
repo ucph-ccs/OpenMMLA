@@ -13,8 +13,8 @@ from openmmla.analytics.audio.analyze import plot_speaking_interaction_network, 
 from openmmla.analytics.audio.text_processing import convert_transcription_json_to_txt
 from openmmla.bases.base import Base
 from openmmla.utils.audio.auga import normalize_decibel
-from openmmla.utils.audio.processing import format_wav, get_audio_properties, segment_wav, crop_and_concatenate_wav, \
-    resample_audio_file
+from openmmla.utils.audio.io import format_wav, segment_wav, crop_and_concatenate_wav, resample_audio_file
+from openmmla.utils.audio.properties import get_audio_properties
 from openmmla.utils.audio.transcriber import get_transcriber
 from openmmla.utils.logger import get_logger
 from .audio_recognizer import AudioRecognizer

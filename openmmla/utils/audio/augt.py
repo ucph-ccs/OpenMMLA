@@ -8,11 +8,11 @@ import warnings
 
 import numpy as np
 
-from .files import read_signal_from_wav, write_signal_to_wav
+from .io import read_signal_from_wav, write_signal_to_wav
 
 
 def eliminate_silence(infile):
-    """Eliminate silence from voice file using ffmpeg library.
+    """Eliminate silence from the voice file using ffmpeg library.
 
     Args:
         infile (str): Path to get the original voice file from.

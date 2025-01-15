@@ -4,7 +4,7 @@ import io
 from flask import request, jsonify, send_file
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.processing import resample_audio_file, write_frames_to_wav
+from openmmla.utils.audio.io import resample_audio_file, write_frames_to_wav
 
 
 class AudioResampler(Server):

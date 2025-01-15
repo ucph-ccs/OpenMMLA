@@ -9,7 +9,7 @@ import numpy as np
 import pyaudio
 
 from openmmla.utils.logger import get_logger
-from openmmla.utils.resampling import resample_audio, ResampleMethod
+from openmmla.streams.resampling import resample_audio, ResampleMethod
 from openmmla.utils.sockets import clear_socket_udp
 from openmmla.utils.threads import RaisingThread
 from .frame import AudioFrame

@@ -4,16 +4,16 @@ import os
 
 import numpy as np
 
-from .files import read_signal_from_wav, write_signal_to_wav
+from .io import read_signal_from_wav, write_signal_to_wav
 
 
 def apply_gain(infile: str, gain: float = 40, inplace: bool = True) -> None:
-    """Apply gain to audio file.
+    """Apply gain to the audio file.
 
     Args:
         infile: Input audio file path
         gain: Gain in dB (positive or negative)
-        inplace: Whether to overwrite input file
+        inplace: Whether to overwrite the input file
     """
     # Read and process audio
     fs, x = read_signal_from_wav(filename=infile)
@@ -42,7 +42,7 @@ def add_noise(infile: str, snr: float) -> None:
     noise_power = np.mean(np.power(noise, 2))
     sig_power = np.mean(np.power(sig, 2))
 
-    # Compute scaling factor
+    # Compute the scaling factor
     snr_linear = 10 ** (snr / 10.0)
     noise_factor = (sig_power / noise_power) * (1 / snr_linear)
 
@@ -78,7 +78,7 @@ def normalize_decibel(infile: str, normalization_technique: str = "rms",
         infile: Input audio file path
         normalization_technique: Type of normalization ("peak" or "rms")
         rms_level: RMS level in dB
-        inplace: Whether to overwrite input file
+        inplace: Whether to overwrite the input file
     
     Raises:
         ValueError: If unknown normalization_technique is specified

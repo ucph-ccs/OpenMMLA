@@ -5,7 +5,7 @@ from typing import Optional, Union, List
 import cv2
 
 from openmmla.utils.logger import get_logger
-from openmmla.utils.resampling import resample_video, ResampleMethod
+from openmmla.streams.resampling import resample_video, ResampleMethod
 from openmmla.utils.threads import RaisingThread
 from .frame import VideoFrame
 from .stream_buffer import RingBuffer

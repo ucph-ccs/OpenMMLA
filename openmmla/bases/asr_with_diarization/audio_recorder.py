@@ -5,9 +5,10 @@ from typing import Union
 import pyaudio
 import yaml
 
+from openmmla.services.audio.requests import request_speech_enhancement, request_voice_activity_detection
 from openmmla.utils.audio.auga import apply_gain
 from openmmla.utils.logger import get_logger
-from openmmla.utils.requests import resolve_url, request_speech_enhancement, request_voice_activity_detection
+from openmmla.utils.requests import resolve_url
 from openmmla.utils.sockets import clear_socket_udp, read_frames_udp, read_frames_tcp
 
 # Try importing the modules separately

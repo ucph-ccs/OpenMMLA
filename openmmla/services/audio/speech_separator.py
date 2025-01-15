@@ -7,7 +7,7 @@ from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.processing import write_frames_to_wav
+from openmmla.utils.audio.io import write_frames_to_wav
 
 
 class SpeechSeparator(Server):

@@ -9,7 +9,7 @@ from denoiser.dsp import convert_audio
 from flask import request, jsonify, send_file
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.processing import write_frames_to_wav
+from openmmla.utils.audio.io import write_frames_to_wav
 
 
 class SpeechEnhancer(Server):

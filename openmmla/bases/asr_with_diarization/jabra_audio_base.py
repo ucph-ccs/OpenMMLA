@@ -6,10 +6,11 @@ import time
 import numpy as np
 import soundfile as sf
 
+from openmmla.bases.asr_with_diarization.errors import RecordingError, RecognizingError
 from openmmla.utils.audio.auga import normalize_decibel
-from openmmla.utils.audio.processing import resample_audio_file, get_energy_level, write_frames_to_wav, \
-    calculate_audio_duration
-from openmmla.utils.errors import RecordingError, RecognizingError
+from openmmla.utils.audio.io import write_frames_to_wav
+from openmmla.utils.audio.files import resample_audio_file
+from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.logger import get_logger
 from .audio_base import AudioBase
 from .enums import BLUE, ENDC
