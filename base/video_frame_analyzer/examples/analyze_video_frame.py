@@ -5,8 +5,7 @@ import requests
 
 
 def process_image(image_path, server_url="http://localhost:5000/process"):
-    """
-    Send an image to the video frame analyzer server and get the results.
+    """Send an image to the video frame analyzer server and get the results.
 
     Args:
         image_path (str): Path to the image file.
@@ -29,9 +28,7 @@ def process_image(image_path, server_url="http://localhost:5000/process"):
 
 
 def main():
-    # Example usage
-    # image_path = "path/to/your/image.jpg"
-    image_path = "../../../server/video_frame_analyzer/examples/1.jpg"
+    image_path = "/Users/ericli/OpenMMLA/base/video_frame_analyzer/data/micro-bit/frame_1737039957.jpg"
 
     try:
         results = process_image(image_path)

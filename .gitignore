@@ -1,6 +1,7 @@
 # Ignore directories
 venv/
 .idea/
+.vscode/
 *.egg-info/
 dist/
 build/

@@ -5,12 +5,14 @@ from openmmla.services.video import VideoFrameAnalyzer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+config_path = os.path.join(project_dir, 'config.yml')
 
 app = create_app(
     class_type=VideoFrameAnalyzer,
     endpoint='process',
-    method_name='process_image',
-    class_args={'project_dir': project_dir},
+    method_name='process_request',
+    class_args={'project_dir': project_dir, 'config_path': config_path},
+    route_args={'end_to_end': True}
 )
 
 # gunicorn -w 1 -b 0.0.0.0:5000 image_processor_server:app

@@ -9,20 +9,23 @@ import numpy as np
 from .image import load_image
 
 
-def detect_apriltags(image_input, tag_detector, render=True, show=True, save=False, save_path=None):
+def detect_apriltags(image_input, tag_detector, normalize=True, render=True, show=True, save=False, save_path=None):
     """
     Detect the apriltags in an image and return the positions of the tags.
 
     Args:
         image_input: Either a string (file path) or bytes (image data)
         tag_detector: AprilTag detector object
+        normalize: If True, return coordinates normalized to [0,1]. If False, return pixel coordinates
         render: Render the detected tags on the image or not
         show: Show the detected image or not
         save: Save the detected image or not
-        save_path: Path to save the detected image (only used if save=True and image_input is bytes)
+        save_path: Path to save the detected image
 
     Returns:
-        dict: The positions of the detected tags in the image, positions are the coordinates normalized to [0, 1]
+        dict: The positions of the detected tags. If normalize=True, positions are normalized to [0,1]
+              where (0,0) is bottom-left and (1,1) is top-right.
+              If normalize=False, positions are in pixel coordinates from bottom-left.
     """
     tag_pos = {}
     image = load_image(image_input)
@@ -36,6 +39,16 @@ def detect_apriltags(image_input, tag_detector, render=True, show=True, save=Fal
     for tag in tags:
         center = np.mean(tag.corners, axis=0)
         corners = np.int32(tag.corners)
+
+        if normalize:
+            x = float(f'{center[0] / width:.4f}')
+            y = float(f'{1.0 - (center[1] / height):.4f}')  # Flip Y coordinate
+        else:
+            x = int(center[0])
+            y = int(height - center[1])  # Flip Y coordinate
+
+        print(f"Person ID {tag.tag_id} center position: [{x}, {y}]")
+        tag_pos[tag.tag_id] = [x, y]
 
         if render:
             tag_position = (int(corners[0][0]), int(corners[0][1]) - 10)  # Adjust position above the tag
@@ -53,12 +66,6 @@ def detect_apriltags(image_input, tag_detector, render=True, show=True, save=Fal
                           (255, 255, 255), -1)
             # Put black text
             cv2.putText(image, text, (text_x, text_y), font, font_scale, (0, 0, 0), font_thickness)
-
-        # Print the center position
-        x = float(f'{center[0] / width:.4f}')
-        y = float(f'{center[1] / height:.4f}')
-        print(f"Person ID {tag.tag_id} center position: [{x}, {y}]")
-        tag_pos[tag.tag_id] = [x, y]
 
     if show:
         cv2.imshow('AprilTag Detection', image)
