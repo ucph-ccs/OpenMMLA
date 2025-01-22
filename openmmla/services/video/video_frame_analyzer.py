@@ -154,7 +154,7 @@ def generate_end_to_end_prompt_msg(id_positions, image_data, action_definitions,
         "    - Lower y means `'closer to Bottom'`.\n"
         "    - Higher y means `'closer to Top'`.\n\n"
         "- Validate the detected individuals listed below by matching their positions.\n"
-        "- For any additional individuals not listed, assign them a unique ID (e.g., `Person [X]` where X is a new "
+        "- For any additional individuals not listed, assign them a unique ID (e.g., `<id>` where `id` is a new "
         "number) and note their approximate position.\n\n"
         "**Detected Individuals and Their Positions**:\n"
         f"```\n{id_positions}\n```\n\n"
@@ -165,27 +165,31 @@ def generate_end_to_end_prompt_msg(id_positions, image_data, action_definitions,
         "- **Posture & Orientation**: Describe their posture (e.g., seated, standing) and where they are facing.\n"
         "- **Gaze Direction**: Indicate where they appear to be looking (e.g., at another person, at a device).\n"
         "- **Hands & Objects**: Describe the state of their hands and any objects they are interacting with (e.g., "
-        "holding a arduino board/raspberry pi/iPad/Phone, touching keyboard/mouse/screen/keyboard.\n"
+        "holding a arduino board/raspberry pi/iPad/Phone, touching keyboard/mouse/screen/keyboard).\n"
         "- **Interactions**: Clearly describe any visible interactions with other people or objects.\n\n"
         "---\n\n"
         "### 3. **Action Classification**\n"
         "Based on the observations from the captioning process, classify each person's action into one of these "
         "categories:\n"
         f"```\n{action_definitions}\n```\n\n"
+        "**Classification Guidelines**\n"
+        "- Match each person's described behavior to the most appropriate action category\n"
+        "- Consider all visible details including posture, gaze, and interactions\n"
+        "- Base classifications only on what is explicitly described\n\n"
         "---\n\n"
         "### Response Format\n"
         "Return your response in **two stages**:\n\n"
         "#### a) **Grounding and Captioning**\n"
         "Provide the position and description for each person:\n"
         "```\n"
-        "ID [X]:\n"
+        "ID [id]:\n"
         "- Position: [brief location in the image]\n"
         "- Visible Details: [specific observations, avoid assumptions]\n"
         "```\n\n"
         "#### b) **Action Classification**\n"
         "Map each person's ID to one of the action categories:\n"
         "```\n"
-        "{7: 'Communicating', 8: 'Working-Software', 'Person 9': 'Distracted'}\n"
+        "{7: 'Communicating', 8: 'Working-Software', 9: 'Distracted'}\n"
         "```\n\n"
         "---\n\n"
         "**Instructions**:\n"
@@ -201,63 +205,55 @@ def generate_end_to_end_prompt_msg(id_positions, image_data, action_definitions,
 
 
 def generate_vlm_prompt_msg(id_positions=None, image_input=None):
-    """Generate a prompt message for VLM, asking the VLM to describe the individuals in the image.
-
-    Args:
-        id_positions: Dictionary containing the position of each person in the image
-        image_input: Either a string (file path) or bytes (image data)
-
-    Returns:
-        Formatted prompt message
-    """
+    """Generate a prompt message for VLM, asking the VLM to describe the individuals in the image."""
     system_content = (
-        "You're a capable video ethnographer analyzing a lab experiment."
+        "You are a video ethnographer analyzing a lab experiment. Your task is to identify and describe each person's "
+        "position and behaviors in the image."
     )
     user_text = (
-        f"Analyze this laboratory image with the detected individuals' IDs and their center "
-        f"positions.\n"
-        f"The coordinate system is defined as follows:\n"
-        f" - The bottom-left corner of the image is (0, 0).\n"
-        f" - The top-right corner of the image is (1, 1).\n"
-        f" - 'Left' and 'Right' are determined by comparing the x-coordinates of the positions "
-        f"(lower x means 'left', higher x means 'right').\n"
-        f" - 'Top' and 'Bottom' are determined by comparing the y-coordinates of the positions "
-        f"(lower y means 'closer to bottom', higher y means 'closer to top').\n\n"
-        f"Here are the individuals detected in the image and their positions:\n"
-        f"{id_positions}\n\n"
-        f"Analyze each person as follows:\n"
-        f"1. **Detected Persons**: For individuals listed in the provided dictionary, validate their position and "
-        f"describe them using the steps below.\n"
-        f"2. **Undetected Persons**: Identify any additional individuals not listed in the dictionary and analyze "
-        f"them in the same way.\n\n"
-        f"For each person, provide:\n"
-        f"a) **Posture & Orientation**: Describe their posture (e.g., seated, standing) and where they are facing.\n"
-        f"b) **Gaze Direction**: Indicate where they appear to be looking (e.g., at another person, at a device).\n"
-        f"c) **Hands & Objects**: Describe the state of their hands and any objects they are interacting with ("
-        f"e.g., holding a arduino board/raspberry pi/iPad/Phone, touching keyboard/mouse/screen/keyboard).\n"
-        f"d) **Interactions**: Clearly describe any visible interactions with other people or objects.\n\n"
-        f"Format your response for each person as follows:\n"
-        f"ID [X]:\n"
-        f"- Position: [relative location in the image, left/right, top/bottom]\n"
-        f"- Visible Details: [specific observations, avoid assumptions]\n\n"
-        f"Example:\n"
-        f"ID 1:\n"
-        f"- Position: [Left, Top]\n"
-        f"- Visible Details: Seated, facing right. Hands holding a laptop, gaze directed at the screen.\n\n"
-        f"Be specific about what you can and cannot see. For example:\n"
-        f"- If hands, gaze, or any part of the body is not visible, state this explicitly.\n"
-        f"- Do not make assumptions about unseen parts of the person or their behavior.\n\n"
-        f"Analyze each person carefully, step by step, ensuring that both detected and undetected individuals are "
-        f"included in your analysis. If you identify additional persons not listed in the dictionary, assign them a "
-        f"unique ID (e.g., 'Person [X]' where X is a new number) and describe them using the same format."
+        "# Analyze Laboratory Image: Step-by-Step Process\n\n"
+        "### 1. **Grounding Process**\n"
+        "Identify each individual in the image based on their position:\n\n"
+        "- **Coordinate System Definition**:\n"
+        "  - The bottom-left corner of the image is **(0, 0)**.\n"
+        "  - The top-right corner of the image is **(1, 1)**.\n"
+        "  - `'Left'` and `'Right'` are determined by comparing the **x-coordinates** of the positions:\n"
+        "    - Lower x means `'Left'`.\n"
+        "    - Higher x means `'Right'`.\n"
+        "  - `'Top'` and `'Bottom'` are determined by comparing the **y-coordinates** of the positions:\n"
+        "    - Lower y means `'closer to Bottom'`.\n"
+        "    - Higher y means `'closer to Top'`.\n\n"
+        "- Validate the detected individuals listed below by matching their positions.\n"
+        "- For any additional individuals not listed, assign them a unique ID (e.g., `<id>` where <id> is a new "
+        "number) and note their approximate position.\n\n"
+        "**Detected Individuals and Their Positions**:\n"
+        f"```\n{id_positions}\n```\n\n"
+        "---\n\n"
+        "### 2. **Captioning Process**\n"
+        "For each individual (both detected and undetected), describe only what you can see:\n\n"
+        "- **Position**: Relative location in the image (e.g., Left, Center, Right, Top, Bottom).\n"
+        "- **Posture & Orientation**: Describe their posture (e.g., seated, standing) and where they are facing.\n"
+        "- **Gaze Direction**: Indicate where they appear to be looking (e.g., at another person, at a device).\n"
+        "- **Hands & Objects**: Describe the state of their hands and any objects they are interacting with (e.g., "
+        "holding a arduino board/raspberry pi/iPad/Phone, touching keyboard/mouse/screen/keyboard).\n"
+        "- **Interactions**: Clearly describe any visible interactions with other people or objects.\n\n"
+        "### Response Format\n"
+        "Provide the position and description for each person:\n"
+        "```\n"
+        "ID [id]:\n"
+        "- Position: [brief location in the image]\n"
+        "- Visible Details: [specific observations, avoid assumptions]\n"
+        "```\n\n"
+        "**Instructions**:\n"
+        "Take a deep breath and follow the process step by step, ensuring grounding and description are accurate."
     )
 
-    if image_input:  # OpenAI API format message
+    if image_input:
         image_b64 = encode_image_base64(image_input)
         vlm_messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": [{"type": "text", "text": user_text},
-                                         {"type": "image_url", "image_url": {"url": image_b64}}]}
+                                       {"type": "image_url", "image_url": {"url": image_b64}}]}
         ]
     else:
         vlm_messages = [
@@ -269,30 +265,32 @@ def generate_vlm_prompt_msg(id_positions=None, image_input=None):
 
 
 def generate_llm_prompt_msg(image_description, action_definitions):
-    """Generate a prompt message for LLM, asking the LLM to categorize actions.
-
-    Args:
-        image_description: Description of the image generated by VLM
-        action_definitions: Definitions of the actions to categorize
-
-    Returns:
-        Formatted prompt message
-    """
+    """Generate a prompt message for LLM, asking the LLM to categorize actions."""
     system_content = (
-        "You are now a taxonomist and sociologist who is good at categorizing human behaviors based on the given "
-        "context of image description and actions definition. ")
+        "You are a video ethnographer specializing in action classification. Your task is to categorize each person's "
+        "actions into defined categories based on their behaviors described in the image."
+    )
 
-    user_text = (f"You will now assist with analysing an image description text. Your task is to first categorize each"
-                 f"individual's action from the given image description into one of the defined action classes from"
-                 f"the action definitions. Then, format the categorization results into a target format.\n\n"
-                 f"Image Description:\n{image_description}\n\n"
-                 f"Action Definitions:\n{action_definitions}\n\n"
-                 f"Carefully read the image description and action definitions and proceed with the following "
-                 f"instructions:\n"
-                 f"1. Categorize their actions into one of the defined classes.\n"
-                 f"2. Format your categorization results into a dictionary string with <ID> : <Action> key value pairs,"
-                 f" for example, {{'1' : 'Action_1', '7' : 'Action_2'}}.\n"
-                 f"Take a deep breath and do the analysis step by step.")
+    user_text = (
+        "# Action Classification Process\n\n"
+        "### 1. Review the Image Description\n"
+        "Below is a detailed description of individuals in a laboratory setting:\n\n"
+        f"```\n{image_description}\n```\n\n"
+        "### 2. Action Categories\n"
+        "Classify each person's action into one of these defined categories:\n"
+        f"```\n{action_definitions}\n```\n\n"
+        "### 3. Classification Guidelines\n"
+        "- Match each person's described behavior to the most appropriate action category\n"
+        "- Consider all visible details including posture, gaze, and interactions\n"
+        "- Base classifications only on what is explicitly described\n\n"
+        "### Response Format\n"
+        "Return your classification as a dictionary mapping IDs to actions:\n"
+        "```\n"
+        "{7: 'Communicating', 8: 'Working-Software', 9: 'Distracted'}\n"
+        "```\n\n"
+        "**Instructions**:\n"
+        "Take a deep breath and classify each person's actions carefully based on the provided description."
+    )
 
     llm_messages = [
         {"role": "system", "content": system_content},

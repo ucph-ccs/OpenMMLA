@@ -28,8 +28,8 @@ def process_image(image_path, server_url="http://localhost:5000/process"):
 
 
 def main():
-    # image_path = "/Users/ericli/OpenMMLA/base/video_frame_analyzer/data/micro-bit/frame_1737039957.jpg"
-    image_path="/Users/ericli/OpenMMLA/base/video_frame_analyzer/data/llm_test/6.jpg"
+    image_path = "/Users/ericli/OpenMMLA/base/video_frame_analyzer/data/micro-bit/frame_1737039536.jpg"
+    # image_path="/Users/ericli/OpenMMLA/base/video_frame_analyzer/data/llm_test/6.jpg"
 
     try:
         results = process_image(image_path)

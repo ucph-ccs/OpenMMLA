@@ -72,6 +72,11 @@ brew install redis
 
 # Start Redis server in unprotected mode if running on different machines
 redis-server --protected-mode no
+
+# for linux
+sudo vim /etc/redis/redis.conf
+# Add/modify these lines
+protected-mode no
 ```
 
 </details>

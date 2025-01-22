@@ -90,14 +90,14 @@ class ContentAnalyzer:
         """
         if self.nlp is None:
             raise ValueError("NLP method not initialized")
-            
+
         # Convert input text to spaCy doc
         doc = self.nlp(text.lower())
-        
+
         # Calculate similarities
         task_similarity = self._calculate_context_similarity(doc, self.task_context)
         construct_similarity = self._calculate_context_similarity(doc, self.construct_context)
-        print(task_similarity, construct_similarity)    
+        print(task_similarity, construct_similarity)
 
         if task_similarity >= construct_similarity and task_similarity >= threshold:
             return 1
@@ -108,20 +108,20 @@ class ContentAnalyzer:
     def _calculate_context_similarity(self, doc, context: Dict) -> float:
         """Calculate similarity between text and a context"""
         similarities = []
-        
+
         # Compare with key phrases
         for phrase in context.get('key_phrases', []):
             phrase_doc = self.nlp(phrase)
             similarity = doc.similarity(phrase_doc)
             similarities.append(similarity)
-            
+
         # Compare with individual keywords
         if context.get('keywords'):
             keywords_text = " ".join(context['keywords'])
             keywords_doc = self.nlp(keywords_text)
             similarity = doc.similarity(keywords_doc)
             similarities.append(similarity)
-        
+
         average_similarity = sum(similarities) / len(similarities) if similarities else 0.0
         return average_similarity
 
@@ -167,6 +167,7 @@ class ContentAnalyzer:
         self.gemmi_client.generate_content(prompt)
         return True
 
+
 def extract_context(text: str, nlp=None) -> Dict:
     """
     Extract document text, key phrases and keywords from input text.
@@ -181,13 +182,13 @@ def extract_context(text: str, nlp=None) -> Dict:
     # Initialize spaCy if not provided
     if nlp is None:
         nlp = spacy.load("en_core_web_md")
-    
+
     # Process the text
     doc = nlp(text)
-    
+
     # Extract key phrases using noun chunks and verb phrases
     matcher = Matcher(nlp.vocab)
-    
+
     # Define patterns for key phrases
     patterns = [
         # Noun phrase patterns
@@ -198,11 +199,11 @@ def extract_context(text: str, nlp=None) -> Dict:
         # Technical term patterns
         [{"ORTH": "RGB"}, {"ORTH": "LED"}],  # e.g., "RGB LED"
     ]
-    
+
     # Add patterns to matcher
     for i, pattern in enumerate(patterns):
         matcher.add(f"pattern_{i}", [pattern])
-    
+
     # Find matches
     matches = matcher(doc)
     key_phrases = []
@@ -210,25 +211,26 @@ def extract_context(text: str, nlp=None) -> Dict:
         phrase = doc[start:end].text.lower()
         if len(phrase.split()) > 1:  # Only keep multi-word phrases
             key_phrases.append(phrase)
-    
+
     # Extract keywords (important nouns, verbs, and adjectives)
     keywords = []
     for token in doc:
         # Check if token is a relevant part of speech and not a stopword
-        if (token.pos_ in ['NOUN', 'VERB', 'ADJ'] and 
-            not token.is_stop and 
-            len(token.text) > 2):  # Avoid very short words
+        if (token.pos_ in ['NOUN', 'VERB', 'ADJ'] and
+                not token.is_stop and
+                len(token.text) > 2):  # Avoid very short words
             keywords.append(token.text.lower())
-    
+
     # Count frequencies and get most common
     key_phrases = list(set(key_phrases))  # Remove duplicates
     keywords = [word for word, count in Counter(keywords).most_common(20)]  # Top 20 keywords
-    
+
     return {
         'document_text': text,
         'key_phrases': key_phrases,
         'keywords': keywords
     }
+
 
 # Example usage
 if __name__ == "__main__":
@@ -347,7 +349,6 @@ if __name__ == "__main__":
 
     """
 
-    
     # Extract context
     task_context = extract_context(task_text)
     construct_context = extract_context(construct_text)
@@ -370,9 +371,9 @@ if __name__ == "__main__":
             'time': 1734094857.0  # Should return 0 (not relevant)
         }
     ]
-    
+
     analyzer = ContentAnalyzer(methods={'nlp'}, task_context=task_context, construct_context=construct_context)
-    
+
     # Test the analysis
     for record in test_transcription:
         status = analyzer.analyze_with_nlp(record['text'])
