@@ -2,48 +2,55 @@ AprilTag:
   families: tag36h11
 
 VideoFrameAnalyzer:
-  backend: openai
+  backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek
   top_p: 0
   temperature: 0
+
   ollama:
-    api_key: ollama
+    api_key: <OLLAMA_API_KEY>
     vlm_base_url: "http://localhost:11434/v1"
     llm_base_url: "http://localhost:11434/v1"
     vlm_model: "llava:13b"
-    llm_model: llama3.1
+    llm_model: "llama3.1"
     VLMExtraBody: {}
     LLMExtraBody: {}
+
   vllm:
-    api_key: token-abc123
+    api_key: <VLLM_API_KEY>
     vlm_base_url: "http://localhost:8000/v1"
     llm_base_url: "http://localhost:8001/v1"
-    vlm_model: openbmb/MiniCPM-V-2_6
-    llm_model: microsoft/Phi-3-small-128k-instruct
+    vlm_model: "openbmb/MiniCPM-V-2_6"
+    llm_model: "microsoft/Phi-3-small-128k-instruct"
     VLMExtraBody:
       stop_token_ids: [151645, 151643]
     LLMExtraBody: {}
+
   openai:
-    api_key: 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
-    vlm_model: gpt-4o
-    llm_model: gpt-4o
+    api_key: <OPENAI_API_KEY>
+    vlm_model: "gpt-4o"
+    llm_model: "gpt-4o"
+
   qwen:
-    api_key: sk-40c8bc22b9454d4992f3efb28719770c
+    api_key: <QWEN_API_KEY>
     vlm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    vlm_model: qwen2.5-72b-instruct
-    llm_model: qwen2.5-72b-instruct
+    vlm_model: "qwen2.5-72b-instruct"
+    llm_model: "qwen2.5-72b-instruct"
+
   gemini:
-    api_key: AIzaSyAEXT36pp5oz6pdCeveH7UK37mkghU6ztU
+    api_key: <GEMINI_API_KEY>
     vlm_base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
     llm_base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
-    vlm_model: gemini-2.0-flash-exp
-    llm_model: gemini-2.0-flash-exp
+    vlm_model: "gemini-2.0-pro-exp-02-05"
+    llm_model: "gemini-2.0-pro-exp-02-05"
+
   deepseek:
-    api_key: sk-7342cbeb7da7423ea362f624cfb86e27
+    api_key: <DEEPSEEK_API_KEY>
     vlm_base_url: "https://api.deepseek.com"
     llm_base_url: "https://api.deepseek.com"
-    vlm_model: deepseek-reasoner
-    llm_model: deepseek-reasoner
+    vlm_model: "deepseek-reasoner"
+    llm_model: "deepseek-reasoner"
+
   defined_actions:
     Communicating: "when a person is directly facing another person, with their hands away from keyboards, mice, screens, or hardware. Communication may involve gestures, pointing, or other non-verbal cues."
     Observing: "when a person is looking at a screen or table, such as laptop or tablet, with no active interaction."
