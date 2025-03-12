@@ -1,5 +1,4 @@
 AprilTag:
-  tag_size: 0.061
   families: tag36h11
 
 VideoFrameAnalyzer:
@@ -27,8 +26,27 @@ VideoFrameAnalyzer:
     api_key: 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
     vlm_model: gpt-4o
     llm_model: gpt-4o
+  qwen:
+    api_key: sk-40c8bc22b9454d4992f3efb28719770c
+    vlm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    vlm_model: qwen2.5-72b-instruct
+    llm_model: qwen2.5-72b-instruct
+  gemini:
+    api_key: AIzaSyAEXT36pp5oz6pdCeveH7UK37mkghU6ztU
+    vlm_base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    llm_base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    vlm_model: gemini-2.0-flash-exp
+    llm_model: gemini-2.0-flash-exp
+  deepseek:
+    api_key: sk-7342cbeb7da7423ea362f624cfb86e27
+    vlm_base_url: "https://api.deepseek.com"
+    llm_base_url: "https://api.deepseek.com"
+    vlm_model: deepseek-reasoner
+    llm_model: deepseek-reasoner
   defined_actions:
-    Communicating: "when a person is directly facing another person and talking or explaining, with their hands away from keyboards, mice, screens, or hardware. Communication may involve gestures, pointing, or other non-verbal cues."
+    Communicating: "when a person is directly facing another person, with their hands away from keyboards, mice, screens, or hardware. Communication may involve gestures, pointing, or other non-verbal cues."
+    Observing: "when a person is looking at a screen or table, such as laptop or tablet, with no active interaction."
     Working-Software: "when a person is actively interacting with a device that has a screen, such as a laptop or tablet, typically using a keyboard, mouse, or touchscreen. This includes typing, coding, navigating interfaces, or running software, with no physical interaction with hardware components."
     Working-Hardware: "when a person is physically interacting with non-screen-based devices or components, such as breadboards, microcontrollers, LEDs, resistors, or wires. This includes assembling, adjusting, or troubleshooting hardware connections, with no active engagement with a screen or keyboard/mouse."
     Distracted: "when a person is disengaged from the experiment, focusing on unrelated activities such as using a mobile phone, looking away, or showing signs of inattention."

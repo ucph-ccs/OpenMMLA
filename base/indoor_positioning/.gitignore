@@ -11,6 +11,7 @@ frames/
 dist/
 build/
 server/
+data/
 
 # ignore the following directories in any subdirectory
 **/__pycache__/

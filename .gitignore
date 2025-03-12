@@ -19,6 +19,7 @@ test/
 .DS_Store
 test*.*
 *test.*
+*.json
 
 # Unignore specific files
 !.gitkeep

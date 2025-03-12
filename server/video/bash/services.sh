@@ -6,7 +6,7 @@ PYHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="video-server"
 ports=(5000)
-services=("frame-analyze")
+services=("vlm")
 
 # Loop through each port and kill processes using those ports
 for i in "${!ports[@]}"

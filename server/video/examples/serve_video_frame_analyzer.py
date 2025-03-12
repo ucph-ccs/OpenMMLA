@@ -12,7 +12,7 @@ app = create_app(
     endpoint='process',
     method_name='process_request',
     class_args={'project_dir': project_dir, 'config_path': config_path},
-    route_args={'end_to_end': False}
+    route_args={'end_to_end': True}
 )
 
 # gunicorn -w 1 -b 0.0.0.0:5000 image_processor_server:app

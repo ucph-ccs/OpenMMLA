@@ -28,9 +28,9 @@ def process_image(image_path, server_url="http://localhost:5000/process"):
 
 
 def main():
-    image_path = "/Users/ericli/OpenMMLA/base/video_frame_analyzer/data/micro-bit/frame_1737039536.jpg"
-    # image_path="/Users/ericli/OpenMMLA/base/video_frame_analyzer/data/llm_test/6.jpg"
-
+    project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+    image_path = os.path.join(project_dir, '/Users/ericli/Desktop/Conference/IMWUT/experiments/session_2025-01-22T14'
+                                           ':42:37Z/video_frames/frame_1737558012.jpg')
     try:
         results = process_image(image_path)
         print("Image processing results:")
@@ -43,8 +43,12 @@ def main():
         print(image_description)
 
         print("\nCategorization Result:")
-        for category, description in categorization_result.items():
-            print(f"{category}: {description}")
+        # for category, description in categorization_result.items():
+        #     print(f"{category}: {description}")
+
+        for pair in categorization_result['pairs']:
+            print(f"ID: {pair['id']}, Action: {pair['action']}")
+
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
