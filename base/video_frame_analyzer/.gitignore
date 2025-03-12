@@ -18,7 +18,6 @@ data/
 
 # ignore the following files
 .DS_Store
-transformation_matrices*
 test*.*
 *test.*
 
