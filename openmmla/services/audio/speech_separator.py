@@ -7,7 +7,7 @@ from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.io import write_frames_to_wav
+from openmmla.utils.audio.io import write_bytes_to_wav
 
 
 class SpeechSeparator(Server):
@@ -46,7 +46,7 @@ class SpeechSeparator(Server):
                 base_id = request.values.get('base_id')
                 audio_file = request.files['audio']
                 audio_file_path = self._get_temp_file_path('separate_audio', base_id, 'wav')
-                write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, 8000)
+                write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, 8000)
 
                 result = self.separation_model(audio_file_path)
                 processed_bytes_streams = []

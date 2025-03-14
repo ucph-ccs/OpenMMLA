@@ -12,8 +12,8 @@ app = create_app(
     class_args={'project_dir': project_dir},
 )
 
-# gunicorn -w 1 -b 0.0.0.0:5005 resample_server:app
-# hypercorn -w 1 -b 0.0.0.0:5005 resample_server:app
-# kill -9 $(lsof -ti:5005)
+# gunicorn -w 1 -b 0.0.0.0:5001 serve_audio_resampler:app
+# hypercorn -w 1 -b 0.0.0.0:5001 serve_audio_resampler:app
+# kill -9 $(lsof -ti:5001)
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5005)
+    app.run(host='0.0.0.0', port=5001, threaded=True)

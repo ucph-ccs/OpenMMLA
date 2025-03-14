@@ -1,6 +1,7 @@
-"""
-- Descriptions: This module contains utility functions for working with images, including load image, encode image to
-base 64 string.
+"""This module contains utility functions for working with images, including load image, encode image to base 64 string.
+
+- load_image: Load an image from either a file path or image data.
+- encode_image_base64: Encode an image to base64 format.
 """
 
 import base64
@@ -10,8 +11,7 @@ import numpy as np
 
 
 def load_image(image_input):
-    """
-    Load an image from either a file path or image data.
+    """Load an image from either a file path or image data.
 
     Args:
         image_input: Either a string (file path) or bytes (image data)

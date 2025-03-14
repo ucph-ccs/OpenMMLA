@@ -3,7 +3,7 @@
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 
 # audio services
-services=("transcribe" "separate" "infer" "enhance" "vad" "resample")
+services=("infer" "resample" "enhance" "separate" "transcribe" "vad" )
 
 shutdown_server() {
     echo "Shutting down selected tmux sessions..."

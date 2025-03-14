@@ -1,17 +1,16 @@
-"""
-- Description: This module provides functions to detect AprilTags' position and ID in an image.
+"""This module contains utility functions to detect AprilTags in an image.
+
+- detect_apriltags: Detect the apriltags in an image and return the ids, positions of the tags.
 """
 import os
-
 import cv2
 import numpy as np
-
+from PIL import Image, ImageDraw, ImageFont
 from .image import load_image
 
 
 def detect_apriltags(image_input, tag_detector, normalize=True, render=True, show=True, save=False, save_path=None):
-    """
-    Detect the apriltags in an image and return the positions of the tags.
+    """Detect the apriltags in an image and return the ids, positions of the tags.
 
     Args:
         image_input: Either a string (file path) or bytes (image data)
@@ -36,10 +35,22 @@ def detect_apriltags(image_input, tag_detector, normalize=True, render=True, sho
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     tags = tag_detector.detect(gray)  # without pose estimation
 
-    for tag in tags:
-        center = np.mean(tag.corners, axis=0)
-        corners = np.int32(tag.corners)
+    # Convert OpenCV image (BGR) to PIL image (RGB)
+    image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(image_pil)
 
+    for tag in tags:
+        corners = np.int32(tag.corners)  # Convert corners to integer coordinates
+        center = np.mean(corners, axis=0).astype(int)  # Compute center of the tag
+
+        # Calculate bounding box width and height
+        min_x, min_y = np.min(corners, axis=0)
+        max_x, max_y = np.max(corners, axis=0)
+        box_width = max_x - min_x
+        box_height = max_y - min_y
+        min_dimension = min(box_width, box_height)
+
+        # Normalize coordinates if required
         if normalize:
             x = float(f'{center[0] / width:.4f}')
             y = float(f'{1.0 - (center[1] / height):.4f}')  # Flip Y coordinate
@@ -47,30 +58,23 @@ def detect_apriltags(image_input, tag_detector, normalize=True, render=True, sho
             x = int(center[0])
             y = int(height - center[1])  # Flip Y coordinate
 
-        print(f"Person ID {tag.tag_id} center position: [{x}, {y}]")
+        print(f"Tag ID {tag.tag_id} center position: [{x}, {y}]")
         tag_pos[tag.tag_id] = [x, y]
 
         if render:
-            tag_position = (int(corners[0][0]), int(corners[0][1]) - 10)  # Adjust position above the tag
-            text = f"{tag.tag_id}"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 5
-            font_thickness = 14
-            text_size, _ = cv2.getTextSize(text, font, font_scale, font_thickness)
-            text_x, text_y = tag_position
-            # Draw black border
-            cv2.rectangle(image, (text_x - 20, text_y - text_size[1] - 20), (text_x + text_size[0] + 10, text_y + 30),
-                          (0, 0, 0), -1)
-            # Draw white background
-            cv2.rectangle(image, (text_x - 10, text_y - text_size[1] - 10), (text_x + text_size[0], text_y + 20),
-                          (255, 255, 255), -1)
-            # Put black text
-            cv2.putText(image, text, (text_x, text_y), font, font_scale, (0, 0, 0), font_thickness)
+            draw.polygon([tuple(c) for c in corners], fill="black")  # Fill the bounding box in black
+            font_size = max(int(min_dimension * 0.5), 20)  # Ensure a minimum font size
+            font = ImageFont.load_default(size=font_size)
+
+            text = str(tag.tag_id)
+            text_size = draw.textbbox((0, 0), text, font=font)
+            text_width, text_height = text_size[2] - text_size[0], text_size[3] - text_size[1]
+            text_x = center[0] - text_width // 2
+            text_y = center[1] - text_height // 2
+            draw.text((text_x, text_y), text, font=font, fill="white")
 
     if show:
-        cv2.imshow('AprilTag Detection', image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        image_pil.show()
 
     if save:
         if isinstance(image_input, str):
@@ -80,7 +84,7 @@ def detect_apriltags(image_input, tag_detector, normalize=True, render=True, sho
         elif save_path is None:
             raise ValueError("save_path must be provided when saving image data")
 
-        cv2.imwrite(save_path, image)
+        image_pil.save(save_path)
         print(f"Detected image saved as {save_path}")
 
     return tag_pos

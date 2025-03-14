@@ -2,18 +2,18 @@ import gc
 import os
 import queue
 import shutil
-import socket
 import time
 
 import numpy as np
 import soundfile as sf
 
 from openmmla.bases.asr_with_diarization.errors import RecordingError, RecognizingError
+from openmmla.streams.audio_stream import AudioStream, write_frame_to_wav
 from openmmla.utils.audio.auga import normalize_decibel, apply_gain
-from openmmla.utils.audio.io import read_frames_from_wav, write_frames_to_wav, resample_audio_file
+from openmmla.utils.audio.files import resample_audio_file
+from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.logger import get_logger
-from openmmla.utils.sockets import read_frames_tcp, clear_socket_udp, read_frames_udp
 from .audio_base import AudioBase
 from .enums import BLUE, ENDC
 from .input import get_mode, get_bucket_name, get_name
@@ -23,23 +23,22 @@ class BadgeAudioBase(AudioBase):
     """The badge audio base process the audio streams recorded from wireless wearable badges."""
     logger = get_logger(f'badge-audio-base')
 
-    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', local: bool = False,
-                 vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, store: bool = True):
+    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', vad: bool = True, nr: bool = True,
+                 tr: bool = True, sp: bool = False, store: bool = True):
         """Initialize the badge audio base.
 
         Args:
             project_dir: root directory of the project
             config_path: path to the configuration file, either absolute or relative to the root directory
             mode: operating mode, either 'record', 'recognize', or 'full', default to 'full'
-            local: whether to run the audio base locally, default to False
             vad: whether to use the VAD, default to True
             nr: whether to use the denoiser to enhance speech, default to True
             tr: whether to transcribe speech to text, default to True
             sp: whether to do speech separation for overlapped segment, default to False
             store: whether to store audio files, default to True
         """
-        super().__init__(project_dir=project_dir, config_path=config_path, mode=mode, local=local, vad=vad, nr=nr,
-                         tr=tr, sp=sp, store=store)
+        super().__init__(project_dir=project_dir, config_path=config_path, mode=mode, vad=vad, nr=nr, tr=tr, sp=sp,
+                         store=store)
 
     @property
     def base_type(self):
@@ -55,19 +54,33 @@ class BadgeAudioBase(AudioBase):
         super()._setup_input()
         self.port = self.id + self.port_offset
 
+    def _setup_objects(self):
+        super()._setup_objects()
+        self.audio_stream = AudioStream(source=self.protocol, host=self.listening_ip, port=self.port)
+
     def _register_profile(self):
         """Register participant's voice to audio database."""
         print("------------------------------------------------")
         output_path = os.path.join(self.audio_temp_dir, f'badge_{self.id}_register.wav')
-        sock_param = (socket.AF_INET, socket.SOCK_STREAM) if self.protocol == 'TCP' else (
-            socket.AF_INET, socket.SOCK_DGRAM)
-        record_func = self.audio_recorder.record_registry_tcp if self.protocol == 'TCP' else (
-            self.audio_recorder.record_registry_udp)
+        self.recording_prompt(self.register_duration)
 
-        with socket.socket(*sock_param) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((self.listening_ip, self.port))
-            audio_path = record_func(self.register_duration, output_path, f'badge_{self.id}', sock)
+        self.audio_stream.start()
+        audio_frame = self.audio_stream.read(duration=self.register_duration, latest=True)
+        self.audio_stream.stop()
+        write_frame_to_wav(output_path, audio_frame)
+
+        apply_gain(output_path)
+        audio_path = self.post_process_audio(output_path, 1)
+
+        # sock_param = (socket.AF_INET, socket.SOCK_STREAM) if self.protocol == 'TCP' else (
+        #     socket.AF_INET, socket.SOCK_DGRAM)
+        # record_func = self.audio_recorder.record_registry_tcp if self.protocol == 'TCP' else (
+        #     self.audio_recorder.record_registry_udp)
+
+        # with socket.socket(*sock_param) as sock:
+        #     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        #     sock.bind((self.listening_ip, self.port))
+        #     audio_path = record_func(self.register_duration, output_path, f'badge_{self.id}', sock)
 
         if audio_path is None:
             self.logger.info("The recorded audio file is not long enough, please record again.")
@@ -101,44 +114,71 @@ class BadgeAudioBase(AudioBase):
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
 
-        sock_param = (socket.AF_INET, socket.SOCK_STREAM) if self.protocol == 'TCP' else (
-            socket.AF_INET, socket.SOCK_DGRAM)
+        # sock_param = (socket.AF_INET, socket.SOCK_STREAM) if self.protocol == 'TCP' else (
+        #     socket.AF_INET, socket.SOCK_DGRAM)
 
         self._prepare_directories()
 
-        with socket.socket(*sock_param) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((self.listening_ip, self.port))
+        # with socket.socket(*sock_param) as sock:
+        #     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        #     sock.bind((self.listening_ip, self.port))
+        #
+        #     self._listen_for_start_signal()
+        #     if self.protocol == 'UDP':
+        #         clear_socket_udp(sock)
+        #     self.logger.info("Buffer cleared, start recording...")
+        #
+        #     # Create threads
+        #     if self.mode in ['record', 'full']:
+        #         self._create_thread(self._continuous_recording, sock)
+        #     if self.mode == 'recognize':
+        #         self._create_thread(self._load_and_queue_recorded_files)
+        #     if self.mode in ['recognize', 'full']:
+        #         recognition_task = self._continuous_recognizing_sp if self.sp else self._continuous_recognizing
+        #         self._create_thread(recognition_task)
+        #         if self.tr:
+        #             self._create_thread(self._continuous_transcribing)
+        #     self._create_thread(self._listen_for_stop_signal)
+        #
+        #     # Start threads
+        #     exception_occurred = None
+        #     try:
+        #         self._start_threads()
+        #         self._join_threads()
+        #     except (Exception, KeyboardInterrupt) as e:
+        #         self.logger.warning(
+        #             f"During voice recognition, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
+        #             exc_info=True)
+        #         exception_occurred = e
+        #     finally:
+        #         self._recognition_handler(exception_occurred)
 
-            self._listen_for_start_signal()
-            if self.protocol == 'UDP':
-                clear_socket_udp(sock)
-            self.logger.info("Buffer cleared, start recording...")
+        self._listen_for_start_signal()
 
-            # Create threads
-            if self.mode in ['record', 'full']:
-                self._create_thread(self._continuous_recording, sock)
-            if self.mode == 'recognize':
-                self._create_thread(self._load_and_queue_recorded_files)
-            if self.mode in ['recognize', 'full']:
-                recognition_task = self._continuous_recognizing_sp if self.sp else self._continuous_recognizing
-                self._create_thread(recognition_task)
-                if self.tr:
-                    self._create_thread(self._continuous_transcribing)
-            self._create_thread(self._listen_for_stop_signal)
+        # Create threads
+        if self.mode in ['record', 'full']:
+            self._create_thread(self._continuous_recording)
+        if self.mode == 'recognize':
+            self._create_thread(self._load_and_queue_recorded_files)
+        if self.mode in ['recognize', 'full']:
+            recognition_task = self._continuous_recognizing_sp if self.sp else self._continuous_recognizing
+            self._create_thread(recognition_task)
+            if self.tr:
+                self._create_thread(self._continuous_transcribing)
+        self._create_thread(self._listen_for_stop_signal)
 
-            # Start threads
-            exception_occurred = None
-            try:
-                self._start_threads()
-                self._join_threads()
-            except (Exception, KeyboardInterrupt) as e:
-                self.logger.warning(
-                    f"During voice recognition, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
-                    exc_info=True)
-                exception_occurred = e
-            finally:
-                self._recognition_handler(exception_occurred)
+        # Start threads
+        exception_occurred = None
+        try:
+            self._start_threads()
+            self._join_threads()
+        except (Exception, KeyboardInterrupt) as e:
+            self.logger.warning(
+                f"During voice recognition, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
+                exc_info=True)
+            exception_occurred = e
+        finally:
+            self._recognition_handler(exception_occurred)
 
     def _recognition_handler(self, e):
         """Handle exceptions and stop all threads.
@@ -170,62 +210,85 @@ class BadgeAudioBase(AudioBase):
         self.mode = get_mode()
         self.logger.info(f"Switched to {self.mode} mode.")
 
-    def _continuous_recording(self, sock):
-        """Continuously record audio from port and put it into the audio queue.
+    # def _continuous_recording(self, sock):
+    #     """Continuously record audio from port and put it into the audio queue.
+    #
+    #     Args:
+    #         sock: the socket object for receiving audio stream
+    #     """
+    #     if self.protocol == 'TCP':
+    #         sock.listen(1)
+    #         conn, addr = sock.accept()
+    #
+    #         while not self.stop_event.is_set():
+    #             try:
+    #                 sub_dir = 'records' if self.mode == 'record' else 'temp'
+    #                 output_path = os.path.join(self.audio_dir, sub_dir,
+    #                                            f'badge_{self.id}_record_{time.time():.4f}.wav')
+    #
+    #                 frames = read_frames_tcp(sock, conn, self.recognize_duration)
+    #
+    #                 # write frames to file if in record mode and put into audio queue if in full mode
+    #                 if self.mode == 'record':
+    #                     write_bytes_to_wav(output_path, frames)
+    #                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
+    #                 else:
+    #                     self.audio_queue.put((output_path, frames))
+    #             except Exception as e:
+    #                 raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
+    #     else:
+    #         while not self.stop_event.is_set():
+    #             try:
+    #                 sub_dir = 'records' if self.mode == 'record' else 'temp'
+    #                 output_path = os.path.join(self.audio_dir, sub_dir,
+    #                                            f'badge_{self.id}_record_{time.time():.4f}.wav')
+    #                 frames = read_frames_udp(sock, self.recognize_duration)
+    #
+    #                 # write frames to file if in record mode and put into audio queue if in full mode
+    #                 if self.mode == 'record':
+    #                     write_bytes_to_wav(output_path, frames)
+    #                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
+    #                 else:
+    #                     self.audio_queue.put((output_path, frames))
+    #             except Exception as e:
+    #                 raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
 
-        Args:
-            sock: the socket object for receiving audio stream
-        """
-        if self.protocol == 'TCP':
-            sock.listen(1)
-            conn, addr = sock.accept()
+    def _continuous_recording(self):
+        """Continuously record audio from port and put it into the audio queue."""
+        first_time = True
+        sub_dir = 'records' if self.mode == 'record' else 'temp'
+        self.audio_stream.start()
 
-            while not self.stop_event.is_set():
-                try:
-                    sub_dir = 'records' if self.mode == 'record' else 'temp'
-                    output_path = os.path.join(self.audio_dir, sub_dir,
-                                               f'badge_{self.id}_record_{time.time():.4f}.wav')
+        while not self.stop_event.is_set():
+            try:
+                audio_frame = self.audio_stream.read(duration=self.recognize_duration, latest=first_time)
 
-                    frames = read_frames_tcp(sock, conn, self.recognize_duration)
+                first_time = False
+                frame_bytes = audio_frame.to_bytes()
+                acquire_time = audio_frame.timestamp
+                output_path = os.path.join(self.audio_dir, sub_dir, f'badge_{self.id}_record_{acquire_time:.4f}.wav')
 
-                    # write frames to file if in record mode and put into audio queue if in full mode
-                    if self.mode == 'record':
-                        write_frames_to_wav(output_path, frames)
-                        print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
-                    else:
-                        self.audio_queue.put((output_path, frames))
-                except Exception as e:
-                    raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
-        else:
-            while not self.stop_event.is_set():
-                try:
-                    sub_dir = 'records' if self.mode == 'record' else 'temp'
-                    output_path = os.path.join(self.audio_dir, sub_dir,
-                                               f'badge_{self.id}_record_{time.time():.4f}.wav')
-                    frames = read_frames_udp(sock, self.recognize_duration)
-
-                    # write frames to file if in record mode and put into audio queue if in full mode
-                    if self.mode == 'record':
-                        write_frames_to_wav(output_path, frames)
-                        print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
-                    else:
-                        self.audio_queue.put((output_path, frames))
-                except Exception as e:
-                    raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
+                # write frames to file if in record mode and put into audio queue if in full mode
+                if self.mode == 'record':
+                    write_frame_to_wav(output_path, audio_frame)
+                    print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frame_bytes)} frames")
+                else:
+                    self.audio_queue.put((output_path, frame_bytes))
+            except Exception as e:
+                raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
 
     def _continuous_recognizing(self):
         """Continuously recognize audio from the audio queue and put the results into the Redis channel."""
         while not self.stop_event.is_set():
             try:
-                segment_audio_path, frames = self.audio_queue.get(timeout=1)
+                segment_audio_path, frame_bytes = self.audio_queue.get(timeout=1)
                 record_start_time = os.path.basename(segment_audio_path).split('_')[-1][:-4]
                 recognize_start_time = time.time()
-                write_frames_to_wav(segment_audio_path, frames)
+                write_bytes_to_wav(segment_audio_path, frame_bytes)
 
                 # Audio pre-processing
                 apply_gain(segment_audio_path)
-                processed_audio_path = self.audio_recorder.post_processing(segment_audio_path, sampling_rate=16000,
-                                                                           inplace=1, base_id=f'badge_{self.id}')
+                processed_audio_path = self.post_process_audio(segment_audio_path, inplace=1)
 
                 # Voice quality check
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
@@ -252,9 +315,9 @@ class BadgeAudioBase(AudioBase):
                         else peak_value / self.rms_peak_threshold
                     similarity = self.threshold * ratio
 
-                self._assemble_chunk_with_hsr(speaker, record_start_time, frames)
-                self._log_and_publish_results(record_start_time, recognize_start_time, [speaker],
-                                              [np.round(np.float64(similarity), 4)], [duration])
+                self._assemble_chunk_with_hsr(speaker, record_start_time, frame_bytes)
+                self._publish_speaker_recognition(record_start_time, recognize_start_time, [speaker],
+                                                  [np.round(np.float64(similarity), 4)], [duration])
 
                 if self.store:
                     shutil.move(segment_audio_path,
@@ -276,12 +339,11 @@ class BadgeAudioBase(AudioBase):
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
                 record_start_time = os.path.basename(segment_audio_path).split('_')[-1][:-4]
                 recognize_start_time = time.time()
-                write_frames_to_wav(segment_audio_path, frames)
+                write_bytes_to_wav(segment_audio_path, frames)
 
                 # Audio pre-processing
                 apply_gain(segment_audio_path)
-                processed_audio_path = self.audio_recorder.post_processing(segment_audio_path, sampling_rate=16000,
-                                                                           inplace=0, base_id=f'badge_{self.id}')
+                processed_audio_path = self.post_process_audio(segment_audio_path, inplace=0)
 
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
                 speaker = 'silent' if processed_audio_path is None else 'unknown'
@@ -299,8 +361,7 @@ class BadgeAudioBase(AudioBase):
                         for i, signal in enumerate(sp_result):
                             save_file = f'{segment_audio_path[:-4]}_spk{i}.wav'
                             sf.write(save_file, np.frombuffer(signal, dtype=np.int16), 8000)
-                            processed_save_file = self.audio_recorder.apply_vad(save_file, sampling_rate=8000,
-                                                                                inplace=1, base_id=f'badge_{self.id}')
+                            processed_save_file = self.apply_vad(save_file, inplace=1)
 
                             if processed_save_file:
                                 normalize_decibel(save_file, rms_level=-20)
@@ -330,11 +391,11 @@ class BadgeAudioBase(AudioBase):
                 if speaker == 'unknown' and similarity == 0:
                     speaker = 'silent'
 
-                resampled_segment_bytes = read_frames_from_wav(segment_audio_path)
+                resampled_segment_bytes = read_bytes_from_wav(segment_audio_path)
                 self._assemble_chunk_with_hsr(speaker, record_start_time, resampled_segment_bytes,
                                               best_separate_frames)
-                self._log_and_publish_results(record_start_time, recognize_start_time, [speaker],
-                                              [np.round(np.float64(similarity), 4)], [duration])
+                self._publish_speaker_recognition(record_start_time, recognize_start_time, [speaker],
+                                                  [np.round(np.float64(similarity), 4)], [duration])
 
                 if self.store:
                     if best_separate_path:
@@ -384,23 +445,21 @@ class BadgeAudioBase(AudioBase):
                     right_temp_path = os.path.join(self.audio_dir, 'temp', f'badge_{self.id}_right_temp.wav')
                     number_frames = int(len(frames) / 2)
                     candidates = [self.last_speaker, speaker]
-                    write_frames_to_wav(left_temp_path, chunk_frames[-number_frames:], framerate=fr)
-                    write_frames_to_wav(right_temp_path, frames[:number_frames], framerate=fr)
+                    write_bytes_to_wav(left_temp_path, chunk_frames[-number_frames:], framerate=fr)
+                    write_bytes_to_wav(right_temp_path, frames[:number_frames], framerate=fr)
 
                     if not self.sp:
                         apply_gain(left_temp_path)
                         apply_gain(right_temp_path)
 
-                    if self.audio_recorder.apply_vad(left_temp_path, sampling_rate=fr, inplace=0,
-                                                     base_id=f'badge_{self.id}'):
+                    if self.apply_vad(left_temp_path, inplace=0):
                         left_speaker, _ = self.audio_recognizer.recognize_among_candidates(left_temp_path, candidates,
                                                                                            self.last_speaker,
                                                                                            self.keep_threshold)
                     else:
                         left_speaker = 'silent'
 
-                    if self.audio_recorder.apply_vad(right_temp_path, sampling_rate=fr, inplace=0,
-                                                     base_id=f'badge_{self.id}'):
+                    if self.apply_vad(right_temp_path, inplace=0):
                         right_speaker, _ = self.audio_recognizer.recognize_among_candidates(right_temp_path, candidates,
                                                                                             speaker,
                                                                                             self.keep_threshold)
@@ -423,7 +482,7 @@ class BadgeAudioBase(AudioBase):
                     if self.store:
                         chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
                                                         f'{self.last_speaker}_chunk_{round(float(chunk_start_time))}.wav')
-                        write_frames_to_wav(chunk_audio_path, chunk_frames, framerate=fr)
+                        write_bytes_to_wav(chunk_audio_path, chunk_frames, framerate=fr)
                         if self.last_speaker != 'silent':
                             normalize_decibel(chunk_audio_path, rms_level=-20)
 

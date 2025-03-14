@@ -8,7 +8,7 @@ import numpy as np
 from flask import request, jsonify
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.io import write_frames_to_wav
+from openmmla.utils.audio.io import write_bytes_to_wav
 
 try:
     import nemo.collections.asr as nemo_asr
@@ -135,7 +135,7 @@ class AudioInferer(Server):
                 fr = int(request.values.get('fr'))
                 audio_file = request.files['audio']
                 audio_file_path = self._get_temp_file_path('infer_audio', base_id, 'wav')
-                write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
+                write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting inference for {base_id}...")
                 feature = self._infer(audio_file_path)

@@ -7,7 +7,6 @@ PYTHON_PATH="$BASH_DIR/../../.."
 CONDA_ENV="audio-base"
 NUM_BASES=3
 NUM_SYNCHRONIZER=1
-LOCAL=false
 SP=false
 
 is_number() {
@@ -44,11 +43,10 @@ run_py_in_new_tab_gnome() {
 }
 
 # Parse arguments
-while getopts "b:s:l:p:" opt; do
+while getopts "b:s:p:" opt; do
   case $opt in
     b) NUM_BASES=$OPTARG ;;
     s) NUM_SYNCHRONIZER=$OPTARG ;;
-    l) LOCAL=$OPTARG ;;
     p) SP=$OPTARG ;;
     \?) echo "Invalid option -$OPTARG" >&2
         exit 1 ;;
@@ -64,15 +62,6 @@ fi
 if ! is_number "$NUM_SYNCHRONIZER"; then
     echo "Error: -b NUM_SYNCHRONIZER must be a number."
     exit 1
-fi
-
-if ! is_boolean "$LOCAL"; then
-    echo "Error: -l LOCAL must be a boolean (true or false)."
-    exit 1
-fi
-
-if [ "$LOCAL" == "true" ]; then
-    CONDA_ENV="audio-server"
 fi
 
 # Prompt user to choose base type
@@ -105,11 +94,11 @@ done
 if [ "$NUM_BASES" -gt 0 ]; then
   for i in $(seq 1 "$NUM_BASES"); do
     if [[ $OSTYPE == 'darwin'* ]]; then
-      run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/$BASE_SCRIPT -l $LOCAL -s $SP -v true -n true -t true -st true"
+      run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/$BASE_SCRIPT -s $SP -v true -n true -t true -st true"
     elif is_raspberry_pi; then
-      run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/$BASE_SCRIPT -l $LOCAL -s $SP -v true -n true -t true -st false"
+      run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/$BASE_SCRIPT -s $SP -v true -n true -t true -st false"
     elif is_ubuntu; then
-      run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/$BASE_SCRIPT -l $LOCAL -s $SP -v true -n true -t true -st true"
+      run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/$BASE_SCRIPT -s $SP -v true -n true -t true -st true"
     else
       echo "Unknown OS or not supported."
     fi

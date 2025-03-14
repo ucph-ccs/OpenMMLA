@@ -1,3 +1,10 @@
+"""This module contains utility functions for audio file manipulation.
+
+- format_wav: Formats an audio file to .wav using ffmpeg with specified parameters.
+- crop_and_concatenate_wav: Crops segments from an audio file and concatenates them into a new .wav file.
+- segment_wav: Segments an audio file and exports each segment as a new .wav file.
+"""
+
 import os
 import shutil
 import subprocess
@@ -5,24 +12,9 @@ import tempfile
 import wave
 from typing import List, Tuple
 
-import librosa
-import soundfile as sf
 from pydub import AudioSegment
 
 from .auga import normalize_decibel
-
-
-def resample_audio_file(file_path: str, target_sr: int = 8000) -> None:
-    """Resamples the audio data from the original sample rate to the target sample rate, and overwrites the original file
-    with the resampled audio data.
-
-    Args:
-        file_path (str): The path to the audio file to be resampled.
-        target_sr (int): The target sample rate for the audio data.
-    """
-    audio_data, original_sr = librosa.load(file_path, sr=None)  # sr=None ensures original SR is used
-    resampled_audio_data = librosa.resample(audio_data, orig_sr=original_sr, target_sr=target_sr)
-    sf.write(file_path, resampled_audio_data, target_sr)
 
 
 def format_wav(input_file: str, output_file: str = None, codec: str = "pcm_s16le",
@@ -98,7 +90,7 @@ def format_wav(input_file: str, output_file: str = None, codec: str = "pcm_s16le
     return output_file
 
 
-def crop_and_concatenate_wav(input_file: str, clip_ranges: List[Tuple[int, int]], output_file: str) -> None:
+def crop_and_concatenate_wav(input_file: str, clip_ranges: List[Tuple[int, int]], output_file: str):
     """Crops segments from an audio file and concatenates them into a new .wav file.
 
     Args:
@@ -122,7 +114,7 @@ def crop_and_concatenate_wav(input_file: str, clip_ranges: List[Tuple[int, int]]
     concatenated_audio.export(output_file, format="wav")
 
 
-def segment_wav(input_file: str, output_dir: str, step_length_ms=None, window_length_ms=None) -> None:
+def segment_wav(input_file: str, output_dir: str, step_length_ms=None, window_length_ms=None):
     """Segments an audio file and exports each segment as a new .wav file.
 
     Args:

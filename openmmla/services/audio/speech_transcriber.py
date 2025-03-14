@@ -9,7 +9,8 @@ from denoiser.dsp import convert_audio
 from flask import request, jsonify
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.io import write_frames_to_wav, normalize_decibel
+from openmmla.utils.audio.io import write_bytes_to_wav
+from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.transcriber import get_transcriber
 
 
@@ -77,7 +78,7 @@ class SpeechTranscriber(Server):
                     fr = int(request.values.get('fr', 16000))
                     audio_file = request.files['audio']
                     audio_file_path = self._get_temp_file_path('transcribe_audio', base_id, 'wav')
-                    write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
+                    write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                     self.logger.info(f"starting transcribe for {base_id}...")
                     if fr == 16000:

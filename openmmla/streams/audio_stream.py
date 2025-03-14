@@ -3,13 +3,14 @@ import socket
 import struct
 import threading
 import time
+import wave
 from typing import Optional
 
 import numpy as np
 import pyaudio
 
-from openmmla.utils.logger import get_logger
 from openmmla.streams.resampling import resample_audio, ResampleMethod
+from openmmla.utils.logger import get_logger
 from openmmla.utils.sockets import clear_socket_udp
 from openmmla.utils.threads import RaisingThread
 from .frame import AudioFrame
@@ -17,6 +18,25 @@ from .stream_buffer import RingBuffer
 from .stream_receiver import StreamReceiver
 
 logger = get_logger(__name__)
+
+
+def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
+    """Write AudioFrame to a wave file.
+
+    Args:
+        output_path (str): The file path where the wave file will be saved.
+        audio_frames (AudioFrame): The audio frames to write.
+    """
+    supported_formats = {'int16': 2}
+    if audio_frames.format not in supported_formats:
+        raise ValueError(f"Unsupported audio format: {audio_frames.format}")
+    sample_width = supported_formats[audio_frames.format]
+
+    with wave.open(str(output_path), 'wb') as wav_file:
+        wav_file.setnchannels(audio_frames.channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(audio_frames.sample_rate)
+        wav_file.writeframes(audio_frames.to_bytes())
 
 
 class AudioStream(StreamReceiver):
@@ -29,7 +49,7 @@ class AudioStream(StreamReceiver):
             source: Stream source type ('pyaudio', 'udp', or 'tcp')
             buffer_duration: Duration of the ring buffer in seconds
             **kwargs: Additional configuration parameters
-                format: Audio format (default: pyaudio.paInt16)
+                format: Audio format (default: int16)
                 channels: Number of channels (default: 1)
                 rate: Sample rate in Hz (default: 16000)
                 chunk_size: Frames per buffer (default: 1024)
@@ -47,7 +67,7 @@ class AudioStream(StreamReceiver):
         self.conn: Optional[socket.socket] = None  # For TCP connection
 
         # Stream configuration
-        self.format = kwargs.get('format', pyaudio.paInt16)
+        self.format = kwargs.get('format', 'int16')
         self.channels = kwargs.get('channels', 1)
         self.rate = kwargs.get('rate', 16000)
         self.chunk_size = kwargs.get('chunk_size', 512)
@@ -56,7 +76,7 @@ class AudioStream(StreamReceiver):
         self._frame_metadata = {
             'sample_rate': self.rate,
             'channels': self.channels,
-            'format': 'int16'
+            'format': self.format
         }
 
         # Calculate buffer size in frames
@@ -95,34 +115,6 @@ class AudioStream(StreamReceiver):
         self._receive_thread.start()
         logger.info(f"Audio stream started with source: {self.source}")
 
-    def _initialize_pyaudio(self) -> None:
-        """Initialize PyAudio stream with configured parameters."""
-        self.p = pyaudio.PyAudio()
-        self.stream = self.p.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.rate,
-            input=True,
-            frames_per_buffer=self.chunk_size
-        )
-
-    def _initialize_udp(self) -> None:
-        """Initialize UDP socket."""
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind((self.host, self.port))
-        clear_socket_udp(self.sock)
-        self.sock.settimeout(3)
-        logger.info(f"UDP socket initialized on {self.host}:{self.port}")
-
-    def _initialize_tcp(self) -> None:
-        """Initialize TCP socket."""
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind((self.host, self.port))
-        self.sock.listen(1)
-        self.conn, addr = self.sock.accept()
-        self.conn.settimeout(3)
-        logger.info(f"TCP connection accepted from {addr}")
-
     def stop(self) -> None:
         """Stop the audio stream and clean up resources."""
         self._stop_event.set()  # Signal the thread to stop
@@ -143,6 +135,87 @@ class AudioStream(StreamReceiver):
             self._cleanup_socket()
 
         self._last_read_pos = -1
+
+    def read(self, duration: float, target_rate: Optional[int] = None, timeout: float = 5.0, latest: bool = False) -> \
+            Optional[AudioFrame]:
+        """Read audio data with optional resampling.
+
+        Args:
+            duration: Duration to read in seconds
+            target_rate: Optional target sample rate for resampling
+            timeout: Maximum time to wait for data in seconds
+            latest: Whether to read from the most recent data or continue from last position
+
+        Returns:
+            AudioFrame containing the requested duration of audio data, or None if timeout is reached
+        """
+        frames_needed = int(duration * self.rate / self.chunk_size)
+        total_frames = []
+        start_time = time.time()
+
+        if latest:
+            self._last_read_pos = -1  # Reset to sentinel value
+
+        while len(total_frames) < frames_needed:
+            current_tail = self.buffer.get_tail()
+
+            # For first/latest read, start from most recent data
+            if self._last_read_pos == -1:
+                self._last_read_pos = current_tail
+                continue
+
+            if current_tail == self._last_read_pos:
+                if time.time() - start_time > timeout:
+                    logger.warning("Timeout reached while waiting for frames.")
+                    break
+                time.sleep(1)
+                continue
+
+            remaining_frames = frames_needed - len(total_frames)
+            available_frames = self.buffer.frames_available(self._last_read_pos)
+            end_pos = (self._last_read_pos + remaining_frames) % self.buffer.size \
+                if available_frames >= remaining_frames else current_tail
+
+            new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
+            total_frames.extend(new_frames)
+            self._last_read_pos = end_pos
+            start_time = time.time()
+
+        return self._process_frames(total_frames, target_rate)
+
+    def _initialize_pyaudio(self) -> None:
+        """Initialize PyAudio stream with configured parameters."""
+        self.p = pyaudio.PyAudio()
+        if self.format == 'int16':
+            stream_format = pyaudio.paInt16
+        else:
+            raise ValueError(f"Unsupported audio format: {self.format} for {self.source}")
+        self.stream = self.p.open(
+            format=stream_format,
+            channels=self.channels,
+            rate=self.rate,
+            input=True,
+            frames_per_buffer=self.chunk_size
+        )
+
+    def _initialize_udp(self) -> None:
+        """Initialize UDP socket."""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((self.host, self.port))
+        clear_socket_udp(self.sock)
+        self.sock.settimeout(3)
+        logger.info(f"UDP socket initialized on {self.host}:{self.port}")
+
+    def _initialize_tcp(self) -> None:
+        """Initialize TCP socket."""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((self.host, self.port))
+        self.sock.listen(1)
+        self.conn, addr = self.sock.accept()
+        self.conn.settimeout(3)
+        logger.info(f"TCP connection accepted from {addr}")
 
     def _cleanup_pyaudio(self) -> None:
         """Clean up PyAudio resources."""
@@ -219,54 +292,6 @@ class AudioStream(StreamReceiver):
             )
         except Exception as e:
             raise RuntimeError(f"Error reading chunk from {self.source}: {e}") from e
-
-    def read(self, duration: float, target_rate: Optional[int] = None,
-             timeout: float = 5.0, latest: bool = False) -> Optional[AudioFrame]:
-        """Read audio data with optional resampling.
-        
-        Args:
-            duration: Duration to read in seconds
-            target_rate: Optional target sample rate for resampling
-            timeout: Maximum time to wait for data in seconds
-            latest: Whether to read from the most recent data or continue from last position
-            
-        Returns:
-            AudioFrame containing the requested duration of audio data,
-            or None if timeout is reached
-        """
-        frames_needed = int(duration * self.rate / self.chunk_size)
-        total_frames = []
-        start_time = time.time()
-
-        if latest:
-            self._last_read_pos = -1  # Reset to sentinel value
-
-        while len(total_frames) < frames_needed:
-            current_tail = self.buffer.get_tail()
-
-            # For first/latest read, start from most recent data
-            if self._last_read_pos == -1:
-                self._last_read_pos = current_tail
-                continue
-
-            if current_tail == self._last_read_pos:
-                if time.time() - start_time > timeout:
-                    logger.warning("Timeout reached while waiting for frames.")
-                    break
-                time.sleep(1)
-                continue
-
-            remaining_frames = frames_needed - len(total_frames)
-            available_frames = self.buffer.frames_available(self._last_read_pos)
-            end_pos = (self._last_read_pos + remaining_frames) % self.buffer.size \
-                if available_frames >= remaining_frames else current_tail
-
-            new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
-            total_frames.extend(new_frames)
-            self._last_read_pos = end_pos
-            start_time = time.time()
-
-        return self._process_frames(total_frames, target_rate)
 
     def _process_frames(self, frames: list, target_rate: Optional[int]) -> Optional[AudioFrame]:
         """Process collected frames and apply resampling if needed.

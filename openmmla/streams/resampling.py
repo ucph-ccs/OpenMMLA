@@ -2,14 +2,26 @@ from enum import Enum
 from typing import List
 
 try:
-    import librosa  # type: ignore
+    import librosa
 except ImportError:
     pass
 
 import numpy as np
 from scipy import signal
 
-from openmmla.utils.audio.io import int16_to_float32, float32_to_int16
+# 16-bit integer range:
+MIN_INT16 = -32768  # -2¹⁵
+MAX_INT16 = 32767  # 2¹⁵ - 1
+
+
+def int16_to_float32(data: np.ndarray) -> np.ndarray:
+    """Convert int16 to float32 [-1.0, 1.0]."""
+    return data.astype(np.float32) / 32768.0  # Use 2¹⁵
+
+
+def float32_to_int16(data: np.ndarray) -> np.ndarray:
+    """Convert float32 [-1.0, 1.0] to int16."""
+    return np.clip(data * 32768.0, MIN_INT16, MAX_INT16).astype(np.int16)
 
 
 class ResampleMethod(Enum):
@@ -35,7 +47,7 @@ class ResampleMethod(Enum):
 def resample_audio(data: np.ndarray,
                    source_rate: int,
                    target_rate: int,
-                   method: ResampleMethod = ResampleMethod.AUDIO_POLYPHASE,
+                   method: ResampleMethod,
                    **kwargs) -> np.ndarray:
     """Resample audio data."""
     if source_rate == target_rate:
@@ -140,7 +152,7 @@ def _audio_polyphase_resample(data: np.ndarray,
         target_rate: Target sampling rate in Hz
         
     Returns:
-        np.ndarray: Resampled audio data in same format as input (int16 or float32)
+        np.ndarray: Resampled audio data in the same format as input (int16 or float32)
     """
     # Convert to float32
     if data.dtype == np.int16:

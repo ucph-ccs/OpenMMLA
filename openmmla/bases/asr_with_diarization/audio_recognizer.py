@@ -3,7 +3,7 @@ import os
 import numpy as np
 import yaml
 
-from openmmla.services.audio import AudioInferer
+from openmmla.services.audio.requests import request_audio_inference
 from openmmla.utils.audio.files import segment_wav
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
@@ -16,60 +16,17 @@ class AudioRecognizer:
     """
     logger = get_logger('audio-recognizer')
 
-    def __init__(self, config_path, audio_db, local=False, use_cuda=True, use_onnx=False):
+    def __init__(self, config_path, audio_db):
         config = yaml.safe_load(open(config_path, 'r'))
         self.audio_db = audio_db
-        self.local = local
-
-        if self.local:
-            self.audio_inferer = AudioInferer(config_path, use_cuda=use_cuda, use_onnx=use_onnx)
-        else:
-            # self.server_host = socket.gethostbyname(config['Server']['server_host'])
-            self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inference'])
-            print(f"Audio inferer URL: {self.audio_inferer_url}")
+        self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inference'])
+        print(f"Audio inferer URL: {self.audio_inferer_url}")
 
         self.registered_speaker_names = []
         self.registered_speaker_features = None
         self.speaker_feature_count = {}
         self._load_audio_db(self.audio_db)
-        self.logger.info(f"Successfully initialize audio recognizer, with local set to {local}.")
-
-    def _load_audio_db(self, audio_db_path):
-        # Clean the speaker profiles
-        self.registered_speaker_names = []
-        self.registered_speaker_features = None
-        if not os.path.exists(audio_db_path):
-            os.mkdir(audio_db_path)
-            return
-
-        for person_dir in os.listdir(audio_db_path):
-            if person_dir.endswith('.DS_Store'):
-                continue
-
-            person_path = os.path.join(audio_db_path, person_dir)
-            person_features = []
-            for audio in os.listdir(person_path):
-                if audio.endswith('.DS_Store'):
-                    continue
-                audio_path = os.path.join(person_path, audio)
-                try:
-                    feature = self.audio_inferer.infer(audio_path)[0]
-                except TypeError as e:  # In case the feature is None
-                    self.logger.warning(f'{e} happens when inferring, return')
-                    return
-                person_features.append(feature)
-
-            person_features = np.array(person_features)
-            person_features = person_features / (np.linalg.norm(person_features, ord=2, axis=-1, keepdims=True))
-            reference_emb = np.sum(person_features, axis=0) / len(person_features)
-
-            self.registered_speaker_names.append(person_dir)
-            self.speaker_feature_count[person_dir] = len(person_features)
-            if self.registered_speaker_features is None:
-                self.registered_speaker_features = reference_emb[np.newaxis, :]
-            else:
-                self.registered_speaker_features = np.vstack([self.registered_speaker_features, reference_emb])
-            self.logger.info("Loaded %s audio." % person_dir)
+        self.logger.info(f"Successfully initialize audio recognizer.")
 
     def register(self, path, user_name):
         user_dir = os.path.join(self.audio_db, user_name)
@@ -79,7 +36,7 @@ class AudioRecognizer:
         for audio_file in audio_files:
             if audio_file.endswith('.wav'):
                 audio_path = os.path.join(user_dir, audio_file)
-                feature = self.audio_inferer.infer(audio_path)[0]
+                feature = self._infer(audio_path)
                 features.append(feature)
 
         features = np.array(features)
@@ -95,7 +52,7 @@ class AudioRecognizer:
 
     def recognize(self, path, update_threshold=0.6):
         try:
-            feature = self.audio_inferer.infer(path)[0]
+            feature = self._infer(path)
         except TypeError as e:  # In case the feature is None
             self.logger.warning(f'{e} happens when inferring, discard this segment')
             return '', -1
@@ -114,7 +71,7 @@ class AudioRecognizer:
         if not set(candidates).issubset(set(self.registered_speaker_names)):
             raise ValueError("Some candidates are not registered in the database.")
         try:
-            feature = self.audio_inferer.infer(path)[0]
+            feature = self._infer(path)
         except TypeError as e:
             self.logger.warning(f'{e} happens when inferring, discard this segment')
             return '', -1
@@ -136,6 +93,46 @@ class AudioRecognizer:
         self.audio_db = audio_db
         self._load_audio_db(self.audio_db)
         self.logger.info("Successfully reload audio database.")
+
+    def _load_audio_db(self, audio_db_path):
+        # Clean the speaker profiles
+        self.registered_speaker_names = []
+        self.registered_speaker_features = None
+        if not os.path.exists(audio_db_path):
+            os.mkdir(audio_db_path)
+            return
+
+        for person_dir in os.listdir(audio_db_path):
+            if person_dir.endswith('.DS_Store'):
+                continue
+
+            person_path = os.path.join(audio_db_path, person_dir)
+            person_features = []
+            for audio in os.listdir(person_path):
+                if audio.endswith('.DS_Store'):
+                    continue
+                audio_path = os.path.join(person_path, audio)
+                try:
+                    feature = self._infer(audio_path)
+                except TypeError as e:  # In case the feature is None
+                    self.logger.warning(f'{e} happens when inferring, return')
+                    return
+                person_features.append(feature)
+
+            person_features = np.array(person_features)
+            person_features = person_features / (np.linalg.norm(person_features, ord=2, axis=-1, keepdims=True))
+            reference_emb = np.sum(person_features, axis=0) / len(person_features)
+
+            self.registered_speaker_names.append(person_dir)
+            self.speaker_feature_count[person_dir] = len(person_features)
+            if self.registered_speaker_features is None:
+                self.registered_speaker_features = reference_emb[np.newaxis, :]
+            else:
+                self.registered_speaker_features = np.vstack([self.registered_speaker_features, reference_emb])
+            self.logger.info("Loaded %s audio." % person_dir)
+
+    def _infer(self, audio_path):
+        return request_audio_inference(audio_path, self.audio_db.split('/')[-1], self.audio_inferer_url)[0]
 
     def _update_features(self, speaker_name, new_feature):
         speaker_index = self.registered_speaker_names.index(speaker_name)

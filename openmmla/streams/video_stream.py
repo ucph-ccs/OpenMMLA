@@ -4,8 +4,8 @@ from typing import Optional, Union, List
 
 import cv2
 
-from openmmla.utils.logger import get_logger
 from openmmla.streams.resampling import resample_video, ResampleMethod
+from openmmla.utils.logger import get_logger
 from openmmla.utils.threads import RaisingThread
 from .frame import VideoFrame
 from .stream_buffer import RingBuffer
@@ -196,7 +196,7 @@ class VideoStream(StreamReceiver):
         return self._process_frames(total_frames, target_fps)
 
     def _process_frames(self, frames: list, target_fps: Optional[float]) -> Optional[
-        Union[VideoFrame, List[VideoFrame]]]:
+                        Union[VideoFrame, List[VideoFrame]]]:
         """Process collected frames and apply fps conversion if needed.
         
         Args:

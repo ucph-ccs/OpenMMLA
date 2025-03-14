@@ -1,5 +1,13 @@
-# Time-based augmentation techniques/manipulations for audio data.
-# Imported and modified based on pydiogment
+"""This module contains utility functions for time-based audio data augmentation. Imported and modified based on pydiogment.
+
+- eliminate_silence: Eliminate silence from the voice file using ffmpeg library.
+- random_cropping: Crop the audio file randomly with minimum duration.
+- slow_down: Slow or stretch a wave.
+- speed: Speed or shrink a wave.
+- shift_time: Shift audio in time.
+- reverse: Reverse the audio signal.
+- resample_audio: Resample the signal according a new input sampling rate with respect to the Nyquist-Shannon theorem.
+"""
 import math
 import os
 import random
@@ -50,7 +58,7 @@ def random_cropping(infile: str, min_len: float = 1) -> None:
         infile: Input audio file path
         min_len: Minimum duration in seconds
     """
-    fs, x = read_signal_from_wav(filename=infile)
+    fs, x = read_signal_from_wav(audio_path=infile)
     t_end = x.size / fs
 
     if t_end > min_len:
@@ -59,7 +67,7 @@ def random_cropping(infile: str, min_len: float = 1) -> None:
         y = x[int(math.floor(start * fs)):int(math.ceil(end * fs))]
 
         outfile = os.path.splitext(infile)[0] + f"_augmented_randomly_cropped_{min_len}.wav"
-        write_signal_to_wav(sig=y, fs=fs, filename=outfile)
+        write_signal_to_wav(sig=y, fs=fs, output_path=outfile)
     else:
         warnings.warn("min_len provided is greater than the duration of the song.")
 
@@ -118,13 +126,13 @@ def shift_time(infile: str, tshift: int, direction: str) -> None:
         tshift: Time shift in seconds
         direction: Shift direction ("left" or "right")
     """
-    fs, sig = read_signal_from_wav(filename=infile)
+    fs, sig = read_signal_from_wav(audio_path=infile)
     shift = int(tshift * fs) * int(direction == "left") - \
             int(tshift * fs) * int(direction == "right")
 
     augmented_sig = np.roll(sig, shift)
     outfile = os.path.splitext(infile)[0] + f"_augmented_{direction}_{tshift}_shifted.wav"
-    write_signal_to_wav(sig=augmented_sig, fs=fs, filename=outfile)
+    write_signal_to_wav(sig=augmented_sig, fs=fs, output_path=outfile)
 
 
 def reverse(infile: str) -> None:
@@ -133,11 +141,11 @@ def reverse(infile: str) -> None:
     Args:
         infile: Input audio file path
     """
-    fs, sig = read_signal_from_wav(filename=infile)
+    fs, sig = read_signal_from_wav(audio_path=infile)
     augmented_sig = sig[::-1]
 
     outfile = os.path.splitext(infile)[0] + "_augmented_reversed.wav"
-    write_signal_to_wav(sig=augmented_sig, fs=fs, filename=outfile)
+    write_signal_to_wav(sig=augmented_sig, fs=fs, output_path=outfile)
 
 
 def resample_audio(infile, sr):

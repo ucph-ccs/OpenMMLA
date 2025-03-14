@@ -1,3 +1,10 @@
+"""This module contains utility functions to calculate the properties of an audio file.
+
+- get_energy_level: Calculate the volume level of an audio file.
+- get_audio_properties: Get properties of an audio file.
+- calculate_rms_db: Calculate the root-mean-square (RMS) energy of the audio data in decibels.
+- calculate_audio_duration: Calculate the duration of the audio file.
+"""
 import wave
 from typing import Dict
 
@@ -7,8 +14,7 @@ import soundfile as sf
 
 
 def get_energy_level(audio_file_path: str, verbose: bool = True) -> (float, float):
-    """
-    Calculate the volume level of audio file
+    """Calculate the volume level of audio file
 
     Args:
         verbose: Print out message or not
@@ -29,8 +35,7 @@ def get_energy_level(audio_file_path: str, verbose: bool = True) -> (float, floa
 
 
 def get_audio_properties(wav_file: str) -> Dict:
-    """
-    Get properties of an audio file.
+    """Get properties of an audio file.
 
     Args:
         wav_file (str): Path to the .wav audio file.
@@ -55,8 +60,7 @@ def get_audio_properties(wav_file: str) -> Dict:
 
 
 def calculate_rms_db(audio_samples: np.ndarray) -> float:
-    """
-    Calculate the root-mean-square (RMS) energy of the audio data in decibels.
+    """Calculate the root-mean-square (RMS) energy of the audio data in decibels.
 
     Args:
         audio_samples (np.ndarray): Numpy array of audio samples.
@@ -69,8 +73,7 @@ def calculate_rms_db(audio_samples: np.ndarray) -> float:
 
 
 def calculate_audio_duration(audio_path: str):
-    """
-    Calculate the duration of the audio file
+    """Calculate the duration of the audio file
 
     Args:
         audio_path (str): the path of the audio

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from time import time
-from typing import Any, Optional, Dict, Tuple
+from typing import Any, Optional, Dict, Tuple, Union, List
 
 import numpy as np
 
@@ -16,6 +16,7 @@ class StreamFrame:
 @dataclass
 class AudioFrame(StreamFrame):
     """Audio frame with specific audio properties."""
+    data: Union[np.ndarray, bytes, List[bytes], Tuple[bytes]]
 
     def __post_init__(self):
         """Ensure required metadata fields are present."""

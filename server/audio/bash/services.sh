@@ -5,8 +5,8 @@ EXAMPLES_DIR="$BASH_DIR/../examples"
 PYHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="audio-server"
+services=("infer" "resample" "enhance" "separate" "transcribe" "vad")
 ports=(5000 5001 5002 5003 5004 5005)
-services=("transcribe" "separate" "infer" "enhance" "vad" "resample")
 
 # Loop through each port and kill processes using those ports
 for i in "${!ports[@]}"
@@ -30,12 +30,12 @@ done
 
 # Tmux session command for each service
 declare -a commands=(
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 1 -b 0.0.0.0:5000 --pythonpath $PYHON_PATH serve_speech_transcriber:app"
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5001 --pythonpath $PYHON_PATH serve_speech_separator:app"
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5002 --pythonpath $PYHON_PATH serve_audio_inferer:app"
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5003 --pythonpath $PYHON_PATH serve_speech_enhancer:app"
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5004 --pythonpath $PYHON_PATH serve_vad:app"
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 1 -b 0.0.0.0:5005 --pythonpath $PYHON_PATH serve_audio_resampler:app"
+  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5000 --pythonpath $PYHON_PATH serve_audio_inferer:app"
+  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 1 -b 0.0.0.0:5001 --pythonpath $PYHON_PATH serve_audio_resampler:app"
+  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5002 --pythonpath $PYHON_PATH serve_speech_enhancer:app"
+  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5003 --pythonpath $PYHON_PATH serve_speech_separator:app"
+  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 1 -b 0.0.0.0:5004 --pythonpath $PYHON_PATH serve_speech_transcriber:app"
+  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 3 -b 0.0.0.0:5005 --pythonpath $PYHON_PATH serve_voice_activity_detector:app"
 )
 
 # Loop for creating tmux session for each service

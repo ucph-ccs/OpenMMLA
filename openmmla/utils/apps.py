@@ -2,7 +2,7 @@ from flask import Flask
 
 
 def create_app(class_type, endpoint, method_name, class_args=None, route_args=None):
-    """Create a Flask app for deploying restful services.
+    """Create Flask app for deploying restful services.
 
     Args:
         class_type (class): The class to instantiate (e.g., AudioEnhancer or AudioInferer).

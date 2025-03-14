@@ -1,7 +1,9 @@
-"""
-- Description: implements the scipybased Butterworth filters.
-    - bandpas: https://stackoverflow.com/questions/12093594/how-to-implement-band-pass-butterworth-filter-with-scipy-signal-butter
-    - highpass: https://stackoverflow.com/questions/39032325/python-high-pass-filter
+"""This module contains utility functions to filter audio signals.
+
+- butter_lowpass: Design lowpass filter. https://stackoverflow.com/questions/12093594/how-to-implement-band-pass-butterworth-filter-with-scipy-signal-butter
+- butter_highpass: Design highpass filter. https://stackoverflow.com/questions/39032325/python-high-pass-filter
+- butter_bandpass: Design bandpass filter.
+- butter_filter: Apply filter to signal.
 """
 from scipy.signal import butter, lfilter
 

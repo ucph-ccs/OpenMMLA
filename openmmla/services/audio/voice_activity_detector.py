@@ -7,7 +7,7 @@ from flask import request, jsonify, send_file
 from silero_vad import load_silero_vad, read_audio, save_audio, get_speech_timestamps, collect_chunks
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.io import write_frames_to_wav
+from openmmla.utils.audio.io import write_bytes_to_wav
 
 
 class VoiceActivityDetector(Server):
@@ -45,7 +45,7 @@ class VoiceActivityDetector(Server):
                 inplace = int(request.values.get('inplace', 0))
                 audio_file = request.files['audio']
                 audio_file_path = self._get_temp_file_path('vad_audio', base_id, 'wav')
-                write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
+                write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting VAD for {base_id}...")
                 result = self.apply_vad(audio_file_path, fr, inplace)

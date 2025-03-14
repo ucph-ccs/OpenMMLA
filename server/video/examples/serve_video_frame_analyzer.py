@@ -5,7 +5,7 @@ from openmmla.services.video import VideoFrameAnalyzer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = os.path.join(project_dir, 'config.yml')
+config_path = os.path.join(project_dir, 'config_test.yml')  # Use your own config file
 
 app = create_app(
     class_type=VideoFrameAnalyzer,

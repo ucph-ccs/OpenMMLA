@@ -1,3 +1,18 @@
+"""Transcriber classes for transcribing audio files using Hugging Face and OpenAI Whisper models.
+
+Example:
+    Basic usage with Whisper model::
+
+        transcriber = get_transcriber("openai/whisper-tiny.en", language="en", use_cuda=False)
+        result = transcriber.transcribe("path/to/audio/file.wav")
+        print(result)
+
+    Using Roest model::
+
+        transcriber = get_transcriber("alexandrainst/roest-315m", language="da", use_cuda=False)
+        result = transcriber.transcribe("path/to/audio/file.wav")
+        print(result)
+"""
 from abc import ABC, abstractmethod
 
 import librosa
@@ -114,13 +129,3 @@ def get_transcriber(model_name, language="en", use_cuda=True):
         raise UnsupportedModelError(f"Unsupported model: {model_name}")
 
     return transcriber_class(model_name, language, use_cuda=use_cuda)
-
-# Usage example:
-# transcriber = get_transcriber("openai/whisper-tiny.en", language="en", use_cuda=False)
-# result = transcriber.transcribe("path/to/audio/file.wav")
-# print(result)
-
-# For Roest model:
-# transcriber = get_transcriber("alexandrainst/roest-315m", language="da", use_cuda=False)
-# result = transcriber.transcribe("path/to/audio/file.wav")
-# print(result)

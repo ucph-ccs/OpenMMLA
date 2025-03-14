@@ -22,6 +22,7 @@ def kill_process(pid):
 
 
 def free_port(port):
+    """Free the port by killing the process using it."""
     pids = find_process_using_port(port)
     if pids:
         print(f"Processes using port {port}: {pids}")

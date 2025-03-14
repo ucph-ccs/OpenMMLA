@@ -4,7 +4,8 @@ import io
 from flask import request, jsonify, send_file
 
 from openmmla.services.server import Server
-from openmmla.utils.audio.io import resample_audio_file, write_frames_to_wav
+from openmmla.utils.audio.io import write_bytes_to_wav
+from openmmla.utils.audio.augf import resample_audio
 
 
 class AudioResampler(Server):
@@ -31,10 +32,10 @@ class AudioResampler(Server):
                 target_fr = int(request.values.get('target_fr'))
                 audio_file = request.files['audio']
                 audio_file_path = self._get_temp_file_path('resample_audio', base_id, 'wav')
-                write_frames_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
+                write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                 self.logger.info(f"starting resampling for {base_id}...")
-                resample_audio_file(audio_file_path, target_fr)
+                resample_audio(audio_file_path, target_fr)
                 self.logger.info(f"finished resampling for {base_id}...")
 
                 with open(audio_file_path, 'rb') as f:

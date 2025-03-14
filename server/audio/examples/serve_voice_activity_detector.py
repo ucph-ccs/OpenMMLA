@@ -12,8 +12,8 @@ app = create_app(
     class_args={'project_dir': project_dir, 'use_cuda': True, 'use_onnx': True},
 )
 
-# gunicorn -w 1 -b 0.0.0.0:5004 vad_server:app
-# hypercorn -w 1 -b 0.0.0.0:5004 vad_server:app
-# kill -9 $(lsof -ti:5004)
+# gunicorn -w 1 -b 0.0.0.0:5005 serve_voice_activity_detector:app
+# hypercorn -w 1 -b 0.0.0.0:5005 serve_voice_activity_detector:app
+# kill -9 $(lsof -ti:5005)
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5004, threaded=True)
+    app.run(host='0.0.0.0', port=5005, threaded=True)

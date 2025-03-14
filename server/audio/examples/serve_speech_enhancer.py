@@ -12,8 +12,8 @@ app = create_app(
     class_args={'project_dir': project_dir, 'use_cuda': True},
 )
 
-# gunicorn -w 1 -b 0.0.0.0:5000 enhance_server:app
-# hypercorn -w 1 -b 0.0.0.0:5000 enhance_server:app
-# kill -9 $(lsof -ti:5000)
+# gunicorn -w 1 -b 0.0.0.0:5002 serve_speech_enhancer:app
+# hypercorn -w 1 -b 0.0.0.0:5002 serve_speech_enhancer:app
+# kill -9 $(lsof -ti:5002)
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    app.run(host='0.0.0.0', port=5002, threaded=True)
