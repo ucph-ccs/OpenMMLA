@@ -1,0 +1,96 @@
+/* SelectBucketPage.css */
+
+.select-bucket-container {
+  text-align: center;
+  padding: 50px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  background-image: url('bg1.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+
+.dashboard-title {
+  font-size: 2em;
+  color: #fff;
+  margin: 0 0 2em;
+}
+
+.select-bucket {
+  padding: 1em;
+  border-radius: 10px;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  margin-bottom: 2em;
+}
+
+.select-bucket select, .select-bucket button {
+  padding: 10px;
+  margin: 5px;
+  border-radius: 5px;
+  border: 1px solid #ddd;
+  cursor: pointer;
+}
+
+.select-bucket button {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  font-weight: bold;
+}
+
+.select-bucket button:hover {
+  background-color: #0056b3;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+.selected-bucket {
+  color: #fff;
+  text-shadow: 1px 1px 2px #000;
+  font-weight: bold;
+  font-size: 1em;
+}
+
+/* Progress after select bucket */
+@keyframes jump {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.loader {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 2em 0;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  margin: 0 5px;
+  background-color: #007bff;
+  border-radius: 50%;
+  animation: jump 0.6s infinite alternate;
+}
+
+.dot:nth-child(1) {
+  animation-delay: 0.1s;
+}
+
+.dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+

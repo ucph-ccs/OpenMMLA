@@ -13,7 +13,7 @@ logger/
 mbox-audio/
 mbox-video/
 mbox-uber/
-test/
+tests/
 
 # Ignore specific files
 .DS_Store

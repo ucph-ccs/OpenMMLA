@@ -52,7 +52,7 @@ class AudioStream(StreamReceiver):
                 format: Audio format (default: int16)
                 channels: Number of channels (default: 1)
                 rate: Sample rate in Hz (default: 16000)
-                chunk_size: Frames per buffer (default: 1024)
+                chunk_size: Size of audio chunk to read in frames (default: 512)
                 resample_method: Method for resampling (default: AUDIO_LIBROSA)
                 host: Socket host (for 'udp' or 'tcp' source)
                 port: Socket port (for 'udp' or 'tcp' source)
@@ -61,8 +61,8 @@ class AudioStream(StreamReceiver):
         self.source = source
 
         # Socket configuration
-        self.host = kwargs.get('host', 'localhost')
-        self.port = kwargs.get('port', 8000)
+        self.host = kwargs.get('host', '0.0.0.0')  # Default to all interfaces
+        self.port = kwargs.get('port', 8000)    # Default to port 8000
         self.sock: Optional[socket.socket] = None
         self.conn: Optional[socket.socket] = None  # For TCP connection
 

@@ -13,7 +13,7 @@ import numpy as np
 from .io import read_signal_from_wav, write_signal_to_wav
 
 
-def apply_gain(infile: str, gain: float = 40, inplace: bool = True) -> None:
+def apply_gain(infile: str, gain: float = 10, inplace: bool = True) -> None:
     """Apply gain to the audio file.
 
     Args:

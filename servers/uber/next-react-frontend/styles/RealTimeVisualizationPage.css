@@ -1,0 +1,101 @@
+/* RealTimeVisualizationPage.css */
+
+.realtime-visualization-container {
+  padding-top: 60px;
+  display: flex; /* Use flexbox */
+  justify-content: space-around; /* Space out the cards */
+  flex-wrap: wrap; /* Allow wrapping for smaller screens */
+}
+
+.visualization-title {
+  text-align: center;
+  color: #0056b3;
+  margin-bottom: 30px;
+  width: 100%; /* Make title take full width */
+}
+
+/* Styles for cards */
+.speaker-recognition-card, .speaker-transcription-card, .graph-card-2d {
+  flex: 1; /* Flex grow */
+  max-width: 45%; /* Max width for each card */
+  margin: 10px;
+  padding: 20px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+  background-color: #f9f9f9;
+  overflow: hidden; /* Optional, to ensure consistent card sizes */
+}
+
+/* Styles for headers within cards */
+.speaker-recognition-card h3, .speaker-transcription-card h3 {
+  color: #007bff;
+  margin-bottom: 15px;
+}
+
+/* Styles for log container */
+.speaker-recognition-card .log-container, .speaker-transcription-card .log-container {
+  max-height: 300px; /* Adjust as needed */
+  overflow-y: auto;
+  background-color: #f0f0f0;
+  border: 1px solid #ccc;
+  padding: 10px;
+  margin-top: 10px;
+}
+
+/* Styles for data content */
+.speaker-recognition-card p, .speaker-transcription-card p {
+  color: #333; /* Different color for text */
+  font-style: italic; /* Different font style */
+}
+
+/* Styles for log entries */
+.speaker-recognition-card .log-entry, .speaker-transcription-card .log-entry {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px;
+  margin-bottom: 5px;
+  background: #f0f0f0;
+  border-radius: 5px;
+  font-family: 'Courier New', monospace;
+}
+
+.speaker-recognition-card .log-entry span, .speaker-transcription-card .log-entry span {
+  margin-right: 10px;
+  font-family: 'Courier New', monospace;
+  white-space: normal; /* Allow wrapping */
+}
+
+/* Mobile responsiveness */
+@media screen and (max-width: 768px) {
+  .realtime-visualization-container {
+    flex-direction: column;
+  }
+
+  .speaker-recognition-card, .speaker-transcription-card, .graph-card-2d {
+    max-width: 89%;
+    margin-left: 5px; /* Adjusted margin */
+    padding: 15px; /* Reduced padding */
+  }
+
+  .speaker-recognition-card .log-container, .speaker-transcription-card .log-container, .graph-container-2d {
+    max-height: 250px; /* Optional adjustment */
+  }
+}
+
+
+/* Styles for the 2D graph container */
+.graph-container-2d {
+  width: 100%; /* Take the full width of the card */
+  height: 600px; /* Fixed height */
+  background-color: #e9ecef; /* Light grey background */
+  overflow: hidden; /* Hide overflow */
+}
+
+/* Ensure the graph title aligns with other card titles */
+.graph-card-2d h3 {
+  text-align: center;
+  color: #007bff; /* Blue, similar to other card titles */
+  margin-bottom: 15px; /* Consistent margin */
+}

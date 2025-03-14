@@ -11,6 +11,8 @@
 import wave
 from typing import List, Tuple, Union
 
+from scipy.io.wavfile import read, write
+
 import numpy as np
 import soundfile as sf
 
@@ -18,8 +20,8 @@ import soundfile as sf
 # 16-bit integer range:
 # MIN_INT16 = -32768  # -2¹⁵
 # MAX_INT16 = 32767  # 2¹⁵ - 1
-
-
+#
+#
 # def int16_to_float32(data: np.ndarray) -> np.ndarray:
 #     """Convert int16 to float32 [-1.0, 1.0]."""
 #     return data.astype(np.float32) / 32768.0  # Use 2¹⁵
@@ -30,16 +32,16 @@ import soundfile as sf
 #     return np.clip(data * 32768.0, MIN_INT16, MAX_INT16).astype(np.int16)
 #
 #
-# def read_signal_from_wav(filename: str):
+# def read_signal_from_wav(audio_path: str):
 #     """Read a wave file as normalized mono signal.
 #
 #     Args:
-#         filename (str): string path or open file handle.
+#         audio_path (str): string path or open file handle.
 #
 #     Returns:
 #         tuple of sampling rate and audio data normalized to [-1.0, 1.0].
 #     """
-#     fr, sig = read(filename=filename)
+#     fr, sig = read(filename=audio_path)
 #     if sig.ndim == 1:
 #         samples = sig
 #     else:
@@ -48,22 +50,22 @@ import soundfile as sf
 #     if sig.dtype == np.int16:
 #         samples = int16_to_float32(samples)
 #     return fr, samples
-#
-#
-# def write_signal_to_wav(sig: np.ndarray, fs: int, filename: str):
+
+
+# def write_signal_to_wav(sig: np.ndarray, fs: int, output_path: str):
 #     """Write processed signal to a wave file as mono.
 #
 #     Args:
 #         sig (np.array): signal/audio array in [-1.0, 1.0] range.
 #         fs (int): sampling rate.
-#         filename (str): output file path.
+#         output_path (str): output file path.
 #
 #     Outputs:
 #         Save a wave file to output_file_path.
 #     """
 #     if sig.dtype in [np.float32, np.float64]:
 #         sig = float32_to_int16(sig)
-#     write(filename=filename, rate=fs, data=sig)
+#     write(filename=output_path, rate=fs, data=sig)
 
 
 def read_signal_from_wav(audio_path: str):
