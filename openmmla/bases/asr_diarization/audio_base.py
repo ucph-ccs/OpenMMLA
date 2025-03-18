@@ -7,7 +7,6 @@ import shutil
 import threading
 import time
 from abc import abstractmethod, ABC
-from typing import Union
 
 import librosa
 import numpy as np
@@ -120,26 +119,26 @@ class AudioBase(Base, ABC):
 
     def _setup_yaml(self):
         self.register_duration = int(self.config[self.base_type]['register_duration'])
+        self.recognize_duration = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
+            self.config[self.base_type]['recognize_duration'])
         self.rms_threshold = int(self.config[self.base_type]['rms_threshold'])
         self.rms_peak_threshold = int(self.config[self.base_type]['rms_peak_threshold'])
         self.threshold = float(self.config[self.base_type]['recognize_sp_threshold']) if self.sp else float(
             self.config[self.base_type]['recognize_threshold'])
         self.keep_threshold = float(self.config[self.base_type]['keep_sp_threshold']) if self.sp else float(
             self.config[self.base_type]['keep_threshold'])
-        self.recognize_duration = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
-            self.config[self.base_type]['recognize_duration'])
         self.speech_transcriber_url = resolve_url(self.config['Server']['asr']['speech_transcription'])
         self.speech_separator_url = resolve_url(self.config['Server']['asr']['speech_separation'])
         self.speech_enhancer_url = resolve_url(self.config['Server']['asr']['speech_enhancement'])
         self.vad_url = resolve_url(self.config['Server']['asr']['voice_activity_detection'])
 
     def _setup_directories(self):
-        self.audio_realtime_dir = os.path.join(self.project_dir, 'audio', 'real-time')
-        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
-        self.audio_db_dir = os.path.join(self.project_dir, 'audio_db')
+        self.runtime_dir = os.path.join(self.project_dir, 'real-time', 'runtime')
+        self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
+        self.audio_db_dir = os.path.join(self.project_dir, 'real-time', 'profiles')
         self.audio_db = os.path.join(self.audio_db_dir, f'{self.base_type}_{self.id}')
-        os.makedirs(self.audio_realtime_dir, exist_ok=True)
-        os.makedirs(self.audio_temp_dir, exist_ok=True)
+        os.makedirs(self.runtime_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
         os.makedirs(self.audio_db_dir, exist_ok=True)
         os.makedirs(self.audio_db, exist_ok=True)
 
@@ -152,14 +151,14 @@ class AudioBase(Base, ABC):
 
     def run(self):
         """Interface for running the Audio Base."""
-        func_map = {1: self._register_profile, 2: self._recognize_voice, 3: self._reset, 4: self._switch_mode}
+        func_map = {1: self._start_register, 2: self._start_recognize, 3: self._reset, 4: self._switch_mode}
         while True:
             try:
                 print(f"\033]0;Audio Base {self.base_type} {self.id} \007")
                 select_fun = get_function_base()
                 if select_fun == 0:
                     print("------------------------------------------------")
-                    clear_directory(self.audio_temp_dir)
+                    clear_directory(self.temp_dir)
                     self.logger.info("Exiting the program...")
                     break
                 func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
@@ -170,12 +169,12 @@ class AudioBase(Base, ABC):
                     exc_info=True)
 
     @abstractmethod
-    def _register_profile(self):
-        """Register participant's voice to audio database."""
+    def _start_register(self):
+        """Start the speaker profile registration."""
         pass
 
     @abstractmethod
-    def _recognize_voice(self):
+    def _start_recognize(self):
         """Start the real-time voice recognition, including audio recording, speaker recognition, speech transcription,
         and listening on stop signal."""
         pass
@@ -287,10 +286,11 @@ class AudioBase(Base, ABC):
 
     def _continuous_transcribing(self):
         """Continuously transcribe audio from the transcription queue."""
+        frame_rate = 8000 if self.sp else 16000
         while not self.stop_event.is_set():
             try:
                 frames, speaker, chunk_start_time, chunk_end_time = self.transcription_queue.get(timeout=2)
-                text = self._transcribe(frames)
+                text = self._transcribe(frames, frame_rate)
                 self._upload_speech_transcription(speaker, text, chunk_start_time, chunk_end_time)
             except queue.Empty:
                 continue
@@ -319,8 +319,9 @@ class AudioBase(Base, ABC):
               f"{GREEN}{speaker} : {text}{ENDC}")
         self.influx_client.write(self.bucket_name, record=transcription_record)
 
-    def _finalize_speech_recognition_with_sp(self, speakers, similarities, durations, signals) -> tuple:
-        """Finalize the speaker recognition results of separated signals to handle edge cases.
+    def _finalize_separated_speaker_recognition(self, speakers, similarities, durations, signals) -> tuple:
+        """Finalize the speaker recognition results of separated signals to handle edge cases (only for base containing
+         multiple registered speakers).
 
         Args:
             speakers: list of recognized speakers
@@ -329,7 +330,7 @@ class AudioBase(Base, ABC):
             signals: list of separated signals
 
         Returns:
-            post-processed speakers, similarities, durations, signals
+            A tuple containing the final speakers, similarities, durations, and signals
         """
         # If there's only one speaker, keep it as is
         if len(speakers) == 1:
@@ -386,16 +387,17 @@ class AudioBase(Base, ABC):
         result_str = json.dumps(base_recognition_result)
         self.mqtt_client.publish(f'{self.bucket_name}/audio', result_str)
 
-    def _transcribe(self, frames):
+    def _transcribe(self, frames, frame_rate) -> str:
         """Transcribe audio frames to text.
 
         Args:
             frames: audio frames to be transcribed
+            frame_rate: sample rate of the audio frames
 
         Returns:
             transcribed text
         """
-        text = request_speech_transcription(frames, f'{self.base_type.lower()}_{self.id}', self.sp,
+        text = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
                                             self.speech_transcriber_url)
         return text
 
@@ -413,7 +415,7 @@ class AudioBase(Base, ABC):
         result = [base64.b64decode(encoded_bytes_stream) for encoded_bytes_stream in separated_result]
         return result
 
-    def post_process_audio(self, input_path: str, inplace: int) -> Union[str, None]:
+    def _audio_preprocessing(self, input_path: str, inplace: int) -> str | None:
         """Apply both NR and VAD processing to audio file.
 
 
@@ -424,10 +426,10 @@ class AudioBase(Base, ABC):
         Returns:
             processed audio file path
         """
-        self.apply_nr(input_path)
-        return self.apply_vad(input_path, inplace)
+        self._apply_nr(input_path)
+        return self._apply_vad(input_path, inplace)
 
-    def apply_vad(self, input_path: str, inplace: int) -> Union[str, None]:
+    def _apply_vad(self, input_path: str, inplace: int) -> str | None:
         """Apply voice activity detection to audio file.
 
         Args:
@@ -437,12 +439,12 @@ class AudioBase(Base, ABC):
         Returns:
             processed audio file path
         """
-        if not self.vad:
-            return input_path
-        return request_voice_activity_detection(input_path, f'{self.base_type.lower()}_{self.id}', inplace,
-                                                self.vad_url)
+        if self.vad:
+            return request_voice_activity_detection(input_path, f'{self.base_type.lower()}_{self.id}', inplace,
+                                                    self.vad_url)
+        return input_path
 
-    def apply_nr(self, input_path: str) -> str:
+    def _apply_nr(self, input_path: str) -> str:
         """Apply noise reduction to audio file.
 
         Args:
@@ -451,9 +453,9 @@ class AudioBase(Base, ABC):
         Returns:
             processed audio file path
         """
-        if not self.nr:
-            return input_path
-        request_speech_enhancement(input_path, f'{self.base_type.lower()}_{self.id}', self.speech_enhancer_url)
+        if self.nr:
+            request_speech_enhancement(input_path, f'{self.base_type.lower()}_{self.id}', self.speech_enhancer_url)
+        return input_path
 
     def _store_audio(self, source_path, dest_path):
         """Store or remove audio files based on the store flag.

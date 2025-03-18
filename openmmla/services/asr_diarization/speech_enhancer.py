@@ -28,7 +28,7 @@ class SpeechEnhancer(Server):
 
         self.nr_model = pretrained.dns64().cuda() if self.cuda_enable else pretrained.dns64()
 
-    def apply_nr(self, input_path: str) -> str:
+    def apply_nr(self, input_path: str):
         """Apply noise reduction to the audio."""
         chunk_size = 30
         sr = torchaudio.info(input_path).sample_rate
@@ -65,8 +65,6 @@ class SpeechEnhancer(Server):
         finally:
             torch.cuda.empty_cache()
             gc.collect()
-
-        return input_path
 
     def process_request(self):
         """Enhance the audio.

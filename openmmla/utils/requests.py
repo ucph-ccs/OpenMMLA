@@ -25,8 +25,12 @@ def resolve_url(url: str) -> str:
 
         ip = socket.gethostbyname(parsed.hostname)
         resolved = parsed._replace(netloc=f"{ip}:{parsed.port}" if parsed.port else ip)
-        return urlunparse(resolved)
-    except socket.gastrror as e:
+
+        result = urlunparse(resolved)
+        if isinstance(result, bytes):
+            result = result.decode("utf-8")
+        return result
+    except socket.gaierror as e:
         logger.warning(f"Could not resolve hostname in {url}: {e}")
         return url
 

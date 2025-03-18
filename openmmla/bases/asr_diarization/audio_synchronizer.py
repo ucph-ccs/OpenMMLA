@@ -57,9 +57,9 @@ class AudioSynchronizer(Synchronizer):
     def _setup_directories(self):
         """Set up required directories."""
         self.logger_dir = os.path.join(self.project_dir, 'logger')
-        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
+        self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
         os.makedirs(self.logger_dir, exist_ok=True)
-        os.makedirs(self.audio_temp_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
 
     def _setup_objects(self):
         """Set up client objects."""
@@ -85,7 +85,7 @@ class AudioSynchronizer(Synchronizer):
                 select_fun = get_function_synchronizer()
                 if select_fun == 0:
                     print("------------------------------------------------")
-                    clear_directory(os.path.join(self.audio_temp_dir))
+                    clear_directory(os.path.join(self.temp_dir))
                     self.logger.info("Exiting audio synchronizer...")
                     break
                 func_map.get(select_fun, lambda: print("Invalid option."))()
@@ -139,9 +139,8 @@ class AudioSynchronizer(Synchronizer):
             self.logger.info("All threads stopped.")
 
         self.mqtt_client.loop_stop()
-        # self.redis_client.publish(f"{self.bucket_name}/control", 'STOP')  # send STOP command to all bases
         session_analysis_audio(self.project_dir, self.bucket_name, self.influx_client)
-        clear_directory(self.audio_temp_dir)
+        clear_directory(self.temp_dir)
         self._clean_up()
 
     def _send_start_regularly(self):

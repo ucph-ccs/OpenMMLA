@@ -150,7 +150,8 @@ Also, when the badges are not connected, it won't receive the stop signal from s
 You can manually shut down the process to free up the port, e.g. port 50004 is in use
 type in terminal. 
 ```cmd
-sudo lsof -i :50004
+sudo lsof -i :50004  # for mac
+sudo netstat -tulnp | grep 50004  # for linux
 ```
 it will list out the process using the port 50004
 ```
@@ -159,7 +160,7 @@ python3.9 3440 ericli    9u  IPv4 0x2bf903e3e96b6203      0t0  UDP *:50004
 ```
 Then, kill the process with PID
 ```cmd
-kill -9 3440
+sudo kill -9 3440
 ```
 Or directly kill the process by 
 `kill -9 $(lsof -ti:50004)`

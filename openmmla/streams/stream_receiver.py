@@ -1,5 +1,7 @@
-# StreamReceiver is a base class for receiving data streams, with specified sampling rate, channels, etc.
-# Data is received into a buffer, and the buffer can be read by the consumer.
+"""
+StreamReceiver is a base class for receiving data streams, with specified sampling rate, channels, etc.
+Data is received into a buffer, and the buffer can be read by the consumer.
+"""
 
 from abc import ABC, abstractmethod
 from typing import Any

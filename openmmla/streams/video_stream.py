@@ -1,6 +1,5 @@
 import threading
 import time
-from typing import Optional, Union, List
 
 import cv2
 
@@ -17,7 +16,7 @@ logger = get_logger(__name__)
 class VideoStream(StreamReceiver):
     """Video stream implementation for continuous video capture."""
 
-    def __init__(self, source: Union[int, str], buffer_duration: float = 1.0, **kwargs):
+    def __init__(self, source: int | str, buffer_duration: float = 1.0, **kwargs):
         """Initialize video stream.
         
         Args:
@@ -120,7 +119,7 @@ class VideoStream(StreamReceiver):
                 self.stop()
                 raise
 
-    def _read_frame(self) -> Optional[VideoFrame]:
+    def _read_frame(self) -> VideoFrame | None:
         """Read a single frame from the video stream."""
         try:
             grabbed, frame = self.stream.read()
@@ -140,8 +139,8 @@ class VideoStream(StreamReceiver):
             logger.error(f"Error reading frame: {e}")
             return None
 
-    def read(self, duration: Optional[float] = None, target_fps: Optional[float] = None,
-             timeout: float = 5.0, latest: bool = False) -> Optional[Union[VideoFrame, List[VideoFrame]]]:
+    def read(self, duration: float = None, target_fps: float = None, timeout: float = 5.0,
+             latest: bool = False) -> VideoFrame | list[VideoFrame] | None:
         """Read video frames with optional fps conversion.
         
         Args:
@@ -195,8 +194,7 @@ class VideoStream(StreamReceiver):
 
         return self._process_frames(total_frames, target_fps)
 
-    def _process_frames(self, frames: list, target_fps: Optional[float]) -> Optional[
-                        Union[VideoFrame, List[VideoFrame]]]:
+    def _process_frames(self, frames: list, target_fps: float | None) -> VideoFrame | list[VideoFrame] | None:
         """Process collected frames and apply fps conversion if needed.
         
         Args:

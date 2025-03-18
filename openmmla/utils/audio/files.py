@@ -131,7 +131,7 @@ def segment_wav(input_file: str, output_dir: str, step_length_ms=None, window_le
 
     num_segments = (len(audio) - window_length_ms) // step_length_ms + 1
 
-    if os.path.exists(output_dir):
+    if os.path.exists(output_dir) and os.listdir(output_dir):
         response = input(f"Output directory {output_dir} already exists. Do you want to delete it? (Y/N): ")
         if response.upper() == "Y":
             shutil.rmtree(output_dir)
@@ -142,7 +142,7 @@ def segment_wav(input_file: str, output_dir: str, step_length_ms=None, window_le
             if response.upper() == "N":
                 return
     else:
-        os.makedirs(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
 
     existing_segments = len([f for f in os.listdir(output_dir) if f.endswith('.wav')])
     for i in range(num_segments):

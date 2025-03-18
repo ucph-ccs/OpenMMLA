@@ -4,7 +4,7 @@ import struct
 import threading
 import time
 import wave
-from typing import Optional
+from typing import Optional, List
 
 import numpy as np
 import pyaudio
@@ -62,7 +62,7 @@ class AudioStream(StreamReceiver):
 
         # Socket configuration
         self.host = kwargs.get('host', '0.0.0.0')  # Default to all interfaces
-        self.port = kwargs.get('port', 8000)    # Default to port 8000
+        self.port = kwargs.get('port', 8000)  # Default to port 8000
         self.sock: Optional[socket.socket] = None
         self.conn: Optional[socket.socket] = None  # For TCP connection
 
@@ -183,6 +183,39 @@ class AudioStream(StreamReceiver):
 
         return self._process_frames(total_frames, target_rate)
 
+    def _process_frames(self, frames: List[AudioFrame], target_rate: Optional[int]) -> Optional[AudioFrame]:
+        """Process collected frames and apply resampling if needed.
+
+        Args:
+            frames: List of AudioFrames to process
+            target_rate: Optional target sample rate for resampling
+
+        Returns:
+            Processed AudioFrame or None if no frames available
+        """
+        if not frames:
+            logger.warning("No frames collected within timeout period.")
+            return None
+
+        audio_data = np.concatenate([frame.data for frame in frames])
+        start_timestamp = frames[0].timestamp
+
+        if target_rate and target_rate != frames[0].sample_rate:
+            audio_data = resample_audio(
+                audio_data,
+                frames[0].sample_rate,
+                target_rate,
+                method=self.resample_method
+            )
+
+        metadata = {
+            'sample_rate': target_rate or frames[0].sample_rate,
+            'channels': frames[0].channels,
+            'format': frames[0].format,
+        }
+
+        return AudioFrame(timestamp=start_timestamp, data=audio_data, metadata=metadata)
+
     def _initialize_pyaudio(self) -> None:
         """Initialize PyAudio stream with configured parameters."""
         self.p = pyaudio.PyAudio()
@@ -292,36 +325,3 @@ class AudioStream(StreamReceiver):
             )
         except Exception as e:
             raise RuntimeError(f"Error reading chunk from {self.source}: {e}") from e
-
-    def _process_frames(self, frames: list, target_rate: Optional[int]) -> Optional[AudioFrame]:
-        """Process collected frames and apply resampling if needed.
-        
-        Args:
-            frames: List of AudioFrames to process
-            target_rate: Optional target sample rate for resampling
-            
-        Returns:
-            Processed AudioFrame or None if no frames available
-        """
-        if not frames:
-            logger.warning("No frames collected within timeout period.")
-            return None
-
-        audio_data = np.concatenate([frame.data for frame in frames])
-        start_timestamp = frames[0].timestamp
-
-        if target_rate and target_rate != frames[0].sample_rate:
-            audio_data = resample_audio(
-                audio_data,
-                frames[0].sample_rate,
-                target_rate,
-                method=self.resample_method
-            )
-
-        metadata = {
-            'sample_rate': target_rate or frames[0].sample_rate,
-            'channels': frames[0].channels,
-            'format': frames[0].format,
-        }
-
-        return AudioFrame(timestamp=start_timestamp, data=audio_data, metadata=metadata)

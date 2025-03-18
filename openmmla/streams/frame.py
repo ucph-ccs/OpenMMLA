@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from time import time
-from typing import Any, Optional, Dict, Tuple, Union, List
+from typing import Any
 
 import numpy as np
 
@@ -10,13 +10,13 @@ class StreamFrame:
     """Base class for stream data frames."""
     data: Any
     timestamp: float = field(default_factory=time)
-    metadata: Dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
 class AudioFrame(StreamFrame):
     """Audio frame with specific audio properties."""
-    data: Union[np.ndarray, bytes, List[bytes], Tuple[bytes]]
+    data: np.ndarray | bytes | list[bytes] | tuple[bytes]
 
     def __post_init__(self):
         """Ensure required metadata fields are present."""
@@ -32,8 +32,8 @@ class AudioFrame(StreamFrame):
         return self.data
 
     @classmethod
-    def from_bytes(cls, data: bytes, sample_rate: int, channels: int,
-                   format: str = 'int16', timestamp: Optional[float] = None) -> 'AudioFrame':
+    def from_bytes(cls, data: bytes, sample_rate: int, channels: int, format: str = 'int16',
+                   timestamp: float = None) -> 'AudioFrame':
         """Create AudioFrame from bytes."""
         np_data = np.frombuffer(data, dtype=format)
         metadata = {
@@ -72,7 +72,7 @@ class VideoFrame(StreamFrame):
             raise ValueError(f"Missing required metadata: {missing}")
 
     @property
-    def resolution(self) -> Tuple[int, int]:
+    def resolution(self) -> tuple[int, int]:
         return self.metadata['resolution']
 
     @property

@@ -1,8 +1,6 @@
 import json
-from typing import Union, List, Tuple
 
 import numpy as np
-# import soundfile as sf
 import wave
 
 from openmmla.utils.requests import send_request_with_retry
@@ -17,9 +15,6 @@ def request_speech_enhancement(audio_path: str, base_id: str, url: str) -> str:
     with wave.open(audio_path, 'rb') as wav_file:
         sample_rate = wav_file.getframerate()
         audio_bytes = wav_file.readframes(wav_file.getnframes())
-
-    # audio_data, sample_rate = sf.read(audio_path, dtype='int16')
-    # audio_bytes = audio_data.tobytes()
 
     files = {'audio': ('audio.wav', audio_bytes, 'audio/wav')}
     data = {'base_id': base_id, 'fr': str(sample_rate)}
@@ -38,16 +33,13 @@ def request_audio_inference(audio_path: str, base_id: str, url: str) -> np.ndarr
         sample_rate = wav_file.getframerate()
         audio_bytes = wav_file.readframes(wav_file.getnframes())
 
-    # audio_data, sample_rate = sf.read(audio_path, dtype='int16')
-    # audio_bytes = audio_data.tobytes()
-
     files = {'audio': ('audio.wav', audio_bytes, 'audio/wav')}
     data = {'base_id': base_id, 'fr': str(sample_rate)}
 
     return send_request_with_retry(url, files, data, process_response=process_response)
 
 
-def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int, url: str) -> Union[str, None]:
+def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int, url: str) -> str | None:
     def process_response(response):
         if response.headers['Content-Type'] == 'audio/wav':
             with open(audio_path, 'wb') as f:
@@ -61,16 +53,13 @@ def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int
         sample_rate = wav_file.getframerate()
         audio_bytes = wav_file.readframes(wav_file.getnframes())
 
-    # audio_data, sample_rate = sf.read(audio_path, dtype='int16')
-    # audio_bytes = audio_data.tobytes()
-
     files = {'audio': ('audio.wav', audio_bytes, 'audio/wav')}
     data = {'base_id': base_id, 'fr': str(sample_rate), 'inplace': str(inplace)}
 
     return send_request_with_retry(url, files, data, process_response=process_response)
 
 
-def request_speech_separation(audio_path: str, base_id: str, url: str) -> List[str]:
+def request_speech_separation(audio_path: str, base_id: str, url: str) -> list[str]:
     def process_response(response):
         response_json = response.json()
         processed_bytes_streams = response_json.get("processed_bytes_streams")
@@ -79,9 +68,6 @@ def request_speech_separation(audio_path: str, base_id: str, url: str) -> List[s
     with wave.open(audio_path, 'rb') as wav_file:
         audio_bytes = wav_file.readframes(wav_file.getnframes())
 
-    # audio_data, sample_rate = sf.read(audio_path, dtype='int16')
-    # audio_bytes = audio_data.tobytes()
-
     files = {'audio': ('audio.wav', audio_bytes, 'audio/wav')}
     data = {'base_id': base_id}
 
@@ -89,9 +75,9 @@ def request_speech_separation(audio_path: str, base_id: str, url: str) -> List[s
 
 
 def request_speech_transcription(
-        frames: Union[bytes, List[bytes], Tuple[bytes]],
+        frames: bytes | list[bytes] | tuple[bytes],
+        frame_rate: int,
         base_id: str,
-        sp: bool,
         url: str
 ) -> str:
     def process_response(response):
@@ -99,9 +85,8 @@ def request_speech_transcription(
         transcription_text = response_json.get('text')
         return transcription_text
 
-    fr = '8000' if sp else '16000'
     files = {'audio': ('audio.wav', frames, 'audio/wav')}
-    data = {'base_id': base_id, 'fr': fr}
+    data = {'base_id': base_id, 'fr': frame_rate}
 
     return send_request_with_retry(url, files, data, timeout=15, process_response=process_response)
 
@@ -115,9 +100,6 @@ def request_audio_resampling(audio_path: str, base_id: str, target_fr: int, url:
     with wave.open(audio_path, 'rb') as wav_file:
         sample_rate = wav_file.getframerate()
         audio_bytes = wav_file.readframes(wav_file.getnframes())
-
-    # audio_data, sample_rate = sf.read(audio_path, dtype='int16')
-    # audio_bytes = audio_data.tobytes()
 
     files = {'audio': ('audio.wav', audio_bytes, 'audio/wav')}
     data = {'base_id': base_id, 'fr': str(sample_rate), 'target_fr': str(target_fr)}

@@ -1,6 +1,6 @@
 # Ignore directories
-audio/
-audio_db/
+post-time/
+real-time/
 logger/
 logs/
 tests/

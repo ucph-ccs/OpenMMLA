@@ -27,7 +27,7 @@ class SpeechTranscriber(Server):
         self.transcriber = get_transcriber(tr_model, language, use_cuda=self.cuda_enable)
         self.transcriber_lock = threading.Lock()
 
-    def apply_nr(self, input_path: str) -> str:
+    def apply_nr(self, input_path: str):
         chunk_size = 30
         sr = torchaudio.info(input_path).sample_rate
         total_duration = torchaudio.info(input_path).num_frames / sr
@@ -63,7 +63,6 @@ class SpeechTranscriber(Server):
         finally:
             torch.cuda.empty_cache()
             gc.collect()
-        return input_path
 
     def process_request(self):
         """Transcribe the audio.
@@ -81,8 +80,7 @@ class SpeechTranscriber(Server):
                     write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                     self.logger.info(f"starting transcribe for {base_id}...")
-                    if fr == 16000:
-                        self.apply_nr(audio_file_path)
+                    self.apply_nr(audio_file_path)
                     normalize_decibel(infile=audio_file_path, rms_level=-20)
                     text = self.transcriber.transcribe(audio_file_path)
                     self.logger.info(f"finished transcribe for {base_id}.")

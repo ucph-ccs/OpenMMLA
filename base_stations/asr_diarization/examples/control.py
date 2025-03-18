@@ -10,6 +10,7 @@ project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 config_path = os.path.join(project_dir, 'config.yml')
 logger = get_logger('control')
 
+print(f"\033]0; Control Base \007")
 while True:
     try:
         influxdb_client = InfluxDBClientWrapper(config_path)
@@ -30,7 +31,7 @@ while True:
         elif operation == '0':
             break
         else:
-            print("Invalid operation. Please input 1, or 0.")
+            print("Invalid operation. Please input 1, 2 or 0.")
     except (Exception, KeyboardInterrupt) as e:
         logger.warning(
             f"During running the control base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",

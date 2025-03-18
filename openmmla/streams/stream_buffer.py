@@ -1,5 +1,5 @@
 import threading
-from typing import List, TypeVar, Optional
+from typing import TypeVar
 
 from .frame import StreamFrame
 
@@ -11,7 +11,7 @@ class RingBuffer:
 
     def __init__(self, size: int):
         self.size = size
-        self.buffer: List[T] = [None] * size
+        self.buffer: list[T | None] = [None] * size
         self.head = 0
         self.tail = 0
         self.full = False
@@ -26,8 +26,7 @@ class RingBuffer:
             self.tail = (self.tail + 1) % self.size
             self.full = self.tail == self.head
 
-    def get(self, n: Optional[int] = None, start_pos: Optional[int] = None,
-            end_pos: Optional[int] = None) -> List[T]:
+    def get(self, n: int = None, start_pos: int = None, end_pos: int = None) -> list[T]:
         """Thread-safe get operation.
         
         Args:

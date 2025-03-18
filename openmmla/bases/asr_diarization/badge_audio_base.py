@@ -14,6 +14,7 @@ from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.logger import get_logger
+from openmmla.utils.ports import free_port
 from .audio_base import AudioBase
 from .enums import BLUE, ENDC
 from .input import get_mode, get_bucket_name, get_name
@@ -53,15 +54,16 @@ class BadgeAudioBase(AudioBase):
     def _setup_input(self):
         super()._setup_input()
         self.port = self.id + self.port_offset
+        free_port(self.port)
 
     def _setup_objects(self):
         super()._setup_objects()
         self.audio_stream = AudioStream(source=self.protocol, host=self.listening_ip, port=self.port)
 
-    def _register_profile(self):
-        """Register participant's voice to audio database."""
+    def _start_register(self):
+        """Start the speaker profile registration."""
         print("------------------------------------------------")
-        output_path = os.path.join(self.audio_temp_dir, f'badge_{self.id}_register.wav')
+        output_path = os.path.join(self.temp_dir, f'badge_{self.id}_register.wav')
         self.recording_prompt(self.register_duration)
 
         self.audio_stream.start()
@@ -70,7 +72,7 @@ class BadgeAudioBase(AudioBase):
         write_frame_to_wav(output_path, audio_frame)
 
         apply_gain(output_path)
-        audio_path = self.post_process_audio(output_path, 1)
+        audio_path = self._audio_preprocessing(output_path, 1)
 
         if audio_path is None:
             self.logger.info("The recorded audio file is not long enough, please record again.")
@@ -83,7 +85,7 @@ class BadgeAudioBase(AudioBase):
 
         self.audio_recognizer.register(audio_path, name)
 
-    def _recognize_voice(self, bucket_name=None):
+    def _start_recognize(self, bucket_name=None):
         """Start the real-time voice recognition, including audio recording, speaker recognition, speech transcription,
         and listening on stop signal.
 
@@ -97,7 +99,7 @@ class BadgeAudioBase(AudioBase):
 
         self.bucket_name = get_bucket_name(self.influx_client) if not bucket_name else bucket_name
         self.last_speaker = None
-        self.audio_dir = os.path.join(self.audio_realtime_dir, f'{self.bucket_name}', f'badge_{self.id}')
+        self.audio_dir = os.path.join(self.runtime_dir, f'{self.bucket_name}', f'badge_{self.id}')
         self.audio_queue = queue.Queue()
         self.transcription_queue = queue.Queue()
         self.speaker_frames_dict = {}
@@ -145,10 +147,11 @@ class BadgeAudioBase(AudioBase):
 
         current_bucket = self.bucket_name
         self.mqtt_client.loop_stop()
+        self.audio_stream.stop()
         self._clean_up()
         if isinstance(e, RecordingError):
             self.logger.info("Restarting recognizing service.")
-            self._recognize_voice(current_bucket)
+            self._start_recognize(current_bucket)
 
     def _reset(self):
         """Set the new port for the audio base and reinitialize audio base."""
@@ -197,10 +200,11 @@ class BadgeAudioBase(AudioBase):
 
                 # Audio pre-processing
                 apply_gain(segment_audio_path)
-                processed_audio_path = self.post_process_audio(segment_audio_path, inplace=1)
+                processed_audio_path = self._audio_preprocessing(segment_audio_path, inplace=1)
 
                 # Voice quality check
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
+                print(f"RMS: {rms_value:.2f}, Peak: {peak_value:.2f}")
                 if processed_audio_path and rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
                     speaker = 'unknown'
                 else:
@@ -252,7 +256,7 @@ class BadgeAudioBase(AudioBase):
 
                 # Audio pre-processing
                 apply_gain(segment_audio_path)
-                processed_audio_path = self.post_process_audio(segment_audio_path, inplace=0)
+                processed_audio_path = self._audio_preprocessing(segment_audio_path, inplace=0)
 
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
                 speaker = 'silent' if processed_audio_path is None else 'unknown'
@@ -270,7 +274,7 @@ class BadgeAudioBase(AudioBase):
                         for i, signal in enumerate(sp_result):
                             save_file = f'{segment_audio_path[:-4]}_spk{i}.wav'
                             sf.write(save_file, np.frombuffer(signal, dtype=np.int16), 8000)
-                            processed_save_file = self.apply_vad(save_file, inplace=1)
+                            processed_save_file = self._apply_vad(save_file, inplace=1)
 
                             if processed_save_file:
                                 normalize_decibel(save_file, rms_level=-20)
@@ -361,14 +365,14 @@ class BadgeAudioBase(AudioBase):
                         apply_gain(left_temp_path)
                         apply_gain(right_temp_path)
 
-                    if self.apply_vad(left_temp_path, inplace=0):
+                    if self._apply_vad(left_temp_path, inplace=0):
                         left_speaker, _ = self.audio_recognizer.recognize_among_candidates(left_temp_path, candidates,
                                                                                            self.last_speaker,
                                                                                            self.keep_threshold)
                     else:
                         left_speaker = 'silent'
 
-                    if self.apply_vad(right_temp_path, inplace=0):
+                    if self._apply_vad(right_temp_path, inplace=0):
                         right_speaker, _ = self.audio_recognizer.recognize_among_candidates(right_temp_path, candidates,
                                                                                             speaker,
                                                                                             self.keep_threshold)

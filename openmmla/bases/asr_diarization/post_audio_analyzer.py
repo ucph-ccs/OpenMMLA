@@ -1,37 +1,41 @@
+import base64
 import json
-import logging
 import os
 import shutil
 import tempfile
+import wave
 from datetime import datetime, timedelta
 
 import numpy as np
 import soundfile as sf
 from tqdm import tqdm
 
-from openmmla.analytics.asr_diarization.analyze import plot_speaking_interaction_network, plot_speaker_diarization_interactive
+from openmmla.analytics.asr_diarization.analyze import plot_speaking_interaction_network, \
+    plot_speaker_diarization_interactive
 from openmmla.analytics.asr_diarization.text_processing import convert_transcription_json_to_txt
 from openmmla.bases.base import Base
 from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.files import format_wav, segment_wav, crop_and_concatenate_wav
 from openmmla.utils.audio.properties import get_audio_properties
-from openmmla.utils.audio.transcriber import get_transcriber
 from openmmla.utils.logger import get_logger
 from .audio_recognizer import AudioRecognizer
+from ...services.asr_diarization.requests import request_voice_activity_detection, request_speech_enhancement, \
+    request_speech_separation, request_speech_transcription
+from ...utils.requests import resolve_urlimport base64
 
 
-class AudioPostAnalyzer(Base):
+class PostAudioAnalyzer(Base):
     logger = get_logger('audio-post-analyzer')
 
-    def __init__(self, project_dir: str = None, config_path: str = None, filename: str = None, vad: bool = True,
+    def __init__(self, project_dir: str, config_path: str, filenames: str = None, vad: bool = True,
                  nr: bool = True, sp: bool = True, tr: bool = True):
-        """Initialize the AudioPostAnalyzer object.
+        """Initialize the PostAudioAnalyzer object.
 
         Args:
-            project_dir: root directory of the project, default to the directory of the caller module when not specified
+            project_dir: root directory of the project
             config_path: path to the configuration file, either absolute or relative to the root directory
-            filename: specified filename in /audio/post-time/origin/ to process, default to all files in the directory
+            filenames: specified filenames in /post-time/origin/ to process, default to all files in the directory
                             when not specified
             vad: whether to use the VAD or not, default to True
             nr: whether to use the denoiser to enhance speech or not, default to True
@@ -39,74 +43,71 @@ class AudioPostAnalyzer(Base):
             tr: whether to transcribe the audio segments or not, default to True
         """
         super().__init__(project_dir, config_path)
-        self.filename = filename
         self.vad = vad
         self.nr = nr
         self.sp = sp
         self.tr = tr
 
+        self.filename: str = ''
+        self.session_name: str = ''
+        self.session_logs_dir: str = ''
+        self.session_runtime_dir: str = ''
+        self.session_segments_dir: str = ''
+        self.session_chunks_dir: str = ''
+
         self._setup_yaml()
         self._setup_directories()
-        self._setup_objects()
 
-        filenames_in_dir = [f for f in os.listdir(self.audio_origin_dir) if not f.startswith('.')]
-        self.filenames_to_process = [filename] if filename else filenames_in_dir
-        if not self.filenames_to_process:
+        origin_files = [f for f in os.listdir(self.origin_dir) if
+                        not f.startswith('.') and not f.endswith('.DS_Store') and os.path.isfile(
+                            os.path.join(self.origin_dir, f))]
+
+        if filenames:
+            self.process_files = filenames.split(',')
+        else:
+            self.process_files = origin_files
+
+        if not self.process_files:
             raise ValueError("You must specify an audio file to process or place it under the audio/post-time/origin "
                              "folder.")
 
+        self._setup_objects()
+
+    @property
+    def base_type(self):
+        return 'PostAnalyzer'
+
     def _setup_yaml(self):
-        self.frame_rate = int(self.config['PostAnalyzer']['frame_rate'])
-        self.channels = int(self.config['PostAnalyzer']['channels'])
-        self.sample_width = int(self.config['PostAnalyzer']['sample_width'])
         self.segment_duration = int(self.config['PostAnalyzer']['segment_duration'])
         self.threshold = float(self.config['PostAnalyzer']['threshold'])
         self.keep_threshold = float(self.config['PostAnalyzer']['keep_threshold'])
-        # self.sr_model = self.config['PostAnalyzer']['sr_model']
-        # self.language = self.config['PostAnalyzer']['language']
+        self.speech_transcriber_url = resolve_url(self.config['Server']['asr']['speech_transcription'])
+        self.speech_separator_url = resolve_url(self.config['Server']['asr']['speech_separation'])
+        self.speech_enhancer_url = resolve_url(self.config['Server']['asr']['speech_enhancement'])
+        self.vad_url = resolve_url(self.config['Server']['asr']['voice_activity_detection'])
 
     def _setup_directories(self):
-        self.speakers_corpus_dir = os.path.join(self.project_dir, 'audio_db', 'post-time')
-        self.audio_origin_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'origin')
-        self.audio_formatted_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'formatted')
-        self.audio_segments_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'segments')
-        self.audio_chunks_dir = os.path.join(self.project_dir, 'audio', 'post-time', 'chunks')
-        self.audio_temp_dir = os.path.join(self.project_dir, 'audio', 'temp')
-        self.audio_db_dir = os.path.join(self.project_dir, 'audio_db')
+        self.runtime_dir = os.path.join(self.project_dir, 'post-time', 'runtime')
+        self.origin_dir = os.path.join(self.project_dir, 'post-time', 'origin')
+        self.audio_db_dir = os.path.join(self.project_dir, 'post-time', 'profiles')
+        self.temp_dir = os.path.join(self.project_dir, 'post-time', 'temp')
         self.logs_dir = os.path.join(self.project_dir, 'logs')
         self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
-        os.makedirs(self.speakers_corpus_dir, exist_ok=True)
-        os.makedirs(self.audio_origin_dir, exist_ok=True)
-        os.makedirs(self.audio_formatted_dir, exist_ok=True)
-        os.makedirs(self.audio_segments_dir, exist_ok=True)
-        os.makedirs(self.audio_chunks_dir, exist_ok=True)
-        os.makedirs(self.audio_temp_dir, exist_ok=True)
-        os.makedirs(self.audio_db_dir, exist_ok=True)
+
+        os.makedirs(self.runtime_dir, exist_ok=True)
+        os.makedirs(self.origin_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
         os.makedirs(self.logs_dir, exist_ok=True)
         os.makedirs(self.visualizations_dir, exist_ok=True)
 
     def _setup_objects(self):
-        # if self.tr:
-        #     self.transcriber = get_transcriber(self.config['PostAnalyzer']['tr_model'], language=self.language,
-        #                                        use_cuda=False)
-        # if self.sp:
-        #     from modelscope.pipelines import pipeline
-        #     from modelscope.utils.constant import Tasks
-        #     logging.getLogger('modelscope').setLevel(logging.WARNING)
-        #     try:
-        #         self.separator = pipeline(Tasks.speech_separation, model=self.config['PostAnalyzer']['sp_model'])
-        #     except ValueError:
-        #         self.separator = pipeline(Tasks.speech_separation, model=self.config['PostAnalyzer']['sp_model_local'])
-
-        # self.recorder = AudioRecorder(config_path=self.config_path, vad_enable=self.vad, nr_enable=self.nr,
-        #                               use_onnx=False, use_cuda=True, vad_local=True, nr_local=True)
-        self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=os.path.join(self.audio_db_dir, os.path.splitext(self.filenames_to_process[0])[0]))
+        self.recognizer = AudioRecognizer(config_path=self.config_path,
+                                          audio_db=os.path.join(self.audio_db_dir,
+                                                                os.path.splitext(self.process_files[0])[0]))
 
     def run(self):
-        """Process all specified files under the audio/post-time/origin folder."""
-        for audio_file_name in tqdm(self.filenames_to_process, desc='Processing audio files', unit='session'):
-            if audio_file_name.endswith('.DS_Store'):
-                continue
+        """Process all specified files."""
+        for audio_file_name in tqdm(self.process_files, desc='Processing audio files', unit='session'):
             self._process_single_audio_file(audio_file_name)
             self.logger.info(f"Processing file: {audio_file_name}")
 
@@ -116,8 +117,9 @@ class AudioPostAnalyzer(Base):
         Args:
             filename: the name of the audio file to process
         """
-        session_name = os.path.splitext(filename)[0]  # Get the session name from the filename without extension
-        speakers_corpus_dir = os.path.join(self.speakers_corpus_dir, session_name)
+        self.filename = filename
+        self.session_name = os.path.splitext(filename)[0]  # Get the session name from the filename without extension
+        speakers_corpus_dir = os.path.join(self.origin_dir, self.session_name)
 
         if not os.path.exists(speakers_corpus_dir):
             os.makedirs(speakers_corpus_dir)
@@ -128,23 +130,32 @@ class AudioPostAnalyzer(Base):
             raise ValueError(
                 f"{speakers_corpus_dir} is empty, please add your raw speaker corpus for {filename}")
 
-        logs_dir = os.path.join(self.logs_dir, f'session_{session_name}')
-        os.makedirs(logs_dir, exist_ok=True)
+        self.session_logs_dir = os.path.join(self.logs_dir, f'session_{self.session_name}')
+        self.session_runtime_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}')
+        self.session_segments_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}', 'segments')
+        self.session_chunks_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}', 'chunks')
+
+        # Clean directories if they exist, otherwise create them
+        for directory in [self.session_logs_dir, self.session_runtime_dir, self.session_segments_dir,
+                          self.session_chunks_dir]:
+            if os.path.exists(directory):
+                shutil.rmtree(directory)
+            os.makedirs(directory)
 
         # Reset audio recognizer's audio database
-        speakers_db = os.path.join(self.audio_db_dir, session_name)
-        self.recognizer.reset_db(speakers_db)
+        audio_db = os.path.join(self.audio_db_dir, self.session_name)
+        self.recognizer.reset_db(audio_db)
 
         #  Register speakers' raw audio files, set enhance to True to apply NR and VAD
         self._register_audio_file_speakers(speakers_corpus_dir, enhance=True)
 
         # Format the origin audio file, segment it, and process the segments
-        formatted_audio_file_path = self._format_origin_audio_file(filename)
-        self._segment_audio_file(session_name, formatted_audio_file_path)
+        self._format_origin_audio_file()
+        self._segment_audio_file()
         if self.sp:
-            self._process_segments_sp(session_name)
+            self._process_segments_sp()
         else:
-            self._process_segments(session_name)
+            self._process_segments()
 
     def _register_audio_file_speakers(self, speakers_corpus_dir, enhance=True):
         """Register speakers' raw audio files to the recognizer.
@@ -153,9 +164,10 @@ class AudioPostAnalyzer(Base):
             speakers_corpus_dir: the directory containing the raw audio files of the speakers
             enhance: whether to apply NR and VAD to the audio files or not
         """
-        for speaker_raw_audio in os.listdir(speakers_corpus_dir):
-            if speaker_raw_audio.endswith('.DS_Store'):
-                continue
+        speaker_corpus = [f for f in os.listdir(speakers_corpus_dir) if
+                          not f.startswith('.') and not f.endswith('.DS_Store')]
+
+        for speaker_raw_audio in speaker_corpus:
             speaker_raw_audio_path = os.path.join(speakers_corpus_dir, speaker_raw_audio)
             speaker_raw_audio_path = format_wav(speaker_raw_audio_path)
             self.logger.info(f"Speaker raw audio path: {speaker_raw_audio_path}")
@@ -165,60 +177,43 @@ class AudioPostAnalyzer(Base):
                     temp_audio_path = temp_file.name
 
                 shutil.copy2(speaker_raw_audio_path, temp_audio_path)
-                self.recorder.apply_nr(input_path=temp_audio_path)
-                self.recorder.apply_vad(input_path=temp_audio_path, sampling_rate=16000, inplace=True)
+                self._apply_nr(temp_audio_path)
+                self._apply_vad(temp_audio_path, inplace=1)
                 self.recognizer.register(temp_audio_path, speaker_raw_audio.split('.')[0])
                 os.unlink(temp_audio_path)
             else:
                 self.recognizer.register(speaker_raw_audio_path, speaker_raw_audio.split('.')[0])
 
-    def _format_origin_audio_file(self, filename):
-        """Format the origin audio file to 16kHz, 16-bit PCM WAV format.
-
-        Args:
-            filename: the name of the audio file to format
-
-        Returns:
-            The path to the formatted audio file
-        """
-        input_file_path = os.path.join(self.audio_origin_dir, filename)
-        output_file_path = os.path.join(self.audio_formatted_dir, f'{os.path.splitext(filename)[0]}_formatted.wav')
+    def _format_origin_audio_file(self):
+        """Format the origin audio file to 16kHz, 16-bit PCM WAV format."""
+        input_file_path = os.path.join(self.origin_dir, self.filename)
+        output_file_path = os.path.join(self.session_runtime_dir, self.filename)
         format_wav(input_file_path, output_file_path)
         properties = get_audio_properties(output_file_path)
         for key, value in properties.items():
             print(f'{key}: {value}')
 
-        return output_file_path
+    def _segment_audio_file(self):
+        """Segment the formatted audio file into fixed-duration segments."""
+        formatted_audio_file_path = os.path.join(self.session_runtime_dir, self.filename)
+        segment_wav(formatted_audio_file_path, self.session_segments_dir,
+                    window_length_ms=int(self.segment_duration * 1000))
 
-    def _segment_audio_file(self, session_name, formatted_audio_file_path):
-        """Segment the formatted audio file into fixed-duration segments.
-
-        Args:
-            session_name: the name of the session
-            formatted_audio_file_path: the path to the formatted audio file
-        """
-        output_dir = os.path.join(self.audio_segments_dir, session_name)
-        segment_wav(formatted_audio_file_path, output_dir, window_length_ms=int(self.segment_duration * 1000))
-
-    def _process_segments(self, session_name):
+    def _process_segments(self):
         """Process segments of the audio file.
-
-        Args:
-            session_name: the name of the session
 
         Outputs:
             JSON files containing the speaker recognition and transcription results for the session
         """
-        segments_dir = os.path.join(self.audio_segments_dir, session_name)
-        speaker_recognition_log_path = os.path.join(self.logs_dir, f'session_{session_name}',
-                                                    f'session_{session_name}_speaker_recognition.json')
-        speaker_transcription_log_path = os.path.join(self.logs_dir, f'session_{session_name}',
-                                                      f'session_{session_name}_speaker_transcription.json')
-        visualization_dir = os.path.join(self.visualizations_dir, f'session_{session_name}')
+        speaker_recognition_log_path = os.path.join(self.logs_dir, f'session_{self.session_name}',
+                                                    f'session_{self.session_name}_speaker_recognition.json')
+        speaker_transcription_log_path = os.path.join(self.logs_dir, f'session_{self.session_name}',
+                                                      f'session_{self.session_name}_speaker_transcription.json')
+        visualization_dir = os.path.join(self.visualizations_dir, f'session_{self.session_name}')
         os.makedirs(visualization_dir, exist_ok=True)
 
         segments_path_list = sorted(
-            [os.path.join(segments_dir, file) for file in os.listdir(segments_dir)],
+            [os.path.join(self.session_segments_dir, file) for file in os.listdir(self.session_segments_dir)],
             key=lambda x: int(os.path.basename(x).split('_')[-1][:-4])
         )
 
@@ -227,14 +222,14 @@ class AudioPostAnalyzer(Base):
         segment_no = 0
         speaker_recognition_log_entries = []
 
-        with tqdm(total=len(segments_path_list), desc=f"Processing segments for {session_name}",
+        with tqdm(total=len(segments_path_list), desc=f"Processing segments for {self.session_name}",
                   unit="segment", position=0, leave=True) as pbar:
             for segment_path in segments_path_list:
                 assert isinstance(segment_path, str), "segment_path must be a string"
                 if segment_path.endswith('.DS_Store'):
                     continue
 
-                processed_segment_path = self.recorder.post_processing(segment_path, sampling_rate=16000, inplace=True)
+                processed_segment_path = self._audio_preprocessing(segment_path, inplace=1)
 
                 # Create speaker recognition log entry and update the speaker_recognition_log_entries list
                 speaker = 'silent' if processed_segment_path is None else 'unknown'
@@ -270,26 +265,26 @@ class AudioPostAnalyzer(Base):
         plot_speaker_diarization_interactive(speaker_recognition_log_path, visualization_dir)
 
         # Process half-scaled recognition at speaker change borders
-        formatted_audio_file_path = os.path.join(self.audio_formatted_dir, f'{session_name}_formatted.wav')
+        formatted_audio_file_path = os.path.join(self.session_runtime_dir, self.filename)
         chunk_list = self._aggregate_segments_by_speaker(speaker_recognition_log_path)
         borders = self.identify_speaker_change_borders(chunk_list)  # A list of tuple, (border_time, [candidates])
         added_chunks_no = 0
         for index, (border_time, candidates) in enumerate(borders):
             adjusted_index = index + added_chunks_no
-            left_temp_path = os.path.join(self.audio_temp_dir, 'left_temp_post_analyzer.wav')
-            right_temp_path = os.path.join(self.audio_temp_dir, 'right_temp_post_analyzer.wav')
+            left_temp_path = os.path.join(self.temp_dir, 'left_temp_post_analyzer.wav')
+            right_temp_path = os.path.join(self.temp_dir, 'right_temp_post_analyzer.wav')
             left_start_time = max(0, 1000 * (border_time - self.segment_duration / 2))  # Segment before the border
             right_end_time = 1000 * (border_time + self.segment_duration / 2)  # Segment after the border
             crop_and_concatenate_wav(formatted_audio_file_path, [(left_start_time, 1000 * border_time)], left_temp_path)
             crop_and_concatenate_wav(formatted_audio_file_path, [(1000 * border_time, right_end_time)], right_temp_path)
 
-            if self.recorder.apply_vad(left_temp_path, sampling_rate=16000, inplace=False):
+            if self._apply_vad(left_temp_path, inplace=0):
                 left_speaker, _ = self.recognizer.recognize_among_candidates(left_temp_path, candidates,
                                                                              candidates[0], self.keep_threshold)
             else:
                 left_speaker = 'silent'
 
-            if self.recorder.apply_vad(right_temp_path, sampling_rate=16000, inplace=False):
+            if self._apply_vad(right_temp_path, inplace=0):
                 right_speaker, _ = self.recognizer.recognize_among_candidates(right_temp_path, candidates,
                                                                               candidates[1], self.keep_threshold)
             else:
@@ -302,33 +297,28 @@ class AudioPostAnalyzer(Base):
 
         # Aggregate the chunks and transcribe them
         chunk_list = self.aggregate_chunks(chunk_list)
-        speaker_transcription_log_entries = self._transcribe_by_chunks(formatted_audio_file_path, chunk_list,
-                                                                       session_name)
+        speaker_transcription_log_entries = self._transcribe_by_chunks(chunk_list)
 
         with open(speaker_transcription_log_path, 'w') as f:
             json.dump(speaker_transcription_log_entries, f, indent=5)
 
         convert_transcription_json_to_txt(speaker_transcription_log_path)
 
-    def _process_segments_sp(self, session_name):
+    def _process_segments_sp(self):
         """Process segments of the audio file with using the separation model.
-
-        Args:
-            session_name: the name of the session
 
         Outputs:
             JSON files containing the speaker recognition and transcription results for the session
         """
-        speaker_recognition_log_path = os.path.join(self.logs_dir, f'{session_name}',
-                                                    f'session_{session_name}_speaker_recognition.json')
-        speaker_transcription_log_path = os.path.join(self.logs_dir, f'{session_name}',
-                                                      f'session_{session_name}_speaker_transcription.json')
-        segments_dir = os.path.join(self.audio_segments_dir, session_name)
-        visualization_dir = os.path.join(self.visualizations_dir, f'session_{session_name}')
+        speaker_recognition_log_path = os.path.join(self.logs_dir, f'session_{self.session_name}',
+                                                    f'session_{self.session_name}_speaker_recognition.json')
+        speaker_transcription_log_path = os.path.join(self.logs_dir, f'session_{self.session_name}',
+                                                      f'session_{self.session_name}_speaker_transcription.json')
+        visualization_dir = os.path.join(self.visualizations_dir, f'session_{self.session_name}')
         os.makedirs(visualization_dir, exist_ok=True)
 
         segments_path_list = sorted(
-            [os.path.join(segments_dir, file) for file in os.listdir(segments_dir)],
+            [os.path.join(self.session_segments_dir, file) for file in os.listdir(self.session_segments_dir)],
             key=lambda x: int(os.path.basename(x).split('_')[-1][:-4])
         )
 
@@ -337,7 +327,7 @@ class AudioPostAnalyzer(Base):
         segment_no = 0
         speaker_recognition_log_entries = []
 
-        with tqdm(total=len(segments_path_list), desc=f"Processing segments for {session_name}",
+        with tqdm(total=len(segments_path_list), desc=f"Processing segments for {self.session_name}",
                   unit="segment", position=0, leave=True) as pbar:
             for segment_path in segments_path_list:
                 assert isinstance(segment_path, str), "segment_path must be a string"
@@ -346,18 +336,18 @@ class AudioPostAnalyzer(Base):
                 time += timedelta(seconds=self.segment_duration)
                 segment_start_time = int((start_time + time).timestamp())
                 speakers, similarities, durations = [], [], []
-                processed_segment_path = self.recorder.post_processing(segment_path, sampling_rate=16000, inplace=True)
+                processed_segment_path = self._audio_preprocessing(segment_path, inplace=1)
 
                 if processed_segment_path:
                     resample_audio(segment_path, 8000)
-                    result = self.separator(segment_path)
+                    result = self._separate_speech(segment_path)
 
-                    for i, signal in enumerate(result['output_pcm_list']):
+                    for i, signal in enumerate(result):
                         save_file = f'{segment_path[:-4]}_spk{i}.wav'
                         sf.write(save_file, np.frombuffer(signal, dtype=np.int16), 8000)
 
                         # speaker recognition on separated signals
-                        processed_save_file = self.recorder.apply_vad(save_file, sampling_rate=8000, inplace=False)
+                        processed_save_file = self._apply_vad(save_file, inplace=0)
                         speaker = 'unknown' if processed_save_file else 'silent'
                         duration = self.segment_duration
                         similarity = 0
@@ -378,9 +368,8 @@ class AudioPostAnalyzer(Base):
                     similarities.append(0)
                     durations.append(self.segment_duration)
 
-                final_speakers, final_similarities, final_durations = self._post_process_sp_results(speakers,
-                                                                                                    similarities,
-                                                                                                    durations)
+                final_speakers, final_similarities, final_durations = self._finalize_separated_speaker_recognition(
+                    speakers, similarities, durations)
                 speaker_recognition_log_entries.append(
                     self.speaker_recognition_results(segment_no, segment_start_time, final_speakers, final_similarities,
                                                      final_durations))
@@ -397,9 +386,7 @@ class AudioPostAnalyzer(Base):
 
         # Aggregate segments into chunks and transcribe them
         chunk_list = self._aggregate_segments_by_speaker(speaker_recognition_log_path)
-        formatted_audio_file_path = os.path.join(self.audio_formatted_dir, f'{session_name}_formatted.wav')
-        speaker_transcription_log_entries = self._transcribe_by_chunks(formatted_audio_file_path, chunk_list,
-                                                                       session_name)
+        speaker_transcription_log_entries = self._transcribe_by_chunks(chunk_list)
 
         with open(speaker_transcription_log_path, 'w') as f:
             json.dump(speaker_transcription_log_entries, f, indent=5)
@@ -450,22 +437,16 @@ class AudioPostAnalyzer(Base):
 
         return chunk_list
 
-    def _transcribe_by_chunks(self, audio_path, chunk_list, session_name):
+    def _transcribe_by_chunks(self, chunk_list):
         """Transcribe the audio by chunk.
 
         Args:
-            audio_path: formatted audio file path
             chunk_list: chunk list containing speaker and start and end times
-            session_name: the name of the session
 
         Returns:
             A list of transcription entries
         """
-        chunk_dir = os.path.join(self.audio_chunks_dir, session_name)
-        if os.path.exists(chunk_dir):
-            shutil.rmtree(chunk_dir)
-        os.makedirs(chunk_dir)
-
+        formatted_audio_path = os.path.join(self.session_runtime_dir, self.filename)
         entries = []
         if self.tr:
             audio_start_time = chunk_list[0][1][0]
@@ -477,11 +458,11 @@ class AudioPostAnalyzer(Base):
                     chunk_end_time = chunk[1][1]
                     start_offset_ms = 1000 * (chunk_start_time - audio_start_time)
                     end_offset_ms = 1000 * (chunk_end_time - audio_start_time)
-                    chunk_path = os.path.join(chunk_dir, f'chunk_{index}_{speaker}.wav')
-                    crop_and_concatenate_wav(audio_path, [(start_offset_ms, end_offset_ms)], chunk_path)
-                    self.recorder.apply_nr(chunk_path)
+                    chunk_path = os.path.join(self.session_chunks_dir, f'chunk_{index}_{speaker}.wav')
+                    crop_and_concatenate_wav(formatted_audio_path, [(start_offset_ms, end_offset_ms)], chunk_path)
+                    self._apply_nr(chunk_path)
                     normalize_decibel(chunk_path, rms_level=-20)
-                    text = self.transcriber.transcribe(chunk_path) if speaker != 'silent' else ''
+                    text = self._transcribe(chunk_path) if speaker != 'silent' else ''
                     transcription_entry = {
                         "chunk_no": index,
                         "chunk_start_time": chunk_start_time,
@@ -495,8 +476,81 @@ class AudioPostAnalyzer(Base):
 
         return entries
 
-    def _post_process_sp_results(self, speakers, similarities, durations):
-        """Post-process the recognition results of separated signals to handle edge cases.
+    def _transcribe(self, input_path):
+        """Transcribe audio file to text.
+
+        Args:
+            input_path: input audio file path
+
+        Returns:
+            transcribed text
+        """
+        with wave.open(input_path, 'rb') as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+            frame_rate = wav_file.getframerate()
+
+        text = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}',
+                                            self.speech_transcriber_url)
+        return text
+
+    def _separate_speech(self, segment_audio_path) -> list:
+        """Separate speech from the overlapped segment audio.
+
+        Args:
+            segment_audio_path:
+
+        Returns:
+            separated speech signals
+        """
+        separated_result = request_speech_separation(segment_audio_path, f'{self.base_type.lower()}',
+                                                     self.speech_separator_url)
+        result = [base64.b64decode(encoded_bytes_stream) for encoded_bytes_stream in separated_result]
+        return result
+
+    def _audio_preprocessing(self, input_path: str, inplace: int) -> str | None:
+        """Apply both NR and VAD processing to audio file.
+
+
+        Args:
+            input_path: input audio file path
+            inplace: whether to overwrite the input file when applying vad
+
+        Returns:
+            processed audio file path
+        """
+        self._apply_nr(input_path)
+        return self._apply_vad(input_path, inplace)
+
+    def _apply_vad(self, input_path: str, inplace: int) -> str | None:
+        """Apply voice activity detection to audio file.
+
+        Args:
+            input_path: input audio file path
+            inplace: whether to overwrite the input file
+
+        Returns:
+            processed audio file path
+        """
+        if self.vad:
+            return request_voice_activity_detection(input_path, f'{self.base_type.lower()}', inplace, self.vad_url)
+
+        return input_path
+
+    def _apply_nr(self, input_path: str) -> str:
+        """Apply noise reduction to audio file.
+
+        Args:
+            input_path: input audio file path
+
+        Returns:
+            processed audio file path
+        """
+        if self.nr:
+            request_speech_enhancement(input_path, f'{self.base_type.lower()}', self.speech_enhancer_url)
+        return input_path
+
+    def _finalize_separated_speaker_recognition(self, speakers, similarities, durations):
+        """Finalize the speaker recognition results of separated signals to handle edge cases.
 
         Args:
             speakers: list of recognized speakers
@@ -586,13 +640,15 @@ class AudioPostAnalyzer(Base):
     def identify_speaker_change_borders(chunk_list):
         """Identify speaker change borders from the chunk list.
 
+        Note: this function only applicable to recognition without speech separation
+
         Args:
             chunk_list: A list of tuples, each containing the speaker and the start and end times of the segment
 
         Returns:
             A list of tuples, each containing the time of the speaker change and the candidates
         """
-        # Note: this function only applicable to normal processing without speech separation
+
         borders = []
         start_time = chunk_list[0][1][0]
         for i in range(1, len(chunk_list)):
@@ -606,6 +662,8 @@ class AudioPostAnalyzer(Base):
     @staticmethod
     def update_chunk_list(chunk_list, border_index, left_speaker, right_speaker, segment_half_duration):
         """Update the chunk list by adding two new half-scaled recognized chunks at the speaker change border.
+
+        Note: this function only applicable to recognition without speech separation
 
         Args:
             chunk_list: A list of tuples, each containing the speaker and the start and end times of the segment

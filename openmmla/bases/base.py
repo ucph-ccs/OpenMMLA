@@ -1,7 +1,6 @@
 import os
 import threading
 from abc import ABC, abstractmethod
-from typing import List
 
 import yaml
 
@@ -33,10 +32,10 @@ class Base(ABC):
         self.config_path = config_path
         self.config = self._load_config()
 
-        self.threads: List[RaisingThread] = None
-        self.stop_event: threading.Event = None
-        self.bucket_name: str = None
-        self.redis_client: RedisClientWrapper = None
+        self.threads: list[RaisingThread] = []
+        self.stop_event: threading.Event = threading.Event()
+        self.bucket_name: str = ''
+        self.redis_client: RedisClientWrapper = None 
 
     def _load_config(self):
         """Load the configuration file."""
