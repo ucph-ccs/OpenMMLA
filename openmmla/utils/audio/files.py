@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import tempfile
 import wave
-from typing import List, Tuple
 
 from pydub import AudioSegment
 
@@ -90,7 +89,7 @@ def format_wav(input_file: str, output_file: str = None, codec: str = "pcm_s16le
     return output_file
 
 
-def crop_and_concatenate_wav(input_file: str, clip_ranges: List[Tuple[int, int]], output_file: str):
+def crop_and_concatenate_wav(input_file: str, clip_ranges: list[tuple[int, int]], output_file: str):
     """Crops segments from an audio file and concatenates them into a new .wav file.
 
     Args:
@@ -114,7 +113,7 @@ def crop_and_concatenate_wav(input_file: str, clip_ranges: List[Tuple[int, int]]
     concatenated_audio.export(output_file, format="wav")
 
 
-def segment_wav(input_file: str, output_dir: str, step_length_ms=None, window_length_ms=None):
+def segment_wav(input_file: str, output_dir: str, step_length_ms: int = None, window_length_ms: int = None):
     """Segments an audio file and exports each segment as a new .wav file.
 
     Args:
@@ -124,8 +123,9 @@ def segment_wav(input_file: str, output_dir: str, step_length_ms=None, window_le
         window_length_ms (int): The duration of each segment in milliseconds.
     """
     audio = AudioSegment.from_wav(input_file)
-    if window_length_ms is None:
+    if window_length_ms is None or window_length_ms > len(audio):
         window_length_ms = len(audio)
+        print(f"Window length is set to the length of the audio: {window_length_ms} ms")
     if step_length_ms is None:
         step_length_ms = window_length_ms
 

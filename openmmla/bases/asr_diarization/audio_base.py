@@ -135,11 +135,11 @@ class AudioBase(Base, ABC):
     def _setup_directories(self):
         self.runtime_dir = os.path.join(self.project_dir, 'real-time', 'runtime')
         self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
-        self.audio_db_dir = os.path.join(self.project_dir, 'real-time', 'profiles')
-        self.audio_db = os.path.join(self.audio_db_dir, f'{self.base_type}_{self.id}')
+        self.profiles_dir = os.path.join(self.project_dir, 'real-time', 'profiles')
+        self.audio_db = os.path.join(self.profiles_dir, f'{self.base_type}_{self.id}')
         os.makedirs(self.runtime_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
-        os.makedirs(self.audio_db_dir, exist_ok=True)
+        os.makedirs(self.profiles_dir, exist_ok=True)
         os.makedirs(self.audio_db, exist_ok=True)
 
     def _setup_objects(self):
@@ -147,7 +147,8 @@ class AudioBase(Base, ABC):
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.warm_up_resampler()
-        self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db)
+        self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db,
+                                                keep_audio=self.store)
 
     def run(self):
         """Interface for running the Audio Base."""

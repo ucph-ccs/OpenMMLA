@@ -9,7 +9,7 @@ CONDA_ENV="audio-base"
 FILENAMES=""
 VAD=true
 NR=true
-SP=true
+SP=false
 TR=true
 
 is_boolean() {

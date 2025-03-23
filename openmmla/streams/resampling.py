@@ -1,5 +1,4 @@
 from enum import Enum
-from typing import List
 
 try:
     import librosa
@@ -70,11 +69,11 @@ def resample_audio(data: np.ndarray,
         raise ValueError(f"Unsupported resampling method: {method}")
 
 
-def resample_video(frames: List[np.ndarray],
+def resample_video(frames: list[np.ndarray],
                    source_fps: float,
                    target_fps: float,
                    method: ResampleMethod = ResampleMethod.VIDEO_SKIP,
-                   **kwargs) -> List[np.ndarray]:
+                   **kwargs) -> list[np.ndarray]:
     """Main video resampling function."""
     if source_fps == target_fps:
         return frames
@@ -271,7 +270,7 @@ def _audio_librosa_resample(data: np.ndarray, source_rate: int, target_rate: int
     return resampled
 
 
-def _video_skip_resample(frames: List[np.ndarray], source_fps: float, target_fps: float) -> List[np.ndarray]:
+def _video_skip_resample(frames: list[np.ndarray], source_fps: float, target_fps: float) -> list[np.ndarray]:
     """Frame skipping method for video downsampling.
     
     Pick frames at regular intervals based on the fps ratio.
@@ -292,7 +291,7 @@ def _video_skip_resample(frames: List[np.ndarray], source_fps: float, target_fps
     return [frames[i] for i in indices if i < len(frames)]
 
 
-def _video_average_resample(frames: List[np.ndarray], source_fps: float, target_fps: float) -> List[np.ndarray]:
+def _video_average_resample(frames: list[np.ndarray], source_fps: float, target_fps: float) -> list[np.ndarray]:
     """Frame averaging method for video downsampling.
     
     Average multiple consecutive frames to create each output frame.
@@ -317,7 +316,7 @@ def _video_average_resample(frames: List[np.ndarray], source_fps: float, target_
     return new_frames
 
 
-def _video_interpolate_resample(frames: List[np.ndarray], source_fps: float, target_fps: float) -> List[np.ndarray]:
+def _video_interpolate_resample(frames: list[np.ndarray], source_fps: float, target_fps: float) -> list[np.ndarray]:
     """Linear interpolation method for video upsampling.
     
     Create new frames by linearly interpolating between existing frames.

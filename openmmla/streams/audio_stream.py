@@ -4,7 +4,6 @@ import struct
 import threading
 import time
 import wave
-from typing import Optional, List
 
 import numpy as np
 import pyaudio
@@ -63,8 +62,8 @@ class AudioStream(StreamReceiver):
         # Socket configuration
         self.host = kwargs.get('host', '0.0.0.0')  # Default to all interfaces
         self.port = kwargs.get('port', 8000)  # Default to port 8000
-        self.sock: Optional[socket.socket] = None
-        self.conn: Optional[socket.socket] = None  # For TCP connection
+        self.sock: socket.socket | None = None
+        self.conn: socket.socket | None = None  # For TCP connection
 
         # Stream configuration
         self.format = kwargs.get('format', 'int16')
@@ -136,8 +135,7 @@ class AudioStream(StreamReceiver):
 
         self._last_read_pos = -1
 
-    def read(self, duration: float, target_rate: Optional[int] = None, timeout: float = 5.0, latest: bool = False) -> \
-            Optional[AudioFrame]:
+    def read(self, duration: float, target_rate: int | None = None, timeout: float = 5.0, latest: bool = False) -> AudioFrame | None:
         """Read audio data with optional resampling.
 
         Args:
@@ -183,7 +181,7 @@ class AudioStream(StreamReceiver):
 
         return self._process_frames(total_frames, target_rate)
 
-    def _process_frames(self, frames: List[AudioFrame], target_rate: Optional[int]) -> Optional[AudioFrame]:
+    def _process_frames(self, frames: list[AudioFrame], target_rate: int | None) -> AudioFrame | None:
         """Process collected frames and apply resampling if needed.
 
         Args:
@@ -278,7 +276,7 @@ class AudioStream(StreamReceiver):
                 logger.error(f"Fatal error in receive loop: {e}")
                 self.stop()
 
-    def _read_chunk(self) -> Optional[AudioFrame]:
+    def _read_chunk(self) -> AudioFrame | None:
         """Read a chunk of audio data continuously.
         
         For UDP/TCP sources, the packet format is:
