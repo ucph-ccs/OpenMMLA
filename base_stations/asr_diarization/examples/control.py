@@ -1,4 +1,4 @@
-"""This script demonstrates how to control the nodes."""
+"""This script runs the control base."""
 import os
 
 from openmmla.bases.asr_diarization.input import get_bucket_name

@@ -1,5 +1,16 @@
 import cv2
 
+# Define colour code
+BLUE = "\033[1;94m"
+GREEN = "\033[1;92m"
+RED = "\033[1;91m"
+PINK = "\033[1;95m"
+GREY = "\033[1;90m"
+PURPLE = "\033[1;35m"
+LIME = "\033[38;5;118m"
+LIGHT_BLUE = "\033[38;5;37m"
+ENDC = "\033[0m"
+
 ROTATIONS = {
     90: cv2.ROTATE_90_CLOCKWISE,
     180: cv2.ROTATE_180,

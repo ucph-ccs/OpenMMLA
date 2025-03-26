@@ -1,22 +1,20 @@
 import json
-import os
-import time
 
 import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
 from openmmla.bases.base import Base
+from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
 from .input import get_function_base
-from .stream import WebcamVideoStream
 from .vector import get_outward_normal_vector
 
 
 class CameraTagDetector(Base):
-    """Camera detector class for detecting AprilTags from camera feed"""
+    """Class for detecting AprilTags from camera feed"""
     logger = get_logger('camera-tag-detector')
 
     def __init__(self, project_dir: str, config_path: str, max_badge_id: int = 15):
@@ -28,17 +26,18 @@ class CameraTagDetector(Base):
             max_badge_id: maximum badge ID to detect
         """
         super().__init__(project_dir, config_path)
-        
+
         """Camera detector parameters."""
         self.max_badge_id = max_badge_id
-        self.cameras_dir = os.path.join(self.project_dir, 'camera_calib/cameras')
+        # self.cameras_dir = os.path.join(self.project_dir, 'camera_calib/cameras')
 
         """Runtime attributes"""
+        self.chosen_camera = None
         self.camera_info = {}
         self.camera_seed = None
-        self.sender_id = None
-        self.video_stream = None
         self.camera_configured = False
+        self.base_id = None
+        self.video_stream = None
 
         self._setup_yaml()
         self._setup_objects()
@@ -62,11 +61,11 @@ class CameraTagDetector(Base):
     def run(self):
         """Run the camera tag detector."""
         print('\033]0;Camera Detector\007')
-        func_map = {1: self._start, 2: self._set_camera}
+        func_map = {1: self._set_camera, 2: self._start}
 
         while True:
             try:
-                select_fun = get_function_base()
+                select_fun = get_function_base(self.chosen_camera, self.camera_seed, self.base_id, main_id='None')
                 if select_fun == 0:
                     self.logger.info("Exiting video base...")
                     break
@@ -115,10 +114,10 @@ class CameraTagDetector(Base):
             return
 
         # check input sender id
-        self.sender_id = input("Input your sender id, 'm' for main camera, and 'a', 'b', 'c', 'd' for alternatives "
-                               "camera: ")
+        self.base_id = input("Input your sender id, 'm' for main camera, and 'a', 'b', 'c', 'd' for alternatives "
+                             "camera: ")
         self.camera_configured = True
-        print(f'\033]0;Camera Detector {self.sender_id}\007')
+        print(f'\033]0;Camera Detector {self.base_id}\007')
 
     def _configure_camera_params(self):
         """Configure camera intrinsic parameters."""
@@ -135,12 +134,12 @@ class CameraTagDetector(Base):
                 if not 0 <= selection < len(camera_choices):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
-                    chosen_camera = camera_choices[selection]
+                    self.chosen_camera = camera_choices[selection]
                     break
             except ValueError:
                 self.logger.warning("Please enter a valid number.")
 
-        camera_config = cameras[chosen_camera]
+        camera_config = cameras[self.chosen_camera]
         fisheye = camera_config['fisheye']
         params = camera_config['params']
         camera_info = {"fisheye": fisheye, "params": params, "res": self.res}
@@ -176,12 +175,16 @@ class CameraTagDetector(Base):
         return available_video_seeds
 
     def _configure_video_capture(self, camera_seed):
-        self.video_stream = WebcamVideoStream(format='MJPG', src=camera_seed, res=(1920, 1080))
+        # self.video_stream = WebcamVideoStream(format='MJPG', src=camera_seed, res=(1920, 1080))
+        self.video_stream = VideoStream(source=camera_seed, resolution=self.res)
         self.video_stream.start()
 
     def _process_frames(self):
         while True:
-            frame = self.video_stream.read()
+            video_frame = self.video_stream.read()[-1]
+            frame = video_frame.data
+            acquired_time = video_frame.timestamp
+
             if self.camera_info.get("fisheye", False):
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                                   interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
@@ -220,12 +223,12 @@ class CameraTagDetector(Base):
                 print(f"Tag ID: {tag.tag_id}, Rotation: {tag.pose_R}, Translation: {tag.pose_t}")
 
             display_frame = cv2.resize(frame, (960, 540))
-            cv2.imshow(f'AprilTags Detection from camera {self.sender_id}', display_frame)
+            cv2.imshow(f'AprilTags Detection from camera {self.base_id}', display_frame)
 
             message = {
-                "sender_id": self.sender_id,
+                "base_id": self.base_id,
                 "tags": tags,
-                "timestamp": time.time(),
+                "acquired_time": acquired_time
             }
             message_str = json.dumps(message)
             self.mqtt_client.publish("camera/synchronize", message_str, qos=0, retain=False)

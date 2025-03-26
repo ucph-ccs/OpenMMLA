@@ -19,12 +19,11 @@ class AudioSynchronizer(Synchronizer):
     logger = get_logger('synchronizer')
 
     def __init__(self, project_dir: str, config_path: str, base_type: str, dominant: bool = False, sp: bool = False):
-        """
-        Initialize the synchronizer object.
+        """Initialize the synchronizer object.
 
         Args:
-            project_dir: root directory of the project
-            config_path: path to the configuration file, either absolute or relative to the root directory
+            project_dir: path to the project directory
+            config_path: path to the configuration file (absolute or relative to project_dir).
             base_type: the audio base type
             dominant: whether to select the dominant speaker or not
             sp: tag of whether the audio bases do speech separation

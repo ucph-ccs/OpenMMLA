@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from openmmla.analytics.asr_diarization.analyze import plot_speaking_interaction_network, \
     plot_speaker_diarization_interactive
-from openmmla.analytics.asr_diarization.text_processing import convert_transcription_json_to_txt
+from openmmla.analytics.asr_diarization.transcription import convert_transcription_json_to_txt
 from openmmla.bases.base import Base
 from openmmla.services.asr_diarization.requests import request_voice_activity_detection, request_speech_enhancement, \
     request_speech_separation, request_speech_transcription
@@ -33,8 +33,8 @@ class PostAudioAnalyzer(Base):
         """Initialize the PostAudioAnalyzer object.
 
         Args:
-            project_dir: root directory of the project
-            config_path: path to the configuration file, either absolute or relative to the root directory
+            project_dir: path to the project directory
+            config_path: path to the configuration file (absolute or relative to project_dir).
             filenames: specified filenames in /post-time/origin/ to process, default to all files in the directory
                             when not specified
             vad: whether to use the VAD or not, default to True
@@ -102,7 +102,8 @@ class PostAudioAnalyzer(Base):
 
     def _setup_objects(self):
         self.recognizer = AudioRecognizer(config_path=self.config_path,
-                                          audio_db=os.path.join(self.profiles_dir, os.path.splitext(self.process_files[0])[0]))
+                                          audio_db=os.path.join(self.profiles_dir,
+                                                                os.path.splitext(self.process_files[0])[0]))
 
     def run(self):
         """Process all specified files."""

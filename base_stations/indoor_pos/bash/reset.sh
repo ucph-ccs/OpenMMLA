@@ -6,7 +6,7 @@ PROJECT_DIR="$BASH_DIR/.."
 # Folders to clean and recreate
 paths=(
     "$PROJECT_DIR/visualizations"
-    "$PROJECT_DIR/frames"
+    "$PROJECT_DIR/real-time"
     "$PROJECT_DIR/logger"
     "$PROJECT_DIR/logs"
 )
@@ -15,7 +15,7 @@ paths=(
 for path in "${paths[@]}"; do
     if [ -d "$path" ]; then
         # Remove all the files and subdirectories
-        rm -r "$path"/*
+        rm -r "${path:?}"/*
         echo "Cleaned folder: $path"
     else
         echo "Folder $path does not exist"

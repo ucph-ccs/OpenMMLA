@@ -11,7 +11,7 @@ from .input import flush_input, get_function_calibrator
 
 
 class CameraCalibrator(Base):
-    """Camera calibration class for calibrating cameras with image capturing and calibration functions."""
+    """Class for calibrating cameras with image capturing and calibration functions."""
     logger = get_logger('camera-calibrator')
 
     def __init__(self, project_dir: str, config_path: str):

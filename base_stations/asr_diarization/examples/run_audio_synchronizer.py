@@ -19,11 +19,11 @@ def run_synchronizer(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     add_arg = functools.partial(add_arguments, argparser=parser)
-    add_arg('base_type', str, None, 'audio base type.', shortname='-b')
     add_arg('project_dir', str, project_dir, 'path to the project directory', shortname='-p')
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
+    add_arg('base_type', str, None, 'audio base type.', shortname='-b')
     add_arg('dominant', bool, False, 'whether to select the dominant speaker or not', shortname='-d')
-    add_arg('sp', bool, False, 'whether the audio bases do speech separation or not', shortname='-s')
+    add_arg('sp', bool, False, 'whether the audio bases do speech separation or not', shortname='-sp')
 
     input_args = parser.parse_args()
     print_arguments(input_args)

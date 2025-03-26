@@ -13,17 +13,42 @@ from openmmla.utils.requests import resolve_url
 
 
 class AudioRecognizer:
-    """The audio recognizer compares audio segments against the known speakers' embeddings in the speaker library and
-    gives a label. During recognition, it will update the speaker profile when new recognized speaker's audio has high
-    similarity by incorporating the new features into the old one.
+    """A speaker recognition system that manages speaker profiles and performs real-time speaker identification.
+
+    This class provides a complete framework for speaker recognition, including:
+    1. Speaker Profile Management:
+        - Registration of new speakers
+        - Storage of speaker embeddings
+        - Maintenance of both original and adaptive speaker profiles
+        - Support for audio file and embedding persistence
+
+    2. Speaker Recognition Features:
+        - Real-time speaker identification
+        - Adaptive speaker profiles that update during recognition
+        - Support for both general and candidate-specific recognition
+        - Similarity score calculation using both original and adapted embeddings
+
+    3. Key Components:
+        - Embedding Generation: Converts audio segments into speaker embeddings
+        - Profile Storage: Manages speaker profiles in a directory structure
+        - Adaptive Learning: Updates speaker profiles based on recognition confidence
+        - Vectorized Operations: Efficient similarity computations using NumPy
+
+    The system maintains two sets of embeddings for each speaker:
+    - Original embeddings: Initial speaker profiles from registration
+    - Adaptive embeddings: Continuously updated profiles during recognition
+
+    Recognition decisions are made by comparing input audio against both original and adaptive embeddings, choosing the
+    highest similarity score.
     """
+
     logger = get_logger('audio-recognizer')
 
-    def __init__(self, config_path: str, audio_db: str, keep_audio: bool = False):
+    def __init__(self, config_path: str, audio_db: str, store: bool = False):
         config = yaml.safe_load(open(config_path, 'r'))
         self.audio_db = audio_db
         self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inference'])
-        self.keep_audio = keep_audio
+        self.store = store
         print(f"Audio inferer URL: {self.audio_inferer_url}")
 
         self.speaker_names = []  # List of speaker names
@@ -62,8 +87,8 @@ class AudioRecognizer:
             new_embedding_filenames = []
 
             for audio_file in audio_files:
+                # Get embedding
                 audio_path = os.path.join(temp_dir, audio_file)
-                # Infer embedding from audio
                 feature = self._infer(audio_path)
                 features.append(feature)
 
@@ -79,7 +104,7 @@ class AudioRecognizer:
                     pickle.dump(feature, f)
 
                 # Optionally, keep a copy of the audio file
-                if self.keep_audio:
+                if self.store:
                     audio_filename = f"{base_filename}_{timestamp}.wav"
                     audio_save_path = os.path.join(user_embeddings_dir, audio_filename)
                     with open(audio_path, 'rb') as src_file:
@@ -89,7 +114,7 @@ class AudioRecognizer:
                     self.logger.debug(f"Saved audio file: {audio_filename}")
 
             self.logger.info(
-                f"Processed {len(features)} audio segments and saved embeddings{' and audio files' if self.keep_audio else ''}.")
+                f"Processed {len(features)} audio segments and saved embeddings{' and audio files' if self.store else ''}.")
 
         if not features:
             self.logger.warning(f"No features could be extracted for user '{user_name}'.")

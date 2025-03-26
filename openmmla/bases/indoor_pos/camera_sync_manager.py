@@ -24,12 +24,12 @@ matplotlib.use('TkAgg')
 
 
 class CameraSyncManager(Synchronizer):
-    """Class for synchronizing the coordinate system between the main camera and alternative camera."""
+    """Class for synchronizing the coordinate system between the main camera and the alternative camera."""
     logger = get_logger('camera-sync-manager')
     colors = cycle('bgrcmyk')
 
     def __init__(self, project_dir: str, config_path: str, sync: bool = True, top_K: int = 5000,
-                 distance_threshold: float = 0.1, angle_threshold: float = 3.0, time_threshold_sync: float = 0.02,
+                 distance_threshold: float = 0.1, angle_threshold: float = 3.0, time_threshold_sync: float = 0.05,
                  time_threshold_unsync: float = 0.1):
         """Initialize the camera sync manager.
 
@@ -55,14 +55,14 @@ class CameraSyncManager(Synchronizer):
         self.time_threshold = self.time_threshold_sync if self.sync else self.time_threshold_unsync
 
         """Runtime attributes."""
-        self.main_camera_id = ''
-        self.alternative_camera_id = ''
-        self.main_positions = {}
+        self.main_id = None
+        self.alt_id = None
         self.main_rotations = {}
-        self.main_last_update = {}
-        self.alternative_positions = {}
-        self.alternative_rotations = {}
-        self.alternative_last_update = {}
+        self.main_translations = {}
+        self.main_last_update_time = {}
+        self.alt_rotations = {}
+        self.alt_translations = {}
+        self.alt_last_update_time = {}
         self.rotation_matrices = []
         self.translations_matrices = []
         self.retrieved_R = None
@@ -88,11 +88,11 @@ class CameraSyncManager(Synchronizer):
 
     def run(self):
         """Run the camera sync manager."""
-        func_map = {1: self._start, 2: self._switch, 3: self._set_camera_id,
+        func_map = {1: self._set_camera_id, 2: self._start, 3: self._switch,
                     4: self._export_transformations, 5: self._clear_transformations}
         while True:
             try:
-                select_fun = get_function_sync_manager()
+                select_fun = get_function_sync_manager(self.main_id, self.alt_id, self.sync)
                 if select_fun == 0:
                     self.logger.info("Exiting video synchronizer...")
                     break
@@ -102,20 +102,20 @@ class CameraSyncManager(Synchronizer):
 
     def _set_camera_id(self):
         """Set camera IDs through user input."""
-        self.main_camera_id = input("Please enter the main camera ID: ")
-        self.alternative_camera_id = input("Please enter the alternative camera ID: ")
-        print(f"\033]0;Camera Sync Manager: main:{self.main_camera_id} - alternative:{self.alternative_camera_id}\007")
+        self.main_id = input("Please enter the main camera ID: ")
+        self.alt_id = input("Please enter the alternative camera ID: ")
+        print(f"\033]0;Camera Sync Manager: main:{self.main_id} - alternative:{self.alt_id}\007")
 
     def _start(self):
         try:
-            if not self.main_camera_id or not self.alternative_camera_id:
+            if not self.main_id or not self.alt_id:
                 return self._set_camera_id()
 
             self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics="camera/synchronize")
             self.mqtt_client.loop_start()
             self.fig, self.ax = plt.subplots(1, 1, subplot_kw={'projection': '3d'})
             plt.get_current_fig_manager().set_window_title(
-                f"Camera Sync Manager: main:{self.main_camera_id} - alternative:{self.alternative_camera_id}")
+                f"Camera Sync Manager: main:{self.main_id} - alternative:{self.alt_id}")
             self.anim = FuncAnimation(self.fig, self._animate_plot, interval=10, cache_frame_data=False)
             plt.show()
         except KeyboardInterrupt:
@@ -131,8 +131,8 @@ class CameraSyncManager(Synchronizer):
 
     def _clean_up(self):
         """Reinitialize the variables and plot based on sync mode."""
-        self.main_positions, self.main_rotations, self.main_last_update = {}, {}, {}
-        self.alternative_positions, self.alternative_rotations, self.alternative_last_update = {}, {}, {}
+        self.main_translations, self.main_rotations, self.main_last_update_time = {}, {}, {}
+        self.alt_translations, self.alt_rotations, self.alt_last_update_time = {}, {}, {}
         self.rotation_matrices, self.translations_matrices = [], []
         self.retrieved_R, self.retrieved_T = None, None
         self.plot_points_queue = queue.Queue()
@@ -165,34 +165,37 @@ class CameraSyncManager(Synchronizer):
     def _handle_base_result(self, client, userdata, msg):
         message = json.loads(msg.payload)
 
-        sender_id = message["sender_id"]
+        base_id = message["base_id"]
         tags = message["tags"]
+        acquired_time = message["acquired_time"]
         current_time = time.time()
 
-        for tag in list(self.main_positions.keys()):
-            if (current_time - self.main_last_update.get(tag, 0)) > self.time_threshold:
-                del self.main_positions[tag]
-                del self.main_last_update[tag]
+        # Remove outdated positions for main camera
+        for tag in list(self.main_translations.keys()):
+            if (current_time - self.main_last_update_time.get(tag, 0)) > self.time_threshold:
+                del self.main_translations[tag]
+                del self.main_last_update_time[tag]
 
-        for tag in list(self.alternative_positions.keys()):
-            if (current_time - self.alternative_last_update.get(tag, 0)) > self.time_threshold:
-                del self.alternative_positions[tag]
-                del self.alternative_last_update[tag]
+        # Remove outdated positions for alternative camera
+        for tag in list(self.alt_translations.keys()):
+            if (current_time - self.alt_last_update_time.get(tag, 0)) > self.time_threshold:
+                del self.alt_translations[tag]
+                del self.alt_last_update_time[tag]
 
         for tag_id, tag_data in tags.items():
-            position = tag_data[1]
             rotation = tag_data[0]
+            position = tag_data[1]
 
-            if sender_id == self.main_camera_id:
-                self.main_positions[tag_id] = position
+            if base_id == self.main_id:
+                self.main_translations[tag_id] = position
                 self.main_rotations[tag_id] = rotation
-                self.main_last_update[tag_id] = current_time
-            elif sender_id == self.alternative_camera_id:
-                self.alternative_positions[tag_id] = position
-                self.alternative_rotations[tag_id] = rotation
-                self.alternative_last_update[tag_id] = current_time
+                self.main_last_update_time[tag_id] = acquired_time
+            elif base_id == self.alt_id:
+                self.alt_translations[tag_id] = position
+                self.alt_rotations[tag_id] = rotation
+                self.alt_last_update_time[tag_id] = acquired_time
 
-            if tag_id in self.main_positions and tag_id in self.alternative_positions:
+            if tag_id in self.main_translations and tag_id in self.alt_translations:
                 color = self.tag_color_map.setdefault(tag_id, next(self.colors))
                 if self.sync:
                     self._synchronize(tag_id, color)
@@ -204,8 +207,8 @@ class CameraSyncManager(Synchronizer):
             self.plot_points_list = []
 
     def _synchronize(self, tag, color):
-        R, T = direct_transform_matrices(self.main_rotations[tag], self.main_positions[tag],
-                                         self.alternative_rotations[tag], self.alternative_positions[tag])
+        R, T = direct_transform_matrices(self.main_rotations[tag], self.main_translations[tag],
+                                         self.alt_rotations[tag], self.alt_translations[tag])
         self.rotation_matrices.append(R)
         self.translations_matrices.append(T)
         self.rotation_matrices = self.rotation_matrices[-self.top_K:]
@@ -214,14 +217,14 @@ class CameraSyncManager(Synchronizer):
         R_avg, T_avg = average_transform_matrices(self.rotation_matrices, self.translations_matrices)
         print(f"R matrix for tag {tag}: {R_avg}, T vector for tag {tag}: {T_avg}")
 
-        transformed_point = transform_point(self.alternative_positions[tag], R_avg, T_avg)
-        transformed_rotation = transform_rotation(R_avg, self.alternative_rotations[tag])
-        point_distance = distance_between_points(transformed_point, self.main_positions[tag])
+        transformed_point = transform_point(self.alt_translations[tag], R_avg, T_avg)
+        transformed_rotation = transform_rotation(R_avg, self.alt_rotations[tag])
+        point_distance = distance_between_points(transformed_point, self.main_translations[tag])
         rotation_distance = distance_between_rotations(transformed_rotation, self.main_rotations[tag])
 
         print(
-            f"Main position for tag {tag}: {self.main_positions[tag]}, "
-            f"alternative position for tag {tag}: {self.alternative_positions[tag]}, "
+            f"Main position for tag {tag}: {self.main_translations[tag]}, "
+            f"alternative position for tag {tag}: {self.alt_translations[tag]}, "
             f"converted position for tag {tag}: {transformed_point}")
         print(f"Distances for tag {tag}: {point_distance} m, angles: {rotation_distance} °")
 
@@ -236,14 +239,14 @@ class CameraSyncManager(Synchronizer):
 
     def _validate(self, tag, color):
         if self.retrieved_R is not None and self.retrieved_T is not None:
-            transformed_point = transform_point(self.alternative_positions[tag], self.retrieved_R, self.retrieved_T)
-            transformed_rotation = transform_rotation(self.retrieved_R, self.alternative_rotations[tag])
-            point_distance = distance_between_points(transformed_point, self.main_positions[tag])
+            transformed_point = transform_point(self.alt_translations[tag], self.retrieved_R, self.retrieved_T)
+            transformed_rotation = transform_rotation(self.retrieved_R, self.alt_rotations[tag])
+            point_distance = distance_between_points(transformed_point, self.main_translations[tag])
             rotation_distance = distance_between_rotations(transformed_rotation, self.main_rotations[tag])
 
             print(
-                f"Main position for tag {tag}: {self.main_positions[tag]}, "
-                f"alternative position for tag {tag}: {self.alternative_positions[tag]},"
+                f"Main position for tag {tag}: {self.main_translations[tag]}, "
+                f"alternative position for tag {tag}: {self.alt_translations[tag]},"
                 f"converted position for tag {tag}: {transformed_point}")
             print(f"Distances for tag {tag}: {point_distance} m, angles: {rotation_distance} °")
 
@@ -251,12 +254,12 @@ class CameraSyncManager(Synchronizer):
         else:
             with open(os.path.join(self.camera_sync_dir, 'transformation_matrices.json'), 'r') as file:
                 data = json.load(file)
-            key = f'{self.alternative_camera_id}-{self.main_camera_id}'
+            key = f'{self.alt_id}-{self.main_id}'
             self.retrieved_R, self.retrieved_T = np.array(data[key]['R']), np.array(
                 data[key]['T'])
 
     def _add_points_to_list(self, tag, color, transformed_point):
-        main_point = np.array(self.main_positions[tag]).reshape(1, 3)
+        main_point = np.array(self.main_translations[tag]).reshape(1, 3)
         transformed_point = np.array(transformed_point).reshape(1, 3)
         self.plot_points_list.append((main_point, transformed_point, color, tag))
 
@@ -269,7 +272,7 @@ class CameraSyncManager(Synchronizer):
         if data is None:
             data = {}
 
-        key = f'{self.alternative_camera_id}-{self.main_camera_id}'
+        key = f'{self.alt_id}-{self.main_id}'
         data[key] = {"R": R, "T": T}
         with open(json_file_path, 'w') as file:
             json.dump(data, file, indent=4)

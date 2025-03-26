@@ -1,6 +1,7 @@
 import datetime
 import socket
 import struct
+import subprocess
 import threading
 import time
 import wave
@@ -18,6 +19,32 @@ from .stream_receiver import StreamReceiver
 
 logger = get_logger(__name__)
 
+# Define supported formats for our module.
+SUPPORTED_FORMATS = {
+    'int16': {'sample_width': 2, 'dtype': np.int16},
+    'int32': {'sample_width': 4, 'dtype': np.int32},
+    'float32': {'sample_width': 4, 'dtype': np.float32},
+}
+
+# Mapping for PyAudio formats.
+PA_FORMATS = {
+    'int16': pyaudio.paInt16,
+    'int32': pyaudio.paInt32,
+    'float32': pyaudio.paFloat32,
+}
+
+# Mapping for FFmpeg's raw audio format and codec names.
+RTMP_FORMATS = {
+    'int16': 's16le',
+    'int32': 's32le',
+    'float32': 'f32le',
+}
+RTMP_CODEC = {
+    'int16': 'pcm_s16le',
+    'int32': 'pcm_s32le',
+    'float32': 'pcm_f32le',
+}
+
 
 def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
     """Write AudioFrame to a wave file.
@@ -26,10 +53,9 @@ def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
         output_path (str): The file path where the wave file will be saved.
         audio_frames (AudioFrame): The audio frames to write.
     """
-    supported_formats = {'int16': 2}
-    if audio_frames.format not in supported_formats:
+    if audio_frames.format not in SUPPORTED_FORMATS:
         raise ValueError(f"Unsupported audio format: {audio_frames.format}")
-    sample_width = supported_formats[audio_frames.format]
+    sample_width = SUPPORTED_FORMATS[audio_frames.format]['sample_width']
 
     with wave.open(str(output_path), 'wb') as wav_file:
         wav_file.setnchannels(audio_frames.channels)
@@ -41,35 +67,54 @@ def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
 class AudioStream(StreamReceiver):
     """Audio stream implementation for continuous audio data capture."""
 
-    def __init__(self, source: str, buffer_duration: float = 5.0, **kwargs):
+    def __init__(self, source: str, **kwargs):
         """Initialize audio stream.
-        
+
         Args:
-            source: Stream source type ('pyaudio', 'udp', or 'tcp')
-            buffer_duration: Duration of the ring buffer in seconds
-            **kwargs: Additional configuration parameters
-                format: Audio format (default: int16)
-                channels: Number of channels (default: 1)
-                rate: Sample rate in Hz (default: 16000)
-                chunk_size: Size of audio chunk to read in frames (default: 512)
-                resample_method: Method for resampling (default: AUDIO_LIBROSA)
-                host: Socket host (for 'udp' or 'tcp' source)
-                port: Socket port (for 'udp' or 'tcp' source)
+            source (str): Stream source type ('pyaudio', 'udp', 'tcp', or 'rtmp')
+
+        Keyword Args:
+            buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 5.0)
+            format (str, optional): Audio format (default: 'int16')
+            channels (int, optional): Number of audio channels (default: 1)
+            rate (int, optional): Sample rate in Hz (default: 16000)
+            chunk_size (int, optional): Size of audio chunk to read in frames (default: 512)
+            resample_method (ResampleMethod, optional): Method for resampling (default: AUDIO_LIBROSA)
+            host (str, optional): Socket host (required for 'udp' or 'tcp' sources)
+            port (int, optional): Socket port (required for 'udp' or 'tcp' sources)
+            url (str, optional): RTMP URL (required for 'rtmp' source)
         """
         super().__init__(**kwargs)
         self.source = source
 
-        # Socket configuration
-        self.host = kwargs.get('host', '0.0.0.0')  # Default to all interfaces
-        self.port = kwargs.get('port', 8000)  # Default to port 8000
-        self.sock: socket.socket | None = None
-        self.conn: socket.socket | None = None  # For TCP connection
-
         # Stream configuration
+        self.buffer_duration = kwargs.get('buffer_duration', 5.0)
         self.format = kwargs.get('format', 'int16')
+        if self.format not in SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported audio format: {self.format}")
+        self.sample_width = SUPPORTED_FORMATS[self.format]['sample_width']
+        self.dtype = SUPPORTED_FORMATS[self.format]['dtype']
+
         self.channels = kwargs.get('channels', 1)
         self.rate = kwargs.get('rate', 16000)
         self.chunk_size = kwargs.get('chunk_size', 512)
+        self.resample_method = kwargs.get('resample_method', ResampleMethod.AUDIO_LIBROSA)
+
+        # PyAudio objects
+        self.p = None
+        self.stream = None
+
+        # Socket objects for UDP/TCP sources
+        if self.source in ['udp', 'tcp']:
+            self.host = self.require_kwarg(kwargs, 'host', "UDP/TCP source requires a 'host' parameter")
+            self.port = self.require_kwarg(kwargs, 'port', "UDP/TCP source requires a 'port' parameter")
+            self.sock: socket.socket | None = None
+            self.conn: socket.socket | None = None  # For TCP connection
+
+        # RTMP objects
+        if self.source == 'rtmp':
+            self.rtmp_url = self.require_kwarg(kwargs, 'url', "RTMP source requires a 'url' parameter")
+            self.ffmpeg_proc: subprocess.Popen | None = None
 
         # Frame metadata
         self._frame_metadata = {
@@ -79,7 +124,7 @@ class AudioStream(StreamReceiver):
         }
 
         # Calculate buffer size in frames
-        buffer_frames = int(self.rate * buffer_duration / self.chunk_size)
+        buffer_frames = int(self.rate * self.buffer_duration / self.chunk_size)
         self.buffer = RingBuffer(buffer_frames)
 
         # Last read position tracking
@@ -88,12 +133,6 @@ class AudioStream(StreamReceiver):
         # Threading control
         self._stop_event = threading.Event()
         self._receive_thread = None
-
-        # PyAudio objects
-        self.p = None
-        self.stream = None
-
-        self.resample_method = kwargs.get('resample_method', ResampleMethod.AUDIO_LIBROSA)
 
     def start(self) -> None:
         """Start the audio stream and begin capturing data."""
@@ -105,6 +144,8 @@ class AudioStream(StreamReceiver):
             self._initialize_udp()
         elif self.source == 'tcp':
             self._initialize_tcp()
+        elif self.source == 'rtmp':
+            self._initialize_rtmp()
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
@@ -112,6 +153,10 @@ class AudioStream(StreamReceiver):
         self._receive_thread = RaisingThread(target=self._receive_loop)
         self._receive_thread.daemon = True
         self._receive_thread.start()
+
+        if self.source == 'rtmp':
+            time.sleep(3)
+
         logger.info(f"Audio stream started with source: {self.source}")
 
     def stop(self) -> None:
@@ -125,39 +170,40 @@ class AudioStream(StreamReceiver):
             except Exception as e:
                 logger.warning(f"During thread stopping, caught: {e}", exc_info=True)
             finally:
-                self._receive_thread = None  # Safely clear the reference
+                self._receive_thread = None
 
-        # Clean up other resources
         if self.source == 'pyaudio':
             self._cleanup_pyaudio()
         elif self.source in ['udp', 'tcp']:
             self._cleanup_socket()
+        elif self.source == 'rtmp':
+            self._cleanup_rtmp()
 
         self._last_read_pos = -1
 
-    def read(self, duration: float, target_rate: int | None = None, timeout: float = 5.0, latest: bool = False) -> AudioFrame | None:
+    def read(self, duration: float, target_rate: int | None = None, timeout: float = 5.0,
+             latest: bool = False) -> AudioFrame | None:
         """Read audio data with optional resampling.
 
         Args:
-            duration: Duration to read in seconds
-            target_rate: Optional target sample rate for resampling
-            timeout: Maximum time to wait for data in seconds
-            latest: Whether to read from the most recent data or continue from last position
+            duration (float): Duration to read in seconds.
+            target_rate (int, optional): Optional target sample rate for resampling.
+            timeout (float): Maximum time to wait for data in seconds.
+            latest (bool): Whether to read from the most recent data or continue from last position.
 
         Returns:
-            AudioFrame containing the requested duration of audio data, or None if timeout is reached
+            AudioFrame: Containing the requested duration of audio data, or None if timeout is reached.
         """
         frames_needed = int(duration * self.rate / self.chunk_size)
         total_frames = []
         start_time = time.time()
 
         if latest:
-            self._last_read_pos = -1  # Reset to sentinel value
+            self._last_read_pos = -1
 
         while len(total_frames) < frames_needed:
             current_tail = self.buffer.get_tail()
 
-            # For first/latest read, start from most recent data
             if self._last_read_pos == -1:
                 self._last_read_pos = current_tail
                 continue
@@ -185,11 +231,11 @@ class AudioStream(StreamReceiver):
         """Process collected frames and apply resampling if needed.
 
         Args:
-            frames: List of AudioFrames to process
-            target_rate: Optional target sample rate for resampling
+            frames (list[AudioFrame]): List of AudioFrames to process.
+            target_rate (int, optional): Optional target sample rate for resampling.
 
         Returns:
-            Processed AudioFrame or None if no frames available
+            AudioFrame: Processed AudioFrame or None if no frames available.
         """
         if not frames:
             logger.warning("No frames collected within timeout period.")
@@ -217,10 +263,9 @@ class AudioStream(StreamReceiver):
     def _initialize_pyaudio(self) -> None:
         """Initialize PyAudio stream with configured parameters."""
         self.p = pyaudio.PyAudio()
-        if self.format == 'int16':
-            stream_format = pyaudio.paInt16
-        else:
+        if self.format not in PA_FORMATS:
             raise ValueError(f"Unsupported audio format: {self.format} for {self.source}")
+        stream_format = PA_FORMATS[self.format]
         self.stream = self.p.open(
             format=stream_format,
             channels=self.channels,
@@ -248,6 +293,35 @@ class AudioStream(StreamReceiver):
         self.conn.settimeout(3)
         logger.info(f"TCP connection accepted from {addr}")
 
+    def _initialize_rtmp(self) -> None:
+        """Initialize RTMP stream using FFmpeg.
+
+        Spawns an FFmpeg process that connects to the provided RTMP URL and outputs
+        raw PCM audio on stdout.
+        """
+        # Determine the correct format and codec based on self.format.
+        fmt = RTMP_FORMATS[self.format]
+        codec = RTMP_CODEC[self.format]
+
+        command = [
+            'ffmpeg',
+            '-i', self.rtmp_url,
+            '-f', fmt,
+            '-acodec', codec,
+            '-ar', str(self.rate),
+            '-ac', str(self.channels),
+            '-'  # Output to stdout
+        ]
+        try:
+            self.ffmpeg_proc = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            if self.ffmpeg_proc.stdout is None:
+                raise RuntimeError("Failed to capture stdout from ffmpeg process")
+            logger.info(f"RTMP stream initialized from {self.rtmp_url}")
+        except Exception as e:
+            raise RuntimeError(f"Error initializing RTMP stream: {e}") from e
+
     def _cleanup_pyaudio(self) -> None:
         """Clean up PyAudio resources."""
         if self.stream:
@@ -265,6 +339,13 @@ class AudioStream(StreamReceiver):
             self.sock.close()
             self.sock = None
 
+    def _cleanup_rtmp(self) -> None:
+        """Clean up RTMP (FFmpeg) process."""
+        if self.ffmpeg_proc:
+            self.ffmpeg_proc.terminate()
+            self.ffmpeg_proc = None
+            logger.info("RTMP stream process terminated.")
+
     def _receive_loop(self) -> None:
         """Continuously receive data and store in buffer."""
         while not self._stop_event.is_set():
@@ -278,38 +359,49 @@ class AudioStream(StreamReceiver):
 
     def _read_chunk(self) -> AudioFrame | None:
         """Read a chunk of audio data continuously.
-        
+
         For UDP/TCP sources, the packet format is:
-        Metadata (18 bytes):
-        - 4 bytes (uint32): packet counter
-        - 14 bytes (7 x uint16): timestamp (year, month, day, hour, minute, second, milliseconds)
-        Audio data (1024 bytes):
-        - 512 samples in int16 format
+          - Metadata (18 bytes):
+              - 4 bytes (uint32): packet counter
+              - 14 bytes (7 x uint16): timestamp (year, month, day, hour, minute, second, milliseconds)
+          - Audio data: (chunk_size frames × channels × sample_width bytes)
+
+        For RTMP, we assume FFmpeg outputs raw PCM data with no extra metadata.
         """
         try:
             if self.source == 'pyaudio':
                 data = self.stream.read(self.chunk_size, exception_on_overflow=False)
-                audio_data = np.frombuffer(data, dtype=np.int16)
+                audio_data = np.frombuffer(data, dtype=self.dtype)
                 timestamp = time.time()
             elif self.source in ['udp', 'tcp']:
+                # For UDP/TCP, include 18 bytes of metadata.
+                expected_bytes = self.chunk_size * self.channels * self.sample_width + 18
                 if self.source == 'udp':
-                    data, _ = self.sock.recvfrom(self.chunk_size * 2 + 18)  # 1024 bytes audio + 18 bytes metadata
-                else:  # TCP
-                    data = self.conn.recv(self.chunk_size * 2 + 18)
+                    data, _ = self.sock.recvfrom(expected_bytes)
+                else:
+                    data = self.conn.recv(expected_bytes)
 
-                if not data or len(data) < 18:  # Check if we have at least the metadata
+                if not data or len(data) < 18:
                     return None
 
-                metadata_format = '>I7H'  # 4 bytes + (7 * 2) bytes = 18 bytes
+                metadata_format = '>I7H'
                 packet_counter, year, month, day, hour, minute, second, milliseconds = \
                     struct.unpack(metadata_format, data[:18])
 
                 timestamp = datetime.datetime(
                     year, month, day, hour, minute, second,
-                    milliseconds * 1000  # Convert to microseconds
+                    milliseconds * 1000
                 ).timestamp()
 
-                audio_data = np.frombuffer(data[18:], dtype=np.int16)
+                audio_data = np.frombuffer(data[18:], dtype=self.dtype)
+            elif self.source == 'rtmp':
+                # For RTMP, expected bytes is the raw audio data only.
+                expected_bytes = self.chunk_size * self.channels * self.sample_width
+                data = self.ffmpeg_proc.stdout.read(expected_bytes)
+                if not data or len(data) < expected_bytes:
+                    return None
+                audio_data = np.frombuffer(data, dtype=self.dtype)
+                timestamp = time.time()
             else:
                 return None
 
@@ -323,3 +415,10 @@ class AudioStream(StreamReceiver):
             )
         except Exception as e:
             raise RuntimeError(f"Error reading chunk from {self.source}: {e}") from e
+
+    @staticmethod
+    def require_kwarg(kwargs, key, message):
+        value = kwargs.get(key)
+        if value is None:
+            raise ValueError(message)
+        return value

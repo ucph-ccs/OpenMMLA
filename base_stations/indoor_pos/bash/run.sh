@@ -1,17 +1,29 @@
 #!/bin/bash
+# This script runs the indoor positioning system
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="video-base"
-NUM_BASES=1
+NUM_BASE=1
 NUM_SYNCHRONIZER=1
 NUM_VISUALIZER=1
 GRAPHICS=true
-RECORD=false
 STORE=false
 
+print_usage() {
+    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-h]"
+    echo ""
+    echo "options:"
+    echo "  -nb NUM_BASE         : Number of audio bases to run (default: 3)"
+    echo "  -ns NUM_SYNCHRONIZER  : Number of synchronizers to run (default: 1)"
+    echo "  -sp SPEECH_SEPARATE   : Whether to use Speech Separation (true/false, default: false)"
+    echo "  -h                    : Display this help message"
+    exit 1
+}
+
+# Helper functions
 is_number() {
     [[ $1 =~ ^[0-9]+$ ]]
 }
@@ -45,88 +57,129 @@ run_py_in_new_tab_gnome() {
     gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
 }
 
-# Parse arguments
-while getopts "b:s:v:g:r:t:" opt; do
-  case $opt in
-    b) NUM_BASES=$OPTARG ;;
-    s) NUM_SYNCHRONIZER=$OPTARG ;;
-    v) NUM_VISUALIZER=$OPTARG ;;
-    g) GRAPHICS=$OPTARG ;;
-    r) RECORD=$OPTARG ;;
-    t) STORE=$OPTARG ;;
-    \?) echo "Invalid option -$OPTARG" >&2
-        exit 1 ;;
-  esac
+
+# Parse arguments for multi-character options
+i=1
+while [ $i -le $# ]; do
+    arg="${!i}"
+    case "$arg" in
+        -nb)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                NUM_BASE="${!i}"
+            else
+                echo "Error: -nb requires a value"
+                print_usage
+            fi
+            ;;
+        -ns)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                NUM_SYNCHRONIZER="${!i}"
+            else
+                echo "Error: -ns requires a value"
+                print_usage
+            fi
+            ;;
+        -sp)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                SPEECH_SEPARATE="${!i}"
+            else
+                echo "Error: -sp requires a value"
+                print_usage
+            fi
+            ;;
+        -h)
+            print_usage
+            ;;
+        *)
+            echo "Invalid option: $arg"
+            print_usage
+            ;;
+    esac
+    i=$((i+1))
 done
 
 # Validate arguments
-if ! is_number "$NUM_BASES"; then
-    echo "Error: -b NUM_BASES must be a number."
-    exit 1
-fi
+for arg_name in "NUM_BASE" "NUM_SYNCHRONIZER"; do
+    arg_value="${!arg_name}"
+    if ! is_number "$arg_value"; then
+        echo "Error: $arg_name must be a number"
+        print_usage
+    fi
+done
 
-if ! is_number "$NUM_SYNCHRONIZER"; then
-    echo "Error: -s NUM_SYNCHRONIZER must be a number."
-    exit 1
-fi
+# shellcheck disable=SC2043
+for arg_name in "SPEECH_SEPARATE"; do
+    arg_value="${!arg_name}"
+    if ! is_boolean "$arg_value"; then
+        echo "Error: $arg_name must be either 'true' or 'false'."
+        print_usage
+    fi
+done
 
-if ! is_number "$NUM_VISUALIZER"; then
-    echo "Error: -v NUM_VISUALIZER must be a number."
-    exit 1
-fi
 
-if ! is_boolean "$GRAPHICS"; then
-    echo "Error: -g GRAPHICS must be a boolean (true or false)."
-    exit 1
-fi
+# Display configuration
+echo "Indoor Positioning System Configuration:"
+echo "--------------------------------"
+echo "NUM_BASE: $NUM_BASE"
+echo "NUM_SYNCHRONIZER: $NUM_SYNCHRONIZER"
+echo "SPEECH_SEPARATE: $SPEECH_SEPARATE"
+echo "--------------------------------"
+echo "Starting $NUM_BASE video base(s) and $NUM_SYNCHRONIZER synchronizer(s)..."
 
-if ! is_boolean "$RECORD"; then
-    echo "Error: -r RECORD must be a boolean (true or false)."
-    exit 1
-fi
-
-if ! is_boolean "$STORE"; then
-    echo "Error: -s STORE must be a boolean (true or false)."
-    exit 1
-fi
-
-# Open new Terminal windows and run video bases
-if [ "$NUM_BASES" -gt 0 ]; then
-    for i in $(seq 1 "$NUM_BASES"); do
+# Run video bases
+CMD="python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -s $STORE"
+if [ "$NUM_BASE" -gt 0 ]; then
+    for i in $(seq 1 "$NUM_BASE"); do
         if [[ $OSTYPE == 'darwin'* ]]; then
-            run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
+            run_py_in_new_tab_mac "$CMD"
         elif is_raspberry_pi; then
-            run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
+            run_py_in_new_win_lxterminal "$CMD"
         elif is_ubuntu; then
-            run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -r $RECORD"
+            run_py_in_new_tab_gnome "$CMD"
         else
-            echo "Unknown OS or not supported."
+            echo "Unknown OS or not supported. Running in current terminal:"
+            export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
+            source activate $CONDA_ENV
+            eval "$CMD"
         fi
     done
 fi
 
-# Open new Terminal windows and run video base synchronizer
+# Run synchronizer
+CMD="python3 $PROJECT_DIR/examples/run_video_synchronizer.py"
 if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
-  if [[ $OSTYPE == 'darwin'* ]]; then
-      run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/run_synchronizer.py"
-  elif is_raspberry_pi; then
-      run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/run_synchronizer.py"
-  elif is_ubuntu; then
-      run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/run_synchronizer.py"
-  else
-      echo "Unknown OS or not supported."
-  fi
+    if [[ $OSTYPE == 'darwin'* ]]; then
+        run_py_in_new_tab_mac "$CMD"
+    elif is_raspberry_pi; then
+        run_py_in_new_win_lxterminal "$CMD"
+    elif is_ubuntu; then
+        run_py_in_new_tab_gnome "$CMD"
+    else
+        echo "Unknown OS or not supported. Running in current terminal:"
+        export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
+        source activate $CONDA_ENV
+        eval "$CMD"
+    fi
 fi
 
-# Open new Terminal windows and run visualizer
+# Run visualizer
+CMD="python3 $PROJECT_DIR/examples/run_video_visualizer.py -s $STORE"
 if [ "$NUM_VISUALIZER" -gt 0 ]; then
-  if [[ $OSTYPE == 'darwin'* ]]; then
-      run_py_in_new_tab_mac "python3 $PROJECT_DIR/examples/run_visualizer.py -s $STORE"
-  elif is_raspberry_pi; then
-      run_py_in_new_win_lxterminal "python3 $PROJECT_DIR/examples/run_visualizer.py -s $STORE"
-  elif is_ubuntu; then
-      run_py_in_new_tab_gnome "python3 $PROJECT_DIR/examples/run_visualizer.py -s $STORE"
-  else
-      echo "Unknown OS or not supported."
-  fi
+    if [[ $OSTYPE == 'darwin'* ]]; then
+        run_py_in_new_tab_mac "$CMD"
+    elif is_raspberry_pi; then
+        run_py_in_new_win_lxterminal "$CMD"
+    elif is_ubuntu; then
+        run_py_in_new_tab_gnome "$CMD"
+    else
+        echo "Unknown OS or not supported. Running in current terminal:"
+        export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
+        source activate $CONDA_ENV
+        eval "$CMD"
+    fi
 fi
+
+echo "All components started successfully."

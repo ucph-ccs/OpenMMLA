@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from openmmla.utils.clean import flush_input
+from .enums import LIGHT_BLUE, ENDC
 
 
 def get_bucket_name(influx_client):
@@ -65,16 +66,16 @@ def get_function_calibrator():
             print('Please enter a valid integer')
 
 
-def get_function_sync_manager():
+def get_function_sync_manager(main_id: str, alt_id: str, sync: bool):
     """Get the function to be performed from user input for sync manager."""
     while True:
         try:
             flush_input()
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
-                               f"1: start\n"
-                               f"2: switch mode\n"
-                               f"3: set camera id\n"
+                               f"1: set camera id ({LIGHT_BLUE}main:{main_id}, alt:{alt_id}{ENDC})\n"
+                               f"2: start\n"
+                               f"3: switch mode ({LIGHT_BLUE}sync:{sync}{ENDC})\n"
                                f"4: export transformations\n"
                                f"5: clear transformations\n"
                                f"0: exit\n"
@@ -91,15 +92,15 @@ def get_function_sync_manager():
             print('Please enter a valid integer')
 
 
-def get_function_base():
+def get_function_base(chosen_camera: str, camera_seed: str, base_id: str, main_id: str):
     """Get the function to be performed from user input for base."""
     while True:
         try:
             flush_input()
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
-                               f"1: start\n"
-                               f"2: set camera\n"
+                               f"1: set camera ({LIGHT_BLUE}camera:{chosen_camera}, camera seed:{camera_seed}, base:{base_id}, main:{main_id}{ENDC})\n"
+                               f"2: start\n"
                                f"0: exit\n"
                                f"Selected function: ")
 
@@ -117,15 +118,15 @@ def get_function_base():
             print('Please enter a valid integer')
 
 
-def get_function_synchronizer():
+def get_function_synchronizer(main_id: str):
     """Get the function to be performed from user input for synchronizer."""
     while True:
         try:
             flush_input()
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
-                               f"1: start\n"
-                               f"2: set main camera\n"
+                               f"1: set main camera ({LIGHT_BLUE}main: {main_id}{ENDC})\n"
+                               f"2: start\n"
                                f"0: exit\n"
                                f"Selected function: ")
 

@@ -1,11 +1,11 @@
 #!/bin/bash
-# This script runs the control base
+# This script runs the camera calibrator for calibrating the camera's intrinsic parameters
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
-CONDA_ENV="audio-base"
+CONDA_ENV="video-base"
 
 is_raspberry_pi() {
     grep -q "ID=debian" /etc/os-release && grep -q "Raspberry Pi" /proc/cpuinfo
@@ -32,8 +32,8 @@ run_py_in_new_tab_gnome() {
     gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
 }
 
-# Run controller
-CMD="python3 $PROJECT_DIR/examples/control.py"
+# Run camera calibrator
+CMD="python3 $PROJECT_DIR/examples/run_camera_calibrator.py"
 if [[ "$OSTYPE" == "darwin"* ]]; then
     run_py_in_new_tab_mac "$CMD"
 elif is_raspberry_pi; then

@@ -66,33 +66,58 @@ except ImportError:
 
 
 class AudioBase(Base, ABC):
+    """An abstract base class for audio processing pipelines that handles speaker recognition, transcription, and audio management.
+
+    This class provides a comprehensive framework for real-time audio processing which includes:
+      - Speaker profile registration and management.
+      - Speech transcription and enhancement.
+      - Voice activity detection (VAD) and noise reduction (NR).
+      - Multi-speaker separation for overlapped speech.
+
+    Key Features:
+      - Multiple operating modes: 'record', 'recognize', and 'full'.
+      - Configurable pipeline components (VAD, NR, transcription, separation).
+      - Persistent storage management for audio files and speaker profiles.
+      - Concurrent audio processing using threads.
+      - Integration with external services via MQTT, Redis, and InfluxDB.
+      - Support for both real-time and pre-recorded audio processing.
+
+    Concrete implementations must provide the following abstract methods:
+      - _start_register: Handle speaker profile registration.
+      - _start_recognize: Handle real-time voice recognition.
+      - _reset: Reset or reinitialize the audio base.
+      - _switch_mode: Switch the operating mode of the audio base.
+    """
+
     logger = get_logger(f'audio-base')
 
-    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', vad: bool = True, nr: bool = True,
-                 tr: bool = True, sp: bool = False, store: bool = True):
-        """Initialize the Audio Base.
+    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', store: bool = True, vad: bool = True,
+                 nr: bool = True, tr: bool = True, sp: bool = False):
+        """Initialize the audio processing pipeline base class.
+
+        Sets up the configuration, directories, and required objects for audio processing.
 
         Args:
-            project_dir: root directory of the project
-            config_path: path to the configuration file, either absolute or relative to the root directory
-            mode: operating mode, either 'record', 'recognize', or 'full', default to 'full'
-            vad: whether to use the VAD, default to True
-            nr: whether to use the denoiser to enhance speech, default to True
-            tr: whether to transcribe speech to text, default to True
-            sp: whether to do speech separation for overlapped segment, default to False
-            store: whether to store audio files, default to True
+            project_dir (str): path to the project directory.
+            config_path (str): path to the configuration file (absolute or relative to project_dir).
+            mode (str): operating mode ('record', 'recognize', or 'full'). Defaults to 'full'.
+            store (bool): whether to store audio files. Defaults to True.
+            vad (bool): whether to apply Voice Activity Detection. Defaults to True.
+            nr (bool): whether to apply noise reduction. Defaults to True.
+            tr (bool): whether to transcribe speech to text. Defaults to True.
+            sp (bool): whether to perform speech separation. Defaults to False.
         """
         super().__init__(project_dir, config_path)
 
-        """Audio base specific parameters."""
+        # Audio base specific parameters.
         self.mode = mode
+        self.store = store
         self.vad = vad
         self.nr = nr
         self.tr = tr
         self.sp = sp
-        self.store = store
 
-        """Runtime attributes."""
+        # Runtime attributes.
         self.bucket_name = None
         self.last_speaker = None
         self.audio_dir = None
@@ -111,13 +136,25 @@ class AudioBase(Base, ABC):
     @property
     @abstractmethod
     def base_type(self):
-        """Return the type of the audio base."""
+        """Abstract property that returns the type of the audio base.
+
+        Returns:
+            str: The audio base type.
+        """
         pass
 
     def _setup_input(self):
+        """Setup the input identifier for the audio base.
+
+        Retrieves and assigns a unique identifier for this instance.
+        """
         self.id = get_id()
 
     def _setup_yaml(self):
+        """Load and assign configuration parameters from the YAML configuration file.
+
+        Reads various settings such as durations, thresholds, and service URLs required for the audio processing pipeline.
+        """
         self.register_duration = int(self.config[self.base_type]['register_duration'])
         self.recognize_duration = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
             self.config[self.base_type]['recognize_duration'])
@@ -133,6 +170,11 @@ class AudioBase(Base, ABC):
         self.vad_url = resolve_url(self.config['Server']['asr']['voice_activity_detection'])
 
     def _setup_directories(self):
+        """Create and set up the necessary directories for runtime operations.
+
+        Creates directories for runtime files, temporary files, speaker profiles, and audio databases.
+        Ensures that the required folder structure exists.
+        """
         self.runtime_dir = os.path.join(self.project_dir, 'real-time', 'runtime')
         self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
         self.profiles_dir = os.path.join(self.project_dir, 'real-time', 'profiles')
@@ -143,15 +185,26 @@ class AudioBase(Base, ABC):
         os.makedirs(self.audio_db, exist_ok=True)
 
     def _setup_objects(self):
+        """Initialize external service clients and internal processing objects.
+
+        Sets up clients for InfluxDB, Redis, and MQTT, warms up the audio resampler, and initializes the AudioRecognizer.
+        """
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.warm_up_resampler()
-        self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db,
-                                                keep_audio=self.store)
+        self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db, store=self.store)
 
     def run(self):
-        """Interface for running the Audio Base."""
+        """Start the audio processing loop.
+
+        Provides an interactive interface to:
+          1. Register speaker profiles.
+          2. Start real-time voice recognition.
+          3. Reset or switch the audio base mode.
+
+        Continuously prompts the user for input until termination.
+        """
         func_map = {1: self._start_register, 2: self._start_recognize, 3: self._reset, 4: self._switch_mode}
         while True:
             try:
@@ -171,27 +224,42 @@ class AudioBase(Base, ABC):
 
     @abstractmethod
     def _start_register(self):
-        """Start the speaker profile registration."""
+        """Abstract method to start the speaker profile registration process.
+
+        Implementations should handle recording, processing, and saving speaker profiles.
+        """
         pass
 
     @abstractmethod
     def _start_recognize(self):
-        """Start the real-time voice recognition, including audio recording, speaker recognition, speech transcription,
-        and listening on stop signal."""
+        """Abstract method to start real-time voice recognition.
+
+        Implementations should handle audio recording, speaker recognition, speech transcription,
+        and listening for a stop signal.
+        """
         pass
 
     @abstractmethod
     def _reset(self):
-        """Set the new port for the audio base and reinitialize audio base."""
+        """Abstract method to reset the audio base.
+
+        Implementations should reinitialize the audio base, for example by setting a new port.
+        """
         pass
 
     @abstractmethod
     def _switch_mode(self):
-        """Switch the mode of the audio base."""
+        """Abstract method to switch the operating mode of the audio base.
+
+        Implementations should handle switching between modes (e.g., from 'record' to 'recognize').
+        """
         pass
 
     def _clean_up(self):
-        """Free memory by resetting the runtime variables."""
+        """Clean up runtime variables and free memory.
+
+        Resets runtime attributes and calls garbage collection to free memory.
+        """
         self.bucket_name = None
         self.last_speaker = None
         self.audio_dir = None
@@ -201,7 +269,11 @@ class AudioBase(Base, ABC):
         gc.collect()
 
     def _prepare_directories(self):
-        """Prepare and manage directories based on the operation mode."""
+        """Prepare subdirectories for audio processing based on the operating mode.
+
+        Creates subdirectories for segments, chunks, separations, temporary files, and records.
+        Clears specific directories based on the current operating mode.
+        """
         sub_dirs = ['segments', 'chunks', 'separations', 'temp', 'records']
         for subdir in sub_dirs:
             directory_path = os.path.join(self.audio_dir, subdir)
@@ -211,14 +283,21 @@ class AudioBase(Base, ABC):
             for subdir in ['segments', 'chunks', 'separations']:
                 clear_directory(os.path.join(self.audio_dir, subdir))
 
-        # Buggy code: when the badge is disconnected, the records folder will be cleared
+        # Note: The following commented code may clear the records folder when in record mode.
         # if self.mode == 'record':
         #     clear_directory(os.path.join(self.audio_dir, 'records'))
 
         clear_directory(os.path.join(self.audio_dir, 'temp'))
 
     def _load_and_queue_recorded_files(self):
-        """Load pre-recorded audio files and queue them for recognition when in recognize mode."""
+        """Load pre-recorded audio files and queue them for recognition.
+
+        In 'recognize' mode, this method loads .wav files from the records directory,
+        reads their content, and queues them for further processing.
+
+        Raises:
+            RecordingError: If an error occurs while loading or queuing the audio files.
+        """
         while not self.stop_event.is_set():
             try:
                 print(f"{GREEN}[Pre-recorded Audio]{ENDC}Loading pre-recorded audio files...")
@@ -238,17 +317,23 @@ class AudioBase(Base, ABC):
                     f'RecordingError occurred when loading pre-recorded audio files and queue: {e}') from e
 
     def _update_chunk_list(self, left_speaker, right_speaker, last_speaker, current_speaker, chunk_frames, frames,
-                           record_start_time):
-        """Update the chunk list based on the half-scaled recognition results at the speaker turn border.
+                           record_start_time) -> tuple:
+        """Update the chunk list based on recognition results at a speaker turn boundary.
+
+        Adjusts the audio chunks based on recognition outcomes from different segments,
+        handling various cases such as extending the chunk to include additional audio.
 
         Args:
-            left_speaker: recognized speaker of the left half-segment
-            right_speaker: recognized speaker of the right half-segment
-            last_speaker: recognized speaker of the last segment
-            current_speaker: recognized speaker of the current segment
-            chunk_frames: audio frames of the current chunk belonging to the last speaker
-            frames: audio frames of the current segment
-            record_start_time: record start time of the current segment
+            left_speaker: Recognized speaker from the left half of the segment.
+            right_speaker: Recognized speaker from the right half of the segment.
+            last_speaker: Recognized speaker from the previous segment.
+            current_speaker: Recognized speaker from the current segment.
+            chunk_frames: Audio frames of the current chunk associated with the last speaker.
+            frames: Audio frames of the current segment.
+            record_start_time: Start time of the current audio segment.
+
+        Returns:
+            tuple: Updated chunk_frames, remaining frames, new record_start_time, and chunk_end_time.
         """
         num_frames = int(len(frames) / 2)
 
@@ -262,7 +347,7 @@ class AudioBase(Base, ABC):
             chunk_frames = chunk_frames[:-num_frames]
             record_start_time = str(float(record_start_time) - self.recognize_duration / 2)
             chunk_end_time = record_start_time
-        else:  # Other cases, AABB, A_BB, AA_B, A__B (excluding ABAB, AB_B, A_AB)
+        else:  # Other cases: AABB, A_BB, AA_B, A__B (excluding ABAB, AB_B, A_AB)
             chunk_end_time = record_start_time
             if left_speaker != last_speaker:
                 chunk_frames = chunk_frames[:-num_frames]
@@ -274,19 +359,28 @@ class AudioBase(Base, ABC):
         return chunk_frames, frames, record_start_time, chunk_end_time
 
     def _add_to_transcription_queue(self, frames, speaker, chunk_start_time, chunk_end_time):
-        """Add audio chunk to the transcription queue.
+        """Add an audio chunk to the transcription queue.
+
+        If transcription is enabled (self.tr), enqueues the audio frames along with speaker and timing details.
 
         Args:
-            frames: audio frames to be transcribed
-            speaker: recognized speaker of the audio frames
-            chunk_start_time: start time of the audio frames
-            chunk_end_time: end time of the audio frames
+            frames: Audio frames to be transcribed.
+            speaker: Recognized speaker for the audio chunk.
+            chunk_start_time: Start time of the audio chunk.
+            chunk_end_time: End time of the audio chunk.
         """
         if self.tr:
             self.transcription_queue.put((frames, speaker, chunk_start_time, chunk_end_time))
 
     def _continuous_transcribing(self):
-        """Continuously transcribe audio from the transcription queue."""
+        """Continuously process audio chunks for transcription.
+
+        Runs in a loop until a stop event is set. Retrieves audio frames from the transcription queue,
+        transcribes them into text, and uploads the transcription.
+
+        Raises:
+            TranscribingError: If an error occurs during the transcription process.
+        """
         frame_rate = 8000 if self.sp else 16000
         while not self.stop_event.is_set():
             try:
@@ -299,13 +393,16 @@ class AudioBase(Base, ABC):
                 raise TranscribingError(f'TranscribingError occurred when transcribing: {e}') from e
 
     def _upload_speech_transcription(self, speaker, text, chunk_start_time, chunk_end_time):
-        """Upload speech transcription to InfluxDB.
+        """Upload the transcribed speech chunk to the database.
+
+        Constructs a transcription record and writes it to InfluxDB.
+        Also prints the transcription for logging purposes.
 
         Args:
-            speaker: recognized speaker name of the transcribed chunk
-            text: transcribed text of the chunk
-            chunk_start_time: start time of the chunk
-            chunk_end_time:  end time of the chunk
+            speaker: Recognized speaker for the transcribed chunk.
+            text: Transcribed text.
+            chunk_start_time: Start time of the audio chunk.
+            chunk_end_time: End time of the audio chunk.
         """
         transcription_record = {
             "measurement": "speaker transcription",
@@ -320,34 +417,36 @@ class AudioBase(Base, ABC):
               f"{GREEN}{speaker} : {text}{ENDC}")
         self.influx_client.write(self.bucket_name, record=transcription_record)
 
-    def _finalize_separated_speaker_recognition(self, speakers, similarities, durations, signals) -> tuple:
-        """Finalize the speaker recognition results of separated signals to handle edge cases (only for base containing
-         multiple registered speakers).
+    def _consolidate_separated_recognition_results(self, speakers, similarities, durations, signals) -> tuple:
+        """Consolidate speaker recognition results for separated audio signals to handle edge cases.
+
+        Processes recognition results and returns a consolidated set of speakers along with
+        their similarity scores, durations, and corresponding signals.
 
         Args:
-            speakers: list of recognized speakers
-            similarities: list of similarity values
-            durations: list of audio durations
-            signals: list of separated signals
+            speakers (list): List of recognized speakers.
+            similarities (list): List of similarity scores.
+            durations (list): List of durations for each speaker.
+            signals (list): List of separated audio signals.
 
         Returns:
-            A tuple containing the final speakers, similarities, durations, and signals
+            tuple: lists of speakers, similarities, durations, and signals.
         """
-        # If there's only one speaker, keep it as is
+        # If there's only one speaker, keep it as is.
         if len(speakers) == 1:
             return speakers, similarities, durations, signals
 
-        # If both speakers are the same, keep the one with the highest similarity
+        # If both speakers are the same, keep the one with the highest similarity.
         if speakers[0] == speakers[1]:
             max_similarity_index = 0 if similarities[0] > similarities[1] else 1
             return [speakers[max_similarity_index]], [similarities[max_similarity_index]], [
                 durations[max_similarity_index]], [signals[max_similarity_index]]
 
-        # If both are real speakers, keep them as is
+        # If both are real speakers, keep them as is.
         if all(speaker not in ['silent', 'unknown'] for speaker in speakers):
             return speakers, similarities, durations, signals
 
-        # If there's at least one real speaker, keep only the real ones
+        # If there's at least one real speaker, keep only the real ones.
         real_speakers, real_similarities, real_durations, real_texts = self.filter_real_speakers(speakers, similarities,
                                                                                                  durations, signals)
         if real_speakers:
@@ -365,15 +464,17 @@ class AudioBase(Base, ABC):
 
         return [], [], [], []
 
-    def _publish_speaker_recognition(self, record_start_time, recognize_start_time, speakers, similarities, durations):
-        """Log and publish base speaker recognition results in JSON string to Redis on bucket channel.
+    def _publish_recognition_results(self, record_start_time, recognize_start_time, speakers, similarities, durations):
+        """Log and publish speaker recognition results via MQTT.
+
+        Constructs a JSON record with recognition details and publishes it on the designated channel.
 
         Args:
-            record_start_time: record start time of the segment
-            recognize_start_time: start time of the recognition process
-            speakers: recognized speakers
-            similarities: similarity values
-            durations: audio durations
+            record_start_time: Start time of the recorded segment.
+            recognize_start_time: Start time of the recognition process.
+            speakers (list): List of recognized speakers.
+            similarities (list): List of similarity scores.
+            durations (list): List of audio durations.
         """
         base_recognition_result = {
             'base_id': f'{self.base_type.lower()}_{self.id}',
@@ -389,27 +490,29 @@ class AudioBase(Base, ABC):
         self.mqtt_client.publish(f'{self.bucket_name}/audio', result_str)
 
     def _transcribe(self, frames, frame_rate) -> str:
-        """Transcribe audio frames to text.
+        """Transcribe audio frames to text using an external service.
 
         Args:
-            frames: audio frames to be transcribed
-            frame_rate: sample rate of the audio frames
+            frames: Audio frames to be transcribed.
+            frame_rate: Sample rate of the audio frames.
 
         Returns:
-            transcribed text
+            str: The transcribed text.
         """
         text = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
                                             self.speech_transcriber_url)
         return text
 
     def _separate_speech(self, segment_audio_path) -> list:
-        """Separate speech from the overlapped segment audio.
+        """Separate overlapping speech from an audio segment.
+
+        Uses an external speech separation service to process the audio file and decodes the separated signals.
 
         Args:
-            segment_audio_path:
+            segment_audio_path (str): Path to the audio segment file.
 
         Returns:
-            separated speech signals
+            list: A list of separated speech signals (decoded from base64).
         """
         separated_result = request_speech_separation(segment_audio_path, f'{self.base_type.lower()}_{self.id}',
                                                      self.speech_separator_url)
@@ -417,28 +520,27 @@ class AudioBase(Base, ABC):
         return result
 
     def _audio_preprocessing(self, input_path: str, inplace: int) -> str | None:
-        """Apply both NR and VAD processing to audio file.
-
+        """Preprocess an audio file by applying noise reduction and voice activity detection.
 
         Args:
-            input_path: input audio file path
-            inplace: whether to overwrite the input file when applying vad
+            input_path (str): Path to the input audio file.
+            inplace (int): Flag indicating whether to overwrite the input file with the processed version.
 
         Returns:
-            processed audio file path
+            str or None: The path to the processed audio file, or None if processing fails.
         """
         self._apply_nr(input_path)
         return self._apply_vad(input_path, inplace)
 
     def _apply_vad(self, input_path: str, inplace: int) -> str | None:
-        """Apply voice activity detection to audio file.
+        """Apply Voice Activity Detection (VAD) to an audio file.
 
         Args:
-            input_path: input audio file path
-            inplace: whether to overwrite the input file
+            input_path (str): Path to the input audio file.
+            inplace (int): Flag indicating whether to overwrite the input file.
 
         Returns:
-            processed audio file path
+            str or None: The path to the audio file after VAD processing, or the original path if VAD is disabled.
         """
         if self.vad:
             return request_voice_activity_detection(input_path, f'{self.base_type.lower()}_{self.id}', inplace,
@@ -446,24 +548,27 @@ class AudioBase(Base, ABC):
         return input_path
 
     def _apply_nr(self, input_path: str) -> str:
-        """Apply noise reduction to audio file.
+        """Apply Noise Reduction (NR) to an audio file.
 
         Args:
-            input_path: input audio file path
+            input_path (str): Path to the input audio file.
 
         Returns:
-            processed audio file path
+            str: The path to the audio file after noise reduction processing.
         """
         if self.nr:
             request_speech_enhancement(input_path, f'{self.base_type.lower()}_{self.id}', self.speech_enhancer_url)
         return input_path
 
     def _store_audio(self, source_path, dest_path):
-        """Store or remove audio files based on the store flag.
+        """Manage the storage of audio files based on the storage flag.
+
+        If storage is enabled, moves the audio file from source_path to dest_path.
+        Otherwise, deletes the source file.
 
         Args:
-            source_path: original audio file path
-            dest_path: destination audio file path
+            source_path (str): Original audio file path.
+            dest_path (str): Destination path for the audio file.
         """
         if self.store:
             shutil.move(source_path, dest_path)
@@ -472,16 +577,16 @@ class AudioBase(Base, ABC):
 
     @staticmethod
     def filter_real_speakers(speakers, similarities, durations, texts) -> tuple:
-        """Filter out 'silent' and 'unknown' from speakers and their associated similarities and durations.
+        """Filter out non-valid speakers (e.g., 'silent', 'unknown') from recognition results.
 
         Args:
-            speakers: list of speakers
-            similarities: list of similarities
-            durations: list of durations
-            texts: list of texts
+            speakers (list): List of recognized speakers.
+            similarities (list): List of similarity scores.
+            durations (list): List of audio durations.
+            texts (list): List of associated texts or signals.
 
         Returns:
-            list of real_speakers, real_similarities, real_durations, real_texts
+            tuple: A tuple containing lists of valid speakers, their similarity scores, durations, and texts.
         """
         real_speakers = []
         real_similarities = []
@@ -498,12 +603,13 @@ class AudioBase(Base, ABC):
 
     @staticmethod
     def warm_up_resampler(sample_rate_original=44100, sample_rate_target=16000):
-        """Warm up the resampler by generating a short segment of silence and performing the resampling operation, to
-        avoid delay in the first resampling operation.
+        """Warm up the audio resampler to avoid delays during the first resampling operation.
+
+        Generates a short segment of silence and performs resampling using librosa.
 
         Args:
-            sample_rate_original: original sample rate, default to 44100
-            sample_rate_target: target sample rate, default to 16000
+            sample_rate_original (int): Original sample rate (default is 44100).
+            sample_rate_target (int): Target sample rate (default is 16000).
         """
         dummy_audio = np.zeros(sample_rate_original)
         _ = librosa.resample(dummy_audio, orig_sr=sample_rate_original, target_sr=sample_rate_target)
@@ -511,7 +617,13 @@ class AudioBase(Base, ABC):
 
     @staticmethod
     def recording_prompt(seconds: float):
-        """Reading prompt for registering."""
+        """Display a recording prompt to the user for speaker registration.
+
+        Prompts the user to press Enter and read a series of sentences within the given time frame.
+
+        Args:
+            seconds (float): Duration (in seconds) allowed for reading the prompt.
+        """
         input(f"Press the Enter key to start recording, and read the following sentence in {seconds} seconds:\n"
               "1. The boy was there when the sun rose.\n"
               "2. A rod is used to catch pink salmon.\n"

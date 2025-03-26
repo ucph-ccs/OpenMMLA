@@ -13,7 +13,7 @@ from pyecharts.charts import Pie, Bar
 from pyecharts.commons.utils import JsCode
 
 from openmmla.utils.querys import fetch_and_process_data, save_to_json_file, read_json_file, convert_json_to_dataframe
-from .text_processing import convert_transcription_json_to_txt
+from .transcription import convert_transcription_json_to_txt
 
 
 def session_analysis_audio(project_dir, bucket_name, influx_client):
@@ -191,7 +191,7 @@ def plot_speaker_diarization_interactive(json_file_path, save_dir):
     counts_distribution = [round(speaker_counts_dict[label], 1) for label in labels]
 
     # Generate visualization page
-    page = Page(page_title="mbox speaker visualization", layout=Page.SimplePageLayout)
+    page = Page(page_title="ASR with diarizations", layout=Page.SimplePageLayout)
     stacked_bar = Bar(init_opts=opts.InitOpts(width="3000px", height="250px"))
     pie1 = Pie(init_opts=opts.InitOpts(width="500px", height="500px"))
     pie2 = Pie(init_opts=opts.InitOpts(width="500px", height="500px"))

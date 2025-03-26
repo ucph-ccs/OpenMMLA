@@ -16,24 +16,31 @@ logger = get_logger(__name__)
 class VideoStream(StreamReceiver):
     """Video stream implementation for continuous video capture."""
 
-    def __init__(self, source: int | str, buffer_duration: float = 1.0, **kwargs):
+    def __init__(self, source: int | str, **kwargs):
         """Initialize video stream.
         
         Args:
-            source: Stream source (camera index or video file path)
-            buffer_duration: Duration of the ring buffer in seconds
-            **kwargs: Additional configuration parameters
-                format: Video format (default: 'MJPG')
-                resolution: Tuple of (width, height) (default: (640, 480))
-                fps: Frames per second (default: 30)
+            source (int | str): Stream source (camera index or video file path)
+
+        Keyword Args:
+            buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 0.08)
+            format(str, optional): Video format (default: 'MJPG')
+            resolution(tuple, optional): Tuple of (width, height) (default: (1920, 1080))
+            fps(int, optional): Frames per second (default: 30)
+            resample_method(ResampleMethod, optional): Resampling method for fps conversion (default: ResampleMethod.VIDEO_AVERAGE)
         """
         super().__init__(**kwargs)
         self.source = source
 
         # Stream configuration
+        self.buffer_duration = kwargs.get('buffer_duration', 0.08)
         self.format = kwargs.get('format', 'MJPG')
-        self.resolution = kwargs.get('resolution', (640, 480))
+        self.resolution = kwargs.get('resolution', (1920, 1080))
         self.fps = kwargs.get('fps', 30)
+        self.resample_method = kwargs.get('resample_method', ResampleMethod.VIDEO_AVERAGE)
+
+        # OpenCV objects
+        self.stream = None
 
         # Frame metadata
         self._frame_metadata = {
@@ -43,7 +50,7 @@ class VideoStream(StreamReceiver):
         }
 
         # Calculate buffer size in frames
-        buffer_frames = int(self.fps * buffer_duration)
+        buffer_frames = int(self.fps * self.buffer_duration)
         self.buffer = RingBuffer(buffer_frames)
 
         # Last read position tracking
@@ -52,11 +59,6 @@ class VideoStream(StreamReceiver):
         # Threading control
         self._stop_event = threading.Event()
         self._receive_thread = None
-
-        # OpenCV objects
-        self.stream = None
-
-        self.resample_method = kwargs.get('resample_method', ResampleMethod.VIDEO_AVERAGE)
 
     def start(self) -> None:
         """Start the video stream and begin capturing frames."""
@@ -69,6 +71,115 @@ class VideoStream(StreamReceiver):
         self._receive_thread.start()
         logger.info(f"Video stream started with source: {self.source}")
 
+    def stop(self) -> None:
+        """Stop the video stream and clean up resources."""
+        self._stop_event.set()
+        if self._receive_thread:
+            self._receive_thread.join()
+        self._cleanup_stream()
+
+    def read(self, duration: float = None, target_fps: float = None, timeout: float = 5.0,
+             latest: bool = False) -> VideoFrame | list[VideoFrame] | None:
+        """Read video frames with optional fps conversion.
+
+        Args:
+            duration: Duration to read in seconds. If None or 0, returns most recent frame
+            target_fps: Optional target frame rate for resampling
+            timeout: Maximum time to wait for frames in seconds
+            latest: Whether to read from the most recent frame or continue from last position
+
+        Returns:
+            Single VideoFrame if duration is None/0, or list of VideoFrames if duration > 0.
+
+        Notes:
+            If buffer duration is set too short, the read operation may timeout since the
+            last_read_pos might be always equal to the current tail.
+        """
+        if duration is None or duration == 0:
+            frames_needed = 1
+        else:
+            frames_needed = int(duration * self.fps)
+
+        total_frames = []
+        start_time = time.time()
+
+        if latest:
+            self._last_read_pos = -1
+
+        while len(total_frames) < frames_needed:
+            current_tail = self.buffer.get_tail()
+
+            # For first/latest read, start from most recent frame
+            if self._last_read_pos == -1:
+                self._last_read_pos = current_tail
+                continue
+
+            if current_tail == self._last_read_pos:
+                if time.time() - start_time > timeout:
+                    logger.warning("Timeout reached while waiting for frames.")
+                    break
+                time.sleep(0.01)
+                continue
+
+            remaining_frames = frames_needed - len(total_frames)
+            available_frames = self.buffer.frames_available(self._last_read_pos)
+            end_pos = (self._last_read_pos + remaining_frames) % self.buffer.size \
+                if available_frames >= remaining_frames else current_tail
+
+            new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
+            total_frames.extend(new_frames)
+            self._last_read_pos = end_pos
+            start_time = time.time()
+
+        return self._process_frames(total_frames, target_fps)
+
+    def _process_frames(self, frames: list, target_fps: float | None) -> VideoFrame | list[VideoFrame] | None:
+        """Process collected frames and apply fps conversion if needed.
+
+        Args:
+            frames: List of VideoFrames to process
+            target_fps: Optional target frame rate
+
+        Returns:
+            Processed VideoFrame(s) or None if no frames available
+        """
+        if not frames:
+            logger.warning("No frames collected within timeout period.")
+            return None
+
+        # If no target_fps specified, return original frames
+        if not target_fps or target_fps == self.fps:
+            return frames
+
+        # Convert frames to numpy arrays for resampling
+        frame_arrays = [frame.data for frame in frames]
+
+        resampled_arrays = resample_video(
+            frame_arrays,
+            source_fps=self.fps,
+            target_fps=target_fps,
+            method=self.resample_method
+        )
+
+        # Convert back to VideoFrames
+        resampled_frames = []
+        time_step = 1.0 / target_fps
+        base_timestamp = frames[0].timestamp
+
+        for i, frame_data in enumerate(resampled_arrays):
+            metadata = {
+                'resolution': self.resolution,
+                'fps': target_fps,
+                'format': self.format
+            }
+            resampled_frames.append(VideoFrame(
+                data=frame_data,
+                timestamp=base_timestamp + (i * time_step),
+                metadata=metadata
+            ))
+
+        return resampled_frames
+
     def _initialize_stream(self) -> None:
         """Initialize video capture stream with configured parameters."""
         self.stream = cv2.VideoCapture(self.source)
@@ -79,13 +190,6 @@ class VideoStream(StreamReceiver):
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
         self.stream.set(cv2.CAP_PROP_FPS, self.fps)
         self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-
-    def stop(self) -> None:
-        """Stop the video stream and clean up resources."""
-        self._stop_event.set()
-        if self._receive_thread:
-            self._receive_thread.join()
-        self._cleanup_stream()
 
     def _cleanup_stream(self) -> None:
         """Clean up video capture resources."""
@@ -138,105 +242,3 @@ class VideoStream(StreamReceiver):
         except Exception as e:
             logger.error(f"Error reading frame: {e}")
             return None
-
-    def read(self, duration: float = None, target_fps: float = None, timeout: float = 5.0,
-             latest: bool = False) -> VideoFrame | list[VideoFrame] | None:
-        """Read video frames with optional fps conversion.
-        
-        Args:
-            duration: Duration to read in seconds. If None or 0, returns most recent frame
-            target_fps: Optional target frame rate for resampling
-            timeout: Maximum time to wait for frames in seconds
-            latest: Whether to read from the most recent frame or continue from last position
-            
-        Returns:
-            Single VideoFrame if duration is None/0, or list of VideoFrames if duration > 0.
-        
-        Notes:
-            If buffer duration is set too short, the read operation may timeout since the
-            last_read_pos might be always equal to the current tail.
-        """
-        if duration is None or duration == 0:
-            frames_needed = 1
-        else:
-            frames_needed = int(duration * self.fps)
-
-        total_frames = []
-        start_time = time.time()
-
-        if latest:
-            self._last_read_pos = -1
-
-        while len(total_frames) < frames_needed:
-            current_tail = self.buffer.get_tail()
-
-            # For first/latest read, start from most recent frame
-            if self._last_read_pos == -1:
-                self._last_read_pos = current_tail
-                continue
-
-            if current_tail == self._last_read_pos:
-                if time.time() - start_time > timeout:
-                    logger.warning("Timeout reached while waiting for frames.")
-                    break
-                time.sleep(0.01)
-                continue
-
-            remaining_frames = frames_needed - len(total_frames)
-            available_frames = self.buffer.frames_available(self._last_read_pos)
-            end_pos = (self._last_read_pos + remaining_frames) % self.buffer.size \
-                if available_frames >= remaining_frames else current_tail
-
-            new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
-            total_frames.extend(new_frames)
-            self._last_read_pos = end_pos
-            start_time = time.time()
-
-        return self._process_frames(total_frames, target_fps)
-
-    def _process_frames(self, frames: list, target_fps: float | None) -> VideoFrame | list[VideoFrame] | None:
-        """Process collected frames and apply fps conversion if needed.
-        
-        Args:
-            frames: List of VideoFrames to process
-            target_fps: Optional target frame rate
-            
-        Returns:
-            Processed VideoFrame(s) or None if no frames available
-        """
-        if not frames:
-            logger.warning("No frames collected within timeout period.")
-            return None
-
-        # If no target_fps specified, return original frames
-        if not target_fps or target_fps == self.fps:
-            return frames
-
-        # Convert frames to numpy arrays for resampling
-        frame_arrays = [frame.data for frame in frames]
-
-        resampled_arrays = resample_video(
-            frame_arrays,
-            source_fps=self.fps,
-            target_fps=target_fps,
-            method=self.resample_method
-        )
-
-        # Convert back to VideoFrames
-        resampled_frames = []
-        time_step = 1.0 / target_fps
-        base_timestamp = frames[0].timestamp
-
-        for i, frame_data in enumerate(resampled_arrays):
-            metadata = {
-                'resolution': self.resolution,
-                'fps': target_fps,
-                'format': self.format
-            }
-            resampled_frames.append(VideoFrame(
-                data=frame_data,
-                timestamp=base_timestamp + (i * time_step),
-                metadata=metadata
-            ))
-
-        return resampled_frames

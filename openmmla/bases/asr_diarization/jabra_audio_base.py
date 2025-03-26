@@ -19,40 +19,78 @@ from .input import get_bucket_name, get_name, get_mode
 
 
 class JabraAudioBase(AudioBase):
-    """The jabra audio base processes the audio streams recorded from built-in or USB-wired speakers."""
+    """JabraAudioBase processes audio streams from built-in sound devices (PyAudio).
+
+    This class extends the AudioBase abstract class with functionality specific to built-in sound devices.
+    It supports both speaker profile registration and real-time voice recognition. The class handles configuration,
+    audio stream setup, recording, and recognition processes. It also manages threading for continuous processing,
+    and interacts with external services for MQTT, InfluxDB, and Redis.
+
+    Key Features:
+      - Configures protocol settings for Jabra devices.
+      - Sets up an AudioStream to read audio data from built-in sound devices.
+      - Implements methods for speaker registration and real-time recognition.
+      - Supports both continuous recording and processing with or without speech separation.
+      - Manages audio chunk assembly with half-scaled recognition when speech separation is not applied.
+      - Manages audio chunk assembly without half-scaled recognition when speech separation is applied.
+    """
+
     logger = get_logger(f'jabra-audio-base')
 
-    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', vad: bool = True, nr: bool = True,
-                 tr: bool = True, sp: bool = False, store: bool = True):
-        """Initialize the Jabra Audio Base.
+    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', store: bool = True,
+                 vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False):
+        """Initialize the JabraAudioBase.
+
+        Initializes the JabraAudioBase with the given configuration and operating parameters.
+        Inherits and extends the AudioBase setup, and initializes the jabra-specific audio stream.
 
         Args:
-            project_dir: root directory of the project
-            config_path: path to the configuration file, either absolute or relative to the root directory
-            mode: operating mode, either 'record', 'recognize', or 'full', default to 'full'
-            vad: whether to use the VAD, default to True
-            nr: whether to use the denoiser to enhance speech, default to True
-            tr: whether to transcribe speech to text, default to True
-            sp: whether to do speech separation for overlapped segment, default to False
-            store: whether to store audio files, default to True
+            project_dir (str): path to the project directory.
+            config_path (str): path to the configuration file (absolute or relative to project_dir).
+            mode (str): operating mode ('record', 'recognize', or 'full'). Defaults to 'full'.
+            store (bool): whether to store audio files. Defaults to True.
+            vad (bool): whether to apply Voice Activity Detection. Defaults to True.
+            nr (bool): whether to apply noise reduction. Defaults to True.
+            tr (bool): whether to transcribe speech to text. Defaults to True.
+            sp (bool): whether to perform speech separation. Defaults to False.
         """
-        super().__init__(project_dir=project_dir, config_path=config_path, mode=mode, vad=vad, nr=nr, tr=tr, sp=sp,
-                         store=store)
+        super().__init__(project_dir=project_dir, config_path=config_path, mode=mode,
+                         store=store, vad=vad, nr=nr, tr=tr, sp=sp)
 
     @property
     def base_type(self):
+        """Return the type of the audio base.
+
+        Returns:
+            str: The string 'Jabra', indicating this is a Jabra audio base.
+        """
         return 'Jabra'
 
     def _setup_yaml(self):
+        """Extend YAML configuration setup for Jabra-specific parameters.
+
+        Calls the parent setup method and sets the protocol for Jabra devices.
+        """
         super()._setup_yaml()
-        self.protocol = self.config[self.base_type]['protocol']
+        self.source = self.config[self.base_type]['source']
+        self.stream_kwargs = self.config[self.base_type]['stream_kwargs']
 
     def _setup_objects(self):
+        """Initialize Jabra-specific objects.
+
+        Calls the parent object setup and then creates an AudioStream configured with the
+        protocol setting for Jabra devices.
+        """
         super()._setup_objects()
-        self.audio_stream = AudioStream(source=self.protocol)
+        self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
 
     def _start_register(self):
-        """Start the speaker profile registration."""
+        """Start the speaker profile registration process for Jabra devices.
+
+        Prompts the user to record a registration sample, preprocesses the recorded audio, and then
+        registers the speaker profile using the audio recognizer. If the recorded audio is too short
+        or no name is provided, the registration is skipped.
+        """
         print("------------------------------------------------")
         output_path = os.path.join(self.temp_dir, f'jabra_{self.id}_register.wav')
         self.recording_prompt(self.register_duration)
@@ -61,6 +99,7 @@ class JabraAudioBase(AudioBase):
         audio_frame = self.audio_stream.read(self.register_duration, latest=True)
         self.audio_stream.stop()
         write_frame_to_wav(output_path, audio_frame)
+
         audio_path = self._audio_preprocessing(output_path, 1)
 
         if audio_path is None:
@@ -69,13 +108,21 @@ class JabraAudioBase(AudioBase):
 
         name = get_name()
         if name == '':
+            self.logger.info('Empty name, skip the registering process.')
             return
 
         self.audio_recognizer.register(audio_path, name)
 
     def _start_recognize(self):
-        """Start the real-time voice recognition, including audio recording, speaker recognition, speech transcription,
-        and listening on stop signal."""
+        """Start the real-time voice recognition process.
+
+        Sets up directories, queues, and MQTT communication before creating threads for:
+          - Continuous recording.
+          - Loading and queuing pre-recorded files (if in 'recognize' mode).
+          - Continuous recognition (with or without speech separation).
+          - Continuous transcription (if enabled).
+          - Listening for stop signals.
+        """
         if self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.info("Audio database is empty.")
@@ -93,7 +140,7 @@ class JabraAudioBase(AudioBase):
         self._prepare_directories()
         self._listen_for_start_signal()
 
-        # Create threads
+        # Create threads based on the current mode and options.
         if self.mode in ['record', 'full']:
             self._create_thread(self._continuous_recording)
         if self.mode == 'recognize':
@@ -105,7 +152,7 @@ class JabraAudioBase(AudioBase):
                 self._create_thread(self._continuous_transcribing)
         self._create_thread(self._listen_for_stop_signal)
 
-        # Start threads
+        # Start and join threads, handling exceptions if they occur
         exception_occurred = None
         try:
             self._start_threads()
@@ -119,10 +166,12 @@ class JabraAudioBase(AudioBase):
             self._recognition_handler(exception_occurred)
 
     def _recognition_handler(self, e):
-        """Handle exceptions and stop all threads.
+        """Handle exceptions during the recognition process and perform cleanup.
+
+        Stops all threads and external clients, cleans up runtime variables.
 
         Args:
-            e: exception occurred during the recognition process
+            e (Exception): The exception that occurred during recognition, if any.
         """
         if e:
             self._stop_threads()
@@ -130,48 +179,68 @@ class JabraAudioBase(AudioBase):
             self.logger.info("All threads stopped properly.")
 
         self.mqtt_client.loop_stop()
+        self.audio_stream.stop()
         self._clean_up()
 
     def _reset(self):
-        """Set the new port for the audio base and reset it."""
-        self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode, vad=self.vad,
-                      nr=self.nr, tr=self.tr, sp=self.sp, store=self.store)
+        """Reset the Jabra audio base.
+
+        Reinitializes the audio base by calling the constructor with the current configuration,
+        logs the reset status, and performs garbage collection.
+        """
+        self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
+                      vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store)
         self.logger.info(f"Audio DB reset to {self.audio_db}")
         gc.collect()
 
     def _switch_mode(self):
-        """Switch the mode between record and recognize."""
+        """Switch the operating mode between 'record', 'recognize' and 'full'."""
         self.mode = get_mode()
         self.logger.info(f"Switched to {self.mode} mode.")
 
     def _continuous_recording(self):
-        """Continuously record audio from stream and put it into the audio queue."""
+        """Continuously record audio from the Jabra stream and enqueue it for processing.
+
+        Depending on the current mode:
+          - In 'record' mode, writes recorded frames to a file.
+          - In 'full' mode, puts the audio frame bytes into the audio queue.
+
+        Raises:
+            RecordingError: If an error occurs during the recording process.
+        """
         first_time = True
         sub_dir = 'records' if self.mode == 'record' else 'temp'
         self.audio_stream.start()
 
-        try:
-            while not self.stop_event.is_set():
+        while not self.stop_event.is_set():
+            try:
                 audio_frame = self.audio_stream.read(duration=self.recognize_duration, latest=first_time)
-
                 first_time = False
                 frame_bytes = audio_frame.to_bytes()
                 acquire_time = audio_frame.timestamp
                 output_path = os.path.join(self.audio_dir, sub_dir, f'jabra_{self.id}_record_{acquire_time:.4f}.wav')
 
-                # write frames to file if in record mode and put into audio queue if in full mode
                 if self.mode == 'record':
                     write_frame_to_wav(output_path, audio_frame)
                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frame_bytes)} frames")
                 else:
                     self.audio_queue.put((output_path, frame_bytes))
-        except Exception as e:
-            raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
-        finally:
-            self.audio_stream.stop()
+            except Exception as e:
+                raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
 
     def _continuous_recognizing(self):
-        """Continuously recognize audio from the audio queue and publish the results into a Redis/MQTT channel."""
+        """Continuously process and recognize audio segments from the audio queue.
+
+        For each segment, the method:
+          - Writes the received bytes to a WAV file.
+          - Preprocesses the audio (e.g., NR, VAD, etc.).
+          - Checks the energy level to determine if the segment is 'silent' or contains speech.
+          - If speech is detected, recognizes the speaker using the audio recognizer.
+          - Assembles the audio chunk with hsr and stores/publishes the recognition result.
+
+        Raises:
+            RecognizingError: If an error occurs during the recognition process.
+        """
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
@@ -182,7 +251,7 @@ class JabraAudioBase(AudioBase):
                 # Audio pre-processing
                 processed_audio_path = self._audio_preprocessing(segment_audio_path, inplace=1)
 
-                # Voice quality check
+                # Check voice quality via energy levels.
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
                 if processed_audio_path and rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
                     speaker = 'unknown'
@@ -201,10 +270,10 @@ class JabraAudioBase(AudioBase):
                         speaker = name
 
                 self._assemble_chunk_with_hsr(speaker, record_start_time, frames)
+                self._publish_recognition_results(record_start_time, recognize_start_time, [speaker],
+                                                  [np.round(np.float64(similarity), 4)], [duration])
                 self._store_audio(segment_audio_path, os.path.join(self.audio_dir, 'segments',
                                                                    f'{speaker}_{round(float(record_start_time))}.wav'))
-                self._publish_speaker_recognition(record_start_time, recognize_start_time, [speaker],
-                                                  [np.round(np.float64(similarity), 4)], [duration])
             except queue.Empty:
                 continue
             except Exception as e:
@@ -213,8 +282,18 @@ class JabraAudioBase(AudioBase):
                 gc.collect()
 
     def _continuous_recognizing_sp(self):
-        """Continuously recognize audio with speech separation from the audio queue and publish the results into
-        a Redis/MQTT channel."""
+        """Continuously process and recognize audio segments with speech separation.
+
+         For each segment, the method:
+          - Write the received bytes to a WAV file.
+          - Preprocess the audio (e.g., NR, VAD).
+          - Checks the energy level to determine if the segment is 'silent' or contains speech.
+          - If speech is detected, applied speech separation and recognizes the speaker on each separated signal.
+          - Assembles the audio chunk without hsr and stores/publishes the recognition result.
+
+        Raises:
+            RecognizingError: If an error occurs during the recognition process.
+        """
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
@@ -236,7 +315,7 @@ class JabraAudioBase(AudioBase):
                     resample_audio(segment_audio_path, 8000)
                     sp_result = self._separate_speech(segment_audio_path)
 
-                    # Recognize separated audio streams
+                    # Process each separated audio stream.
                     for i, signal in enumerate(sp_result):
                         save_file = f'{segment_audio_path[:-4]}_spk{i}.wav'
                         sf.write(save_file, np.frombuffer(signal, dtype=np.int16), 8000)
@@ -272,13 +351,13 @@ class JabraAudioBase(AudioBase):
 
                 self._store_audio(segment_audio_path,
                                   os.path.join(self.audio_dir, 'separations', f'{round(float(record_start_time))}.wav'))
-                final_speakers, final_similarities, final_durations, final_signals = (
-                    self._finalize_separated_speaker_recognition(speakers, similarities, durations, signals))
+                speakers, similarities, durations, signals = (
+                    self._consolidate_separated_recognition_results(speakers, similarities, durations, signals))
 
-                # Assemble chunk without half-scaled recognition
-                self._assemble_chunk_without_hsr(final_speakers, record_start_time, final_signals)
-                self._publish_speaker_recognition(record_start_time, recognize_start_time, final_speakers,
-                                                  final_similarities, final_durations)
+                # Assemble audio chunk without half-scaled recognition.
+                self._assemble_chunk_without_hsr(speakers, record_start_time, signals)
+                self._publish_recognition_results(record_start_time, recognize_start_time, speakers, similarities,
+                                                  durations)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -287,16 +366,19 @@ class JabraAudioBase(AudioBase):
                 gc.collect()
 
     def _assemble_chunk_with_hsr(self, speaker, record_start_time, frames):
-        """Assemble the chunk of audio frames if the current recognized speaker is the same as the last recognized
-        speaker, if not, do speaker recognition on half-segment before and after the border of the speaker turn.
-        Update the speaker audio dictionary and last speaker.
+        """Assemble and processs audio chunks with half-scaled recognition (HSR) at speaker boundaries.
 
-        Note: This function only applicable to recognition without speech separation.
+        If the current recognized speaker matches the previous speaker, appends the audio frames.
+        Otherwise, performs HSR by processing half-segments before and after the speaker change,
+        updating the internal speaker frames dictionary accordingly. Also, adds transcribed chunks
+        to the transcription queue if applicable.
+
+        Note: This function is applicable only for recognition without speech separation.
 
         Args:
-            speaker: recognized speaker of the current segment
-            record_start_time: record start time of the current segment
-            frames: audio frames of the current segment
+            speaker: The recognized speaker for the current segment.
+            record_start_time: The start time of the current segment.
+            frames: The audio frames of the current segment.
         """
         fr = 8000 if self.sp else 16000
 
@@ -311,7 +393,7 @@ class JabraAudioBase(AudioBase):
                 chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(self.last_speaker)
                 chunk_end_time = record_start_time
 
-                # Half-scaled recognition
+                # Perform half-scaled recognition on speaker turn border
                 if chunk_frames:
                     left_temp_path = os.path.join(self.audio_dir, 'temp', f'jabra_{self.id}_left_temp.wav')
                     right_temp_path = os.path.join(self.audio_dir, 'temp', f'jabra_{self.id}_right_temp.wav')
@@ -321,16 +403,14 @@ class JabraAudioBase(AudioBase):
                     write_bytes_to_wav(right_temp_path, frames[:number_frames], framerate=fr)
 
                     if self._apply_vad(left_temp_path, inplace=0):
-                        left_speaker, _ = self.audio_recognizer.recognize_among_candidates(left_temp_path, candidates,
-                                                                                           self.last_speaker,
-                                                                                           self.keep_threshold)
+                        left_speaker, _ = self.audio_recognizer.recognize_among_candidates(
+                            left_temp_path, candidates, self.last_speaker, self.keep_threshold)
                     else:
                         left_speaker = 'silent'
 
                     if self._apply_vad(right_temp_path, inplace=0):
-                        right_speaker, _ = self.audio_recognizer.recognize_among_candidates(right_temp_path, candidates,
-                                                                                            speaker,
-                                                                                            self.keep_threshold)
+                        right_speaker, _ = self.audio_recognizer.recognize_among_candidates(
+                            right_temp_path, candidates, speaker, self.keep_threshold)
                     else:
                         right_speaker = 'silent'
 
@@ -346,7 +426,7 @@ class JabraAudioBase(AudioBase):
                         self._add_to_transcription_queue(chunk_frames, self.last_speaker, chunk_start_time,
                                                          chunk_end_time)
 
-                    # Store transcribed chunk locally
+                    # Optionally store the audio chunk locally.
                     if self.store:
                         chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
                                                         f'{self.last_speaker}_chunk_{round(float(chunk_start_time))}.wav')
@@ -358,40 +438,40 @@ class JabraAudioBase(AudioBase):
 
         self.last_speaker = speaker
 
-    def _assemble_chunk_without_hsr(self, final_speakers, record_start_time, final_signals):
-        """Assemble the chunk of audio frames without half-scaled recognition. Update the speaker audio dictionary
-        and last speaker.
+    def _assemble_chunk_without_hsr(self, speakers, record_start_time, signals):
+        """Assemble audio chunks without half-scaled recognition for speech separation cases.
 
-        Note: This function only applicable to recognition with speech separation.
+        If the current recognized speakers match the previous speakers, the audio signals are appended; otherwise,
+        new entries are created. For previous speakers not present in the current chunk, the chunk is finalized and
+        popped out.
 
         Args:
-            final_speakers: a list of finalized recognized speakers
-            record_start_time: segment start time
-            final_signals: a list of finalized audio signals
+            speakers (list): List of finalized recognized speakers.
+            record_start_time (str): Start time of the current audio segment.
+            signals (list): List of finalized audio signals corresponding to the recognized speakers.
         """
         fr = 8000 if self.sp else 16000
 
         if not self.last_speaker:
             self.last_speaker = []
-            for i, speaker in enumerate(final_speakers):
-                self.speaker_frames_dict[speaker] = (record_start_time, final_signals[i])
+            for i, speaker in enumerate(speakers):
+                self.speaker_frames_dict[speaker] = (record_start_time, signals[i])
                 self.last_speaker.append(speaker)
         else:
             for speaker in self.last_speaker:
-                if speaker in final_speakers:
+                if speaker in speakers:
                     chunk_start_time, chunk_frames = self.speaker_frames_dict[speaker]
-                    chunk_frames += final_signals[final_speakers.index(speaker)]
+                    chunk_frames += signals[speakers.index(speaker)]
                     self.speaker_frames_dict[speaker] = (chunk_start_time, chunk_frames)
-                else:  # end of the speaker turn, pop out the speaker and transcribe the chunk
+                else:
                     chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(speaker)
                     chunk_end_time = record_start_time
                     self.last_speaker.remove(speaker)
 
                     if speaker not in ['silent', 'unknown']:
-                        self._add_to_transcription_queue(chunk_frames, speaker, chunk_start_time,
-                                                         chunk_end_time)
+                        self._add_to_transcription_queue(chunk_frames, speaker, chunk_start_time, chunk_end_time)
 
-                    # Store transcribed chunk locally
+                    # Optionally store the audio chunk locally.
                     if self.store:
                         chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
                                                         f'{speaker}_chunk_{round(float(chunk_start_time))}.wav')
@@ -399,7 +479,7 @@ class JabraAudioBase(AudioBase):
                         if speaker != 'silent':
                             normalize_decibel(chunk_audio_path, rms_level=-20)
 
-            for i, speaker in enumerate(final_speakers):
-                if speaker not in self.last_speaker:  # add new speaker and its corresponding frames
+            for i, speaker in enumerate(speakers):
+                if speaker not in self.last_speaker:
                     self.last_speaker.append(speaker)
-                    self.speaker_frames_dict[speaker] = (record_start_time, final_signals[i])
+                    self.speaker_frames_dict[speaker] = (record_start_time, signals[i])

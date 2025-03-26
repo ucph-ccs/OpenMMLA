@@ -21,47 +21,91 @@ from .input import get_mode, get_bucket_name, get_name
 
 
 class BadgeAudioBase(AudioBase):
-    """The badge audio base process the audio streams recorded from wireless wearable badges."""
+    """BadgeAudioBase processes audio streams recorded from wireless wearable badges (TCP/UDP).
+
+    This class extends the AudioBase abstract class with functionality specific to wearable badge devices.
+    It supports both speaker profile registration and real-time voice recognition. The class handles configuration,
+    audio stream setup, recording, and recognition processes. It also manages threading for continuous processing,
+    and interacts with external services for MQTT, InfluxDB, and Redis.
+
+    Key Features:
+      - Configures connection parameters (listening IP, protocol, port offset) for the badge.
+      - Sets up an AudioStream to read audio data from the badge device.
+      - Implements methods for speaker registration and real-time recognition.
+      - Supports both continuous recording and processing with or without speech separation.
+      - Manages audio chunk assembly with half-scaled recognition.
+    """
+
     logger = get_logger(f'badge-audio-base')
 
-    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', vad: bool = True, nr: bool = True,
-                 tr: bool = True, sp: bool = False, store: bool = True):
-        """Initialize the badge audio base.
+    def __init__(self, project_dir: str, config_path: str, mode: str = 'full', store: bool = True,
+                 vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False):
+        """Initialize the BadgeAudioBase.
+
+        Initializes the BadgeAudioBase with the given configuration and operating parameters.
+        Inherits and extends the AudioBase setup, and initializes the badge-specific audio stream.
 
         Args:
-            project_dir: root directory of the project
-            config_path: path to the configuration file, either absolute or relative to the root directory
-            mode: operating mode, either 'record', 'recognize', or 'full', default to 'full'
-            vad: whether to use the VAD, default to True
-            nr: whether to use the denoiser to enhance speech, default to True
-            tr: whether to transcribe speech to text, default to True
-            sp: whether to do speech separation for overlapped segment, default to False
-            store: whether to store audio files, default to True
+            project_dir (str): path to the project directory.
+            config_path (str): path to the configuration file (absolute or relative to project_dir).
+            mode (str): operating mode ('record', 'recognize', or 'full'). Defaults to 'full'.
+            store (bool): whether to store audio files. Defaults to True.
+            vad (bool): whether to apply Voice Activity Detection. Defaults to True.
+            nr (bool): whether to apply noise reduction. Defaults to True.
+            tr (bool): whether to transcribe speech to text. Defaults to True.
+            sp (bool): whether to perform speech separation. Defaults to False.
         """
-        super().__init__(project_dir=project_dir, config_path=config_path, mode=mode, vad=vad, nr=nr, tr=tr, sp=sp,
-                         store=store)
+        super().__init__(project_dir=project_dir, config_path=config_path, mode=mode, store=store, vad=vad, nr=nr,
+                         tr=tr, sp=sp)
 
     @property
     def base_type(self):
+        """Return the type of the audio base.
+
+        Returns:
+            str: The string 'Badge', indicating this is a badge audio base.
+        """
         return 'Badge'
 
     def _setup_yaml(self):
+        """Extend YAML configuration setup for badge-specific parameters.
+
+        Calls the parent YAML setup and then loads additional settings:
+          - host: The IP address to listen for audio data.
+          - source: The communication protocol used by the badge.
+          - port_offset: The offset used to compute the port number.
+        """
         super()._setup_yaml()
-        self.listening_ip = self.config[self.base_type]['listening_ip']
-        self.protocol = self.config[self.base_type]['protocol']
+        self.source = self.config[self.base_type]['source']
         self.port_offset = int(self.config[self.base_type]['port_offset'])
+        self.stream_kwargs = self.config[self.base_type]['stream_kwargs']
 
     def _setup_input(self):
+        """Setup input parameters for the badge audio stream.
+
+        Calls the parent object setup and then calculates the port number by
+        adding the port offset to the unique identifier (id), and ensures the port is free.
+        """
         super()._setup_input()
         self.port = self.id + self.port_offset
         free_port(self.port)
 
     def _setup_objects(self):
+        """Initialize badge-specific objects.
+
+        Calls the parent object setup and then creates an AudioStream object configured with the
+        protocol, listening IP, and port number for badge devices.
+        """
         super()._setup_objects()
-        self.audio_stream = AudioStream(source=self.protocol, host=self.listening_ip, port=self.port)
+        self.audio_stream = AudioStream(source=self.source, port=self.port, **self.stream_kwargs)
 
     def _start_register(self):
-        """Start the speaker profile registration."""
+        """Start the speaker profile registration process for the badge.
+
+        Prompts the user to record a segment sample, applies gain and preprocessing, and then
+        registers the speaker profile using the audio recognizer. If the recorded audio is too
+        short or no name is provided, the registration is skipped.
+        """
         print("------------------------------------------------")
         output_path = os.path.join(self.temp_dir, f'badge_{self.id}_register.wav')
         self.recording_prompt(self.register_duration)
@@ -86,11 +130,18 @@ class BadgeAudioBase(AudioBase):
         self.audio_recognizer.register(audio_path, name)
 
     def _start_recognize(self, bucket_name=None):
-        """Start the real-time voice recognition, including audio recording, speaker recognition, speech transcription,
-        and listening on stop signal.
+        """Start the real-time voice recognition process.
+
+        Sets up directories, queues, and MQTT communication before creating threads for:
+          - Continuous recording.
+          - Loading and queuing pre-recorded files (if in 'recognize' mode).
+          - Continuous recognition (with or without speech separation).
+          - Continuous transcription (if enabled).
+          - Listening for stop signals.
 
         Args:
-            bucket_name: the bucket name for storing the results, default to None
+            bucket_name (str, optional): The bucket name for storing recognition results. If not provided,
+                                         it is obtained interactively.
         """
         if self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
@@ -109,7 +160,7 @@ class BadgeAudioBase(AudioBase):
         self._prepare_directories()
         self._listen_for_start_signal()
 
-        # Create threads
+        # Create threads based on the operating mode
         if self.mode in ['record', 'full']:
             self._create_thread(self._continuous_recording)
         if self.mode == 'recognize':
@@ -121,7 +172,7 @@ class BadgeAudioBase(AudioBase):
                 self._create_thread(self._continuous_transcribing)
         self._create_thread(self._listen_for_stop_signal)
 
-        # Start threads
+        # Start and join threads, handling exceptions if they occur
         exception_occurred = None
         try:
             self._start_threads()
@@ -135,10 +186,13 @@ class BadgeAudioBase(AudioBase):
             self._recognition_handler(exception_occurred)
 
     def _recognition_handler(self, e):
-        """Handle exceptions and stop all threads.
+        """Handle exceptions during the recognition process and perform cleanup.
+
+        Stops all threads and external clients, cleans up runtime variables, and if a RecordingError
+        occurred, restarts the recognition service with the current bucket.
 
         Args:
-            e: the exception occurred during the recognition process
+            e (Exception): The exception that occurred during recognition, if any.
         """
         if e:
             self._stop_threads()
@@ -154,19 +208,31 @@ class BadgeAudioBase(AudioBase):
             self._start_recognize(current_bucket)
 
     def _reset(self):
-        """Set the new port for the audio base and reinitialize audio base."""
+        """Reset the Jabra audio base.
+
+        Reinitializes the audio base by calling the constructor with the current configuration,
+        logs the reset status, and performs garbage collection.
+        """
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode, vad=self.vad,
                       nr=self.nr, tr=self.tr, sp=self.sp, store=self.store)
         self.logger.info(f"Audio DB reset to {self.audio_db}")
         gc.collect()
 
     def _switch_mode(self):
-        """Switch the mode between record and recognize."""
+        """Switch the operating mode between 'record', 'recognize' and 'full'."""
         self.mode = get_mode()
         self.logger.info(f"Switched to {self.mode} mode.")
 
     def _continuous_recording(self):
-        """Continuously record audio from port and put it into the audio queue."""
+        """Continuously record audio from the badge stream and enqueue it for processing.
+
+        Depending on the operating mode:
+          - In 'record' mode, writes recorded frames to a file.
+          - In 'full' mode, puts the audio frame bytes into the audio queue.
+
+        Raises:
+            RecordingError: If an error occurs during the recording process.
+        """
         first_time = True
         sub_dir = 'records' if self.mode == 'record' else 'temp'
         self.audio_stream.start()
@@ -174,13 +240,11 @@ class BadgeAudioBase(AudioBase):
         while not self.stop_event.is_set():
             try:
                 audio_frame = self.audio_stream.read(duration=self.recognize_duration, latest=first_time)
-
                 first_time = False
                 frame_bytes = audio_frame.to_bytes()
                 acquire_time = audio_frame.timestamp
                 output_path = os.path.join(self.audio_dir, sub_dir, f'badge_{self.id}_record_{acquire_time:.4f}.wav')
 
-                # write frames to file if in record mode and put into audio queue if in full mode
                 if self.mode == 'record':
                     write_frame_to_wav(output_path, audio_frame)
                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frame_bytes)} frames")
@@ -190,7 +254,18 @@ class BadgeAudioBase(AudioBase):
                 raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
 
     def _continuous_recognizing(self):
-        """Continuously recognize audio from the audio queue and put the results into the Redis channel."""
+        """Continuously process and recognize audio segments from the audio queue.
+
+        For each segment, the method:
+          - Writes the received bytes to a WAV file.
+          - Preprocesses the audio (e.g., applying gain, NR, VAD, etc.).
+          - Checks the energy level to determine if the segment is 'silent' or contains speech.
+          - If speech is detected, recognizes the speaker using the audio recognizer.
+          - Assembles the audio chunk with hsr and stores/publishes the recognition result.
+
+        Raises:
+            RecognizingError: If an error occurs during processing.
+        """
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frame_bytes = self.audio_queue.get(timeout=1)
@@ -202,9 +277,8 @@ class BadgeAudioBase(AudioBase):
                 apply_gain(segment_audio_path)
                 processed_audio_path = self._audio_preprocessing(segment_audio_path, inplace=1)
 
-                # Voice quality check
+                # Evaluate energy levels for quality check
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
-                print(f"RMS: {rms_value:.2f}, Peak: {peak_value:.2f}")
                 if processed_audio_path and rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
                     speaker = 'unknown'
                 else:
@@ -220,16 +294,15 @@ class BadgeAudioBase(AudioBase):
 
                     if similarity > self.threshold:
                         speaker = name
-                        energy_level_factor = np.log(rms_value) / np.log(self.rms_threshold)  # Weight factor
+                        energy_level_factor = np.log(rms_value) / np.log(self.rms_threshold)
                         similarity = min(similarity * energy_level_factor, 1)
 
                 if speaker == 'unknown' and similarity == 0:
-                    ratio = rms_value / self.rms_threshold if rms_value <= self.rms_threshold \
-                        else peak_value / self.rms_peak_threshold
+                    ratio = rms_value / self.rms_threshold if rms_value <= self.rms_threshold else peak_value / self.rms_peak_threshold
                     similarity = self.threshold * ratio
 
                 self._assemble_chunk_with_hsr(speaker, record_start_time, frame_bytes)
-                self._publish_speaker_recognition(record_start_time, recognize_start_time, [speaker],
+                self._publish_recognition_results(record_start_time, recognize_start_time, [speaker],
                                                   [np.round(np.float64(similarity), 4)], [duration])
 
                 if self.store:
@@ -245,8 +318,18 @@ class BadgeAudioBase(AudioBase):
                 gc.collect()
 
     def _continuous_recognizing_sp(self):
-        """Continuously recognize audio with speech separation from the audio queue and publish the results into
-        a Redis/MQTT channel."""
+        """Continuously process and recognize audio segments with speech separation.
+
+        For each segment, the method:
+          - Write the received bytes to a WAV file.
+          - Preprocess the audio (e.g., applying gain, NR, VAD).
+          - Checks the energy level to determine if the segment is 'silent' or contains speech.
+          - If speech is detected, applied speech separation and recognizes the speaker on each separated signal.
+          - Assembles the audio chunk with hsr and stores/publishes the recognition result.
+
+        Raises:
+            RecognizingError: If an error occurs during the recognition process.
+        """
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
@@ -280,7 +363,7 @@ class BadgeAudioBase(AudioBase):
                                 normalize_decibel(save_file, rms_level=-20)
                                 temp_name, temp_similarity = self.audio_recognizer.recognize(save_file)
 
-                                # Compare and select best result
+                                # Select the best recognition result
                                 if temp_similarity > similarity:
                                     similarity = temp_similarity
                                     duration = calculate_audio_duration(save_file)
@@ -307,7 +390,7 @@ class BadgeAudioBase(AudioBase):
                 resampled_segment_bytes = read_bytes_from_wav(segment_audio_path)
                 self._assemble_chunk_with_hsr(speaker, record_start_time, resampled_segment_bytes,
                                               best_separate_frames)
-                self._publish_speaker_recognition(record_start_time, recognize_start_time, [speaker],
+                self._publish_recognition_results(record_start_time, recognize_start_time, [speaker],
                                                   [np.round(np.float64(similarity), 4)], [duration])
 
                 if self.store:
@@ -328,15 +411,18 @@ class BadgeAudioBase(AudioBase):
                 gc.collect()
 
     def _assemble_chunk_with_hsr(self, speaker, record_start_time, origin_frames, separate_frames=None):
-        """Assemble the chunk of audio frames if the current recognized speaker is the same as the last recognized
-        speaker, if not, do speaker recognition on half-segment before and after the border of the speaker turn. Update
-        the speaker audio dictionary and last speaker.
+        """Assemble and process audio chunks with half-scaled recognition (HSR) at speaker boundaries.
+
+        If the current recognized speaker matches the previous speaker, appends the audio frames.
+        Otherwise, performs HSR by processing half-segments before and after the speaker change,
+        updating the internal speaker frames dictionary accordingly. Also, adds transcribed chunks
+        to the transcription queue if applicable.
 
         Args:
-            speaker: recognized speaker of the current segment
-            record_start_time: record start time of the current segment
-            origin_frames: audio frames of the current segment
-            separate_frames: speech separated frames of the current segment, default to None
+            speaker: The recognized speaker of the current segment.
+            record_start_time: The start time of the current segment.
+            origin_frames: The original audio frames of the current segment.
+            separate_frames: Optional; speech separated frames from the current segment.
         """
         frames = separate_frames if separate_frames else origin_frames
         fr = 8000 if self.sp else 16000
@@ -352,7 +438,7 @@ class BadgeAudioBase(AudioBase):
                 chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(self.last_speaker)
                 chunk_end_time = record_start_time
 
-                # Half-scaled recognition
+                # Perform half-scaled recognition on speaker turn border
                 if chunk_frames:
                     left_temp_path = os.path.join(self.audio_dir, 'temp', f'badge_{self.id}_left_temp.wav')
                     right_temp_path = os.path.join(self.audio_dir, 'temp', f'badge_{self.id}_right_temp.wav')
@@ -366,16 +452,14 @@ class BadgeAudioBase(AudioBase):
                         apply_gain(right_temp_path)
 
                     if self._apply_vad(left_temp_path, inplace=0):
-                        left_speaker, _ = self.audio_recognizer.recognize_among_candidates(left_temp_path, candidates,
-                                                                                           self.last_speaker,
-                                                                                           self.keep_threshold)
+                        left_speaker, _ = self.audio_recognizer.recognize_among_candidates(
+                            left_temp_path, candidates, self.last_speaker, self.keep_threshold)
                     else:
                         left_speaker = 'silent'
 
                     if self._apply_vad(right_temp_path, inplace=0):
-                        right_speaker, _ = self.audio_recognizer.recognize_among_candidates(right_temp_path, candidates,
-                                                                                            speaker,
-                                                                                            self.keep_threshold)
+                        right_speaker, _ = self.audio_recognizer.recognize_among_candidates(
+                            right_temp_path, candidates, speaker, self.keep_threshold)
                     else:
                         right_speaker = 'silent'
 
@@ -391,7 +475,7 @@ class BadgeAudioBase(AudioBase):
                         self._add_to_transcription_queue(chunk_frames, self.last_speaker, chunk_start_time,
                                                          chunk_end_time)
 
-                    # Store transcribed chunk locally
+                    # Optionally store the audio chunk locally
                     if self.store:
                         chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
                                                         f'{self.last_speaker}_chunk_{round(float(chunk_start_time))}.wav')

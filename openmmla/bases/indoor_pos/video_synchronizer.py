@@ -28,15 +28,18 @@ class VideoSynchronizer(Synchronizer):
         super().__init__(project_dir, config_path)
 
         """Runtime attributes."""
+        self.main_id = None
+        self.transform_matrices_dict = None
+        self.merged_tags = None
+        self.merged_relations = None
+        self.bucket_name = None
+        self.segment_start_time = None
+        self.alive = False
+
+        """Threading attributes."""
         self.threads = []
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        self.bucket_name = None
-        self.transformation_id = None
-        self.transform_matrices_dict = None
-        self.graph_dict = None
-        self.location_dict = None
-        self.alive = False
 
         self._setup_directories()
         self._setup_objects()
@@ -57,18 +60,18 @@ class VideoSynchronizer(Synchronizer):
     def _clean_up(self):
         """Free memory by resetting dictionaries."""
         self.bucket_name = None
-        self.graph_dict = None
-        self.location_dict = None
+        self.merged_relations = None
+        self.merged_tags = None
         gc.collect()
 
     def run(self):
         """Main menu for video synchronizer."""
         print('\033]0;Video Synchronizer\007')
-        func_map = {1: self._start_synchronizing, 2: self._set_main_camera}
+        func_map = {1: self._set_main_camera, 2: self._start_synchronizing}
 
         while True:
             try:
-                select_fun = get_function_synchronizer()
+                select_fun = get_function_synchronizer(self.main_id)
                 if select_fun == 0:
                     self.logger.info("Exiting video synchronizer...")
                     break
@@ -84,8 +87,8 @@ class VideoSynchronizer(Synchronizer):
             self.logger.warning("Main camera id or transformation matrices not set, please set them first.")
             return self._set_main_camera()
 
-        self.graph_dict = {}
-        self.location_dict = {}
+        self.merged_relations = {}
+        self.merged_tags = {}
         self.bucket_name = get_bucket_name(self.influx_client)
         self.logger = get_logger(f'synchronizer-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_synchronizer.log'),
@@ -95,6 +98,7 @@ class VideoSynchronizer(Synchronizer):
 
         # Reinitialize MQTT client with new topics and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/video')
+        self.segment_start_time = time.time()
         self.mqtt_client.loop_start()
 
         # Create threads
@@ -148,46 +152,47 @@ class VideoSynchronizer(Synchronizer):
             if not self.stop_event.is_set():
                 self.alive = True
                 message = json.loads(msg.payload)
-                sender_id = message["sender_id"]
+                base_id = message["base_id"]
+                acquired_time = message["acquired_time"]
 
-                if sender_id.isnumeric():  # results from nicla vision's onboard apriltag detection
-                    self.graph_dict.setdefault(sender_id, []).extend(message['detected_tags'])
-                else:  # msg from base camera
-                    tags = message["tags"]
-                    tag_relations = message["tag_relations"]
+                if self.segment_start_time < acquired_time < self.segment_start_time + 1.0:
+                    if base_id.isnumeric():  # results from nicla vision's onboard apriltag detection
+                        self.merged_relations.setdefault(base_id, []).extend(message['detected_tags'])
+                    else:  # msg from base camera
+                        tags = message["tags"]
+                        tag_relations = message["tag_relations"]
 
-                    if sender_id != self.transformation_id:  # convert to main coordinates
-                        R = self.transform_matrices_dict[sender_id]['R']
-                        T = self.transform_matrices_dict[sender_id]['T']
-                        for tag_id, tag_data in tags.items():
-                            main_rotation = transform_rotation(R, tag_data[0])
-                            main_translation = transform_point(tag_data[1], R, T)
-                            self.location_dict[tag_id] = [main_rotation, main_translation]
-                    else:
-                        self.location_dict.update(tags)
+                        if base_id != self.main_id:  # convert to main coordinates
+                            R = self.transform_matrices_dict[base_id]['R']
+                            T = self.transform_matrices_dict[base_id]['T']
+                            for tag_id, tag_data in tags.items():
+                                main_rotation = transform_rotation(R, tag_data[0])
+                                main_translation = transform_point(tag_data[1], R, T)
+                                self.merged_tags[tag_id] = [main_rotation, main_translation]
+                        else:
+                            self.merged_tags.update(tags)
 
-                    # Store tag relations into graph
-                    for tag_id, look_at_tags in tag_relations.items():
-                        self.graph_dict.setdefault(tag_id, []).extend(look_at_tags)
+                        # Store tag relations into graph
+                        for tag_id, look_at_tags in tag_relations.items():
+                            self.merged_relations.setdefault(tag_id, []).extend(look_at_tags)
 
-                    # Detect tag relations again under main camera's coordinate system
-                    for tag_id, tag_data in self.location_dict.items():
-                        self.graph_dict.setdefault(tag_id, [])
-                        for target_id, target_data in self.location_dict.items():
-                            if target_id != tag_id and target_id not in self.graph_dict[tag_id]:
-                                if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.7,
-                                                                distance_threshold=1.2):
-                                    self.graph_dict[tag_id].append(target_id)
+                        # Detect tag relations again under main camera's coordinate system
+                        for tag_id, tag_data in self.merged_tags.items():
+                            self.merged_relations.setdefault(tag_id, [])
+                            for target_id, target_data in self.merged_tags.items():
+                                if target_id != tag_id and target_id not in self.merged_relations[tag_id]:
+                                    if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.7,
+                                                                    distance_threshold=1.2):
+                                        self.merged_relations[tag_id].append(target_id)
 
     def _upload_merged_result(self):
         """Log and upload merge segment result to InfluxDB"""
         while not self.stop_event.is_set():
             with self.lock:
                 if self.alive:
-                    segment_start_time = int(time.time()) - 1.0
                     rotations_dict = {}
                     translations_dict = {}
-                    for tag_id, (rotation, translation) in self.location_dict.items():
+                    for tag_id, (rotation, translation) in self.merged_tags.items():
                         rotations_dict[tag_id] = rotation
                         translations_dict[tag_id] = translation
 
@@ -195,7 +200,7 @@ class VideoSynchronizer(Synchronizer):
                     translation_data = {
                         "measurement": "badge translations",
                         "fields": {
-                            "segment_start_time": segment_start_time,
+                            "segment_start_time": self.segment_start_time,
                             "translations": json.dumps(translations_dict),
                         }
                     }
@@ -203,7 +208,7 @@ class VideoSynchronizer(Synchronizer):
                     rotation_data = {
                         "measurement": "badge rotations",
                         "fields": {
-                            "segment_start_time": segment_start_time,
+                            "segment_start_time": self.segment_start_time,
                             "rotations": json.dumps(rotations_dict),
                         }
                     }
@@ -211,8 +216,8 @@ class VideoSynchronizer(Synchronizer):
                     relation_data = {
                         "measurement": "badge relations",
                         "fields": {
-                            "segment_start_time": segment_start_time,
-                            "graph": json.dumps(self.graph_dict),
+                            "segment_start_time": self.segment_start_time,
+                            "graph": json.dumps(self.merged_relations),
                         }
                     }
 
@@ -221,9 +226,10 @@ class VideoSynchronizer(Synchronizer):
                     self.influx_client.write(self.bucket_name, relation_data)
 
                 # Reset for next cycle
-                self.graph_dict.clear()
-                self.location_dict.clear()
+                self.merged_relations.clear()
+                self.merged_tags.clear()
                 self.alive = False
+                self.segment_start_time = time.time()
 
             # Schedule the next upload outside the lock to avoid potential deadlocks
             time.sleep(1)
@@ -250,7 +256,7 @@ class VideoSynchronizer(Synchronizer):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
                     chosen_transformation = transformation_choices[selection]
-                    self.transformation_id = chosen_transformation.split('_')[-1].split('.')[0]
+                    self.main_id = chosen_transformation.split('_')[-1].split('.')[0]
                     break
             except ValueError:
                 self.logger.warning("Please enter a valid number or press Enter for default.")

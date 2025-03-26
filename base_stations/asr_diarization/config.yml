@@ -8,9 +8,16 @@ Badge:
   recognize_sp_threshold: 0.3
   rms_threshold: 1000
   rms_peak_threshold: 5000
-  listening_ip: 0.0.0.0
   port_offset: 50000
-  protocol: udp
+  source: udp
+  stream_kwargs:
+    channels: 1
+    rate: 16000
+    format: int16
+    chunk_size: 512
+    buffer_duration: 5.0
+    resample_method: audio_librosa
+    host: 0.0.0.0
 
 Jabra:
   register_duration: 15
@@ -24,7 +31,17 @@ Jabra:
   rms_peak_threshold: 5000   # jabra device rms peak threshold
 #  rms_threshold: 250 # macbook air internal mic rms threshold
 #  rms_peak_threshold: 250 # macbook air internal mic rms peak threshold
-  protocol: pyaudio
+#  source: pyaudio
+  source: rtmp
+  stream_kwargs:
+    url: rtmp://uber-server.local/stream_01
+    channels: 1
+    rate: 16000
+    format: int16
+    chunk_size: 512
+    buffer_duration: 5.0
+    resample_method: audio_librosa
+
 
 Local:
   sr_model: titanet_large
