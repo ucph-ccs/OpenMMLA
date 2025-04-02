@@ -3,7 +3,7 @@
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 
 # uber services
-services=("influxdb" "nginx" "redis" "flask-backend" "react-frontend" "mosquitto" "celery")
+services=("influxdb" "nginx" "redis" "flask" "next" "mosquitto" "celery")
 
 shutdown_server() {
     echo "Shutting down selected tmux sessions..."
@@ -21,7 +21,7 @@ shutdown_server() {
 }
 
 start_server() {
-    tmux new-session -s uber-services "bash -c '$BASH_DIR/bash/uber_services.sh; exec bash'"
+    tmux new-session -s uber-services "bash -c '$BASH_DIR/bash/services.sh; exec bash'"
 }
 
 # Prompt user to start or shutdown the server

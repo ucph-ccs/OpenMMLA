@@ -22,6 +22,9 @@ def apply_gain(infile: str, gain: float = 10, inplace: bool = True) -> None:
         inplace: Whether to overwrite the input file
     """
     # Read and process audio
+    if gain == 0:
+        return
+
     fs, x = read_signal_from_wav(audio_path=infile)
     x = x * (10 ** (gain / 20.0))
     x = np.clip(x, -1.0, 1.0)  # Using clip instead of minimum/maximum

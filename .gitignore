@@ -8,6 +8,7 @@ build/
 __pycache__/
 temp/
 logger/
+deprecated/
 
 # Ignore repositories
 mbox-audio/
@@ -22,3 +23,4 @@ test*.*
 
 # Unignore specific files
 !.gitkeep
+twine.txt

@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openmmla"
+version = "0.1.0"
+description = "OpenMMLA: A unified multimedia platform integrating audio and vision modules for analysis and computer aided instruction."
+readme = "README.md"
+authors = [{name = "Zaibei Li", email = "zali@di.ku.dk"}]
+license = {text = "MIT License"}
+classifiers = [
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Education :: Computer Aided Instruction (CAI)",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: MIT License",
+]
+requires-python = ">=3.9.0"
+dependencies = []
+
+[project.optional-dependencies]
+asr-base = [
+   "PyAudio>=0.2.14",
+   "influxdb-client==1.44.0",
+   "jiwer==3.0.4",
+   "librosa==0.10.2.post1",
+   "llvmlite==0.43.0",
+   "matplotlib==3.9.1",
+   "networkx==3.3",
+   "paho-mqtt==2.1.0",
+   "pydub==0.25.1",
+   "pyecharts==2.0.6",
+   "redis==5.0.7",
+   "pyyaml==6.0.2",
+]
+
+asr-server = [
+   "Cython==3.0.11",
+   "nemo-toolkit[asr]<=1.23.0",
+   "modelscope[framework]==1.16.1",
+   "denoiser-compat==0.1.5.dev0",
+   "silero-vad==5.1",
+   "googletrans==3.0.0",
+   "onnxruntime==1.18.1",
+   "openai-whisper==20231117",
+   "transformers==4.33.3",
+   "speechbrain==1.0.0",
+   "rotary-embedding-torch==0.6.4",
+   "gunicorn==22.0.0",
+   "flask==3.0.3",
+   "pandas==2.2.2",
+   "gevent==24.2.1",
+   "huggingface_hub==0.23.5",
+   "pyyaml==6.0.2",
+]
+
+ips-base = [
+    "influxdb-client==1.44.0",
+    "matplotlib==3.9.2",
+    "opencv-python==4.10.0.84",
+    "paho-mqtt==2.1.0",
+    "pandas==2.2.2",
+    "pupil_apriltags==1.0.4.post10",
+    "redis==5.0.7",
+    "scipy==1.14.0",
+    "networkx==3.3",
+    "pyecharts==2.0.6",
+    "pyyaml==6.0.2",
+]
+
+vfa-server = [
+    "numpy==1.26.4",
+    "opencv-python==4.10.0.84",
+    "Pillow==10.4.0",
+    "pupil_apriltags==1.0.4.post10",
+    "huggingface-hub==0.24.6",
+    "flask==3.0.3",
+    "openai==1.42.0",
+    "vllm==0.5.4; sys_platform == 'linux'",
+    "pyyaml==6.0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/ucph-ccs/openmmla"
+
+[project.scripts]
+openmmla = "openmmla.cli:main"
+
+[tool.setuptools]
+packages = ["openmmla"]
+

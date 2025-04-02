@@ -3,9 +3,11 @@
 - detect_apriltags: Detect the apriltags in an image and return the ids, positions of the tags.
 """
 import os
+
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
 from .image import load_image
 
 

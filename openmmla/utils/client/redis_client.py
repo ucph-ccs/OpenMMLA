@@ -9,8 +9,9 @@ class RedisClientWrapper(redis.Redis):
         """Initialize a Redis client with configurations"""
         config = yaml.safe_load(open(config_path, 'r'))
         super().__init__(
-            host=config['Redis']['redis_host'],
-            port=int(config['Redis']['redis_port']),
+            host=config['Redis']['host'],
+            port=int(config['Redis']['port']),
+            db=int(config['Redis']['db']),
             health_check_interval=10,
             socket_timeout=10,
             socket_keepalive=True,

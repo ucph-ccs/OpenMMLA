@@ -101,8 +101,11 @@ class AudioStream(StreamReceiver):
         self.resample_method = kwargs.get('resample_method', ResampleMethod.AUDIO_LIBROSA)
 
         # PyAudio objects
-        self.p = None
-        self.stream = None
+        if self.source == 'pyaudio':
+            value = kwargs.get('input_device_index')
+            self.input_device_index = int(value) if value is not None else None
+            self.p = None
+            self.stream = None
 
         # Socket objects for UDP/TCP sources
         if self.source in ['udp', 'tcp']:
@@ -271,6 +274,7 @@ class AudioStream(StreamReceiver):
             channels=self.channels,
             rate=self.rate,
             input=True,
+            input_device_index=self.input_device_index,
             frames_per_buffer=self.chunk_size
         )
 

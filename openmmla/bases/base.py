@@ -13,29 +13,35 @@ class Base(ABC):
     """Base class for data processing pipeline."""
     logger = get_logger('Base')
 
-    def __init__(self, project_dir: str, config_path: str):
+    def __init__(self, project_dir: str | None = None, config_path: str | None = None):
         """Initialize the data processing pipeline base class.
         
         Args:
-            project_dir (str): The project directory.
-            config_path (str, optional): Path to the configuration file.
+            project_dir: path to the project directory
+            config_path: path to the configuration file
         """
-        self.project_dir = project_dir
-        if not os.path.isabs(config_path):
-            config_path = os.path.join(project_dir, config_path)
+        if project_dir:
+            if not os.path.isabs(project_dir):
+                project_dir = os.path.join(os.getcwd(), project_dir)
+            if not os.path.exists(project_dir):
+                raise FileNotFoundError(f"Project directory not found at {project_dir}")
+            self.project_dir = project_dir
+        else:
+            self.project_dir = os.getcwd()
 
-        if not os.path.exists(project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found at {config_path}")
+        if config_path:
+            if not os.path.isabs(config_path):
+                config_path = os.path.join(os.getcwd(), config_path)
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Configuration file not found at {config_path}")
 
         self.config_path = config_path
-        self.config = self._load_config()
+        self.config = self._load_config() if self.config_path else None
 
-        self.threads: list[RaisingThread] = []
-        self.stop_event: threading.Event = threading.Event()
-        self.bucket_name: str = ''
-        self.redis_client: RedisClientWrapper = None 
+        self.threads: list[RaisingThread] | None = None
+        self.stop_event: threading.Event | None = None
+        self.bucket_name: str | None = None
+        self.redis_client: RedisClientWrapper | None = None
 
     def _load_config(self):
         """Load the configuration file."""

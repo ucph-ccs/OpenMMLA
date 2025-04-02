@@ -9,6 +9,6 @@ The toolkit is for building up the MMLA pipeline/platform as shown below:
 
 ### Pre-implemented Pipelines
 
-+ [ASR with Diarization](base_stations/asr_diarization/README.md)
-+ [Indoor Positioning](base_stations/indoor_pos/README.md)
-+ [Video Frame Analyzer](base_stations/video_analyzer/README.md)
++ [ASR with Diarization](base_stations/asr/README.md)
++ [Indoor Positioning](base_stations/ips/README.md)
++ [Video Frame Analyzer](base_stations/vfa/README.md)

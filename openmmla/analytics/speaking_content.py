@@ -1,11 +1,11 @@
 import os
-from typing import Dict, Set
-from typing import Dict
-import spacy
 from collections import Counter
-from spacy.matcher import Matcher
-import re
+from typing import Dict
+from typing import Set
+
+import spacy
 from dotenv import load_dotenv
+from spacy.matcher import Matcher
 
 try:
     import spacy
