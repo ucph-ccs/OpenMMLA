@@ -1,4 +1,10 @@
 # Define colour code
 BLUE = "\033[1;94m"
 GREEN = "\033[1;92m"
+RED = "\033[1;91m"
+PINK = "\033[1;95m"
+GREY = "\033[1;90m"
+PURPLE = "\033[1;35m"
+LIME = "\033[38;5;118m"
+LIGHT_BLUE = "\033[38;5;37m"
 ENDC = "\033[0m"

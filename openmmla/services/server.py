@@ -1,4 +1,5 @@
 import os
+import time
 from abc import abstractmethod, ABC
 
 import yaml
@@ -39,8 +40,9 @@ class Server(ABC):
         self.server_temp_folder = os.path.join(self.project_dir, 'temp')
         os.makedirs(self.server_logger_dir, exist_ok=True)
         os.makedirs(self.server_temp_folder, exist_ok=True)
-        self.logger = get_logger(self.__class__.__name__,
-                                 os.path.join(self.server_logger_dir, f'{self.__class__.__name__.lower()}_server.log'))
+        self.logger = get_logger(f'{self.__class__.__name__}_{time.time()}',
+                                 os.path.join(self.server_logger_dir, f'{self.__class__.__name__.lower()}_server.log'),
+                                 mode='a')
 
     def _load_config(self):
         """Load the configuration file."""

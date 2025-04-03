@@ -5,7 +5,7 @@ import os
 import threading
 import time
 
-from openmmla.analytics.ips.analyze import session_analysis_video
+from openmmla.analysis.ips.analyze import session_analysis_video
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
@@ -18,14 +18,16 @@ class VideoSynchronizer(Synchronizer):
     """Synchronizer class for synchronizing detection results from multiple cameras and uploading to InfluxDB"""
     logger = get_logger('synchronizer')
 
-    def __init__(self, project_dir: str | None, config_path: str):
+    def __init__(self, project_dir: str | None, config_path: str, verbose: bool = False):
         """Initialize the synchronizer.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
+            verbose: whether to enable verbose logging (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
+        self.verbose = verbose
 
         """Runtime attributes."""
         self.main_id = None
@@ -67,7 +69,7 @@ class VideoSynchronizer(Synchronizer):
     def run(self):
         """Main menu for video synchronizer."""
         print('\033]0;Video Synchronizer\007')
-        func_map = {1: self._set_main_camera, 2: self._start_synchronizing}
+        func_map = {1: self._start_synchronization, 2: self._set_main_camera, }
 
         while True:
             try:
@@ -81,7 +83,7 @@ class VideoSynchronizer(Synchronizer):
                     f"During running the synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
 
-    def _start_synchronizing(self):
+    def _start_synchronization(self):
         """Start the synchronization process."""
         if self.transform_matrices_dict is None:
             self.logger.warning("Main camera id or transformation matrices not set, please set them first.")
@@ -92,7 +94,7 @@ class VideoSynchronizer(Synchronizer):
         self.bucket_name = get_bucket_name(self.influx_client)
         self.logger = get_logger(f'synchronizer-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_synchronizer.log'),
-                                 level=logging.DEBUG, console_level=logging.INFO, file_level=logging.DEBUG)
+                                 console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
 
         self._listen_for_start_signal()
 
@@ -220,6 +222,10 @@ class VideoSynchronizer(Synchronizer):
                             "graph": json.dumps(self.merged_relations),
                         }
                     }
+
+                    self.logger.debug(translation_data)
+                    self.logger.debug(rotation_data)
+                    self.logger.debug(relation_data)
 
                     self.influx_client.write(self.bucket_name, translation_data)
                     self.influx_client.write(self.bucket_name, rotation_data)

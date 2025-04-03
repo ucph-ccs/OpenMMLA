@@ -1,7 +1,7 @@
 """This script demonstrates how to perform session analysis based on audio measurement data."""
 import os
 
-from openmmla.analytics.asr.analyze import session_analysis_audio
+from openmmla.analysis.asr.analyze import session_analysis_audio
 from openmmla.bases.asr.input import get_bucket_name
 from openmmla.utils.client.influx_client import InfluxDBClientWrapper
 

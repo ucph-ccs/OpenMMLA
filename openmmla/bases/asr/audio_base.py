@@ -60,7 +60,7 @@ class AudioBase(Base):
                  store: bool = True, vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False):
         """Initialize the audio processing pipeline base class.
 
-        Sets up the configuration, directories, and required objects for audio processing.
+        Set up the configuration, directories, and required objects for audio processing.
 
         Args:
             project_dir: path to the project directory
@@ -105,7 +105,7 @@ class AudioBase(Base):
     def _setup_yaml(self):
         """Load and assign configuration parameters from the YAML configuration file.
 
-        Reads various settings such as durations, thresholds, and service URLs required for the audio processing pipeline.
+        Read various settings such as durations, thresholds, and service URLs required for the audio processing pipeline.
         """
         self.register_duration = int(self.config[self.base_type]['register_duration'])
         self.recognize_duration = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
@@ -127,9 +127,9 @@ class AudioBase(Base):
         self.stream_kwargs = self.config[self.base_type]['stream_kwargs']
 
     def _setup_input(self):
-        """Setup the input identifier for the audio base.
+        """Set up the input identifier for the audio base.
 
-        Retrieves and assigns a unique identifier for this instance, calculates the port number by
+        Retrieve and assigns a unique identifier for this instance, calculates the port number by
         adding the port offset to the unique identifier (id), and ensures the port is free.
         """
         self.id = get_id()
@@ -157,7 +157,10 @@ class AudioBase(Base):
                 if (p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
                     print(i, " - ", p.get_device_info_by_host_api_device_index(0, i).get('name'))
                     available_indexes.append(i)
+            p.terminate()
+
             self.input_device_index = get_input_device_index(available_indexes)
+            self.stream_kwargs['input_device_index'] = self.input_device_index
 
         # set url for 'rtmp'
         if self.source == 'rtmp':
@@ -176,14 +179,16 @@ class AudioBase(Base):
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations.
 
-        Creates directories for runtime files, temporary files, speaker profiles, and audio databases.
+        Create directories for runtime files, temporary files, speaker profiles, and audio databases.
         Ensures that the required folder structure exists.
         """
+        self.logger_dir = os.path.join(self.project_dir, 'logger')
         self.runtime_dir = os.path.join(self.project_dir, 'real-time', 'runtime')
         self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
         self.profiles_dir = os.path.join(self.project_dir, 'real-time', 'profiles')
         self.audio_db = os.path.join(self.profiles_dir, f'{self.base_type}_{self.id}')
 
+        os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.runtime_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
         os.makedirs(self.profiles_dir, exist_ok=True)
@@ -192,7 +197,7 @@ class AudioBase(Base):
     def _setup_objects(self):
         """Initialize external service clients and internal processing objects.
 
-        Sets up clients for InfluxDB, Redis, and MQTT, warms up the audio resampler, and initializes the AudioRecognizer
+        Set up clients for InfluxDB, Redis, and MQTT, warms up the audio resampler, and initializes the AudioRecognizer
         and AudioStream.
         """
         self.influx_client = InfluxDBClientWrapper(self.config_path)
@@ -212,11 +217,11 @@ class AudioBase(Base):
 
         Continuously prompts the user for input until termination.
         """
-        func_map = {1: self._start_register, 2: self._start_recognize, 3: self._reset, 4: self._switch_mode}
+        func_map = {1: self._start_registration, 2: self._start_recognition, 3: self._reset, 4: self._switch_mode}
         while True:
             try:
                 print(f"\033]0;Audio Base {self.base_type} {self.id} \007")
-                select_fun = get_function_base()
+                select_fun = get_function_base(self.id, self.mode)
                 if select_fun == 0:
                     print("------------------------------------------------")
                     clear_directory(self.temp_dir)
@@ -229,10 +234,10 @@ class AudioBase(Base):
                     f"During running the audio base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
 
-    def _start_register(self):
+    def _start_registration(self):
         """Start the speaker profile registration process.
 
-        Prompts the user to record a segment sample, applies gain and preprocessing, and then registers the speaker
+        Prompt the user to record a segment sample, applies gain and preprocessing, and then registers the speaker
         profile using the audio recognizer. If the recorded audio is too short or no name is provided, the registration
         is skipped.
         """
@@ -259,10 +264,10 @@ class AudioBase(Base):
 
         self.audio_recognizer.register(audio_path, name)
 
-    def _start_recognize(self, bucket_name=None):
+    def _start_recognition(self, bucket_name=None):
         """Start the real-time voice recognition process.
 
-        Sets up directories, queues, and MQTT communication before creating threads for:
+        Set up directories, queues, and MQTT communication before creating threads for:
           - Continuous recording.
           - Loading and queuing pre-recorded files (if in 'recognize' mode).
           - Continuous recognition (with or without speech separation).
@@ -279,6 +284,9 @@ class AudioBase(Base):
             return
 
         self.bucket_name = get_bucket_name(self.influx_client) if not bucket_name else bucket_name
+        self.logger = get_logger(f'base-{self.bucket_name}',
+                                 os.path.join(self.logger_dir, f'{self.bucket_name}_{self.base_type}_{self.id}.log'))
+
         self.last_speaker = None
         self.audio_dir = os.path.join(self.runtime_dir, f'{self.bucket_name}', f'{self.base_type}_{self.id}')
         self.audio_queue = queue.Queue()
@@ -318,7 +326,7 @@ class AudioBase(Base):
     def _reset(self):
         """Reset the audio base.
 
-        Reinitializes the audio base by calling the constructor with the current configuration,
+        Reinitialize the audio base by calling the constructor with the current configuration,
         logs the reset status, and performs garbage collection.
         """
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, base_type=self.base_type,
@@ -651,7 +659,7 @@ class AudioBase(Base):
                            record_start_time) -> tuple:
         """Update the chunk list based on recognition results at a speaker turn boundary.
 
-        Adjusts the audio chunks based on recognition outcomes from different segments,
+        Adjust the audio chunks based on recognition outcomes from different segments,
         handling various cases such as extending the chunk to include additional audio.
 
         Args:
@@ -720,7 +728,7 @@ class AudioBase(Base):
     def _upload_transcription(self, speaker, text, chunk_start_time, chunk_end_time):
         """Upload the transcribed speech chunk to the database.
 
-        Constructs a transcription record and writes it to InfluxDB.
+        Construct a transcription record and writes it to InfluxDB.
         Also prints the transcription for logging purposes.
 
         Args:
@@ -745,7 +753,7 @@ class AudioBase(Base):
     def _publish_recognition(self, record_start_time, recognize_start_time, speakers, similarities, durations):
         """Log and publish speaker recognition results via MQTT.
 
-        Constructs a JSON record with recognition details and publishes it on the designated channel.
+        Construct a JSON record with recognition details and publishes it on the designated channel.
 
         Args:
             record_start_time: Start time of the recorded segment.
@@ -770,7 +778,7 @@ class AudioBase(Base):
     def _separate_speech(self, segment_audio_path) -> list:
         """Separate overlapping speech from an audio segment.
 
-        Uses an external speech separation service to process the audio file and decodes the separated signals.
+        Use an external speech separation service to process the audio file and decodes the separated signals.
 
         Args:
             segment_audio_path (str): Path to the audio segment file.
@@ -827,8 +835,8 @@ class AudioBase(Base):
     def _prepare_directories(self):
         """Prepare subdirectories for audio processing based on the operating mode.
 
-        Creates subdirectories for segments, chunks, separations, temporary files, and records.
-        Clears specific directories based on the current operating mode.
+        Create subdirectories for segments, chunks, separations, temporary files, and records.
+        Clear specific directories based on the current operating mode.
         """
         sub_dirs = ['segments', 'chunks', 'separations', 'temp', 'records']
         for subdir in sub_dirs:
@@ -848,7 +856,7 @@ class AudioBase(Base):
     def _recognition_handler(self, e):
         """Handle exceptions during the recognition process and perform cleanup.
 
-        Stops all threads and external clients, cleans up runtime variables, and if a RecordingError
+        Stop all threads and external clients, cleans up runtime variables, and if a RecordingError
         occurred, restarts the recognition service with the current bucket.
 
         Args:
@@ -865,7 +873,7 @@ class AudioBase(Base):
         self._clean_up()
         if isinstance(e, RecordingError):
             self.logger.info("Restarting recognizing service.")
-            self._start_recognize(current_bucket)
+            self._start_recognition(current_bucket)
 
     def _clean_up(self):
         """Clean up runtime variables and free memory.
@@ -884,7 +892,7 @@ class AudioBase(Base):
     def warm_up_resampler(sample_rate_original=44100, sample_rate_target=16000):
         """Warm up the audio resampler to avoid delays during the first resampling operation.
 
-        Generates a short segment of silence and performs resampling using librosa.
+        Generate a short segment of silence and performs resampling using librosa.
 
         Args:
             sample_rate_original (int): Original sample rate (default is 44100).
@@ -898,7 +906,7 @@ class AudioBase(Base):
     def recording_prompt(seconds: float):
         """Display a recording prompt to the user for speaker registration.
 
-        Prompts the user to press Enter and read a series of sentences within the given time frame.
+        Prompt the user to press Enter and read a series of sentences within the given time frame.
 
         Args:
             seconds (float): Duration (in seconds) allowed for reading the prompt.

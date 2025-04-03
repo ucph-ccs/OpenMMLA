@@ -1,8 +1,7 @@
 import json
 import os
-import platform
+import threading
 import time
-from multiprocessing import Process
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -15,35 +14,30 @@ from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 from .input import get_bucket_name, get_function_visualizer
 
-# Setup for multiprocessing on macOS
-# https://stackoverflow.com/questions/44144584/typeerror-cant-pickle-thread-lock-objects/78013322#78013322
-# Add 'export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES' to ~/.zshrc for multiprocess fork
-if platform.system() != "Linux":
-    from multiprocessing import set_start_method
-
-    set_start_method("fork")
-
 
 class VideoVisualizer(Base):
     """Real Time Visualization class for visualizing the real-time badge relations and positions"""
     logger = get_logger('visualizer')
 
-    def __init__(self, config_path: str, project_dir: str | None = None, store: bool = False):
+    def __init__(self, config_path: str, project_dir: str | None = None, store: bool = False, use_3d: bool = False):
         """Initialize the visualizer.
 
         Args:
             config_path: path to the configuration file
             project_dir: path to the project directory
             store: whether to store the visualization images (default: False)
+            use_3d: if True, run the 3D visualization; otherwise use 2D visualization
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
-
-        """Visualizer specific parameters."""
         self.store = store
+        self.use_3d = use_3d
 
-        """Runtime attributes."""
+        # Runtime attribute
         self.bucket_name = None
-        self.processes = []
+
+        # Threading attribute
+        self.stop_event = threading.Event()
+        self.threads = []
 
         self._setup_directories()
         self._setup_objects()
@@ -60,77 +54,60 @@ class VideoVisualizer(Base):
 
     def run(self):
         print('\033]0;Video Visualizer\007')
-        func_map = {1: self._start_visualizing}
+        func_map = {1: self._start_visualization, 2: self._switch_dimension}
 
         while True:
             try:
-                select_fun = get_function_visualizer()
+                dimension = '3d' if self.use_3d else '2d'
+                select_fun = get_function_visualizer(dimension=dimension)
                 if select_fun == 0:
                     self.logger.info("Exiting video visualizer...")
                     break
                 func_map.get(select_fun, lambda: print("Invalid option."))()
             except (Exception, KeyboardInterrupt) as e:
                 self.logger.warning(
-                    f"During running the visualizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
+                    f"During running the visualizer, caught: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, returning to main menu.",
                     exc_info=True)
 
-    def _start_visualizing(self):
+    def _start_visualization(self):
         self.bucket_name = get_bucket_name(self.influx_client_main)
+        self.stop_event.clear()
 
         if self.store:
             dir_path = os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time')
             os.makedirs(dir_path, exist_ok=True)
 
         self._listen_for_start_signal()
-        self.create_process(self._start_2d_plot)
-        self.create_process(self._start_3d_plot)
+        self._create_thread(self._listen_for_stop_signal)
+        self._start_threads()
 
         try:
-            self.start_processes()
-            self.join_processes()
+            if self.use_3d:
+                self._start_3d_plot()
+            else:
+                self._start_2d_plot()
         except (Exception, KeyboardInterrupt) as e:
-            self.logger.warning("%s, Come back to the main menu.", e, exc_info=True)
+            self.logger.warning("%s, returning to main menu.", e, exc_info=True)
         finally:
-            self.stop_processes()
             self.bucket_name = None
-
-    def create_process(self, target):
-        p = Process(target=target, daemon=True)
-        self.processes.append(p)
-
-    def start_processes(self):
-        for p in self.processes:
-            p.start()
-
-    def join_processes(self):
-        for p in self.processes:
-            p.join()
-
-    def stop_processes(self):
-        for p in self.processes:
-            if p.is_alive():
-                p.terminate()  # Send termination request
-                p.join()  # Wait for the process to finish
-        self.processes.clear()
 
     def _start_2d_plot(self):
         influx_client = InfluxDBClientWrapper(self.config_path)
         fig = plt.figure()
-        ani = FuncAnimation(fig, self._animate, fargs=(influx_client,), interval=50, cache_frame_data=False)
+        self.ani = FuncAnimation(fig, self._animate, fargs=(influx_client,), interval=50, cache_frame_data=False)
         plt.show()
 
     def _start_3d_plot(self):
         influx_client = InfluxDBClientWrapper(self.config_path)
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-        ani = FuncAnimation(fig, self._animate_3d, fargs=(fig, ax, influx_client,),
-                            interval=50, cache_frame_data=False)
+        self.ani = FuncAnimation(fig, self._animate_3d, fargs=(fig, ax, influx_client,), interval=50,
+                                 cache_frame_data=False)
         plt.show()
 
     def _animate(self, i, influx_client):
         plt.cla()
-
-        # Get node relations and pos
+        # Get node relations and positions
         graph_dict, segment_time = self._get_node_relations(influx_client)
         if graph_dict is None:
             return
@@ -147,18 +124,20 @@ class VideoVisualizer(Base):
         }
         nx.draw_networkx(G, pos, **options)
 
-        # Set margins for the axes so that nodes aren't clipped
         ax = plt.gca()
         ax.margins(0.20)
         plt.axis("off")
+
         if self.store:
             plt.savefig(
                 os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{segment_time}_2d.png'))
 
+    def _switch_dimension(self):
+        self.use_3d = not self.use_3d
+
     def _animate_3d(self, i, fig, ax, influx_client):
         plt.cla()
-
-        # Get node relations and pos
+        # Get node relations and positions
         graph_dict, segment_time = self._get_node_relations(influx_client)
         if graph_dict is None:
             return
@@ -169,7 +148,8 @@ class VideoVisualizer(Base):
         for node, coordinates in pos_3d.items():
             camera_x, camera_y, camera_z = coordinates
             ax.scatter(camera_x, camera_z, camera_y, s=200, c='white', edgecolors='green')
-            ax.text(camera_x, camera_z, camera_y, node, fontsize=6, color='green', ha='center', va='center', zorder=40)
+            ax.text(camera_x, camera_z, camera_y, node, fontsize=6, color='green',
+                    ha='center', va='center', zorder=40)
 
         # Draw directed edges as arrows
         for edge in G.edges():
@@ -180,7 +160,7 @@ class VideoVisualizer(Base):
         ax.set_xlabel('x')
         ax.set_ylabel('z')
         ax.set_zlabel('y')
-        ax.view_init(elev=20., azim=30)  # adjust the viewing angle for better visualization
+        ax.view_init(elev=20., azim=30)
         if self.store:
             plt.savefig(
                 os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{segment_time}_3d.png'))
@@ -188,16 +168,15 @@ class VideoVisualizer(Base):
     def _build_graph(self, graph_dict, pos):
         G = nx.DiGraph()
         G.add_node('B')
-        # Add nodes and edges based on the graph_dict
         for badge_id, detected_tags in graph_dict.items():
             if badge_id not in G:
                 G.add_node(badge_id)
             for tag_id in detected_tags:
-                if str(tag_id) not in G:
-                    G.add_node(str(tag_id))
-                G.add_edge(badge_id, str(tag_id))
+                tag_str = str(tag_id)
+                if tag_str not in G:
+                    G.add_node(tag_str)
+                G.add_edge(badge_id, tag_str)
 
-        # Remove missing nodes
         missing_nodes = [node for node in G.nodes() if node not in pos]
         if missing_nodes:
             self.logger.warning("Missing positions for nodes: %s", missing_nodes)
@@ -248,12 +227,19 @@ class VideoVisualizer(Base):
                 positions[badge_id] = (x, -y, z)
         return positions
 
+    def _stop_threads(self):
+        super()._stop_threads()
+        self.ani.pause()
+
     @staticmethod
     def draw_arrow(ax, x1, y1, z1, x2, y2, z2, node_radius=0.04):
         arrow_vector = np.array([x2 - x1, y2 - y1, z2 - z1])
         arrow_unit_vector = arrow_vector / norm(arrow_vector)
         start_point = np.array([x1, y1, z1]) + node_radius * arrow_unit_vector
         end_point = np.array([x2, y2, z2]) - node_radius * arrow_unit_vector
-        ax.plot([start_point[0], end_point[0]], [start_point[1], end_point[1]], [start_point[2], end_point[2]],
+        ax.plot([start_point[0], end_point[0]],
+                [start_point[1], end_point[1]],
+                [start_point[2], end_point[2]],
                 c='green', linewidth=0.5, zorder=4)
-        ax.scatter([end_point[0]], [end_point[1]], [end_point[2]], c='red', s=10, marker='.', zorder=10)
+        ax.scatter([end_point[0]], [end_point[1]], [end_point[2]],
+                   c='red', s=10, marker='.', zorder=10)

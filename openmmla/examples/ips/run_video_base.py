@@ -1,7 +1,6 @@
 import argparse
 import functools
 
-
 def get_parser():
     parser = argparse.ArgumentParser(
         description="Run IPS video base for AprilTags detection.",
@@ -12,8 +11,9 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('graphics', bool, True, 'whether to display video frames with overlays (for debugging)', shortname='-g')
-    add_arg('store', bool, False, 'whether to record and store video frames', shortname='-s')
+    add_arg('graphics', bool, True, 'whether to display video frames', shortname='-g')
+    add_arg('store', bool, False, 'whether to store video frames', shortname='-s')
+    add_arg('verbose', bool, False, 'whether to print debug information', shortname='-v')
     return parser
 
 
@@ -30,7 +30,8 @@ def main():
         project_dir=args.project_dir,
         config_path=args.config_path,
         graphics=args.graphics,
-        store=args.store
+        store=args.store,
+        verbose=args.verbose
     )
     video_base.run()
 

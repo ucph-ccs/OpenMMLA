@@ -6,6 +6,7 @@ llvmlite==0.43.0
 matplotlib==3.9.1
 networkx==3.3
 paho-mqtt==2.1.0
+pandas==2.2.2
 pydub==0.25.1
 pyecharts==2.0.6
 redis==5.0.7

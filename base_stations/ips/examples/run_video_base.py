@@ -11,7 +11,8 @@ config_path = os.path.join(project_dir, 'config.yml')
 
 
 def run_video_base(args):
-    video_base = VideoBase(project_dir=args.project_dir, config_path=args.config_path, graphics=args.graphics, store=args.store)
+    video_base = VideoBase(project_dir=args.project_dir, config_path=args.config_path, graphics=args.graphics,
+                           store=args.store, verbose=args.verbose)
     video_base.run()
 
 
@@ -22,6 +23,7 @@ if __name__ == '__main__':
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
     add_arg('graphics', bool, True, 'whether shows graphics', shortname='-g')
     add_arg('store', bool, False, 'whether records video frames', shortname='-s')
+    add_arg('verbose', bool, False, 'whether prints debug information', shortname='-v')
 
     input_args = parser.parse_args()
     print_arguments(input_args)

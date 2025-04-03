@@ -1,7 +1,7 @@
 """This script demonstrates how to perform session analysis based on video measurement data"""
 import os
 
-from openmmla.analytics.ips.analyze import session_analysis_video
+from openmmla.analysis.ips.analyze import session_analysis_video
 from openmmla.bases.ips.input import get_bucket_name
 from openmmla.utils.client import InfluxDBClientWrapper
 

@@ -275,8 +275,14 @@ def export_main_transformations_json(input_file, output_file, main_system='m'):
         set to 'm' will produce an output JSON with keys 'a', 'b', 'c' assuming it is possible to calculate these transformations
         based on the data provided.
     """
-    with open(input_file, 'r') as file:
-        data = json.load(file)
+    try:
+        with open(input_file, 'r') as file:
+            data = json.load(file)
+    except FileNotFoundError:
+        # export an empty json file for the main_system if the input file is not found
+        with open(output_file, 'w') as file:
+            json.dump({}, file)
+        return
 
     results = {}
     # Find all starting systems, except the main system

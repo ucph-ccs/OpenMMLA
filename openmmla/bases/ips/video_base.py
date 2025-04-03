@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import os
 import threading
 
@@ -21,7 +22,7 @@ class VideoBase(Base):
     logger = get_logger('video-base')
 
     def __init__(self, project_dir: str | None, config_path: str, graphics: bool = True,
-                 store: bool = False):
+                 store: bool = False, verbose: bool = False):
         """Initialize the video base.
 
         Args:
@@ -29,12 +30,14 @@ class VideoBase(Base):
             project_dir: path to the project directory
             graphics: whether to show graphics (default: True)
             store: whether to store video frames (default: False)
+            verbose: whether to enable verbose logging (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
         """Video-base specific parameters."""
         self.graphics = graphics
         self.store = store
+        self.verbose = verbose
         self.max_badge_id = 12
 
         """Runtime attributes."""
@@ -72,9 +75,11 @@ class VideoBase(Base):
     def _setup_directories(self):
         """Set up directories."""
         self.runtime_dir = os.path.join(self.project_dir, 'real-time/runtime')
+        self.logger_dir = os.path.join(self.project_dir, 'logger')
         self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
         self.camera_calib_dir = os.path.join(self.project_dir, 'camera_calib')
         os.makedirs(self.runtime_dir, exist_ok=True)
+        os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.camera_sync_dir, exist_ok=True)
         os.makedirs(self.camera_calib_dir, exist_ok=True)
 
@@ -87,7 +92,7 @@ class VideoBase(Base):
 
     def run(self):
         print('\033]0;Video Base\007')
-        func_map = {1: self._set_camera, 2: self._start}
+        func_map = {1: self._start_detection, 2: self._set_camera}
 
         while True:
             try:
@@ -101,7 +106,7 @@ class VideoBase(Base):
                     f"During running the video base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
 
-    def _start(self):
+    def _start_detection(self):
         """Start AprilTag detection"""
         if not self.camera_configured:
             self.logger.warning("Camera is not configured.")
@@ -109,6 +114,10 @@ class VideoBase(Base):
 
         # Bucket selection
         self.bucket_name = get_bucket_name(self.influx_client)
+        self.logger = get_logger(f'base-{self.bucket_name}',
+                                 os.path.join(self.logger_dir, f'{self.bucket_name}_base_{self.base_id}.log'),
+                                 console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
+
         self._listen_for_start_signal()
 
         # MQTT client reinitialization
@@ -359,6 +368,7 @@ class VideoBase(Base):
                 "tag_relations": tag_relations,
                 "acquired_time": acquired_time
             }
+            self.logger.debug(message)
             message_str = json.dumps(message)
             self.mqtt_client.publish(f'{self.bucket_name}/video', message_str, qos=0, retain=False)
 

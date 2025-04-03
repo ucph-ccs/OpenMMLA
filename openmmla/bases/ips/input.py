@@ -73,9 +73,9 @@ def get_function_sync_manager(main_id: str, alt_id: str, sync: bool):
             flush_input()
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
-                               f"1: set camera id ({LIGHT_BLUE}main:{main_id}, alt:{alt_id}{ENDC})\n"
-                               f"2: start\n"
-                               f"3: switch mode ({LIGHT_BLUE}sync:{sync}{ENDC})\n"
+                               f"1: start\n"
+                               f"2: set camera id (main:{LIGHT_BLUE}{main_id}{ENDC}, alt:{LIGHT_BLUE}{alt_id}{ENDC})\n"
+                               f"3: switch mode (sync:{LIGHT_BLUE}{sync}{ENDC})\n"
                                f"4: export transformations\n"
                                f"5: clear transformations\n"
                                f"0: exit\n"
@@ -99,8 +99,8 @@ def get_function_base(chosen_camera: str, camera_seed: str, base_id: str, main_i
             flush_input()
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
-                               f"1: set camera ({LIGHT_BLUE}camera:{chosen_camera}, camera seed:{camera_seed}, base:{base_id}, main:{main_id}{ENDC})\n"
-                               f"2: start\n"
+                               f"1: start\n"
+                               f"2: set camera (camera:{LIGHT_BLUE}{chosen_camera}{ENDC}, camera seed:{LIGHT_BLUE}{camera_seed}{ENDC}, base:{LIGHT_BLUE}{base_id}{ENDC}, main:{LIGHT_BLUE}{main_id}{ENDC})\n"
                                f"0: exit\n"
                                f"Selected function: ")
 
@@ -125,8 +125,8 @@ def get_function_synchronizer(main_id: str):
             flush_input()
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
-                               f"1: set main camera ({LIGHT_BLUE}main: {main_id}{ENDC})\n"
-                               f"2: start\n"
+                               f"1: start\n"
+                               f"2: set main camera (main:{LIGHT_BLUE}{main_id}{ENDC})\n"
                                f"0: exit\n"
                                f"Selected function: ")
 
@@ -144,7 +144,7 @@ def get_function_synchronizer(main_id: str):
             print('Please enter a valid integer')
 
 
-def get_function_visualizer():
+def get_function_visualizer(dimension: str):
     """Get the function to be performed from user input for visualizer."""
     while True:
         try:
@@ -152,6 +152,7 @@ def get_function_visualizer():
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
                                f"1: start\n"
+                               f"2: switch (dimension:{LIGHT_BLUE}{dimension}{ENDC})\n"
                                f"0: exit\n"
                                f"Selected function: ")
 

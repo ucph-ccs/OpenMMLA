@@ -5,10 +5,10 @@ from typing import Optional
 
 def get_logger(name: str,
                log_file: Optional[str] = None,
-               level: int = logging.INFO,
+               level: int = logging.DEBUG,
                console_level: int = logging.INFO,
-               file_level: int = logging.INFO,
-               mode: str = 'w') -> logging.Logger:
+               file_level: int = logging.DEBUG,
+               mode: str = 'a') -> logging.Logger:
     """Function to create a logger with a given name and log to both console and file.
 
     Args:
@@ -17,7 +17,7 @@ def get_logger(name: str,
         level (int): The threshold level for the logger. Defaults to logging.INFO.
         console_level (int): The threshold level for logging output to the console. Defaults to logging.INFO.
         file_level (int): The threshold level for logging output to the file. Defaults to logging.INFO.
-        mode (str): The mode in which the file is opened. Defaults to 'w' - write, can be 'a' - append.
+        mode (str): The mode in which the file is opened ('w'-write, 'a'-append). Defaults to 'a'.
 
     Raises:
         FileNotFoundError: If the directory specified in 'log_file' does not exist.
@@ -26,7 +26,8 @@ def get_logger(name: str,
         logging.Logger: A configured logger object that logs to both the file and console.
 
     Example:
-        logger = get_logger('example_logger', 'logs/app.log', level=logging.DEBUG, console_level=logging.INFO, file_level=logging.ERROR)
+        logger = get_logger('example_logger', 'logs/app.log', level=logging.DEBUG, console_level=logging.INFO,
+                            file_level=logging.ERROR)
     """
     logger = logging.getLogger(name)
     logger.setLevel(level)

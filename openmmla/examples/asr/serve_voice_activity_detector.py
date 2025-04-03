@@ -58,7 +58,7 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    os.environ["VOICE_ACTIVITY_DETECTOR_PROJECT_DIR"] = args.project_dir
+    os.environ["VOICE_ACTIVITY_DETECTOR_PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
     os.environ["VOICE_ACTIVITY_DETECTOR_CONFIG_PATH"] = args.config_path
 
     application = get_app()

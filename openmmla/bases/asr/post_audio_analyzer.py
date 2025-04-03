@@ -10,9 +10,9 @@ import numpy as np
 import soundfile as sf
 from tqdm import tqdm
 
-from openmmla.analytics.asr.analyze import plot_speaking_interaction_network, \
+from openmmla.analysis.asr.analyze import plot_speaking_interaction_network, \
     plot_speaker_diarization_interactive
-from openmmla.analytics.asr.transcription import convert_transcription_json_to_txt
+from openmmla.analysis.asr.transcription import convert_transcription_json_to_txt
 from openmmla.bases.base import Base
 from openmmla.services.asr.requests import request_voice_activity_detection, request_speech_enhancement, \
     request_speech_separation, request_speech_transcription
@@ -67,8 +67,8 @@ class PostAudioAnalyzer(Base):
             self.process_files = origin_files
 
         if not self.process_files:
-            raise ValueError("You must specify an audio file to process or place it under the audio/post-time/origin "
-                             "folder.")
+            raise ValueError(
+                "You must specify an audio file to process or place it under the /post-time/origin folder.")
 
         self._setup_objects()
 

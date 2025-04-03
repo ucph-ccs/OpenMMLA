@@ -57,7 +57,7 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    os.environ["AUDIO_INFERER_PROJECT_DIR"] = args.project_dir
+    os.environ["AUDIO_INFERER_PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
     os.environ["AUDIO_INFERER_CONFIG_PATH"] = args.config_path
 
     application = get_app()

@@ -88,7 +88,7 @@ class CameraSyncManager(Synchronizer):
 
     def run(self):
         """Run the camera sync manager."""
-        func_map = {1: self._set_camera_id, 2: self._start, 3: self._switch,
+        func_map = {1: self._start_synchronization, 2: self._set_camera_id, 3: self._switch,
                     4: self._export_transformations, 5: self._clear_transformations}
         while True:
             try:
@@ -102,11 +102,18 @@ class CameraSyncManager(Synchronizer):
 
     def _set_camera_id(self):
         """Set camera IDs through user input."""
-        self.main_id = input("Please enter the main camera ID: ")
-        self.alt_id = input("Please enter the alternative camera ID: ")
+        main_id = input("Please enter the main camera ID: ")
+        alt_id = input("Please enter the alternative camera ID: ")
+
+        if main_id == alt_id:
+            print("Main camera ID and alternative camera ID should be different.")
+            return
+
+        self.main_id = main_id
+        self.alt_id = alt_id
         print(f"\033]0;Camera Sync Manager: main:{self.main_id} - alternative:{self.alt_id}\007")
 
-    def _start(self):
+    def _start_synchronization(self):
         try:
             if not self.main_id or not self.alt_id:
                 return self._set_camera_id()

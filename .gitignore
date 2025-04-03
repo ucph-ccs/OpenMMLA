@@ -14,7 +14,10 @@ deprecated/
 mbox-audio/
 mbox-video/
 mbox-uber/
-tests/
+
+# Ignore test and tests directories
+**/test/
+**/tests/
 
 # Ignore specific files
 .DS_Store

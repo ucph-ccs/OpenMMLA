@@ -3,6 +3,7 @@ import time
 from urllib.parse import urlparse, urlunparse
 
 import requests
+
 from openmmla.utils.logger import get_logger
 
 logger = get_logger(__name__)

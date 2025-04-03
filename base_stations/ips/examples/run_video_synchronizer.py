@@ -11,7 +11,8 @@ config_path = os.path.join(project_dir, 'config.yml')
 
 
 def run_video_synchronizer(args):
-    synchronizer = VideoSynchronizer(project_dir=args.project_dir, config_path=args.config_path)
+    synchronizer = VideoSynchronizer(project_dir=args.project_dir, config_path=args.config_path,
+                                     verbose=args.verbose)
     synchronizer.run()
 
 
@@ -20,6 +21,7 @@ if __name__ == "__main__":
     add_arg = functools.partial(add_arguments, argparser=parser)
     add_arg('project_dir', str, project_dir, 'path to the project directory', shortname='-p')
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
+    add_arg('verbose', bool, False, 'whether prints debug information', shortname='-v')
 
     input_args = parser.parse_args()
     print_arguments(input_args)

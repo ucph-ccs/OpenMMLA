@@ -11,15 +11,18 @@ NUM_SYNCHRONIZER=1
 NUM_VISUALIZER=1
 GRAPHICS=true
 STORE=false
+VERBOSE=false
 
 print_usage() {
     echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-h]"
     echo ""
     echo "options:"
     echo "  -nb NUM_BASE         : Number of audio bases to run (default: 3)"
-    echo "  -ns NUM_SYNCHRONIZER  : Number of synchronizers to run (default: 1)"
-    echo "  -sp SPEECH_SEPARATE   : Whether to use Speech Separation (true/false, default: false)"
-    echo "  -h                    : Display this help message"
+    echo "  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)"
+    echo "  -g GRAPHICS          : Enable graphics (default: true)"
+    echo "  -s STORE             : Enable store (default: false)"
+    echo "  -v VERBOSE           : Enable verbose mode (default: false)"
+    echo "  -h                   : Display this help message"
     exit 1
 }
 
@@ -81,12 +84,30 @@ while [ $i -le $# ]; do
                 print_usage
             fi
             ;;
-        -sp)
+        -g)
             i=$((i+1))
             if [ $i -le $# ]; then
-                SPEECH_SEPARATE="${!i}"
+                GRAPHICS="${!i}"
             else
-                echo "Error: -sp requires a value"
+                echo "Error: -g requires a value"
+                print_usage
+            fi
+            ;;
+        -s)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                STORE="${!i}"
+            else
+                echo "Error: -s requires a value"
+                print_usage
+            fi
+            ;;
+        -v)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                VERBOSE="${!i}"
+            else
+                echo "Error: -v requires a value"
                 print_usage
             fi
             ;;
@@ -110,8 +131,8 @@ for arg_name in "NUM_BASE" "NUM_SYNCHRONIZER"; do
     fi
 done
 
-# shellcheck disable=SC2043
-for arg_name in "SPEECH_SEPARATE"; do
+
+for arg_name in "GRAPHICS" "STORE" "VERBOSE"; do
     arg_value="${!arg_name}"
     if ! is_boolean "$arg_value"; then
         echo "Error: $arg_name must be either 'true' or 'false'."
@@ -125,12 +146,13 @@ echo "Indoor Positioning System Configuration:"
 echo "--------------------------------"
 echo "NUM_BASE: $NUM_BASE"
 echo "NUM_SYNCHRONIZER: $NUM_SYNCHRONIZER"
-echo "SPEECH_SEPARATE: $SPEECH_SEPARATE"
+echo "GRAPHICS: $GRAPHICS"
+echo "STORE: $STORE"
 echo "--------------------------------"
 echo "Starting $NUM_BASE video base(s) and $NUM_SYNCHRONIZER synchronizer(s)..."
 
 # Run video bases
-CMD="python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -s $STORE"
+CMD="python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -s $STORE -v $VERBOSE"
 if [ "$NUM_BASE" -gt 0 ]; then
     for i in $(seq 1 "$NUM_BASE"); do
         if [[ $OSTYPE == 'darwin'* ]]; then
@@ -149,7 +171,7 @@ if [ "$NUM_BASE" -gt 0 ]; then
 fi
 
 # Run synchronizer
-CMD="python3 $PROJECT_DIR/examples/run_video_synchronizer.py"
+CMD="python3 $PROJECT_DIR/examples/run_video_synchronizer.py -v $VERBOSE"
 if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
     if [[ $OSTYPE == 'darwin'* ]]; then
         run_py_in_new_tab_mac "$CMD"

@@ -52,7 +52,7 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    os.environ["AUDIO_RESAMPLER_PROJECT_DIR"] = args.project_dir
+    os.environ["AUDIO_RESAMPLER_PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
 
     application = get_app()
     application.run(host=args.host, port=args.port, threaded=True)

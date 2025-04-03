@@ -1,11 +1,10 @@
 import gc
 import json
-import logging
 import os
 import threading
 import time
 
-from openmmla.analytics.asr.analyze import session_analysis_audio
+from openmmla.analysis.asr.analyze import session_analysis_audio
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
@@ -78,7 +77,7 @@ class AudioSynchronizer(Synchronizer):
     def run(self):
         """Main menu for audio synchronizer."""
         print('\033]0;Audio Synchronizer\007')
-        func_map = {1: self._start_synchronizing}
+        func_map = {1: self._start_synchronization}
 
         while True:
             try:
@@ -94,15 +93,14 @@ class AudioSynchronizer(Synchronizer):
                     f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
 
-    def _start_synchronizing(self):
+    def _start_synchronization(self):
         """Start the synchronization process."""
         self.bucket_name = get_bucket_name(self.influx_client)
         self.number_of_speaker = get_number_of_group_members()
         self.latest_time = 0
         self.retained_segments_results = {}
         self.logger = get_logger(f'synchronizer-{self.bucket_name}',
-                                 os.path.join(self.logger_dir, f'{self.bucket_name}_synchronizer.log'),
-                                 level=logging.DEBUG, console_level=logging.INFO, file_level=logging.DEBUG)
+                                 os.path.join(self.logger_dir, f'{self.bucket_name}_synchronizer.log'))
 
         self._listen_for_start_signal()
 

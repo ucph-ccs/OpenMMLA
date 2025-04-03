@@ -1,8 +1,9 @@
 """This script demonstrates how to detect apriltags in an image."""
 import os
 
-from openmmla.utils.video.apriltag import detect_apriltags
 from pupil_apriltags import Detector
+
+from openmmla.utils.video.apriltag import detect_apriltags
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 image_path = os.path.join(project_dir, 'data/img.png')

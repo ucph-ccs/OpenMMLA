@@ -2,6 +2,8 @@ import argparse
 import functools
 import os
 
+from openmmla.utils.clean import flush_input
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -19,8 +21,8 @@ def run_session_analysis(args):
 
     from openmmla.utils.logger import get_logger
     from openmmla.utils.client import InfluxDBClientWrapper
-    from openmmla.analytics.asr.analyze import session_analysis_audio
-    from openmmla.analytics.ips.analyze import session_analysis_video
+    from openmmla.analysis.asr.analyze import session_analysis_audio
+    from openmmla.analysis.ips.analyze import session_analysis_video
     from openmmla.bases.asr.input import get_bucket_name
 
     logger = get_logger('session_analysis')
@@ -34,13 +36,15 @@ def run_session_analysis(args):
     while True:
         try:
             influx_client = InfluxDBClientWrapper(config_path)
+
+            flush_input()
             operation = input(
                 "Please input your operation:\n"
                 "1: ASR diarization analysis\n"
                 "2: Indoor positioning analysis\n"
                 "0: Exit\n"
                 "Selected function: "
-            )
+            ).strip()
             if operation == '1':
                 bucket_name = get_bucket_name(influx_client)
                 session_analysis_audio(None, bucket_name, influx_client)

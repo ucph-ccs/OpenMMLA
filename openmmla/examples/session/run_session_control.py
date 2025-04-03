@@ -2,6 +2,8 @@ import argparse
 import functools
 import os
 
+from openmmla.utils.clean import flush_input
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -34,21 +36,22 @@ def run_session_control(args):
             influx_client = InfluxDBClientWrapper(config_path)
             redis_client = RedisClientWrapper(config_path)
 
+            flush_input()
             operation = input(
                 "Please input your operation:\n"
                 "1: Reconnect nodes\n"
                 "2: Disconnect nodes\n"
                 "0: Exit\n"
                 "Selected function: "
-            )
-            bucket_name = get_bucket_name(influx_client)
-            topic = f"{bucket_name}/control"
+            ).strip()
 
             if operation == '1':
-                redis_client.publish(topic, 'START')
+                bucket_name = get_bucket_name(influx_client)
+                redis_client.publish(f"{bucket_name}/control", 'START')
                 print("✅ Start signal sent.")
             elif operation == '2':
-                redis_client.publish(topic, 'STOP')
+                bucket_name = get_bucket_name(influx_client)
+                redis_client.publish(f"{bucket_name}/control", 'STOP')
                 print("🛑 Stop signal sent.")
             elif operation == '0':
                 break

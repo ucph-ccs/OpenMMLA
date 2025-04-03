@@ -1,7 +1,6 @@
 import os
 import threading
 from abc import ABC, abstractmethod
-from typing import List
 
 import yaml
 
@@ -39,7 +38,7 @@ class Synchronizer(ABC):
         self.config_path = config_path
         self.config = self._load_config() if self.config_path else None
 
-        self.threads: List[RaisingThread] | None = None
+        self.threads: list[RaisingThread] | None = None
         self.stop_event: threading.Event | None = None
         self.bucket_name: str | None = None
         self.redis_client: RedisClientWrapper | None = None

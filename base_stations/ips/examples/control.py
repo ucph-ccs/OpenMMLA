@@ -2,6 +2,7 @@
 import os
 
 from openmmla.bases.ips.input import get_bucket_name
+from openmmla.utils.clean import flush_input
 from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 
@@ -11,19 +12,21 @@ logger = get_logger('control')
 
 while True:
     try:
-        influxdb_client = InfluxDBClientWrapper(config_path)
+        influx_client = InfluxDBClientWrapper(config_path)
         redis_client = RedisClientWrapper(config_path)
+
+        flush_input()
         operation = input(f"Please input your operation:\n"
                           f"1: reconnect nodes\n"
                           f"2: disconnect nodes\n"
                           f"0: exit\n"
                           f"Selected function:")
         if operation == '1':
-            bucket_name = get_bucket_name(influxdb_client)
+            bucket_name = get_bucket_name(influx_client)
             redis_client.publish(f"{bucket_name}/control", 'START')
             print("Start signal sent.")
         elif operation == '2':
-            bucket_name = get_bucket_name(influxdb_client)
+            bucket_name = get_bucket_name(influx_client)
             redis_client.publish(f"{bucket_name}/control", 'STOP')
             print("Stop signal sent.")
         elif operation == '0':

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from openmmla.utils.clean import flush_input
+from .enums import LIGHT_BLUE, ENDC
 
 
 def get_bucket_name(influx_client):
@@ -123,19 +124,19 @@ def get_number_of_group_members():
             print("Invalid input. Please enter a valid integer.")
 
 
-def get_function_base():
+def get_function_base(id: int, mode: str):
     """Get the function to be performed from user input for base."""
     while True:
         try:
             flush_input()
             print("------------------------------------------------")
             select_fun = input(
-                "Please select your function:\n"
-                "1 : register audio to the voice-print library\n"
-                "2 : perform voice-print recognition\n"
-                "3 : reset port\n"
-                "4 : switch mode\n"
-                "0 : exit\n"
+                f"Please select your function:\n"
+                f"1 : register speaker profiles\n"
+                f"2 : start voice recognition\n"
+                f"3 : reset (id:{LIGHT_BLUE}{id}{ENDC})\n"
+                f"4 : switch (mode:{LIGHT_BLUE}{mode}{ENDC})\n"
+                f"0 : exit\n"
                 "Selected function: ")
 
             if select_fun.strip():  # check if input is not empty after removing leading/trailing whitespace

@@ -57,7 +57,7 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    os.environ["SPEECH_TRANSCRIBER_PROJECT_DIR"] = args.project_dir
+    os.environ["SPEECH_TRANSCRIBER_PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
     os.environ["SPEECH_TRANSCRIBER_CONFIG_PATH"] = args.config_path
 
     application = get_app()

@@ -61,7 +61,7 @@ class CameraTagDetector(Base):
     def run(self):
         """Run the camera tag detector."""
         print('\033]0;Camera Detector\007')
-        func_map = {1: self._set_camera, 2: self._start}
+        func_map = {1: self._start_detection, 2: self._set_camera}
 
         while True:
             try:
@@ -75,7 +75,7 @@ class CameraTagDetector(Base):
                     f"During running the tag detector, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
 
-    def _start(self):
+    def _start_detection(self):
         """Start AprilTag detection"""
         if not self.camera_configured:
             self.logger.warning("Camera is not configured.")
