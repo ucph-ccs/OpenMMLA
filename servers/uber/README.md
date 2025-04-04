@@ -37,46 +37,94 @@ to [mBox System Design](./docs/mbox_system.md).
 ### Install required system dependencies
 
    ```bash
-   # For Mac 
+   # For macOS
    brew install tmux
    # For Ubuntu
    sudo apt install tmux
    ```
 
 ### Install services
+The uber server hosts the following services:
+data storage, data messaging, load balancing, data streaming, and dashboard web interface.
 
-The uber server host the following services:
-data storage, data messaging, load balancing, data streaming, and web application backend and frontend.
-
-#### Database Server
+#### Database Server (Mandatory)
 
 <details>
 <summary>InfluxDB server</summary>
 
-Please refer to [InfluxDB.md](./docs/InfluxDB.md) for detailed setup instructions.
+You can refer to [InfluxDB.md](./docs/InfluxDB.md) for details.
 
 ```bash
+# For macOS
+
+# Install InfluxDB 
+brew install influxdb
+
+# Install InfluxDB CLI
+brew install influxdb-cli
+
 # Start InfluxDB server
-influxd
+brew services start influxdb
 ```
+
+```bash
+# For Ubuntu
+
+# Install InfluxDB
+wget -q https://repos.influxdata.com/influxdata-archive_compat.key
+echo '393e8779c89ac8d958f81f942f9ad7fb82a25e133faddaf92e15b16e6ac9ce4c influxdata-archive_compat.key' | sha256sum -c && cat influxdata-archive_compat.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg > /dev/null
+echo 'deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main' | sudo tee /etc/apt/sources.list.d/influxdata.list   
+sudo apt-get update && sudo apt-get install influxdb2
+
+# Install InfluxDB CLI
+sudo apt-get update && sudo apt-get install influxdb2-cli
+
+# Start InfluxDB server
+sudo systemctl enable influxdb
+sudo systemctl start influxdb
+```
+
+Go to `http://localhost:8086`, and follow the instructions to create admin user with operator API token, save your token
+      in a safe place.
 
 </details>
 
-#### Message Brokers
+#### Message Brokers (Mandatory)
 
 <details>
 <summary>Redis Server</summary>
 
 ```bash
+# For macOS
+
+# Install Redis
 brew install redis
 
-# Start Redis server in unprotected mode if running on different machines
-redis-server --protected-mode no
+# Edit configuration 
+sudo vim /opt/homebrew/etc/redis.conf
 
-# for linux
-sudo vim /etc/redis/redis.conf
 # Add/modify these lines
 protected-mode no
+
+# Restart Redis server
+brew services restart redis
+```
+
+```bash
+# For Ubuntu
+
+# Install Redis
+sudo apt install redis-server
+
+# Edit configuration
+sudo vim /etc/redis/redis.conf
+
+# Add/modify these lines
+protected-mode no
+
+# Restart Redis server
+sudo systemctl enable redis-server
+sudo systemctl restart redis-server
 ```
 
 </details>
@@ -85,10 +133,13 @@ protected-mode no
 <summary>Mosquitto Server</summary>
 
 ```bash
+# For macOS
+
+# Install Mosquitto
 brew install mosquitto
 
-# Edit configuration to listen from all IP addresses
-vim /opt/homebrew/etc/mosquitto/mosquitto.conf
+# Edit configuration
+sudo vim /opt/homebrew/etc/mosquitto/mosquitto.conf
 
 # Add/modify these lines
 listener 1883 0.0.0.0
@@ -96,6 +147,24 @@ allow_anonymous true
 
 # Restart Mosquitto
 brew services restart mosquitto
+```
+
+```bash
+# For Ubuntu
+
+# Install Mosquitto
+sudo apt install -y mosquitto
+
+# Edit configuration
+sudo nano /etc/mosquitto/mosquitto.conf
+
+# Add/modify these lines
+listener 1883 0.0.0.0
+allow_anonymous true
+
+# Restart Mosquitto
+sudo systemctl enable mosquitto
+sudo systemctl restart mosquitto
 ```
 
 </details>

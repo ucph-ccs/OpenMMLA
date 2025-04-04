@@ -1,43 +1,41 @@
-#!/bin/bash
+  #!/bin/bash
 
-# Get the root directory of the script
-BASH_DIR="$(dirname "$(readlink -f "$0")")"
+  BASH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  CONFIG_YAML="$BASH_DIR/config.yml"
+  TEMPLATE_J2="$BASH_DIR/nginx.conf.j2"
+  OUTPUT_CONF="$BASH_DIR/nginx.generated.conf"
 
-# Define server names
-SERVER_NAMES=("server-01" "server-02" "server-03")
+  # 判断 OS 类型
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+      OS_TYPE="macos"
+      NGINX_CONF="/opt/homebrew/etc/nginx/nginx.conf"
+  else
+      OS_TYPE="linux"
+      NGINX_CONF="/etc/nginx/nginx.conf"
+  fi
 
-# Determine the platform and set the NGINX configuration path
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS
-    NGINX_CONF="/opt/homebrew/etc/nginx/nginx.conf"
-else
-    # Assume Linux
-    NGINX_CONF="/etc/nginx/nginx.conf"
-fi
+  echo "NGINX config path: $NGINX_CONF"
 
-echo "Using NGINX configuration file: $NGINX_CONF"
+  # 判断是否启用端口检查
+  PORT_CHECK_FLAG=""
+  if [[ "$1" == "--port-check" ]]; then
+      PORT_CHECK_FLAG="--port-check"
+      echo "🔍 Port connectivity check is ENABLED."
+  else
+      echo "🧊 Port connectivity check is DISABLED (default)."
+  fi
 
-# Process the NGINX configuration
-TEMP_CONF="$BASH_DIR/nginx_temp.conf"
-python3 "$BASH_DIR/nginx_conf.py" "$BASH_DIR/nginx.conf" "$TEMP_CONF" "${SERVER_NAMES[@]}"
+  # 渲染配置
+  python3 "$BASH_DIR/render_nginx.py" "$CONFIG_YAML" "$TEMPLATE_J2" "$OUTPUT_CONF" $PORT_CHECK_FLAG
 
-# Copy the processed config to the actual config file
-sudo cp "$TEMP_CONF" "$NGINX_CONF"
+  # 拷贝配置到 NGINX 路径
+  sudo cp "$OUTPUT_CONF" "$NGINX_CONF"
 
-# Remove the temporary file
-rm "$TEMP_CONF"
-
-# Start NGINX with the updated configuration
-sudo nginx -c $NGINX_CONF
-
-# Test the NGINX configuration
-sudo nginx -t
-
-# Reload NGINX to apply the changes
-sudo nginx -s reload
-
-# Close uber-services
-tmux kill-session -t "uber-services"
-
-# Detach the current session
-tmux detach
+  # 检查 nginx 是否在运行
+  if pgrep nginx > /dev/null; then
+      echo "🔁 Reloading NGINX..."
+      sudo nginx -t && sudo nginx -s reload
+  else
+      echo "🚀 Starting NGINX..."
+      sudo nginx
+  fi

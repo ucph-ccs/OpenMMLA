@@ -3,7 +3,7 @@ module.exports = {
     remotePatterns: [
       {
         protocol: 'http',
-        hostname: 'uber-server.local',
+        hostname: 'localhost',
       },
     ],
   },

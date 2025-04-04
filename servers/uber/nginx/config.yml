@@ -1,0 +1,73 @@
+upstreams:
+  infer_service:
+    - name: server-01
+      port: 5001
+      weight: 3
+    - name: 192.168.3.2
+      port: 5001
+      weight: 3
+    - name: server-03
+      port: 5001
+      weight: 1
+
+  resample_service:
+    - name: server-01
+      port: 5001
+      weight: 3
+    - name: server-02
+      port: 5001
+      weight: 3
+    - name: server-03
+      port: 5001
+      weight: 1
+
+  enhance_service:
+    - name: server-01
+      port: 5001
+      weight: 3
+    - name: server-02
+      port: 5001
+      weight: 3
+    - name: server-03
+      port: 5001
+      weight: 1
+
+  separate_service:
+    - name: server-01
+      port: 5001
+      weight: 3
+    - name: server-02
+      port: 5001
+      weight: 3
+    - name: server-03
+      port: 5001
+      weight: 1
+
+  transcribe_service:
+    - name: server-01
+      port: 5005
+      weight: 3
+    - name: server-02
+      port: 5005
+      weight: 3
+    - name: server-03
+      port: 5005
+      weight: 1
+
+  vad_service:
+    - name: server-01
+      port: 5001
+      weight: 3
+    - name: server-02
+      port: 5001
+      weight: 3
+    - name: server-03
+      port: 5001
+      weight: 1
+
+rtmp_apps:
+  - stream_01
+  - stream_02
+  - stream_03
+  - stream_04
+  - stream_05

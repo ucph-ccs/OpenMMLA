@@ -1,10 +1,10 @@
 InfluxDB:
-  url: http://uber-server.local:8086
-  token: nZO5yjoohyBGCyqGhChu98f2pgXEkou6wLXTax2nHvFjwsKnBtvHipT4uA_FX2QJUDY-R7uJBbTlFkpN312RKg==
-  org: group_01
+  url: http://localhost:8086
+  token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  org: admin
 
 Redis:
-  host: uber-server.local
+  host: localhost
   port: 6379
   db: 1
   auth: mbox

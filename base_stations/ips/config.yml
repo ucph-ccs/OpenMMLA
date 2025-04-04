@@ -10,8 +10,9 @@ Image:
 
 InfluxDB:
   url: 'http://uber-server.local:8086'
-  token: nZO5yjoohyBGCyqGhChu98f2pgXEkou6wLXTax2nHvFjwsKnBtvHipT4uA_FX2QJUDY-R7uJBbTlFkpN312RKg==
-  org: group_01
+#  token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  token: eNMnz5EuJlWNukW15iI8ys734I7ZEgXKvQHi18AX4RtMWLQqBys6Rjfb5hfpmY_0YopaZUCEnhrMP7mx7e4d_A==
+  org: admin
 
 MQTT:
   host: uber-server.local
