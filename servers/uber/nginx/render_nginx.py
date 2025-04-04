@@ -7,6 +7,8 @@ import asyncio
 from jinja2 import Environment, FileSystemLoader
 from concurrent.futures import ThreadPoolExecutor
 
+import platform
+
 
 # ========== 工具函数 ==========
 
@@ -23,6 +25,15 @@ def resolve_hostname(hostname):
         return socket.gethostbyname(f"{hostname}.local")
     except socket.gaierror:
         return None
+
+
+def is_host_alive(ip_or_hostname, timeout=1.5):
+    try:
+        for port in [22]:  # check SSH port
+            with socket.create_connection((ip_or_hostname, port), timeout=timeout):
+                return True
+    except Exception:
+        return False
 
 
 def is_ip_port_open(ip, port, timeout=1.5):
@@ -73,7 +84,7 @@ def resolve_and_check_one(server, check_port):
     if check_port:
         reachable = is_ip_port_open(ip, port)
     else:
-        reachable = True
+        reachable = is_host_alive(ip)
 
     server['ip'] = ip if reachable else None
     server['reachable'] = reachable
@@ -89,7 +100,7 @@ def render_nginx_template(config, template_path, output_path):
     with open(output_path, 'w') as f:
         f.write(rendered)
 
-    print("\n🧠 Server Resolution Summary:")
+    print("\n Server Resolution Summary:")
     print("=" * 40)
     for service, servers in config.get("upstreams", {}).items():
         reachable_servers = [s for s in servers if s.get("reachable")]
@@ -112,5 +123,7 @@ if __name__ == "__main__":
     check_port = "--port-check" in sys.argv
 
     config = load_config(config_path)
+    config["is_linux"] = platform.system().lower() == "linux"
+
     asyncio.run(resolve_and_check_servers(config, check_port=check_port))
     render_nginx_template(config, template_path, output_path)

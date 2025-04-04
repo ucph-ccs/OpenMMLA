@@ -2,7 +2,7 @@
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
-IS_MAC := $(shell [[ "$$OSTYPE" == darwin* ]] && echo 1 || echo 0)
+IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
 PORT := $(or $(PORT), $(port))
 
 # ======= Default task =======
