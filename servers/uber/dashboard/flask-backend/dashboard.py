@@ -71,6 +71,7 @@ def get_buckets():
 @celery.task
 def generate_post_time_visualization(bucket_name):
     try:
+        print("Generating post-time visualization...")
         session_analysis(project_dir, bucket_name, influx_client)
     except KeyError as e:
         print(f"Key not found, {e}")
@@ -86,6 +87,7 @@ def post_time_visualize():
     visualization_age = datetime.now() - last_visualized if last_visualized else timedelta.max
     if visualization_age > timedelta(minutes=2):  # At least 1 minute old data to regenerate
         generate_post_time_visualization.delay(bucket_name)
+        print("Post-time visualization task started")
         post_time_visualization_timestamps[bucket_name] = datetime.now()
     return jsonify({'message': "Post-time visualization started"})
 

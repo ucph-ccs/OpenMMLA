@@ -27,7 +27,7 @@ const PostVisualizePage = ({ bucketName }) => {
   }, [bucketName, flaskBackend]);
 
   const handleVisualizationData = (data) => {
-    const updatedUrls = data.files.map(file => `http://${flaskBackend}:{flaskPort}${file}`);
+    const updatedUrls = data.files.map(file => `http://${flaskBackend}:${flaskPort}${file}`);
     // Sorting images alphabetically by file names
     const imageUrls = updatedUrls.filter(url => !url.endsWith('.html'));
     const sortedImageUrls = imageUrls.sort((a, b) => {
@@ -93,7 +93,7 @@ const PostVisualizePage = ({ bucketName }) => {
       <div className="log-files-section">
           <select multiple onChange={handleLogSelection} value={selectedLogs} size="5">
             {logUrls.map((log, index) => (
-              <option key={index} value={`http://${flaskBackend}:{flaskPort}${log.url}`}>{log.name}</option>
+              <option key={index} value={`http://${flaskBackend}:${flaskPort}${log.url}`}>{log.name}</option>
             ))}
           </select>
           <button onClick={downloadSelectedLogs} disabled={!selectedLogs.length}>

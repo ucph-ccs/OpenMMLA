@@ -13,7 +13,8 @@ const RealVisualizePage = ({ bucketName }) => {
   const flaskPort = process.env.NEXT_PUBLIC_FLASK_PORT || '5000';
 
   useEffect(() => {
-    const socket = io(`http://${flaskBackend}:{flaskPort}`);
+    const socket = io(`http://${flaskBackend}:${flaskPort}`);
+
     socket.on('connect', () => {
       socket.emit('join_bucket', { bucket_name: bucketName, client_id: socket.id });
       console.log('Connected to server');
