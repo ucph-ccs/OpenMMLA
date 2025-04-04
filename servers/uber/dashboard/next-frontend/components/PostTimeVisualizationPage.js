@@ -7,7 +7,8 @@ const PostVisualizePage = ({ bucketName }) => {
   const [visualizationUrls, setVisualizationUrls] = useState([]);
   const [logUrls, setLogUrls] = useState([]);
   const [selectedLogs, setSelectedLogs] = useState([]);
-  const serverIP = process.env.NEXT_PUBLIC_SERVER_IP;
+  const flaskBackend = process.env.NEXT_PUBLIC_FLASK_BACKEND;
+  const flaskPort = process.env.NEXT_PUBLIC_FLASK_PORT || '5000';
 
   useEffect(() => {
     document.title = `Visualizations for ${bucketName} - OpenMMLA Dashboard`;
@@ -23,10 +24,10 @@ const PostVisualizePage = ({ bucketName }) => {
       .then(response => response.json())
       .then(handleLogData)
       .catch(error => console.error('Error fetching logs:', error));
-  }, [bucketName, serverIP]);
+  }, [bucketName, flaskBackend]);
 
   const handleVisualizationData = (data) => {
-    const updatedUrls = data.files.map(file => `http://${serverIP}:5000${file}`);
+    const updatedUrls = data.files.map(file => `http://${flaskBackend}:{flaskPort}${file}`);
     // Sorting images alphabetically by file names
     const imageUrls = updatedUrls.filter(url => !url.endsWith('.html'));
     const sortedImageUrls = imageUrls.sort((a, b) => {
@@ -92,7 +93,7 @@ const PostVisualizePage = ({ bucketName }) => {
       <div className="log-files-section">
           <select multiple onChange={handleLogSelection} value={selectedLogs} size="5">
             {logUrls.map((log, index) => (
-              <option key={index} value={`http://${serverIP}:5000${log.url}`}>{log.name}</option>
+              <option key={index} value={`http://${flaskBackend}:{flaskPort}${log.url}`}>{log.name}</option>
             ))}
           </select>
           <button onClick={downloadSelectedLogs} disabled={!selectedLogs.length}>

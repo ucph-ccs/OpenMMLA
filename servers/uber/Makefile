@@ -1,9 +1,11 @@
-.PHONY: all influxdb redis mosquitto nginx flask next celery clean-ports status stop enable-autostart
+.PHONY: all influxdb redis mosquitto nginx flask next celery clean-ports stop
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
 IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
 PORT := $(or $(PORT), $(port))
+CONDA_PREFIX := $(shell conda info --base)
+CONDA_ACTIVATE := . $(CONDA_PREFIX)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)
 
 # ======= Default task =======
 all: sudo-keepalive clean-ports stop influxdb redis mosquitto nginx next flask celery
@@ -45,9 +47,9 @@ endif
 nginx:
 	@echo "🔁 Rendering and starting NGINX"
 ifeq ($(PORT), 1)
-	python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf --port-check
+	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf --port-check
 else
-	python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf
+	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf
 endif
 ifeq ($(IS_MAC), 1)
 	sudo cp nginx/nginx.generated.conf /opt/homebrew/etc/nginx/nginx.conf
@@ -76,11 +78,7 @@ flask:
 	tmux new-session -d -s flask -n flask bash
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t flask 'source activate $(ENV_NAME)' C-m
-ifeq ($(IS_MAC), 1)
 	tmux send-keys -t flask 'gunicorn -k gevent -w 1 -b 0.0.0.0:5000 dashboard:app' C-m
-else
-	tmux send-keys -t flask 'hypercorn dashboard:app --bind 0.0.0.0:5000' C-m
-endif
 
 celery:
 	@echo "🔁 Starting Celery worker"
@@ -95,9 +93,6 @@ clean-ports:
 	@for p in 8086 6379 1883 8080 3000 5000; do \
 		sudo lsof -ti:$$p | xargs -r sudo kill -9 || true; \
 	done
-
-status:
-	@pgrep -lf nginx || echo "❌ NGINX not running"
 
 stop:
 ifeq ($(IS_MAC), 1)
@@ -118,5 +113,3 @@ endif
 		tmux has-session -t $$name 2>/dev/null && tmux kill-session -t $$name && echo "Killed tmux session: $$name" || echo "No session found: $$name"; \
 	done
 	@echo "✅ All services stopped."
-
-

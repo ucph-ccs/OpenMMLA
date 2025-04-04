@@ -2,8 +2,7 @@ celery[redis]==5.4.0
 flask==3.0.3
 flask-cors==4.0.1
 flask-socketio==5.3.6
-gunicorn==23.0.0; sys_platform == "darwin"
-hypercorn==0.17.3; sys_platform == 'linux'
+gunicorn==23.0.0
 gevent==24.2.1
 influxdb_client==1.45.0
 matplotlib==3.9.2

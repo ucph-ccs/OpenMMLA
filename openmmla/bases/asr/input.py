@@ -13,6 +13,7 @@ def get_bucket_name(influx_client):
         print("------------------------------------------------")
         bucket_list = influx_client.get_buckets()
         bucket_names = [bucket.name for bucket in bucket_list.buckets if bucket.name not in ['_tasks', '_monitoring']]
+        bucket_names = [name for name in bucket_names if 'session_' in name]
 
         try:
             bucket_names = sorted(bucket_names, key=lambda x: datetime.strptime(x.split('_')[1], '%Y-%m-%dT%H:%M:%SZ'))

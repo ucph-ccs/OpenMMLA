@@ -28,7 +28,7 @@ class Server(ABC):
 
         if config_path:
             if not os.path.isabs(config_path):
-                config_path = os.path.join(os.getcwd(), config_path)
+                config_path = os.path.join(self.project_dir, config_path)
             if not os.path.exists(config_path):
                 raise FileNotFoundError(f"Configuration file not found at {config_path}")
 

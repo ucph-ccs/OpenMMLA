@@ -9,8 +9,7 @@ openai-whisper==20231117
 transformers==4.33.3
 speechbrain==1.0.0
 rotary-embedding-torch==0.6.4
-gunicorn==23.0.0; sys_platform == "darwin"
-hypercorn==0.17.3; sys_platform == 'linux'
+gunicorn==23.0.0
 flask==3.0.3
 pandas==2.2.2
 gevent==24.2.1

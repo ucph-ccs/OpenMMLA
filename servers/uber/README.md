@@ -1,7 +1,7 @@
 # 🌐 OpenMMLA Uber
 
 Uber module of mBox multimodal learning analytic system. For more details, please refer
-to [mBox System Design](./docs/mbox_system.md).
+to [mBox System Design](../../docs/mbox_system.md).
 
 ## Table of Contents
 
@@ -52,7 +52,7 @@ data storage, data messaging, load balancing, data streaming, and dashboard web 
 <details>
 <summary>InfluxDB server</summary>
 
-You can refer to [InfluxDB.md](./docs/InfluxDB.md) for details.
+You can refer to [InfluxDB.md](./docs/influxDB) for details.
 
 ```bash
 # For macOS
@@ -105,6 +105,7 @@ sudo vim /opt/homebrew/etc/redis.conf
 
 # Add/modify these lines
 protected-mode no
+bind 0.0.0.0
 
 # Restart Redis server
 brew services restart redis
@@ -121,6 +122,7 @@ sudo vim /etc/redis/redis.conf
 
 # Add/modify these lines
 protected-mode no
+bind 0.0.0.0
 
 # Restart Redis server
 sudo systemctl enable redis-server
@@ -283,7 +285,7 @@ cd mbox-uber/
 ./server.sh
 ```
 
-## [FAQ](./docs/FAQ.md)
+## [FAQ](../../docs/faq)
 
 ## Citation
 

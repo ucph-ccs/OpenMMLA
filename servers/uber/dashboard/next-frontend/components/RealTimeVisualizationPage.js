@@ -9,9 +9,11 @@ const RealVisualizePage = ({ bucketName }) => {
   const [recognitionData, setRecognitionData] = useState([]);
   const [transcriptionData, setTranscriptionData] = useState([]);
   const [graphData, setGraphData] = useState({ nodes: [], links: [] }); // State for graph data
+  const flaskBackend = process.env.NEXT_PUBLIC_FLASK_BACKEND;
+  const flaskPort = process.env.NEXT_PUBLIC_FLASK_PORT || '5000';
 
   useEffect(() => {
-    const socket = io('http://uber-server.local:5000');
+    const socket = io(`http://${flaskBackend}:{flaskPort}`);
     socket.on('connect', () => {
       socket.emit('join_bucket', { bucket_name: bucketName, client_id: socket.id });
       console.log('Connected to server');

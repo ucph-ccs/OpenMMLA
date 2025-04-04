@@ -7,7 +7,7 @@ from openmmla.bases.asr import PostAudioAnalyzer
 from openmmla.utils.args import add_arguments, print_arguments
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = 'config.yml'
+config_path = os.path.join(project_dir, 'config.yml')
 
 
 def run_post_audio_analyzer(args):

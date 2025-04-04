@@ -3,7 +3,7 @@ module.exports = {
     remotePatterns: [
       {
         protocol: 'http',
-        hostname: 'localhost',
+        hostname: 'uber-server.local',      # your flask backend server
       },
     ],
   },
@@ -11,7 +11,7 @@ module.exports = {
     return [
       {
         source: '/api/:path*',
-        destination: 'http://localhost:5000/api/:path*',
+        destination: 'http://uber-server:5000/api/:path*',  # your flask backend server
       },
     ];
   },

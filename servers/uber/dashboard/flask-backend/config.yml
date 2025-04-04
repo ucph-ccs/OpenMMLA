@@ -1,11 +1,12 @@
 InfluxDB:
-  url: http://localhost:8086
-#  token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
-  token: eNMnz5EuJlWNukW15iI8ys734I7ZEgXKvQHi18AX4RtMWLQqBys6Rjfb5hfpmY_0YopaZUCEnhrMP7mx7e4d_A==
+#  url: http://ericli.local:8086
+#  token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw== # ericli
+  url: http://uber-server.local:8086
+  token: eNMnz5EuJlWNukW15iI8ys734I7ZEgXKvQHi18AX4RtMWLQqBys6Rjfb5hfpmY_0YopaZUCEnhrMP7mx7e4d_A==  # uber-server
   org: admin
 
 Redis:
-  host: localhost
+  host: uber-server.local
   port: 6379
   db: 1
   auth: mbox
