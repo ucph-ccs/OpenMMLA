@@ -4,7 +4,7 @@ BASH_DIR="$(dirname "$(readlink -f "$0")")"
 EXAMPLES_DIR="$BASH_DIR/../examples"
 PYHON_PATH="$BASH_DIR/../../.."
 
-CONDA_ENV="audio-server"
+CONDA_ENV="asr-server"
 services=("infer" "resample" "enhance" "separate" "transcribe" "vad")
 ports=(5001 5002 5003 5004 5005 5006)
 

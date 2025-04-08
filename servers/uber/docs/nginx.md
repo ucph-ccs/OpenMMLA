@@ -1,148 +1,109 @@
-# Nginx Load Balancer and RTMP Documentation
+# Nginx Documentation
 
-This document outlines the setup and configuration of Nginx as a load balancer for multiple services and as an RTMP
-server.
+This document outlines the setup and configuration of Nginx for load balancing and RTMP streaming.
 
-## Part 1: Load Balancer
+## Installation
 
-### Installation
+Choose the appropriate installation based on your needs:
 
-#### On macOS (Apple Silicon)
+### Basic Installation (Load Balancer Only)
 
+```bash
+# macOS
+brew install nginx
+# config file located at `/opt/homebrew/etc/nginx/nginx.conf`
+
+# Ubuntu
+sudo apt update && install nginx
+# config file located at `/etc/nginx/nginx.conf`
+```
+
+### Complete Installation (Load Balancer + RTMP)
+
+If you need RTMP functionality, use this installation instead:
+
+```bash
+# macOS
+brew tap denji/nginx
+brew install nginx-full --with-rtmp-module
+# config file located at `/opt/homebrew/etc/nginx/nginx.conf`
+
+# Ubuntu
+sudo apt update && install nginx libnginx-mod-rtmp
+# config file located at `/etc/nginx/nginx.conf`
+```
+
+Note: The RTMP version includes all standard Nginx functionality, including load balancing.
+
+## Configuration
+
+The Nginx configuration is managed through a Jinja2 templating system with three key files:
+
+1. `nginx/config.yml` - Contains configuration variables and service definitions
+2. `nginx/nginx.conf.j2` - The Jinja2 template file for the Nginx configuration
+3. `nginx/nginx.generated.conf` - The final rendered configuration file
+
+### Configuring Services
+
+1. Edit the `config.yml` file to define your services and their configurations:
+
+```yaml
+# Example configuration for load balancer
+upstreams:
+  transcribe_service:
+    - name: server-01
+      port: 5000
+      weight: 3
+    - name: server-02
+      port: 5000
+      weight: 3
+
+# Example configuration for RTMP (only if you need streaming)
+rtmp_apps:
+  - stream_01
+  - stream_02
+  - stream_03
+```
+
+2. The `nginx.conf.j2` template will use these configurations to generate:
+   - Upstream server blocks for load balancing (if upstream services are defined and reachable)
+   - Location blocks for service routing (if corresponding upstream server blocks exist)
+   - RTMP configuration (if RTMP apps are defined)
+
+### Running the Nginx 
+Use the Makefile to render and apply the Nginx configuration:
+
+```bash
+# Regular deployment
+make nginx
+
+# Deploy with port availability checking
+make nginx -check-port=1
+```
+
+## Additional Setup for macOS
+
+For macOS users, you may need to configure the firewall:
+- Go to **System Preferences** -> **Privacy & Security** and ensure that Nginx is allowed to receive incoming connections
+
+## Troubleshooting
+1. **Port conflicts**:
+   If you encounter port conflicts, you can clean specific ports:
+   ```bash
+   # Clean port if it conflicts with 8080
+   make clean-ports PORT=8080
    ```
-   brew install nginx
-   ```
-
-The configuration file will be located at `/opt/homebrew/etc/nginx/nginx.conf`.
-
-#### On Linux (Ubuntu/Debian)
-
-   ```
-   sudo apt update
-   sudo apt install nginx
-   ```
-
-The configuration file will be located at `/etc/nginx/nginx.conf`.
-
-### Configuring the Load Balancer
-
-#### Step 1: Edit the nginx.conf Template
-
-1. Locate the `mbox-uber/conf/nginx.conf` template file in your project directory.
-
-2. Define your upstream services in the `http` block. Each upstream should specify the servers that will handle the
-   requests. Use the format `$<server-hostname>:PORT` for each server. For example:
-
-   ```nginx
-   upstream transcribe_service {
-       server $server-01:5000 weight=3;
-       server $server-02:5000 weight=3;
-       server $server-03:5000 weight=1;
-       keepalive 40;
-   }
-   ```
-
-3. Add a `location` block in the `server` section for each service:
-
-   ```nginx
-   location /transcribe {
-       proxy_pass http://transcribe_service;
-   }
-   ```
-
-4. Repeat this process for all your services (separate, infer, enhance, vad, etc.).
-
-#### Step 2: Configure the nginx.sh Script
-
-1. Modify the line in `mbox-uber/bash/nginx.sh` to specify the server hostnames you use in the `nginx.conf` template:
-   ```shell
-   SERVER_NAMES=("server-01" "server-02" "server-03")
-   ```
-
-#### Step 3: Run the nginx.sh Script
-
-   ```
-   cd <your-paht-to>/mbox-uber/bash
-   ./nginx.sh
-   ```
-
-The script will automatically:
-
-- Resolve the IP addresses of the servers in your local network.
-- Replace the placeholders (`$<server-hostname>`) with the actual IP addresses.
-- Comment out the unreachable servers.
-- Copy the template `nginx.conf` to the system's Nginx configuration directory.
-- Start or reload Nginx with the new configuration.
-
-## Part 2: RTMP
-
-### Installation
-
-#### On macOS (Apple Silicon)
-
-   ```sh
-   brew tap denji/nginx
-   brew install nginx-full --with-rtmp-module
-   ```
-
-#### On Linux (Ubuntu/Debian)
-
-   ```sh
-   sudo apt update
-   sudo apt install nginx libnginx-mod-rtmp
-   ```
-
-### Configuring RTMP
-
-There are two ways to set up RTMP for our system:
-
-#### Method 1: Direct Configuration
-
-1. Open the system-wide Nginx configuration file:
-    - On macOS: `/opt/homebrew/etc/nginx/nginx.conf`
-    - On Linux: `/etc/nginx/nginx.conf`
-
-2. Add an RTMP configuration block outside the http block:
-
-   ```nginx
-   rtmp {
-       server {
-           listen 1935;  # Standard port for RTMP
-           chunk_size 4096;
-
-           # camera 1
-           application stream_01 {
-               live on;    # stream option
-               record off; # storage option
-           }
-
-           # Add more stream applications as needed
-       }
-   }
+2. **Service management**:
+   ```bash
+   # Stop nginx services if it already exists
+   make stop-nginx
    ```
 
-3. Save the file and reload Nginx:
-   ```sh
-   sudo nginx -s reload
+3. **View Nginx error logs**:
+   ```bash
+   # On macOS
+   tail -f /opt/homebrew/var/log/nginx/error.log
+
+   # On Linux
+   tail -f /var/log/nginx/error.log
    ```
-
-#### Method 2: Using mbox-uber Configuration (Recommended)
-
-1. Edit the RTMP configuration in mbox-uber:
-   ```
-   mbox-uber/conf/nginx.conf
-   ```
-
-2. Add or modify the RTMP configuration block in this file, similar to the one shown in Method 1.
-
-3. Run custom script to update the system-wide Nginx configuration:
-   ```sh
-   cd <your-path-to>/mbox-uber/bash
-   ./nginx.sh
-   ```
-
-### Additional Setup for macOS
-
-1. Configure firewall:
-    - Go to **System Preferences** -> **Privacy & Security** and ensure that Nginx is allowed to receive incoming
-      connections.

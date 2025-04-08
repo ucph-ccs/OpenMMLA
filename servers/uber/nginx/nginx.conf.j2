@@ -51,6 +51,7 @@ http {
     }
 }
 
+{% if config.rtmp_apps and config.rtmp_apps | length > 0 %}
 rtmp {
     server {
         listen 1935;
@@ -64,3 +65,4 @@ rtmp {
         {% endfor %}
     }
 }
+{% endif %}

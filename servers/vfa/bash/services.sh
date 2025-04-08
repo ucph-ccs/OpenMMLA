@@ -4,8 +4,8 @@ BASH_DIR="$(dirname "$(readlink -f "$0")")"
 EXAMPLES_DIR="$BASH_DIR/../examples"
 PYHON_PATH="$BASH_DIR/../../.."
 
-CONDA_ENV="video-server"
-services=("vfa")
+CONDA_ENV="vfa-server"
+services=("vlm")
 ports=(5007)
 
 # Loop through each port and kill processes using those ports

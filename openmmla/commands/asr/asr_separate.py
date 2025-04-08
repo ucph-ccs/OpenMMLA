@@ -2,6 +2,10 @@ import argparse
 import functools
 import os
 
+from openmmla.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -26,14 +30,14 @@ def get_app():
     from openmmla.services.asr import SpeechSeparator
     from openmmla.utils.apps import create_app
 
-    project_dir = os.environ.get("SPEECH_SEPARATOR_PROJECT_DIR")
-    config_path = os.environ.get("SPEECH_SEPARATOR_CONFIG_PATH")
+    project_dir = os.environ.get("PROJECT_DIR")
+    config_path = os.environ.get("CONFIG_PATH")
 
     if not project_dir:
-        print("WARNINGS: Environment variable SPEECH_SEPARATOR_PROJECT_DIR not set. Using current working directory.")
+        logger.warning("Environment variable PROJECT_DIR not set. Using current working directory.")
 
     if not config_path:
-        raise RuntimeError("Environment variable SPEECH_SEPARATOR_CONFIG_PATH must be set.")
+        raise RuntimeError("Environment variable CONFIG_PATH must be set, please set it via export or -c.")
 
     return create_app(
         class_type=SpeechSeparator,
@@ -43,10 +47,11 @@ def get_app():
     )
 
 
-# Module-level app for WSGI servers like gunicorn
+# Create a module-level WSGI app for gunicorn or other WSGI servers
 try:
     app = get_app()
-except Exception:
+except Exception as e:
+    logger.error(f"Failed to create WSGI app: {e}")
     app = None
 
 
@@ -57,8 +62,8 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    os.environ["SPEECH_SEPARATOR_PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
-    os.environ["SPEECH_SEPARATOR_CONFIG_PATH"] = args.config_path
+    os.environ["PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
+    os.environ["CONFIG_PATH"] = args.config_path
 
     application = get_app()
     application.run(host=args.host, port=args.port, threaded=True)

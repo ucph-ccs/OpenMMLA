@@ -1,4 +1,4 @@
-# InfluxDB OSS 2.7.1
+# InfluxDB OSS 2.7
 
 ## Data Organizational Structure
 
@@ -44,56 +44,28 @@ Client (Influx CLI)
 </details>
 
 ## Setup InfluxDB
+```bash
+# For macOS
+brew install influxdb influxdb-cli
+brew services start influxdb
 
-<details>
-<summary>macOS</summary>
+# For Ubuntu/Debian
+wget -q https://repos.influxdata.com/influxdata-archive_compat.key
+echo '393e8779c89ac8d958f81f942f9ad7fb82a25e133faddaf92e15b16e6ac9ce4c influxdata-archive_compat.key' | sha256sum -c && cat influxdata-archive_compat.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg > /dev/null
+echo 'deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main' | sudo tee /etc/apt/sources.list.d/influxdata.list
+sudo apt update && sudo apt install influxdb2 influxdb2-cli
+sudo systemctl enable influxdb
+sudo systemctl start influxdb
 
-  + Install InfluxDB && InfluxDB CLI (needs [homebrew](https://brew.sh/))
-    ```cmd
-    brew install influxdb
-    brew install influxdb-cli
-    ```
-    
-  + Start InfluxDB server
-    ```cmd
-    brew services start influxdb
-    ```
-  
-  + Go to `localhost:8086`, and follow the instructions to create admin user with operator API token, save your token
-    in a safe place.
+# Go to http://localhost:8086, and follow the instructions to create admin user with operator API token, save your token in a safe place, 
+# it will be used for config later.
+```
 
-</details>
-
-<details>
-<summary>Ubuntu</summary>
-
-  + Install InfluxDB & InfluxDB CLI
-    ```cmd
-    # influxdata-archive_compat.key GPG fingerprint:
-    #     9D53 9D90 D332 8DC7 D6C8 D3B9 D8FF 8E1F 7DF8 B07E
-    wget -q https://repos.influxdata.com/influxdata-archive_compat.key
-    echo '393e8779c89ac8d958f81f942f9ad7fb82a25e133faddaf92e15b16e6ac9ce4c influxdata-archive_compat.key' | sha256sum -c && cat influxdata-archive_compat.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg > /dev/null
-    echo 'deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main' | sudo tee /etc/apt/sources.list.d/influxdata.list
-        
-    sudo apt-get update && sudo apt-get install influxdb2
-    sudo apt-get update && sudo apt-get install influxdb2-cli
-    ```
-      
-  + Start InfluxDB server
-    ```cmd
-    sudo service influxdb start
-    ```
-    
-  + Go to `localhost:8086`, and follow the instructions to create admin user with operator API token, save your token in a safe place.
-  
-</details>
-
-
-## Miscellaneous (Optional)
+## Miscellaneous
 
 ### Config InfluxDB CLI 
 + Create a connection configuration and set it active
-  ```cmd
+  ```bash
   influx config create --active \
   -n config-name \
   -u http://localhost:8086 \
@@ -101,23 +73,23 @@ Client (Influx CLI)
   -o example-org
   ```
 + Check config file
-  ```cmd
+  ```bash
   cat ~/.influxdbv2/conf
   ```
   
 ### CLI User management
 + Creat orgnization
-  ```cmd
+  ```bash
   influx org create -n [org-name]
   ```
 
 + Create user
-  ```cmd
+  ```bash
   influx user create -n [usr-name] -p [usr-pwd] -o [usr-org]
   ```
 
 + Create authorization
-  ```cmd
+  ```bash
   # grant all access in a single organization
   influx auth create -u [usr-name] --all-access -o [org-name]
   # grant all access to all organization
@@ -127,7 +99,7 @@ Client (Influx CLI)
 <details>
 <summary>Mac</summary>
 
-  ```cmd
+  ```bash
   # stop the InfluxDB server
   brew services stop influxdb
   
@@ -145,7 +117,7 @@ Client (Influx CLI)
 <details>
 <summary>Linux</summary>
 
-  ```cmd
+  ```bash
   # Stop the InfluxDB server
   sudo service influxdb stop
   

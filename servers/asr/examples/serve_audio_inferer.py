@@ -14,7 +14,6 @@ app = create_app(
 )
 
 # gunicorn -w 1 -b 0.0.0.0:5001 serve_audio_inferer:app
-# hypercorn -w 1 -b 0.0.0.0:5001 serve_audio_inferer:app
 # kill -9 $(lsof -ti:5001)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, threaded=True)

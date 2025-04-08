@@ -14,7 +14,6 @@ app = create_app(
 )
 
 # gunicorn -w 1 -b 0.0.0.0:5005 serve_speech_transcriber:app
-# hypercorn -w 1 -b 0.0.0.0:5005 serve_speech_transcriber:app
 # kill -9 $(lsof -ti:5005)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5005, threaded=True)

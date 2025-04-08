@@ -16,7 +16,6 @@ app = create_app(
 )
 
 # gunicorn -w 1 -b 0.0.0.0:5000 image_processor_server:app
-# hypercorn -w 1 -b 0.0.0.0:5000 image_processor_server:app
 # To kill the server: kill -9 $(lsof -ti:5000)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

@@ -5,7 +5,7 @@ BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
-CONDA_ENV="video-base"
+CONDA_ENV="ips-base"
 
 is_raspberry_pi() {
     grep -q "ID=debian" /etc/os-release && grep -q "Raspberry Pi" /proc/cpuinfo

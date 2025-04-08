@@ -5,7 +5,7 @@ BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
-CONDA_ENV="video-base"
+CONDA_ENV="ips-base"
 NUM_CAMERA=2
 NUM_SYNCMANAGER=1
 

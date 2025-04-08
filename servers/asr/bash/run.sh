@@ -2,8 +2,8 @@
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 
-# video services
-services=("vfa")
+# audio services
+services=("infer" "resample" "enhance" "separate" "transcribe" "vad" )
 
 shutdown_server() {
     echo "Shutting down selected tmux sessions..."
@@ -21,7 +21,7 @@ shutdown_server() {
 }
 
 start_server() {
-    tmux new-session -s video-services "bash -c '$BASH_DIR/bash/services.sh; exec bash'"
+    tmux new-session -s audio-services "bash -c '$BASH_DIR/services.sh; exec bash'"
 }
 
 # Prompt user to start or shutdown the server

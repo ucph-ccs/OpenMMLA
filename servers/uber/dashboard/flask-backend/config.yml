@@ -6,6 +6,6 @@ InfluxDB:
   org: admin
 
 Redis:
-  host: localhost
+  host: uber-server.local
   port: 6379
   db: 1

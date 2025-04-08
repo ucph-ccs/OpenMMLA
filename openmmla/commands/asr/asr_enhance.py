@@ -2,10 +2,14 @@ import argparse
 import functools
 import os
 
+from openmmla.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        description="Start speech transcription server.",
+        description="Start speech enhancement server.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )
     from openmmla.utils.args import add_arguments
@@ -14,39 +18,40 @@ def get_parser():
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
     add_arg('host', str, '0.0.0.0', 'host address to bind the server', shortname='-H')
-    add_arg('port', int, 5005, 'port number to bind the server', shortname='-P')
+    add_arg('port', int, 5003, 'port number to bind the server', shortname='-P')
     return parser
 
 
 def get_app():
     """
     Creates the WSGI app using configuration from environment variables.
-    Raises an error if the required environment variables are not set.
+    Raises an error if the required environment variable is not set.
     """
-    from openmmla.services.asr import SpeechTranscriber
+    from openmmla.services.asr import SpeechEnhancer
     from openmmla.utils.apps import create_app
 
-    project_dir = os.environ.get("SPEECH_TRANSCRIBER_PROJECT_DIR")
-    config_path = os.environ.get("SPEECH_TRANSCRIBER_CONFIG_PATH")
+    project_dir = os.environ.get("PROJECT_DIR")
+    config_path = os.environ.get("CONFIG_PATH")
 
     if not project_dir:
-        print("WARNINGS: Environment variable SPEECH_TRANSCRIBER_PROJECT_DIR not set. Using current working directory.")
+        logger.warning("Environment variable PROJECT_DIR not set. Using current working directory.")
 
     if not config_path:
-        raise RuntimeError("Environment variable SPEECH_TRANSCRIBER_CONFIG_PATH must be set.")
+        raise RuntimeError("Environment variables CONFIG_PATH must be set, please set it via export or -c.")
 
     return create_app(
-        class_type=SpeechTranscriber,
-        endpoint='transcribe',
+        class_type=SpeechEnhancer,
+        endpoint='enhance',
         method_name='process_request',
         class_args={'project_dir': project_dir, 'config_path': config_path},
     )
 
 
-# Create module-level app for WSGI servers (e.g., gunicorn)
+# Create a module-level WSGI application for WSGI servers (e.g., gunicorn)
 try:
     app = get_app()
-except Exception:
+except Exception as e:
+    logger.error(f"Failed to create WSGI app: {e}")
     app = None
 
 
@@ -57,8 +62,8 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    os.environ["SPEECH_TRANSCRIBER_PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
-    os.environ["SPEECH_TRANSCRIBER_CONFIG_PATH"] = args.config_path
+    os.environ["PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
+    os.environ["CONFIG_PATH"] = args.config_path
 
     application = get_app()
     application.run(host=args.host, port=args.port, threaded=True)

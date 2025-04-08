@@ -5,7 +5,7 @@ BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
-CONDA_ENV="audio-base"
+CONDA_ENV="asr-base"
 NUM_BASE=3
 NUM_SYNCHRONIZER=1
 STORE=true

@@ -2,6 +2,10 @@ import argparse
 import functools
 import os
 
+from openmmla.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -25,10 +29,10 @@ def get_app():
     from openmmla.services.asr import AudioResampler
     from openmmla.utils.apps import create_app
 
-    project_dir = os.environ.get("AUDIO_RESAMPLER_PROJECT_DIR")
+    project_dir = os.environ.get("PROJECT_DIR")
 
     if not project_dir:
-        print("WARNINGS: Environment variable AUDIO_RESAMPLER_PROJECT_DIR not set. Using current working directory.")
+        logger.warning("Environment variable PROJECT_DIR not set. Using current working directory.")
 
     return create_app(
         class_type=AudioResampler,
@@ -38,10 +42,11 @@ def get_app():
     )
 
 
-# Create a module-level WSGI app for use with WSGI servers like gunicorn
+# Create a module-level WSGI app for gunicorn or other WSGI servers
 try:
     app = get_app()
-except Exception:
+except Exception as e:
+    logger.error(f"Failed to create WSGI app: {e}")
     app = None
 
 
@@ -52,7 +57,7 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    os.environ["AUDIO_RESAMPLER_PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
+    os.environ["PROJECT_DIR"] = args.project_dir if args.project_dir else os.getcwd()
 
     application = get_app()
     application.run(host=args.host, port=args.port, threaded=True)

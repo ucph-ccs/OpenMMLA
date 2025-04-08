@@ -13,7 +13,7 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('filenames', str, None, 'specify filenames in /post-time/origin/ to process', shortname='-f', required=True)
+    add_arg('filenames', str, None, 'specify filenames in /post-time/origin/ to process', shortname='-f')
     add_arg('vad', bool, True, 'whether to use the VAD or not', shortname='-vad')
     add_arg('nr', bool, True, 'whether to use the denoiser to enhance speech or not', shortname='-nr')
     add_arg('sp', bool, False, 'whether to use the separation model or not', shortname='-sp')

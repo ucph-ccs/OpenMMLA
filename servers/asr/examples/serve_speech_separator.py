@@ -14,7 +14,6 @@ app = create_app(
 )
 
 # gunicorn -w 1 -b 0.0.0.0:5004 serve_speech_separator:app
-# hypercorn -w 1 -b 0.0.0.0:5004 serve_speech_separator:app
 # kill -9 $(lsof -ti:5004)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5004, threaded=True)

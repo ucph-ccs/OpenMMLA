@@ -14,7 +14,6 @@ app = create_app(
 )
 
 # gunicorn -w 1 -b 0.0.0.0:5006 serve_voice_activity_detector:app
-# hypercorn -w 1 -b 0.0.0.0:5006 serve_voice_activity_detector:app
 # kill -9 $(lsof -ti:5006)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5006, threaded=True)

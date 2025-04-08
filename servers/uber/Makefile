@@ -1,14 +1,28 @@
-.PHONY: all influxdb redis mosquitto nginx flask next celery clean-ports stop
+.PHONY: all influxdb redis mosquitto nginx flask next celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-nginx stop-next stop-flask stop-celery
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
 IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
-PORT := $(or $(PORT), $(port))
+-port ?= 
+-check-port ?= 
+-without ?= 
 CONDA_PREFIX := $(shell conda info --base)
 CONDA_ACTIVATE := . $(CONDA_PREFIX)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)
 
+# ======= Service exclusion ========
+SERVICES := influxdb redis mosquitto nginx flask next celery
+FILTERED_SERVICES := $(filter-out $(subst $(comma),$(space),$(-without)),$(SERVICES))
+
+# Helper variables for parsing
+comma := ,
+space :=
+space +=
+
 # ======= Default task =======
-all: sudo-keepalive clean-ports stop influxdb redis mosquitto nginx next flask celery
+all: sudo-keepalive
+	@for service in $(FILTERED_SERVICES); do \
+		$(MAKE) clean-ports stop-$$service $$service; \
+	done
 
 # ======= Autostart services =======
 sudo-keepalive:
@@ -46,7 +60,7 @@ endif
 
 nginx:
 	@echo "🔁 Rendering and starting NGINX"
-ifeq ($(PORT), 1)
+ifeq ($(-check-port), 1)
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf --port-check
 else
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf
@@ -89,27 +103,75 @@ celery:
 
 # ======= Utility =======
 clean-ports:
-	@echo "🧹 Cleaning all reserved ports..."
-	@for p in 8086 6379 1883 8080 3000 5000; do \
-		sudo lsof -ti:$$p | xargs -r sudo kill -9 || true; \
-	done
+	@echo "🧹 Cleaning ports..."
+	@if [ -n "$(-port)" ]; then \
+		echo "Cleaning port $(-port)..."; \
+		sudo lsof -ti:$(-port) | xargs -r sudo kill -9 || true; \
+	else \
+		echo "Cleaning default ports for services: $(FILTERED_SERVICES)"; \
+		for p in $(filter 8086,$(if $(filter influxdb,$(FILTERED_SERVICES)),8086,)) \
+				 $(filter 6379,$(if $(filter redis,$(FILTERED_SERVICES)),6379,)) \
+				 $(filter 1883,$(if $(filter mosquitto,$(FILTERED_SERVICES)),1883,)) \
+				 $(filter 8080,$(if $(filter nginx,$(FILTERED_SERVICES)),8080,)) \
+				 $(filter 3000,$(if $(filter next,$(FILTERED_SERVICES)),3000,)) \
+				 $(filter 5000,$(if $(filter flask,$(FILTERED_SERVICES)),5000,)); do \
+			echo "  Cleaning port $$p..."; \
+			sudo lsof -ti:$$p | xargs -r sudo kill -9 || true; \
+		done; \
+	fi
 
-stop:
+# ======= Individual stop functions =======
+stop-influxdb:
 ifeq ($(IS_MAC), 1)
-	@echo "🛑 Stopping services (macOS)"
-	@sudo nginx -s stop 2>/dev/null || echo "⚠️ NGINX not running"
+	@echo "🛑 Stopping InfluxDB (macOS)"
 	@brew services stop influxdb 2>/dev/null || echo "⚠️ InfluxDB not running"
+else
+	@echo "🛑 Stopping InfluxDB (Linux)"
+	@sudo systemctl stop influxdb || echo "⚠️ InfluxDB not running"
+endif
+
+stop-redis:
+ifeq ($(IS_MAC), 1)
+	@echo "🛑 Stopping Redis (macOS)"
 	@brew services stop redis 2>/dev/null || echo "⚠️ Redis not running"
+else
+	@echo "🛑 Stopping Redis (Linux)"
+	@sudo systemctl stop redis-server || echo "⚠️ Redis not running"
+endif
+
+stop-mosquitto:
+ifeq ($(IS_MAC), 1)
+	@echo "🛑 Stopping Mosquitto (macOS)"
 	@brew services stop mosquitto 2>/dev/null || echo "⚠️ Mosquitto not running"
 else
-	@echo "🛑 Stopping services (Linux)"
-	@sudo systemctl stop nginx || echo "⚠️ NGINX not running"
-	@sudo systemctl stop influxdb || echo "⚠️ InfluxDB not running"
-	@sudo systemctl stop redis || echo "⚠️ Redis not running"
+	@echo "🛑 Stopping Mosquitto (Linux)"
 	@sudo systemctl stop mosquitto || echo "⚠️ Mosquitto not running"
 endif
-	@echo "🛑 Stopping tmux-based services"
-	@for name in flask next celery; do \
-		tmux has-session -t $$name 2>/dev/null && tmux kill-session -t $$name && echo "Killed tmux session: $$name" || echo "No session found: $$name"; \
+
+stop-nginx:
+ifeq ($(IS_MAC), 1)
+	@echo "🛑 Stopping NGINX (macOS)"
+	@sudo nginx -s stop 2>/dev/null || echo "⚠️ NGINX not running"
+else
+	@echo "🛑 Stopping NGINX (Linux)"
+	@sudo systemctl stop nginx || echo "⚠️ NGINX not running"
+endif
+
+stop-next:
+	@echo "🛑 Stopping Next.js frontend"
+	@tmux has-session -t next 2>/dev/null && tmux kill-session -t next && echo "Killed tmux session: next" || echo "⚠️ No Next.js session found"
+
+stop-flask:
+	@echo "🛑 Stopping Flask backend"
+	@tmux has-session -t flask 2>/dev/null && tmux kill-session -t flask && echo "Killed tmux session: flask" || echo "⚠️ No Flask session found"
+
+stop-celery:
+	@echo "🛑 Stopping Celery worker"
+	@tmux has-session -t celery 2>/dev/null && tmux kill-session -t celery && echo "Killed tmux session: celery" || echo "⚠️ No Celery session found"
+
+stop:
+	@echo "🛑 Stopping services: $(FILTERED_SERVICES)"
+	@for service in $(FILTERED_SERVICES); do \
+		$(MAKE) stop-$$service; \
 	done
-	@echo "✅ All services stopped."
+	@echo "✅ Services stopped."
