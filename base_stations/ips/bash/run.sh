@@ -17,7 +17,7 @@ print_usage() {
     echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-h]"
     echo ""
     echo "options:"
-    echo "  -nb NUM_BASE         : Number of audio bases to run (default: 3)"
+    echo "  -nb NUM_BASE         : Number of IPS bases to run (default: 3)"
     echo "  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)"
     echo "  -g GRAPHICS          : Enable graphics (default: true)"
     echo "  -s STORE             : Enable store (default: false)"

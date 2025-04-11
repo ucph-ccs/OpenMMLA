@@ -8,9 +8,10 @@ from openmmla.analysis.asr.analyze import session_analysis_audio
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import get_bucket_name
 from openmmla.utils.logger import get_logger
 from .enums import BLUE, ENDC
-from .input import get_bucket_name, get_number_of_group_members, get_function_synchronizer
+from .input import get_number_of_group_members, get_function_synchronizer
 
 
 class AudioSynchronizer(Synchronizer):

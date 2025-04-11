@@ -11,8 +11,9 @@ from numpy.linalg import norm
 
 from openmmla.bases.base import Base
 from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
+from openmmla.utils.input import get_bucket_name
 from openmmla.utils.logger import get_logger
-from .input import get_bucket_name, get_function_visualizer
+from .input import get_function_visualizer
 
 
 class VideoVisualizer(Base):

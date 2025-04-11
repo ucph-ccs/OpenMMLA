@@ -1,0 +1,31 @@
+# Database settings
+InfluxDB:
+  # Replace <inlfuxdb-example-server> with your actual sever address that runs the InfluxDB server, and the <port>
+  # with the actual port number that InfluxDB server is listening to. The default port for InfluxDB is 8086.
+  # Replace <influxdb-token> with your actual InfluxDB token, and <org-name> with your actual InfluxDB organization name.
+  # =================================================================================
+  # e.g., if your InfluxDB server is on uber-server.local machine and its IP address is 192.168.1.12 and listens on 8086,
+  # and it has a token named lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  # and organization named admin, then the following line should be:
+  # url: http://uber-server.local:8086
+  # token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  # org: admin
+  url: http://<influxdb-example-server>:<port>
+  token: <influxdb-token>
+  org: <org-name>
+
+Redis:
+  # Replace <redis-example-server> with your actual sever address that runs the Redis server, and the <port-number>
+  # with the actual port number that Redis server is listening to. Specify a certain database number you want to use for
+  # message queue. The default database number is 0. The default port for Redis is 6379. The redis here is for celery
+  # workers to receive tasks from the message queue, so we recommend you to use a different database number other than
+  # the default 0, like 1 or 2.
+  # =================================================================================
+  # e.g., if your Redis server is on uber-server.local machine and its IP address is 192.168.1.12, and it has listening
+  # on port 6379, then the following line should be:
+  # host: uber-server.local
+  # port: 6379
+  # db: 1
+  host: <redis-example-server>
+  port: <port-number>
+  db: <database-number>

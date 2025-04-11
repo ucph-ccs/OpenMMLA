@@ -8,8 +8,9 @@ import time
 from openmmla.analysis.ips.analyze import session_analysis_video
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import get_bucket_name
 from openmmla.utils.logger import get_logger
-from .input import get_function_synchronizer, get_bucket_name
+from .input import get_function_synchronizer
 from .transform import transform_point, transform_rotation
 from .vector import is_tag_looking_at_another_2d
 

@@ -3,10 +3,10 @@ import os
 
 import cv2
 import numpy as np
-import yaml
 
 from openmmla.bases.base import Base
 from openmmla.utils.logger import get_logger
+from openmmla.utils.yaml_dump import dump_yaml_pretty
 from .input import flush_input, get_function_calibrator
 
 
@@ -195,8 +195,7 @@ class CameraCalibrator(Base):
         })
 
         # Write updated config to file
-        with open(self.config_path, 'w') as config_file:
-            yaml.safe_dump(self.config, config_file, sort_keys=False, default_flow_style=None)
+        dump_yaml_pretty(self.config, self.config_path)
         print(f"Configuration updated for {camera_name}.")
 
     @staticmethod

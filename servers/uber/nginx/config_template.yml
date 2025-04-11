@@ -1,67 +1,67 @@
 upstreams:
-  infer_service:
-    - name: server-01
+  infer:
+    - host: server-01.local
       port: 5001
       weight: 3
-    - name: 192.168.3.2
+    - host: 192.168.3.2
       port: 5001
       weight: 3
-    - name: server-03
+    - host: server-03.local
       port: 5001
       weight: 1
 
-  resample_service:
-    - name: server-01
+  resample:
+    - host: server-01.local
       port: 5002
       weight: 3
-    - name: server-02
+    - host: server-02.local
       port: 5002
       weight: 3
-    - name: server-03
+    - host: server-03.local
       port: 5002
       weight: 1
 
-  enhance_service:
-    - name: server-01
+  enhance:
+    - host: server-01.local
       port: 5003
       weight: 3
-    - name: server-02
+    - host: server-02.local
       port: 5003
       weight: 3
-    - name: server-03
+    - host: server-03.local
       port: 5003
       weight: 1
 
-  separate_service:
-    - name: server-01
+  separate:
+    - host: server-01.local
       port: 5004
       weight: 3
-    - name: server-02
+    - host: server-02.local
       port: 5004
       weight: 3
-    - name: server-03
+    - host: server-03.local
       port: 5004
       weight: 1
 
-  transcribe_service:
-    - name: server-01
+  transcribe:
+    - host: server-01.local
       port: 5005
       weight: 3
-    - name: server-02
+    - host: server-02.local
       port: 5005
       weight: 3
-    - name: server-03
+    - host: server-03.local
       port: 5005
       weight: 1
 
-  vad_service:
-    - name: server-01
+  vad:
+    - host: server-01.local
       port: 5006
       weight: 3
-    - name: server-02
+    - host: server-02.local
       port: 5006
       weight: 3
-    - name: server-03
+    - host: server-03.local
       port: 5006
       weight: 1
 

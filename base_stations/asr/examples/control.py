@@ -1,7 +1,7 @@
 """This script runs the control base."""
 import os
 
-from openmmla.bases.asr.input import get_bucket_name
+from openmmla.utils.input import get_bucket_name
 from openmmla.utils.clean import flush_input
 from openmmla.utils.client.influx_client import InfluxDBClientWrapper
 from openmmla.utils.client.redis_client import RedisClientWrapper

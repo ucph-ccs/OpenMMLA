@@ -2,7 +2,7 @@
 
 OpenMMLA a toolkit for multimodal learning analytics, providing various built-in pipelines for different tasks. The toolkit is for building up the MMLA pipeline as shown below:
 
-<img src="docs/high-level-system-design.png" alt="OpenMMLA system design" width="100%">
+<img src="docs/high_level_system_design.png" alt="OpenMMLA system design" width="100%">
 
 <details>
 <summary><strong>High-level System Design (Data flow)</strong></summary>
@@ -29,7 +29,7 @@ OpenMMLA consists of several hardware components working together:
 <details>
 <summary><strong>Detailed Architecture</strong></summary>
 
-![mBox System Design](docs/system_overview.png)
+![mBox System Design](docs/system_architecture.png)
 
 </details>
 
@@ -90,7 +90,7 @@ sudo apt install -y build-essential git ffmpeg python3-pyaudio libsndfile1 porta
 
 ### Required Services 
 
-These services are primarily required for the **Uber Server** which acts as the central hub:
+These services are primarily required for the **Uber Servers** which acts as the central hub:
 
 - **InfluxDB**: Time series database for storing measurements data(Required)
 - **Redis**: Message broker and cache (Required)
@@ -127,7 +127,7 @@ brew install redis
 brew services restart redis
 
 # For Ubuntu/Debian
-sudo apt install redis-server
+sudo apt install -y redis-server
 # Edit /etc/redis/redis.conf: set "protected-mode no" and "bind 0.0.0.0"
 sudo systemctl enable redis-server
 sudo systemctl restart redis-server
@@ -148,11 +148,11 @@ sudo systemctl restart mosquitto
 ```
 
 #### Nginx Installation (Optional)
-For detailed Nginx installation and configuration as both a load balancer and RTMP server, please refer to the [Nginx Setup Guide](servers/uber/docs/nginx.md).
+For detailed Nginx installation and configuration as both a load balancer and RTMP server, please refer to the [Nginx Setup Guide](docs/nginx.md).
 
 
 #### Dashboard Installation (Optional)
-For detailed instructions on setting up the Next.js frontend and Flask backend for the dashboard, please refer to the [Dashboard Setup Guide](servers/uber/docs/dashboard.md).
+For detailed instructions on setting up the Next.js frontend and Flask backend for the dashboard, please refer to the [Dashboard Setup Guide](docs/dashboard.md).
 
 </details>
 
@@ -160,41 +160,62 @@ For detailed instructions on setting up the Next.js frontend and Flask backend f
 
 You can install OpenMMLA in two ways:
 
-#### Option 1: Via PyPI
-```bash
-# Create conda environment
-conda create -n openmmla python=3.10.12 -y
-conda activate <your-env-name> e.g., asr-base, asr-server, ips-base, vfa-server
-
-# Install base package
-pip install openmmla
-
-# Install pipeline-specific dependencies for specific envs
-pip install 'openmmla[asr-base]'  # For ASR Base
-pip install 'openmmla[asr-server]'  # For ASR Server
-pip install 'openmmla[ips-base]'  # For IPS Base
-pip install 'openmmla[vfa-server]'  # For VFA Server
-
-```
-
-#### Option 2: Via Git
+#### Option 1: Via Git
 ```bash
 # Clone the repository
 git clone https://github.com/ucph-ccs/openmmla.git
 cd openmmla
 
-# Create conda environment
-conda create -n openmmla python=3.10.12 -y
-conda activate <your-env-name> e.g., asr-base, asr-server, ips-base, vfa-server
+# Create conda environment with specific envs 
+# e.g., asr-base, asr-server, ips-base, vfa-server
+conda create -n <your-env-name> -c conda-forge python=3.10.12 -y
+conda activate <your-env-name> 
 
-# Install in development mode
-pip install -e .  # Install base package
+# Install base package
+pip install -e .
 
-# Install pipeline-specific dependencies for specific envs
-pip install -e '.[asr-base]'  # For ASR Base
-pip install -e '.[asr-server]'  # For ASR Server
-pip install -e '.[ips-base]'  # For IPS Base
-pip install -e '.[vfa-server]'  # For VFA Server
+# Install specific dependencies for specific envs
+# For uber servers with uber-server env
+pip install -e .[uber-server]
+
+# For base stations with asr-base env
+pip install -e .[asr-base] 
+
+# For base servers with asr-server env
+pip install -e .[asr-server]
+ 
+# For base stations with ips-base env
+pip install -e .[ips-base]  
+
+# For base servers with vfa-server env
+pip install -e .[vfa-server] 
+```
+
+#### Option 2: Via PyPI
+```bash
+# Create conda environment with specific envs
+# e.g., asr-base, asr-server, ips-base, vfa-server
+conda create -n <your-env-name> -c conda-forge python=3.10.12 -y
+conda activate <your-env-name> 
+
+# Install base package
+pip install openmmla
+
+# Install specific dependencies for specific envs
+# For uber servers with uber-server env
+pip install openmmla[uber-server]
+
+# For base stations with asr-base env
+pip install openmmla[asr-base] 
+
+# For base servers with asr-server env
+pip install openmmla[asr-server]
+ 
+# For base stations with ips-base env
+pip install openmmla[ips-base]  
+
+# For base servers with vfa-server env
+pip install openmmla[vfa-server]
 ```
 
 ### Pipeline Setup

@@ -22,8 +22,8 @@ def get_energy_level(audio_file_path: str, verbose: bool = True) -> (float, floa
 
     Returns:
         tuple:
-            - RMS Value (float): The Root Mean Square value representing the energy level of the audio file.
-            - Peak Value (float): The maximum amplitude in the audio file.
+            - RMS Value (float): The Root Mean Square amplitude value of the audio file.
+            - Peak Value (float): The Peak amplitude value of the audio file.
     """
     rate, audio_samples = wav.read(audio_file_path)
     audio_samples = audio_samples.astype(float)
@@ -60,13 +60,13 @@ def get_audio_properties(wav_file: str) -> Dict:
 
 
 def calculate_rms_db(audio_samples: np.ndarray) -> float:
-    """Calculate the root-mean-square (RMS) energy of the audio data in decibels.
+    """Calculate the root-mean-square (RMS) amplitude values of the audio data in decibels.
 
     Args:
         audio_samples (np.ndarray): Numpy array of audio samples.
 
     Returns:
-        float: Root mean square (RMS) energy of the audio data in decibels.
+        float: Root mean square (RMS) amplitude values of the audio data in decibels.
     """
     mean_square = np.mean(audio_samples ** 2)
     return 10 * np.log10(mean_square)

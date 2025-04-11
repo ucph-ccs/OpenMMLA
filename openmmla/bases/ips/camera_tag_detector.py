@@ -34,7 +34,7 @@ class CameraTagDetector(Base):
         """Runtime attributes"""
         self.chosen_camera = None
         self.camera_info = {}
-        self.camera_seed = None
+        self.selected_source = None
         self.camera_configured = False
         self.base_id = None
         self.video_stream = None
@@ -44,15 +44,17 @@ class CameraTagDetector(Base):
 
     def _setup_yaml(self):
         """Set up attributes from YAML configuration."""
-        tag_config = self.config.get('AprilTag', {})
-        self.tag_size = float(tag_config.get('tag_size', 0.061))
-        self.families = tag_config.get('families', 'tag36h11')
+        base_config = self.config.get('Base', {})
+        self.tag_size = float(base_config.get('tag_size', 0.061))
+        self.families = base_config.get('families', 'tag36h11')
+        self.res = tuple(base_config.get('resolution', (1920, 1080)))
+        self.rotate = int(base_config.get('rotate', 0))
+        self.fps = int(base_config.get('fps', 30))
 
-        image_config = self.config.get('Image', {})
-        self.res_width = int(image_config.get('res_width', 1920))
-        self.res_height = int(image_config.get('res_height', 1080))
-        self.res = (self.res_width, self.res_height)
-        self.rotate = int(image_config.get('rotate', 0))
+        self.source = base_config['source']
+        self.stream_kwargs = base_config['stream_kwargs']
+        self.stream_kwargs['resolution'] = self.res
+        self.stream_kwargs['fps'] = self.fps
 
     def _setup_objects(self):
         self.detector = Detector(families=self.families, nthreads=4)
@@ -65,7 +67,7 @@ class CameraTagDetector(Base):
 
         while True:
             try:
-                select_fun = get_function_base(self.chosen_camera, self.camera_seed, self.base_id, main_id='None')
+                select_fun = get_function_base(self.chosen_camera, self.selected_source, self.base_id, main_id='None')
                 if select_fun == 0:
                     self.logger.info("Exiting video base...")
                     break
@@ -86,7 +88,7 @@ class CameraTagDetector(Base):
         self.mqtt_client.loop_start()
 
         # Start video stream
-        self._configure_video_capture(self.camera_seed)
+        self._configure_video_stream()
 
         try:
             self._process_frames()
@@ -107,37 +109,51 @@ class CameraTagDetector(Base):
             self.logger.warning("Camera configuration failed, please calibrate your camera first.")
             return
 
-        available_seeds = self._detect_video_seeds()
-        self.camera_seed = self.choose_camera_seed(available_seeds)
-        if self.camera_seed is None:
-            self.logger.warning("No available camera seed found.")
+        available_sources = self._detect_video_sources()
+        self.selected_source = self._choose_video_source(available_sources)
+
+        if self.selected_source is None:
+            self.logger.warning("No available video source found.")
             return
 
-        # check input sender id
+        # Configure stream based on source type
+        if self.source == 'opencv':
+            self.stream_kwargs['camera_index'] = self.selected_source
+        elif self.source == 'rtmp':
+            self.stream_kwargs['rtmp_url'] = self.selected_source
+
+        # Config camera base id
         self.base_id = input("Input your sender id, 'm' for main camera, and 'a', 'b', 'c', 'd' for alternatives "
-                             "camera: ")
+                             "camera [m]: ")
+        if not self.base_id:
+            self.base_id = 'm'
         self.camera_configured = True
         print(f'\033]0;Camera Detector {self.base_id}\007')
 
     def _configure_camera_params(self):
         """Configure camera intrinsic parameters."""
         cameras = self.config.get('Cameras', {})
-        camera_choices = list(cameras.keys())
+        camera_choices = sorted(list(cameras.keys()))
         if not camera_choices:
             return None
         for idx, choice in enumerate(camera_choices):
             print(f"{idx}: {choice}")
 
+        default_selection = 0  # Default to the first camera
         while True:
             try:
-                selection = int(input("Choose your camera name with number: "))
+                selection_input = input(f"Choose your camera name with number [{default_selection}]: ")
+                if selection_input == '':
+                    selection = default_selection
+                else:
+                    selection = int(selection_input)
                 if not 0 <= selection < len(camera_choices):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
                     self.chosen_camera = camera_choices[selection]
                     break
             except ValueError:
-                self.logger.warning("Please enter a valid number.")
+                self.logger.warning("Please enter a valid number or press Enter for default.")
 
         camera_config = cameras[self.chosen_camera]
         fisheye = camera_config['fisheye']
@@ -153,33 +169,66 @@ class CameraTagDetector(Base):
         print(camera_info)
         return camera_info
 
-    def _detect_video_seeds(self):
-        available_video_seeds = []
-        number_of_detected_seeds = 0
-        for i in range(4):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                print(f"{number_of_detected_seeds} : Camera seed {i} is available.")
-                number_of_detected_seeds += 1
-                available_video_seeds.append(i)
-            cap.release()
+    def _detect_video_sources(self):
+        """Detect available video sources based on the source type."""
+        available_sources = []
+        number_of_detected_sources = 0
 
-        if 'RTMP' in self.config and 'video_streams' in self.config['RTMP']:
-            video_stream_list = self.config['RTMP']['video_streams'].split(',')
-            for streams in video_stream_list:
-                if streams:
-                    print(f"{number_of_detected_seeds} : RTMP stream {streams} is available.")
-                    available_video_seeds.append(streams)
-                    number_of_detected_seeds += 1
+        if self.source == 'opencv':
+            # Detect available camera indices
+            for i in range(4):
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    print(f"{number_of_detected_sources} : Camera index {i} is available.")
+                    number_of_detected_sources += 1
+                    available_sources.append(i)
+                cap.release()
 
-        return available_video_seeds
+        elif self.source == 'rtmp':
+            # Get RTMP URLs from configuration
+            rtmp_config = self.config.get('RTMP', {})
+            if 'video_streams' in rtmp_config:
+                video_stream_list = rtmp_config['video_streams'].split(',')
+                for url in video_stream_list:
+                    if url:
+                        print(f"{number_of_detected_sources} : RTMP stream {url} is available.")
+                        available_sources.append(url)
+                        number_of_detected_sources += 1
+            else:
+                self.logger.warning("No RTMP video streams found in the configuration, please set it in "
+                                    "yaml config file ['RTMP']['video_streams'].")
 
-    def _configure_video_capture(self, camera_seed):
-        # self.video_stream = WebcamVideoStream(format='MJPG', src=camera_seed, res=(1920, 1080))
-        self.video_stream = VideoStream(source=camera_seed, resolution=self.res)
+        return available_sources
+
+    def _choose_video_source(self, available_sources):
+        """Choose a video source (camera index or RTMP URL)."""
+        if not available_sources:
+            return None
+        default_source_idx = 0  # Default to the first available source
+        while True:
+            try:
+                source_idx_input = input(f"Choose your video source index [{default_source_idx}]: ")
+                if source_idx_input == '':
+                    source_idx = default_source_idx
+                else:
+                    source_idx = int(source_idx_input)
+                if 0 <= source_idx < len(available_sources):
+                    selected_source = available_sources[source_idx]
+                    self.logger.info(f"Selected video source: {selected_source}")
+                    return selected_source
+                else:
+                    self.logger.warning("Invalid selection. Please choose a valid source index.")
+            except ValueError:
+                self.logger.warning("Please enter a valid number or press Enter for default.")
+
+    def _configure_video_stream(self):
+        """Configure video stream."""
+        self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
         self.video_stream.start()
 
     def _process_frames(self):
+        print("Processing frames...")
+
         while True:
             video_frame = self.video_stream.read()[-1]
             frame = video_frame.data
@@ -198,7 +247,7 @@ class CameraTagDetector(Base):
             tags = {}
 
             for tag in results:
-                if int(tag.tag_id) > self.max_badge_id:
+                if tag.decision_margin < 10 or int(tag.tag_id) > self.max_badge_id:
                     continue
 
                 corners = np.int32(tag.corners)
@@ -235,18 +284,3 @@ class CameraTagDetector(Base):
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-
-    @staticmethod
-    def choose_camera_seed(available_video_seeds):
-        if not available_video_seeds:
-            return None
-        while True:
-            try:
-                seed_id = int(input("Choose your video seed id: "))
-                if 0 <= seed_id < len(available_video_seeds):
-                    print(f"Selected video seed: {available_video_seeds[seed_id]}")
-                    return available_video_seeds[seed_id]
-                else:
-                    print("Invalid selection. Please choose a valid video seed.")
-            except ValueError:
-                print("Please enter a valid number.")

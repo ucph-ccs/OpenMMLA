@@ -10,11 +10,11 @@ NUM_CAMERA=2
 NUM_SYNCMANAGER=1
 
 print_usage() {
-    echo "usage: $0 [-nc] $NUM_CAMERA [-ns] $NUM_SYNCHRONIZER [-h]"
+    echo "usage: $0 [-nc] $NUM_CAMERA [-ns] $NUM_SYNCMANAGER [-h]"
     echo ""
     echo "options:"
     echo "  -nc  NUM_CAMERA             : Number of camera detectors to run (default: 3)"
-    echo "  -ns  NUM_SYNCHRONIZER       : Number of synchronizers to run (default: 1)"
+    echo "  -ns  NUM_SYNCMANAGER       : Number of sync managers to run (default: 1)"
     echo "  -h                          : Display this help message"
     exit 1
 }
@@ -80,7 +80,7 @@ while [ $i -le $# ];do
 done
 
 # Validate arguments
-for arg_name in "NUM_CAMERA" "NUM_SYNCHRONIZER"; do
+for arg_name in "NUM_CAMERA" "NUM_SYNCMANAGER"; do
     arg_value="${!arg_name}"
     if ! is_number "$arg_value"; then
         echo "Error: $arg_name must be a number"
@@ -92,7 +92,7 @@ done
 echo "Multi-camera Synchronization Configuration:"
 echo "--------------------------------"
 echo "NUM_CAMERA: $NUM_CAMERA"
-echo "NUM_SYNCHRONIZER: $NUM_SYNCHRONIZER"
+echo "NUM_SYNCMANAGER: $NUM_SYNCMANAGER"
 echo "--------------------------------"
 
 # Run camera tag detectors

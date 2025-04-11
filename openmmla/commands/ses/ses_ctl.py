@@ -7,6 +7,7 @@ from openmmla.utils.clean import flush_input
 
 def get_parser():
     parser = argparse.ArgumentParser(
+        prog="openmmla ses-ctl",
         description="Start/stop bucket sessions.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

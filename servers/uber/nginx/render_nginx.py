@@ -22,7 +22,7 @@ def is_valid_ip(name):
 
 def resolve_hostname(hostname):
     try:
-        return socket.gethostbyname(f"{hostname}.local")
+        return socket.gethostbyname(f"{hostname}")
     except socket.gaierror:
         return None
 
@@ -66,14 +66,14 @@ async def resolve_and_check_servers(config, check_port=False, max_workers=20):
 
 
 def resolve_and_check_one(server, check_port):
-    name = server['name']
+    host = server['host']
     port = server.get('port', 80)
 
     # Step 1: resolve
-    if is_valid_ip(name):
-        ip = name
+    if is_valid_ip(host):
+        ip = host
     else:
-        ip = resolve_hostname(name)
+        ip = resolve_hostname(host)
 
     if not ip:
         server['ip'] = None
@@ -109,7 +109,7 @@ def render_nginx_template(config, template_path, output_path):
         else:
             for s in servers:
                 status = f"✅ {s['ip']}" if s.get("reachable") else "❌ Not reachable"
-                print(f"{s['name']} ({service}) → {status}")
+                print(f"{s['host']} ({service}) → {status}")
 
 
 # ========== 主入口 ==========

@@ -1,0 +1,25 @@
+# config_template.yml
+# Template configuration file for audio processing pipeline components.
+# Fill in or update values as needed for your environment.
+
+AudioEnhancer:
+  cuda: true # whether to use gpu acceleration, true/false
+
+AudioInferer:
+  cuda: true
+  onnx: false # whether to use onnx runtime for inference, true/false (onnx runtime is faster but less precise)
+  model: <neomo-speaking-embedding-model>  # e.g., titanet_large, ecapa_tdnn, etc.
+
+SpeechSeparator:
+  cuda: true
+  model: <modelscope-speech-separation-model> # e.g., damo/speech_mossformer2_separation_temporal_8k
+  model_local: <modelscope-speech-separation-model-local-path>  # e.g., .cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
+
+SpeechTranscriber:
+  cuda: true
+  model: <whisper-or-huggingface-transcription-model>  # e.g., base.en, small.en, medium.en, large.en
+  language: en  # language code, e.g., en, zh, fr, etc.
+
+VoiceActivityDetector:
+  cuda: true
+  onnx: true

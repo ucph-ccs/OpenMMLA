@@ -1,7 +1,9 @@
-AprilTag:
-  families: tag36h11
-
+# config_template.yml
+# Template configuration file for video frame analyzer pipeline components.
+# Fill in or update values as needed for your environment.
 VideoFrameAnalyzer:
+  families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
+
   backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek
   top_p: 0
   temperature: 0
@@ -52,6 +54,7 @@ VideoFrameAnalyzer:
     vlm_model: "deepseek-reasoner"
     llm_model: "deepseek-reasoner"
 
+  # Define the actions that you want to classify
   defined_actions:
     Communicating: "when a person is directly facing another person, with their hands away from keyboards, mice, screens, or hardware. Communication may involve gestures, pointing, or other non-verbal cues."
     Observing: "when a person is looking at a screen or table, such as laptop or tablet, with no active interaction."

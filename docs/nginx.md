@@ -14,7 +14,7 @@ brew install nginx
 # config file located at `/opt/homebrew/etc/nginx/nginx.conf`
 
 # Ubuntu
-sudo apt update && install nginx
+sudo apt update && sudo apt install nginx
 # config file located at `/etc/nginx/nginx.conf`
 ```
 
@@ -29,11 +29,13 @@ brew install nginx-full --with-rtmp-module
 # config file located at `/opt/homebrew/etc/nginx/nginx.conf`
 
 # Ubuntu
-sudo apt update && install nginx libnginx-mod-rtmp
+sudo apt update && sudo apt install nginx libnginx-mod-rtmp
 # config file located at `/etc/nginx/nginx.conf`
-```
 
-Note: The RTMP version includes all standard Nginx functionality, including load balancing.
+# Add stat.xsl to visualize the RTMP statistics
+sudo mkdir -p /usr/local/nginx/html
+sudo curl -o /usr/local/nginx/html/stat.xsl https://raw.githubusercontent.com/arut/nginx-rtmp-module/master/stat.xsl
+```
 
 ## Configuration
 

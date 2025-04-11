@@ -14,54 +14,57 @@ Before setting up the dashboard, ensure you have the following prerequisites ins
 ## Installation
 
 ### Step 1: Clone the Repository
-
-If you haven't already done so, clone the OpenMMLA repository:
-
 ```bash
 git clone https://github.com/ucph-ccs/openmmla.git
 cd openmmla
 ```
 
-### Step 2: Navigate to the Dashboard Directory
+### Step 2: Setup Dashboard Flask Backend
 
-The dashboard components are located in the `servers/uber/dashboard` directory:
+1. **Install backend dependencies**:
 
 ```bash
 cd servers/uber/dashboard
-```
-
-### Step 3: Set Up the Flask Backend
-
-1. **Create and activate a Conda environment**:
-
-```bash
-conda create -n uber-server python=3.10.12 -y
+conda create -n uber-server -c conda-forge python=3.10.12 -y
 conda activate uber-server
+pip install -e .[uber-server]
 ```
 
-2. **Install dependencies**:
-
-```bash
-pip install -r flask-backend/requirements.txt
-```
-
-3. **Configure the backend**:
-
+2. **Configure the backend**:
 Edit the configuration file at `flask-backend/config.yml` to set up your database connection and other settings:
 
 ```yml
 InfluxDB:
-  url: <your-influxdb-url> e.g., http://uber-server.local:8086
-  token: <your-influxdb-operator-token> e.g., eNMnz5EuJlWNukW15iI8ys7
-  org: <your-organization-name> e.g., admin
+  # Replace <inlfuxdb-example-server> with your actual sever address that runs the InfluxDB server, and the <port>
+  # with the actual port number that InfluxDB server is listening to. The default port for InfluxDB is 8086.
+  # Replace <influxdb-token> with your actual InfluxDB token, and <org-name> with your actual InfluxDB organization name.
+  # =================================================================================
+  # e.g., if your InfluxDB server is on uber-server.local machine and its IP address is 192.168.1.12 and listens on 8086,
+  # and it has a token named lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  # and organization named admin, then the following line should be:
+  # url: http://uber-server.local:8086
+  # token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  # org: admin
+  url: http://<influxdb-example-server>:<port>
+  token: <influxdb-token>
+  org: <org-name>
 
 Redis:
-  host: <your-redis-server-hostname> e.g., uber-server.local
-  port: <your-redis-server-port> e.g., 6379
-  db: <your-database-number> e.g., 1
+  # Replace <redis-example-server> with your actual sever address that runs the Redis server, and the <port-number>
+  # with the actual port number that Redis server is listening to. Specify a certain database number you want to use for
+  # message queue. The default database number is 0. The default port for Redis is 6379.
+  # =================================================================================
+  # e.g., if your Redis server is on uber-server.local machine and its IP address is 192.168.1.12, and it has listening
+  # on port 6379, then the following line should be:
+  # host: uber-server.local
+  # port: 6379
+  # db: 1
+  host: <redis-example-server>
+  port: <port-number>
+  db: <database-number>
 ```
 
-### Step 4: Set Up the Next.js Frontend
+### Step 3: Set Up the Next.js Frontend
 
 1. **Install dependencies**:
 
@@ -71,16 +74,17 @@ npm install
 ```
 
 2. **Configure the frontend**:
-
-Update the `.env.local` file in the `next-frontend` directory: replace the `uber-server.local` with your Flask backend's hostname or IP address.
+Edit `next-frontend/.env.local`: replace the `<flask-example-server>` with your
+actual flask backend server address.
 
 ```
 # .env.local
-NEXT_PUBLIC_FLASK_BACKEND=uber-server.local
+NEXT_PUBLIC_FLASK_BACKEND=<flask-example-server>
 NEXT_PUBLIC_FLASK_PORT=5000
 ```
 
-Update the `next.config.js` file in the `next-frontend` directory: replace the `uber-server.local` with your Flask backend's hostname or IP address.
+Edit `next-frontend/next.config.js`: replace the `<flask-example-server>` with your
+actual flask backend server address.
 
 ```javascript
 module.exports = {
@@ -88,7 +92,7 @@ module.exports = {
     remotePatterns: [
       {
         protocol: 'http',
-        hostname: 'uber-server.local',
+        hostname: '<flask-example-server>',
       },
     ],
   },
@@ -109,13 +113,10 @@ The easiest way to run the dashboard is using the provided Makefile commands fro
 
 ```bash
 cd ../  # Go back to servers/uber directory
-
 # Start the Flask Backend on port 5000 using Gunicorn with the gevent worker
 make flask 
-
 # Start the Celery Worker for Flask that process background tasks
 make celery
-
 # Start the Next.js Frontend on port 3000
 make next
 ```
@@ -128,8 +129,9 @@ Once all services are running, you can access the dashboard by opening a web bro
 # Access from dashbaord server
 http://localhost:3000   
 
-# Access from other devices under the same network, replace `uber-server.local` with your dashbaord server's hostname or IP address
-http://uber-server.local:3000
+# Access from other devices under the same network, replace `<dashboard-example-server>` with your actual dashboard 
+# server address or hostname.
+http://<dashboard-example-server>:3000
 ```
 
 ## Troubleshooting
@@ -138,7 +140,7 @@ http://uber-server.local:3000
    If you encounter port conflicts, you can clean specific ports:
    ```bash
    # Clean port if it conflicts with 5000
-   make clean-ports PORT=5000
+   make clean-ports 5000
    ```
 
 2. **Service management**:
@@ -159,7 +161,7 @@ http://uber-server.local:3000
    Press `Ctrl+B` then `D` to detach from a tmux session.
 
 4. **Database / Redis issues**:
-   Ensure InfluxDB and Redis is running and accessible and your config.yml file is correct 
+   Ensure InfluxDB and Redis is running and accessible and your `flask_backend/config.yml` file is correctly setup. 
 
 ## Dashboard Features
 

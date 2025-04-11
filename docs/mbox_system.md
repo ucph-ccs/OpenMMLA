@@ -4,7 +4,7 @@
 
 Below is a diagram that represents the different components of the system and their interactions:
 
-![mBox System Design](system_overview.png)
+![mBox System Design](system_architecture.png)
 
 The mBox system is designed to analyze the learning activity within a group using different modalities of data - video, audio, and radio. The system
 is composed of several modules: Clients(dashboard, MobileTag), Servers, Bases and Badges.

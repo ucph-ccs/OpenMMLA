@@ -1,7 +1,7 @@
 """This script demonstrates how to control the nodes."""
 import os
 
-from openmmla.bases.ips.input import get_bucket_name
+from openmmla.utils.input import get_bucket_name
 from openmmla.utils.clean import flush_input
 from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger

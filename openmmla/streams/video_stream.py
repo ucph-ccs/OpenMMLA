@@ -16,11 +16,11 @@ logger = get_logger(__name__)
 class VideoStream(StreamReceiver):
     """Video stream implementation for continuous video capture."""
 
-    def __init__(self, source: int | str, **kwargs):
+    def __init__(self, source: str, **kwargs):
         """Initialize video stream.
         
         Args:
-            source (int | str): Stream source (camera index or video file path)
+            source (str): Stream source type ('opencv' or 'rtmp')
 
         Keyword Args:
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 0.08)
@@ -28,6 +28,19 @@ class VideoStream(StreamReceiver):
             resolution(tuple, optional): Tuple of (width, height) (default: (1920, 1080))
             fps(int, optional): Frames per second (default: 30)
             resample_method(ResampleMethod, optional): Resampling method for fps conversion (default: ResampleMethod.VIDEO_AVERAGE)
+            camera_index(int, optional): Camera index for 'opencv' source (default: 0)
+            rtmp_url(str, optional): RTMP URL for 'rtmp' source
+            use_ffmpeg(bool, optional): Whether to use FFmpeg directly for RTMP streams (default: True)
+                - True: Uses FFmpeg directly for better control and lower latency
+                - False: Uses OpenCV's built-in RTMP support (simpler but may have limitations)
+
+        Notes:
+            For RTMP streams, using FFmpeg directly (use_ffmpeg=True) is recommended because:
+            1. Better control over stream parameters
+            2. Lower latency
+            3. More reliable for high-resolution/high-frame-rate streams
+            4. Better error handling and recovery
+            5. Supports a wider range of RTMP streams and codecs
         """
         super().__init__(**kwargs)
         self.source = source
@@ -39,8 +52,15 @@ class VideoStream(StreamReceiver):
         self.fps = kwargs.get('fps', 30)
         self.resample_method = kwargs.get('resample_method', ResampleMethod.VIDEO_AVERAGE)
 
-        # OpenCV objects
-        self.stream = None
+        # Source-specific configuration
+        if self.source == 'opencv':
+            self.camera_index = kwargs.get('camera_index', 0)
+            self.stream = None
+        elif self.source == 'rtmp':
+            self.rtmp_url = self.require_kwarg(kwargs, 'rtmp_url', "RTMP source requires a 'rtmp_url' parameter")
+            self.stream = None
+        else:
+            raise ValueError(f"Unsupported source type: {self.source}")
 
         # Frame metadata
         self._frame_metadata = {
@@ -63,7 +83,11 @@ class VideoStream(StreamReceiver):
     def start(self) -> None:
         """Start the video stream and begin capturing frames."""
         self.stop()
-        self._initialize_stream()
+
+        if self.source in ['opencv', 'rtmp']:
+            self._initialize_opencv()
+        else:
+            raise ValueError(f"Unsupported source type: {self.source}")
 
         self._stop_event.clear()
         self._receive_thread = RaisingThread(target=self._receive_loop)
@@ -75,10 +99,86 @@ class VideoStream(StreamReceiver):
         """Stop the video stream and clean up resources."""
         self._stop_event.set()
         if self._receive_thread:
-            self._receive_thread.join()
-        self._cleanup_stream()
+            try:
+                if threading.current_thread() != self._receive_thread:
+                    self._receive_thread.join(timeout=5)
+            except Exception as e:
+                logger.warning(f"During thread stopping, caught: {e}", exc_info=True)
+            finally:
+                self._receive_thread = None
 
-    def read(self, duration: float = None, target_fps: float = None, timeout: float = 5.0,
+        if self.source in ['opencv', 'rtmp']:
+            self._cleanup_opencv()
+
+        self._last_read_pos = -1
+
+    def _initialize_opencv(self) -> None:
+        """Initialize OpenCV video capture with configured parameters."""
+        self.stream = cv2.VideoCapture(self.camera_index if self.source == 'opencv' else self.rtmp_url)
+
+        # Set video properties
+        self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.format))
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+        self.stream.set(cv2.CAP_PROP_FPS, self.fps)
+        self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+
+    def _cleanup_opencv(self) -> None:
+        """Clean up OpenCV video capture resources."""
+        if self.stream:
+            self.stream.release()
+            self.stream = None
+
+    def _receive_loop(self) -> None:
+        """Continuously receive frames and store in buffer."""
+        frame_count = 0
+        start_time = time.time()
+
+        logger.info("Starting video stream receive loop.")
+
+        while not self._stop_event.is_set():
+            try:
+                frame = self._read_frame()
+                if frame:
+                    self.buffer.push(frame)
+
+                    # Calculate and log FPS every 30 frames
+                    frame_count += 1
+                    if frame_count % 30 == 0:
+                        elapsed_time = time.time() - start_time
+                        fps = frame_count / elapsed_time
+                        logger.debug(f"Video capture FPS: {fps:.2f}")
+                        start_time = time.time()
+                        frame_count = 0
+
+            except Exception as e:
+                logger.error(f"Fatal error in receive loop: {e}")
+                self.stop()
+                raise
+
+    def _read_frame(self) -> VideoFrame | None:
+        """Read a single frame from the video stream."""
+        try:
+            if self.source in ['opencv', 'rtmp']:
+                grabbed, frame = self.stream.read()
+                if not grabbed:
+                    logger.warning("Failed to grab frame")
+                    return None
+            else:
+                raise ValueError(f"Unsupported source type: {self.source}")
+
+            timestamp = time.time()
+            return VideoFrame(
+                data=frame,
+                timestamp=timestamp,
+                metadata=self._frame_metadata
+            )
+
+        except Exception as e:
+            logger.error(f"Error reading frame: {e}")
+            return None
+
+    def read(self, duration: float = None, target_fps: float = None, timeout: float = 10.0,
              latest: bool = False) -> VideoFrame | list[VideoFrame] | None:
         """Read video frames with optional fps conversion.
 
@@ -180,65 +280,9 @@ class VideoStream(StreamReceiver):
 
         return resampled_frames
 
-    def _initialize_stream(self) -> None:
-        """Initialize video capture stream with configured parameters."""
-        self.stream = cv2.VideoCapture(self.source)
-
-        # Set video properties
-        self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.format))
-        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-        self.stream.set(cv2.CAP_PROP_FPS, self.fps)
-        self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-
-    def _cleanup_stream(self) -> None:
-        """Clean up video capture resources."""
-        if self.stream:
-            self.stream.release()
-            self.stream = None
-        self._last_read_pos = -1
-
-    def _receive_loop(self) -> None:
-        """Continuously receive frames and store in buffer."""
-        frame_count = 0
-        start_time = time.time()
-
-        while not self._stop_event.is_set():
-            try:
-                frame = self._read_frame()
-                if frame:
-                    self.buffer.push(frame)
-
-                    # Calculate and log FPS every 30 frames
-                    frame_count += 1
-                    if frame_count % 30 == 0:
-                        elapsed_time = time.time() - start_time
-                        fps = frame_count / elapsed_time
-                        logger.debug(f"Video capture FPS: {fps:.2f}")
-                        start_time = time.time()
-                        frame_count = 0
-
-            except Exception as e:
-                logger.error(f"Fatal error in receive loop: {e}")
-                self.stop()
-                raise
-
-    def _read_frame(self) -> VideoFrame | None:
-        """Read a single frame from the video stream."""
-        try:
-            grabbed, frame = self.stream.read()
-            if not grabbed:
-                logger.warning("Failed to grab frame")
-                return None
-
-            timestamp = time.time()
-
-            return VideoFrame(
-                data=frame,
-                timestamp=timestamp,
-                metadata=self._frame_metadata
-            )
-
-        except Exception as e:
-            logger.error(f"Error reading frame: {e}")
-            return None
+    @staticmethod
+    def require_kwarg(kwargs, key, message):
+        value = kwargs.get(key)
+        if value is None:
+            raise ValueError(message)
+        return value

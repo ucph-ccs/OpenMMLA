@@ -19,7 +19,7 @@ print_usage() {
     echo "usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-s STORE] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-tr TRANSCRIBE] [-sp SPEECH_SEPARATE] [-d DOMINANT] [-h]"
     echo ""
     echo "options:"
-    echo "  -nb  NUM_BASE               : Number of audio bases to run (default: 3)"
+    echo "  -nb  NUM_BASE               : Number of ASR bases to run (default: 3)"
     echo "  -ns  NUM_SYNCHRONIZER       : Number of synchronizers to run (default: 1)"
     echo "  -s   STORE                  : Whether to store audio data (true/false, default: true)"
     echo "  -vad VOICE_ACTIVITY_DETECT  : Whether to use Voice Activity Detection (true/false, default: true)"

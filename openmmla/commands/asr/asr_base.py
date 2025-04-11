@@ -4,6 +4,7 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
+        prog="openmmla asr-base",
         description="Run ASR audio base for speaker recognition and transcription.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

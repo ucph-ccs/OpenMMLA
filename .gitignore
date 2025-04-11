@@ -23,6 +23,7 @@ mbox-uber/
 .DS_Store
 test*.*
 *test.*
+**/config.yml
 
 # Unignore specific files
 !.gitkeep

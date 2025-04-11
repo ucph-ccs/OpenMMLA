@@ -25,7 +25,7 @@ class VideoFrameAnalyzer(Server):
         self._setup_objects()
 
     def _setup_yaml(self):
-        self.families = self.config['AprilTag']['families']
+        self.families = self.config['VideoFrameAnalyzer']['families']
         self.backend = self.config['VideoFrameAnalyzer']['backend']
         self.top_p = float(self.config['VideoFrameAnalyzer']['top_p'])
         self.temperature = float(self.config['VideoFrameAnalyzer']['temperature'])

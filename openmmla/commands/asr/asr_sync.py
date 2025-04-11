@@ -4,6 +4,7 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
+        prog="openmmla asr-sync",
         description="Run ASR audio synchronizer for synchronizing results from audio bases.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

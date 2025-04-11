@@ -22,12 +22,13 @@ from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import get_bucket_name
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN
-from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_mode, get_bucket_name, get_name
+from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_mode, get_name
 
 
 class AudioBase(Base):
@@ -107,24 +108,24 @@ class AudioBase(Base):
 
         Read various settings such as durations, thresholds, and service URLs required for the audio processing pipeline.
         """
-        self.register_duration = int(self.config[self.base_type]['register_duration'])
-        self.recognize_duration = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
-            self.config[self.base_type]['recognize_duration'])
-        self.rms_threshold = int(self.config[self.base_type]['rms_threshold'])
-        self.rms_peak_threshold = int(self.config[self.base_type]['rms_peak_threshold'])
-        self.threshold = float(self.config[self.base_type]['recognize_sp_threshold']) if self.sp else float(
-            self.config[self.base_type]['recognize_threshold'])
-        self.keep_threshold = float(self.config[self.base_type]['keep_sp_threshold']) if self.sp else float(
-            self.config[self.base_type]['keep_threshold'])
-        self.gain = float(self.config[self.base_type]['gain'])
+        base_config = self.config[self.base_type]
+        asr_server_config = self.config['Server']['asr']
 
-        self.speech_transcriber_url = resolve_url(self.config['Server']['asr']['speech_transcription'])
-        self.speech_separator_url = resolve_url(self.config['Server']['asr']['speech_separation'])
-        self.speech_enhancer_url = resolve_url(self.config['Server']['asr']['speech_enhancement'])
-        self.vad_url = resolve_url(self.config['Server']['asr']['voice_activity_detection'])
+        self.register_duration = int(base_config['register_duration'])
+        self.recognize_duration = int(base_config['recognize_sp_duration']) if self.sp else int(base_config['recognize_duration'])
+        self.rms_threshold = int(base_config['rms_threshold'])
+        self.rms_peak_threshold = int(base_config['rms_peak_threshold'])
+        self.threshold = float(base_config['recognize_sp_threshold']) if self.sp else float(base_config['recognize_threshold'])
+        self.keep_threshold = float(base_config['keep_sp_threshold']) if self.sp else float(base_config['keep_threshold'])
+        self.gain = float(base_config['gain'])
 
-        self.source = self.config[self.base_type]['source']
-        self.stream_kwargs = self.config[self.base_type]['stream_kwargs']
+        self.source = base_config['source']
+        self.stream_kwargs = base_config['stream_kwargs']
+
+        self.speech_transcriber_url = resolve_url(asr_server_config['speech_transcription'])
+        self.speech_separator_url = resolve_url(asr_server_config['speech_separation'])
+        self.speech_enhancer_url = resolve_url(asr_server_config['speech_enhancement'])
+        self.vad_url = resolve_url(asr_server_config['voice_activity_detection'])
 
     def _setup_input(self):
         """Set up the input identifier for the audio base.

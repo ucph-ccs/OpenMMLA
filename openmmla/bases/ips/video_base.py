@@ -11,9 +11,11 @@ from pupil_apriltags import Detector
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import get_bucket_name
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
-from .input import get_bucket_name, get_function_base
+from .input import get_function_base
+from .track_utils import PoseStabilizer, NormalVectorStabilizer, TagRelationTracker
 from .vector import is_tag_looking_at_another_2d, get_2d_outward_normal_vector
 
 
@@ -43,7 +45,7 @@ class VideoBase(Base):
         """Runtime attributes."""
         self.chosen_camera = None
         self.camera_info = {}
-        self.camera_seed = None
+        self.selected_source = None
         self.base_id = None  # the base camera id
         self.main_id = None  # the main camera id
         self.transform_matrices_dict = None
@@ -61,16 +63,17 @@ class VideoBase(Base):
 
     def _setup_yaml(self):
         """Set up attributes from YAML configuration."""
-        tag_config = self.config.get('AprilTag', {})
-        self.tag_size = float(tag_config.get('tag_size', 0.061))
-        self.families = tag_config.get('families', 'tag36h11')
+        base_config = self.config.get('Base', {})
+        self.tag_size = float(base_config.get('tag_size', 0.061))
+        self.families = base_config.get('families', 'tag36h11')
+        self.res = tuple(base_config.get('resolution', (1920, 1080)))
+        self.rotate = int(base_config.get('rotate', 0))
+        self.fps = int(base_config.get('fps', 30))
 
-        image_config = self.config.get('Image', {})
-        self.res_width = int(image_config.get('res_width', 1920))
-        self.res_height = int(image_config.get('res_height', 1080))
-        self.res = (self.res_width, self.res_height)
-        self.rotate = int(image_config.get('rotate', 0))
-        self.fps = int(image_config.get('fps', 30))
+        self.source = base_config['source']
+        self.stream_kwargs = base_config['stream_kwargs']
+        self.stream_kwargs['resolution'] = self.res
+        self.stream_kwargs['fps'] = self.fps
 
     def _setup_directories(self):
         """Set up directories."""
@@ -89,6 +92,9 @@ class VideoBase(Base):
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.detector = Detector(families=self.families, nthreads=4)
+        self.pose_stabilizer = PoseStabilizer(smoothing=0.7)
+        self.normal_stabilizer = NormalVectorStabilizer(smoothing=0.7)
+        self.relation_tracker = TagRelationTracker(min_consistent_frames=2)
 
     def run(self):
         print('\033]0;Video Base\007')
@@ -96,7 +102,7 @@ class VideoBase(Base):
 
         while True:
             try:
-                select_fun = get_function_base(self.chosen_camera, self.camera_seed, self.base_id, self.main_id)
+                select_fun = get_function_base(self.chosen_camera, self.selected_source, self.base_id, self.main_id)
                 if select_fun == 0:
                     self.logger.info("Exiting video base...")
                     break
@@ -125,7 +131,7 @@ class VideoBase(Base):
         self.mqtt_client.loop_start()
 
         # Start video stream
-        self._configure_video_stream(self.camera_seed)
+        self._configure_video_stream()
 
         exception_occurred = None
         try:
@@ -161,7 +167,7 @@ class VideoBase(Base):
         self.threads.clear()
 
     def _set_camera(self):
-        """Set up camera seed and id."""
+        """Set up video source and base id."""
         self.camera_configured = False
 
         self.transform_matrices_dict = self._load_transform_matrices()
@@ -174,11 +180,18 @@ class VideoBase(Base):
             self.logger.warning("Camera configuration failed.")
             return
 
-        available_seeds = self._detect_video_seeds()
-        self.camera_seed = self._choose_camera_seed(available_seeds)
-        if self.camera_seed is None:
-            self.logger.warning("No available camera seed found.")
+        available_sources = self._detect_video_sources()
+        self.selected_source = self._choose_video_source(available_sources)
+
+        if self.selected_source is None:
+            self.logger.warning("No available video source found.")
             return
+
+        # Configure stream based on source type
+        if self.source == 'opencv':
+            self.stream_kwargs['camera_index'] = self.selected_source
+        elif self.source == 'rtmp':
+            self.stream_kwargs['rtmp_url'] = self.selected_source
 
         self.base_id = self._choose_base_id()
         self.camera_configured = True
@@ -223,46 +236,55 @@ class VideoBase(Base):
         print(camera_info)
         return camera_info
 
-    def _detect_video_seeds(self):
-        """Detect available video seeds."""
-        available_video_seeds = []
-        number_of_detected_seeds = 0
-        for i in range(4):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                print(f"{number_of_detected_seeds} : Camera seed {i} is available.")
-                number_of_detected_seeds += 1
-                available_video_seeds.append(i)
-            cap.release()
+    def _detect_video_sources(self):
+        """Detect available video sources based on the source type."""
+        available_sources = []
+        number_of_detected_sources = 0
 
-        rtmp_config = self.config.get('RTMP', {})
-        if 'video_streams' in rtmp_config:
-            video_stream_list = rtmp_config['video_streams'].split(',')
-            for streams in video_stream_list:
-                if streams:
-                    print(f"{number_of_detected_seeds} : RTMP stream {streams} is available.")
-                    available_video_seeds.append(streams)
-                    number_of_detected_seeds += 1
+        if self.source == 'opencv':
+            # Detect available camera indices
+            for i in range(4):
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    print(f"{number_of_detected_sources} : Camera index {i} is available.")
+                    number_of_detected_sources += 1
+                    available_sources.append(i)
+                cap.release()
 
-        return available_video_seeds
+        elif self.source == 'rtmp':
+            # Get RTMP URLs from configuration
+            rtmp_config = self.config.get('RTMP', {})
+            if 'video_streams' in rtmp_config:
+                video_stream_list = rtmp_config['video_streams'].split(',')
+                for url in video_stream_list:
+                    if url:
+                        print(f"{number_of_detected_sources} : RTMP stream {url} is available.")
+                        available_sources.append(url)
+                        number_of_detected_sources += 1
+            else:
+                self.logger.warning("No RTMP video streams found in the configuration, please set it in "
+                                    "yaml config file ['RTMP']['video_streams'].")
 
-    def _choose_camera_seed(self, available_video_seeds):
-        """Choose a camera seed."""
-        if not available_video_seeds:
+        return available_sources
+
+    def _choose_video_source(self, available_sources):
+        """Choose a video source (camera index or RTMP URL)."""
+        if not available_sources:
             return None
-        default_seed_id = 0  # Default to the first available seed
+        default_source_idx = 0  # Default to the first available source
         while True:
             try:
-                seed_id_input = input(f"Choose your video seed id [{default_seed_id}]: ")
-                if seed_id_input == '':
-                    seed_id = default_seed_id
+                source_idx_input = input(f"Choose your video source index [{default_source_idx}]: ")
+                if source_idx_input == '':
+                    source_idx = default_source_idx
                 else:
-                    seed_id = int(seed_id_input)
-                if 0 <= seed_id < len(available_video_seeds):
-                    self.logger.info(f"Selected video seed: {available_video_seeds[seed_id]}")
-                    return available_video_seeds[seed_id]
+                    source_idx = int(source_idx_input)
+                if 0 <= source_idx < len(available_sources):
+                    selected_source = available_sources[source_idx]
+                    self.logger.info(f"Selected video source: {selected_source}")
+                    return selected_source
                 else:
-                    self.logger.warning("Invalid selection. Please choose a valid video seed.")
+                    self.logger.warning("Invalid selection. Please choose a valid source index.")
             except ValueError:
                 self.logger.warning("Please enter a valid number or press Enter for default.")
 
@@ -280,14 +302,13 @@ class VideoBase(Base):
             else:
                 print("Invalid selection. Please enter a valid sender id or press Enter for default.")
 
-    def _configure_video_stream(self, camera_seed):
+    def _configure_video_stream(self):
         """Configure video stream."""
-        self.video_stream = VideoStream(source=camera_seed, buffer_duration=0.08, format='MJPG', resolution=self.res,
-                                        fps=self.fps)
+        self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
         self.video_stream.start()
 
     def _process_frames(self):
-        """Process video frames and detect AprilTags."""
+        """Process video frames and detect AprilTags with pose and relation stability."""
         print("Processing frames...")
 
         save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/{self.base_id}')
@@ -298,70 +319,73 @@ class VideoBase(Base):
             video_frame = self.video_stream.read()[-1]
             frame = video_frame.data
             frames_count += 1
-            acquired_time = video_frame.timestamp  # Capture the frame timestamp
+            acquired_time = video_frame.timestamp
 
-            # Frame preprocessing.
             if self.camera_info.get("fisheye", False):
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                                   interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
             if self.rotate in ROTATIONS:
                 frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
-            # AprilTag detection.
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=self.camera_info["params"],
                                            tag_size=self.tag_size)
+
+            self.relation_tracker.step()
 
             tags = {}
             tag_relations = {}
 
             for tag in results:
-                if int(tag.tag_id) > self.max_badge_id:
+                if tag.decision_margin < 10 or int(tag.tag_id) > self.max_badge_id:
                     continue
 
-                corners = np.int32(tag.corners)
-                normal, tag = get_2d_outward_normal_vector(tag)
-                tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
+                # Stabilize pose
+                stabilized_R, stabilized_t = self.pose_stabilizer.update(tag.tag_id, tag.pose_R, tag.pose_t)
+                tag.pose_R = stabilized_R
+                tag.pose_t = stabilized_t
 
-                # Detect tag relations.
+                # Stabilize normal
+                normal, tag = get_2d_outward_normal_vector(tag)
+                smoothed_normal = self.normal_stabilizer.update(tag.tag_id, normal)
+
+                tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
                 tag_relations.setdefault(tag.tag_id, [])
 
+                # Decide if the tag is looking at another tag
                 other_tags = [t for t in results if t.tag_id != tag.tag_id]
                 for other_tag in other_tags:
-                    if other_tag.tag_id not in tag_relations[tag.tag_id]:
-                        if is_tag_looking_at_another_2d(tag, other_tag, cosine_threshold=-0.94, distance_threshold=1):
-                            tag_relations[tag.tag_id].append(str(other_tag.tag_id))
+                    is_seeing = is_tag_looking_at_another_2d(tag, other_tag, cosine_threshold=-0.94,
+                                                             distance_threshold=1)
+                    self.relation_tracker.update(tag.tag_id, other_tag.tag_id, is_seeing)
 
-                if self.graphics:  # drawing annotations.
+                    if self.relation_tracker.is_confirmed(tag.tag_id, other_tag.tag_id):
+                        tag_relations[tag.tag_id].append(str(other_tag.tag_id))
+
+                # Visualize
+                if self.graphics:
+                    corners = np.int32(tag.corners)
                     tag_center = np.mean(corners, axis=0)
-                    arrow_dir = normal[:2]
+                    arrow_dir = smoothed_normal[:2]
                     scale_factor = 50
                     end_point = tag_center + scale_factor * arrow_dir
                     cv2.arrowedLine(frame, tuple(np.int32(tag_center)), tuple(np.int32(end_point)), (0, 0, 255), 2)
                     cv2.polylines(frame, [corners], True, (0, 255, 0), thickness=2)
                     cv2.putText(frame, str(tag.tag_id), org=(int(tag_center[0]) + 10, int(tag_center[1]) + 10),
                                 fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.8, color=(0, 255, 0), thickness=2)
-                    cv2.putText(frame, f"Rot: {tag.pose_R}",
-                                (tag.corners[0][0].astype(int), tag.corners[0][1].astype(int) - 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                    cv2.putText(frame, f"Trans: {tag.pose_t}",
-                                (tag.corners[0][0].astype(int), tag.corners[0][1].astype(int) - 60),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
-            if self.graphics:  # display frame.
+            if self.graphics:
                 display_frame = cv2.resize(frame, (960, 540))
                 now = datetime.datetime.now()
                 current_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
                 cv2.putText(display_frame, current_time_str, (display_frame.shape[1] - 300, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7, (0, 255, 0), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.imshow(f'AprilTags Detection from camera {self.base_id}', display_frame)
 
             if self.store and frames_count % self.fps == 0:
                 frames_count = 0
                 cv2.imwrite(os.path.join(save_path, f'{acquired_time}.jpg'), frame)
 
-            # Publish message with the acquired timestamp.
             message = {
                 "base_id": self.base_id,
                 "tags": tags,
