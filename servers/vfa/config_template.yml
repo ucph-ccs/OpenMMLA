@@ -1,7 +1,7 @@
 # config_template.yml
 # Template configuration file for video frame analyzer pipeline components.
 # Fill in or update values as needed for your environment.
-VideoFrameAnalyzer:
+VLLMFrameAnalyzer:
   families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
 
   backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek
@@ -12,7 +12,7 @@ VideoFrameAnalyzer:
   ollama:
     api_key: <OLLAMA_API_KEY>
     vlm_base_url: "http://localhost:11434/v1"
-    llm_base_url: "http://localhost:11434/v1"
+    llm_base_url: "http://localhost:11434/v1" 
     vlm_model: "llava:13b"
     llm_model: "llama3.1"
     VLMExtraBody: {}

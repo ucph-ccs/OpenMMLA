@@ -1,11 +1,13 @@
 #!/bin/bash
-# This script runs the indoor positioning system
+# This script runs the real-time indoor positioning system (IPS) with bases, synchronizer, and visualizer.
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="ips-base"
+CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+
 NUM_BASE=1
 NUM_SYNCHRONIZER=1
 NUM_VISUALIZER=1
@@ -14,10 +16,10 @@ STORE=false
 VERBOSE=false
 
 print_usage() {
-    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-h]"
+    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]"
     echo ""
     echo "options:"
-    echo "  -nb NUM_BASE         : Number of IPS bases to run (default: 3)"
+    echo "  -nb NUM_BASE         : Number of IPS bases to run (default: 1)"
     echo "  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)"
     echo "  -g GRAPHICS          : Enable graphics (default: true)"
     echo "  -s STORE             : Enable store (default: false)"
@@ -26,7 +28,6 @@ print_usage() {
     exit 1
 }
 
-# Helper functions
 is_number() {
     [[ $1 =~ ^[0-9]+$ ]]
 }
@@ -47,21 +48,20 @@ run_py_in_new_tab_mac() {
     CMD=$1
     osascript -e "tell app \"Terminal\" to activate" \
               -e "tell app \"System Events\" to keystroke \"t\" using command down" \
-              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && source activate $CONDA_ENV && $CMD\" in the front window"
+              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && $CONDA_INIT && $CMD\" in the front window"
 }
 
 run_py_in_new_win_lxterminal() {
     CMD=$1
-    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source ~/miniforge3/etc/profile.d/conda.sh; conda activate $CONDA_ENV; $CMD; exec bash\"" &
+    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash\"" &
 }
 
 run_py_in_new_tab_gnome() {
     CMD=$1
-    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
+    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash"
 }
 
-
-# Parse arguments for multi-character options
+# Parse arguments
 i=1
 while [ $i -le $# ]; do
     arg="${!i}"
@@ -122,15 +122,14 @@ while [ $i -le $# ]; do
     i=$((i+1))
 done
 
-# Validate arguments
-for arg_name in "NUM_BASE" "NUM_SYNCHRONIZER"; do
+# Validate input
+for arg_name in "NUM_BASE" "NUM_SYNCHRONIZER" "NUM_VISUALIZER"; do
     arg_value="${!arg_name}"
     if ! is_number "$arg_value"; then
         echo "Error: $arg_name must be a number"
         print_usage
     fi
 done
-
 
 for arg_name in "GRAPHICS" "STORE" "VERBOSE"; do
     arg_value="${!arg_name}"
@@ -140,19 +139,19 @@ for arg_name in "GRAPHICS" "STORE" "VERBOSE"; do
     fi
 done
 
-
-# Display configuration
+# Display config
 echo "Indoor Positioning System Configuration:"
 echo "--------------------------------"
 echo "NUM_BASE: $NUM_BASE"
 echo "NUM_SYNCHRONIZER: $NUM_SYNCHRONIZER"
+echo "NUM_VISUALIZER: $NUM_VISUALIZER"
 echo "GRAPHICS: $GRAPHICS"
 echo "STORE: $STORE"
+echo "VERBOSE: $VERBOSE"
 echo "--------------------------------"
-echo "Starting $NUM_BASE video base(s) and $NUM_SYNCHRONIZER synchronizer(s)..."
 
-# Run video bases
-CMD="python3 $PROJECT_DIR/examples/run_video_base.py -g $GRAPHICS -s $STORE -v $VERBOSE"
+# Run bases
+CMD="python3 $PROJECT_DIR/examples/run_ips_base.py -g $GRAPHICS -s $STORE -v $VERBOSE"
 if [ "$NUM_BASE" -gt 0 ]; then
     for i in $(seq 1 "$NUM_BASE"); do
         if [[ $OSTYPE == 'darwin'* ]]; then
@@ -164,14 +163,14 @@ if [ "$NUM_BASE" -gt 0 ]; then
         else
             echo "Unknown OS or not supported. Running in current terminal:"
             export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
-            source activate $CONDA_ENV
+            eval "$CONDA_INIT"
             eval "$CMD"
         fi
     done
 fi
 
 # Run synchronizer
-CMD="python3 $PROJECT_DIR/examples/run_video_synchronizer.py -v $VERBOSE"
+CMD="python3 $PROJECT_DIR/examples/run_ips_synchronizer.py -v $VERBOSE"
 if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
     if [[ $OSTYPE == 'darwin'* ]]; then
         run_py_in_new_tab_mac "$CMD"
@@ -182,13 +181,13 @@ if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
     else
         echo "Unknown OS or not supported. Running in current terminal:"
         export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
-        source activate $CONDA_ENV
+        eval "$CONDA_INIT"
         eval "$CMD"
     fi
 fi
 
 # Run visualizer
-CMD="python3 $PROJECT_DIR/examples/run_video_visualizer.py -s $STORE"
+CMD="python3 $PROJECT_DIR/examples/run_ips_visualizer.py -s $STORE"
 if [ "$NUM_VISUALIZER" -gt 0 ]; then
     if [[ $OSTYPE == 'darwin'* ]]; then
         run_py_in_new_tab_mac "$CMD"
@@ -199,9 +198,9 @@ if [ "$NUM_VISUALIZER" -gt 0 ]; then
     else
         echo "Unknown OS or not supported. Running in current terminal:"
         export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
-        source activate $CONDA_ENV
+        eval "$CONDA_INIT"
         eval "$CMD"
     fi
 fi
 
-echo "All components started successfully."
+echo "All indoor positioning system components started successfully."

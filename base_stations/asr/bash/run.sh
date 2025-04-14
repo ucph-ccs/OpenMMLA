@@ -1,11 +1,13 @@
 #!/bin/bash
-# This script runs the real-time audio analyzer
+# This script runs the real-time automatic speech recognition (ASR) system with bases and synchronizers.
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="asr-base"
+CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+
 NUM_BASE=3
 NUM_SYNCHRONIZER=1
 STORE=true
@@ -52,17 +54,17 @@ run_py_in_new_tab_mac() {
     CMD=$1
     osascript -e "tell app \"Terminal\" to activate" \
               -e "tell app \"System Events\" to keystroke \"t\" using command down" \
-              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && source activate $CONDA_ENV && $CMD\" in the front window"
+              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && $CONDA_INIT && $CMD\" in the front window"
 }
 
 run_py_in_new_win_lxterminal() {
     CMD=$1
-    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source ~/miniforge3/etc/profile.d/conda.sh; conda activate $CONDA_ENV; $CMD; exec bash\"" &
+    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash\"" &
 }
 
 run_py_in_new_tab_gnome() {
     CMD=$1
-    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
+    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash"
 }
 
 # Parse arguments for multi-character options
@@ -209,12 +211,10 @@ while true; do
     esac
 done
 
-echo "Starting $NUM_BASE $BASE_TYPE audio base(s) and $NUM_SYNCHRONIZER synchronizer(s)..."
-
-# Run audio bases
-CMD="python3 $PROJECT_DIR/examples/run_audio_base.py -b $BASE_TYPE -s $STORE -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -tr $TRANSCRIBE -sp $SPEECH_SEPARATE"
+# Run bases
+CMD="python3 $PROJECT_DIR/examples/run_asr_base.py -b $BASE_TYPE -s $STORE -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -tr $TRANSCRIBE -sp $SPEECH_SEPARATE"
 if [ "$NUM_BASE" -gt 0 ]; then
-    echo "Starting audio bases..."
+    echo "Starting bases..."
     for i in $(seq 1 "$NUM_BASE"); do
         if [[ $OSTYPE == 'darwin'* ]]; then
             run_py_in_new_tab_mac "$CMD"
@@ -225,14 +225,14 @@ if [ "$NUM_BASE" -gt 0 ]; then
         else
             echo "Unknown OS or not supported. Running in current terminal:"
             export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
-            source activate $CONDA_ENV
+            eval "$CONDA_INIT"
             eval "$CMD"
         fi
     done
 fi
 
 # Run synchronizer
-CMD="python3 $PROJECT_DIR/examples/run_audio_synchronizer.py -b $BASE_TYPE -d $DOMINANT -sp $SPEECH_SEPARATE"
+CMD="python3 $PROJECT_DIR/examples/run_asr_synchronizer.py -b $BASE_TYPE -d $DOMINANT -sp $SPEECH_SEPARATE"
 if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
     echo "Starting synchronizer..."
     if [[ $OSTYPE == 'darwin'* ]]; then
@@ -244,9 +244,9 @@ if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
     else
         echo "Unknown OS or not supported. Running in current terminal:"
         export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
-        source activate $CONDA_ENV
+        eval "$CONDA_INIT"
         eval "$CMD"
     fi
 fi
 
-echo "All components started successfully."
+echo "All automatic speech recognition with diarization system components started successfully."

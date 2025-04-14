@@ -5,26 +5,25 @@ venv/
 *.egg-info/
 dist/
 build/
-__pycache__/
 temp/
 logger/
-deprecated/
 
-# Ignore repositories
+# Ignore deprecated repositories
+deprecated/
 mbox-audio/
 mbox-video/
 mbox-uber/
 
-# Ignore test and tests directories
-**/test/
+# Ignore directories at any level
 **/tests/
+**/__pycache__/
 
 # Ignore specific files
 .DS_Store
-test*.*
-*test.*
+twine.txt
+
+# Ignore specific files at any level
 **/config.yml
 
 # Unignore specific files
 !.gitkeep
-twine.txt

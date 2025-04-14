@@ -53,7 +53,7 @@ openmmla <asr-server-commands> -c <config_file_path>
 # 2. ASR server with multiple workers via gunicorn
 # e.g.,
 # export CONFIG_FILE=config.yml
-# gunicorn -k gevent -w 3 -b 0.0.0.0:5001 openmmla.commands.asr.asr_infer:app
+# gunicorn -k gevent -w 3 -b 0.0.0.0:5001 openmmla.commands.asr.infer:app
 export CONFIG_FILE=config.yml
 gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> <path-to-asr-servers-app>:app
 ```

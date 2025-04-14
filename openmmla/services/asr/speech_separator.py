@@ -65,8 +65,8 @@ class SpeechSeparator(Server):
                 # Return the processed audio data
                 return jsonify({"processed_bytes_streams": processed_bytes_streams}), 200
             except Exception as e:
-                self.logger.error(f"during speech separation, {e} happens.")
-                return jsonify({"error": str(e)}), 500
+                self.logger.error(f"Exception during speech separation", exc_info=True)
+                return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
             finally:
                 torch.cuda.empty_cache()
                 gc.collect()

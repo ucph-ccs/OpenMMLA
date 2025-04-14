@@ -42,8 +42,8 @@ class AudioResampler(Server):
                     audio_data = f.read()
                 return send_file(io.BytesIO(audio_data), mimetype="audio/wav"), 200
             except Exception as e:
-                self.logger.error(f"during resampling, {e} happens.")
-                return jsonify({"error": str(e)}), 500
+                self.logger.error(f"Exception during audio resampling", exc_info=True)
+                return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
             finally:
                 gc.collect()
         else:

@@ -101,7 +101,7 @@ class CameraTagDetector(Base):
             cv2.waitKey(1)
 
     def _set_camera(self):
-        """Set up camera seed and id."""
+        """Set up camera source and id."""
         self.camera_configured = False
 
         self.camera_info = self._configure_camera_params()

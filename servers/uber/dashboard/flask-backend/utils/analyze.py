@@ -74,8 +74,8 @@ def session_analysis(project_dir, bucket_name, influx_client):
     plot_physical_interaction_network(relations_json_file, visualization_dir)
 
     # Analyze across sessions
-    across_sessions_analysis_audio(logs_dir, visualizations_dir)
-    across_sessions_analysis_video(logs_dir, visualizations_dir)
+    asr_across_sessions_analysis(logs_dir, visualizations_dir)
+    ips_across_sessions_analysis(logs_dir, visualizations_dir)
 
 
 def format_time(hours, minutes, seconds):
@@ -544,7 +544,7 @@ def calculate_physical_interactions(df, normalize_factor):
     return interaction_counts
 
 
-def across_sessions_analysis_video(logs_dir, visualizations_dir):
+def ips_across_sessions_analysis(logs_dir, visualizations_dir):
     """Analyzes and visualizes various movement metrics across multiple sessions using saved log data."""
     session_data = []
 
@@ -567,13 +567,22 @@ def across_sessions_analysis_video(logs_dir, visualizations_dir):
     session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst = zip(*session_data)
 
     # Call plotting functions
-    plot_across_sessions_analysis_video(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, visualizations_dir)
-    plot_across_sessions_analysis_video_interactive(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst,
-                                                    visualizations_dir)
+    plot_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, visualizations_dir)
+    plot_interactive_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst,
+                                                  visualizations_dir)
 
 
-def plot_across_sessions_analysis_video(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
-    """Creates and saves matplotlib plots of various video analysis metrics across different sessions."""
+def plot_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
+    """Visualize IPS across sessions analysis with matplotlib.
+
+    Args:
+        session_names (list): List of session names.
+        stm_lst (list): List of Session Translate Movement values.
+        nstm_lst (list): List of Normalized Session Translate Movement values.
+        srm_lst (list): List of Session Rotate Movement values.
+        nsrm_lst (list): List of Normalized Session Rotate Movement values.
+        save_dir (str): Directory to save the plots.
+    """
     # Create subplots
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
 
@@ -608,15 +617,17 @@ def plot_across_sessions_analysis_video(session_names, stm_lst, nstm_lst, srm_ls
     ax2_twin.legend(loc='upper right')
 
     # Show plot
-    fig.suptitle("Video Analysis Metrics Across Sessions")
+    fig.suptitle("IPS across sessions analysis")
     fig.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'video_analysis_across_sessions.png'), dpi=300)
+
+    plt.savefig(os.path.join(save_dir, 'ips_across_sessions_analysis.png'), dpi=300)
+    print("IPS across sessions analysis saved to 'ips_across_sessions_analysis.png'")
 
 
-def plot_across_sessions_analysis_video_interactive(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
-    """Visualize audio analysis metrics across sessions with pyecharts."""
+def plot_interactive_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
+    """Visualize IPS across sessions analysis with pyecharts."""
     # Generate visualization page
-    page = Page(page_title="video metrics analysis across sessions", layout=Page.SimplePageLayout)
+    page = Page(page_title="IPS across sessions analysis", layout=Page.SimplePageLayout)
 
     def format_list(data):
         return [f"{x:.4f}" if x is not None else '0' for x in data]
@@ -694,7 +705,8 @@ def plot_across_sessions_analysis_video_interactive(session_names, stm_lst, nstm
 
     page.add(line1)
     page.add(line2)
-    page.render(os.path.join(save_dir, f'video_analysis_across_sessions.html'))
+    page.render(os.path.join(save_dir, f'ips_across_sessions_analysis.html'))
+    print("IPS across sessions analysis saved to 'ips_across_sessions_analysis.html'")
 
 
 def analyze_translations_log(json_path):
@@ -1051,7 +1063,7 @@ def calculate_speaker_interactions(json_file_path):
     return interaction_counts
 
 
-def across_sessions_analysis_audio(logs_dir, visualizations_dir):
+def asr_across_sessions_analysis(logs_dir, visualizations_dir):
     """Analyzes and visualizes various conversation metrics across multiple sessions using saved log data."""
     session_data = []
     for bucket_dir_name in sorted(os.listdir(logs_dir)):
@@ -1071,9 +1083,8 @@ def across_sessions_analysis_audio(logs_dir, visualizations_dir):
     # Unpacking the sorted data into separate lists
     session_names, apd_lst, peq_lst, nttc_lst, sr_lst = zip(*session_data)
 
-    plot_across_sessions_analysis_audio(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, visualizations_dir)
-    plot_across_sessions_analysis_audio_interactive(session_names, apd_lst, nttc_lst, sr_lst, peq_lst,
-                                                    visualizations_dir)
+    plot_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, visualizations_dir)
+    plot_interactive_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, visualizations_dir)
 
 
 def analyze_recognition_log(json_file_path, unknown=False):
@@ -1156,8 +1167,17 @@ def analyze_recognition_log(json_file_path, unknown=False):
     return apd, peq, nttc, sr
 
 
-def plot_across_sessions_analysis_audio(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
-    """Creates and saves matplotlib plots of various audio analysis metrics across different sessions."""
+def plot_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
+    """Visualize ASR across sessions analysis with matplotlib.
+
+    Args:
+        session_names (list): List of session names.
+        apd_lst (list): List of Average Pause Durations (APD).
+        nttc_lst (list): List of Normalized Turn Taking Counts (NTTC).
+        sr_lst (list): List of Silence Ratios (SR).
+        peq_lst (list): List of Participation Equalities (PEQ).
+        save_dir (str): Directory to save the plots.
+    """
     # Create subplots
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
 
@@ -1192,15 +1212,16 @@ def plot_across_sessions_analysis_audio(session_names, apd_lst, nttc_lst, sr_lst
     ax2_twin.legend(loc='upper right')
 
     # Show plot
-    fig.suptitle("Audio Analysis Metrics Across Sessions")
+    fig.suptitle("ASR across sessions analysis")
     fig.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'audio_analysis_across_sessions.png'), dpi=300)
+    plt.savefig(os.path.join(save_dir, 'asr_across_sessions_analysis.png'), dpi=300)
+    print("ASR across sessions analysis saved to 'asr_across_sessions_analysis.png'")
 
 
-def plot_across_sessions_analysis_audio_interactive(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
-    """Visualize audio analysis metrics across sessions with pyecharts."""
+def plot_interactive_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
+    """Visualize ASR across sessions analysis with pyecharts."""
     # Generate visualization page
-    page = Page(page_title="audio metrics analysis across sessions", layout=Page.SimplePageLayout)
+    page = Page(page_title="ASR across sessions analysis", layout=Page.SimplePageLayout)
 
     def format_list(data):
         return [f"{x:.4f}" if x is not None else '0' for x in data]
@@ -1278,4 +1299,5 @@ def plot_across_sessions_analysis_audio_interactive(session_names, apd_lst, nttc
 
     page.add(line1)
     page.add(line2)
-    page.render(os.path.join(save_dir, f'audio_analysis_across_sessions.html'))
+    page.render(os.path.join(save_dir, f'asr_across_sessions_analysis.html'))
+    print("ASR across sessions analysis saved to 'asr_across_sessions_analysis.html'")

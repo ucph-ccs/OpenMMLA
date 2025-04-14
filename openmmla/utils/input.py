@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+
 from .clean import flush_input
 
 
@@ -40,3 +41,14 @@ def get_bucket_name(influx_client):
                   "list")
 
     return bucket_name
+
+
+def get_id():
+    """Get the unique base id from user input."""
+    while True:
+        try:
+            flush_input()
+            print("------------------------------------------------")
+            return int(input("Enter the your base id: "))
+        except ValueError:
+            print("Invalid input. Please enter an integer as your unique base id.")

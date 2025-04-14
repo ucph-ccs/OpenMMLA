@@ -16,7 +16,7 @@ from openmmla.utils.querys import fetch_and_process_data, save_to_json_file, rea
 from .transcription import convert_transcription_json_to_txt
 
 
-def session_analysis_audio(project_dir, bucket_name, influx_client):
+def asr_session_analysis(project_dir, bucket_name, influx_client):
     """Retrieves data from InfluxDB for speaker recognition, transcription, and then visualizes them."""
     if not project_dir or not os.path.exists(project_dir):
         print("Warning: project_dir is not set or does not exist. Please set it to a valid directory, set it to current"
@@ -42,7 +42,7 @@ def session_analysis_audio(project_dir, bucket_name, influx_client):
     plot_speaking_interaction_network(recognition_json_file_path, visualization_dir)
 
     # Analyze across sessions
-    across_sessions_analysis_audio(logs_dir, visualizations_dir)
+    asr_across_sessions_analysis(logs_dir, visualizations_dir)
 
 
 def format_time(hours, minutes, seconds):
@@ -422,7 +422,7 @@ def calculate_speaker_interactions(json_file_path):
     return interaction_counts
 
 
-def across_sessions_analysis_audio(logs_dir, visualizations_dir):
+def asr_across_sessions_analysis(logs_dir, visualizations_dir):
     """Analyzes and visualizes various conversation metrics across multiple sessions using saved log data."""
     session_data = []
     for bucket_dir_name in sorted(os.listdir(logs_dir)):
@@ -442,9 +442,9 @@ def across_sessions_analysis_audio(logs_dir, visualizations_dir):
     # Unpacking the sorted data into separate lists
     session_names, apd_lst, peq_lst, nttc_lst, sr_lst = zip(*session_data)
 
-    plot_across_sessions_analysis_audio(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, visualizations_dir)
-    plot_across_sessions_analysis_audio_interactive(session_names, apd_lst, nttc_lst, sr_lst, peq_lst,
-                                                    visualizations_dir)
+    plot_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, visualizations_dir)
+    plot_interactive_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst,
+                                                  visualizations_dir)
 
 
 def analyze_recognition_log(json_file_path, unknown=False):
@@ -527,8 +527,8 @@ def analyze_recognition_log(json_file_path, unknown=False):
     return apd, peq, nttc, sr
 
 
-def plot_across_sessions_analysis_audio(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
-    """Creates and saves matplotlib plots of various audio analysis metrics across different sessions.
+def plot_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
+    """Visualize ASR across sessions analysis with matplotlib.
 
     Args:
         session_names (list): List of session names.
@@ -572,16 +572,16 @@ def plot_across_sessions_analysis_audio(session_names, apd_lst, nttc_lst, sr_lst
     ax2_twin.legend(loc='upper right')
 
     # Show plot
-    fig.suptitle("Audio Analysis Metrics Across Sessions")
+    fig.suptitle("ASR across sessions analysis")
     fig.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'audio_analysis_across_sessions.png'), dpi=300)
-    print("Audio analysis metrics across sessions saved to 'audio_analysis_across_sessions.png'")
+    plt.savefig(os.path.join(save_dir, 'asr_across_sessions_analysis.png'), dpi=300)
+    print("ASR across sessions analysis saved to 'asr_across_sessions_analysis.png'")
 
 
-def plot_across_sessions_analysis_audio_interactive(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
-    """Visualize audio analysis metrics across sessions with pyecharts."""
+def plot_interactive_asr_across_sessions_analysis(session_names, apd_lst, nttc_lst, sr_lst, peq_lst, save_dir):
+    """Visualize ASR across sessions analysis with pyecharts."""
     # Generate visualization page
-    page = Page(page_title="audio metrics analysis across sessions", layout=Page.SimplePageLayout)
+    page = Page(page_title="ASR across sessions analysis", layout=Page.SimplePageLayout)
 
     def format_list(data):
         return [f"{x:.4f}" if x is not None else '0' for x in data]
@@ -659,5 +659,5 @@ def plot_across_sessions_analysis_audio_interactive(session_names, apd_lst, nttc
 
     page.add(line1)
     page.add(line2)
-    page.render(os.path.join(save_dir, f'audio_analysis_across_sessions.html'))
-    print("Audio analysis metrics across sessions saved to 'audio_analysis_across_sessions.html'")
+    page.render(os.path.join(save_dir, f'asr_across_sessions_analysis.html'))
+    print("ASR across sessions analysis saved to 'asr_across_sessions_analysis.html'")

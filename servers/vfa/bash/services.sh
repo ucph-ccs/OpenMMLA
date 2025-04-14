@@ -5,7 +5,9 @@ EXAMPLES_DIR="$BASH_DIR/../examples"
 PYHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="vfa-server"
-services=("vlm")
+CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+
+services=("vllm")
 ports=(5007)
 
 # Loop through each port and kill processes using those ports
@@ -30,7 +32,7 @@ done
 
 # Tmux session command for each service
 declare -a commands=(
-  "cd $EXAMPLES_DIR && source activate $CONDA_ENV && gunicorn -k gevent -w 1 -b 0.0.0.0:5007 --pythonpath $PYHON_PATH serve_video_frame_analyzer:app"
+  "cd $EXAMPLES_DIR && $CONDA_INIT && gunicorn -k gevent -w 1 -b 0.0.0.0:5007 --pythonpath $PYHON_PATH serve_vllm_frame_analyzer:app"
 )
 
 # Loop for creating tmux session for each service
@@ -53,4 +55,4 @@ do
 done
 
 # Close the current tmux session
-tmux kill-session -t "video-services"
+tmux kill-session -t "vfa-services"

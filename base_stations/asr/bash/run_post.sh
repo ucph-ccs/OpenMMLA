@@ -1,11 +1,13 @@
 #!/bin/bash
-# This script runs the post-time audio analyzer
+# This script runs the post-time automated speech recognition (ASR) analyzer.
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="asr-base"
+CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+
 FILENAMES=""
 VOICE_ACTIVITY_DETECT=true
 NOISE_REDUCE=true
@@ -19,13 +21,12 @@ print_usage() {
     echo "  -f FILENAMES                 : specified filenames in /post-time/origin/ to process, default to all files when not specified."
     echo "  -vad VOICE_ACTIVITY_DETECT   : Whether to use Voice Activity Detection (true/false, default: true)"
     echo "  -nr NOISE_REDUCE             : Whether to use Noise Reduction (true/false, default: true)"
-    echo "  -sp SPEECH_SEPARATE          : Whether to use Speech Separation (true/false, default: true)"
+    echo "  -sp SPEECH_SEPARATE          : Whether to use Speech Separation (true/false, default: false)"
     echo "  -tr TRANSCRIBE               : Whether to transcribe audio (true/false, default: true)"
     echo "  -h                           : Display this help message"
     exit 1
 }
 
-# Helper functions
 is_boolean() {
     [[ $1 =~ ^(true|false)$ ]]
 }
@@ -42,20 +43,20 @@ run_py_in_new_tab_mac() {
     CMD=$1
     osascript -e "tell app \"Terminal\" to activate" \
               -e "tell app \"System Events\" to keystroke \"t\" using command down" \
-              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && source activate $CONDA_ENV && $CMD\" in the front window"
+              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && $CONDA_INIT && $CMD\" in the front window"
 }
 
 run_py_in_new_win_lxterminal() {
     CMD=$1
-    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source ~/miniforge3/etc/profile.d/conda.sh; conda activate $CONDA_ENV; $CMD; exec bash\"" &
+    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash\"" &
 }
 
 run_py_in_new_tab_gnome() {
     CMD=$1
-    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
+    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash"
 }
 
-# Parse arguments for multi-character options
+# Parse arguments
 i=1
 while [ $i -le $# ]; do
     arg="${!i}"
@@ -116,7 +117,7 @@ while [ $i -le $# ]; do
     i=$((i+1))
 done
 
-# Validate boolean arguments
+# Validate booleans
 for arg_name in "VOICE_ACTIVITY_DETECT" "NOISE_REDUCE" "SPEECH_SEPARATE" "TRANSCRIBE"; do
     arg_value="${!arg_name}"
     if ! is_boolean "$arg_value"; then
@@ -125,7 +126,7 @@ for arg_name in "VOICE_ACTIVITY_DETECT" "NOISE_REDUCE" "SPEECH_SEPARATE" "TRANSC
     fi
 done
 
-# Display configuration
+# Display config
 echo "Audio Post-Analyzer Configuration:"
 echo "--------------------------------"
 echo "Filename: $FILENAMES"
@@ -136,8 +137,10 @@ echo "Transcription: $TRANSCRIBE"
 echo "--------------------------------"
 echo "Starting audio post analyzer..."
 
-# Run post audio analyzer
-CMD="python3 $PROJECT_DIR/examples/run_post_audio_analyzer.py -f '$FILENAMES' -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -sp $SPEECH_SEPARATE -tr $TRANSCRIBE"
+# Compose command
+CMD="python3 $PROJECT_DIR/examples/run_asr_post_analyzer.py -f '$FILENAMES' -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -sp $SPEECH_SEPARATE -tr $TRANSCRIBE"
+
+# Run
 if [[ $OSTYPE == 'darwin'* ]]; then
     run_py_in_new_tab_mac "$CMD"
 elif is_raspberry_pi; then
@@ -147,7 +150,7 @@ elif is_ubuntu; then
 else
     echo "Unknown OS or not supported. Running in current terminal:"
     export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
-    source activate $CONDA_ENV
+    eval "$CONDA_INIT"
     eval "$CMD"
 fi
 

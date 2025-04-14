@@ -18,24 +18,28 @@ while True:
         redis_client = RedisClientWrapper(config_path)
 
         flush_input()
-        operation = input(f"Please input your operation:\n"
-                          f"1: reconnect nodes\n"
-                          f"2: disconnect nodes\n"
-                          f"0: exit\n"
-                          f"Selected function:")
+        operation = input(
+            "Please input your operation:\n"
+            "1: Reconnect nodes\n"
+            "2: Disconnect nodes\n"
+            "0: Exit\n"
+            "Selected function: "
+        ).strip()
+
         if operation == '1':
             bucket_name = get_bucket_name(influx_client)
             redis_client.publish(f"{bucket_name}/control", 'START')
-            print("Start signal sent.")
+            print("✅ Start signal sent.")
         elif operation == '2':
             bucket_name = get_bucket_name(influx_client)
             redis_client.publish(f"{bucket_name}/control", 'STOP')
-            print("Stop signal sent.")
+            print("🛑 Stop signal sent.")
         elif operation == '0':
             break
         else:
-            print("Invalid operation. Please input 1, 2 or 0.")
+            print("Invalid operation. Please input 1, 2, or 0.")
     except (Exception, KeyboardInterrupt) as e:
         logger.warning(
-            f"During running the control base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
-            exc_info=True)
+            f"Interrupted: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}. Returning to main menu.",
+            exc_info=True
+        )

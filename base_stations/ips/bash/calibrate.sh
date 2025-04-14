@@ -6,6 +6,7 @@ PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="ips-base"
+CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
 
 is_raspberry_pi() {
     grep -q "ID=debian" /etc/os-release && grep -q "Raspberry Pi" /proc/cpuinfo
@@ -19,17 +20,17 @@ run_py_in_new_tab_mac() {
     CMD=$1
     osascript -e "tell app \"Terminal\" to activate" \
               -e "tell app \"System Events\" to keystroke \"t\" using command down" \
-              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && source activate $CONDA_ENV && $CMD\" in the front window"
+              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && $CONDA_INIT && $CMD\" in the front window"
 }
 
 run_py_in_new_win_lxterminal() {
     CMD=$1
-    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source ~/miniforge3/etc/profile.d/conda.sh; conda activate $CONDA_ENV; $CMD; exec bash\"" &
+    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash\"" &
 }
 
 run_py_in_new_tab_gnome() {
     CMD=$1
-    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
+    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash"
 }
 
 # Run camera calibrator
@@ -43,6 +44,6 @@ elif is_ubuntu; then
 else
     echo "Unknown OS or not supported. Running in current terminal:"
     export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
-    source activate $CONDA_ENV
+    eval "$CONDA_INIT"
     eval "$CMD"
 fi

@@ -6,20 +6,21 @@ PROJECT_DIR="$BASH_DIR/.."
 PYTHON_PATH="$BASH_DIR/../../.."
 
 CONDA_ENV="ips-base"
+CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+
 NUM_CAMERA=2
 NUM_SYNCMANAGER=1
 
 print_usage() {
-    echo "usage: $0 [-nc] $NUM_CAMERA [-ns] $NUM_SYNCMANAGER [-h]"
+    echo "usage: $0 [-nc NUM_CAMERA] [-ns NUM_SYNCMANAGER] [-h]"
     echo ""
     echo "options:"
-    echo "  -nc  NUM_CAMERA             : Number of camera detectors to run (default: 3)"
-    echo "  -ns  NUM_SYNCMANAGER       : Number of sync managers to run (default: 1)"
-    echo "  -h                          : Display this help message"
+    echo "  -nc  NUM_CAMERA         : Number of camera detectors to run (default: 2)"
+    echo "  -ns  NUM_SYNCMANAGER    : Number of sync managers to run (default: 1)"
+    echo "  -h                      : Display this help message"
     exit 1
 }
 
-# Helper functions
 is_number() {
     [[ $1 =~ ^[0-9]+$ ]]
 }
@@ -36,22 +37,22 @@ run_py_in_new_tab_mac() {
     CMD=$1
     osascript -e "tell app \"Terminal\" to activate" \
               -e "tell app \"System Events\" to keystroke \"t\" using command down" \
-              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && source activate $CONDA_ENV && $CMD\" in the front window"
+              -e "tell app \"Terminal\" to do script \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH && $CONDA_INIT && $CMD\" in the front window"
 }
 
 run_py_in_new_win_lxterminal() {
     CMD=$1
-    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source ~/miniforge3/etc/profile.d/conda.sh; conda activate $CONDA_ENV; $CMD; exec bash\"" &
+    lxterminal --command="bash -c \"export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash\"" &
 }
 
 run_py_in_new_tab_gnome() {
     CMD=$1
-    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; source activate $CONDA_ENV; $CMD; exec bash"
+    gnome-terminal --tab -- bash -c "export PYTHONPATH=$PYTHON_PATH/:$PYTHONPATH; $CONDA_INIT; $CMD; exec bash"
 }
 
 # Parse arguments
 i=1
-while [ $i -le $# ];do
+while [ $i -le $# ]; do
     arg="${!i}"
     case "$arg" in
         -nc)
@@ -75,11 +76,15 @@ while [ $i -le $# ];do
         -h)
             print_usage
             ;;
+        *)
+            echo "Invalid option: $arg"
+            print_usage
+            ;;
     esac
     i=$((i+1))
 done
 
-# Validate arguments
+# Validate input
 for arg_name in "NUM_CAMERA" "NUM_SYNCMANAGER"; do
     arg_value="${!arg_name}"
     if ! is_number "$arg_value"; then
@@ -88,7 +93,7 @@ for arg_name in "NUM_CAMERA" "NUM_SYNCMANAGER"; do
     fi
 done
 
-# Display configuration
+# Display config
 echo "Multi-camera Synchronization Configuration:"
 echo "--------------------------------"
 echo "NUM_CAMERA: $NUM_CAMERA"
@@ -98,7 +103,7 @@ echo "--------------------------------"
 # Run camera tag detectors
 CMD="python3 $PROJECT_DIR/examples/run_camera_tag_detector.py"
 if [[ $NUM_CAMERA -gt 0 ]]; then
-    for i in $(seq 1 $((NUM_CAMERA))); do
+    for i in $(seq 1 "$NUM_CAMERA"); do
         if [[ "$OSTYPE" == "darwin"* ]]; then
             run_py_in_new_tab_mac "$CMD"
         elif is_raspberry_pi; then
@@ -106,8 +111,10 @@ if [[ $NUM_CAMERA -gt 0 ]]; then
         elif is_ubuntu; then
             run_py_in_new_tab_gnome "$CMD"
         else
-            echo "Unsupported OS."
-            exit 1
+            echo "Unsupported OS. Running in current terminal..."
+            export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
+            eval "$CONDA_INIT"
+            eval "$CMD"
         fi
     done
 fi
@@ -122,8 +129,10 @@ if [[ $NUM_SYNCMANAGER -gt 0 ]]; then
     elif is_ubuntu; then
         run_py_in_new_tab_gnome "$CMD"
     else
-        echo "Unsupported OS."
-        exit 1
+        echo "Unsupported OS. Running in current terminal..."
+        export PYTHONPATH="$PYTHON_PATH":$PYTHONPATH
+        eval "$CONDA_INIT"
+        eval "$CMD"
     fi
 fi
 

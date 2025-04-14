@@ -57,8 +57,8 @@ class SpeechEnhancer(Server):
                     audio_data = f.read()
                 return send_file(io.BytesIO(audio_data), mimetype="audio/wav"), 200
             except Exception as e:
-                self.logger.error(f"during enhancement, {e} happens.")
-                return jsonify({"error": str(e)}), 500
+                self.logger.error(f"Exception during speech enhancement", exc_info=True)
+                return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
             finally:
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -98,7 +98,7 @@ class SpeechEnhancer(Server):
             processed_audio = torch.cat(output_chunks, dim=1)  # Concatenate and save the processed chunks
             torchaudio.save(input_path, processed_audio, sample_rate=self.nr_model.sample_rate, bits_per_sample=16)
         except Exception as e:
-            raise RuntimeError(f"Error in apply_nr: {e}")
+            raise RuntimeError("Error in apply_nr") from e
         finally:
             torch.cuda.empty_cache()
             gc.collect()

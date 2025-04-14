@@ -60,8 +60,8 @@ class VoiceActivityDetector(Server):
                     # For cases where inplace is False or speech timestamps are not detected
                     return jsonify({"result": result or "None"}), 200
             except Exception as e:
-                self.logger.error(f"during voice activity detector, {e} happens.")
-                return jsonify({"error": str(e)}), 500
+                self.logger.error(f"Exception during voice activity detection", exc_info=True)
+                return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
             finally:
                 torch.cuda.empty_cache()
                 gc.collect()

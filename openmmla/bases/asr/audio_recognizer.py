@@ -54,7 +54,7 @@ class AudioRecognizer:
         """
         config = yaml.safe_load(open(config_path, 'r'))
         self.audio_db = audio_db
-        self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inference'])
+        self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inferer'])
         self.store = store
         print(f"Audio inferer URL: {self.audio_inferer_url}")
 

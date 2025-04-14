@@ -1,4 +1,4 @@
-"""This script runs the camera calibrator."""
+"""This script runs the CameraCalibrator for camera intrinsic calibration."""
 import argparse
 import functools
 import os

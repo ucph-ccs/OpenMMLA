@@ -93,6 +93,7 @@ MQTT:
   host: <mqtt-example-server>
   port: <port-number>
 
+# Redis settings
 Redis:
   # Replace <redis-example-server> with your actual sever address that runs the Redis server, and the <port-number>
   # with the actual port number that Redis server is listening to. Specify a certain database number you want to use for
@@ -107,37 +108,37 @@ Redis:
   port: <port-number>
   db: <database-number>
 
+# Server settings
 Server:
+  # ASR server settings
   # Replace <asr-example-server> with your actual sever address that runs the ASR server or the load balancer
-  # that proxy your ASR requests, and the <port-number> with the port numbers different ASR services listening on
+  # that proxy your ASR requests, and the <port> with the port numbers different ASR services listening on
   # or the port number that the load balancer listening on. The default port for ASR services is infer:5001,
   # resample:5002, enhance:5003, separate:5004, transcribe:5005, vad:5006. The default port for load balancer is 8080.
   # =================================================================================
   # e.g., if your ASR server is run on asr-server.local, and you have a load balancer on uber-server.local that proxy
   # your ASR requests, then the following line could be:
+  # request ASR services from load balancer:
   # asr:
-  #   audio_inference: http://uber-server.local:8080/infer
-  #   audio_resampling: http://uber-server.local:8080/resample
-  #   speech_enhancement: http://uber-server.local:8080/enhance
-  #   speech_separation: http://uber-server.local:8080/separate
-  #   speech_transcription: http://uber-server.local:8080/transcribe
-  #   voice_activity_detection: http://uber-server.local:8080/vad
+  #   audio_inferer: http://uber-server.local:8080/infer
+  #   audio_resampler: http://uber-server.local:8080/resample
+  #   speech_enhancer: http://uber-server.local:8080/enhance
+  #   speech_separator: http://uber-server.local:8080/separate
+  #   speech_transcriber: http://uber-server.local:8080/transcribe
+  #   voice_activity_detector: http://uber-server.local:8080/vad
   #
   # or you can directly request the services from the ASR server:
   # asr:
-  #   audio_inference: http://asr-server.local:5001/infer
-  #   audio_resampling: http://asr-server.local:5002/resample
-  #   speech_enhancement: http://asr-server.local:5003/enhance
-  #   speech_separation: http://asr-server.local:5004/separate
-  #   speech_transcription: http://asr-server.local:5005/transcribe
-  #   voice_activity_detection: http://asr-server.local:5006/vad
+  #   audio_inferer: http://asr-server.local:5001/infer
+  #   audio_resampler: http://asr-server.local:5002/resample
+  #   speech_enhancer: http://asr-server.local:5003/enhance
+  #   speech_separator: http://asr-server.local:5004/separate
+  #   speech_transcriber: http://asr-server.local:5005/transcribe
+  #   voice_activity_detector: http://asr-server.local:5006/vad
   asr:
-    audio_inference: http://<asr-example-server>:<port>/infer
-    audio_resampling: http://<asr-example-server>:<port>/resample
-    speech_enhancement: http://<asr-example-server>:<port>/enhance
-    speech_separation: http://<asr-example-server>:<port>/separate
-    speech_transcription: http://<asr-example-server>:<port>/transcribe
-    voice_activity_detection: http://<asr-example-server>:<port>/vad
-
-  vfa:
-    frame_analyzer: http://<vfa-example-server>:<port>/frame_analyze
+    audio_inferer: http://<asr-example-server>:<port>/infer
+    audio_resampler: http://<asr-example-server>:<port>/resample
+    speech_enhancer: http://<asr-example-server>:<port>/enhance
+    speech_separator: http://<asr-example-server>:<port>/separate
+    speech_transcriber: http://<asr-example-server>:<port>/transcribe
+    voice_activity_detector: http://<asr-example-server>:<port>/vad

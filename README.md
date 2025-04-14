@@ -65,10 +65,8 @@ bash Miniforge3-$(uname)-$(uname -m).sh
 
 ```bash
 # macOS
-brew install ffmpeg portaudio mecab llvm tmux
-echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> ~/.zshrc
-echo 'export LDFLAGS="-L/opt/homebrew/opt/llvm/lib"' >> ~/.zshrc
-echo 'export CPPFLAGS="-I/opt/homebrew/opt/llvm/include"' >> ~/.zshrc
+brew install ffmpeg portaudio tmux
+echo 'export CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"' >> ~/.zshrc
 source ~/.zshrc
 
 # Ubuntu
@@ -79,10 +77,8 @@ tar -zxvf pa_stable_v190700_20210406.tgz
 cd portaudio
 ./configure && make
 sudo make install
-```
 
-#### Debian (Raspberry Pi Bullseye or later)
-```bash
+# Debian (Raspberry Pi Bullseye or later)
 sudo apt update && sudo apt upgrade
 sudo apt install -y build-essential git ffmpeg python3-pyaudio libsndfile1 portaudio19-dev tmux
 ```
@@ -223,13 +219,13 @@ pip install openmmla[vfa-server]
 After installing OpenMMLA and its dependencies, you can set up specific pipelines:
 
 1. **Automatic Speech Recognition (ASR) with Diarization**
-   - See [ASR Pipeline README](base_stations/asr/README.md) for detailed setup and usage instructions.
+   - See [ASR Pipeline](base_stations/asr/README.md) for detailed setup and usage instructions.
 
 2. **Indoor Positioning System (IPS)**
-   - See [IPS Pipeline README](base_stations/ips/README.md) for detailed setup and usage instructions.
+   - See [IPS Pipeline](base_stations/ips/README.md) for detailed setup and usage instructions.
 
 3. **Video Frame Analyzer (VFA)**
-   - See [VFA Pipeline README](base_stations/vfa/README.md) for detailed setup and usage instructions.
+   - See [VFA Pipeline](base_stations/vfa/README.md) for detailed setup and usage instructions.
 
 Each pipeline has specific usage instructions and configuration options detailed in their respective documentation.
 

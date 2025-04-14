@@ -5,7 +5,16 @@ in image), vision captioning (give description about the image), and text classi
 actions into predefined categories.
 
 ## Pipeline Overview
-![video_frame_analyzer](docs/video_frame_analyzer.png)
+<img src="docs/video_frame_analyzer.png" alt="video_frame_analyzer" width="400"/>
+
+The system performs nonverbal behavior analysis using large language models (LLMs) and vision-language models (VLMs), processing image frames every 30 seconds:
+- Image frame capture from base station (vfa-base)
+- AprilTag detection and in-image coordinate calculation
+- Prompt construction for VLM to describe gestures, postures, and interactions
+- VLM output links AprilTag IDs to natural language descriptions
+- Prompt construction for LLM using VLM-generated descriptions
+- LLM classification of actions into predefined behavior categories
+- Output generation in structured <ID, Action> dictionary format
 
 ## Usage Instructions
 
@@ -47,7 +56,7 @@ openmmla <vfa-server-commands> -c <config_file_path>
 # 2. ASR server with multiple workers via gunicorn
 # e.g.,
 # export CONFIG_FILE=config.yml
-# gunicorn -k gevent -w 3 -b 0.0.0.0:5007 openmmla.commands.vfa.vfa_vlm:app
+# gunicorn -k gevent -w 3 -b 0.0.0.0:5007 openmmla.commands.vfa.vllm:app
 export CONFIG_FILE=config.yml
 gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> <path-to-vfa-servers-app>:app
 ```
@@ -56,4 +65,21 @@ gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> <path-to-vfa-servers-ap
 ```bash
 # Edit your own config.yml file, see base_stations/vfa/config_template.yml for more details
 # You can either run it via bash or python
+
+# ===================BASH========================
+# Go to /base_stations/vfa/bash
+# For real-time video frame analyzer
+Usage: ./run.sh [-nb NUM_BASE] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]
+
+options:
+  -nb NUM_BASE         : Number of IPS bases to run (default: 1)
+  -g GRAPHICS          : Enable graphics (default: true)
+  -s STORE             : Enable store (default: false)
+  -v VERBOSE           : Enable verbose mode (default: false)
+  -h                   : Display this help message
+  
+# ==================PYTHON========================
+# For real-time video frame analyzer
+conda activate vfa-base
+openmmla vfa-base -c <config_file_path> # start vfa-base
 ```

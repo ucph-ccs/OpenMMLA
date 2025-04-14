@@ -7,7 +7,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import destroy_model_parallel
 
-from openmmla.services.vfa.video_frame_analyzer import generate_vlm_prompt_msg, generate_llm_prompt_msg, \
+from openmmla.services.vfa.vllm_frame_analyzer import generate_vlm_prompt_msg, generate_llm_prompt_msg, \
     parse_text_to_dict
 from openmmla.utils.video.apriltag import detect_apriltags
 

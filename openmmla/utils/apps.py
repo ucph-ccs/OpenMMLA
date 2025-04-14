@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, request
 
 
 def create_app(class_type, endpoint, method_name, class_args=None, route_args=None):
@@ -6,7 +6,7 @@ def create_app(class_type, endpoint, method_name, class_args=None, route_args=No
 
     Args:
         class_type (class): The class to instantiate (e.g., AudioEnhancer or AudioInferer).
-        endpoint (str): The endpoint name for the Flask route.
+        endpoint (str): The API endpoint name for the Flask route.
         method_name (str): The method name to call on the instantiated class.
         class_args (dict): Additional arguments required to instantiate the class.
         route_args (dict): Arguments needed to define the route function.

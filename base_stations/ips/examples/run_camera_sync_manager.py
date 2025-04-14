@@ -1,4 +1,4 @@
-"""This scripts runs the camera sync manager."""
+"""This scripts runs the CameraSyncManager for the multi-cameras coordinate synchronization."""
 import argparse
 import functools
 import os

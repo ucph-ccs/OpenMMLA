@@ -17,81 +17,86 @@ OPTIONAL_DEP_MAP = {
     "ips-base": "ips-base",
     "ips-sync": "ips-base",
     "ips-vis": "ips-base",
-    "vfa-vlm": "vfa-server",
+    "vfa-base": "vfa-base",
+    "vfa-vllm": "vfa-server",
 }
 
 # List of all available commands
 COMMANDS = {
     "asr-base": (
-        "openmmla.commands.asr.asr_base:main",
-        "Run ASR audio base for speaker recognition and transcription."
+        "openmmla.commands.asr.base:main",
+        "Run ASR base of real-time audio analyzer."
     ),
     "asr-sync": (
-        "openmmla.commands.asr.asr_sync:main",
-        "Run ASR audio synchronizer for synchronizing results from audio bases."
+        "openmmla.commands.asr.sync:main",
+        "Run ASR synchronizer of real-time audio analyzer."
     ),
     "asr-post": (
-        "openmmla.commands.asr.asr_post:main",
+        "openmmla.commands.asr.post:main",
         "Run ASR post-time audio analyser."
     ),
     "asr-infer": (
-        "openmmla.commands.asr.asr_infer:main",
+        "openmmla.commands.asr.infer:main",
         "Start audio inference server."
     ),
     "asr-resample": (
-        "openmmla.commands.asr.asr_resample:main",
+        "openmmla.commands.asr.resample:main",
         "Start audio resampling server."
     ),
     "asr-enhance": (
-        "openmmla.commands.asr.asr_enhance:main",
+        "openmmla.commands.asr.enhance:main",
         "Start speech enhancement server."
     ),
     "asr-separate": (
-        "openmmla.commands.asr.asr_separate:main",
+        "openmmla.commands.asr.separate:main",
         "Start speech separation server."
     ),
     "asr-transcribe": (
-        "openmmla.commands.asr.asr_transcribe:main",
+        "openmmla.commands.asr.transcribe:main",
         "Start speech transcription server."
     ),
     "asr-vad": (
-        "openmmla.commands.asr.asr_vad:main",
+        "openmmla.commands.asr.vad:main",
         "Start voice activity detection server."
     ),
     "ips-ccal": (
-        "openmmla.commands.ips.ips_ccal:main",
-        "Run camera calibrator for calibrating camera's intrinsic parameters."
+        "openmmla.commands.ips.ccal:main",
+        "Run camera calibrator for camera intrinsic calibration."
     ),
     "ips-csync": (
-        "openmmla.commands.ips.ips_csync:main",
-        "Run camera sync manager for synchronizing multi-camera's transformation matrices."
+        "openmmla.commands.ips.csync:main",
+        "Run camera sync manager for multi-cameras coordinate synchronization."
     ),
     "ips-ctag": (
-        "openmmla.commands.ips.ips_ctag:main",
-        "Run camera tag detector for detecting AprilTags."
+        "openmmla.commands.ips.ctag:main",
+        "Run camera tag detector for multi-cameras coordinate synchronization."
     ),
     "ips-base": (
-        "openmmla.commands.ips.ips_base:main",
-        "Run IPS video base for AprilTags detection."
+        "openmmla.commands.ips.base:main",
+        "Run IPS base of real-time indoor positioning system."
     ),
     "ips-sync": (
-        "openmmla.commands.ips.ips_sync:main",
-        "Run IPS video synchronizer for synchronizing results from video bases."
+        "openmmla.commands.ips.sync:main",
+        "Run IPS synchronizer of real-time indoor positioning system."
     ),
     "ips-vis": (
-        "openmmla.commands.ips.ips_vis:main",
-        "Run IPS video visualizer for visualizing the bases results."
+        "openmmla.commands.ips.vis:main",
+        "Run IPS visualizer of real-time indoor positioning system."
     ),
-    "vfa-vlm": (
-        "openmmla.commands.vfa.vfa_vlm:main",
-        "Start vision language model server."
+    "vfa-base": (
+        "openmmla.commands.vfa.base:main",
+        "Run VFA base of real-time video frame analyzer."
+    ),
+    "vfa-vllm": (
+        "openmmla.commands.vfa.vllm:main",
+        "Start multimodal large language model server."
     ),
     "ses-ctl": (
-        "openmmla.commands.session.ses_ctl:main",
-        "Start/stop bucket sessions."
+        "openmmla.commands.ses.ctl:main",
+        "Start/stop bucket session."
     ),
     "ses-ana": (
-        "openmmla.commands.session.ses_ana:main",
-        "Analyze and summarize collected multimodal measurements by session."
+        "openmmla.commands.ses.ana:main",
+        "Start session analysis."
     ),
 }

@@ -1,4 +1,4 @@
-"""This script runs the camera tag detector."""
+"""This script runs the CameraTagDetector for multi-cameras coordinate synchronization."""
 import argparse
 import functools
 import os

@@ -1,6 +1,6 @@
 def __getattr__(name):
-    if name == "VideoFrameAnalyzer":
-        from .video_frame_analyzer import VideoFrameAnalyzer
-        return VideoFrameAnalyzer
+    if name == "VLLMFrameAnalyzer":
+        from .vllm_frame_analyzer import VLLMFrameAnalyzer
+        return VLLMFrameAnalyzer
     else:
         raise AttributeError(f"{name} not found")

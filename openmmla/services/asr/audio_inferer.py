@@ -126,8 +126,8 @@ class AudioInferer(Server):
 
                 return jsonify({"embeddings": embeddings}), 200
             except Exception as e:
-                self.logger.error(f"during inference, {e} happens.")
-                return jsonify({"error": str(e)}), 500
+                self.logger.error(f"Exception during audio inference", exc_info=True)
+                return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
             finally:
                 torch.cuda.empty_cache()
                 gc.collect()

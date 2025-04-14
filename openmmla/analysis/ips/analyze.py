@@ -39,7 +39,7 @@ BADGE_COLOR_MAP = {
 CANDIDATES = [str(i) for i in range(20)]
 
 
-def session_analysis_video(project_dir, bucket_name, influx_client):
+def ips_session_analysis(project_dir, bucket_name, influx_client):
     """Retrieves data from InfluxDB for badge relations, translations, and rotations, and then visualizes them."""
     if not project_dir or not os.path.exists(project_dir):
         print("Warning: project_dir is not set or does not exist. Please set it to a valid directory, set it to current"
@@ -67,7 +67,7 @@ def session_analysis_video(project_dir, bucket_name, influx_client):
     plot_physical_interaction_network(relations_json_file, visualization_dir)
 
     # Analyze across sessions
-    across_sessions_analysis_video(logs_dir, visualizations_dir)
+    ips_across_sessions_analysis(logs_dir, visualizations_dir)
 
 
 def weight_to_width(wt, min_wt=0.0, max_wt=0.5, min_width=1, max_width=20):
@@ -486,7 +486,7 @@ def calculate_physical_interactions(json_file_path):
     return interaction_counts
 
 
-def across_sessions_analysis_video(logs_dir, visualizations_dir):
+def ips_across_sessions_analysis(logs_dir, visualizations_dir):
     """Analyzes and visualizes various movement metrics across multiple sessions using saved log data."""
     session_data = []
 
@@ -509,13 +509,13 @@ def across_sessions_analysis_video(logs_dir, visualizations_dir):
     session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst = zip(*session_data)
 
     # Call plotting functions
-    plot_across_sessions_analysis_video(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, visualizations_dir)
-    plot_across_sessions_analysis_video_interactive(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst,
-                                                    visualizations_dir)
+    plot_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, visualizations_dir)
+    plot_interactive_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst,
+                                                  visualizations_dir)
 
 
-def plot_across_sessions_analysis_video(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
-    """Creates and saves matplotlib plots of various video analysis metrics across different sessions.
+def plot_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
+    """Visualize IPS across sessions analysis with matplotlib.
 
     Args:
         session_names (list): List of session names.
@@ -559,17 +559,17 @@ def plot_across_sessions_analysis_video(session_names, stm_lst, nstm_lst, srm_ls
     ax2_twin.legend(loc='upper right')
 
     # Show plot
-    fig.suptitle("Video Analysis Metrics Across Sessions")
+    fig.suptitle("IPS across sessions analysis")
     fig.tight_layout()
 
-    plt.savefig(os.path.join(save_dir, 'video_analysis_across_sessions.png'), dpi=300)
-    print("Saved video analysis metrics across sessions to video_analysis_across_sessions.png")
+    plt.savefig(os.path.join(save_dir, 'ips_across_sessions_analysis.png'), dpi=300)
+    print("IPS across sessions analysis saved to 'ips_across_sessions_analysis.png'")
 
 
-def plot_across_sessions_analysis_video_interactive(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
-    """Visualize video analysis metrics across sessions with pyecharts."""
+def plot_interactive_ips_across_sessions_analysis(session_names, stm_lst, nstm_lst, srm_lst, nsrm_lst, save_dir):
+    """Visualize IPS across sessions analysis with pyecharts."""
     # Generate visualization page
-    page = Page(page_title="video metrics analysis across sessions", layout=Page.SimplePageLayout)
+    page = Page(page_title="IPS across sessions analysis", layout=Page.SimplePageLayout)
 
     def format_list(data):
         return [f"{x:.4f}" if x is not None else '0' for x in data]
@@ -647,8 +647,8 @@ def plot_across_sessions_analysis_video_interactive(session_names, stm_lst, nstm
 
     page.add(line1)
     page.add(line2)
-    page.render(os.path.join(save_dir, f'video_analysis_across_sessions.html'))
-    print("Saved interactive video analysis metrics across sessions to video_analysis_across_sessions.html")
+    page.render(os.path.join(save_dir, f'ips_across_sessions_analysis.html'))
+    print("IPS across sessions analysis saved to 'ips_across_sessions_analysis.html'")
 
 
 def analyze_translations_log(json_path):

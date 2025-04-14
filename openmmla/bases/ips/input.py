@@ -51,7 +51,7 @@ def get_function_sync_manager(main_id: str, alt_id: str, sync: bool):
             print('Please enter a valid integer')
 
 
-def get_function_base(chosen_camera: str, camera_seed: str, base_id: str, main_id: str):
+def get_function_base(chosen_camera: str, stream_source: str, base_id: str, main_id: str):
     """Get the function to be performed from user input for base."""
     while True:
         try:
@@ -59,7 +59,7 @@ def get_function_base(chosen_camera: str, camera_seed: str, base_id: str, main_i
             print("------------------------------------------------")
             select_fun = input(f"Please input your operation:\n"
                                f"1: start\n"
-                               f"2: set camera (camera:{LIGHT_BLUE}{chosen_camera}{ENDC}, camera seed:{LIGHT_BLUE}{camera_seed}{ENDC}, base:{LIGHT_BLUE}{base_id}{ENDC}, main:{LIGHT_BLUE}{main_id}{ENDC})\n"
+                               f"2: set camera (camera:{LIGHT_BLUE}{chosen_camera}{ENDC}, camera seed:{LIGHT_BLUE}{stream_source}{ENDC}, base:{LIGHT_BLUE}{base_id}{ENDC}, main:{LIGHT_BLUE}{main_id}{ENDC})\n"
                                f"0: exit\n"
                                f"Selected function: ")
 

@@ -56,6 +56,7 @@ MQTT:
   host: <mqtt-example-server>
   port: <port-number>
 
+# Redis settings
 Redis:
   # Replace <redis-example-server> with your actual sever address that runs the Redis server, and the <port-number>
   # with the actual port number that Redis server is listening to. Specify a certain database number you want to use for
