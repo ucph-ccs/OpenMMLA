@@ -3,8 +3,9 @@
 This pipeline provides automatic speech recognition with speaker diarization capabilities. It processes audio streams in real-time to transcribe speech and identify different speakers.
 
 ## Pipeline Overview
-![Real time audio analyzer](docs/real_analyzer_pipeline.png)
-The pipeline processes audio through several stages:
+<img src="docs/real_time_asr_analyzer.png" alt="real_time_asr_analyzer" width="800"/>
+
+The real-time pipeline processes audio through several stages:
 - Audio capture/input from microphones
 - Voice activity detection (VAD) to identify speech segments
 - Speech enhancement to clean audio signals
@@ -12,14 +13,14 @@ The pipeline processes audio through several stages:
 - Speech recognition to transcribe the audio to text
 - Synchronization of results from multiple asr bases
 
-The post-time audio analzyer is similar:
-![Post time audio analyzer](docs/post_analyzer_pipeline.png)
+The post-time analyzer is as follows:
+<img src="docs/post_time_asr_analyzer.png" alt="post_time_asr_analyzer" width="800"/>
 ## Usage Instructions
 
 ### Install Dependencies
 ```bash
-# Install the required dependencies for the ASR pipeline on specific machines (e.g., base stations -> asr-base,
-# asr servers -> asr-server, uber servers -> uber-server)
+# Install the required dependencies for the ASR pipeline on specific machines 
+# (e.g., base stations: asr-base, asr servers: asr-server, uber servers: uber-server)
 conda create -n asr-base -c conda-forge python=3.10.12 -y
 pip install openmmla[asr-base]
 ```
@@ -45,10 +46,10 @@ make all -without=nginx,celery,flask,next # if start without nginx(load balancer
 conda activate asr-server
 
 # Start asr services one by one
-# 1. ASR server with single worker via openmmla command
+# 1. ASR server with single worker via mmla command
 # e.g.,
-# openmmla asr-infer -c config.yml
-openmmla <asr-server-commands> -c <config_file_path>
+# mmla asr-infer -c config.yml
+mmla <asr-server-commands> -c <config_file_path>
  
 # 2. ASR server with multiple workers via gunicorn
 # e.g.,
@@ -94,9 +95,9 @@ options:
 # ==================PYTHON========================
 # For real-time audio analyzer
 conda activate asr-base
-openmmla asr-base -b <base_type> -c <config_file_path> # start asr-base
-openmmla asr-sync -c <config_file_path> # start base synchronizer
+mmla asr-base -b <base_type> -c <config_file_path> # start asr-base
+mmla asr-sync -c <config_file_path> # start base synchronizer
 
 # For post-time audio analyzer
-openmmla asr-post -f <filenames> -c <config_file_path>
+mmla asr-post -f <filenames> -c <config_file_path>
 ```

@@ -4,7 +4,7 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="openmmla ips-ctag",
+        prog="mmla ips-ctag",
         description="Run camera tag detector for multi-cameras coordinate synchronization.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

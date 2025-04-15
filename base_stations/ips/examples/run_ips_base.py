@@ -22,7 +22,7 @@ if __name__ == '__main__':
     add_arg('project_dir', str, project_dir, 'path to the project directory', shortname='-p')
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
     add_arg('graphics', bool, True, 'whether shows graphics', shortname='-g')
-    add_arg('store', bool, False, 'whether records video frames', shortname='-s')
+    add_arg('store', bool, True, 'whether records video frames', shortname='-s')
     add_arg('verbose', bool, False, 'whether prints debug information', shortname='-v')
 
     input_args = parser.parse_args()

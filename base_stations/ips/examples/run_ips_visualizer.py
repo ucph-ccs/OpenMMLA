@@ -20,7 +20,7 @@ if __name__ == "__main__":
     add_arg = functools.partial(add_arguments, argparser=parser)
     add_arg('project_dir', str, project_dir, 'path to the project directory', shortname='-p')
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
-    add_arg("store", bool, False, "whether to store the visualization images in the local directory.", shortname='-s')
+    add_arg("store", bool, True, "whether to store the visualization images in the local directory.", shortname='-s')
 
     input_args = parser.parse_args()
     print_arguments(input_args)

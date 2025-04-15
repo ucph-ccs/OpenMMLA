@@ -5,7 +5,7 @@ in image), vision captioning (give description about the image), and text classi
 actions into predefined categories.
 
 ## Pipeline Overview
-<img src="docs/video_frame_analyzer.png" alt="video_frame_analyzer" width="400"/>
+<img src="docs/video_frame_analyzer.png" alt="video_frame_analyzer" width="800"/>
 
 The system performs nonverbal behavior analysis using large language models (LLMs) and vision-language models (VLMs), processing image frames every 30 seconds:
 - Image frame capture from base station (vfa-base)
@@ -20,8 +20,8 @@ The system performs nonverbal behavior analysis using large language models (LLM
 
 ### Install Dependencies
 ```bash
-# Install the required dependencies for the VFA pipeline on specific machines (e.g., base stations : vfa-base,
-# vfa servers -> vfa-server, uber servers -> uber-server)
+# Install the required dependencies for the VFA pipeline on specific machines 
+# (e.g., base stations: vfa-base, vfa servers: vfa-server, uber servers: uber-server)
 conda create -n vfa-base -c conda-forge python=3.10.12 -y
 pip install openmmla[vfa-base]
 ```
@@ -48,10 +48,10 @@ make all -without=nginx,celery,flask,next # if start without nginx(load balancer
 conda activate vfa-server
 
 # Start vaf services one by one
-# 1. VFA server with single worker via openmmla command
+# 1. VFA server with single worker via mmla command
 # e.g.,
-# openmmla vfa-infer -c config.yml
-openmmla <vfa-server-commands> -c <config_file_path>
+# mmla vfa-infer -c config.yml
+mmla <vfa-server-commands> -c <config_file_path>
  
 # 2. ASR server with multiple workers via gunicorn
 # e.g.,
@@ -81,5 +81,5 @@ options:
 # ==================PYTHON========================
 # For real-time video frame analyzer
 conda activate vfa-base
-openmmla vfa-base -c <config_file_path> # start vfa-base
+mmla vfa-base -c <config_file_path> # start vfa-base
 ```

@@ -92,7 +92,7 @@ These services are primarily required for the **Uber Servers** which acts as the
 - **Redis**: Message broker and cache (Required)
 - **Mosquitto**: MQTT broker for publish/subscribe messaging (Required)
 - **Nginx**: RTMP server and load balancer (Optional)
-- **Dashbaord** NEXT.js frontend & Flask backend server (Optional)
+- **Dashbaord** Next.js frontend & Flask backend server (Optional)
 
 <details>
 <summary>Services Installation</summary>

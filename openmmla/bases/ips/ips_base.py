@@ -24,14 +24,14 @@ class IPSBase(Base):
     logger = get_logger('ips-base')
 
     def __init__(self, project_dir: str | None, config_path: str, graphics: bool = True,
-                 store: bool = False, verbose: bool = False):
+                 store: bool = True, verbose: bool = False):
         """Initialize the IPSBase class.
 
         Args:
             config_path: path to the configuration file
             project_dir: path to the project directory
             graphics: whether to show graphics (default: True)
-            store: whether to store video frames (default: False)
+            store: whether to store the video frames (default: True)
             verbose: whether to enable verbose logging (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)

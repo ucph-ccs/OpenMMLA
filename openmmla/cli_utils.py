@@ -16,7 +16,7 @@ def print_main_help():
     print("\n📦 OpenMMLA CLI\n")
     print("OpenMMLA is a toolkit for multimodal learning analytics, providing various built-in pipelines for "
           "different tasks.\n")
-    print(f"usage: openmmla [-h] [-V] or openmmla COMMAND [options]\n")
+    print(f"usage: mmla [-h] [-V] or mmla COMMAND [options]\n")
     print(f'options: \n'
           f'    -h, --help       show this help message and exit\n'
           f'    -V --version     show version number and exit\n'
@@ -38,7 +38,7 @@ def print_main_help():
                 print(f"  🔹 {name:<24} {desc}")
         print("")
 
-    print("📘 Tip: run `openmmla <command> -h` for detailed usage of a command.\n")
+    print("📘 Tip: run `mmla <command> -h` for detailed usage of a command.\n")
 
 
 def run_cli():

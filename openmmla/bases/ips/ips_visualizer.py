@@ -20,14 +20,14 @@ class IPSVisualizer(Base):
     """IPSVisualizer class for visualizing the tracing badges' real-time positions and relations"""
     logger = get_logger('ips-visualizer')
 
-    def __init__(self, config_path: str, project_dir: str | None = None, store: bool = False,
-                 use_3d: bool = False):
+    def __init__(self, config_path: str, project_dir: str | None = None,
+                 store: bool = True, use_3d: bool = False):
         """Initialize the IPSVisualizer class.
 
         Args:
             config_path: path to the configuration file
             project_dir: path to the project directory
-            store: whether to store the visualization images (default: False)
+            store: whether to store the visualization plots (default: True)
             use_3d: if True, run the 3D visualization; otherwise use 2D visualization
         """
         super().__init__(project_dir=project_dir, config_path=config_path)

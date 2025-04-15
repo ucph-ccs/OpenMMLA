@@ -4,7 +4,7 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="openmmla ips-csync",
+        prog="mmla ips-csync",
         description="Run camera sync manager for multi-cameras coordinate synchronization.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

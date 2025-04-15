@@ -4,7 +4,7 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="openmmla ips-ccal",
+        prog="mmla ips-ccal",
         description="Run camera calibrator for camera intrinsic calibration.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

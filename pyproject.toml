@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openmmla"
-version = "0.1.0"
+version = "0.1.1"
 description = "OpenMMLA: A unified multimedia platform integrating audio and vision modules for analysis and computer aided instruction."
 readme = "README.md"
 authors = [{name = "Zaibei Li", email = "zali@di.ku.dk"}]
@@ -121,6 +121,7 @@ Homepage = "https://github.com/ucph-ccs/openmmla"
 
 [project.scripts]
 openmmla = "openmmla.cli:main"
+mmla = "openmmla.cli:main"
 
 [tool.setuptools]
 packages = ["openmmla"]

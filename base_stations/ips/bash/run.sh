@@ -12,7 +12,7 @@ NUM_BASE=1
 NUM_SYNCHRONIZER=1
 NUM_VISUALIZER=1
 GRAPHICS=true
-STORE=false
+STORE=true
 VERBOSE=false
 
 print_usage() {

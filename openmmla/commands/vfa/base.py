@@ -4,7 +4,7 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="openmmla vfa-base",
+        prog="mmla vfa-base",
         description="Run VFA video base for AprilTags detection.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

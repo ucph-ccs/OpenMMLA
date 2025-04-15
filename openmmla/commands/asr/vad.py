@@ -9,7 +9,7 @@ logger = get_logger(__name__)
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="openmmla asr-vad",
+        prog="mmla asr-vad",
         description="Start voice activity detection server.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

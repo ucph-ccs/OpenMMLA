@@ -4,7 +4,7 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="openmmla ips-vis",
+        prog="mmla ips-vis",
         description="Run IPS visualizer of real-time indoor positioning system.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )

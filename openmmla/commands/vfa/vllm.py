@@ -9,7 +9,7 @@ logger = get_logger(__name__)
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="openmmla vfa-vllm",
+        prog="mmla vfa-vllm",
         description="Start multimodal large language model server.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )
