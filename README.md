@@ -16,10 +16,16 @@ The platform's high-level design consists of three stages: input, processing, an
 ## System Architecture
 
 OpenMMLA consists of several hardware components working together:
-- **Sensors**: wearable devices and distributed environmental sensors for data acquisition. As for wearable devices, we support: 
-   + *Voice-Badge*: [Nicla Vision board](https://docs.arduino.cc/hardware/nicla-vision/) with power supply
-   + *Vision-Badge*: Nicla Vision board with [AprilTag](https://april.eecs.umich.edu/software/apriltag) and power supply
-   + *Regular-Badge*: AprilTag only
+- **Sensors**: wearable devices and distributed environmental sensors for data acquisition: 
+   + Supported wearables:
+      - *AprilTag*: A fiducial marker for camera-based localization and tracking.
+          + *Regular-Badge*: AprilTag only
+      - *Nicla Vision*: Arduino Nicla Vision board with camera and microphone, and Wi-Fi/BLE connectivity.
+          + *Voice-Badge*: [Nicla Vision board](https://docs.arduino.cc/hardware/nicla-vision/) with power supply
+          + *Vision-Badge*: Nicla Vision board with [AprilTag](https://april.eecs.umich.edu/software/apriltag) and power supply
+   + Supported environmental sensors:
+     - *Microphone*: PyAudio USB microphone (Jabra Speak2 75, built-in mic, etc.)
+     - *Camera*: USB camera (Logitech HD C920, etc.)
 - **Base Stations**: microprocessors/PCs that processes various data streams. Each base station runs one or more instances of *Base* and *Synchronizer*, with specific types (e.g., *AudioSynchronizer*) synchronizing data from corresponding *Base* components (e.g., *AudioBase*).
 - **Servers**: powerful PCs that provides centralized services for other devices within distributed environments. Based on functionality, it can be divided into:
    + *Base Servers*: REST servers for AI services (infer, transcribe, vad, vlm... via Flask/FastAPI).
@@ -86,13 +92,13 @@ sudo apt install -y build-essential git ffmpeg python3-pyaudio libsndfile1 porta
 
 ### Required Services 
 
-These services are primarily required for the **Uber Servers** which acts as the central hub:
+These services are essential for the **Uber Servers** which acts as the central hub:
 
-- **InfluxDB**: Time series database for storing measurements data(Required)
-- **Redis**: Message broker and cache (Required)
-- **Mosquitto**: MQTT broker for publish/subscribe messaging (Required)
-- **Nginx**: RTMP server and load balancer (Optional)
-- **Dashbaord** Next.js frontend & Flask backend server (Optional)
+- **InfluxDB** (required): Time series database for storing group segment measurement results  
+- **Redis** (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks)  
+- **Mosquitto** (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*
+- **Nginx** (optional): Load balancer for AI/Algorithm services and RTMP server for streams 
+- **Dashboard** (optional): Next.js frontend & Flask backend server for real/post-time visualizations 
 
 <details>
 <summary>Services Installation</summary>

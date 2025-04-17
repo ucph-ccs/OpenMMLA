@@ -52,11 +52,11 @@ The Nginx configuration is managed through a Jinja2 templating system with three
 ```yaml
 # Example configuration for load balancer
 upstreams:
-  transcribe_service:
-    - name: server-01
+  transcribe:
+    - host: server-01.local
       port: 5000
       weight: 3
-    - name: server-02
+    - host: 192.168.1.12 
       port: 5000
       weight: 3
 

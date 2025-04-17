@@ -20,9 +20,8 @@ class StreamReceiver(ABC):
         Args:
             **kwargs: Configuration parameters for the stream
         """
-        self.source = None  # stream type: 'pyaudio', 'socket', 'cv2'
+        self.source = None  # stream type: 'pyaudio', 'socket', 'cv2', 'rtmp', 'lsl', etc.
         self.stream = None  # stream object from pyaudio, cv2, etc.
-        self.socket = None  # socket object from socket, etc.
         self.buffer = None  # ring buffer for data storage
         self.config = kwargs
 
