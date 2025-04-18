@@ -4,10 +4,12 @@ import struct
 import subprocess
 import threading
 import time
-import wave
 
 import numpy as np
 import pyaudio
+import soundfile as sf
+from pylsl import local_clock
+from pylsl import resolve_byprop, StreamInlet
 
 from openmmla.streams.resampling import resample_audio, ResampleMethod
 from openmmla.utils.logger import get_logger
@@ -39,6 +41,7 @@ RTMP_FORMATS = {
     'int32': 's32le',
     'float32': 'f32le',
 }
+
 RTMP_CODEC = {
     'int16': 'pcm_s16le',
     'int32': 'pcm_s32le',
@@ -47,21 +50,15 @@ RTMP_CODEC = {
 
 
 def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
-    """Write AudioFrame to a wave file.
+    """Write AudioFrame to a wave file. The default format is PCM_16.
 
     Args:
-        output_path (str): The file path where the wave file will be saved.
-        audio_frames (AudioFrame): The audio frames to write.
+        output_path: The file path where the wave file will be saved.
+        audio_frames: The audio frames to write.
     """
     if audio_frames.format not in SUPPORTED_FORMATS:
         raise ValueError(f"Unsupported audio format: {audio_frames.format}")
-    sample_width = SUPPORTED_FORMATS[audio_frames.format]['sample_width']
-
-    with wave.open(str(output_path), 'wb') as wav_file:
-        wav_file.setnchannels(audio_frames.channels)
-        wav_file.setsampwidth(sample_width)
-        wav_file.setframerate(audio_frames.sample_rate)
-        wav_file.writeframes(audio_frames.to_bytes())
+    sf.write(output_path, audio_frames.data, audio_frames.sample_rate)
 
 
 class AudioStream(StreamReceiver):
@@ -71,7 +68,7 @@ class AudioStream(StreamReceiver):
         """Initialize audio stream.
 
         Args:
-            source (str): Stream source type ('pyaudio', 'udp', 'tcp', or 'rtmp')
+            source (str): Stream source type ('pyaudio', 'udp', 'tcp', 'rtmp', 'lsl').
 
         Keyword Args:
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 5.0)
@@ -119,6 +116,12 @@ class AudioStream(StreamReceiver):
             self.rtmp_url = self.require_kwarg(kwargs, 'url', "RTMP source requires a 'url' parameter")
             self.ffmpeg_proc: subprocess.Popen | None = None
 
+        # LSL objects
+        if self.source == 'lsl':
+            self.lsl_name = self.require_kwarg(kwargs, 'lsl_name', "LSL source requires a 'lsl_name' parameter")
+            self.lsl_inlet = None
+            self.lsl_offset = None
+
         # Frame metadata
         self._frame_metadata = {
             'sample_rate': self.rate,
@@ -149,6 +152,8 @@ class AudioStream(StreamReceiver):
             self._initialize_tcp()
         elif self.source == 'rtmp':
             self._initialize_rtmp()
+        elif self.source == 'lsl':
+            self._initialize_lsl()
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
@@ -181,6 +186,8 @@ class AudioStream(StreamReceiver):
             self._cleanup_socket()
         elif self.source == 'rtmp':
             self._cleanup_rtmp()
+        elif self.source == 'lsl':
+            self._cleanup_lsl()
 
         self._last_read_pos = -1
 
@@ -234,8 +241,8 @@ class AudioStream(StreamReceiver):
         """Process collected frames and apply resampling if needed.
 
         Args:
-            frames (list[AudioFrame]): List of AudioFrames to process.
-            target_rate (int, optional): Optional target sample rate for resampling.
+            frames: List of AudioFrames to process.
+            target_rate: Optional target sample rate for resampling.
 
         Returns:
             AudioFrame: Processed AudioFrame or None if no frames available.
@@ -326,6 +333,13 @@ class AudioStream(StreamReceiver):
         except Exception as e:
             raise RuntimeError(f"Error initializing RTMP stream: {e}") from e
 
+    def _initialize_lsl(self):
+        """Initialize lab streaming layer stream."""
+        streams = resolve_byprop('name', self.lsl_name)
+        self.lsl_inlet = StreamInlet(streams[0])
+        self.lsl_offset = time.time() - local_clock()
+        logger.info(f"Subscribe LSL stream: {self.lsl_name}")
+
     def _cleanup_pyaudio(self) -> None:
         """Clean up PyAudio resources."""
         if self.stream:
@@ -349,6 +363,13 @@ class AudioStream(StreamReceiver):
             self.ffmpeg_proc.terminate()
             self.ffmpeg_proc = None
             logger.info("RTMP stream process terminated.")
+
+    def _cleanup_lsl(self):
+        """Clean up lab streaming layer resources."""
+        if self.lsl_inlet:
+            self.lsl_inlet.close_stream()
+        self.lsl_inlet = None
+        self.lsl_offset = None
 
     def _receive_loop(self) -> None:
         """Continuously receive data and store in buffer."""
@@ -406,6 +427,12 @@ class AudioStream(StreamReceiver):
                     return None
                 audio_data = np.frombuffer(data, dtype=self.dtype)
                 timestamp = time.time()
+            elif self.source == 'lsl':
+                chunk, timestamps = self.lsl_inlet.pull_chunk(timeout=1.0, max_samples=self.chunk_size)
+                if not chunk:
+                    return None
+                audio_data = np.array(chunk, dtype=self.dtype)
+                timestamp = (timestamps[0] + self.lsl_offset) if timestamps else time.time()
             else:
                 return None
 

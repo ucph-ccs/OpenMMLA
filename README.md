@@ -20,7 +20,7 @@ OpenMMLA consists of several hardware components working together:
    + Supported wearables:
       - *AprilTag*: A fiducial marker for camera-based localization and tracking.
           + *Regular-Badge*: AprilTag only
-      - *Nicla Vision*: Arduino Nicla Vision board with camera and microphone, and Wi-Fi/BLE connectivity.
+      - *Nicla Vision*: Arduino board with camera and microphone, and Wi-Fi/BLE connectivity.
           + *Voice-Badge*: [Nicla Vision board](https://docs.arduino.cc/hardware/nicla-vision/) with power supply
           + *Vision-Badge*: Nicla Vision board with [AprilTag](https://april.eecs.umich.edu/software/apriltag) and power supply
    + Supported environmental sensors:
@@ -159,65 +159,36 @@ For detailed instructions on setting up the Next.js frontend and Flask backend f
 </details>
 
 ### OpenMMLA Installation
-
-You can install OpenMMLA in two ways:
-
-#### Option 1: Via Git
 ```bash
-# Clone the repository
-git clone https://github.com/ucph-ccs/openmmla.git
+# Step 1: Create a conda environment
+# Create conda environment with specific envs: 
+# e.g., uber-server, asr-base, asr-server, ips-base, vfa-base, vfa-server
+conda create -n <your-env-name> -c conda-forge python=3.10.12 -y
+conda activate <your-env-name>
+
+# Step 2: Install OpenMMLA
+## Option 1: Via GitHub
+git clone https://github.com/ucph-ccs/openmmla.git  # clone the repo
 cd openmmla
+pip install -e .  # base package
+pip install -e .[uber-server] # For uber servers with env `uber-server`
+pip install -e .[asr-base] # For base stations with env `asr-base`
+pip install -e .[asr-server] # For base servers with env `asr-server`
+pip install -e .[ips-base] # For base stations with env `ips-base`
+pip install -e .[vfa-server] # For base servers with env `vfa-server`
 
-# Create conda environment with specific envs 
-# e.g., asr-base, asr-server, ips-base, vfa-server
-conda create -n <your-env-name> -c conda-forge python=3.10.12 -y
-conda activate <your-env-name> 
+## Option 2: Via PyPI
+pip install openmmla  # base package
+pip install openmmla[uber-server] # For uber servers with env `uber-server`
+pip install openmmla[asr-base] # For base stations with env `asr-base` 
+pip install openmmla[asr-server] # For base servers with env `asr-server`
+pip install openmmla[ips-base] # For base stations with env `ips-base`  
+pip install openmmla[vfa-server] # For base servers with env `vfa-server`
 
-# Install base package
-pip install -e .
-
-# Install specific dependencies for specific envs
-# For uber servers with uber-server env
-pip install -e .[uber-server]
-
-# For base stations with asr-base env
-pip install -e .[asr-base] 
-
-# For base servers with asr-server env
-pip install -e .[asr-server]
- 
-# For base stations with ips-base env
-pip install -e .[ips-base]  
-
-# For base servers with vfa-server env
-pip install -e .[vfa-server] 
-```
-
-#### Option 2: Via PyPI
-```bash
-# Create conda environment with specific envs
-# e.g., asr-base, asr-server, ips-base, vfa-server
-conda create -n <your-env-name> -c conda-forge python=3.10.12 -y
-conda activate <your-env-name> 
-
-# Install base package
-pip install openmmla
-
-# Install specific dependencies for specific envs
-# For uber servers with uber-server env
-pip install openmmla[uber-server]
-
-# For base stations with asr-base env
-pip install openmmla[asr-base] 
-
-# For base servers with asr-server env
-pip install openmmla[asr-server]
- 
-# For base stations with ips-base env
-pip install openmmla[ips-base]  
-
-# For base servers with vfa-server env
-pip install openmmla[vfa-server]
+# Step 3: Install additional dependencies
+# If you would like to use lab streaming layer (LSL) for data streaming
+pip install pylsl==1.17.6
+conda install -c conda-forge liblsl=1.16.2
 ```
 
 ### Pipeline Setup

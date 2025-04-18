@@ -2,6 +2,8 @@ import threading
 import time
 
 import cv2
+import numpy as np
+from pylsl import local_clock, StreamInlet, resolve_byprop
 
 from openmmla.streams.resampling import resample_video, ResampleMethod
 from openmmla.utils.logger import get_logger
@@ -18,13 +20,13 @@ class VideoStream(StreamReceiver):
 
     def __init__(self, source: str, **kwargs):
         """Initialize video stream.
-        
+
         Args:
             source (str): Stream source type ('opencv' or 'rtmp')
 
         Keyword Args:
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 0.08)
-            format(str, optional): Video format (default: 'MJPG')
+            format(str, optional): Video format, 'MJPG', 'JPEG', 'raw' (default: 'MJPG')
             resolution(tuple, optional): Tuple of (width, height) (default: (1920, 1080))
             fps(int, optional): Frames per second (default: 30)
             resample_method(ResampleMethod, optional): Resampling method for fps conversion (default: ResampleMethod.VIDEO_AVERAGE)
@@ -47,18 +49,24 @@ class VideoStream(StreamReceiver):
 
         # Stream configuration
         self.buffer_duration = kwargs.get('buffer_duration', 0.08)
-        self.format = kwargs.get('format', 'MJPG')
         self.resolution = kwargs.get('resolution', (1920, 1080))
         self.fps = kwargs.get('fps', 30)
         self.resample_method = kwargs.get('resample_method', ResampleMethod.VIDEO_AVERAGE)
 
         # Source-specific configuration
         if self.source == 'opencv':
+            self.format = kwargs.get('format', 'MJPG')
             self.camera_index = kwargs.get('camera_index', 0)
             self.stream = None
         elif self.source == 'rtmp':
+            self.format = kwargs.get('format', 'MJPG')
             self.rtmp_url = self.require_kwarg(kwargs, 'rtmp_url', "RTMP source requires a 'rtmp_url' parameter")
             self.stream = None
+        elif self.source == 'lsl':
+            self.format = kwargs.get('format', 'raw')
+            self.lsl_name = self.require_kwarg(kwargs, 'lsl_name', "LSL source requires a 'lsl_name'")
+            self.lsl_offset = None
+            self.lsl_inlet: StreamInlet | None = None
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
@@ -69,11 +77,9 @@ class VideoStream(StreamReceiver):
             'format': self.format
         }
 
-        # Calculate buffer size in frames
+        # Buffer
         buffer_frames = int(self.fps * self.buffer_duration)
         self.buffer = RingBuffer(buffer_frames)
-
-        # Last read position tracking
         self._last_read_pos = -1
 
         # Threading control
@@ -83,9 +89,10 @@ class VideoStream(StreamReceiver):
     def start(self) -> None:
         """Start the video stream and begin capturing frames."""
         self.stop()
-
         if self.source in ['opencv', 'rtmp']:
             self._initialize_opencv()
+        elif self.source == 'lsl':
+            self._initialize_lsl()
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
@@ -109,6 +116,8 @@ class VideoStream(StreamReceiver):
 
         if self.source in ['opencv', 'rtmp']:
             self._cleanup_opencv()
+        elif self.source == 'lsl':
+            self._cleanup_lsl()
 
         self._last_read_pos = -1
 
@@ -123,17 +132,31 @@ class VideoStream(StreamReceiver):
         self.stream.set(cv2.CAP_PROP_FPS, self.fps)
         self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 
+    def _initialize_lsl(self) -> None:
+        streams = resolve_byprop('name', self.lsl_name)
+        if not streams:
+            raise RuntimeError(f"LSL stream '{self.lsl_name}' not found")
+        self.lsl_inlet = StreamInlet(streams[0])
+        self.lsl_offset = time.time() - local_clock()
+        logger.info(f"Subscribed to LSL video stream: {self.lsl_name}")
+
     def _cleanup_opencv(self) -> None:
-        """Clean up OpenCV video capture resources."""
+        """Clean up OpenCV stream resources."""
         if self.stream:
             self.stream.release()
             self.stream = None
+
+    def _cleanup_lsl(self) -> None:
+        """Clean up LSL stream resources."""
+        if self.lsl_inlet:
+            self.lsl_inlet.close_stream()
+        self.lsl_inlet = None
+        self.lsl_offset = None
 
     def _receive_loop(self) -> None:
         """Continuously receive frames and store in buffer."""
         frame_count = 0
         start_time = time.time()
-
         logger.info("Starting video stream receive loop.")
 
         while not self._stop_event.is_set():
@@ -141,8 +164,6 @@ class VideoStream(StreamReceiver):
                 frame = self._read_frame()
                 if frame:
                     self.buffer.push(frame)
-
-                    # Calculate and log FPS every 30 frames
                     frame_count += 1
                     if frame_count % 30 == 0:
                         elapsed_time = time.time() - start_time
@@ -150,7 +171,6 @@ class VideoStream(StreamReceiver):
                         logger.debug(f"Video capture FPS: {fps:.2f}")
                         start_time = time.time()
                         frame_count = 0
-
             except Exception as e:
                 logger.error(f"Fatal error in receive loop: {e}")
                 self.stop()
@@ -161,13 +181,40 @@ class VideoStream(StreamReceiver):
         try:
             if self.source in ['opencv', 'rtmp']:
                 grabbed, frame = self.stream.read()
+                timestamp = time.time()
                 if not grabbed:
                     logger.warning("Failed to grab frame")
                     return None
+            elif self.source == 'lsl':
+                sample, timestamp = self.lsl_inlet.pull_sample(timeout=1.0)
+                if not sample:
+                    return None
+
+                if self.format == 'raw':    # raw RGB data
+                    data_array = np.array(sample, dtype=np.float32)
+                    expected_size = self.resolution[0] * self.resolution[1] * 3  # width * height * RGB
+                    if len(data_array) != expected_size:
+                        logger.warning(
+                            f"Received LSL frame with unexpected size: {len(data_array)} (expected {expected_size})")
+                        return None
+                    frame = data_array.reshape((self.resolution[1], self.resolution[0], 3)).astype(np.uint8)
+                elif self.format == 'JPEG':  # JPEG compressed data
+                    data_array = np.array(sample, dtype=np.float32).astype(np.uint8)
+                    try:
+                        frame = cv2.imdecode(data_array, cv2.IMREAD_COLOR)
+                        if frame is None:
+                            logger.warning("Failed to decode JPEG data")
+                            return None
+                    except Exception as e:
+                        logger.error(f"Error decoding JPEG data: {e}", exc_info=True)
+                        return None
+                else:
+                    raise ValueError(f"Unsupported format for LSL source: {self.format}")
+
+                timestamp = (timestamp + self.lsl_offset) if timestamp else time.time()
             else:
                 raise ValueError(f"Unsupported source type: {self.source}")
 
-            timestamp = time.time()
             return VideoFrame(
                 data=frame,
                 timestamp=timestamp,
@@ -175,7 +222,7 @@ class VideoStream(StreamReceiver):
             )
 
         except Exception as e:
-            logger.error(f"Error reading frame: {e}")
+            logger.error(f"Error reading frame: {e}", exc_info=True)
             return None
 
     def read(self, duration: float = None, target_fps: float = None, timeout: float = 10.0,
