@@ -12,10 +12,10 @@ Base:
   fps: 30                                           # Frames per second of the image capture
 
   # VideoStream settings
-  source: opencv                                    # VideoStream source type (opencv/rtmp)
+  source: opencv                                    # VideoStream source type (opencv/rtmp/lsl)
   stream_kwargs:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
-    format: MJPG                                    # Video format (e.g., MJPG, H264)
+    format: MJPG                                    # Source format (e.g., MJPG, H264, JPEG, raw)
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
 
 # RTMP streams settings

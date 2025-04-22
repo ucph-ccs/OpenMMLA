@@ -160,13 +160,13 @@ For detailed instructions on setting up the Next.js frontend and Flask backend f
 
 ### OpenMMLA Installation
 ```bash
-# Step 1: Create a conda environment
-# Create conda environment with specific envs: 
-# e.g., uber-server, asr-base, asr-server, ips-base, vfa-base, vfa-server
-conda create -n <your-env-name> -c conda-forge python=3.10.12 -y
-conda activate <your-env-name>
+# Step 1: Create conda environments
+# Create specific conda envs for different components: 
+# env-name: uber-server, asr-base, asr-server, ips-base, vfa-base, vfa-server
+conda create -n <env-name> -c conda-forge python=3.10.12 -y
+conda activate <env-name>
 
-# Step 2: Install OpenMMLA
+# Step 2: Install OpenMMLA and components dependencies
 ## Option 1: Via GitHub
 git clone https://github.com/ucph-ccs/openmmla.git  # clone the repo
 cd openmmla
@@ -186,7 +186,7 @@ pip install openmmla[ips-base] # For base stations with env `ips-base`
 pip install openmmla[vfa-server] # For base servers with env `vfa-server`
 
 # Step 3: Install additional dependencies
-# If you would like to use lab streaming layer (LSL) for data streaming
+# If you would like to use lab streaming layer (LSL) as stream source
 pip install pylsl==1.17.6
 conda install -c conda-forge liblsl=1.16.2
 ```

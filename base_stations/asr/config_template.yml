@@ -13,7 +13,7 @@ Badge:
   rms_threshold: 1000               # Root Mean Square amplitude value threshold for VAD preprocessing
   rms_peak_threshold: 5000          # Peak amplitude value threshold for VAD preprocessing
   gain: 10                          # Volume gain multiplier in decibels for audio preprocessing
-  source: udp                       # AudioStream source type (udp/tcp/pyaudio/rtmp)
+  source: udp                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl)
   port_offset: 50000                # Port offset for udp/tcp streams
   stream_kwargs:                    # Additional stream settings
     channels: 1                     # Number of audio channels (1 for mono, 2 for stereo)
