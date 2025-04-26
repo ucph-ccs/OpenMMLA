@@ -32,7 +32,6 @@ def detect_apriltags(image_input, tag_detector, normalize=True, render=True, sho
         - PIL.Image.Image or None: The rendered PIL image if render=True, otherwise None.
     """
     tag_pos = {}
-    rendered_image = None
     image = load_image(image_input)
 
     height, width, _ = image.shape
@@ -44,8 +43,10 @@ def detect_apriltags(image_input, tag_detector, normalize=True, render=True, sho
     # Convert OpenCV image (BGR) to PIL image (RGB)
     image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     
+    # Initialize rendered_image to a copy of the original image
+    rendered_image = image_pil.copy()
+    
     if render:
-        rendered_image = image_pil.copy()
         draw = ImageDraw.Draw(rendered_image)
         
         for tag in tags:
@@ -96,10 +97,10 @@ def detect_apriltags(image_input, tag_detector, normalize=True, render=True, sho
             print(f"Tag ID {tag.tag_id} center position: [{x}, {y}]")
             tag_pos[tag.tag_id] = [x, y]
 
-    if show and rendered_image:
+    if show and render:
         rendered_image.show()
 
-    if save and rendered_image:
+    if save and render:
         if isinstance(image_input, str):
             dirname, filename = os.path.split(image_input)
             name, ext = os.path.splitext(filename)

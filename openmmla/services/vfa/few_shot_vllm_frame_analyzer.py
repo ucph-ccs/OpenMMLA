@@ -1,25 +1,24 @@
 import json
+import os
 import re
 from io import BytesIO
 
 import torch
 from flask import request, jsonify
 from openai import OpenAI
-from pupil_apriltags import Detector
 from retinaface import RetinaFace
 
 from openmmla.services.server import Server
-from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze
 from openmmla.utils.video.image import encode_image_base64
 
 
-class VLLMFrameAnalyzer(Server):
-    """VLLM frame analyzer analyzes the image with multimodal language model (VLMs and LLMs) and predicts individuals'
-    action recognition results mapped with AprilTag IDs."""
+class FewShotVLLMFrameAnalyzer(Server):
+    """VLLM frame analyzer with few-shot learning capabilities. Analyzes images with multimodal language model
+    (VLMs and LLMs) to identify AprilTags and predict individuals' action recognition results."""
 
     def __init__(self, project_dir: str | None, config_path: str):
-        """Initialize the VLM frame analyzer.
+        """Initialize the Few-Shot VLM frame analyzer.
 
         Args:
             project_dir: path to the project directory
@@ -29,15 +28,19 @@ class VLLMFrameAnalyzer(Server):
 
         self._setup_yaml()
         self._setup_objects()
+        self._load_apriltag_examples()
 
     def _setup_yaml(self):
         analyzer_config = self.config['VLLMFrameAnalyzer']  # type: ignore
 
-        self.families = analyzer_config['families']
         self.backend = analyzer_config['backend']
         self.top_p = float(analyzer_config['top_p'])
         self.temperature = float(analyzer_config['temperature'])
         self.end_to_end = analyzer_config.get('end_to_end', False)
+        self.apriltag_examples_dir = analyzer_config.get('apriltag_examples_dir', 'data/apriltag_examples')
+
+        if not os.path.isabs(self.apriltag_examples_dir):
+            self.apriltag_examples_dir = os.path.join(self.project_dir, self.apriltag_examples_dir)
 
         if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek']:
             backend_config = analyzer_config[self.backend]
@@ -64,10 +67,10 @@ class VLLMFrameAnalyzer(Server):
         self.logger.info(f"LLM Model: {self.llm_model}")
         self.logger.info(f"VLM Base URL: {self.vlm_base_url}")
         self.logger.info(f"LLM Base URL: {self.llm_base_url}")
+        self.logger.info(f"AprilTag Examples Dir: {self.apriltag_examples_dir}")
         self.logger.info(f"End-to-End: {self.end_to_end}")
 
     def _setup_objects(self):
-        self.detector = Detector(families=self.families, nthreads=4)
         self.face_detector = RetinaFace.detect_faces
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         try:
@@ -95,8 +98,43 @@ class VLLMFrameAnalyzer(Server):
             base_url=self.llm_base_url,
         )
 
+    def _load_apriltag_examples(self):
+        """Load AprilTag examples from the specified directory."""
+        self.apriltag_examples = []
+
+        if not os.path.exists(self.apriltag_examples_dir):
+            self.logger.warning(f"AprilTag examples directory not found: {self.apriltag_examples_dir}")
+            return
+
+        try:
+            # Look for image files and extract tag IDs from filenames
+            for filename in os.listdir(self.apriltag_examples_dir):
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    # Expected filename format: tag_<id>.<ext>
+                    match = re.match(r'tag_(\d+)\.\w+', filename.lower())
+                    if match:
+                        tag_id = match.group(1)
+                        filepath = os.path.join(self.apriltag_examples_dir, filename)
+
+                        try:
+                            with open(filepath, 'rb') as f:
+                                image_bytes = f.read()
+                                img_base64 = encode_image_base64(image_bytes)
+
+                            self.apriltag_examples.append({
+                                'tag_id': tag_id,
+                                'image': img_base64
+                            })
+                            self.logger.info(f"Loaded AprilTag example for tag ID {tag_id}")
+                        except Exception as e:
+                            self.logger.error(f"Error loading AprilTag example image {filename}: {e}")
+
+            self.logger.info(f"Loaded {len(self.apriltag_examples)} AprilTag examples")
+        except Exception as e:
+            self.logger.error(f"Error loading AprilTag examples: {e}")
+
     def process_request(self):
-        """Process the image with full rendering pipeline."""
+        """Process the image with few-shot learning approach."""
         if 'image' not in request.files:
             return jsonify({'error': 'No image file provided'}), 400
 
@@ -107,20 +145,6 @@ class VLLMFrameAnalyzer(Server):
 
             self.logger.info(f"Starting analysis for {base_id}...")
 
-            # Step 1: Detect AprilTags and render them on the image
-            tag_positions, apriltag_image = detect_apriltags(
-                image_bytes,
-                self.detector,
-                normalize=True,
-                render=True,
-                show=False,
-                save=False
-            )
-
-            if apriltag_image:
-                image_bytes = pil_image_to_bytes(apriltag_image)
-
-            # Step 2: Detect gaze on the AprilTag rendered image if gaze detection is available
             if self.gazelle_model and self.gazelle_transform:
                 device = self.device if self.device is not None else 'cpu'
                 gaze_results, rendered_image = detect_gaze(
@@ -132,7 +156,7 @@ class VLLMFrameAnalyzer(Server):
                     normalize_bbox=True,
                     normalize_target=True,
                     render=True,
-                    show=False,
+                    show=True,
                     inout_thresh=0.5,
                     render_heatmap=False,
                     save=False
@@ -145,10 +169,9 @@ class VLLMFrameAnalyzer(Server):
             if self.end_to_end:
                 # End-to-end approach: VLM does both observation and classification
                 system_message = self._create_system_prompt()
-                messages = self._create_end_to_end_messages(image_b64, system_message)
-                vlm_response = self._process_with_vlm(messages)
+                vlm_messages = self._create_end_to_end_messages(image_b64, system_message)
+                vlm_response = self._process_with_vlm(vlm_messages)
 
-                # Extract observations, classifications, and justifications
                 result = {
                     'observations': vlm_response.get('observations', {}),
                     'classifications': vlm_response.get('classifications', {}),
@@ -159,8 +182,6 @@ class VLLMFrameAnalyzer(Server):
                 system_message = self._create_system_prompt()
                 vlm_messages = self._create_vlm_messages(image_b64, system_message)
                 vlm_response = self._process_with_vlm(vlm_messages)
-
-                # Process with LLM for text classification
                 llm_messages = self._create_llm_messages(vlm_response)
                 llm_result = self._process_with_llm(llm_messages)
 
@@ -181,29 +202,24 @@ class VLLMFrameAnalyzer(Server):
         """Create plain text system prompt without images."""
         if self.end_to_end:
             system_content = (
-                "You are an expert image analyst for lab experiments. Focus specifically on two key elements: "
-                "1) Gaze direction (shown by colored lines) and 2) Hand interactions with objects. "
-                "Base all observations ONLY on what is directly visible in the image."
+                "You are an expert multimodal assistant for lab experiments. Your tasks are to:"
+                "\n1. Analyze images focusing on gaze direction (colored lines) and hand interactions with objects."
+                "\n2. Identify AprilTags based on provided visual examples."
+                "\n3. Classify actions based on gaze, hand interactions, and predefined categories."
+                "\nBase all observations and classifications ONLY on what is directly visible in the image."
             )
         else:
             system_content = (
-                "You are an expert in analyzing images with focus on two specific elements: "
-                "1) Gaze direction (shown by colored lines) and 2) Hand interactions with objects. "
+                "You are an expert image analyst focusing on gaze direction and hand interactions. "
+                "Identify AprilTags based on provided visual examples. "
                 "Describe ONLY what is directly visible with absolute certainty."
             )
 
         return system_content
 
     def _create_end_to_end_messages(self, img_base64, system_message):
-        """Generate a prompt message for end-to-end approach with the rendered image.
-        
-        Args:
-            img_base64: Base64 encoded image string
-            system_message: System prompt content
-            
-        Returns:
-            list: Messages for the VLM
-        """
+        """Create end-to-end messages with AprilTag examples before task description and emphasis on gaze endpoints."""
+
         user_text = (
             "# Lab Image Analysis\n\n"
             "### Visual Elements in Image:\n"
@@ -211,19 +227,39 @@ class VLLMFrameAnalyzer(Server):
             "- Colored boxes around faces: These indicate detected faces.\n"
             "- Colored lines from faces: These show EXACT gaze direction (where someone is looking).\n"
             "- 'in: X.XX' values: These indicate the confidence that the person is looking at something inside the frame.\n\n"
+        )
+
+        # Create user message content
+        user_content = [{"type": "text", "text": user_text}]
+
+        # Add AprilTag examples and images (if available)
+        if hasattr(self, 'apriltag_examples') and self.apriltag_examples:
+            apriltag_intro = "### AprilTag Reference Examples:\nBelow are examples of AprilTags with their corresponding IDs. Study these patterns carefully to identify similar tags in the main image:\n\n"
+            user_content.append({"type": "text", "text": apriltag_intro})
+
+            for example in self.apriltag_examples:
+                example_text = f"Tag ID {example['tag_id']}: Study this pattern carefully."
+                user_content.append({"type": "text", "text": example_text})
+                user_content.append({"type": "image_url", "image_url": {"url": example['image'], "detail": "high"}})
+
+        # Add task description
+        task_instructions = (
+            "\n### CRITICAL TASK:\n"
+            "1. First, identify all AprilTags in the image by comparing them with the example AprilTags provided above.\n"
+            "2. Match each AprilTag ID to the person wearing it.\n"
+            "3. For each identified person, analyze their gaze and hand interactions.\n\n"
 
             "### CRITICAL INTERPRETATION RULES:\n"
             "1. GAZE ENDPOINT FOCUS: Pay EXTREME attention to the EXACT ENDPOINT of colored gaze lines - specifically what object or area the line TERMINATES ON. This endpoint is the precise target of the person's attention.\n"
             "2. If a person has NO colored line extending from their face, or their 'in' probability is low (below 0.5), "
-            "this means they are NOT looking at anything within the frame. This person should be classified as 'Distracted' "
-            "or similar category as they are not attending to anything visible in the scene.\n"
+            "this means they are NOT looking at anything within the frame. This person should be classified as 'Distracted'.\n"
             "3. The presence of a colored line indicates the person is looking at something within the frame - focus on the ENDPOINT of the line to determine the exact object they're looking at.\n"
             "4. Higher 'in' probability values (closer to 1.0) indicate higher confidence that the person is attending to "
             "something within the frame.\n\n"
 
             "### 1. Describe each person by their AprilTag ID number\n"
-            "For each person with a visible AprilTag ID number, provide comprehensive observations.\n"
-            "For anyone without a visible AprilTag ID number, label them as \"Untagged Person 1\", \"Untagged Person 2\", etc.\n\n"
+            "For each person with a visible AprilTag, compare the AprilTag with the examples shown previously to determine the person's correct ID number.\n"
+            "For anyone without a visible AprilTag, label them as \"Untagged Person 1\", \"Untagged Person 2\", etc.\n\n"
 
             "### 2. For each person, describe ONLY these elements:\n"
             "- **Gaze Focus**: MOST CRITICAL - Describe the EXACT OBJECT or AREA where the colored gaze line ENDS (the target). Name the specific object the endpoint of the line touches. If NO gaze line is visible or 'in' probability is low, explicitly state that the person is not looking at anything within the frame.\n"
@@ -273,34 +309,55 @@ class VLLMFrameAnalyzer(Server):
             "}\n"
             "```"
         )
+        user_content.append({"type": "text", "text": task_instructions})
+
+        # Add separator and main analysis task text
+        user_content.append({"type": "text", "text": "\n### MAIN IMAGE TO ANALYZE:"})
+
+        # Add main analysis image
+        user_content.append({"type": "image_url", "image_url": {"url": img_base64, "detail": "high"}})
 
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_text},
-                {"type": "image_url", "image_url": {"url": img_base64, "detail": "high"}}
-            ]}
+            {"role": "user", "content": user_content}
         ]
 
         return messages
 
     def _create_vlm_messages(self, img_base64, system_message):
-        """Generate a prompt message for VLM with the rendered image.
-        
-        Args:
-            img_base64: Base64 encoded image string
-            system_message: System prompt content
-            
-        Returns:
-            list: Messages for the VLM
-        """
-        user_text = (
-            "# Lab Image Analysis\n\n"
+        """Create VLM messages with AprilTag examples before task description and emphasis on gaze endpoints."""
+
+        # Basic introduction
+        user_text = "# Lab Image Analysis\n\n"
+
+        # Visual elements explanation
+        user_text += (
             "### Visual Elements in Image:\n"
             "- Black squares with white numbers: These are AprilTags. Each person has a unique ID tag.\n"
             "- Colored boxes around faces: These indicate detected faces.\n"
             "- Colored lines from faces: These show EXACT gaze direction (where someone is looking).\n"
             "- 'in: X.XX' values: These indicate the confidence that the person is looking at something inside the frame.\n\n"
+        )
+
+        # Create user message content
+        user_content = [{"type": "text", "text": user_text}]
+
+        # Add AprilTag examples and images (if available)
+        if hasattr(self, 'apriltag_examples') and self.apriltag_examples:
+            apriltag_intro = "### AprilTag Reference Examples:\nBelow are examples of AprilTags with their corresponding IDs. Study these patterns carefully to identify similar tags in the main image:\n\n"
+            user_content.append({"type": "text", "text": apriltag_intro})
+
+            for example in self.apriltag_examples:
+                example_text = f"Tag ID {example['tag_id']}: Study this pattern carefully."
+                user_content.append({"type": "text", "text": example_text})
+                user_content.append({"type": "image_url", "image_url": {"url": example['image'], "detail": "high"}})
+
+        # Add task description
+        task_instructions = (
+            "\n### CRITICAL TASK:\n"
+            "1. First, identify all AprilTags in the image by comparing them with the example AprilTags provided above.\n"
+            "2. Match each AprilTag ID to the person wearing it.\n"
+            "3. For each identified person, analyze their gaze and hand interactions.\n\n"
 
             "### CRITICAL INTERPRETATION RULES:\n"
             "1. GAZE ENDPOINT FOCUS: Pay EXTREME attention to the EXACT ENDPOINT of colored gaze lines - specifically what object or area the line TERMINATES ON. This endpoint is the precise target of the person's attention.\n"
@@ -311,8 +368,8 @@ class VLLMFrameAnalyzer(Server):
             "something within the frame.\n\n"
 
             "### 1. Describe each person by their AprilTag ID number\n"
-            "For each person with a visible AprilTag ID number, provide comprehensive observations.\n"
-            "For anyone without a visible AprilTag ID number, label them as \"Untagged Person 1\", \"Untagged Person 2\", etc.\n\n"
+            "For each person with a visible AprilTag, compare the AprilTag with the examples shown previously to determine the person's correct ID number.\n"
+            "For anyone without a visible AprilTag, label them as \"Untagged Person 1\", \"Untagged Person 2\", etc.\n\n"
 
             "### 2. For each person, describe ONLY these elements:\n"
             "- **Gaze Focus**: MOST CRITICAL - Describe the EXACT OBJECT or AREA where the colored gaze line ENDS (the target). Name the specific object the endpoint of the line touches. If NO gaze line is visible or 'in' probability is low, explicitly state that the person is not looking at anything within the frame.\n"
@@ -347,20 +404,24 @@ class VLLMFrameAnalyzer(Server):
             "}\n"
             "```"
         )
+        user_content.append({"type": "text", "text": task_instructions})
 
-        vlm_messages = [
+        # Add separator and main analysis task text
+        user_content.append({"type": "text", "text": "\n### MAIN IMAGE TO ANALYZE:"})
+
+        # Add main analysis image
+        user_content.append({"type": "image_url", "image_url": {"url": img_base64, "detail": "high"}})
+
+        # Create complete message
+        messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_text},
-                {"type": "image_url", "image_url": {"url": img_base64, "detail": "high"}}
-            ]}
+            {"role": "user", "content": user_content}
         ]
 
-        return vlm_messages
+        return messages
 
     def _create_llm_messages(self, vlm_response):
-        """Generate a prompt message for LLM, asking the LLM to categorize actions based strictly on the provided
-        description.
+        """Create messages for LLM classification based on VLM observations.
         
         Args:
             vlm_response: Response from the VLM containing observations
@@ -385,7 +446,7 @@ class VLLMFrameAnalyzer(Server):
 
             "### 3. Classification Rules:\n"
             "- Give GREATER WEIGHT to these two critical factors, in order of importance:\n"
-            "  1. Gaze focus - specifically the endpoint of the gaze line and what object it touches\n"
+            "  1. Gaze focus - where the gaze line points (or if it's absent)\n"
             "  2. Hand interactions - what objects hands are touching\n"
             "- ABSOLUTELY CRITICAL: If a person has NO gaze line or their 'in' probability is low (below 0.5), classify them as 'Distracted' "
             "  as they are not looking at anything within the frame\n"
@@ -400,7 +461,7 @@ class VLLMFrameAnalyzer(Server):
             "    \"43\": \"Distracted\"\n"
             "  },\n"
             "  \"justifications\": {\n"
-            "    \"12\": \"Classified as 'Working-Software' because gaze line endpoint touches directly on computer screen (in: 0.92) and hands are described as actively interacting with keyboard and mouse\",\n"
+            "    \"12\": \"Classified as 'Working-Software' because gaze line shows direct attention to computer screen (in: 0.92) and hands are described as actively interacting with keyboard and mouse\",\n"
             "    \"43\": \"Classified as 'Distracted' because the low in probability (0.21) and absence of gaze line indicate the person is not attending to anything visible in the frame\"\n"
             "  }\n"
             "}\n"

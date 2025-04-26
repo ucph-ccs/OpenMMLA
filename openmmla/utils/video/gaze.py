@@ -58,7 +58,6 @@ def detect_gaze(
         - Image.Image | None: The rendered PIL image if render=True, otherwise None.
     """
     gaze_results: List[Dict[str, Any]] = []
-    rendered_image: Optional[Image.Image] = None
 
     try:
         # 1. Load Image - assuming load_image returns numpy array (H, W, C) BGR by default
@@ -69,6 +68,10 @@ def detect_gaze(
         # Convert to RGB for PIL and RetinaFace if needed
         np_image_rgb = cv2.cvtColor(np_image_bgr, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(np_image_rgb)
+        
+        # Initialize rendered_image to a copy of the original image
+        rendered_image = pil_image.copy().convert("RGBA")
+        
         height, width, _ = np_image_rgb.shape
 
         if width == 0 or height == 0:
@@ -79,7 +82,7 @@ def detect_gaze(
 
         if not isinstance(faces_resp, dict) or not faces_resp:
             print("No faces detected or unexpected face detector response.")
-            return gaze_results, None
+            return gaze_results, rendered_image
 
         face_bboxes_pixels = [details['facial_area'] for key, details in faces_resp.items()]
         valid_face_indices: List[int] = []
@@ -102,7 +105,7 @@ def detect_gaze(
 
         if not norm_face_bboxes_tl:
             print("No valid face bboxes found after filtering.")
-            return gaze_results, None
+            return gaze_results, rendered_image
 
         # 3. Prepare Gazelle Input (using PIL image)
         img_tensor = gazelle_transform(pil_image).unsqueeze(0).to(device)
@@ -159,7 +162,6 @@ def detect_gaze(
 
         # 6. Render Visualization
         if render:
-            rendered_image = pil_image.copy().convert("RGBA")
             draw = ImageDraw.Draw(rendered_image)
             colors = ['lime', 'tomato', 'cyan', 'fuchsia', 'yellow']
             font_size = max(int(min(width, height) * 0.025), 40)
@@ -260,8 +262,7 @@ def detect_gaze(
                               fill=color, width=max(int(min(width, height) * 0.003), 2))
 
             if show:
-                if rendered_image:
-                    rendered_image.show(title="Gaze Detection Results")
+                rendered_image.show(title="Gaze Detection Results")
 
             if save:
                 if not save_path:
@@ -272,17 +273,14 @@ def detect_gaze(
                         save_path = os.path.join(dirname, f"{name}_gaze_detected{ext}")
                     else:
                         raise ValueError("save_path must be provided when saving image from bytes")
-                if rendered_image:
-                    try:
-                        # Convert RGBA to RGB before saving as JPEG
-                        if rendered_image.mode == 'RGBA':
-                            rendered_image = rendered_image.convert('RGB')
-                        rendered_image.save(save_path)
-                    except Exception as e:
-                        print(f"Error during image save: {e}")
-                    print(f"Gaze detection image saved to {save_path}")
-                else:
-                    print("Warning: Rendering was enabled but no image was generated to save.")
+                try:
+                    # Convert RGBA to RGB before saving as JPEG
+                    if rendered_image.mode == 'RGBA':
+                        rendered_image = rendered_image.convert('RGB')
+                    rendered_image.save(save_path)
+                except Exception as e:
+                    print(f"Error during image save: {e}")
+                print(f"Gaze detection image saved to {save_path}")
 
     except FileNotFoundError:
         print(f"Error: Image file not found at {image_input}")

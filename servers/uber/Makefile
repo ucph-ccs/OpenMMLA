@@ -2,6 +2,7 @@
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
+CONDA_BASE := $(shell conda info --base)
 IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
 
 # extract command and arguments
@@ -101,14 +102,14 @@ flask:
 	@echo "🔁 Starting Flask"
 	tmux new-session -d -s flask -n flask bash
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
-	tmux send-keys -t flask 'source activate $(ENV_NAME)' C-m
+	tmux send-keys -t flask 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
 	tmux send-keys -t flask 'gunicorn -k gevent -w 1 -b 0.0.0.0:5000 dashboard:app' C-m
 
 celery:
 	@echo "🔁 Starting Celery worker"
 	tmux new-session -d -s celery -n celery bash
 	tmux send-keys -t celery 'cd dashboard/flask-backend' C-m
-	tmux send-keys -t celery 'source activate $(ENV_NAME)' C-m
+	tmux send-keys -t celery 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
 	tmux send-keys -t celery 'celery -A dashboard.celery worker --loglevel=info' C-m
 
 # ======= Utility =======

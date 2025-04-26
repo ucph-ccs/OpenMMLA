@@ -7,7 +7,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import destroy_model_parallel
 
-from openmmla.services.vfa.vllm_frame_analyzer import generate_vlm_prompt_msg, generate_llm_prompt_msg, \
+from openmmla.services.vfa.vllm_frame_analyzer import _create_vlm_messages, _create_llm_messages, \
     parse_text_to_dict
 from openmmla.utils.video.apriltag import detect_apriltags
 
@@ -22,7 +22,7 @@ vlm_tokenizer = AutoTokenizer.from_pretrained(vlm_model_name, trust_remote_code=
 vlm = LLM(model=vlm_model_name, trust_remote_code=True, gpu_memory_utilization=1, max_model_len=2048,
           enforce_eager=True)
 
-vlm_messages = generate_vlm_prompt_msg(id_positions)
+vlm_messages = _create_vlm_messages(id_positions)
 image = Image.open(image_path).convert("RGB")
 vlm_prompt = vlm_tokenizer.apply_chat_template(vlm_messages, tokenize=False, add_generation_prompt=True)
 vlm_inputs = {
@@ -69,7 +69,7 @@ action_definitions = '''
 'Unfocused': when a person is engaging with a mobile phone in ways that suggest leisure or distraction, like scrolling through social media, texting, or playing games.\n
 'Unclear': you are not confident to categorize them into any of the above action classes.\n
 '''
-llm_messages = generate_llm_prompt_msg(image_description, action_definitions)
+llm_messages = _create_llm_messages(image_description, action_definitions)
 llm_prompt = llm_tokenizer.apply_chat_template(llm_messages, tokenize=False, add_generation_prompt=True)
 llm_sampling_params = SamplingParams(temperature=0, top_p=0.1, max_tokens=1024)
 llm_outputs = llm.generate(llm_prompt, llm_sampling_params)

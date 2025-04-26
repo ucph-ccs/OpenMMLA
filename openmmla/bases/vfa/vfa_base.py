@@ -160,7 +160,7 @@ class VFABase(Base):
 
         self.base_id = get_id()
         self.camera_configured = True
-        print(f'\033]0;VFA Base {self.base_id}\007')
+        print(f'\033]0;VFA Base {self.base_id}, Camera {self.selected_source}\007')
 
     def _configure_camera_params(self):
         """Configure camera intrinsic parameters."""
@@ -258,7 +258,7 @@ class VFABase(Base):
         self.video_stream.stop()
         self.mqtt_client.loop_stop()
         if self.graphics:
-            cv2.destroyWindow(f'VFA Camera {self.base_id}')
+            cv2.destroyWindow(f'VFA Base {self.base_id}, Camera {self.selected_source}')
             cv2.waitKey(1)
         self.threads.clear()
 
@@ -285,7 +285,7 @@ class VFABase(Base):
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 cv2.putText(display_frame, timestamp, (display_frame.shape[1] - 300, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.imshow(f'VFA Camera {self.base_id}', display_frame)
+                cv2.imshow(f'VFA Base {self.base_id}, Camera {self.selected_source}', display_frame)
 
             if current_time - last_saved_time >= self.interval:
                 acquired_time = video_frame.timestamp
