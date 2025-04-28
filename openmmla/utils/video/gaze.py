@@ -1,15 +1,12 @@
 """This module contains utility functions to detect faces and estimate gaze using Gazelle."""
-import math
-from io import BytesIO
-from typing import List, Dict, Any, Optional, Tuple
+import os
+from typing import Any
 
+import cv2
+import matplotlib.cm as cm
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
-from retinaface import RetinaFace
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import cv2
 
 from .image import load_image
 
@@ -27,8 +24,8 @@ def detect_gaze(
         inout_thresh: float = 0.5,
         render_heatmap: bool = False,
         save: bool = False,
-        save_path: Optional[str] = None
-) -> Tuple[List[Dict[str, Any]], Optional[Image.Image]]:
+        save_path: str | None = None
+) -> tuple[list[dict[str, Any]], Image.Image | None]:
     """Detect faces, estimate gaze, and optionally render visualizations.
 
     Args:
@@ -57,36 +54,27 @@ def detect_gaze(
             }
         - Image.Image | None: The rendered PIL image if render=True, otherwise None.
     """
-    gaze_results: List[Dict[str, Any]] = []
+    gaze_results: list[dict[str, Any]] = []
 
     try:
-        # 1. Load Image - assuming load_image returns numpy array (H, W, C) BGR by default
-        np_image_bgr = load_image(image_input)
-        if np_image_bgr is None or np_image_bgr.size == 0:
-            raise ValueError("Failed to load image or image is empty.")
+        image = load_image(image_input)
+        height, width, _ = image.shape
+        print(f"Image resolution: {width}x{height} (Width x Height)")
 
-        # Convert to RGB for PIL and RetinaFace if needed
-        np_image_rgb = cv2.cvtColor(np_image_bgr, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(np_image_rgb)
-        
-        # Initialize rendered_image to a copy of the original image
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(rgb_image)
         rendered_image = pil_image.copy().convert("RGBA")
-        
-        height, width, _ = np_image_rgb.shape
-
-        if width == 0 or height == 0:
-            raise ValueError("Loaded image has zero width or height.")
 
         # 2. Detect Faces (using RGB numpy array)
-        faces_resp = face_detector(np_image_rgb)
+        faces_resp = face_detector(rgb_image)
 
         if not isinstance(faces_resp, dict) or not faces_resp:
             print("No faces detected or unexpected face detector response.")
             return gaze_results, rendered_image
 
         face_bboxes_pixels = [details['facial_area'] for key, details in faces_resp.items()]
-        valid_face_indices: List[int] = []
-        norm_face_bboxes_tl: List[List[float]] = []
+        valid_face_indices: list[int] = []
+        norm_face_bboxes_tl: list[list[float]] = []
 
         # Validate and normalize bboxes
         for i, bbox in enumerate(face_bboxes_pixels):
@@ -165,11 +153,7 @@ def detect_gaze(
             draw = ImageDraw.Draw(rendered_image)
             colors = ['lime', 'tomato', 'cyan', 'fuchsia', 'yellow']
             font_size = max(int(min(width, height) * 0.025), 40)
-            try:
-                font = ImageFont.load_default(size=font_size)
-            except IOError:
-                print("Warning: Default font not found. Using basic font.")
-                font = ImageFont.load_default()
+            font = ImageFont.load_default(size=font_size)
 
             # Store face bounding box details first
             face_details = []
@@ -187,10 +171,10 @@ def detect_gaze(
                     xmin, ymin, xmax, ymax = bbox_to_draw
 
                 xmin, ymin, xmax, ymax = int(xmin), int(ymin), int(xmax), int(ymax)
-                
+
                 inout_score = result['inout_score']
                 gaze_target = result['gaze_target']
-                
+
                 # Store details for drawing after heatmaps
                 face_details.append({
                     'bbox': (xmin, ymin, xmax, ymax),
@@ -199,7 +183,7 @@ def detect_gaze(
                     'gaze_target': gaze_target,
                     'original_index': original_index
                 })
-                
+
             # First render heatmaps if enabled
             if render_heatmap:
                 for face_detail in face_details:
@@ -209,18 +193,19 @@ def detect_gaze(
                         if heatmap_tensor is not None:
                             heatmap_np = heatmap_tensor.detach().cpu().numpy()
                             if heatmap_np.size > 0:
-                                heatmap_img = Image.fromarray((heatmap_np * 255).astype(np.uint8)).resize(pil_image.size,
-                                                                                                        Image.Resampling.BILINEAR)
+                                heatmap_img = Image.fromarray((heatmap_np * 255).astype(np.uint8)).resize(
+                                    pil_image.size,
+                                    Image.Resampling.BILINEAR)
                                 cmap = cm.get_cmap('viridis')
                                 heatmap_color_rgba = cmap(np.array(heatmap_img) / 255.)
                                 heatmap_color_rgb = (heatmap_color_rgba[:, :, :3] * 255).astype(np.uint8)
                                 heatmap_rgba = Image.fromarray(heatmap_color_rgb).convert("RGBA")
                                 # Resize alpha to match the dimensions of heatmap_rgba
                                 alpha = Image.fromarray((heatmap_np * 180).astype(np.uint8)).resize(pil_image.size,
-                                                                                                   Image.Resampling.BILINEAR)
+                                                                                                    Image.Resampling.BILINEAR)
                                 heatmap_rgba.putalpha(alpha)
                                 rendered_image = Image.alpha_composite(rendered_image, heatmap_rgba)
-            
+
             # Now draw bounding boxes and gaze lines (on top of heatmaps)
             draw = ImageDraw.Draw(rendered_image)  # Recreate the draw object
             for face_detail in face_details:
@@ -228,7 +213,7 @@ def detect_gaze(
                 color = face_detail['color']
                 inout_score = face_detail['inout_score']
                 gaze_target = face_detail['gaze_target']
-                
+
                 # Draw face bounding box
                 draw.rectangle([xmin, ymin, xmax, ymax], outline=color, width=max(int(min(width, height) * 0.005), 2))
 
@@ -237,11 +222,11 @@ def detect_gaze(
                     text_bbox = draw.textbbox((0, 0), text, font=font)
                     text_width = text_bbox[2] - text_bbox[0]
                     text_height = text_bbox[3] - text_bbox[1]
-                    
+
                     # Position text at the top left of the bounding box
                     text_x = xmin
                     text_y = ymin - text_height - 15
-                    
+
                     # Then draw the text in the specified color
                     draw.text((text_x, text_y), text, fill=color, font=font)
 
@@ -265,30 +250,13 @@ def detect_gaze(
                 rendered_image.show(title="Gaze Detection Results")
 
             if save:
-                if not save_path:
-                    if isinstance(image_input, str):
-                        import os
-                        dirname, filename = os.path.split(image_input)
-                        name, ext = os.path.splitext(filename)
-                        save_path = os.path.join(dirname, f"{name}_gaze_detected{ext}")
-                    else:
-                        raise ValueError("save_path must be provided when saving image from bytes")
-                try:
-                    # Convert RGBA to RGB before saving as JPEG
-                    if rendered_image.mode == 'RGBA':
-                        rendered_image = rendered_image.convert('RGB')
-                    rendered_image.save(save_path)
-                except Exception as e:
-                    print(f"Error during image save: {e}")
+                if save_path is None:
+                    raise ValueError("save_path must be provided when saving image data")
+                if rendered_image.mode == 'RGBA':
+                    rendered_image = rendered_image.convert('RGB')
+                rendered_image.save(save_path)
                 print(f"Gaze detection image saved to {save_path}")
 
-    except FileNotFoundError:
-        print(f"Error: Image file not found at {image_input}")
-        return [], None
-    except ImportError as e:
-        print(
-            f"Error: Missing dependency for gaze detection: {e}. Please install retina-face, torch, cv2, and matplotlib.")
-        return [], None
     except Exception as e:
         print(f"Error during gaze detection: {type(e).__name__}: {e}")
         import traceback

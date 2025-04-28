@@ -2,7 +2,8 @@ from openmmla.utils.clean import flush_input
 from .enums import LIGHT_BLUE, ENDC
 
 
-def get_function_base(chosen_camera: str, camera_seed: str, base_id: str, mode: str):
+def get_function_base(chosen_camera: str | None, camera_seed: str | None, camera_angle: str | None, base_id: int | None,
+                      mode: str | None):
     """Get the function to be performed from user input for base."""
     while True:
         try:
@@ -11,13 +12,38 @@ def get_function_base(chosen_camera: str, camera_seed: str, base_id: str, mode: 
             select_fun = input(f"Please input your operation:\n"
                                f"1: start\n"
                                f"2: set camera (camera:{LIGHT_BLUE}{chosen_camera}{ENDC}, "
-                               f"camera seed:{LIGHT_BLUE}{camera_seed}{ENDC}, base:{LIGHT_BLUE}{base_id}{ENDC}, "
+                               f"camera seed:{LIGHT_BLUE}{camera_seed}{ENDC}, "
+                               f"camera angle:{LIGHT_BLUE}{camera_angle}{ENDC}, "
+                               f"base:{LIGHT_BLUE}{base_id}{ENDC}, "
                                f"mode:{LIGHT_BLUE}{mode}{ENDC})\n"
                                f"3: switch mode\n"
                                f"0: exit\n"
                                f"Selected function: ")
 
             if select_fun.strip():  # Check if input is not empty after removing leading/trailing whitespace
+                return int(select_fun)
+            else:
+                print('Please enter a value')
+
+        except EOFError:
+            print(
+                "\nUnexpected input received. If you resized the terminal or pressed certain keys, please avoid doing "
+                "so and try again.")
+
+        except ValueError:
+            print('Please enter a valid integer')
+
+
+def get_function_synchronizer():
+    """Get the function to be performed from user input for synchronizer."""
+    while True:
+        try:
+            flush_input()
+            select_fun = input(f"Please input your operation:\n"
+                               f"1: start\n"
+                               f"0: exit\n"
+                               f"Selected function: ")
+            if select_fun.strip():
                 return int(select_fun)
             else:
                 print('Please enter a value')
@@ -51,3 +77,20 @@ def get_mode():
                 print("Invalid mode, please select again.")
         except ValueError:
             print("Invalid input. Please enter a valid integer.")
+
+
+def get_number_of_cameras() -> int:
+    """Get the number of cameras to synchronize.
+
+    Returns:
+        int: Number of cameras
+    """
+    while True:
+        try:
+            flush_input()
+            num = int(input("Enter the number of cameras to synchronize: ") or "2")
+            if num > 0:
+                return num
+            print("Please enter a positive number.")
+        except ValueError:
+            print("Please enter a valid number.")

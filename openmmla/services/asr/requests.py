@@ -6,7 +6,7 @@ import numpy as np
 from openmmla.utils.requests import send_request_with_retry
 
 
-def request_speech_enhancement(audio_path: str, base_id: str, url: str) -> str:
+def request_speech_enhancement(audio_path: str, base_id: str, url: str) -> str | None:
     def process_response(response):
         with open(audio_path, 'wb') as out_file:
             out_file.write(response.content)
@@ -22,7 +22,7 @@ def request_speech_enhancement(audio_path: str, base_id: str, url: str) -> str:
     return send_request_with_retry(url, files, data, process_response=process_response)
 
 
-def request_audio_inference(audio_path: str, base_id: str, url: str) -> np.ndarray:
+def request_audio_inference(audio_path: str, base_id: str, url: str) -> np.ndarray | None:
     def process_response(response):
         response_json = response.json()
         embeddings_list = json.loads(response_json["embeddings"])
@@ -59,7 +59,7 @@ def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int
     return send_request_with_retry(url, files, data, process_response=process_response)
 
 
-def request_speech_separation(audio_path: str, base_id: str, url: str) -> list[str]:
+def request_speech_separation(audio_path: str, base_id: str, url: str) -> list[str] | None:
     def process_response(response):
         response_json = response.json()
         processed_bytes_streams = response_json.get("processed_bytes_streams")
@@ -79,7 +79,7 @@ def request_speech_transcription(
         frame_rate: int,
         base_id: str,
         url: str
-) -> str:
+) -> str | None:
     def process_response(response):
         response_json = response.json()
         transcription_text = response_json.get('text')
@@ -91,7 +91,7 @@ def request_speech_transcription(
     return send_request_with_retry(url, files, data, timeout=15, process_response=process_response)
 
 
-def request_audio_resampling(audio_path: str, base_id: str, target_fr: int, url: str) -> str:
+def request_audio_resampling(audio_path: str, base_id: str, target_fr: int, url: str) -> str | None:
     def process_response(response):
         with open(audio_path, 'wb') as out_file:
             out_file.write(response.content)

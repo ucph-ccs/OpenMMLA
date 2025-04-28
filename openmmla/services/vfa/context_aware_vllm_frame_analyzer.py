@@ -39,7 +39,7 @@ class ContextAwareVLLMFrameAnalyzer(Server):
         self.top_p = float(analyzer_config['top_p'])
         self.temperature = float(analyzer_config['temperature'])
         self.end_to_end = analyzer_config.get('end_to_end', False)
-        
+
         # Load participant descriptions from config
         self.participant_descriptions = analyzer_config.get('participant_descriptions', {})
         self.logger.info(f"Loaded {len(self.participant_descriptions)} participant descriptions")
@@ -212,10 +212,10 @@ class ContextAwareVLLMFrameAnalyzer(Server):
         """
         if not self.participant_descriptions:
             return ""
-        
+
         description_text = "### Known Participants Reference:\n"
         description_text += "The following people may appear in the image. Use this information to help identify them by AprilTag ID:\n\n"
-        
+
         # Handle the nested structure where participant_descriptions are organized by base_id
         if base_id and base_id in self.participant_descriptions:
             # Get descriptions specific to this base_id
@@ -223,11 +223,12 @@ class ContextAwareVLLMFrameAnalyzer(Server):
             for tag_id, description in base_descriptions.items():
                 description_text += f"Person with Tag ID {tag_id}: {description}\n"
         # Fall back to flat structure if no matching base_id or base_id not provided
-        elif isinstance(self.participant_descriptions, dict) and all(not isinstance(v, dict) for v in self.participant_descriptions.values()):
+        elif isinstance(self.participant_descriptions, dict) and all(
+                not isinstance(v, dict) for v in self.participant_descriptions.values()):
             # Old flat structure (tag_id -> description)
             for tag_id, description in self.participant_descriptions.items():
                 description_text += f"Person with Tag ID {tag_id}: {description}\n"
-        
+
         return description_text + "\n"
 
     def _create_end_to_end_messages(self, img_base64, system_message, base_id=None):
@@ -250,12 +251,12 @@ class ContextAwareVLLMFrameAnalyzer(Server):
             "- Colored lines from faces: These show gaze direction (where someone is looking).\n"
             "- 'in: X.XX' values: These indicate the confidence that the person is looking at something inside the frame.\n\n"
         )
-        
+
         # Add participant descriptions if available
         participant_descriptions = self._format_participant_descriptions(base_id)
         if participant_descriptions:
             user_text += participant_descriptions
-            
+
         # Add interpretation rules with updated flexibility for gaze focus
         user_text += (
             "### OBSERVATION GUIDELINES:\n"
@@ -370,12 +371,12 @@ class ContextAwareVLLMFrameAnalyzer(Server):
             "- Colored lines from faces: These show gaze direction (where someone is looking).\n"
             "- 'in: X.XX' values: These indicate the confidence that the person is looking at something inside the frame.\n\n"
         )
-        
+
         # Add participant descriptions if available
         participant_descriptions = self._format_participant_descriptions(base_id)
         if participant_descriptions:
             user_text += participant_descriptions
-            
+
         # Add interpretation rules with updated flexibility for gaze focus
         user_text += (
             "### OBSERVATION GUIDELINES:\n"
@@ -591,4 +592,4 @@ def pil_image_to_bytes(pil_image, format='PNG'):
     """Convert a PIL Image to bytes."""
     img_byte_array = BytesIO()
     pil_image.save(img_byte_array, format=format)
-    return img_byte_array.getvalue() 
+    return img_byte_array.getvalue()

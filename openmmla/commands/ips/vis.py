@@ -26,12 +26,12 @@ def main():
 
     print_arguments(args)
 
-    visualizer = IPSVisualizer(
+    ips_visualizer = IPSVisualizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
         store=args.store
     )
-    visualizer.run()
+    ips_visualizer.run()
 
 
 if __name__ == "__main__":

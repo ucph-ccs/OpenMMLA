@@ -22,6 +22,7 @@ The post-time analyzer is as follows:
 # Install the required dependencies for the ASR pipeline on specific machines 
 # (e.g., base stations: asr-base, asr servers: asr-server, uber servers: uber-server)
 conda create -n asr-base -c conda-forge python=3.10.12 -y
+conda activate asr-base
 pip install openmmla[asr-base]
 ```
 
@@ -95,8 +96,8 @@ options:
 # ==================PYTHON========================
 # For real-time audio analyzer
 conda activate asr-base
-mmla asr-base -b <base_type> -c <config_file_path> # start asr-base
-mmla asr-sync -c <config_file_path> # start base synchronizer
+mmla asr-base -b <base_type> -c <config_file_path> # start an asr base
+mmla asr-sync -c <config_file_path> # start an asr base synchronizer
 
 # For post-time audio analyzer
 mmla asr-post -f <filenames> -c <config_file_path>

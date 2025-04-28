@@ -26,12 +26,12 @@ def main():
 
     print_arguments(args)
 
-    synchronizer = IPSSynchronizer(
+    ips_synchronizer = IPSSynchronizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
         verbose=args.verbose
     )
-    synchronizer.run()
+    ips_synchronizer.run()
 
 
 if __name__ == "__main__":

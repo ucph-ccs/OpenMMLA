@@ -17,7 +17,7 @@ def load_image(image_input):
         image_input: Either a string (file path) or bytes (image data)
 
     Returns:
-        numpy.ndarray: The loaded image
+        numpy.ndarray: The loaded opencv image
     """
     if isinstance(image_input, str):
         image = cv2.imread(image_input)

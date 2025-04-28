@@ -755,7 +755,7 @@ class ASRBase(Base):
               f"{BLUE}{base_recognition_result['speakers']}{ENDC}, similarity: {base_recognition_result['similarities']},"
               f"processed time: {time.time() - recognize_start_time} seconds")
         result_str = json.dumps(base_recognition_result)
-        self.mqtt_client.publish(f'{self.bucket_name}/audio', result_str)
+        self.mqtt_client.publish(f'{self.bucket_name}/asr', result_str)
 
     def _separate_speech(self, segment_audio_path) -> list:
         """Separate overlapping speech from an audio segment.

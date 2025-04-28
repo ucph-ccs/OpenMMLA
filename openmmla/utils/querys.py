@@ -22,6 +22,8 @@ def fetch_and_process_data(bucket_name, measurement, influx_client):
     data = json.loads(json_str)
     if measurement == 'speaker transcription':
         data.sort(key=lambda x: x['chunk_start_time'])
+    elif measurement == 'action recognition':
+        data.sort(key=lambda x: x['acquired_time'])
     else:
         data.sort(key=lambda x: x['segment_start_time'])
     return json.dumps(data, ensure_ascii=False, indent=5)

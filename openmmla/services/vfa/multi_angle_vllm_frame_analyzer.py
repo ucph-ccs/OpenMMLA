@@ -1,7 +1,7 @@
 import json
 import re
 from io import BytesIO
-from typing import Dict, List, Tuple, Any, Union, cast
+from typing import Dict, Any, cast
 
 import torch
 from flask import request, jsonify
@@ -40,14 +40,15 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.top_p = float(analyzer_config['top_p'])
         self.temperature = float(analyzer_config['temperature'])
         self.end_to_end = analyzer_config.get('end_to_end', False)
-        
+
         # Load participant descriptions from config
         self.participant_descriptions = analyzer_config.get('participant_descriptions', {})
         self.logger.info(f"Loaded {len(self.participant_descriptions)} participant descriptions")
 
         # Load angle configuration (we'll be flexible with arbitrary angles)
         self.angle_config = analyzer_config.get('angle_config', {})
-        self.logger.info(f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
+        self.logger.info(
+            f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
 
         if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek']:
             backend_config = analyzer_config[self.backend]
@@ -108,46 +109,47 @@ class MultiAngleVLLMFrameAnalyzer(Server):
     def process_request(self):
         """Process multiple images from different angles with contextual awareness."""
         try:
-            base_id = request.values.get('base_id')
-            
-            # 检查是否使用images参数（多图像）还是image参数（单图像）
+            session_id = request.values.get('session_id')
+
+            # check if using images or image parameter
             if 'images' in request.files:
                 image_files = request.files.getlist('images')
                 angle_labels = request.values.getlist('angles')
             elif 'image' in request.files:
-                # 兼容单图像情况，将其转换为列表格式处理
+                # compatible with single image case, convert to list format
                 image_files = [request.files['image']]
                 angle_labels = []
             else:
                 return jsonify({'error': 'No image files provided'}), 400
-            
+
             # Validate we have at least one image
             if not image_files:
                 return jsonify({'error': 'No images found in request'}), 400
-                
+
             # Generate generic perspective labels if none provided
             if not angle_labels:
-                angle_labels = [f"perspective_{i+1}" for i in range(len(image_files))]
+                angle_labels = [f"perspective_{i + 1}" for i in range(len(image_files))]
             elif len(angle_labels) != len(image_files):
                 return jsonify({'error': 'Number of angles does not match number of images'}), 400
 
-            self.logger.info(f"Starting multi-angle analysis for {base_id} with {len(image_files)} images from angles: {angle_labels}")
+            self.logger.info(
+                f"Starting multi-angle analysis for {session_id} with {len(image_files)} images from angles: {angle_labels}")
 
             # Process each image
             processed_images = {}
             for i, (image_file, angle) in enumerate(zip(image_files, angle_labels)):
                 image_bytes = image_file.read()
-                
+
                 # Process the image with AprilTag detection and gaze detection
                 self.logger.info(f"Processed image from {angle} perspective")
                 processed_image = self._process_single_image(image_bytes, angle)
                 processed_images[angle] = processed_image
-            
+
             # Analyze all processed images together
             if self.end_to_end:
                 # End-to-end approach: VLM does both observation and classification for multiple images
                 system_message = self._create_system_prompt(len(processed_images))
-                messages = self._create_end_to_end_messages(processed_images, system_message, base_id)
+                messages = self._create_end_to_end_messages(processed_images, system_message, session_id)
                 vlm_response = self._process_with_vlm(messages)
 
                 # Extract observations, classifications, and justifications
@@ -159,7 +161,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             else:
                 # Two-step approach: VLM for observations, LLM for classification
                 system_message = self._create_system_prompt(len(processed_images))
-                vlm_messages = self._create_vlm_messages(processed_images, system_message, base_id)
+                vlm_messages = self._create_vlm_messages(processed_images, system_message, session_id)
                 vlm_response = self._process_with_vlm(vlm_messages)
 
                 # Process with LLM for text classification
@@ -172,7 +174,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                     'justifications': llm_result.get('justifications', {})
                 }
 
-            self.logger.info(f"Finished multi-angle analyzing for {base_id}.")
+            self.logger.info(f"Finished multi-angle analyzing for {session_id}.")
             return jsonify(result), 200
 
         except Exception as e:
@@ -225,12 +227,12 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         # Create a result dictionary with the processed image and metadata
         image_b64 = encode_image_base64(image_bytes)
-        
+
         # Get angle description if available, otherwise create a generic one
         angle_description = self.angle_config.get(angle)
         if not angle_description:
             angle_description = f"Image from {angle} perspective"
-            
+
         return {
             "image_b64": image_b64,
             "angle": angle,
@@ -257,42 +259,43 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         return system_content
 
-    def _format_participant_descriptions(self, base_id=None):
+    def _format_participant_descriptions(self, session_id=None):
         """Format participant descriptions from config into readable text for prompts.
         
         Args:
-            base_id: The base_id of the current request to filter participant descriptions
+            session_id: The session_id of the current request to filter participant descriptions
             
         Returns:
             str: Formatted participant descriptions
         """
         if not self.participant_descriptions:
             return ""
-        
+
         description_text = "### Known Participants Reference:\n"
         description_text += "The following people may appear in the images. Use this information to help identify them by AprilTag ID:\n\n"
-        
-        # Handle the nested structure where participant_descriptions are organized by base_id
-        if base_id and base_id in self.participant_descriptions:
-            # Get descriptions specific to this base_id
-            base_descriptions = self.participant_descriptions[base_id]
-            for tag_id, description in base_descriptions.items():
+
+        # Handle the nested structure where participant_descriptions are organized by session_id
+        if session_id and session_id in self.participant_descriptions:
+            # Get descriptions specific to this session_id
+            session_descriptions = self.participant_descriptions[session_id]
+            for tag_id, description in session_descriptions.items():
                 description_text += f"Person with Tag ID {tag_id}: {description}\n"
-        # Fall back to flat structure if no matching base_id or base_id not provided
-        elif isinstance(self.participant_descriptions, dict) and all(not isinstance(v, dict) for v in self.participant_descriptions.values()):
+        # Fall back to flat structure if no matching session_id or session_id not provided
+        elif isinstance(self.participant_descriptions, dict) and all(
+                not isinstance(v, dict) for v in self.participant_descriptions.values()):
             # Old flat structure (tag_id -> description)
             for tag_id, description in self.participant_descriptions.items():
                 description_text += f"Person with Tag ID {tag_id}: {description}\n"
-        
+
         return description_text + "\n"
 
-    def _create_end_to_end_messages(self, processed_images, system_message, base_id=None):
+    def _create_end_to_end_messages(self, processed_images, system_message, session_id=None):
         """Generate a context-aware prompt message for end-to-end approach with multiple images.
         
         Args:
             processed_images: Dictionary containing processed images from different angles
             system_message: System prompt content
-            base_id: The base_id of the current request
+            session_id: The session_id of the current request
             
         Returns:
             list: Messages for the VLM
@@ -308,18 +311,18 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "### Multiple Camera Views:\n"
             f"You have been provided with {len(processed_images)} synchronized images of the same scene, each from a different perspective:\n"
         )
-        
+
         # Add descriptions for each angle
         for angle, image_data in processed_images.items():
             user_text += f"- **{angle}**: {image_data['angle_description']}\n"
-        
+
         user_text += f"\nUse all {len(processed_images)} camera perspectives to resolve ambiguities. If something is obscured in one view, check if it's visible from another angle.\n\n"
-        
+
         # Add participant descriptions if available
-        participant_descriptions = self._format_participant_descriptions(base_id)
+        participant_descriptions = self._format_participant_descriptions(session_id)
         if participant_descriptions:
             user_text += participant_descriptions
-            
+
         # Add interpretation rules
         user_text += (
             "### MULTI-PERSPECTIVE OBSERVATION GUIDELINES:\n"
@@ -397,13 +400,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         # Create message content with multiple images
         content = [{"type": "text", "text": user_text}]
-        
+
         # Add all the images to the content - fixing the type error with proper casting
         for angle, image_data in processed_images.items():
             content.append(cast(Dict[str, str], {
-                "type": "image_url", 
+                "type": "image_url",
                 "image_url": {
-                    "url": image_data["image_b64"], 
+                    "url": image_data["image_b64"],
                     "detail": "high"
                 }
             }))
@@ -415,13 +418,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         return messages
 
-    def _create_vlm_messages(self, processed_images, system_message, base_id=None):
+    def _create_vlm_messages(self, processed_images, system_message, session_id=None):
         """Generate a context-aware prompt message for VLM with multiple images.
         
         Args:
             processed_images: Dictionary containing processed images from different angles
             system_message: System prompt content
-            base_id: The base_id of the current request
+            session_id: The session_id of the current request
             
         Returns:
             list: Messages for the VLM
@@ -437,18 +440,18 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "### Multiple Camera Views:\n"
             f"You have been provided with {len(processed_images)} synchronized images of the same scene, each from a different perspective:\n"
         )
-        
+
         # Add descriptions for each angle
         for angle, image_data in processed_images.items():
             user_text += f"- **{angle}**: {image_data['angle_description']}\n"
-        
+
         user_text += f"\nUse all {len(processed_images)} camera perspectives to resolve ambiguities. If something is obscured in one view, check if it's visible from another angle.\n\n"
-        
+
         # Add participant descriptions if available
-        participant_descriptions = self._format_participant_descriptions(base_id)
+        participant_descriptions = self._format_participant_descriptions(session_id)
         if participant_descriptions:
             user_text += participant_descriptions
-            
+
         # Add interpretation rules
         user_text += (
             "### MULTI-PERSPECTIVE OBSERVATION GUIDELINES:\n"
@@ -510,13 +513,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         # Create message content with multiple images
         content = [{"type": "text", "text": user_text}]
-        
+
         # Add all the images to the content - fixing the type error with proper casting
         for angle, image_data in processed_images.items():
             content.append(cast(Dict[str, str], {
-                "type": "image_url", 
+                "type": "image_url",
                 "image_url": {
-                    "url": image_data["image_b64"], 
+                    "url": image_data["image_b64"],
                     "detail": "high"
                 }
             }))
@@ -666,4 +669,4 @@ def pil_image_to_bytes(pil_image, format='PNG'):
     """Convert a PIL Image to bytes."""
     img_byte_array = BytesIO()
     pil_image.save(img_byte_array, format=format)
-    return img_byte_array.getvalue() 
+    return img_byte_array.getvalue()

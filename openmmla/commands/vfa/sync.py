@@ -4,8 +4,8 @@ import functools
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="mmla ips-base",
-        description="Run IPS base of real-time indoor positioning system.",
+        prog="mmla vfa-sync",
+        description="Run VFA base synchronizer for synchronizing video frames between multiple bases.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )
     from openmmla.utils.args import add_arguments
@@ -13,9 +13,6 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('graphics', bool, True, 'whether to display video frames', shortname='-g')
-    add_arg('store', bool, False, 'whether to store video frames', shortname='-s')
-    add_arg('verbose', bool, False, 'whether to print debug information', shortname='-v')
     return parser
 
 
@@ -23,19 +20,16 @@ def main():
     parser = get_parser()
     args = parser.parse_args()
 
-    from openmmla.bases.ips import IPSBase
+    from openmmla.bases.vfa import VFASynchronizer
     from openmmla.utils.args import print_arguments
 
     print_arguments(args)
 
-    ips_base = IPSBase(
+    vfa_synchronizer = VFASynchronizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
-        graphics=args.graphics,
-        store=args.store,
-        verbose=args.verbose
     )
-    ips_base.run()
+    vfa_synchronizer.run()
 
 
 if __name__ == '__main__':

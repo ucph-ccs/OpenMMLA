@@ -107,7 +107,7 @@ class ASRSynchronizer(Synchronizer):
         self._listen_for_start_signal()
 
         # Reinitialize MQTT client with a new topic and on_message callback
-        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/audio')
+        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/asr')
         self.mqtt_client.loop_start()
 
         # Create threads

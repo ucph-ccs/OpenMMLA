@@ -23,6 +23,7 @@ The system performs nonverbal behavior analysis using large language models (LLM
 # Install the required dependencies for the VFA pipeline on specific machines 
 # (e.g., base stations: vfa-base, vfa servers: vfa-server, uber servers: uber-server)
 conda create -n vfa-base -c conda-forge python=3.10.12 -y
+conda activate vfa-base
 pip install openmmla[vfa-base]
 ```
 
@@ -50,7 +51,7 @@ conda activate vfa-server
 # Start vaf services one by one
 # 1. VFA server with single worker via mmla command
 # e.g.,
-# mmla vfa-infer -c config.yml
+# mmla vfa-vllm -c config.yml
 mmla <vfa-server-commands> -c <config_file_path>
  
 # 2. ASR server with multiple workers via gunicorn
@@ -69,17 +70,18 @@ gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> <path-to-vfa-servers-ap
 # ===================BASH========================
 # Go to /base_stations/vfa/bash
 # For real-time video frame analyzer
-Usage: ./run.sh [-nb NUM_BASE] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]
+Usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]
 
 options:
-  -nb NUM_BASE         : Number of IPS bases to run (default: 1)
+  -nb NUM_BASE         : Number of VFA bases to run (default: 1)
+  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)
   -g GRAPHICS          : Enable graphics (default: true)
-  -s STORE             : Enable store (default: false)
   -v VERBOSE           : Enable verbose mode (default: false)
   -h                   : Display this help message
   
 # ==================PYTHON========================
 # For real-time video frame analyzer
 conda activate vfa-base
-mmla vfa-base -c <config_file_path> # start vfa-base
+mmla vfa-base -c <config_file_path> # start a vfa base
+mmla vfa-sync -c <config_file_path> # start a vfa base synchronizer
 ```

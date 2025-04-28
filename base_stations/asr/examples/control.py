@@ -3,8 +3,7 @@ import os
 
 from openmmla.utils.input import get_bucket_name
 from openmmla.utils.clean import flush_input
-from openmmla.utils.client.influx_client import InfluxDBClientWrapper
-from openmmla.utils.client.redis_client import RedisClientWrapper
+from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
 from openmmla.utils.logger import get_logger
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

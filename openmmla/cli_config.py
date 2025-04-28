@@ -18,6 +18,7 @@ OPTIONAL_DEP_MAP = {
     "ips-sync": "ips-base",
     "ips-vis": "ips-base",
     "vfa-base": "vfa-base",
+    "vfa-sync": "vfa-base",
     "vfa-vllm": "vfa-server",
 }
 
@@ -86,6 +87,10 @@ COMMANDS = {
     "vfa-base": (
         "openmmla.commands.vfa.base:main",
         "Run VFA base of real-time video frame analyzer."
+    ),
+    "vfa-sync": (
+        "openmmla.commands.vfa.sync:main",
+        "Run VFA synchronizer of real-time video frame analyzer."
     ),
     "vfa-vllm": (
         "openmmla.commands.vfa.vllm:main",

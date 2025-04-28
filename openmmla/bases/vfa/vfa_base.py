@@ -9,13 +9,11 @@ import cv2
 import numpy as np
 
 from openmmla.bases.base import Base
-from openmmla.services.vfa.requests import request_frame_analyze
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import get_bucket_name, get_id
+from openmmla.utils.input import get_bucket_name, get_id, flush_input
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
-from .enums import BLUE, ENDC
 from .input import get_function_base, get_mode
 
 
@@ -24,7 +22,7 @@ class VFABase(Base):
     logger = get_logger('vfa-base')
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'full', graphics: bool = True,
-                 store: bool = True, verbose: bool = False):
+                 verbose: bool = False):
         """Initializes the VFABase class.
 
         Args:
@@ -32,7 +30,6 @@ class VFABase(Base):
             config_path: path to the configuration file
             mode: operating mode, 'record', 'analyze', or 'full'. (default: 'full')
             graphics: whether to display graphics (default: True)
-            store: whether to store results (default: True)
             verbose: whether to enable verbose logging (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
@@ -40,7 +37,6 @@ class VFABase(Base):
         # VFABase specific parameters
         self.mode = mode
         self.graphics = graphics
-        self.store = store
         self.verbose = verbose
 
         # Runtime attributes
@@ -63,6 +59,10 @@ class VFABase(Base):
         """Load and assign configuration parameters from the YAML configuration file."""
         base_config = self.config['Base']
         vfa_server_config = self.config['Server']['vfa']
+
+        # Load angle configurations
+        self.angle_config = base_config.get('angle_config', {})
+        self.camera_angle = None  # Will be set during camera configuration
 
         self.res = tuple(base_config.get('resolution', (1920, 1080)))
         self.rotate = int(base_config.get('rotate', 0))
@@ -94,7 +94,8 @@ class VFABase(Base):
         func_map = {1: self._start, 2: self._set_camera, 3: self._switch_mode}
         while True:
             try:
-                select_fun = get_function_base(self.chosen_camera, self.selected_source, self.base_id, self.mode)
+                select_fun = get_function_base(self.chosen_camera, self.selected_source, self.camera_angle,
+                                               self.base_id, self.mode)
                 if select_fun == 0:
                     self.logger.info("Exiting VFA base...")
                     break
@@ -118,7 +119,6 @@ class VFABase(Base):
 
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
-
         self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
         self.video_stream.start()
 
@@ -137,7 +137,7 @@ class VFABase(Base):
         self.logger.info(f"Switched to {self.mode} mode.")
 
     def _set_camera(self):
-        """Set up video source and base id."""
+        """Set up video source, base id, and camera angle."""
         self.camera_configured = False
 
         self.camera_info = self._configure_camera_params()
@@ -145,6 +145,7 @@ class VFABase(Base):
             self.logger.warning("No camera parameters found, please calibrate camera first.")
             return
 
+        self.camera_angle = self._set_camera_angle()
         available_sources = self._detect_video_sources()
         self.selected_source = self._choose_video_source(available_sources)
 
@@ -201,6 +202,35 @@ class VFABase(Base):
         print(camera_info)
         return camera_info
 
+    def _set_camera_angle(self):
+        """Set the camera angle."""
+        # Configure camera angle
+        if self.angle_config:
+            angles = list(self.angle_config.keys())
+            print("Available camera angles:")
+            for idx, angle in enumerate(angles):
+                print(f"{idx}: {angle} - {self.angle_config[angle]}")
+            print(f"{len(angles)}: None - No specific angle")
+
+            while True:
+                try:
+                    flush_input()
+                    angle_input = input("Choose camera angle (press Enter for None): ")
+                    if angle_input == '':
+                        return None
+
+                    angle_idx = int(angle_input)
+                    if 0 <= angle_idx < len(angles):
+                        return angles[angle_idx]
+                    elif angle_idx == len(angles):
+                        return None
+                    else:
+                        print("Invalid selection. Please choose a valid option.")
+                except ValueError:
+                    print("Please enter a valid number or press Enter for None.")
+        else:
+            return None
+
     def _detect_video_sources(self):
         """Detect available video sources based on the source type."""
         available_sources = []
@@ -239,6 +269,7 @@ class VFABase(Base):
         default_source_idx = 0  # Default to the first available source
         while True:
             try:
+                flush_input()
                 source_idx_input = input(f"Choose your video source index [{default_source_idx}]: ")
                 if source_idx_input == '':
                     source_idx = default_source_idx
@@ -264,7 +295,7 @@ class VFABase(Base):
 
     def _process_frames(self):
         print("Processing VFA frames...")
-        save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/vfa_{self.base_id}')
+        save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/{self.chosen_camera}_{self.base_id}')
         os.makedirs(save_path, exist_ok=True)
 
         if self.mode == 'analyze':
@@ -273,7 +304,7 @@ class VFABase(Base):
             return
 
         # For record and full modes, process live frames
-        last_saved_time = time.time() - self.interval
+        last_saved_time = time.time() - self.interval + 1
 
         while not self.stop_event.is_set():
             video_frame = self.video_stream.read()[-1]
@@ -295,17 +326,9 @@ class VFABase(Base):
 
                 if self.mode == 'full':
                     try:
-                        result = request_frame_analyze(image_path=image_path, base_id=self.base_id,
-                                                       url=self.vllm_frame_analyzer_url)
-                        self.logger.info(f"VFA result: {result}")
-                        self._upload_result(acquired_time, result)
-
-                        if not self.store:
-                            os.remove(image_path)
+                        self._publish_frame(image_path, acquired_time)
                     except Exception as e:
-                        self.logger.warning(f"VFA request failed: {e}")
-                        if not self.store and os.path.exists(image_path):
-                            os.remove(image_path)
+                        self.logger.warning(f"VFA publish failed: {e}")
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -327,32 +350,20 @@ class VFABase(Base):
 
             image_path = os.path.join(save_path, frame_file)
             try:
-                result = request_frame_analyze(image_path=image_path, base_id=self.base_id,
-                                               url=self.vllm_frame_analyzer_url)
-                self.logger.info(f"VFA result: {result}")
-                self._upload_result(acquired_time, result)
-
-                if not self.store:
-                    os.remove(image_path)
+                self._publish_frame(image_path, acquired_time)
             except Exception as e:
-                self.logger.warning(f"VFA request failed for {frame_file}: {e}")
-                if not self.store and os.path.exists(image_path):
-                    os.remove(image_path)
+                self.logger.warning(f"VFA publish failed for {frame_file}: {e}")
 
-    def _upload_result(self, acquired_time, result):
-        """Log and upload the merged segment result to InfluxDB.
-
-        Args:
-            acquired_time: the timestamp of the frame
-            result: the result dictionary of one frame
-        """
-        analysis_data = {
-            "measurement": "video frame analysis",
-            "fields": {
-                "acquired_time": acquired_time,
-                "result": json.dumps(result['result'])
-            },
+    def _publish_frame(self, image_path, acquired_time):
+        """Publish frame to MQTT for synchronization."""
+        # For MQTT, we'll publish just the path and metadata
+        # The synchronizer will load the actual image
+        frame_data = {
+            "base_id": str(self.base_id),
+            "angle": self.camera_angle,
+            "image_path": image_path,
+            "acquired_time": acquired_time
         }
-        print(f"{BLUE}[Video Frame Analysis]{ENDC}{analysis_data['fields']['acquired_time']}: "
-              f"{BLUE}{analysis_data['fields']['result']}{ENDC}")
-        self.influx_client.write(self.bucket_name, analysis_data)
+
+        self.mqtt_client.publish(f"{self.bucket_name}/vfa", json.dumps(frame_data))
+        self.logger.info(f"Published frame with angle {self.camera_angle} at {acquired_time}")

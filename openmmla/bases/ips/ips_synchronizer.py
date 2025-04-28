@@ -101,7 +101,7 @@ class IPSSynchronizer(Synchronizer):
         self._listen_for_start_signal()
 
         # Reinitialize MQTT client with new topics and on_message callback
-        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/video')
+        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/ips')
         self.segment_start_time = time.time()
         self.mqtt_client.loop_start()
 

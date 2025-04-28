@@ -395,7 +395,7 @@ class IPSBase(Base):
             }
             self.logger.debug(message)
             message_str = json.dumps(message)
-            self.mqtt_client.publish(f'{self.bucket_name}/video', message_str, qos=0, retain=False)
+            self.mqtt_client.publish(f'{self.bucket_name}/ips', message_str, qos=0, retain=False)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break

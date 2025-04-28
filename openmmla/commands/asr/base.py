@@ -32,7 +32,7 @@ def main():
     from openmmla.utils.args import print_arguments
 
     print_arguments(args)
-    badge_audio_base = ASRBase(
+    asr_base = ASRBase(
         project_dir=args.project_dir,
         config_path=args.config_path,
         base_type=args.base_type,
@@ -43,7 +43,7 @@ def main():
         sp=args.sp,
         store=args.store
     )
-    badge_audio_base.run()
+    asr_base.run()
 
 
 if __name__ == "__main__":

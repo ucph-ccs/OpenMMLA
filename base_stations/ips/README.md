@@ -21,6 +21,7 @@ The system uses multiple cameras to track participants wearing AprilTag markers:
 # Install the required dependencies for the IPS pipeline on specific machines 
 # (e.g., base stations: ips-base, uber servers: uber-server)
 conda create -n ips-base -c conda-forge python=3.10.12 -y
+conda activate ips-base
 pip install openmmla[ips-base]
 ```
 
@@ -71,10 +72,10 @@ mmla ips-ccal [-h] [-p project_dir] -c config_path
 
 # For multiple cameras coordinate synchronization
 mmla ips-ctag [-h] [-p project_dir] -c config_path # start a camera detector
-mmla ips-csync [-h] [-p project_dir] -c config_path # start a sync manager
+mmla ips-csync [-h] [-p project_dir] -c config_path # start a camera sync manager
 
 # For real-time indoor position system
-mmla ips-base [-h] [-p project_dir] -c config_path [-g graphics] [-s store] [-v verbose] # start an ips-base
-mmla ips-sync [-h] [-p project_dir] -c config_path [-v verbose] # start a base synchronizer
-mmla ips-vis [-h] [-p project_dir] -c config_path [-s store] # start a visualizer
+mmla ips-base [-h] [-p project_dir] -c config_path [-g graphics] [-s store] [-v verbose] # start an ips base
+mmla ips-sync [-h] [-p project_dir] -c config_path [-v verbose] # start an ips base synchronizer
+mmla ips-vis [-h] [-p project_dir] -c config_path [-s store] # start an ips base visualizer
 ```

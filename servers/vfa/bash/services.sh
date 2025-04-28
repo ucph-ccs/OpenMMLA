@@ -32,7 +32,7 @@ done
 
 # Tmux session command for each service
 declare -a commands=(
-  "cd $EXAMPLES_DIR && $CONDA_INIT && gunicorn -k gevent -w 1 -b 0.0.0.0:5007 --pythonpath $PYHON_PATH serve_vllm_frame_analyzer:app"
+  "cd $EXAMPLES_DIR && $CONDA_INIT && gunicorn -k gevent -w 1 -b 0.0.0.0:5007 --pythonpath $PYHON_PATH serve_multi_angle_vllm_frame_analyzer:app"
 )
 
 # Loop for creating tmux session for each service

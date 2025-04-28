@@ -28,14 +28,14 @@ def main():
     from openmmla.utils.args import print_arguments
 
     print_arguments(args)
-    synchronizer = ASRSynchronizer(
+    asr_synchronizer = ASRSynchronizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
         base_type=args.base_type,
         dominant=args.dominant,
         sp=args.sp
     )
-    synchronizer.run()
+    asr_synchronizer.run()
 
 
 if __name__ == "__main__":
