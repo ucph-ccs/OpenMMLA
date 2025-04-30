@@ -11,10 +11,10 @@ def get_parser():
     from openmmla.utils.args import add_arguments
     add_arg = functools.partial(add_arguments, argparser=parser)
 
-    add_arg('project_dir', str, None,
-            'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
+    add_arg('project_dir', str, None, 'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('filenames', str, None, 'specify filenames in /post-time/origin/ to process', shortname='-f')
+    add_arg('custom_origin_dir', str, None, 'path to the custom origin directory, default to <project_dir>/post-time/origin/ when not specified', shortname='-custom')
+    add_arg('filenames', str, None, 'comma-separated list of filenames in <custom_origin_dir> to process, default to all files when not specified', shortname='-f')
     add_arg('vad', bool, True, 'whether to use the VAD or not', shortname='-vad')
     add_arg('nr', bool, True, 'whether to use the denoiser to enhance speech or not', shortname='-nr')
     add_arg('sp', bool, False, 'whether to use the separation model or not', shortname='-sp')
@@ -35,6 +35,7 @@ def main():
     post_audio_analyzer = ASRPostAnalyzer(
         project_dir=args.project_dir,
         config_path=args.config_path,
+        custom_origin_dir=args.custom_origin_dir,
         filenames=args.filenames,
         vad=args.vad,
         nr=args.nr,

@@ -29,27 +29,51 @@ class ASRPostAnalyzer(Base):
     """ASRPostAnalyzer class for analyzing audio files with automatic speech recognition and speaker diarization."""
     logger = get_logger('asr-post-analyzer')
 
-    def __init__(self, project_dir: str | None, config_path: str, filenames: str = None, vad: bool = True,
+    def __init__(self, project_dir: str | None = None, config_path: str | None = None,
+                 custom_origin_dir: str | None = None, filenames: str | None = None, vad: bool = True,
                  nr: bool = True, sp: bool = False, tr: bool = True):
         """Initialize the ASRPostAnalyzer class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
-            filenames: specified filenames in /post-time/origin/ to process (default: all files in the directory)
+            custom_origin_dir: path to the custom origin directory, default to <project_dir>/post-time/origin/ when not specified.
+            filenames: comma-separated list of filenames in <custom_origin_dir> to process, default to all files when not specified.
             vad: whether to use the VAD or not (default: True)
             nr: whether to use the denoiser to enhance speech or not (default: True)
             sp: whether to use the separation model or not (default: False)
             tr: whether to transcribe the audio segments or not (default: True)
         """
+        # Ensure config_path is treated as a string for Base class
         super().__init__(project_dir=project_dir, config_path=config_path)
+        self.base_type = 'PostAnalyzer'
+
         self.vad = vad
         self.nr = nr
         self.sp = sp
         self.tr = tr
+        self.custom_origin_dir = custom_origin_dir
+        self.process_files: list[str] = []
+
+        self.segment_duration: int = 0
+        self.threshold: float = 0.0
+        self.keep_threshold: float = 0.0
+        self.speech_transcriber_url: str = ''
+        self.speech_separator_url: str = ''
+        self.speech_enhancer_url: str = ''
+        self.vad_url: str = ''
+
+        self.origin_dir: str = ''
+        self.runtime_dir: str = ''
+        self.profiles_dir: str = ''
+        self.temp_dir: str = ''
+        self.logs_dir: str = ''
+        self.logger_dir: str = ''
+        self.visualizations_dir: str = ''
+        self.recognizer = None
 
         self.filename: str = ''
-        self.session_name: str = ''  # filename without extension
+        self.session_name: str = ''  # session_name: filename without extension
         self.session_logs_dir: str = ''
         self.session_runtime_dir: str = ''
         self.session_segments_dir: str = ''
@@ -58,24 +82,48 @@ class ASRPostAnalyzer(Base):
         self._setup_yaml()
         self._setup_directories()
 
+        # Use custom origin directory if provided
+        if self.custom_origin_dir:
+            if os.path.isdir(self.custom_origin_dir):
+                self.origin_dir = os.path.abspath(self.custom_origin_dir)
+                self.logger.info(f"Using custom origin directory: {self.origin_dir}")
+            else:
+                self.logger.warning(f"Custom origin directory {self.custom_origin_dir} is not a valid directory. "
+                                    f"Using default origin directory: {self.origin_dir}")
+
+        # Check if the origin directory exists
+        if not os.path.exists(self.origin_dir):
+            os.makedirs(self.origin_dir)
+            self.logger.warning(f"Created empty origin directory: {self.origin_dir}")
+            raise ValueError(f"Origin directory {self.origin_dir} was empty. "
+                             f"Please add audio files to process.")
+
+        # Get list of audio files to process
         origin_files = [f for f in os.listdir(self.origin_dir) if
                         not f.startswith('.') and not f.endswith('.DS_Store') and os.path.isfile(
-                            os.path.join(self.origin_dir, f))]
+                            os.path.join(self.origin_dir, f)) and
+                        f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg', '.m4a'))]
 
+        # Process specific files if filenames is provided, otherwise process all files in the origin directory
         if filenames:
-            self.process_files = filenames.split(',')
+            specified_files = [f.strip() for f in str(filenames).split(',')]
+            self.process_files = [f for f in specified_files if os.path.isfile(os.path.join(self.origin_dir, f))]
+
+            if not self.process_files:
+                self.logger.warning(f"None of the specified files {specified_files} were found in {self.origin_dir}")
+                self.logger.info(f"Available files: {origin_files}")
+                raise ValueError(f"None of the specified files were found in {self.origin_dir}. "
+                                 f"Please check the filenames and try again.")
         else:
+            # Process all audio files in the origin directory
             self.process_files = origin_files
 
         if not self.process_files:
             raise ValueError(
-                "You must specify an audio file to process or place it under the /post-time/origin folder.")
+                f"No audio files found in {self.origin_dir}. "
+                f"Please add audio files to process or specify valid filenames.")
 
         self._setup_objects()
-
-    @property
-    def base_type(self):
-        return 'PostAnalyzer'
 
     def _setup_yaml(self):
         """Load and assign configuration parameters from the YAML configuration file."""
@@ -90,6 +138,7 @@ class ASRPostAnalyzer(Base):
         self.vad_url = resolve_url(asr_server_config['voice_activity_detector'])
 
     def _setup_directories(self):
+        """Set up the directory structure for the ASRPostAnalyzer."""
         self.runtime_dir = os.path.join(self.project_dir, 'post-time', 'runtime')
         self.origin_dir = os.path.join(self.project_dir, 'post-time', 'origin')
         self.profiles_dir = os.path.join(self.project_dir, 'post-time', 'profiles')
@@ -105,23 +154,29 @@ class ASRPostAnalyzer(Base):
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.visualizations_dir, exist_ok=True)
 
-    def _setup_objects(self):
-        self.recognizer = AudioRecognizer(config_path=self.config_path,
-                                          audio_db=os.path.join(self.profiles_dir,
-                                                                os.path.splitext(self.process_files[0])[0]))
+    def _setup_objects(self) -> None:
+        """Initialize the AudioRecognizer object."""
+        # Create audio database directory
+        first_file = os.path.splitext(self.process_files[0])[0]
+        db_path = os.path.join(self.profiles_dir, first_file)
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    def run(self):
+        # Initialize the recognizer with a valid config path
+        self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=db_path)
+
+    def run(self) -> None:
         """Process all specified files."""
         self._process_audio_files()
 
-    def _process_audio_files(self):
+    def _process_audio_files(self) -> None:
+        """Process each audio file in the list of files to process."""
         for audio_filename in tqdm(self.process_files, desc='Processing audio files', unit='session'):
             self.logger = get_logger(f'asr-post-{audio_filename}',
                                      os.path.join(self.logger_dir, f'{audio_filename}_asr_post.log'))
             self.logger.info(f"Processing file: {audio_filename}")
             self._process_single_audio_file(audio_filename)
 
-    def _process_single_audio_file(self, filename):
+    def _process_single_audio_file(self, filename: str):
         """Process a single audio file.
 
         Args:
@@ -129,16 +184,21 @@ class ASRPostAnalyzer(Base):
         """
         self.filename = filename
         self.session_name = os.path.splitext(filename)[0]
-        speakers_corpus_dir = os.path.join(self.origin_dir, self.session_name)
 
+        speakers_corpus_dir = os.path.join(self.origin_dir, self.session_name)
         if not os.path.exists(speakers_corpus_dir):
             os.makedirs(speakers_corpus_dir)
+            self.logger.error(f"Speaker corpus directory not found: {speakers_corpus_dir}")
             raise ValueError(
-                f"{speakers_corpus_dir} not exist, please add your raw speaker corpus for {filename}")
+                f"Speaker corpus directory not found: {speakers_corpus_dir}\n"
+                f"Please create this directory and add your raw speaker audio files for {filename}\n"
+                f"Each speaker should have their own audio file named <speaker_name>.wav")
 
         if not os.listdir(speakers_corpus_dir):
+            self.logger.error(f"Speaker corpus directory is empty: {speakers_corpus_dir}")
             raise ValueError(
-                f"{speakers_corpus_dir} is empty, please add your raw speaker corpus for {filename}")
+                f"Speaker corpus directory is empty: {speakers_corpus_dir}\n"
+                f"Please add your raw speaker audio files for {filename}")
 
         self.session_logs_dir = os.path.join(self.logs_dir, f'session_{self.session_name}')
         self.session_runtime_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}')
@@ -167,7 +227,7 @@ class ASRPostAnalyzer(Base):
         else:
             self._process_segments()
 
-    def _register_speakers(self, speakers_corpus_dir, enhance=True):
+    def _register_speakers(self, speakers_corpus_dir: str, enhance: bool = True):
         """Register speakers' raw audio files to the recognizer.
 
         Args:
@@ -253,10 +313,10 @@ class ASRPostAnalyzer(Base):
                         speaker = name
 
                 time += timedelta(seconds=self.segment_duration)
-                segment_start_time = int((start_time + time).timestamp())
+                segment_start_time = float((start_time + time).timestamp())
                 recognition_entry = {
                     "segment_no": segment_no,
-                    "segment_start_time": segment_start_time,
+                    "time_bucket": segment_start_time,
                     "speakers": json.dumps([speaker]),
                     "similarities": json.dumps([np.round(np.float64(similarity), 4)]),
                     "durations": json.dumps([duration]),
@@ -343,7 +403,7 @@ class ASRPostAnalyzer(Base):
                 assert isinstance(segment_path, str), "segment_path must be a string"
 
                 time += timedelta(seconds=self.segment_duration)
-                segment_start_time = int((start_time + time).timestamp())
+                segment_start_time = float((start_time + time).timestamp())
                 speakers, similarities, durations = [], [], []
                 processed_segment_path = self._audio_preprocessing(segment_path, inplace=1)
 
@@ -417,7 +477,7 @@ class ASRPostAnalyzer(Base):
         speakers_segments = {}  # Dictionary to hold the current speaker segments
         chunk_list = []
         for entry in speaker_recognition_log:
-            segment_start_time = entry['segment_start_time']
+            segment_start_time = entry['time_bucket']
             segment_end_time = segment_start_time + self.segment_duration
             speakers = json.loads(entry['speakers'])
 
@@ -438,7 +498,7 @@ class ASRPostAnalyzer(Base):
 
         # Handle the last segment for remaining speakers
         if speaker_recognition_log:
-            last_segment_start_time = speaker_recognition_log[-1]['segment_start_time']
+            last_segment_start_time = speaker_recognition_log[-1]['time_bucket']
             last_segment_end_time = last_segment_start_time + self.segment_duration
             for speaker, times in speakers_segments.items():
                 times[1] = last_segment_end_time
@@ -474,6 +534,7 @@ class ASRPostAnalyzer(Base):
                     text = self._transcribe(chunk_path) if speaker != 'silent' else ''
                     transcription_entry = {
                         "chunk_no": index,
+                        "time_bucket": chunk_start_time,
                         "chunk_start_time": chunk_start_time,
                         "chunk_end_time": chunk_end_time,
                         "speaker": speaker,
@@ -637,7 +698,7 @@ class ASRPostAnalyzer(Base):
         """
         recognition_entry = {
             "segment_no": segment_no,
-            "segment_start_time": segment_start_time,
+            "time_bucket": segment_start_time,
             "speakers": json.dumps(final_speakers),
             "similarities": json.dumps(final_similarities),
             "durations": json.dumps(final_durations),

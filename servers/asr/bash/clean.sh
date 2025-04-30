@@ -1,17 +1,11 @@
 #!/bin/bash
-# This script is for cleaning and recreating the necessary folders for the project
-
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PROJECT_DIR="$BASH_DIR/.."
 
 # Folders to clean and recreate
 paths=(
-    "$PROJECT_DIR/visualizations/"
-    "$PROJECT_DIR/logs/"
     "$PROJECT_DIR/logger/"
-    "$PROJECT_DIR/real-time/"
-    "$PROJECT_DIR/post-time/"
-    "$PROJECT_DIR/post-time/origin"
+    "$PROJECT_DIR/temp/"
 )
 
 # Clean the folders

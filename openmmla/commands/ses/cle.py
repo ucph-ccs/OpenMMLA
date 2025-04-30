@@ -96,7 +96,7 @@ def run_bucket_cleanup(args):
             flush_input()
             operation = input(
                 "Please select an operation:\n"
-                "1: Clean up bucket data (keep bucket structure)\n"
+                "1: Clean up bucket data\n"
                 "2: Delete bucket\n"
                 "3: Create new bucket\n"
                 "4: Clean up local data\n"
