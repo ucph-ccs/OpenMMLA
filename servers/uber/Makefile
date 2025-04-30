@@ -48,6 +48,7 @@ ifeq ($(IS_MAC), 1)
 	brew services restart influxdb
 else
 	@echo "🔁 Restarting InfluxDB (Linux)"
+	sudo systemctl enable influxdb
 	sudo systemctl restart influxdb
 endif
 
@@ -57,6 +58,7 @@ ifeq ($(IS_MAC), 1)
 	brew services restart redis
 else
 	@echo "🔁 Restarting Redis (Linux)"
+	sudo systemctl enable redis-server
 	sudo systemctl restart redis-server
 endif
 
@@ -66,6 +68,7 @@ ifeq ($(IS_MAC), 1)
 	brew services restart mosquitto
 else
 	@echo "🔁 Restarting Mosquitto (Linux)"
+	sudo systemctl enable mosquitto
 	sudo systemctl restart mosquitto
 endif
 
@@ -90,7 +93,8 @@ ifeq ($(IS_MAC), 1)
 		sudo nginx; \
 	fi
 else
-	echo "🔁 Reloading NGINX (Linux)"; \
+	echo "🔁 Restarting NGINX (Linux)"; \
+	sudo systemctl enable nginx
 	sudo systemctl restart nginx
 endif
 
@@ -142,6 +146,7 @@ ifeq ($(IS_MAC), 1)
 else
 	@echo "🛑 Stopping InfluxDB (Linux)"
 	@sudo systemctl stop influxdb || echo "⚠️ InfluxDB not running"
+	@sudo systemctl disable influxdb || echo "⚠️ Could not disable InfluxDB"
 endif
 
 stop-redis:
@@ -151,6 +156,7 @@ ifeq ($(IS_MAC), 1)
 else
 	@echo "🛑 Stopping Redis (Linux)"
 	@sudo systemctl stop redis-server || echo "⚠️ Redis not running"
+	@sudo systemctl disable redis-server || echo "⚠️ Could not disable Redis"
 endif
 
 stop-mosquitto:
@@ -160,6 +166,7 @@ ifeq ($(IS_MAC), 1)
 else
 	@echo "🛑 Stopping Mosquitto (Linux)"
 	@sudo systemctl stop mosquitto || echo "⚠️ Mosquitto not running"
+	@sudo systemctl disable mosquitto || echo "⚠️ Could not disable Mosquitto"
 endif
 
 stop-nginx:
@@ -169,6 +176,7 @@ ifeq ($(IS_MAC), 1)
 else
 	@echo "🛑 Stopping NGINX (Linux)"
 	@sudo systemctl stop nginx || echo "⚠️ NGINX not running"
+	@sudo systemctl disable nginx || echo "⚠️ Could not disable NGINX"
 endif
 
 stop-next:

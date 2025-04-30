@@ -29,7 +29,7 @@ OpenMMLA consists of several hardware components working together:
 - **Base Stations**: microprocessors/PCs that processes various data streams. Each base station runs one or more instances of *Base* and *Synchronizer*, with specific types (e.g., *AudioSynchronizer*) synchronizing data from corresponding *Base* components (e.g., *AudioBase*).
 - **Servers**: powerful PCs that provides centralized services for other devices within distributed environments. Based on functionality, it can be divided into:
    + *Base Server*: REST servers running AI services (infer, transcribe, vad, vllm... via Flask/FastAPI).
-   + *Uber Server*: central server running services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
+   + *Uber Server*: central servers running services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
 - **Dashboard**: web-page interfaces accessible via phone and web browsers, featuring on session selection, real-time visualizations, post-time visualizations and measurements downloads.
 
 <details>
@@ -109,7 +109,7 @@ sudo systemctl enable influxdb
 sudo systemctl start influxdb
 
 # Go to http://localhost:8086, and follow the instructions to create admin user with operator API token, save your token in a safe place, 
-# it will be used for config later.
+# it will be used for setting your [InfluxDB][token] in your config yml file.
 ```
 
 #### Redis Installation
@@ -161,6 +161,7 @@ conda activate <env-name>
 ## Option 1: via GitHub project (Recommended)
 git clone https://github.com/ucph-ccs/openmmla.git  # clone the repo
 cd openmmla
+# Add quote if on macOS, e.g., pip install -e '.[uber-server]'
 pip install -e .[uber-server] # On uber server with conda env `uber-server`
 pip install -e .[asr-base] # On base station with conda env `asr-base`
 pip install -e .[asr-server] # On base server with conda env `asr-server`

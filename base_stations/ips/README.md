@@ -29,7 +29,7 @@ pip install -e .[ips-base] # or pip install openmmla[ips-base]
 ### On Servers
 ```bash
 # 1. Run uber services on uber server with conda env `uber-server`
-# Go to servers/uber/
+# Go to /servers/uber/ to run with scripts or run manually with brew or systemctl
 make all # if start all services 
 make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
 ```

@@ -124,7 +124,7 @@ class ASRBase(Base):
             self.stream_kwargs['port'] = self.port
 
         # set input_device_index for 'pyaudio'
-        if self.source == 'pyaudio':
+        elif self.source == 'pyaudio':
             try:
                 import pyaudio
             except ImportError:
@@ -145,14 +145,13 @@ class ASRBase(Base):
             self.stream_kwargs['input_device_index'] = self.input_device_index
 
         # set url for 'rtmp'
-        if self.source == 'rtmp':
-            # check self.config['RTMP']['audio_streams'] exist, if not, raise error
+        elif self.source == 'rtmp':
             if 'RTMP' not in self.config:
                 raise ValueError("RTMP configuration is missing in the YAML file.")
             if 'audio_streams' not in self.config['RTMP']:
                 raise ValueError("RTMP: audio_streams configuration is missing in the YAML file.")
 
-            audio_stream_list = self.config['RTMP']['audio_streams'].split(',')
+            audio_stream_list = [url.strip() for url in self.config['RTMP']['audio_streams'].split(',') if url.strip()]
             for i, stream_rul in enumerate(audio_stream_list):
                 print(f'{i} : {stream_rul}')
             self.url = get_rtmp_url(audio_stream_list)

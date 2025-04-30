@@ -16,7 +16,7 @@ Before setting up the dashboard, ensure you have the following prerequisites ins
 ### Step 1: Clone the Repository
 ```bash
 git clone https://github.com/ucph-ccs/openmmla.git
-cd openmmla
+cd OpenMMLA
 ```
 
 ### Step 2: Setup Dashboard Flask Backend
@@ -24,10 +24,10 @@ cd openmmla
 1. **Install backend dependencies**:
 
 ```bash
-cd servers/uber/dashboard
 conda create -n uber-server -c conda-forge python=3.10.12 -y
 conda activate uber-server
 pip install -e .[uber-server]
+cd servers/uber/dashboard
 ```
 
 2. **Configure the backend**:
@@ -75,7 +75,8 @@ npm install
 
 2. **Configure the frontend**:
 Edit `next-frontend/.env.local`: replace the `<flask-example-server>` with your
-actual flask backend server address.
+actual flask backend server hostname or IP address, e.g., `uber-server.local` or 
+`192.168.1.12`.
 
 ```
 # .env.local
@@ -84,7 +85,8 @@ NEXT_PUBLIC_FLASK_PORT=5000
 ```
 
 Edit `next-frontend/next.config.js`: replace the `<flask-example-server>` with your
-actual flask backend server address.
+actual flask backend server hostname or IP address, e.g., `uber-server.local` or
+`192.168.1.12`.
 
 ```javascript
 module.exports = {
@@ -109,13 +111,14 @@ module.exports = {
 
 ## Running the Dashboard
 
-The easiest way to run the dashboard is using the provided Makefile commands from the main `servers/uber` directory:
+Run the dashboard using the provided Makefile commands from the main `servers/uber` directory:
 
 ```bash
-cd ../  # Go back to servers/uber directory
-# Start the Flask Backend on port 5000 using Gunicorn with the gevent worker
+# Go back to servers/uber directory if you are at servers/uber/dashboard/next-frontend
+cd ../..
+# Start the Flask backend on port 5000 using Gunicorn with the gevent worker
 make flask 
-# Start the Celery Worker for Flask that process background tasks
+# Start the Celery Workers for Flask backend to process background tasks (generate visualisations)
 make celery
 # Start the Next.js Frontend on port 3000
 make next

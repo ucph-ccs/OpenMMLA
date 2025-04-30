@@ -30,7 +30,7 @@
 # Each service can have multiple servers with different weights for load balancing
 upstreams:
   # Audio inference service
-  infer:  # <your-service-name> - must match the endpoint name in create_app
+  infer:  # reserved for asr-infer
     - host: <server-01-host>  # Hostname or IP address of the server, e.g. 192.168.1.12 or server-01.local
       port: <port-number>     # Port number where the service is running, e.g. 5000
       weight: 3              # Weight for load balancing (higher = more requests)
@@ -42,7 +42,7 @@ upstreams:
       weight: 1
 
   # Audio resampling service
-  resample:  # <your-service-name>
+  resample:  # reserved for asr-resample
     - host: <server-01-host>
       port: <port-number>
       weight: 3
@@ -54,7 +54,7 @@ upstreams:
       weight: 1
 
   # Speech enhancement service
-  enhance:  # <your-service-name>
+  enhance:  # reserved for asr-enhance
     - host: <server-01-host>
       port: <port-number>
       weight: 3
@@ -66,7 +66,7 @@ upstreams:
       weight: 1
 
   # Speech separation service
-  separate:  # <your-service-name>
+  separate:  # reserved for asr-separate
     - host: <server-01-host>
       port: <port-number>
       weight: 3
@@ -78,7 +78,7 @@ upstreams:
       weight: 1
 
   # Speech transcription service
-  transcribe:  # <your-service-name>
+  transcribe:  # reserved for asr-transcribe
     - host: <server-01-host>
       port: <port-number>
       weight: 3
@@ -90,7 +90,7 @@ upstreams:
       weight: 1
 
   # Voice activity detection service
-  vad:  # <your-service-name>
+  vad:  # reserved for asr-vad
     - host: <server-01-host>
       port: <port-number>
       weight: 3
@@ -101,11 +101,27 @@ upstreams:
       port: <port-number>
       weight: 1
 
+  vllm: # reserved for vfa-vllm
+    - host: <server-01-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  # reserved for your custom service created with create_app(), matched with the endpoint name defined in crate_app()
+  <your-service-endpoint-name>:
+    - host: <server-01-host>
+      port: <port-number
+
 # RTMP application names for video streaming
 # These are the application names that will be used in RTMP URLs
-# Format: rtmp://<nginx-host>/<app-name>/<stream-key>
+# Format: rtmp://<nginx-host>/<stream-app-name>
 rtmp_apps:
-  - <stream-01>  # e.g., camera1, room1, etc.
+  - <stream-01>  # e.g., replace it with your actual name like camera_01, microphone_01, stream_01, etc.
   - <stream-02>
   - <stream-03>
   - <stream-04>

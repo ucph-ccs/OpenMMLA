@@ -106,7 +106,7 @@ class ASRPostAnalyzer(Base):
 
         # Process specific files if filenames is provided, otherwise process all files in the origin directory
         if filenames:
-            specified_files = [f.strip() for f in str(filenames).split(',')]
+            specified_files = [f.strip() for f in str(filenames).split(',') if f.strip()]
             self.process_files = [f for f in specified_files if os.path.isfile(os.path.join(self.origin_dir, f))]
 
             if not self.process_files:
