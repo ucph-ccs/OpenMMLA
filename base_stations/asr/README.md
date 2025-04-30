@@ -23,17 +23,17 @@ The post-time analyzer is as follows:
 # (e.g., base stations: asr-base, asr servers: asr-server, uber servers: uber-server)
 conda create -n asr-base -c conda-forge python=3.10.12 -y
 conda activate asr-base
-pip install openmmla[asr-base]
+pip install -e .[asr-base] # or pip install openmmla[asr-base]
 ```
 
 ### On Servers
 ```bash
-# Run uber services on your machine with uber-server env
+# Run services on uber server with uber-server env
 # Go to servers/uber/
 make all # if start all services 
 make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
 
-# Run asr services on your machine with asr-server env
+# Run asr services on base server with asr-server env
 # Edit your own config.yml file, see servers/asr/config_template.yml for more details
 # You can either run it via bash or python
 
@@ -83,16 +83,17 @@ options:
   -h                          : Display this help message
 
 # For post-time audio analyzer
-usage: ./run_post.sh [-f FILENAMES] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-sp SPEECH_SEPARATE] [-tr TRANSCRIBE] [-h]
+usage: ./run_post.sh [-f FILENAMES] [-custom CUSTOM_ORIGIN_DIR] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-sp SPEECH_SEPARATE] [-tr TRANSCRIBE] [-h]
 
 options:
-  -f FILENAMES                 : specified filenames in <asr-project>/post-time/origin/ to process, default to all files when not specified.
+  -f FILENAMES                 : Comma-separated list of filenames in <custom_origin_dir> to process, default to all files when not specified.
+  -custom CUSTOM_ORIGIN_DIR    : Path to the custom origin directory, default to <project_dir>/post-time/origin/ when not specified.
   -vad VOICE_ACTIVITY_DETECT   : Whether to use Voice Activity Detection (true/false, default: true)
   -nr NOISE_REDUCE             : Whether to use Noise Reduction (true/false, default: true)
-  -sp SPEECH_SEPARATE          : Whether to use Speech Separation (true/false, default: true)
+  -sp SPEECH_SEPARATE          : Whether to use Speech Separation (true/false, default: false)
   -tr TRANSCRIBE               : Whether to transcribe audio (true/false, default: true)
   -h                           : Display this help message
-  
+   
 # ==================PYTHON========================
 # For real-time audio analyzer
 conda activate asr-base
@@ -100,5 +101,5 @@ mmla asr-base -b <base_type> -c <config_file_path> # start an asr base
 mmla asr-sync -c <config_file_path> # start an asr base synchronizer
 
 # For post-time audio analyzer
-mmla asr-post -f <filenames> -c <config_file_path>
-```
+mmla asr-post -f [-custom <custom_origin_dir>] [-f <filenames>] -c <config_file_path>
+``` 

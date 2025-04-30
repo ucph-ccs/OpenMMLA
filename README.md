@@ -28,8 +28,8 @@ OpenMMLA consists of several hardware components working together:
      - *Camera*: USB camera (Logitech HD C920, etc.)
 - **Base Stations**: microprocessors/PCs that processes various data streams. Each base station runs one or more instances of *Base* and *Synchronizer*, with specific types (e.g., *AudioSynchronizer*) synchronizing data from corresponding *Base* components (e.g., *AudioBase*).
 - **Servers**: powerful PCs that provides centralized services for other devices within distributed environments. Based on functionality, it can be divided into:
-   + *Base Servers*: REST servers for AI services (infer, transcribe, vad, vlm... via Flask/FastAPI).
-   + *Uber Servers*: other services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
+   + *Base Server(s)*: REST servers for AI services (infer, transcribe, vad, vlm... via Flask/FastAPI).
+   + *Uber Server(s)*: other services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
 - **Dashboard**: web-page interfaces accessible via phone and web browsers, featuring on session selection, real-time visualizations, post-time visualizations and measurements downloads.
 
 <details>
@@ -45,23 +45,14 @@ The setup requirements depend on which part of the system you're implementing:
 
 ### System Dependencies 
 
-These tools are required for **Base Stations** and **Base Servers** to process audio/video data:
-
-- **Python Environment**: [Conda](https://docs.conda.io/en/latest/miniconda.html)
-- **Terminal Multiplexer**: [tmux](https://github.com/tmux/tmux/wiki/Installing)
-- **Audio Processing**: [PortAudio](http://www.portaudio.com/download.html)
-- **Video Processing**: [FFmpeg](https://ffmpeg.org/download.html)
+Install the following tools for **Base Stations** and **Base Servers**:
+[Conda](https://docs.conda.io/en/latest/miniconda.html), [tmux](https://github.com/tmux/tmux/wiki/Installing), [PortAudio](https://www.portaudio.com/), [FFmpeg](https://ffmpeg.org/)
 
 <details>
 <summary>Conda Installation</summary>
 
 ```bash
-# macOS & Ubuntu
-wget "https://repo.anaconda.com/miniconda/Miniconda3-latest-$(uname)-$(uname -m).sh"
-bash Miniconda3-latest-$(uname)-$(uname -m).sh
-
-# Debian (Raspberry Pi)
-wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
 bash Miniforge3-$(uname)-$(uname -m).sh
 ```
 </details>
@@ -92,7 +83,7 @@ sudo apt install -y build-essential git ffmpeg python3-pyaudio libsndfile1 porta
 
 ### Required Services 
 
-These services are essential for the **Uber Servers** which acts as the central hub:
+Install the following services for **Uber Server(s)**:
 
 - **InfluxDB** (required): Time series database for storing group segment measurement results  
 - **Redis** (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks)  
@@ -167,7 +158,7 @@ conda create -n <env-name> -c conda-forge python=3.10.12 -y
 conda activate <env-name>
 
 # Step 2: Install OpenMMLA and components dependencies
-## Option 1: Via GitHub
+## Option 1: Via GitHub to keep updated (Recommended)
 git clone https://github.com/ucph-ccs/openmmla.git  # clone the repo
 cd openmmla
 pip install -e .  # base package
