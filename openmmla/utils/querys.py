@@ -20,12 +20,7 @@ def fetch_and_process_data(bucket_name, measurement, influx_client):
     tables = influx_client.query(query)
     json_str = tables.to_json(indent=5)
     data = json.loads(json_str)
-    if measurement == 'speaker transcription':
-        data.sort(key=lambda x: x['chunk_start_time'])
-    elif measurement == 'action recognition':
-        data.sort(key=lambda x: x['acquired_time'])
-    else:
-        data.sort(key=lambda x: x['segment_start_time'])
+    data.sort(key=lambda x: x['time_bucket'])
     return json.dumps(data, ensure_ascii=False, indent=5)
 
 
@@ -49,10 +44,19 @@ def save_to_json_file(bucket_name, data, suffix, log_dir):
 
 
 def convert_json_to_dataframe(json_data, json_columns):
-    """Converts JSON data into a pandas DataFrame and transforms specific JSON-formatted string columns into Python
+    """Converts JSON data into a pandas DataFrame and transforms JSON-formatted string columns into Python
     dictionaries."""
     df = pd.DataFrame(json_data)[json_columns]
+
+    def try_json_loads(x):
+        if isinstance(x, str):
+            try:
+                return json.loads(x)
+            except json.JSONDecodeError:
+                return x
+        return x
+
     for column in json_columns:
-        if column != 'segment_start_time':
-            df[column] = df[column].apply(json.loads)  # Convert JSON-formatted string to Python dictionary
+        df[column] = df[column].apply(try_json_loads)
+
     return df

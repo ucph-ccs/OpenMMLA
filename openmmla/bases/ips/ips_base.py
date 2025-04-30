@@ -11,7 +11,7 @@ from pupil_apriltags import Detector
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import get_bucket_name
+from openmmla.utils.input import select_or_create_bucket
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
 from .input import get_function_base
@@ -120,7 +120,7 @@ class IPSBase(Base):
             return self._set_camera()
 
         # Bucket selection
-        self.bucket_name = get_bucket_name(self.influx_client)
+        self.bucket_name = select_or_create_bucket(self.influx_client)
         self.logger = get_logger(f'ips-base-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_ips_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
@@ -145,7 +145,7 @@ class IPSBase(Base):
         finally:
             self._detection_handler(exception_occurred)
 
-    def _detection_handler(self, e):
+    def _detection_handler(self, e: Exception | None):
         """Handle exceptions and stop all threads.
 
         Args:
@@ -429,3 +429,10 @@ class IPSBase(Base):
 
         with open(os.path.join(self.camera_sync_dir, chosen_transformation), 'r') as file:
             return json.load(file)
+
+    @property
+    def bucket_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current bucket_name."""
+        if self.bucket_name:
+            return f'{self.bucket_name}/ips/control'
+        return None

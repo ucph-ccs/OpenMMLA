@@ -22,7 +22,7 @@ from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import get_bucket_name
+from openmmla.utils.input import select_or_create_bucket
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
@@ -245,7 +245,7 @@ class ASRBase(Base):
 
         self.audio_recognizer.register(audio_path, name)
 
-    def _start_recognition(self, bucket_name=None):
+    def _start_recognition(self, bucket_name: str | None = None):
         """Start the real-time voice recognition process.
 
         Set up directories, queues, and MQTT communication before creating threads for:
@@ -256,15 +256,14 @@ class ASRBase(Base):
           - Listening for stop signals.
 
         Args:
-            bucket_name (str, optional): The bucket name for storing recognition results. If not provided,
-                                         it is obtained interactively.
+            bucket_name: The bucket name for storing recognition results. If not provided, it is obtained interactively.
         """
         if self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.info("Audio database is empty.")
             return
 
-        self.bucket_name = get_bucket_name(self.influx_client) if not bucket_name else bucket_name
+        self.bucket_name = select_or_create_bucket(self.influx_client) if not bucket_name else bucket_name
         self.logger = get_logger(f'asr-base-{self.bucket_name}',
                                  os.path.join(self.logger_dir,
                                               f'{self.bucket_name}_asr_{self.base_type}_{self.id}.log'))
@@ -304,6 +303,28 @@ class ASRBase(Base):
             exception_occurred = e
         finally:
             self._recognition_handler(exception_occurred)
+
+    def _recognition_handler(self, e: Exception | KeyboardInterrupt | None):
+        """Handle exceptions during the recognition process and perform cleanup.
+
+        Stop all threads and external clients, cleans up runtime variables, and if a RecordingError
+        occurred, restarts the recognition service with the current bucket.
+
+        Args:
+            e: The exception that occurred during recognition, if any.
+        """
+        if e:
+            self._stop_threads()
+        else:
+            self.logger.info("All threads stopped properly.")
+
+        current_bucket = self.bucket_name  # assign bucket name before cleaning up
+        self.mqtt_client.loop_stop()
+        self.audio_stream.stop()
+        self._clean_up()
+        if isinstance(e, RecordingError):
+            self.logger.info("Restarting recognizing service.")
+            self._start_recognition(current_bucket)
 
     def _reset(self):
         """Reset the ASR base.
@@ -368,7 +389,7 @@ class ASRBase(Base):
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
-                record_start_time = os.path.basename(segment_audio_path).split('_')[-1][:-4]
+                record_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
                 write_bytes_to_wav(segment_audio_path, frames)
 
@@ -408,7 +429,7 @@ class ASRBase(Base):
 
                 if self.store:
                     shutil.move(segment_audio_path,
-                                os.path.join(self.audio_dir, 'segments', f'{speaker}_{float(record_start_time)}.wav'))
+                                os.path.join(self.audio_dir, 'segments', f'{speaker}_{record_start_time}.wav'))
                 else:
                     os.remove(segment_audio_path)
             except queue.Empty:
@@ -434,7 +455,7 @@ class ASRBase(Base):
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
-                record_start_time = os.path.basename(segment_audio_path).split('_')[-1][:-4]
+                record_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
                 write_bytes_to_wav(segment_audio_path, frames)
 
@@ -443,7 +464,6 @@ class ASRBase(Base):
                 processed_audio_path = self._audio_preprocessing(segment_audio_path, inplace=0)
 
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
-                # speaker = 'silent' if processed_audio_path is None else 'unknown'
                 speaker = 'unknown' if processed_audio_path else 'silent'
                 duration = self.recognize_duration
                 similarity = 0
@@ -498,9 +518,9 @@ class ASRBase(Base):
                 if self.store:
                     if best_separate_path:
                         shutil.move(best_separate_path, os.path.join(self.audio_dir, 'separations',
-                                                                     f'{speaker}_{round(float(record_start_time))}_spk.wav'))
-                    shutil.move(segment_audio_path, os.path.join(self.audio_dir, 'segments',
-                                                                 f'{speaker}_{round(float(record_start_time))}.wav'))
+                                                                     f'{speaker}_{record_start_time}_spk.wav'))
+                    shutil.move(segment_audio_path,
+                                os.path.join(self.audio_dir, 'segments', f'{speaker}_{record_start_time}.wav'))
                 else:
                     if best_separate_path:
                         os.remove(best_separate_path)
@@ -559,7 +579,8 @@ class ASRBase(Base):
             except Exception as e:
                 raise TranscribingError(f'TranscribingError occurred when transcribing: {e}') from e
 
-    def _assemble_chunk_with_hsr(self, speaker, record_start_time, origin_frames, separate_frames=None):
+    def _assemble_chunk_with_hsr(self, speaker: str, record_start_time: float, origin_frames: bytes,
+                                 separate_frames: bytes | None = None):
         """Assemble and process audio chunks with half-scaled recognition (HSR) at speaker boundaries.
 
         If the current recognized speaker matches the previous speaker, appends the audio frames.
@@ -590,8 +611,7 @@ class ASRBase(Base):
                 # Perform half-scaled recognition on speaker turn border
                 if chunk_frames:
                     left_temp_path = os.path.join(self.audio_dir, 'temp', f'{self.base_type}_{self.id}_left_temp.wav')
-                    right_temp_path = os.path.join(self.audio_dir, 'temp',
-                                                   f'{self.base_type}_{self.id}_right_temp.wav')
+                    right_temp_path = os.path.join(self.audio_dir, 'temp', f'{self.base_type}_{self.id}_right_temp.wav')
                     number_frames = int(len(frames) / 2)
                     candidates = [self.last_speaker, speaker]
                     write_bytes_to_wav(left_temp_path, chunk_frames[-number_frames:], framerate=fr)
@@ -622,13 +642,12 @@ class ASRBase(Base):
 
                 if chunk_frames:
                     if self.last_speaker not in ['silent', 'unknown']:
-                        self._enqueue_transcription(chunk_frames, self.last_speaker, chunk_start_time,
-                                                    chunk_end_time)
+                        self._enqueue_transcription(chunk_frames, self.last_speaker, chunk_start_time, chunk_end_time)
 
                     # Optionally store the audio chunk locally
                     if self.store:
                         chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
-                                                        f'{self.last_speaker}_chunk_{round(float(chunk_start_time))}.wav')
+                                                        f'{self.last_speaker}_chunk_{chunk_start_time}.wav')
                         write_bytes_to_wav(chunk_audio_path, chunk_frames, framerate=fr)
                         if self.last_speaker != 'silent':
                             normalize_decibel(chunk_audio_path, rms_level=-20)
@@ -637,8 +656,8 @@ class ASRBase(Base):
 
         self.last_speaker = speaker
 
-    def _update_chunk_list(self, left_speaker, right_speaker, last_speaker, current_speaker, chunk_frames, frames,
-                           record_start_time) -> tuple:
+    def _update_chunk_list(self, left_speaker: str, right_speaker: str, last_speaker: str, current_speaker: str,
+                           chunk_frames: bytes, frames: bytes, record_start_time: float) -> tuple:
         """Update the chunk list based on recognition results at a speaker turn boundary.
 
         Adjust the audio chunks based on recognition outcomes from different segments,
@@ -661,25 +680,25 @@ class ASRBase(Base):
         if left_speaker == right_speaker and left_speaker == last_speaker:  # Case AAAB: Extend the left chunk
             chunk_frames = chunk_frames + frames[:num_frames]
             frames = frames[num_frames:]
-            record_start_time = str(float(record_start_time) + self.recognize_duration / 2)
+            record_start_time = record_start_time + self.recognize_duration / 2
             chunk_end_time = record_start_time
         elif left_speaker == right_speaker and right_speaker == current_speaker:  # Case ABBB: Extend the right chunk
             frames = chunk_frames[-num_frames:] + frames
             chunk_frames = chunk_frames[:-num_frames]
-            record_start_time = str(float(record_start_time) - self.recognize_duration / 2)
+            record_start_time = record_start_time - self.recognize_duration / 2
             chunk_end_time = record_start_time
         else:  # Other cases: AABB, A_BB, AA_B, A__B (excluding ABAB, AB_B, A_AB)
             chunk_end_time = record_start_time
             if left_speaker != last_speaker:
                 chunk_frames = chunk_frames[:-num_frames]
-                chunk_end_time = str(float(record_start_time) - self.recognize_duration / 2)
+                chunk_end_time = record_start_time - self.recognize_duration / 2
             if right_speaker != current_speaker:
                 frames = frames[num_frames:]
-                record_start_time = str(float(record_start_time) + self.recognize_duration / 2)
+                record_start_time = record_start_time + self.recognize_duration / 2
 
         return chunk_frames, frames, record_start_time, chunk_end_time
 
-    def _enqueue_transcription(self, frames, speaker, chunk_start_time, chunk_end_time):
+    def _enqueue_transcription(self, frames: bytes, speaker: str, chunk_start_time: float, chunk_end_time: float):
         """Add an audio chunk to the transcription queue.
 
         If transcription is enabled (self.tr), enqueues the audio frames along with speaker and timing details.
@@ -693,63 +712,71 @@ class ASRBase(Base):
         if self.tr:
             self.transcription_queue.put((frames, speaker, chunk_start_time, chunk_end_time))
 
-    def _transcribe(self, frames, frame_rate) -> str:
-        """Transcribe audio frames to text using an external service.
+    def _transcribe(self, frames: bytes, frame_rate: int) -> str:
+        """Transcribe audio frames to text using an external speech-to-text service.
+
+        Sends the audio frames to a remote transcription service and retrieves the 
+        resulting text. The transcription is performed with the base's identifier
+        to maintain context in multi-device setups.
 
         Args:
-            frames: Audio frames to be transcribed.
-            frame_rate: Sample rate of the audio frames.
+            frames: Raw audio byte data to be transcribed.
+            frame_rate: Sample rate of the audio frames in Hz (typically 8000 or 16000).
 
         Returns:
-            str: The transcribed text.
+            The transcribed text as a string. Empty string if transcription failed.
         """
         text = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
                                             self.speech_transcriber_url)
-        return text
+        return text if text is not None else ""
 
-    def _upload_transcription(self, speaker, text, chunk_start_time, chunk_end_time):
+    def _upload_transcription(self, speaker: str, text: str, chunk_start_time: float, chunk_end_time: float):
         """Upload the transcribed speech chunk to the database.
 
-        Construct a transcription record and writes it to InfluxDB.
-        Also prints the transcription for logging purposes.
+        Constructs a transcription record with speaker, text content, and timing information,
+        then writes it to InfluxDB for persistent storage. Also displays the transcription
+        in the console for real-time monitoring.
 
         Args:
-            speaker: Recognized speaker for the transcribed chunk.
-            text: Transcribed text.
-            chunk_start_time: Start time of the audio chunk.
-            chunk_end_time: End time of the audio chunk.
+            speaker: Identified speaker for the transcribed chunk.
+            text: Transcribed text content from the audio chunk.
+            chunk_start_time: Start timestamp of the audio chunk.
+            chunk_end_time: End timestamp of the audio chunk.
         """
         transcription_record = {
             "measurement": "speaker transcription",
             "fields": {
-                "chunk_start_time": float(chunk_start_time),
-                "chunk_end_time": float(chunk_end_time),
+                "time_bucket": chunk_start_time,
                 "text": text,
                 "speaker": speaker,
+                "chunk_start_time": chunk_start_time,
+                "chunk_end_time": chunk_end_time,
             },
         }
-        print(f"{GREEN}[Speaker Transcription]{ENDC}{transcription_record['fields']['chunk_start_time']}: "
+        print(f"{GREEN}[Speaker Transcription]{ENDC}{transcription_record['fields']['time_bucket']}: "
               f"{GREEN}{speaker} : {text}{ENDC}")
         self.influx_client.write(self.bucket_name, record=transcription_record)
 
-    def _publish_recognition(self, record_start_time, recognize_start_time, speakers, similarities, durations):
+    def _publish_recognition(self, record_start_time: float, recognize_start_time: float, speakers: list[str],
+                             similarities: list[float], durations: list[float]):
         """Log and publish speaker recognition results via MQTT.
 
-        Construct a JSON record with recognition details and publishes it on the designated channel.
+        Constructs a JSON record with recognition details and publishes it on the designated MQTT channel.
+        The record includes speaker identities, similarity scores, and timing information.
 
         Args:
-            record_start_time: Start time of the recorded segment.
-            recognize_start_time: Start time of the recognition process.
-            speakers (list): List of recognized speakers.
-            similarities (list): List of similarity scores.
-            durations (list): List of audio durations.
+            record_start_time: Start time of the recorded segment (timestamp).
+            recognize_start_time: Start time of the recognition process (timestamp).
+            speakers: List of recognized speakers.
+            similarities: List of similarity scores (0.0-1.0) corresponding to speakers.
+            durations: List of audio durations in seconds for each speaker segment.
         """
         base_recognition_result = {
             'base_id': f'{self.base_type.lower()}_{self.id}',
-            'record_start_time': record_start_time,
             'speakers': json.dumps(speakers),
             'similarities': json.dumps(similarities),
-            'durations': json.dumps(durations)
+            'durations': json.dumps(durations),
+            'record_start_time': record_start_time
         }
         print(f"{BLUE}[Speaker Recognition]{ENDC}{base_recognition_result['record_start_time']}: "
               f"{BLUE}{base_recognition_result['speakers']}{ENDC}, similarity: {base_recognition_result['similarities']},"
@@ -757,31 +784,42 @@ class ASRBase(Base):
         result_str = json.dumps(base_recognition_result)
         self.mqtt_client.publish(f'{self.bucket_name}/asr', result_str)
 
-    def _separate_speech(self, segment_audio_path) -> list:
-        """Separate overlapping speech from an audio segment.
+    def _separate_speech(self, segment_audio_path: str) -> list[bytes]:
+        """Separate overlapping speech from an audio segment using source separation.
 
-        Use an external speech separation service to process the audio file and decodes the separated signals.
+        Uses an external speech separation service to process the audio file, identifying and
+        isolating different speakers in the recording. The separated signals are returned as
+        raw audio bytes for further processing.
 
         Args:
-            segment_audio_path (str): Path to the audio segment file.
+            segment_audio_path: Path to the audio segment file containing potentially overlapped speech.
 
         Returns:
-            list: A list of separated speech signals (decoded from base64).
+            A list of separated speech signals as raw bytes (decoded from base64). Each element 
+            represents an isolated speaker's audio. Returns an empty list if separation fails.
         """
         separated_result = request_speech_separation(segment_audio_path, f'{self.base_type.lower()}_{self.id}',
                                                      self.speech_separator_url)
+        if separated_result is None:
+            return []
+
         result = [base64.b64decode(encoded_bytes_stream) for encoded_bytes_stream in separated_result]
         return result
 
     def _audio_preprocessing(self, input_path: str, inplace: int) -> str | None:
         """Preprocess an audio file by applying noise reduction and voice activity detection.
-
+        
+        Performs a sequence of audio enhancement steps to improve recognition quality:
+        1. Noise reduction (if enabled) - Enhances speech by reducing background noise
+        2. Voice activity detection (if enabled) - Identifies and isolates speech segments
+        
         Args:
-            input_path (str): Path to the input audio file.
-            inplace (int): Flag indicating whether to overwrite the input file with the processed version.
-
+            input_path: Path to the input audio file to be processed.
+            inplace: Flag indicating whether to modify the input file (1) when VAD is enabled.
+        
         Returns:
-            str or None: The path to the processed audio file, or None if processing fails.
+            Path to the processed audio file if successful, or None if processing failed
+            (e.g., if no voice activity was detected in the file).
         """
         self._apply_nr(input_path)
         return self._apply_vad(input_path, inplace)
@@ -789,12 +827,16 @@ class ASRBase(Base):
     def _apply_vad(self, input_path: str, inplace: int) -> str | None:
         """Apply Voice Activity Detection (VAD) to an audio file.
 
+        Uses an external VAD service to identify speech segments in the audio file. 
+        This helps filter out silence and non-speech portions to improve recognition quality.
+
         Args:
-            input_path (str): Path to the input audio file.
-            inplace (int): Flag indicating whether to overwrite the input file.
+            input_path: Path to the input audio file to process.
+            inplace: Flag indicating whether to modify the input file (1).
 
         Returns:
-            str or None: The path to the audio file after VAD processing, or the original path if VAD is disabled.
+            Path to the processed audio file if VAD is enabled and successful, the original path if VAD 
+            is disabled, or None if no speech was detected.
         """
         if self.vad:
             return request_voice_activity_detection(input_path, f'{self.base_type.lower()}_{self.id}', inplace,
@@ -804,11 +846,15 @@ class ASRBase(Base):
     def _apply_nr(self, input_path: str) -> str:
         """Apply Noise Reduction (NR) to an audio file.
 
+        Uses an external speech enhancement service to reduce background noise in the audio file.
+        This improves speech clarity for better recognition results.
+
         Args:
-            input_path (str): Path to the input audio file.
+            input_path: Path to the input audio file to process.
 
         Returns:
-            str: The path to the audio file after noise reduction processing.
+            Path to the audio file after noise reduction (the same as input_path, as the file is
+            modified in place by the external service).
         """
         if self.nr:
             request_speech_enhancement(input_path, f'{self.base_type.lower()}_{self.id}', self.speech_enhancer_url)
@@ -829,33 +875,7 @@ class ASRBase(Base):
             for subdir in ['segments', 'chunks', 'separations']:
                 clear_directory(os.path.join(self.audio_dir, subdir))
 
-        # Note: The following commented code may clear the records folder when in record mode.
-        # if self.mode == 'record':
-        #     clear_directory(os.path.join(self.audio_dir, 'records'))
-
         clear_directory(os.path.join(self.audio_dir, 'temp'))
-
-    def _recognition_handler(self, e):
-        """Handle exceptions during the recognition process and perform cleanup.
-
-        Stop all threads and external clients, cleans up runtime variables, and if a RecordingError
-        occurred, restarts the recognition service with the current bucket.
-
-        Args:
-            e (Exception): The exception that occurred during recognition, if any.
-        """
-        if e:
-            self._stop_threads()
-        else:
-            self.logger.info("All threads stopped properly.")
-
-        current_bucket = self.bucket_name  # assign bucket name before cleaning up
-        self.mqtt_client.loop_stop()
-        self.audio_stream.stop()
-        self._clean_up()
-        if isinstance(e, RecordingError):
-            self.logger.info("Restarting recognizing service.")
-            self._start_recognition(current_bucket)
 
     def _clean_up(self):
         """Clean up runtime variables and free memory.
@@ -871,14 +891,16 @@ class ASRBase(Base):
         gc.collect()
 
     @staticmethod
-    def warm_up_resampler(sample_rate_original=44100, sample_rate_target=16000):
+    def warm_up_resampler(sample_rate_original: int = 44100, sample_rate_target: int = 16000):
         """Warm up the audio resampler to avoid delays during the first resampling operation.
 
-        Generate a short segment of silence and performs resampling using librosa.
+        Performs a no-op resampling operation on a silent audio segment to ensure that when the
+        actual resampling is needed, there won't be initialization delays. This is particularly
+        important for real-time processing scenarios.
 
         Args:
-            sample_rate_original (int): Original sample rate (default is 44100).
-            sample_rate_target (int): Target sample rate (default is 16000).
+            sample_rate_original: Original sample rate in Hz (default is 44100 Hz).
+            sample_rate_target: Target sample rate in Hz (default is 16000 Hz).
         """
         dummy_audio = np.zeros(sample_rate_original)
         _ = librosa.resample(dummy_audio, orig_sr=sample_rate_original, target_sr=sample_rate_target)
@@ -888,10 +910,12 @@ class ASRBase(Base):
     def recording_prompt(seconds: float):
         """Display a recording prompt to the user for speaker registration.
 
-        Prompt the user to press Enter and read a series of sentences within the given time frame.
+        Guides the user through the speaker registration process by presenting a standardized
+        set of phonetically balanced sentences to read aloud. These sentences are designed
+        to capture various speech characteristics for more accurate speaker identification.
 
         Args:
-            seconds (float): Duration (in seconds) allowed for reading the prompt.
+            seconds: Duration (in seconds) allowed for recording the prompt sentences.
         """
         input(f"Press the Enter key to start recording, and read the following sentence in {seconds} seconds:\n"
               "1. The boy was there when the sun rose.\n"
@@ -906,3 +930,19 @@ class ASRBase(Base):
               "10. The girl at the booth sold fifty bonds."
               )
         print("------------------------------------------------")
+
+    @property
+    def bucket_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current bucket_name.
+        
+        This property provides the MQTT topic name used for start/stop control signals.
+        The channel name is constructed using the current bucket_name, which allows
+        for controlling specific sessions without affecting others.
+        
+        Returns:
+            The control channel string in format '{bucket_name}/asr/control' if bucket_name 
+            is set, otherwise None.
+        """
+        if self.bucket_name:
+            return f'{self.bucket_name}/asr/control'
+        return None

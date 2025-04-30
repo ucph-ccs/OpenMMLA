@@ -149,10 +149,10 @@ def emit_realtime_data(bucket_name, stop_event):
             recognition_data = fetch_latest_entry(bucket_name, "speaker recognition", influx_client)
             transcription_data = fetch_latest_entry(bucket_name, "speaker transcription", influx_client)
             relations = fetch_latest_entry(bucket_name, "badge relations", influx_client)
-            graph_data, segment_time = relations if relations else (None, None)
+            graph_data, time_bucket = relations if relations else (None, None)
             position_data = {}
-            if segment_time:
-                position_data = get_node_positions(bucket_name, influx_client, segment_time)
+            if time_bucket:
+                position_data = get_node_positions(bucket_name, influx_client, time_bucket)
 
             data = {'recognition': None, 'transcription': None, 'graph': None, 'positions': None}
             recognition_new = False
@@ -162,24 +162,24 @@ def emit_realtime_data(bucket_name, stop_event):
             if bucket_name not in last_sent_data:
                 last_sent_data[bucket_name] = {}
 
-            # Check for new recognition data based on segment_start_time
-            if recognition_data and (bucket_name not in last_sent_data or recognition_data['segment_start_time']
-                                     != last_sent_data[bucket_name].get('recognition_segment_start_time')):
-                last_sent_data[bucket_name]['recognition_segment_start_time'] = recognition_data['segment_start_time']
+            # Check for new recognition data based on time_bucket
+            if recognition_data and (bucket_name not in last_sent_data or recognition_data['time_bucket']
+                                     != last_sent_data[bucket_name].get('recognition_time_bucket')):
+                last_sent_data[bucket_name]['recognition_time_bucket'] = recognition_data['time_bucket']
                 data['recognition'] = recognition_data
                 recognition_new = True
 
-            # Check for new transcription data based on chunk_start_time
-            if transcription_data and (bucket_name not in last_sent_data or transcription_data['chunk_start_time']
-                                       != last_sent_data[bucket_name].get('transcription_chunk_start_time')):
-                last_sent_data[bucket_name]['transcription_chunk_start_time'] = transcription_data['chunk_start_time']
+            # Check for new transcription data based on time_bucket
+            if transcription_data and (bucket_name not in last_sent_data or transcription_data['time_bucket']
+                                       != last_sent_data[bucket_name].get('transcription_time_bucket')):
+                last_sent_data[bucket_name]['transcription_time_bucket'] = transcription_data['time_bucket']
                 data['transcription'] = transcription_data
                 transcription_new = True
 
-            # Update graph and position data if there's a new segment
-            if segment_time and (bucket_name not in last_sent_data or segment_time != last_sent_data[bucket_name].get(
-                    'graph_segment_time')):
-                last_sent_data[bucket_name]['graph_segment_time'] = segment_time
+            # Update graph and position data if there's a new time_bucket
+            if time_bucket and (bucket_name not in last_sent_data or time_bucket != last_sent_data[bucket_name].get(
+                    'graph_time_bucket')):
+                last_sent_data[bucket_name]['graph_time_bucket'] = time_bucket
                 data['graph'] = graph_data
                 data['positions'] = position_data
                 graph_new = True

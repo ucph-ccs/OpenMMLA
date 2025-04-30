@@ -176,7 +176,7 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
     # Extract and store badge locations from the JSON data
     for entry in json_data:
         coords_dict = json.loads(entry['translations'])
-        segment_time = entry['segment_start_time']
+        time_bucket = entry['time_bucket']
         for badge, coords in coords_dict.items():
             if badge in CANDIDATES:
                 x, y, z = coords
@@ -185,7 +185,7 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
                     'y': y[0],
                     'z': z[0]
                 })
-                badge_time_stamps[badge].append(segment_time)
+                badge_time_stamps[badge].append(time_bucket)
 
     if plot_type in ['both', 'position']:
         # 2D scatter plot of positions
@@ -471,7 +471,7 @@ def plot_physical_interaction_network(json_file_path, visualization_dir):
 def calculate_physical_interactions(json_file_path):
     """Calculates the frequencies of physical interactions between badges based on DataFrame data."""
     json_data = read_json_file(json_file_path)
-    df = convert_json_to_dataframe(json_data, ['graph', 'segment_start_time'])
+    df = convert_json_to_dataframe(json_data, ['graph', 'time_bucket'])
     normalize_factor = len(df)  # Normalized by number of entries
     interaction_counts = defaultdict(lambda: defaultdict(float))
 
@@ -654,7 +654,7 @@ def plot_interactive_ips_across_sessions_analysis(session_names, stm_lst, nstm_l
 def analyze_translations_log(json_path):
     """Calculates translation-based movement levels using Euclidean distances between translation vectors."""
     json_data = read_json_file(json_path)
-    df = convert_json_to_dataframe(json_data, ['segment_start_time', 'translations'])
+    df = convert_json_to_dataframe(json_data, ['time_bucket', 'translations'])
     session_duration = len(df) * 1
     badges_movement = {}
 
@@ -678,7 +678,7 @@ def analyze_translations_log(json_path):
 def analyze_rotations_log(json_path):
     """Computes rotation-based movement levels using degree changes between rotation matrices."""
     json_data = read_json_file(json_path)
-    df = convert_json_to_dataframe(json_data, ['segment_start_time', 'rotations'])
+    df = convert_json_to_dataframe(json_data, ['time_bucket', 'rotations'])
     session_duration = len(df) * 1  # Assuming each row represents 1 unit of time
     badges_movement = {}
 

@@ -94,7 +94,7 @@ def generate_query(bucket_name, measurement):
 
 
 def fetch_and_process_data(bucket_name, measurement, influx_client):
-    """Queries InfluxDB for specified data, converts it to JSON, and sorts it based on 'segment_start_time'."""
+    """Queries InfluxDB for specified data, converts it to JSON, and sorts it based on 'time_bucket'."""
     query = generate_query(bucket_name, measurement)
     tables = influx_client.query(query)
     json_str = tables.to_json(indent=5)
@@ -102,7 +102,7 @@ def fetch_and_process_data(bucket_name, measurement, influx_client):
     if measurement == 'speaker transcription':
         data.sort(key=lambda x: x['chunk_start_time'])
     else:
-        data.sort(key=lambda x: x['segment_start_time'])
+        data.sort(key=lambda x: x['time_bucket'])
     return json.dumps(data, ensure_ascii=False, indent=5)
 
 
@@ -129,7 +129,7 @@ def convert_to_dataframe(json_data, json_columns):
     dictionaries."""
     df = pd.DataFrame(json_data)[json_columns]
     for column in json_columns:
-        if column != 'segment_start_time':
+        if column != 'time_bucket':
             df[column] = df[column].apply(json.loads)
     return df
 
@@ -239,7 +239,7 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
     # Extract and store badge locations from the JSON data
     for entry in json_data:
         coords_dict = json.loads(entry['translations'])
-        segment_time = entry['segment_start_time']
+        time_bucket = entry['time_bucket']
         for badge, coords in coords_dict.items():
             if badge in CANDIDATES:
                 x, y, z = coords
@@ -248,7 +248,7 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
                     'y': y[0],
                     'z': z[0]
                 })
-                badge_time_stamps[badge].append(segment_time)
+                badge_time_stamps[badge].append(time_bucket)
 
     if plot_type in ['both', 'position']:
         # 2D scatter plot of positions
@@ -461,7 +461,7 @@ def plot_2d_heatmap(json_file_path, visualization_dir):
 def plot_physical_interaction_network(json_file_path, visualization_dir):
     """Plots a network graph representing physical interactions between badges."""
     json_data = read_json_file(json_file_path)
-    df = convert_to_dataframe(json_data, ['graph', 'segment_start_time'])
+    df = convert_to_dataframe(json_data, ['graph', 'time_bucket'])
     normalize_factor = len(df)  # Normalized by number of entries
     physical_interactions = calculate_physical_interactions(df, normalize_factor)
     session_name = os.path.basename(json_file_path).split('_')[1]
@@ -712,7 +712,7 @@ def plot_interactive_ips_across_sessions_analysis(session_names, stm_lst, nstm_l
 def analyze_translations_log(json_path):
     """Calculates translation-based movement levels using Euclidean distances between translation vectors."""
     json_data = read_json_file(json_path)
-    df = convert_to_dataframe(json_data, ['segment_start_time', 'translations'])
+    df = convert_to_dataframe(json_data, ['time_bucket', 'translations'])
     session_duration = len(df) * 1
     badges_movement = {}
 
@@ -736,7 +736,7 @@ def analyze_translations_log(json_path):
 def analyze_rotations_log(json_path):
     """Computes rotation-based movement levels using degree changes between rotation matrices."""
     json_data = read_json_file(json_path)
-    df = convert_to_dataframe(json_data, ['segment_start_time', 'rotations'])
+    df = convert_to_dataframe(json_data, ['time_bucket', 'rotations'])
     session_duration = len(df) * 1  # Assuming each row represents 1 unit of time
     badges_movement = {}
 
@@ -782,7 +782,7 @@ def plot_speaker_diarization_interactive(json_file_path, visualization_dir):
     with open(json_file_path, 'r') as f:
         json_dicts = json.load(f)
     l = len(json_dicts)
-    segment_start_time = datetime.fromtimestamp(int(json_dicts[0]['segment_start_time']))
+    first_time_bucket = datetime.fromtimestamp(int(json_dicts[0]['time_bucket']))
 
     x_bar = []
     count = 0
@@ -790,11 +790,11 @@ def plot_speaker_diarization_interactive(json_file_path, visualization_dir):
         speaker_list = json.loads(json_dicts[i]['speakers'])
         probability_list = json.loads(json_dicts[i]['similarities'])
         duration_list = json.loads(json_dicts[i]['durations'])
-        time = datetime.fromtimestamp(json_dicts[i]['segment_start_time'])
+        current_time_bucket = datetime.fromtimestamp(json_dicts[i]['time_bucket'])
 
         # Increase the timeline axis values
         count += 1
-        period = time - segment_start_time
+        period = current_time_bucket - first_time_bucket
         # Convert timedelta to hours, minutes, and seconds.
         hours, remainder = divmod(period.total_seconds(), 3600)
         minutes, seconds = divmod(remainder, 60)

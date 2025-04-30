@@ -1,6 +1,10 @@
+from datetime import datetime
+
 import influxdb_client
 import yaml
 from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client.domain.delete_predicate_request import DeletePredicateRequest
+from influxdb_client.domain.bucket import Bucket
 
 
 class InfluxDBClientWrapper(influxdb_client.InfluxDBClient):
@@ -16,6 +20,7 @@ class InfluxDBClientWrapper(influxdb_client.InfluxDBClient):
         self.query_api = self.query_api()
         self.write_api = self.write_api(write_options=SYNCHRONOUS)
         self.bucket_api = self.buckets_api()
+        self.delete_api = self.delete_api()
 
     def query(self, query):
         """Query data from InfluxDB"""
@@ -32,3 +37,10 @@ class InfluxDBClientWrapper(influxdb_client.InfluxDBClient):
     def create_bucket(self, bucket_name):
         """Create a new bucket in InfluxDB"""
         return self.bucket_api.create_bucket(bucket_name=bucket_name)
+
+    def delete_bucket(self, bucket_name):
+        """Delete a bucket from InfluxDB"""
+        bucket = self.bucket_api.find_bucket_by_name(bucket_name)
+        if not bucket:
+            raise ValueError(f"Bucket {bucket_name} not found.")
+        return self.bucket_api.delete_bucket(bucket)

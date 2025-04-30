@@ -11,7 +11,7 @@ import numpy as np
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import get_bucket_name, get_id, flush_input
+from openmmla.utils.input import select_or_create_bucket, get_id, flush_input
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
 from .input import get_function_base, get_mode
@@ -110,7 +110,7 @@ class VFABase(Base):
             self.logger.warning("Camera is not configured.")
             return self._set_camera()
 
-        self.bucket_name = get_bucket_name(self.influx_client)
+        self.bucket_name = select_or_create_bucket(self.influx_client)
         self.logger = get_logger(f'vfa-{self.bucket_name}',
                                  os.path.join(self.project_dir, f'logger/{self.bucket_name}_vfa_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
@@ -163,7 +163,7 @@ class VFABase(Base):
         self.camera_configured = True
         print(f'\033]0;VFA Base {self.base_id}, Camera {self.selected_source}\007')
 
-    def _configure_camera_params(self):
+    def _configure_camera_params(self) -> dict | None:
         """Configure camera intrinsic parameters."""
         cameras = self.config.get('Cameras', {})
         camera_choices = sorted(list(cameras.keys()))
@@ -202,7 +202,7 @@ class VFABase(Base):
         print(camera_info)
         return camera_info
 
-    def _set_camera_angle(self):
+    def _set_camera_angle(self) -> str | None:
         """Set the camera angle."""
         # Configure camera angle
         if self.angle_config:
@@ -231,7 +231,7 @@ class VFABase(Base):
         else:
             return None
 
-    def _detect_video_sources(self):
+    def _detect_video_sources(self) -> list[str | int]:
         """Detect available video sources based on the source type."""
         available_sources = []
         number_of_detected_sources = 0
@@ -262,7 +262,7 @@ class VFABase(Base):
 
         return available_sources
 
-    def _choose_video_source(self, available_sources):
+    def _choose_video_source(self, available_sources: list[str | int]) -> str | int | None:
         """Choose a video source (camera index or RTMP URL)."""
         if not available_sources:
             return None
@@ -333,7 +333,7 @@ class VFABase(Base):
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-    def _analyze_existing_frames(self, save_path):
+    def _analyze_existing_frames(self, save_path: str):
         """Analyze existing frames in the save path."""
         if not os.path.exists(save_path):
             self.logger.warning(f"No frames found in {save_path}")
@@ -341,10 +341,10 @@ class VFABase(Base):
 
         # Get all image files and sort by timestamp
         frame_files = [f for f in os.listdir(save_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        frame_files.sort(key=lambda x: int(x.split('.')[0]))  # Sort by timestamp
+        frame_files.sort(key=lambda x: float(x.split('.')[0].split('_')[1]))  # Sort by timestamp
 
         for frame_file in frame_files:
-            acquired_time = float(frame_file.split('.')[0])
+            acquired_time = float(frame_file.split('.')[0].split('_')[1])
             if self.stop_event.is_set():
                 break
 
@@ -354,10 +354,8 @@ class VFABase(Base):
             except Exception as e:
                 self.logger.warning(f"VFA publish failed for {frame_file}: {e}")
 
-    def _publish_frame(self, image_path, acquired_time):
+    def _publish_frame(self, image_path: str, acquired_time: float):
         """Publish frame to MQTT for synchronization."""
-        # For MQTT, we'll publish just the path and metadata
-        # The synchronizer will load the actual image
         frame_data = {
             "base_id": str(self.base_id),
             "angle": self.camera_angle,
@@ -367,3 +365,10 @@ class VFABase(Base):
 
         self.mqtt_client.publish(f"{self.bucket_name}/vfa", json.dumps(frame_data))
         self.logger.info(f"Published frame with angle {self.camera_angle} at {acquired_time}")
+
+    @property
+    def bucket_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current bucket_name."""
+        if self.bucket_name:
+            return f'{self.bucket_name}/vfa/control'
+        return None

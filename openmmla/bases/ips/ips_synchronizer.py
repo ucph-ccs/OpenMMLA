@@ -8,7 +8,7 @@ import time
 from openmmla.analysis.ips.analyze import ips_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import get_bucket_name
+from openmmla.utils.input import select_or_create_bucket
 from openmmla.utils.logger import get_logger
 from .input import get_function_synchronizer
 from .transform import transform_point, transform_rotation
@@ -37,7 +37,7 @@ class IPSSynchronizer(Synchronizer):
         self.merged_tags = None
         self.merged_relations = None
         self.bucket_name = None
-        self.segment_start_time = None
+        self.time_bucket = None  # time_bucket represents the start time of a time window
         self.alive = False
 
         # Threading attributes
@@ -45,8 +45,12 @@ class IPSSynchronizer(Synchronizer):
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
 
+        self._setup_yaml()
         self._setup_directories()
         self._setup_objects()
+
+    def _setup_yaml(self):
+        self.window_size = float(self.config['Synchronizer']['window_size'])
 
     def _setup_directories(self):
         """Set up directories."""
@@ -93,7 +97,7 @@ class IPSSynchronizer(Synchronizer):
 
         self.merged_relations = {}
         self.merged_tags = {}
-        self.bucket_name = get_bucket_name(self.influx_client)
+        self.bucket_name = select_or_create_bucket(self.influx_client)
         self.logger = get_logger(f'ips-synchronizer-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_ips_synchronizer.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
@@ -102,7 +106,7 @@ class IPSSynchronizer(Synchronizer):
 
         # Reinitialize MQTT client with new topics and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/ips')
-        self.segment_start_time = time.time()
+        self.time_bucket = time.time()  # Initialize time_bucket with current time
         self.mqtt_client.loop_start()
 
         # Create threads
@@ -121,15 +125,9 @@ class IPSSynchronizer(Synchronizer):
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
+            return None
 
-    def _set_main_camera(self):
-        """Set the main camera id and load transformation matrices."""
-        self.transform_matrices_dict = self._load_transform_matrices()
-        if self.transform_matrices_dict is None:
-            self.logger.warning("No transformation matrices found, please check your main camera id or do the camera "
-                                "sync first.")
-
-    def _synchronization_handler(self, e):
+    def _synchronization_handler(self, e: Exception | KeyboardInterrupt | None):
         """Handle exceptions and stop all threads.
 
         Args:
@@ -144,6 +142,13 @@ class IPSSynchronizer(Synchronizer):
         ips_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
         self._clean_up()
 
+    def _set_main_camera(self):
+        """Set the main camera id and load transformation matrices."""
+        self.transform_matrices_dict = self._load_transform_matrices()
+        if self.transform_matrices_dict is None:
+            self.logger.warning("No transformation matrices found, please check your main camera id or do the camera "
+                                "sync first.")
+
     def _handle_base_result(self, client, userdata, msg):
         """Handle the received base result.
 
@@ -155,16 +160,16 @@ class IPSSynchronizer(Synchronizer):
         with self.lock:
             if not self.stop_event.is_set():
                 self.alive = True
-                message = json.loads(msg.payload)
-                base_id = message["base_id"]
-                acquired_time = message["acquired_time"]
+                base_result = json.loads(msg.payload)
+                base_id = base_result["base_id"]
+                acquired_time = float(base_result["acquired_time"])
 
-                if self.segment_start_time < acquired_time < self.segment_start_time + 1.0:
+                if self.time_bucket < acquired_time < self.time_bucket + self.window_size:
                     if base_id.isnumeric():  # results from nicla vision's onboard apriltag detection
-                        self.merged_relations.setdefault(base_id, []).extend(message['detected_tags'])
+                        self.merged_relations.setdefault(base_id, []).extend(base_result['detected_tags'])
                     else:  # msg from base camera
-                        tags = message["tags"]
-                        tag_relations = message["tag_relations"]
+                        tags = base_result["tags"]
+                        tag_relations = base_result["tag_relations"]
 
                         if base_id != self.main_id:  # convert to main coordinates
                             R = self.transform_matrices_dict[base_id]['R']
@@ -204,7 +209,8 @@ class IPSSynchronizer(Synchronizer):
                     translation_data = {
                         "measurement": "badge translations",
                         "fields": {
-                            "segment_start_time": self.segment_start_time,
+                            "time_bucket": self.time_bucket,
+                            "window_size": self.window_size,
                             "translations": json.dumps(translations_dict),
                         }
                     }
@@ -212,7 +218,8 @@ class IPSSynchronizer(Synchronizer):
                     rotation_data = {
                         "measurement": "badge rotations",
                         "fields": {
-                            "segment_start_time": self.segment_start_time,
+                            "time_bucket": self.time_bucket,
+                            "window_size": self.window_size,
                             "rotations": json.dumps(rotations_dict),
                         }
                     }
@@ -220,7 +227,8 @@ class IPSSynchronizer(Synchronizer):
                     relation_data = {
                         "measurement": "badge relations",
                         "fields": {
-                            "segment_start_time": self.segment_start_time,
+                            "time_bucket": self.time_bucket,
+                            "window_size": self.window_size,
                             "graph": json.dumps(self.merged_relations),
                         }
                     }
@@ -237,7 +245,7 @@ class IPSSynchronizer(Synchronizer):
                 self.merged_relations.clear()
                 self.merged_tags.clear()
                 self.alive = False
-                self.segment_start_time = time.time()
+                self.time_bucket = time.time()  # Update time_bucket with current time
 
             # Schedule the next upload outside the lock to avoid potential deadlocks
             time.sleep(1)
@@ -271,3 +279,10 @@ class IPSSynchronizer(Synchronizer):
 
         with open(os.path.join(self.camera_sync_dir, chosen_transformation), 'r') as file:
             return json.load(file)
+
+    @property
+    def bucket_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current bucket_name."""
+        if self.bucket_name:
+            return f'{self.bucket_name}/ips/control'
+        return None

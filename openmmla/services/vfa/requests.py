@@ -49,4 +49,4 @@ def request_multi_angle_frame_analyze(image_paths: list[str], session_id: str, u
             for angle in angles:
                 data.setdefault('angles', []).append(angle)
 
-    return send_request_with_retry(url, files, data, timeout=30, process_response=process_response)
+    return send_request_with_retry(url, files, data, timeout=40, process_response=process_response)

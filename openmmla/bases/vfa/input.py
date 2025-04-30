@@ -77,20 +77,3 @@ def get_mode():
                 print("Invalid mode, please select again.")
         except ValueError:
             print("Invalid input. Please enter a valid integer.")
-
-
-def get_number_of_cameras() -> int:
-    """Get the number of cameras to synchronize.
-
-    Returns:
-        int: Number of cameras
-    """
-    while True:
-        try:
-            flush_input()
-            num = int(input("Enter the number of cameras to synchronize: ") or "2")
-            if num > 0:
-                return num
-            print("Please enter a positive number.")
-        except ValueError:
-            print("Please enter a valid number.")

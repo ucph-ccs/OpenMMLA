@@ -104,4 +104,8 @@ COMMANDS = {
         "openmmla.commands.ses.ana:main",
         "Start session analysis."
     ),
+    "ses-cle": (
+        "openmmla.commands.ses.cle:main",
+        "Clean up or manage bucket data."
+    ),
 }

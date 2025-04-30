@@ -8,8 +8,13 @@ import time
 import numpy as np
 import pyaudio
 import soundfile as sf
-from pylsl import local_clock
-from pylsl import resolve_byprop, StreamInlet
+
+try:
+    from pylsl import local_clock, resolve_byprop, StreamInlet
+except ImportError:
+    local_clock = None
+    resolve_byprop = None
+    StreamInlet = None
 
 from openmmla.streams.resampling import resample_audio, ResampleMethod
 from openmmla.utils.logger import get_logger
@@ -335,7 +340,15 @@ class AudioStream(StreamReceiver):
 
     def _initialize_lsl(self):
         """Initialize lab streaming layer stream."""
+        if resolve_byprop is None or StreamInlet is None or local_clock is None:
+            raise ImportError(
+                "pylsl package is not installed. Please install it with 'pip install pylsl' to use LSL features."
+            )
+        
         streams = resolve_byprop('name', self.lsl_name)
+        if not streams:
+            raise RuntimeError(f"No LSL stream found with name: {self.lsl_name}")
+            
         self.lsl_inlet = StreamInlet(streams[0])
         self.lsl_offset = time.time() - local_clock()
         logger.info(f"Subscribe LSL stream: {self.lsl_name}")

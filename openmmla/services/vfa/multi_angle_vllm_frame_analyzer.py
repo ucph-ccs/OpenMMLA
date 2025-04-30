@@ -217,7 +217,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 normalize_bbox=True,
                 normalize_target=True,
                 render=True,
-                show=True,
+                show=False,
                 inout_thresh=0.5,
                 render_heatmap=False,
                 save=False
@@ -307,7 +307,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "- Black squares with white numbers: These are AprilTags. Each person has a unique ID tag.\n"
             "- Colored boxes around faces: These indicate detected faces.\n"
             "- Colored lines from faces: These show gaze direction (where someone is looking).\n"
-            "- 'in: X.XX' values: These indicate the confidence that the person is looking at something inside the frame.\n\n"
+            "- 'in: X.XX' values: These indicate the probability that the person's gaze is within the frame:\n"
+            "  * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
+            "  * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
             "### Multiple Camera Views:\n"
             f"You have been provided with {len(processed_images)} synchronized images of the same scene, each from a different perspective:\n"
         )
@@ -329,8 +331,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "1. GAZE FOCUS: Describe in detail what each person is looking at based on the colored gaze lines across all available perspectives.\n"
             "   - Compare gaze lines across different perspectives for more accurate targeting\n"
             "   - Include the specific target object/area where the gaze line points\n"
-            "   - Include the 'in: X.XX' probability value when mentioned in the image\n"
-            "   - DO NOT infer head position - rely SOLELY on the rendered gaze lines\n"
+            "   - Include the 'in: X.XX' probability value - this indicates the likelihood the gaze is within the frame:\n"
+            "     * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
+            "     * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
+            "   - When 'in' value is low (<0.3), this strongly suggests the person is looking outside the frame\n"
+            "   - DO NOT interpret low 'in' values as low confidence - they indicate gaze is likely outside frame\n"
             "   - WHEN NO GAZE LINE IS VISIBLE IN ANY VIEW: You may make a cautious inference based on head orientation\n"
             "   - Always mark gaze inferences with: 'INFERENCE (low confidence): Based on head orientation, likely looking at [object]'\n"
             "2. HAND STATUS: Provide detailed description of hand positions and activities, combining information from all perspectives.\n"
@@ -353,7 +358,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "IMPORTANT: ALWAYS use only numeric IDs (e.g., \"6\", \"10\", \"100\") without words like \"Person\" or \"Tag\" when identifying people in your response.\n\n"
 
             "### 2. For each person, describe ONLY these elements:\n"
-            "- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability. Note which camera view provides the clearest information.\n"
+            "- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability and its interpretation. Note which camera view provides the clearest information.\n"
             "- **Hands Status**: Describe visible hand positions and activities in detail. Note which camera view provides the clearest information about hands.\n"
             "- **Position**: Basic location in frame for identification only.\n"
             "- **Clothing**: Brief description for identification only, matching with known participant descriptions when possible.\n\n"
@@ -370,13 +375,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "{\n"
             "  \"observations\": {\n"
             "    \"0\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates high confidence attention is within frame.\",\n"
+            "      \"gaze_focus\": \"In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates gaze is within frame.\",\n"
             "      \"hands_status\": \"In perspective_1: Both hands are on keyboard, actively typing. Left hand positioned over WASD keys, right hand near spacebar. perspective_2 partially obscures hands but confirms typing activity.\",\n"
             "      \"position\": \"Center-right of frame in all views\",\n"
             "      \"clothing\": \"Yellow sweater matching description of participant with Tag ID 0\"\n"
             "    },\n"
             "    \"1\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates moderate confidence attention is within frame.\",\n"
+            "      \"gaze_focus\": \"In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates gaze is within frame.\",\n"
             "      \"hands_status\": \"In perspective_2: Hands are obscured by desk edge. In perspective_1: Hands clearly visible manipulating papers, sorting through documents.\",\n"
             "      \"position\": \"Left side of frame in all views\",\n"
             "      \"clothing\": \"Dark blue sweater matching description of participant with Tag ID 1\"\n"
@@ -436,7 +441,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "- Black squares with white numbers: These are AprilTags. Each person has a unique ID tag.\n"
             "- Colored boxes around faces: These indicate detected faces.\n"
             "- Colored lines from faces: These show gaze direction (where someone is looking).\n"
-            "- 'in: X.XX' values: These indicate the confidence that the person is looking at something inside the frame.\n\n"
+            "- 'in: X.XX' values: These indicate the probability that the person's gaze is within the frame:\n"
+            "  * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
+            "  * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
             "### Multiple Camera Views:\n"
             f"You have been provided with {len(processed_images)} synchronized images of the same scene, each from a different perspective:\n"
         )
@@ -458,8 +465,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "1. GAZE FOCUS: Describe in detail what each person is looking at based on the colored gaze lines across all available perspectives.\n"
             "   - Compare gaze lines across different perspectives for more accurate targeting\n"
             "   - Include the specific target object/area where the gaze line points\n"
-            "   - Include the 'in: X.XX' probability value when mentioned in the image\n"
-            "   - DO NOT infer head position - rely SOLELY on the rendered gaze lines\n"
+            "   - Include the 'in: X.XX' probability value - this indicates the likelihood the gaze is within the frame:\n"
+            "     * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
+            "     * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
+            "   - When 'in' value is low (<0.3), this strongly suggests the person is looking outside the frame\n"
+            "   - DO NOT interpret low 'in' values as low confidence - they indicate gaze is likely outside frame\n"
             "   - WHEN NO GAZE LINE IS VISIBLE IN ANY VIEW: You may make a cautious inference based on head orientation\n"
             "   - Always mark gaze inferences with: 'INFERENCE (low confidence): Based on head orientation, likely looking at [object]'\n"
             "2. HAND STATUS: Provide detailed description of hand positions and activities, combining information from all perspectives.\n"
@@ -482,7 +492,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "IMPORTANT: ALWAYS use only numeric IDs (e.g., \"6\", \"10\", \"100\") without words like \"Person\" or \"Tag\" when identifying people in your response.\n\n"
 
             "### 2. For each person, describe ONLY these elements:\n"
-            "- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability. Note which camera view provides the clearest information.\n"
+            "- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability and its interpretation. Note which camera view provides the clearest information.\n"
             "- **Hands Status**: Describe visible hand positions and activities in detail. Note which camera view provides the clearest information about hands.\n"
             "- **Position**: Basic location in frame for identification only.\n"
             "- **Clothing**: Brief description for identification only, matching with known participant descriptions when possible.\n\n"
@@ -492,13 +502,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "{\n"
             "  \"observations\": {\n"
             "    \"0\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates high confidence attention is within frame.\",\n"
+            "      \"gaze_focus\": \"In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates gaze is within frame.\",\n"
             "      \"hands_status\": \"In perspective_1: Both hands are on keyboard, actively typing. Left hand positioned over WASD keys, right hand near spacebar. perspective_2 partially obscures hands but confirms typing activity.\",\n"
             "      \"position\": \"Center-right of frame in all views\",\n"
             "      \"clothing\": \"Yellow sweater matching description of participant with Tag ID 0\"\n"
             "    },\n"
             "    \"1\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates moderate confidence attention is within frame.\",\n"
+            "      \"gaze_focus\": \"In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates gaze is within frame.\",\n"
             "      \"hands_status\": \"In perspective_2: Hands are obscured by desk edge. In perspective_1: Hands clearly visible manipulating papers, sorting through documents.\",\n"
             "      \"position\": \"Left side of frame in all views\",\n"
             "      \"clothing\": \"Dark blue sweater matching description of participant with Tag ID 1\"\n"

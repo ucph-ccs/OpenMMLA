@@ -11,7 +11,7 @@ from numpy.linalg import norm
 
 from openmmla.bases.base import Base
 from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
-from openmmla.utils.input import get_bucket_name
+from openmmla.utils.input import select_or_create_bucket
 from openmmla.utils.logger import get_logger
 from .input import get_function_visualizer
 
@@ -75,7 +75,7 @@ class IPSVisualizer(Base):
                     exc_info=True)
 
     def _start_visualization(self):
-        self.bucket_name = get_bucket_name(self.influx_client_main)
+        self.bucket_name = select_or_create_bucket(self.influx_client_main)
         self.logger = get_logger(f'ips-visualizer-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_ips_visualizer.log'))
 
@@ -111,13 +111,13 @@ class IPSVisualizer(Base):
                                  cache_frame_data=False)
         plt.show()
 
-    def _animate(self, i, influx_client):
+    def _animate(self, i, influx_client: InfluxDBClientWrapper):
         plt.cla()
         # Get node relations and positions
-        graph_dict, segment_time = self._get_node_relations(influx_client)
+        graph_dict, time_bucket = self._get_node_relations(influx_client)
         if graph_dict is None:
             return
-        pos = self._get_node_positions(influx_client, segment_time=segment_time, dimension='2d')
+        pos = self._get_node_positions(influx_client, time_bucket=time_bucket, dimension='2d')
         G = self._build_graph(graph_dict, pos)
 
         options = {
@@ -136,18 +136,18 @@ class IPSVisualizer(Base):
 
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{segment_time}_2d.png'))
+                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{time_bucket}_2d.png'))
 
     def _switch_dimension(self):
         self.use_3d = not self.use_3d
 
-    def _animate_3d(self, i, fig, ax, influx_client):
+    def _animate_3d(self, i, fig, ax, influx_client: InfluxDBClientWrapper):
         plt.cla()
         # Get node relations and positions
-        graph_dict, segment_time = self._get_node_relations(influx_client)
+        graph_dict, time_bucket = self._get_node_relations(influx_client)
         if graph_dict is None:
             return
-        pos_3d = self._get_node_positions(segment_time=segment_time, dimension='3d', influx_client=influx_client)
+        pos_3d = self._get_node_positions(time_bucket=time_bucket, dimension='3d', influx_client=influx_client)
         G = self._build_graph(graph_dict, pos_3d)
 
         # Draw the 3D graph
@@ -169,9 +169,9 @@ class IPSVisualizer(Base):
         ax.view_init(elev=20., azim=30)
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{segment_time}_3d.png'))
+                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{time_bucket}_3d.png'))
 
-    def _build_graph(self, graph_dict, pos):
+    def _build_graph(self, graph_dict: dict, pos: dict) -> nx.DiGraph:
         G = nx.DiGraph()
         G.add_node('B')
         for badge_id, detected_tags in graph_dict.items():
@@ -190,7 +190,7 @@ class IPSVisualizer(Base):
             G.remove_node(node)
         return G
 
-    def _get_node_relations(self, influx_client):
+    def _get_node_relations(self, influx_client: InfluxDBClientWrapper) -> tuple[dict | None, float | None]:
         start_time = int(time.time()) - 20
         query = f"""from(bucket: "{self.bucket_name}")
                     |> range(start: {start_time})
@@ -205,16 +205,17 @@ class IPSVisualizer(Base):
             return None, None
         graph_dict_str = data[0]["graph"]
         graph_dict = json.loads(graph_dict_str)
-        segment_time = data[0]["segment_start_time"]
-        return graph_dict, segment_time
+        time_bucket = data[0]["time_bucket"]
+        return graph_dict, time_bucket
 
-    def _get_node_positions(self, influx_client, segment_time, dimension='2d'):
-        start_time = int(segment_time) - 20
+    def _get_node_positions(self, influx_client: InfluxDBClientWrapper, time_bucket: float,
+                            dimension: str = '2d') -> dict:
+        start_time = int(time_bucket) - 20
         query = f"""from(bucket: "{self.bucket_name}")
                    |> range(start: {start_time})
                    |> filter(fn: (r) => r._measurement == "badge translations")
                    |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-                   |> filter(fn: (r) => r.segment_start_time == {segment_time})
+                   |> filter(fn: (r) => r.time_bucket == {time_bucket})
                   """
         tables = influx_client.query(query)
         data = json.loads(tables.to_json(indent=5))
@@ -249,3 +250,10 @@ class IPSVisualizer(Base):
                 c='green', linewidth=0.5, zorder=4)
         ax.scatter([end_point[0]], [end_point[1]], [end_point[2]],
                    c='red', s=10, marker='.', zorder=10)
+
+    @property
+    def bucket_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current bucket_name."""
+        if self.bucket_name:
+            return f'{self.bucket_name}/ips/control'
+        return None

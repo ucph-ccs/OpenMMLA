@@ -69,20 +69,6 @@ def get_rtmp_url(available_urls: list[str]) -> str:
             print("Invalid input. Please enter a valid integer.")
 
 
-def get_number_of_group_members():
-    """Get the number of group members from user input."""
-    while True:
-        try:
-            flush_input()
-            number = int(input("Please specify how many group members: "))
-            if number > 0:
-                return number
-            else:
-                print("Please enter a number greater than 0.")
-        except ValueError:
-            print("Invalid input. Please enter a valid integer.")
-
-
 def get_function_base(id: int, mode: str):
     """Get the function to be performed from user input for base."""
     while True:

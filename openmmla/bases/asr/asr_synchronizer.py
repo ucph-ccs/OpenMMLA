@@ -8,10 +8,11 @@ from openmmla.analysis.asr.analyze import asr_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import get_bucket_name
+from openmmla.utils.input import select_or_create_bucket, get_number_of_bases
 from openmmla.utils.logger import get_logger
+from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
-from .input import get_number_of_group_members, get_function_synchronizer
+from .input import get_function_synchronizer
 
 
 class ASRSynchronizer(Synchronizer):
@@ -38,11 +39,11 @@ class ASRSynchronizer(Synchronizer):
         # Runtime attributes
         self.threads = []
         self.stop_event = threading.Event()
-        self.bucket_name = None
-        self.number_of_speaker = None  # Number of group members
-        self.latest_time = None  # Record start time of the most recent received segment
-        self.retained_segments_results = None  # Results to be handled {segment_time: {base_id: {'speaker':x,
-        # 'similarity':x, 'duration':x}}}
+        self.bucket_name = None  # Session bucket name
+        self.number_of_bases = None  # Number of group members
+        self.latest_time = None  # Record start time of the most recent received frame
+        self.time_bucket_buffer = {}  # Buffer for {time_bucket: {base_id: {<speakers>, <similarities>, <durations>,
+        # <record_start_times>}}} time_bucket represents the start time of a time window
 
         self._setup_yaml()
         self._setup_directories()
@@ -50,10 +51,12 @@ class ASRSynchronizer(Synchronizer):
 
     def _setup_yaml(self):
         """Set up attributes from YAML configuration."""
-        self.result_expiry_time = int(
+        self.buffer_expiry_time = int(
             self.config['Synchronizer']['result_expiry_time'])  # Expiry time of retained results
         self.time_range = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
-            self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest segment
+            self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest time bucket
+        self.window_size = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
+            self.config[self.base_type]['recognize_duration'])
 
     def _setup_directories(self):
         """Set up required directories."""
@@ -69,11 +72,16 @@ class ASRSynchronizer(Synchronizer):
         self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
 
     def _clean_up(self):
-        """Free memory by resetting dictionaries."""
+        """Free memory by resetting runtime attributes.
+        
+        Clears all buffers and runtime state variables, then calls the garbage
+        collector to free resources. This is important for ensuring the system
+        doesn't leak memory between synchronization sessions.
+        """
         self.bucket_name = None
-        self.number_of_speaker = None
+        self.number_of_bases = None
         self.latest_time = None
-        self.retained_segments_results = None
+        self.time_bucket_buffer = {}
         gc.collect()
 
     def run(self):
@@ -97,10 +105,10 @@ class ASRSynchronizer(Synchronizer):
 
     def _start_synchronization(self):
         """Start the synchronization process."""
-        self.bucket_name = get_bucket_name(self.influx_client)
-        self.number_of_speaker = get_number_of_group_members()
+        self.bucket_name = select_or_create_bucket(self.influx_client)
+        self.number_of_bases = get_number_of_bases()
         self.latest_time = 0
-        self.retained_segments_results = {}
+        self.time_bucket_buffer = {}  # Reset the time bucket buffer
         self.logger = get_logger(f'synchronizer-{self.bucket_name}',
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_asr_synchronizer.log'))
 
@@ -127,11 +135,89 @@ class ASRSynchronizer(Synchronizer):
         finally:
             self._synchronization_handler(exception_occurred)
 
-    def _synchronization_handler(self, e):
-        """Handle exceptions and stop all threads.
+    def _handle_base_result(self, client, userdata, message):
+        """Handle the received base recognition result from MQTT message.
+
+        Process incoming ASR base results, organize them into time buckets, and determine
+        when to merge and upload results. This is the core synchronization logic that:
+        1. Groups results from the same time period
+        2. Manages expired time buckets 
+        3. Merges results when all bases have reported
 
         Args:
-            e: the exception that occurred during the synchronization process
+            client: The MQTT client instance that received the message
+            userdata: Private user data as set in Client() or user_data_set()
+            message: MQTT message instance containing the ASR base result payload
+        """
+        base_result = json.loads(message.payload.decode('utf-8'))
+        acquired_time = float(base_result['record_start_time'])
+
+        # Initialize for the first received message
+        if not self.latest_time:
+            self.latest_time = acquired_time
+            self.time_bucket_buffer[self.latest_time] = {}
+            self._update_time_bucket_buffer(self.latest_time, base_result)
+            return
+
+        # Check and clean up expired frames based on buffer expiry time
+        expired_times = TimeBucketSynchronizer.get_expired_buckets(
+            acquired_time,
+            self.time_bucket_buffer,
+            self.buffer_expiry_time
+        )
+
+        for t in expired_times:
+            frame_set = self.time_bucket_buffer[t]
+            merged_result = self._merge_base_results(frame_set)
+            merged_result['time_bucket'] = t  # t is the time_bucket (start time of the bucket)
+            self.logger.debug(
+                f"\033[91mExpired frame set {t} with result {self.time_bucket_buffer[t]}\033[0m")
+            self._upload_merged_result(merged_result)
+            del self.time_bucket_buffer[t]
+
+        # Find closest time bucket for the current message
+        closest_time = TimeBucketSynchronizer.find_closest_time_bucket(
+            acquired_time,
+            self.time_bucket_buffer,
+            base_result['base_id'],
+            self.time_range,
+            SyncStrategy.EARLIEST  # Using earliest strategy for ASR
+        )
+
+        # Handle the current message
+        if closest_time is None:
+            if self.latest_time > acquired_time:  # outdated message
+                self.logger.debug(
+                    f"\033[91m{base_result['base_id']} results is outdated, acquired time is {acquired_time}\033[0m")
+                return
+            else:
+                # Create new time bucket for new message
+                self.latest_time = acquired_time
+                self.time_bucket_buffer[self.latest_time] = {}
+                self._update_time_bucket_buffer(self.latest_time, base_result)
+        else:
+            # Add to existing time bucket
+            self._update_time_bucket_buffer(closest_time, base_result)
+
+        # Process complete time buckets (all bases have reported)
+        time_bucket = closest_time if closest_time else self.latest_time
+        self.logger.debug(
+            f"Time bucket {time_bucket} is selected for {base_result['base_id']} acquired time is {acquired_time}")
+        if len(self.time_bucket_buffer[time_bucket]) == self.number_of_bases:
+            merged_result = self._merge_base_results(self.time_bucket_buffer[time_bucket])
+            merged_result['time_bucket'] = time_bucket
+            self._upload_merged_result(merged_result)
+            del self.time_bucket_buffer[time_bucket]
+
+    def _synchronization_handler(self, e: Exception | KeyboardInterrupt | None):
+        """Handle exceptions during synchronization and perform cleanup.
+
+        Stops all threads, disconnects from MQTT, runs session analysis, and 
+        cleans up resources when synchronization is complete or encounters an error.
+
+        Args:
+            e: The exception that occurred during synchronization, or None if 
+               synchronization completed normally
         """
         if e:
             self._stop_threads()
@@ -144,199 +230,177 @@ class ASRSynchronizer(Synchronizer):
         self._clean_up()
 
     def _send_start_regularly(self):
-        """Send the START signal to all bases regularly."""
+        """Send periodic START signals to ASR bases.
+
+        Continuously sends START control signals to all ASR bases at regular intervals
+        defined by self.time_range. This ensures that bases keep recording and processing
+        audio even if they miss an initial start signal.
+
+        The loop continues until the stop_event is set during shutdown.
+        """
         while not self.stop_event.is_set():
-            self.redis_client.publish(f"{self.bucket_name}/control", 'START')
+            self.redis_client.publish(f"{self.bucket_name}/asr/control", 'START')
             time.sleep(self.time_range)
 
-    def _handle_base_result(self, client, userdata, message):
-        """Handle the received base result.
+    def _update_time_bucket_buffer(self, time_bucket: float, latest_base_result: dict):
+        """Update the time bucket buffer with the latest base recognition result.
+
+        Stores or updates recognition results from a specific base in the appropriate time bucket.
+        If a result from the same base already exists for this time bucket, it will be overwritten
+        with the newer result.
 
         Args:
-            client: the client instance for this callback
-            userdata: the private user data as a set in Client() or user_data_set()
-            message: an instance of MQTTMessage
+            time_bucket: Timestamp representing the start time of the time bucket
+            latest_base_result: Recognition result dictionary from a single ASR base, containing:
+                               - base_id: Identifier of the source base
+                               - speakers: JSON string of recognized speaker names
+                               - similarities: JSON string of similarity scores
+                               - durations: JSON string of audio durations
+                               - record_start_time: Timestamp when audio was recorded
         """
-        new_base_result = json.loads(message.payload.decode('utf-8'))
-        record_start_time = float(new_base_result['record_start_time'])
-
-        if not self.latest_time:
-            self.latest_time = int(record_start_time)
-            self.retained_segments_results[self.latest_time] = {}
-            self._update_retained_segments_results(self.latest_time, new_base_result)
-            return
-
-        expired_segments = [segment_time for segment_time in self.retained_segments_results.keys() if
-                            record_start_time - segment_time > self.result_expiry_time]
-
-        for segment_time in expired_segments:
-            merged_segment_result = self._merge_segment_results(self.retained_segments_results[segment_time])
-            merged_segment_result['segment_start_time'] = segment_time
+        base_id = latest_base_result['base_id']
+        if base_id in self.time_bucket_buffer[time_bucket]:
             self.logger.debug(
-                f"\033[91mExpired segment {segment_time} with result {self.retained_segments_results[segment_time]}\033[0m")
-            self._upload_merged_result(merged_segment_result)
-            del self.retained_segments_results[segment_time]
+                f"\033[91mOverwrite results: {self.time_bucket_buffer[time_bucket][base_id]}\033[0m")
 
-        closest_segment_time = self._find_closest_segment(record_start_time, new_base_result['base_id'])
-        if closest_segment_time is None:
-            if self.latest_time > record_start_time:  # outdated message
-                self.logger.debug(
-                    f"\033[91m{new_base_result['base_id']} results is outdated, record time is {record_start_time}\033[0m")
-                return
-            else:
-                # self.latest_time = self._update_time(self.latest_time, record_start_time)
-                # self.latest_time += self.time_range
-                self.latest_time = record_start_time  # Update the latest time to the record start time
-                self.retained_segments_results[self.latest_time] = {}
-                self._update_retained_segments_results(self.latest_time, new_base_result)
-        else:
-            self._update_retained_segments_results(closest_segment_time, new_base_result)
-
-        segment_time = closest_segment_time if closest_segment_time else self.latest_time
-        self.logger.debug(
-            f"Segment {segment_time} is selected for {new_base_result['base_id']} record time is {record_start_time}")
-        if len(self.retained_segments_results[segment_time]) == self.number_of_speaker:
-            merged_segment_result = self._merge_segment_results(self.retained_segments_results[segment_time])
-            merged_segment_result['segment_start_time'] = segment_time
-            self._upload_merged_result(merged_segment_result)
-            del self.retained_segments_results[segment_time]
-
-    def _update_retained_segments_results(self, segment_time, latest_base_result):
-        """Helper function to update the base result of one segment.
-
-        Args:
-            segment_time: the segment time of the recognition result
-            latest_base_result: the latest recognition result from one base
-        """
-        if latest_base_result['base_id'] in self.retained_segments_results[segment_time]:
-            self.logger.debug(
-                f"\033[91mOverwrite results: {self.retained_segments_results[segment_time][latest_base_result['base_id']]}\033[0m")
-        self.retained_segments_results[segment_time][latest_base_result['base_id']] = {
-            'record_start_time': latest_base_result['record_start_time'],
+        # Store parsed (decoded from JSON) values in the buffer
+        self.time_bucket_buffer[time_bucket][base_id] = {
             'speakers': json.loads(latest_base_result['speakers']),
             'similarities': json.loads(latest_base_result['similarities']),
             'durations': json.loads(latest_base_result['durations']),
+            'record_start_time': latest_base_result['record_start_time'],
         }
 
-    def _merge_segment_results(self, segment_results):
-        """Merge the base results of one segment, keys are base id, values are base results.
+    def _merge_base_results(self, frame_results: dict) -> dict:
+        """Merge ASR results from multiple bases for a single time bucket.
+
+        Based on synchronization strategy (dominant speaker or all speakers),
+        this method consolidates recognition results from multiple audio bases
+        into a single result set for the time period.
 
         Args:
-            segment_results: the base results dictionary of one segment
+            frame_results: Dictionary of base results for one time bucket.
+                           Format: {base_id: {'speakers': [...], 'similarities': [...], 
+                                   'durations': [...], 'record_start_time': float}}
 
         Returns:
-            The consolidated result dictionary of one segment
+            Dictionary with merged results containing:
+            - speakers: List of recognized speaker names
+            - similarities: List of corresponding similarity scores
+            - durations: List of corresponding audio durations
+            - record_start_times: List of corresponding recording start times
         """
         speakers, similarities, durations, record_start_times = [], [], [], []
+
         if self.dominant:
-            best_result, i = self.find_best_base_result(segment_results)
+            # Dominant speaker mode: only select the single most confident recognition
+            best_result, i = self.find_best_base_result(frame_results)
             record_start_times.append(best_result['record_start_time'])
             speakers.append(best_result['speakers'][i])
             similarities.append(best_result['similarities'][i])
             durations.append(best_result['durations'][i])
         else:
-            for res in segment_results.values():
-                # Append real speakers
+            # All speakers mode: include all valid speaker recognitions
+            for res in frame_results.values():
+                # Append real speakers (exclude unknown and silent segments)
                 for i, speaker in enumerate(res['speakers']):
                     if speaker not in ['unknown', 'silent']:
                         record_start_times.append(res['record_start_time'])
                         speakers.append(res['speakers'][i])
                         similarities.append(res['similarities'][i])
                         durations.append(res['durations'][i])
+
+            # Fallback to best result if no valid speakers were found
             if not speakers:
-                best_result, i = self.find_best_base_result(segment_results)
+                best_result, i = self.find_best_base_result(frame_results)
                 record_start_times.append(best_result['record_start_time'])
                 speakers.append(best_result['speakers'][i])
                 similarities.append(best_result['similarities'][i])
                 durations.append(best_result['durations'][i])
 
-        return {'speakers': speakers, 'similarities': similarities, 'record_start_times': record_start_times,
-                'durations': durations}
-
-    # def _find_closest_segment(self, current_time):
-    #     time_differences = {key: abs(current_time - key) for key in self.retained_results.keys()}
-    #     valid_segments = {key: diff for key, diff in time_differences.items() if diff <= self.time_range}
-    #     closest_segment_time = min(valid_segments.keys(), default=None)
-    #     return closest_segment_time
-
-    def _find_closest_segment(self, current_time, base_id):
-        """Find the closest segment of the new received segment among the retained segments results.
-
-        Args:
-            current_time: the record start time of the received segment
-            base_id: the base id of the received segment
-
-        Returns:
-            The segment time of the closest segment, or None if no valid segments are found
-        """
-        # Calculate time differences for all segments in retained results
-        time_differences = {key: abs(current_time - key) for key in self.retained_segments_results.keys()}
-
-        # Filter valid segments based on time difference and exclude segments where base_id already exists
-        valid_segments = {
-            key: diff for key, diff in time_differences.items()
-            if diff <= self.time_range and base_id not in self.retained_segments_results[key]
+        return {
+            'speakers': speakers,
+            'similarities': similarities,
+            'record_start_times': record_start_times,
+            'durations': durations
         }
 
-        # If no valid segments are found, return None
-        if not valid_segments:
-            return None
-
-        # Choose the segment with the earliest segment time
-        closest_segment_time = min(valid_segments.keys())
-
-        # Choose the segment with the nearest segment time
-        # closest_segment_time = min(valid_segments, key=valid_segments.get)
-
-        return closest_segment_time
-
-    # def _update_time(self, latest_time, record_start_time):
-    #     n = (record_start_time - latest_time) // self.time_range
-    #     updated_latest_time = latest_time + self.time_range * n
-    #     if record_start_time - updated_latest_time >= self.time_range / 2:
-    #         updated_latest_time += self.time_range
-    #     return updated_latest_time
-
-    def _upload_merged_result(self, merged_result):
-        """Log and upload the merged segment result to InfluxDB.
-
+    def _upload_merged_result(self, merged_result: dict):
+        """Log and upload the merged ASR segment result to InfluxDB.
+        
+        Creates a final record for the synchronized segment containing all
+        speaker information and metadata, displays a console log, and 
+        persists the data to the database.
+        
         Args:
-            merged_result: the merged result dictionary of one segment
+            merged_result: Dictionary containing consolidated speaker recognition data:
+                          - time_bucket: Start time of the time bucket
+                          - speakers: List of recognized speaker names
+                          - similarities: List of corresponding similarity scores
+                          - durations: List of corresponding audio durations
+                          - record_start_times: List of base recording start times
         """
         recognition_data = {
             "measurement": "speaker recognition",
             "fields": {
-                "segment_start_time": float(merged_result['segment_start_time']),
+                "time_bucket": float(merged_result['time_bucket']),
+                "window_size": float(self.window_size),
                 "speakers": json.dumps(merged_result['speakers']),
                 "similarities": json.dumps(merged_result['similarities']),
+                "durations": json.dumps(merged_result['durations']),
                 "record_start_times": json.dumps(merged_result['record_start_times']),
-                "durations": json.dumps(merged_result['durations'])
             },
         }
-        print(f"{BLUE}[Speaker Recognition]{ENDC}{recognition_data['fields']['segment_start_time']}: "
+        print(f"{BLUE}[Speaker Recognition]{ENDC}{recognition_data['fields']['time_bucket']}: "
               f"{BLUE}{recognition_data['fields']['speakers']}{ENDC}, "
               f"similarity: {recognition_data['fields']['similarities']}")
         self.influx_client.write(self.bucket_name, recognition_data)
 
     @staticmethod
-    def find_best_base_result(segment_results: dict):
-        """Find the best result among the base results of one segment.
+    def find_best_base_result(segment_results: dict) -> tuple:
+        """Find the best (most confident) speaker recognition result among all base results.
+
+        Identifies which base and which speaker has the highest confidence score in the given 
+        time segment. This is useful for determining the dominant speaker or as a fallback 
+        when no valid speakers are detected.
 
         Args:
-            segment_results: the base results dictionary of one segment
+            segment_results: Dictionary of base results for one time segment.
+                            Format: {base_id: {'speakers': [...], 'similarities': [...], 
+                                    'durations': [...], 'record_start_time': float}}
 
         Returns:
-            The best result and its index
+            Tuple containing:
+            - best_result: The base result dictionary with highest confidence score
+            - max_index: Index of the best speaker within that result's arrays
         """
         best_result = None
-        max_similarity = -2
+        max_similarity = -2  # Start with a very low value
         max_index = -1
 
         for result in segment_results.values():
+            # Find the speaker with highest similarity score in this base result
             current_index, current_similarity = max(enumerate(result["similarities"]), key=lambda x: x[1])
+
+            # Update if this is better than our previous best
             if current_similarity > max_similarity:
                 best_result = result
                 max_similarity = current_similarity
                 max_index = current_index
 
         return best_result, max_index
+
+    @property
+    def bucket_control(self) -> str | None:
+        """Get the Redis control channel name for the current bucket.
+        
+        This property dynamically constructs the communication channel name that
+        should be used for sending control signals (START/STOP) to ASR bases.
+        
+        Returns:
+            A Redis channel string in format '{bucket_name}/asr/control' if bucket_name
+            is set, or None if no bucket is currently active.
+        """
+        if self.bucket_name:
+            return f'{self.bucket_name}/asr/control'
+        return None

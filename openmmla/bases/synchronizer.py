@@ -93,8 +93,8 @@ class Synchronizer(ABC):
 
     def _listen_for_start_signal(self):
         """Listen on the redis bucket control channel for the START signal."""
-        p = self.redis_client.subscribe(f"{self.bucket_name}/control")
-        self.logger.info("Wait for START signal...")
+        p = self.redis_client.subscribe(f"{self.bucket_control}")
+        self.logger.info(f"Wait for START signal on {self.bucket_control}...")
         while True:
             message = p.get_message()
             if message and message['data'] == b'START':
@@ -103,8 +103,8 @@ class Synchronizer(ABC):
 
     def _listen_for_stop_signal(self):
         """Listen on the redis bucket control channel for the STOP signal."""
-        p = self.redis_client.subscribe(f"{self.bucket_name}/control")
-        self.logger.info("Listening for STOP signal...")
+        p = self.redis_client.subscribe(f"{self.bucket_control}")
+        self.logger.info(f"Listening for STOP signal on {self.bucket_control}...")
 
         while not self.stop_event.is_set():
             message = p.get_message()

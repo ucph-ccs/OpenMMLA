@@ -3,7 +3,13 @@ import time
 
 import cv2
 import numpy as np
-from pylsl import local_clock, StreamInlet, resolve_byprop
+
+try:
+    from pylsl import local_clock, StreamInlet, resolve_byprop
+except ImportError:
+    local_clock = None
+    StreamInlet = None
+    resolve_byprop = None
 
 from openmmla.streams.resampling import resample_video, ResampleMethod
 from openmmla.utils.logger import get_logger
@@ -133,9 +139,16 @@ class VideoStream(StreamReceiver):
         self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 
     def _initialize_lsl(self) -> None:
+        """Initialize LSL stream connection."""
+        if resolve_byprop is None or StreamInlet is None or local_clock is None:
+            raise ImportError(
+                "pylsl package is not installed. Please install it with 'pip install pylsl' to use LSL features."
+            )
+            
         streams = resolve_byprop('name', self.lsl_name)
         if not streams:
             raise RuntimeError(f"LSL stream '{self.lsl_name}' not found")
+        
         self.lsl_inlet = StreamInlet(streams[0])
         self.lsl_offset = time.time() - local_clock()
         logger.info(f"Subscribed to LSL video stream: {self.lsl_name}")

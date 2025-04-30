@@ -3,7 +3,7 @@ from enum import Enum
 try:
     import librosa
 except ImportError:
-    pass
+    librosa = None
 
 import numpy as np
 from scipy import signal
@@ -255,6 +255,9 @@ def _audio_librosa_resample(data: np.ndarray, source_rate: int, target_rate: int
     Returns:
         np.ndarray: Resampled audio data in same format as input (int16 or float32)
     """
+    if librosa is None:
+        raise ImportError("librosa is not installed. Please install it with 'pip install librosa' to use librosa features.")
+
     if data.dtype == np.int16:
         float_data = int16_to_float32(data)
     else:
