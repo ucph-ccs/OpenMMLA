@@ -19,16 +19,16 @@ The system uses multiple cameras to track participants wearing AprilTag markers:
 ### Install Dependencies
 ```bash
 # Install the required dependencies for the IPS pipeline on specific machines 
-# (e.g., base stations: ips-base, uber servers: uber-server)
+# (e.g., base station: ips-base, uber server: uber-server)
 conda create -n ips-base -c conda-forge python=3.10.12 -y
 conda activate ips-base
-pip install openmmla[ips-base]
+pip install -e .[ips-base] # or pip install openmmla[ips-base]
 ```
 
 
 ### On Servers
 ```bash
-# Run uber services on your machine with uber-server env
+# 1. Run uber services on uber server with conda env `uber-server`
 # Go to servers/uber/
 make all # if start all services 
 make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
@@ -36,15 +36,15 @@ make all -without=nginx,celery,flask,next # if start without nginx(load balancer
 
 ### On Base Stations
 ```bash
-# Run ips pipeline on your machine with ips-base env
+# Run ips pipelines on base station with conda env `ips-base`
 # Edit your own config.yml file, see base_stations/ips/config_template.yml for more details
 # You can either run it via bash or python
 
 # ===================BASH========================
-# For camera intrinsic calibration
+# Run camera intrinsic calibration
 usage: ./calibrate.sh
 
-# For multiple cameras coordinate synchronization
+# Run multiple cameras coordinate synchronization
 usage: ./synchronize.sh [-nc] 2 [-ns] 1 [-h]
 
 options:
@@ -52,7 +52,7 @@ options:
   -ns  NUM_SYNCMANAGER       : Number of sync managers to run (default: 1)
   -h                          : Display this help message
 
-# For real-time indoor position system
+# Run real-time indoor position system
 Usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-h]
 
 options:
@@ -64,18 +64,18 @@ options:
   -h                   : Display this help message
 
 # ==================PYTHON========================
-# Activate ips-base environment
+# Activate conda env `ips-base`
 conda activate ips-base
 
-# For camera intrinsic calibration
-mmla ips-ccal [-h] [-p project_dir] -c config_path
+# Run camera intrinsic calibration
+mmla ips-ccal -c <config_path>
 
-# For multiple cameras coordinate synchronization
-mmla ips-ctag [-h] [-p project_dir] -c config_path # start a camera detector
-mmla ips-csync [-h] [-p project_dir] -c config_path # start a camera sync manager
+# Run multiple cameras coordinate synchronization
+mmla ips-ctag -c <config_path> # start a camera detector
+mmla ips-csync -c <config_path> # start a camera sync manager
 
-# For real-time indoor position system
-mmla ips-base [-h] [-p project_dir] -c config_path [-g graphics] [-s store] [-v verbose] # start an ips base
-mmla ips-sync [-h] [-p project_dir] -c config_path [-v verbose] # start an ips base synchronizer
-mmla ips-vis [-h] [-p project_dir] -c config_path [-s store] # start an ips base visualizer
+# Run real-time indoor position system
+mmla ips-base -c <config_path> # start an ips base
+mmla ips-sync -c <config_path> # start an ips base synchronizer
+mmla ips-vis -c <config_path> # start an ips base visualizer
 ```

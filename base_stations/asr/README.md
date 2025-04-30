@@ -20,7 +20,7 @@ The post-time analyzer is as follows:
 ### Install Dependencies
 ```bash
 # Install the required dependencies for the ASR pipeline on specific machines 
-# (e.g., base stations: asr-base, asr servers: asr-server, uber servers: uber-server)
+# (e.g., base station: asr-base, base server: asr-server, uber server: uber-server)
 conda create -n asr-base -c conda-forge python=3.10.12 -y
 conda activate asr-base
 pip install -e .[asr-base] # or pip install openmmla[asr-base]
@@ -28,47 +28,47 @@ pip install -e .[asr-base] # or pip install openmmla[asr-base]
 
 ### On Servers
 ```bash
-# Run services on uber server with uber-server env
+# 1. Run uber services on uber server with conda env `uber-server` 
 # Go to servers/uber/
 make all # if start all services 
 make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
 
-# Run asr services on base server with asr-server env
+# 2. Run asr services on base server with conda env `asr-server` 
 # Edit your own config.yml file, see servers/asr/config_template.yml for more details
 # You can either run it via bash or python
 
 # ==================BASH========================
-# Start asr services at once via servers/asr/bash/run.sh, you can edit the weight and port of each server inside the run script file
+# Start asr services at once
+# Go to /servers/asr/bash
 ./run.sh
 
-
 # =================PYTHON========================
-# Activate asr-server environment
+# Start asr services one-by-one (asr-infer, asr-enhance, asr-vad, asr-transcribe, asr-separate, etc.)
+# Activate conda env `asr-server`
 conda activate asr-server
 
-# Start asr services one by one
-# 1. ASR server with single worker via mmla command
-# e.g.,
-# mmla asr-infer -c config.yml
-mmla <asr-server-commands> -c <config_file_path>
- 
-# 2. ASR server with multiple workers via gunicorn
-# e.g.,
-# export CONFIG_FILE=config.yml
-# gunicorn -k gevent -w 3 -b 0.0.0.0:5001 openmmla.commands.asr.infer:app
-export CONFIG_FILE=config.yml
+## Option 1: run with single worker via mmla command
+## e.g., 
+## mmla asr-infer -c config.yml
+mmla <asr-server-commands> -c <config_file_path> 
+
+## Option 2: run with multiple workers via gunicorn
+## e.g., 
+## export CONFIG_FILE=config.yml
+## gunicorn -k gevent -w 3 -b 0.0.0.0:5001 openmmla.commands.asr.infer:app
+export CONFIG_FILE=<config_file_path>
 gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> <path-to-asr-servers-app>:app
 ```
 
 ### On Base Stations
 ```bash
-# Run asr pipeline on your machine with asr-base env
+# Run asr pipelines on base station with conda env `asr-base`
 # Edit your own config.yml file, see base_stations/asr/config_template.yml for more details
 # You can either run it via bash or python
 
 # ===================BASH========================
 # Go to /base_stations/asr/bash
-# For real-time audio analyzer
+# Run real-time audio analyzer
 usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-s STORE] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-tr TRANSCRIBE] [-sp SPEECH_SEPARATE] [-d DOMINANT] [-h]
 
 options:
@@ -82,7 +82,7 @@ options:
   -d   DOMINANT               : Whether to apply dominant speaker (true/false, default: false)
   -h                          : Display this help message
 
-# For post-time audio analyzer
+# Run post-time audio analyzer
 usage: ./run_post.sh [-f FILENAMES] [-custom CUSTOM_ORIGIN_DIR] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-sp SPEECH_SEPARATE] [-tr TRANSCRIBE] [-h]
 
 options:
@@ -95,11 +95,13 @@ options:
   -h                           : Display this help message
    
 # ==================PYTHON========================
-# For real-time audio analyzer
+# Activate conda env `asr-base`
 conda activate asr-base
+
+# Run real-time audio analyzer
 mmla asr-base -b <base_type> -c <config_file_path> # start an asr base
 mmla asr-sync -c <config_file_path> # start an asr base synchronizer
 
-# For post-time audio analyzer
+# Run post-time audio analyzer
 mmla asr-post -f [-custom <custom_origin_dir>] [-f <filenames>] -c <config_file_path>
 ``` 

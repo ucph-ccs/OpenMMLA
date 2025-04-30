@@ -28,8 +28,8 @@ OpenMMLA consists of several hardware components working together:
      - *Camera*: USB camera (Logitech HD C920, etc.)
 - **Base Stations**: microprocessors/PCs that processes various data streams. Each base station runs one or more instances of *Base* and *Synchronizer*, with specific types (e.g., *AudioSynchronizer*) synchronizing data from corresponding *Base* components (e.g., *AudioBase*).
 - **Servers**: powerful PCs that provides centralized services for other devices within distributed environments. Based on functionality, it can be divided into:
-   + *Base Server(s)*: REST servers for AI services (infer, transcribe, vad, vlm... via Flask/FastAPI).
-   + *Uber Server(s)*: other services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
+   + *Base Server*: REST servers running AI services (infer, transcribe, vad, vllm... via Flask/FastAPI).
+   + *Uber Server*: central server running services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
 - **Dashboard**: web-page interfaces accessible via phone and web browsers, featuring on session selection, real-time visualizations, post-time visualizations and measurements downloads.
 
 <details>
@@ -45,7 +45,7 @@ The setup requirements depend on which part of the system you're implementing:
 
 ### System Dependencies 
 
-Install the following tools for **Base Stations** and **Base Servers**:
+Install the following tools on **Base Station** and **Base Server**:
 [Conda](https://docs.conda.io/en/latest/miniconda.html), [tmux](https://github.com/tmux/tmux/wiki/Installing), [PortAudio](https://www.portaudio.com/), [FFmpeg](https://ffmpeg.org/)
 
 <details>
@@ -81,9 +81,9 @@ sudo apt install -y build-essential git ffmpeg python3-pyaudio libsndfile1 porta
 ```
 </details>
 
-### Required Services 
+### Central Services 
 
-Install the following services for **Uber Server(s)**:
+Install the following services on **Uber Server**:
 
 - **InfluxDB** (required): Time series database for storing group segment measurement results  
 - **Redis** (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks)  
@@ -151,33 +151,33 @@ For detailed instructions on setting up the Next.js frontend and Flask backend f
 
 ### OpenMMLA Installation
 ```bash
-# Step 1: Create conda environments
+# Step 1: create conda environments
 # Create specific conda envs for different components: 
 # env-name: uber-server, asr-base, asr-server, ips-base, vfa-base, vfa-server
 conda create -n <env-name> -c conda-forge python=3.10.12 -y
 conda activate <env-name>
 
-# Step 2: Install OpenMMLA and components dependencies
-## Option 1: Via GitHub to keep updated (Recommended)
+# Step 2: install OpenMMLA and components dependencies
+## Option 1: via GitHub project (Recommended)
 git clone https://github.com/ucph-ccs/openmmla.git  # clone the repo
 cd openmmla
-pip install -e .  # base package
-pip install -e .[uber-server] # For uber servers with env `uber-server`
-pip install -e .[asr-base] # For base stations with env `asr-base`
-pip install -e .[asr-server] # For base servers with env `asr-server`
-pip install -e .[ips-base] # For base stations with env `ips-base`
-pip install -e .[vfa-server] # For base servers with env `vfa-server`
+pip install -e .[uber-server] # On uber server with conda env `uber-server`
+pip install -e .[asr-base] # On base station with conda env `asr-base`
+pip install -e .[asr-server] # On base server with conda env `asr-server`
+pip install -e .[ips-base] # On base station with conda env `ips-base`
+pip install -e .[vfa-base] # On base station with conda env `vfa-base`
+pip install -e .[vfa-server] # On base server with conda env `vfa-server`
 
-## Option 2: Via PyPI
-pip install openmmla  # base package
-pip install openmmla[uber-server] # For uber servers with env `uber-server`
-pip install openmmla[asr-base] # For base stations with env `asr-base` 
-pip install openmmla[asr-server] # For base servers with env `asr-server`
-pip install openmmla[ips-base] # For base stations with env `ips-base`  
-pip install openmmla[vfa-server] # For base servers with env `vfa-server`
+## Option 2: via PyPI
+pip install openmmla[uber-server] 
+pip install openmmla[asr-base]  
+pip install openmmla[asr-server] 
+pip install openmmla[ips-base]   
+pip install openmmla[vfa-server] 
 
-# Step 3: Install additional dependencies
+# Step 3: install additional dependencies
 # If you would like to use lab streaming layer (LSL) as stream source
+# Install the following packages on your base station with specific conda env
 pip install pylsl==1.17.6
 conda install -c conda-forge liblsl=1.16.2
 ```

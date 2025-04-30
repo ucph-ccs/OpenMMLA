@@ -21,55 +21,57 @@ The system performs nonverbal behavior analysis using large language models (LLM
 ### Install Dependencies
 ```bash
 # Install the required dependencies for the VFA pipeline on specific machines 
-# (e.g., base stations: vfa-base, vfa servers: vfa-server, uber servers: uber-server)
+# (e.g., base station: vfa-base, base server: vfa-server, uber server: uber-server)
 conda create -n vfa-base -c conda-forge python=3.10.12 -y
 conda activate vfa-base
-pip install openmmla[vfa-base]
+pip install -e .[vfa-base] # or pip install openmmla[vfa-base]
 ```
 
 
 ### On Servers
 ```bash
-# Run uber services on your machine with uber-server env
+# 1. Run uber services on uber server with conda env `uber-server`
 # Go to servers/uber/
 make all # if start all services 
 make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
 
-# Run vfa services on your machine with vfa-server env
+# 2. Run vfa services on base server with conda env `vfa-server`
 # Edit your own config.yml file, see servers/vfa/config_template.yml for more details
 # You can either run it via bash or python
 
 # ==================BASH========================
-# Start vfa services at once via servers/vfa/bash/run.sh, you can edit the weight and port of each server inside the run script file
+# Start vfa services at once
+# Go to /servers/vfa/bash
 ./run.sh
 
 
 # =================PYTHON========================
-# Activate vfa-server environment
+# Start vaf services one by one
+# Activate conda env `vfa-server`
 conda activate vfa-server
 
-# Start vaf services one by one
-# 1. VFA server with single worker via mmla command
-# e.g.,
-# mmla vfa-vllm -c config.yml
+## Option 1: run with single worker via mmla command
+## e.g., 
+## mmla vfa-vllm -c config.yml
 mmla <vfa-server-commands> -c <config_file_path>
  
-# 2. ASR server with multiple workers via gunicorn
-# e.g.,
-# export CONFIG_FILE=config.yml
-# gunicorn -k gevent -w 3 -b 0.0.0.0:5007 openmmla.commands.vfa.vllm:app
-export CONFIG_FILE=config.yml
+## Option 2: run with multiple workers via gunicorn
+## e.g., 
+## export CONFIG_FILE=config.yml
+## gunicorn -k gevent -w 3 -b 0.0.0.0:5007 openmmla.commands.vfa.vllm:app
+export CONFIG_FILE=<config_file_path>
 gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> <path-to-vfa-servers-app>:app
 ```
 
 ### On Base Stations
 ```bash
+# Run vfa pipelines on base station with conda env `vfa-base`
 # Edit your own config.yml file, see base_stations/vfa/config_template.yml for more details
 # You can either run it via bash or python
 
 # ===================BASH========================
 # Go to /base_stations/vfa/bash
-# For real-time video frame analyzer
+# Run real-time video frame analyzer
 Usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]
 
 options:
@@ -80,8 +82,10 @@ options:
   -h                   : Display this help message
   
 # ==================PYTHON========================
-# For real-time video frame analyzer
+# Activate conda env `vfa-base`
 conda activate vfa-base
+
+# Run real-time video frame analyzer
 mmla vfa-base -c <config_file_path> # start a vfa base
 mmla vfa-sync -c <config_file_path> # start a vfa base synchronizer
 ```
