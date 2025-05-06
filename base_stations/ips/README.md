@@ -23,6 +23,9 @@ The system uses multiple cameras to track participants wearing AprilTag markers:
 conda create -n ips-base -c conda-forge python=3.10.12 -y
 conda activate ips-base
 pip install -e .[ips-base] # or pip install openmmla[ips-base]
+# Optional: if you would like to use lab streaming layer as an input source
+pip install pylsl==1.17.6 
+conda install -c conda-forge liblsl=1.16.2
 ```
 
 

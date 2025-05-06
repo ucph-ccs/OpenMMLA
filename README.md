@@ -1,22 +1,39 @@
 # OpenMMLA
 
-OpenMMLA a toolkit for multimodal learning analytics, providing various built-in pipelines for different tasks. The toolkit is for building up the MMLA pipeline as shown below:
+The OpenMMLA repository consists of two main components:
 
-<img src="docs/high_level_system_design.png" alt="OpenMMLA system design" width="100%">
+1. The `openmmla` toolkit: An IoT-based multimodal data collection toolkit for learning analytics, providing the core classes, utilities, and pipeline implementations.
+
+2. The runtime platform, represented by the `base_stations`, `servers`, and `wearable_devices` directories. These directories provide the structured environments for deploying and executing pipelines built with the `openmmla` toolkit. They house runtime data, service initiation scripts, logging configurations and outputs, and device-specific adaptation scripts for wearable technology during operation.
+
+## Platform Design
+
+This section provides an overview of the runtime platform, from its high-level system design to its detailed hardware architecture.
+
+### High-level System Design
+
+The MMLA pipeline built with the `openmmla` toolkit follows a three-stage data flow, as depicted below:
+
+<img src="docs/high_level_system_design.png" alt="OpenMMLA High-level System Design" width="100%">
 
 <details>
-<summary><strong>High-level System Design (Data flow)</strong></summary>
+<summary><strong>Data Flow Stages Explained</strong></summary>
 
-The platform's high-level design consists of three stages: input, processing, and output. 
-+ **Data input stage (purple)**, multimodal raw data from sensors & wearable badges are streamed directly to base stations or a central media server. The raw inputs are transformed into structured, coded streams for efficient transmission and processing. 
-+ **Data processing stage (black)**, these encoded streams are processed individually by the corresponding *(Audio/Video/..)Base*, which handles some signal processing, while more complex tasks are offloaded to the server. For *Bases* within the same group, results are synchronized and uploaded to the time series database, where segment-level measurement features are generated.
-+ **Data output stage (lime)**, these measurement features are visualized on the dashboard in real time and combined into indicators to analyze group interactions. The platform also generates post-processing visualizations, logs, and reports, which are stored and accessible via the shared dashboard, enabling both real-time awareness and retrospective analysis of group dynamics.
++ **Data Input Stage (purple)**: Multimodal raw data from sensors & wearable badges are streamed directly to base stations or a central media server. The raw inputs are transformed into structured, coded streams for efficient transmission and processing.
++ **Data Processing Stage (black)**: These encoded streams are processed individually by the corresponding *(ASR/IPS/VFA)Base*, which handles some signal processing, while more complex tasks are offloaded to the server. For *Bases* within the same group, results are synchronized and uploaded to the time series database, where segment-level measurement features are generated.
++ **Data Output Stage (lime)**: These measurement features are visualized on the dashboard in real time and combined into indicators to analyze group interactions. The platform also generates post-processing visualizations, logs, and reports, which are stored and accessible via the shared dashboard, enabling both real-time awareness and retrospective analysis of group dynamics.
 </details>
 
-## System Architecture
+### System Architecture
 
-OpenMMLA consists of several hardware components working together:
-- **Sensors**: wearable devices and distributed environmental sensors for data acquisition: 
+The platform's physical architecture consists of several interconnected hardware components:
+
+<img src="docs/system_architecture.png" alt="OpenMMLA System Architecture" width="100%">
+
+<details>
+<summary><strong>Hardware Components Detailed</strong></summary>
+
+- **Sensors**: Wearable devices and distributed environmental sensors for data acquisition:
    + Supported wearables:
       - *AprilTag*: A fiducial marker for camera-based localization and tracking.
           + *Regular-Badge*: AprilTag only
@@ -26,27 +43,27 @@ OpenMMLA consists of several hardware components working together:
    + Supported environmental sensors:
      - *Microphone*: PyAudio USB microphone (Jabra Speak2 75, built-in mic, etc.)
      - *Camera*: USB camera (Logitech HD C920, etc.)
-- **Base Stations**: microprocessors/PCs that processes various data streams. Each base station runs one or more instances of *Base* and *Synchronizer*, with specific types (e.g., *AudioSynchronizer*) synchronizing data from corresponding *Base* components (e.g., *AudioBase*).
-- **Servers**: powerful PCs that provides centralized services for other devices within distributed environments. Based on functionality, it can be divided into:
+- **Base Stations**: Microprocessors/PCs that process various data streams. Each base station runs one or more instances of *Base* and *Synchronizer*, with specific types (e.g., *AudioSynchronizer*) synchronizing data from corresponding *Base* components (e.g., *AudioBase*).
+- **Servers**: Powerful PCs that provide centralized services for other devices within distributed environments. Based on functionality, it can be divided into:
    + *Base Server*: REST servers running AI services (infer, transcribe, vad, vllm... via Flask/FastAPI).
-   + *Uber Server*: central servers running services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
-- **Dashboard**: web-page interfaces accessible via phone and web browsers, featuring on session selection, real-time visualizations, post-time visualizations and measurements downloads.
-
-<details>
-<summary><strong>Detailed Architecture</strong></summary>
-
-![mBox System Design](docs/system_architecture.png)
+   + *Uber Server*: Central servers running services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
+- **Dashboard**: Web-page interfaces accessible via phone and web browsers, featuring session selection, real-time visualizations, post-time visualizations, and measurements downloads.
 
 </details>
 
 ## Quick Setup
 
-The setup requirements depend on which part of the system you're implementing:
+This section guides you through setting up the OpenMMLA.
 
-### System Dependencies 
+### System Prerequisites
 
-Install the following tools on **Base Station** and **Base Server**:
-[Conda](https://docs.conda.io/en/latest/miniconda.html), [tmux](https://github.com/tmux/tmux/wiki/Installing), [PortAudio](https://www.portaudio.com/), [FFmpeg](https://ffmpeg.org/)
+The following tools are generally required on machines designated as **Base Stations** or **Servers** (including Base Servers and Uber Servers):
+
+- [Conda](https://docs.conda.io/en/latest/miniconda.html) (for managing Python environments)
+- [Git](https://git-scm.com/) (for cloning the repository)
+- [tmux](https://github.com/tmux/tmux/wiki/Installing) (for managing terminal sessions)
+- [PortAudio](https://www.portaudio.com/) (for audio I/O, if using audio pipelines)
+- [FFmpeg](https://ffmpeg.org/) (for audio/video processing, if using relevant pipelines)
 
 <details>
 <summary>Conda Installation</summary>
@@ -58,41 +75,30 @@ bash Miniforge3-$(uname)-$(uname -m).sh
 </details>
 
 <details>
-<summary>Others Installation</summary>
+<summary>Other Tools Installation (PortAudio, FFmpeg, tmux)</summary>
 
 ```bash
 # macOS
 brew install ffmpeg portaudio tmux
-echo 'export CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"' >> ~/.zshrc
-source ~/.zshrc
 
-# Ubuntu
+# Ubuntu/Debian
 sudo apt update && sudo apt upgrade
-sudo apt install build-essential git ffmpeg python3-pyaudio libsndfile1 libasound-dev tmux
-wget https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
-tar -zxvf pa_stable_v190700_20210406.tgz
-cd portaudio
-./configure && make
-sudo make install
-
-# Debian (Raspberry Pi Bullseye or later)
-sudo apt update && sudo apt upgrade
-sudo apt install -y build-essential git ffmpeg python3-pyaudio libsndfile1 portaudio19-dev tmux
+sudo apt install -y build-essential git ffmpeg portaudio19-dev python3-pyaudio libsndfile1 tmux
 ```
 </details>
 
-### Central Services 
+### Central Services Setup
 
-Install the following services on **Uber Server**:
+The following services are typically run on a dedicated **Uber Server** to provide centralized functionalities:
 
-- **InfluxDB** (required): Time series database for storing group segment measurement results  
-- **Redis** (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks)  
-- **Mosquitto** (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*
-- **Nginx** (optional): Load balancer for AI/Algorithm services and RTMP server for streams 
-- **Dashboard** (optional): Next.js frontend & Flask backend server for real/post-time visualizations 
+- **InfluxDB** (required): Time series database for storing group segment measurement results.
+- **Redis** (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks).
+- **Mosquitto** (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*.
+- **Nginx** (optional): Load balancer for AI/Algorithm services and RTMP server for streams.
+- **Dashboard** (optional): Next.js frontend & Flask backend server for real/post-time visualizations.
 
 <details>
-<summary>Services Installation</summary>
+<summary>Services Installation Instructions</summary>
 
 #### InfluxDB Installation
 ```bash
@@ -108,7 +114,7 @@ sudo apt update && sudo apt install influxdb2
 sudo systemctl enable influxdb
 sudo systemctl start influxdb
 
-# Go to http://localhost:8086, and follow the instructions to create admin user with operator API token, save your token in a safe place, 
+# Go to http://localhost:8086, and follow the instructions to create admin user with operator API token, save your token in a safe place,
 # it will be used for setting your [InfluxDB][token] in your config yml file.
 ```
 
@@ -116,7 +122,7 @@ sudo systemctl start influxdb
 ```bash
 # For macOS
 brew install redis
-# Edit /opt/homebrew/etc/redis.conf: set "protected-mode no" and "bind 0.0.0.0"
+# Edit /opt/homebrew/etc/redis.conf (or equivalent path): set "protected-mode no" and "bind 0.0.0.0"
 brew services restart redis
 
 # For Ubuntu/Debian
@@ -130,7 +136,7 @@ sudo systemctl restart redis-server
 ```bash
 # For macOS
 brew install mosquitto
-# Edit /opt/homebrew/etc/mosquitto/mosquitto.conf: add "listener 1883 0.0.0.0" and "allow_anonymous true"
+# Edit /opt/homebrew/etc/mosquitto/mosquitto.conf (or equivalent path): add "listener 1883 0.0.0.0" and "allow_anonymous true"
 brew services restart mosquitto
 
 # For Ubuntu/Debian
@@ -149,54 +155,28 @@ For detailed instructions on setting up the Next.js frontend and Flask backend f
 
 </details>
 
-### OpenMMLA Installation
-```bash
-# Step 1: create conda environments
-# Create specific conda envs for different components: 
-# env-name: uber-server, asr-base, asr-server, ips-base, vfa-base, vfa-server
-conda create -n <env-name> -c conda-forge python=3.10.12 -y
-conda activate <env-name>
+### OpenMMLA Codebase Setup
 
-# Step 2: install OpenMMLA and components dependencies
-## Option 1: via GitHub project (Recommended)
-git clone https://github.com/ucph-ccs/openmmla.git  # clone the repo
-cd openmmla
-# Add quote if on macOS, e.g., pip install -e '.[uber-server]'
-pip install -e .[uber-server] # On uber server with conda env `uber-server`
-pip install -e .[asr-base] # On base station with conda env `asr-base`
-pip install -e .[asr-server] # On base server with conda env `asr-server`
-pip install -e .[ips-base] # On base station with conda env `ips-base`
-pip install -e .[vfa-base] # On base station with conda env `vfa-base`
-pip install -e .[vfa-server] # On base server with conda env `vfa-server`
+1.  **Clone the Repository:**
+    Get the OpenMMLA codebase by cloning the repository:
+    ```bash
+    git clone https://github.com/ucph-ccs/openmmla.git
+    ```
+    This will download the `openmmla` toolkit and all associated runtime platform directories and pipeline configurations.
 
-## Option 2: via PyPI
-pip install openmmla[uber-server] 
-pip install openmmla[asr-base]  
-pip install openmmla[asr-server] 
-pip install openmmla[ips-base]   
-pip install openmmla[vfa-server] 
+### Pipeline-Specific Setup
+After setting up the prerequisites, central services, and cloning the OpenMMLA repository, you can proceed to set up the specific data collection and analysis pipelines you intend to use. Each pipeline has its own dedicated Conda environment, dependencies, and configuration.
 
-# Step 3: install additional dependencies
-# If you would like to use lab streaming layer (LSL) as stream source
-# Install the following packages on your base station with specific conda env
-pip install pylsl==1.17.6
-conda install -c conda-forge liblsl=1.16.2
-```
+Follow the detailed instructions in the respective `README.md` files for each pipeline:
 
-### Pipeline Setup
+1.  **Automatic Speech Recognition (ASR) with Diarization**
+    *   Setup Guide: [ASR Pipeline README](base_stations/asr/README.md)
 
-After installing OpenMMLA and its dependencies, you can set up specific pipelines:
+2.  **Indoor Positioning System (IPS)**
+    *   Setup Guide: [IPS Pipeline README](base_stations/ips/README.md)
 
-1. **Automatic Speech Recognition (ASR) with Diarization**
-   - See [ASR Pipeline](base_stations/asr/README.md) for detailed setup and usage instructions.
-
-2. **Indoor Positioning System (IPS)**
-   - See [IPS Pipeline](base_stations/ips/README.md) for detailed setup and usage instructions.
-
-3. **Video Frame Analyzer (VFA)**
-   - See [VFA Pipeline](base_stations/vfa/README.md) for detailed setup and usage instructions.
-
-Each pipeline has specific usage instructions and configuration options detailed in their respective documentation.
+3.  **Video Frame Analyzer (VFA)**
+    *   Setup Guide: [VFA Pipeline README](base_stations/vfa/README.md)
 
 ## [FAQ](docs/faq.md)
 

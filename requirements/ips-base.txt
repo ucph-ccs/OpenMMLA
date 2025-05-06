@@ -3,7 +3,7 @@ matplotlib==3.9.2
 opencv-python==4.10.0.84
 paho-mqtt==2.1.0
 pandas==2.2.2
-pupil_apriltags==1.0.4.post10
+pupil_apriltags==1.0.4.post11
 redis==5.0.7
 scipy==1.14.0
 networkx==3.3

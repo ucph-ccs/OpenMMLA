@@ -25,6 +25,9 @@ The system performs nonverbal behavior analysis using large language models (LLM
 conda create -n vfa-base -c conda-forge python=3.10.12 -y
 conda activate vfa-base
 pip install -e .[vfa-base] # or pip install openmmla[vfa-base]
+# Optional: if you would like to use lab streaming layer as an input source
+pip install pylsl==1.17.6 
+conda install -c conda-forge liblsl=1.16.2
 ```
 
 
