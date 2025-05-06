@@ -18,6 +18,9 @@ Base:
     format: MJPG                                    # Source format (e.g., MJPG, H264, JPEG, raw)
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
 
+Synchronizer:
+  window_size: 1                                    # Size of the synchronization window (seconds)
+
 # RTMP streams settings
 RTMP:
   # Replace <example-rtmp-server> with your actual sever address that runs the RTMP server, and the <stream_id> with

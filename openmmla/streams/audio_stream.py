@@ -113,8 +113,8 @@ class AudioStream(StreamReceiver):
         if self.source in ['udp', 'tcp']:
             self.host = self.require_kwarg(kwargs, 'host', "UDP/TCP source requires a 'host' parameter")
             self.port = self.require_kwarg(kwargs, 'port', "UDP/TCP source requires a 'port' parameter")
-            self.sock: socket.socket | None = None
-            self.conn: socket.socket | None = None  # For TCP connection
+            self.sock = None
+            self.conn = None  # For TCP connection
 
         # RTMP objects
         if self.source == 'rtmp':

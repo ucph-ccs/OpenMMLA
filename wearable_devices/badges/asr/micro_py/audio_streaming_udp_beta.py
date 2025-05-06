@@ -7,10 +7,10 @@ from ulab import numpy as np
 import audio
 
 
-SSID = "YOUR_SSID"
-PASSWORD = "YOUR_PASSWORD"
-AUDIO_BASE_HOSTNAME = "YOUR_AUDIO_BASE_HOSTNAME"
-AUDIO_BASE_PORT = 50000  # Change this to the port number you are connecting to
+SSID = "<YOUR_SSID>"
+PASSWORD = "<YOUR_PASSWORD>"
+AUDIO_BASE_HOSTNAME = "<YOUR_AUDIO_BASE_HOSTNAME>"
+AUDIO_BASE_PORT = <YOUR_AUDIO_BASE_PORT>  # Change this to the port number you are connecting to
 
 channels = 1
 frequency = 16000

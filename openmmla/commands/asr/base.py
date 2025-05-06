@@ -20,6 +20,7 @@ def get_parser():
     add_arg('nr', bool, True, 'whether to use noise reduction', shortname='-nr')
     add_arg('tr', bool, True, 'whether to transcribe speech to text', shortname='-tr')
     add_arg('sp', bool, False, 'whether to do speech separation', shortname='-sp')
+    add_arg('hsr', bool, True, 'whether to apply Half-Scaled Recognition at speaker boundaries', shortname='-hsr')
     return parser
 
 
@@ -41,10 +42,10 @@ def main():
         nr=args.nr,
         tr=args.tr,
         sp=args.sp,
-        store=args.store
+        store=args.store,
+        hsr=args.hsr
     )
     asr_base.run()
-
 
 if __name__ == "__main__":
     main()

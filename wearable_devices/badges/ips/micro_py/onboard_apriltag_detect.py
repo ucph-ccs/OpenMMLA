@@ -10,7 +10,7 @@ SSID = "<YOUR_SSID>"
 PASSWORD = "<YOUR_PASSWORD>"
 BROKER = "<YOUR_BROKER_HOST_NAME>"
 PORT = 1883  # Default MQTT port
-TOPIC = "<SELECTED_SESSION_BUCKET>/video"  # MQTT topic to publish messages
+TOPIC = "<SELECTED_SESSION_BUCKET>/ips"  # MQTT topic to publish messages
 SENDER_ID = '0'  # Unique ID for the Badge
 TAG_FAMILIES = image.TAG36H11
 

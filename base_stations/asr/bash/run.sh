@@ -16,9 +16,10 @@ NOISE_REDUCE=true
 TRANSCRIBE=true
 SPEECH_SEPARATE=false
 DOMINANT=false
+HSR=true
 
 print_usage() {
-    echo "usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-s STORE] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-tr TRANSCRIBE] [-sp SPEECH_SEPARATE] [-d DOMINANT] [-h]"
+    echo "usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-s STORE] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-tr TRANSCRIBE] [-sp SPEECH_SEPARATE] [-d DOMINANT] [-hsr HSR] [-h]"
     echo ""
     echo "options:"
     echo "  -nb  NUM_BASE               : Number of ASR bases to run (default: 3)"
@@ -29,6 +30,7 @@ print_usage() {
     echo "  -tr  TRANSCRIBE             : Whether to transcribe audio (true/false, default: true)"
     echo "  -sp  SPEECH_SEPARATE        : Whether to use Speech Separation (true/false, default: false)"
     echo "  -d   DOMINANT               : Whether to apply dominant speaker (true/false, default: false)"
+    echo "  -hsr HSR                    : Whether to apply Half-Scaled Recognition at speaker boundaries (true/false, default: true)"
     echo "  -h                          : Display this help message"
     exit 1
 }
@@ -144,6 +146,15 @@ while [ $i -le $# ]; do
                 print_usage
             fi
             ;;
+        -hsr)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                HSR="${!i}"
+            else
+                echo "Error: -hsr requires a value"
+                print_usage
+            fi
+            ;;
         -h)
             print_usage
             ;;
@@ -164,7 +175,7 @@ for arg_name in "NUM_BASE" "NUM_SYNCHRONIZER"; do
     fi
 done
 
-for arg_name in "STORE" "VOICE_ACTIVITY_DETECT" "NOISE_REDUCE" "TRANSCRIBE" "SPEECH_SEPARATE" "DOMINANT"; do
+for arg_name in "STORE" "VOICE_ACTIVITY_DETECT" "NOISE_REDUCE" "TRANSCRIBE" "SPEECH_SEPARATE" "DOMINANT" "HSR"; do
     arg_value="${!arg_name}"
     if ! is_boolean "$arg_value"; then
         echo "Error: $arg_name must be either 'true' or 'false'."
@@ -183,6 +194,7 @@ echo "NOISE_REDUCE: $NOISE_REDUCE"
 echo "TRANSCRIBE: $TRANSCRIBE"
 echo "SPEECH_SEPARATE: $SPEECH_SEPARATE"
 echo "DOMINANT: $DOMINANT"
+echo "HALF-SCALED RECOGNITION: $HSR"
 echo "--------------------------------"
 
 # Prompt user to choose base type
@@ -212,7 +224,7 @@ while true; do
 done
 
 # Run bases
-CMD="python3 $PROJECT_DIR/examples/run_asr_base.py -b $BASE_TYPE -s $STORE -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -tr $TRANSCRIBE -sp $SPEECH_SEPARATE"
+CMD="python3 $PROJECT_DIR/examples/run_asr_base.py -b $BASE_TYPE -s $STORE -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -tr $TRANSCRIBE -sp $SPEECH_SEPARATE -hsr $HSR"
 if [ "$NUM_BASE" -gt 0 ]; then
     echo "Starting bases..."
     for i in $(seq 1 "$NUM_BASE"); do

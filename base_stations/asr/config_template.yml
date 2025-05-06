@@ -10,8 +10,8 @@ Badge:
   recognize_sp_threshold: 0.3       # Similarity threshold for recognition (with speech separate)
   keep_threshold: 0.2               # Special threshold for keeping identity for speaker border cases
   keep_sp_threshold: 0.1            # Special threshold for keeping identity for speaker border cases (with speech separate)
-  rms_threshold: 1000               # Root Mean Square amplitude value threshold for VAD preprocessing
-  rms_peak_threshold: 5000          # Peak amplitude value threshold for VAD preprocessing
+  rms_threshold: 500                # Root Mean Square amplitude value threshold for VAD preprocessing
+  rms_peak_threshold: 2500          # Peak amplitude value threshold for VAD preprocessing
   gain: 10                          # Volume gain multiplier in decibels for audio preprocessing
   source: udp                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl)
   port_offset: 50000                # Port offset for udp/tcp streams

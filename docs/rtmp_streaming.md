@@ -71,14 +71,14 @@ ffmpeg -f avfoundation -list_devices true -i ""
 # Video Streaming
 ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i <Input_Device> \
   -c:v libx264 -b:v 1M -preset ultrafast -tune zerolatency \
-  -maxrate 2M -bufsize 2M  \
+  -maxrate 2M -bufsize 2M \
   -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<Stream_ID>
 
 e.g.
 # Ubuntu
 ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
   -c:v libx264 -b:v 1M -preset ultrafast -tune zerolatency \
-  -maxrate 2M -bufsize 2M 
+  -maxrate 2M -bufsize 2M \
   -f flv rtmp://ericli.local/stream_01
 
 # macOS

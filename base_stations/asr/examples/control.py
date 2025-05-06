@@ -121,8 +121,6 @@ while True:
             
             if not selected_services:
                 continue
-                
-            print(f"Selected services: {', '.join(selected_services)}")
             
             # Send control signal to each selected service
             for service in selected_services:

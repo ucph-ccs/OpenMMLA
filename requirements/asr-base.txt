@@ -3,7 +3,7 @@ influxdb-client==1.44.0
 jiwer==3.0.4
 librosa==0.10.2.post1
 llvmlite==0.43.0
-matplotlib==3.9.1
+matplotlib==3.9.2
 networkx==3.3
 paho-mqtt==2.1.0
 pandas==2.2.2

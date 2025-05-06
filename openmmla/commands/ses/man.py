@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        prog="mmla ses-cle",
-        description="Clean up or manage bucket data.",
+        prog="mmla ses-man",
+        description="Manage bucket data and local data.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )
     from openmmla.utils.args import add_arguments
@@ -73,7 +73,7 @@ def cleanup_local_data(project_dir, bucket_name) -> None:
         print(f"❌ Failed to clean up local data: {e}")
 
 
-def run_bucket_cleanup(args):
+def run_bucket_management(args):
     print(f"\033]0;Bucket Cleanup\007")
 
     from openmmla.utils.clean import flush_input
@@ -96,25 +96,25 @@ def run_bucket_cleanup(args):
             flush_input()
             operation = input(
                 "Please select an operation:\n"
-                "1: Clean up bucket data\n"
-                "2: Delete bucket\n"
-                "3: Create new bucket\n"
-                "4: Clean up local data\n"
+                "1: Create new bucket (database)\n"
+                "2: Delete bucket (database)\n"
+                "3: Clean up bucket data (database)\n"
+                "4: Clean up local data (logs, visualizations, runtime, etc.)\n"
                 "0: Exit\n"
                 "Selected function: "
             ).strip()
 
-            if operation in ['1', '2', '4']:
+            if operation in ['2', '3', '4']:
                 bucket_name = select_bucket(influx_client)
                 if bucket_name is None:
                     continue
-                if operation == '1':
-                    cleanup_bucket_data(influx_client, bucket_name)
-                elif operation == '2':
+                if operation == '2':
                     delete_bucket(influx_client, bucket_name)
+                elif operation == '3':
+                    cleanup_bucket_data(influx_client, bucket_name)
                 elif operation == '4':
                     cleanup_local_data(os.path.dirname(config_path), bucket_name)
-            elif operation == '3':
+            elif operation == '1':  
                 create_new_bucket(influx_client)
             elif operation == '0':
                 break
@@ -134,7 +134,7 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    run_bucket_cleanup(args)
+    run_bucket_management(args)
 
 
 if __name__ == "__main__":

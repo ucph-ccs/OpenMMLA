@@ -4,8 +4,8 @@
 #include <WiFiUdp.h>
 
 // WiFi network credentials
-char ssid[] = "YOUR_SSID";
-char pass[] = "YOUR_Password";
+char ssid[] = "<YOUR_SSID>";
+char pass[] = "<YOUR_Password>";
 
 // UDP server
 WiFiUDP udp;

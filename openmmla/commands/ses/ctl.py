@@ -6,7 +6,7 @@ import os
 def get_parser():
     parser = argparse.ArgumentParser(
         prog="mmla ses-ctl",
-        description="Start/stop bucket session.",
+        description="Control bucket session.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )
     from openmmla.utils.args import add_arguments
@@ -81,7 +81,6 @@ def select_services() -> list[str]:
                 elif key == 27:  # ESC key - cancel and exit
                     return []  # Return empty list to indicate cancellation
 
-            # Return the selected services
             return [all_services[i] for i in range(len(all_services)) if selected[i]]
 
         # Run the curses menu
@@ -139,7 +138,9 @@ def run_session_control(args):
 
                 command = 'START' if operation == '1' else 'STOP'
                 selected_services = select_services()
-                print(f"Selected services: {', '.join(selected_services)}")
+
+                if not selected_services:
+                    continue
 
                 # Send control signal to each selected service
                 for service in selected_services:

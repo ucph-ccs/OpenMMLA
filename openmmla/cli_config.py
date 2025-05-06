@@ -20,6 +20,9 @@ OPTIONAL_DEP_MAP = {
     "vfa-base": "vfa-base",
     "vfa-sync": "vfa-base",
     "vfa-vllm": "vfa-server",
+    "ses-ctl": "uber-base",
+    "ses-ana": "uber-base",
+    "ses-man": "uber-base",
 }
 
 # List of all available commands
@@ -98,14 +101,14 @@ COMMANDS = {
     ),
     "ses-ctl": (
         "openmmla.commands.ses.ctl:main",
-        "Start/stop bucket session."
+        "Control bucket session."
     ),
     "ses-ana": (
         "openmmla.commands.ses.ana:main",
-        "Start session analysis."
+        "Analyze bucket data."
     ),
-    "ses-cle": (
-        "openmmla.commands.ses.cle:main",
-        "Clean up or manage bucket data."
+    "ses-man": (
+        "openmmla.commands.ses.man:main",
+        "Manage bucket data and local data."
     ),
 }

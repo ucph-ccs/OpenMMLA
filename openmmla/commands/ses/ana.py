@@ -6,7 +6,7 @@ import os
 def get_parser():
     parser = argparse.ArgumentParser(
         prog="mmla ses-ana",
-        description="Start session analysis.",
+        description="Analyze bucket data.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )
     from openmmla.utils.args import add_arguments

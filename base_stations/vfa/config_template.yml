@@ -10,7 +10,7 @@ Base:
   resolution: [1920, 1080]                          # Image resolution in pixels (width, height)
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
-  interval: 30                                        # Interval in seconds between image captures
+  interval: 30                                      # Interval in seconds between image captures
 
   # VideoStream settings
   source: opencv                                    # VideoStream source type (opencv/rtmp)
@@ -18,6 +18,10 @@ Base:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
     format: MJPG                                    # Video format (e.g., MJPG, H264)
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
+
+Synchronizer:
+  result_expiry_time: 30                            # Time (sec) before a result expires
+  time_range: 0.5                                   # Time window range for syncing frames (in seconds)
 
 # RTMP streams settings
 RTMP:

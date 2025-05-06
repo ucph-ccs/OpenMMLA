@@ -55,7 +55,7 @@ class VFASynchronizer(Synchronizer):
 
         self.buffer_expiry_time = int(sync_config.get('result_expiry_time', 30))
         self.time_range = float(sync_config.get('time_range', 0.5))  # Time window for syncing frames (in seconds)
-        self.window_size = int(sync_config.get('window_size', 30))  # Time window size for analysis (in seconds)
+        self.window_size = int(self.config['Base']['interval'])  # Time window size for analysis (in seconds)
         self.vllm_frame_analyzer_url = vfa_server_config['vllm_frame_analyzer']
 
     def _setup_directories(self):
@@ -291,7 +291,7 @@ class VFASynchronizer(Synchronizer):
             "measurement": "action recognition",
             "fields": {
                 "time_bucket": time_bucket,
-                "window_size": self.time_range,
+                "window_size": self.window_size,
                 "action_recognition": json.dumps(result)
             },
         }

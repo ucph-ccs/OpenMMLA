@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=45", "wheel", "Cython>=3.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -29,7 +29,7 @@ asr-base = [
     "jiwer==3.0.4",
     "librosa==0.10.2.post1",
     "llvmlite==0.43.0",
-    "matplotlib==3.9.1",
+    "matplotlib==3.9.2",
     "networkx==3.3",
     "paho-mqtt==2.1.0",
     "pandas==2.2.2",
@@ -41,18 +41,17 @@ asr-base = [
 ]
 
 asr-server = [
-    "Cython==3.0.11",
     "nemo-toolkit[asr]<=1.23.0",
     "modelscope[framework]==1.16.1",
     "denoiser-compat==0.1.5.dev0",
-    "silero-vad==5.1",
+    "silero-vad==5.1.2",
     "googletrans==3.0.0",
     "onnxruntime==1.18.1",
     "openai-whisper==20231117",
     "transformers==4.33.3",
     "speechbrain==1.0.0",
     "rotary-embedding-torch==0.6.4",
-    "gunicorn==22.0.0",
+    "gunicorn==23.0.0",
     "flask==3.0.3",
     "pandas==2.2.2",
     "gevent==24.2.1",
@@ -101,6 +100,18 @@ vfa-server = [
     "pyyaml==6.0.2",
 ]
 
+uber-base = [
+    "influxdb_client==1.44.0",
+    "redis==5.0.7",
+    "pyyaml==6.0.2",
+    "matplotlib==3.9.1",
+    "networkx==3.3",
+    "pyecharts==2.0.6",
+    "pandas==2.2.2",
+    "jiwer==3.0.4",
+    "scipy==1.14.0",
+]
+
 uber-server = [
     "celery[redis]==5.4.0",
     "flask==3.0.3",
@@ -108,13 +119,13 @@ uber-server = [
     "flask-socketio==5.3.6",
     "gunicorn==23.0.0",
     "gevent==24.2.1",
-    "influxdb_client==1.45.0",
+    "influxdb_client==1.44.0",
     "matplotlib==3.9.2",
     "networkx==3.3",
     "numpy==2.1.0",
     "pandas==2.2.2",
     "pyecharts==2.0.6",
-    "scipy==1.14.1",
+    "scipy==1.14.0",
     "pyyaml==6.0.2",
 ]
 

@@ -12,7 +12,7 @@ config_path = os.path.join(project_dir, 'config.yml')
 
 def run_asr_base(args):
     asr_base = ASRBase(project_dir=args.project_dir, config_path=args.config_path, base_type=args.base_type,
-                       mode=args.mode, vad=args.vad, nr=args.nr, tr=args.tr, sp=args.sp, store=args.store)
+                       mode=args.mode, vad=args.vad, nr=args.nr, tr=args.tr, sp=args.sp, store=args.store, hsr=args.hsr)
     asr_base.run()
 
 
@@ -28,6 +28,7 @@ if __name__ == "__main__":
     add_arg('nr', bool, True, 'whether to use the denoiser to enhance speech', shortname='-nr')
     add_arg('tr', bool, True, 'whether to transcribe speech to text', shortname='-tr')
     add_arg('sp', bool, False, 'whether to do speech separation for overlapped segment', shortname='-sp')
+    add_arg('hsr', bool, True, 'whether to apply Half-Scaled Recognition at speaker boundaries', shortname='-hsr')
 
     input_args = parser.parse_args()
     print_arguments(input_args)

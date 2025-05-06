@@ -37,7 +37,7 @@ class ASRBase(Base):
     logger = get_logger(f'asr-base')
 
     def __init__(self, project_dir: str | None, config_path: str, base_type: str, mode: str = 'full',
-                 store: bool = True, vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False):
+                 store: bool = True, vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
         """Initialize the ASRBase class.
 
         Args:
@@ -50,6 +50,7 @@ class ASRBase(Base):
             nr: whether to apply noise reduction (default: True)
             tr: whether to transcribe speech to text (default: True)
             sp: whether to perform speech separation (default: False)
+            hsr: whether to apply Half-Scaled Recognition at speaker boundaries (default: True)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -64,6 +65,7 @@ class ASRBase(Base):
         self.nr = nr
         self.tr = tr
         self.sp = sp
+        self.hsr = hsr
 
         # Runtime attributes
         self.bucket_name = None
@@ -332,7 +334,7 @@ class ASRBase(Base):
         logs the reset status, and performs garbage collection.
         """
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, base_type=self.base_type,
-                      mode=self.mode, vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store)
+                      mode=self.mode, vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store, hsr=self.hsr)
         self.logger.info(f"Audio DB reset to {self.audio_db}")
         gc.collect()
 
@@ -359,10 +361,10 @@ class ASRBase(Base):
             try:
                 audio_frame = self.audio_stream.read(duration=self.recognize_duration, latest=first_time)
                 first_time = False
+
                 frames = audio_frame.to_bytes()
                 acquire_time = audio_frame.timestamp
-                output_path = os.path.join(self.audio_dir, sub_dir,
-                                           f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
+                output_path = os.path.join(self.audio_dir, sub_dir, f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
 
                 if self.mode == 'record':
                     write_frame_to_wav(output_path, audio_frame)
@@ -477,7 +479,7 @@ class ASRBase(Base):
                     for i, signal in enumerate(sp_result):
                         save_file = f'{segment_audio_path[:-4]}_spk{i}.wav'
                         sf.write(save_file, np.frombuffer(signal, dtype=np.int16), 8000)
-                        processed_save_file = self._apply_vad(save_file, inplace=True)
+                        processed_save_file = self._apply_vad(save_file, inplace=1)
 
                         # Skip file if VAD fails, removing it immediately.
                         if not processed_save_file:
@@ -599,7 +601,7 @@ class ASRBase(Base):
         if not self.last_speaker:
             self.speaker_frames_dict[speaker] = (record_start_time, frames)
         else:
-            if self.last_speaker == speaker:
+            if speaker == self.last_speaker:
                 chunk_start_time, last_speaker_frames = self.speaker_frames_dict[speaker]
                 last_speaker_frames += frames
                 self.speaker_frames_dict[speaker] = (chunk_start_time, last_speaker_frames)
@@ -607,8 +609,9 @@ class ASRBase(Base):
                 chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(self.last_speaker)
                 chunk_end_time = record_start_time
 
-                # Perform half-scaled recognition on speaker turn border
-                if chunk_frames:
+                # Perform half-scaled recognition on speaker turn border if hsr is enabled
+                if chunk_frames and self.hsr:
+                    self.logger.info(f"Performing half-scaled recognition on speaker turn border for {self.last_speaker} and {speaker}")
                     left_temp_path = os.path.join(self.audio_dir, 'temp', f'{self.base_type}_{self.id}_left_temp.wav')
                     right_temp_path = os.path.join(self.audio_dir, 'temp', f'{self.base_type}_{self.id}_right_temp.wav')
                     number_frames = int(len(frames) / 2)
