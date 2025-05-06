@@ -1,0 +1,37 @@
+# Multi-Perspective Action Classification
+
+### 1. Observation Data (from multiple camera views):
+{{image_description}}
+
+### 2. Action Categories:
+{{action_definitions}}
+
+### 3. Classification Approach:
+- Focus primarily on two key elements for classification:
+  1. Gaze Focus - what the person is looking at (target of gaze line)
+  2. Hands Status - what the hands are doing/touching (or inferred to be doing if partially obscured)
+- Consider information from ALL available camera perspectives to make the most accurate assessment
+- When one perspective provides clear information that another doesn't, prioritize the clearer view
+- Classify each person based on the ACTION DEFINITIONS provided above
+- Consider both direct observations and clearly marked inferences in the observations
+- The combination of where someone is looking and what their hands are doing should determine classification
+- Provide detailed justification for each classification, explicitly referencing the observed gaze and hand status from specific camera views
+
+### Response Format
+```json
+{
+  "classifications": {
+    "0": "Working-Software",
+    "1": "Working-Document"
+  },
+  "justifications": {
+    "0": "Classified as 'Working-Software' because gaze is directed at colleague's face (in: 0.92) while hands are actively typing on keyboard as clearly visible in perspective_1.",
+    "1": "Classified as 'Working-Document' because gaze is directed at documents on desk (in: 0.78) and hands are manipulating papers as visible in perspective_1."
+  }
+}
+```
+
+### CRITICAL ID ASSIGNMENT RULES:
+1. ALWAYS use numeric IDs as keys in the JSON response, never use descriptive identifiers like 'Person 1' or 'Tag_1'
+2. PRESERVE the same exact numeric IDs that were used in the observation data
+3. All IDs must be consistent across classifications and justifications 

@@ -1,0 +1,94 @@
+# Multi-Perspective Lab Image Analysis
+
+### Visual Elements in Images:
+- Black squares with white numbers: These are AprilTags. Each person has a unique ID tag.
+- Colored boxes around faces: These indicate detected faces.
+- Colored lines from faces: These show gaze direction (where someone is looking).
+- 'in: X.XX' values: These indicate the probability that the person's gaze is within the frame:
+  * HIGH values (0.5-1.0) indicate gaze is likely within frame
+  * LOW values (0.0-0.5) indicate gaze is likely outside frame
+
+### Multiple Camera Views:
+You have been provided with {{num_perspectives}} synchronized images of the same scene, each from a different perspective:
+{{angle_descriptions}}
+
+Use all {{num_perspectives}} camera perspectives to resolve ambiguities. If something is obscured in one view, check if it's visible from another angle.
+
+{{participant_descriptions}}
+
+### MULTI-PERSPECTIVE OBSERVATION GUIDELINES:
+1. GAZE FOCUS: Describe in detail what each person is looking at based on the colored gaze lines across all available perspectives.
+   - Compare gaze lines across different perspectives for more accurate targeting
+   - Include the specific target object/area where the gaze line points
+   - Include the 'in: X.XX' probability value - this indicates the likelihood the gaze is within the frame:
+     * HIGH values (0.5-1.0) indicate gaze is likely within frame
+     * LOW values (0.0-0.5) indicate gaze is likely outside frame
+   - When 'in' value is low (<0.3), this strongly suggests the person is looking outside the frame
+   - DO NOT interpret low 'in' values as low confidence - they indicate gaze is likely outside frame
+   - WHEN NO GAZE LINE IS VISIBLE IN ANY VIEW: You may make a cautious inference based on head orientation
+   - Always mark gaze inferences with: 'INFERENCE (low confidence): Based on head orientation, likely looking at [object]'
+2. HAND STATUS: Provide detailed description of hand positions and activities, combining information from all perspectives.
+   - If hands are visible in one view but not another, prioritize the view where they're visible
+   - Describe exact hand positions and what they are touching/interacting with
+   - If hands are visible but inactive (resting, clasped), clearly state this
+   - If hands are obscured in all views, clearly indicate this
+3. RESOLVING AMBIGUITIES:
+   - First check if information missing in one perspective is visible in another
+   - Only make inferences when something is obscured in ALL available perspectives
+   - When making inferences, be explicit about the visual cues you're using from multiple perspectives
+4. CLEAR DISTINCTION BETWEEN OBSERVATION AND INFERENCE:
+   - For direct observations, describe exactly what is visible in which camera view
+   - For any inferences (when something is partially obscured in all views), clearly mark these by starting with 'INFERENCE:'
+
+### 1. Describe each person by their AprilTag ID number
+First, for each person with a visible AprilTag ID number in ANY view, map their identity with the shown ID number (e.g., "6", "10").
+Second, for people without visible AprilTag IDs in ANY view, try to match their appearance and clothing with known participant descriptions, and use that ID number.
+Finally, for anyone without a visible AprilTag ID in ANY view and no matching description, assign sequential numbers starting from 100 (e.g., "100", "101").
+IMPORTANT: ALWAYS use only numeric IDs (e.g., "6", "10", "100") without words like "Person" or "Tag" when identifying people in your response.
+
+### 2. For each person, describe ONLY these elements:
+- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability and its interpretation. Note which camera view provides the clearest information.
+- **Hands Status**: Describe visible hand positions and activities in detail. Note which camera view provides the clearest information about hands.
+- **Position**: Basic location in frame for identification only.
+- **Clothing**: Brief description for identification only, matching with known participant descriptions when possible.
+
+### 3. Activity Classification
+{{action_definitions}}
+
+- Classify each person's action based on your observations of their gaze focus and hand status, using the definitions above
+- Use the combination of gaze focus and hand status as your primary criteria for classification
+- When making reasonable inferences about obscured elements, clearly indicate this in your justification
+- Provide detailed justification explaining how the observed gaze and hand status led to your classification
+
+### Response Format
+```json
+{
+  "observations": {
+    "0": {
+      "gaze_focus": "In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates gaze is within frame.",
+      "hands_status": "In perspective_1: Both hands are on keyboard, actively typing. Left hand positioned over WASD keys, right hand near spacebar. perspective_2 partially obscures hands but confirms typing activity.",
+      "position": "Center-right of frame in all views",
+      "clothing": "Yellow sweater matching description of participant with Tag ID 0"
+    },
+    "1": {
+      "gaze_focus": "In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates gaze is within frame.",
+      "hands_status": "In perspective_2: Hands are obscured by desk edge. In perspective_1: Hands clearly visible manipulating papers, sorting through documents.",
+      "position": "Left side of frame in all views",
+      "clothing": "Dark blue sweater matching description of participant with Tag ID 1"
+    }
+  },
+  "classifications": {
+    "0": "Working-Software",
+    "1": "Working-Document"
+  },
+  "justifications": {
+    "0": "Classified as 'Working-Software' because gaze is directed at colleague's face (in: 0.92) while hands are actively typing on keyboard as clearly visible in perspective_1.",
+    "1": "Classified as 'Working-Document' because gaze is directed at documents on desk (in: 0.78) and hands are manipulating papers as visible in perspective_1."
+  }
+}
+```
+
+### CRITICAL ID ASSIGNMENT RULES:
+1. ALWAYS use numeric IDs as keys in the JSON response, never use descriptive identifiers like 'Person 1' or 'Tag_1'
+2. PRESERVE the same exact numeric IDs across all observations, classifications and justifications
+3. Ensure you identify the same person consistently across all camera perspectives 

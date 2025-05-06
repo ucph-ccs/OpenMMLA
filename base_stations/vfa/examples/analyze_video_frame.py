@@ -4,7 +4,7 @@ import os
 import requests
 
 
-def process_image(image_path, server_url="http://localhost:5000/process"):
+def process_image(image_path, server_url="http://localhost:5007/vllm"):
     """Send an image to the video frame analyzer server and get the results.
 
     Args:
@@ -29,27 +29,11 @@ def process_image(image_path, server_url="http://localhost:5000/process"):
 
 def main():
     project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-    image_path = os.path.join(project_dir, '/Users/ericli/Desktop/Conference/IMWUT/experiments/session_2025-01-22T14'
-                                           ':42:37Z/video_frames/frame_1737558012.jpg')
+    image_path = os.path.join(project_dir, '/Users/li/OpenMMLA/tests/cph/case_0/frame_1737557862.jpg')
     try:
         results = process_image(image_path)
         print("Image processing results:")
         print(json.dumps(results, indent=2))
-
-        image_description = results['image_description']
-        categorization_result = results['categorization_result']
-
-        print("\nImage Description:")
-        print(image_description)
-
-        print("\nCategorization Result:")
-        # for category, description in categorization_result.items():
-        #     print(f"{category}: {description}")
-
-        for pair in categorization_result['pairs']:
-            print(f"ID: {pair['id']}, Action: {pair['action']}")
-
-
     except Exception as e:
         print(f"An error occurred: {str(e)}")
 

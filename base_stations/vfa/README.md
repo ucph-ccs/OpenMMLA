@@ -30,6 +30,68 @@ pip install pylsl==1.17.6
 conda install -c conda-forge liblsl=1.16.2
 ```
 
+### LLM and VLM Backend Options
+
+VFA requires backend services to run large language models (LLMs) and vision-language models (VLMs). You can choose either to run these models locally on your own hardware or connect to cloud services:
+
+#### Local Backend Options
+- **vLLM**: Efficient inference for LLMs with optimized attention algorithms
+  - Installation and setup guide: [vLLM Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
+  - Example: `pip install vllm` and run `vllm serve Qwen/Qwen2.5-1.5B-Instruct`
+  
+- **Ollama**: Simplified local deployment of open-source models
+  - Installation: [Ollama Download](https://ollama.com/download)
+  - Example: `ollama pull llava` to download a multimodal model
+
+#### Cloud API Options
+For these options, you'll need to obtain API keys from the respective providers and configure them in your `config.yml`:
+
+- **OpenAI API**: Access to GPT-4 Vision and other OpenAI models
+  - Requires an [OpenAI API key](https://platform.openai.com)
+  
+- **Google Gemini**: Google's multimodal LLM 
+  - Requires a [Gemini API key](https://ai.google.dev/)
+  
+- **DeepSeek**: DeepSeek's vision-language models
+  - Requires a [DeepSeek API key](https://platform.deepseek.com)
+  
+- **Qwen**: Alibaba's multimodal models via ModelScope
+  - Requires a [Qwen API key](https://help.aliyun.com/document_detail/611472.html)
+
+Configure your chosen backend in the `config.yml` file under the appropriate VLM/LLM section.
+
+### Customizing Prompt Templates
+
+VFA now supports loading custom prompt templates from external files, allowing you to modify the prompts without changing the code:
+
+1. Add the `prompt_templates_dir` parameter to your `config.yml` file:
+   ```yaml
+   VLLMFrameAnalyzer:
+     prompt_templates_dir: "prompts"  # Path to your prompt templates directory
+     # Other configuration options...
+   ```
+
+2. Create the templates directory and add template files:
+   ```bash
+   mkdir -p /path/to/your/prompts
+   ```
+
+3. Create the following template files:
+   - `system_prompt.txt`: System prompt for single image analysis
+   - `multi_angle_system_prompt.txt`: System prompt for multi-angle analysis
+   - `vlm_prompt.txt`: User prompt for vision model's image analysis
+   - `llm_prompt.txt`: User prompt for text classification
+   - `end_to_end_prompt.txt`: User prompt for end-to-end analysis
+   - `multi_angle_vlm_prompt.txt`: User prompt for multi-angle analysis
+
+4. Use template variables to make your prompts dynamic:
+   - `{{action_definitions}}`: Will be replaced with your defined actions
+   - `{{image_description}}`: Will be replaced with the VLM's observations
+   - `{{num_perspectives}}`: For multi-angle prompts, the number of camera angles
+   - `{{angle_descriptions}}`: For multi-angle prompts, descriptions of each camera angle
+   - `{{participant_descriptions}}`: Will be replaced with participant information
+
+This feature makes it easy to experiment with different prompt engineering approaches without modifying the code.
 
 ### On Servers
 ```bash

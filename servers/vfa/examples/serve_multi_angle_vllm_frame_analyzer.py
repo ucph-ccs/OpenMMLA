@@ -18,4 +18,4 @@ app = create_app(
 # Or with gunicorn: gunicorn -w 1 -b 0.0.0.0:5007 serve_multi_angle_vllm_frame_analyzer:app
 # To kill the server: kill -9 $(lsof -ti:5007)  
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5007)  # Using port 5007 to avoid conflict with other analyzers 
+    app.run(host='0.0.0.0', port=5007)

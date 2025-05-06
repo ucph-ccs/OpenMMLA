@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask
 
 
 def create_app(class_type, endpoint, method_name, class_args=None, route_args=None):

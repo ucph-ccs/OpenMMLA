@@ -21,8 +21,7 @@ The post-time analyzer is as follows:
 ```bash
 # Install the required dependencies for the ASR pipeline on specific machines 
 # (e.g., base station: asr-base, base server: asr-server, uber server: uber-server)
-conda create -n asr-base -c conda-forge -y python=3.10.12 # add liblsl=1.16.2 after python if you want to use lab streaming layer
-
+conda create -n asr-base -c conda-forge -y python=3.10.12
 conda activate asr-base
 pip install -e .[asr-base] # or pip install openmmla[asr-base]
 # Optional: if you would like to use lab streaming layer as an input source

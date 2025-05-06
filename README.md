@@ -59,11 +59,11 @@ This section guides you through setting up the OpenMMLA.
 
 The following tools are generally required on machines designated as **Base Stations** or **Servers** (including Base Servers and Uber Servers):
 
-- [Conda](https://docs.conda.io/en/latest/miniconda.html) (for managing Python environments)
-- [Git](https://git-scm.com/) (for cloning the repository)
-- [tmux](https://github.com/tmux/tmux/wiki/Installing) (for managing terminal sessions)
-- [PortAudio](https://www.portaudio.com/) (for audio I/O, if using audio pipelines)
-- [FFmpeg](https://ffmpeg.org/) (for audio/video processing, if using relevant pipelines)
+- [Conda](https://docs.conda.io/en/latest/miniconda.html) : for managing Python environments
+- [Git](https://git-scm.com/) : for cloning the repository
+- [tmux](https://github.com/tmux/tmux/wiki/Installing) : for managing terminal sessions
+- [PortAudio](https://www.portaudio.com/) : for audio I/O, if using audio pipelines
+- [FFmpeg](https://ffmpeg.org/) : for audio/video processing, if using relevant pipelines
 
 <details>
 <summary>Conda Installation</summary>
@@ -75,7 +75,7 @@ bash Miniforge3-$(uname)-$(uname -m).sh
 </details>
 
 <details>
-<summary>Other Tools Installation (PortAudio, FFmpeg, tmux)</summary>
+<summary>Other Tools Installation</summary>
 
 ```bash
 # macOS
@@ -91,14 +91,14 @@ sudo apt install -y build-essential git ffmpeg portaudio19-dev python3-pyaudio l
 
 The following services are typically run on a dedicated **Uber Server** to provide centralized functionalities:
 
-- **InfluxDB** (required): Time series database for storing group segment measurement results.
-- **Redis** (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks).
-- **Mosquitto** (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*.
-- **Nginx** (optional): Load balancer for AI/Algorithm services and RTMP server for streams.
-- **Dashboard** (optional): Next.js frontend & Flask backend server for real/post-time visualizations.
+- [InfluxDB](https://docs.influxdata.com/influxdb/v2/install/) (required): Time series database for storing group segment measurement results
+- [Redis](https://redis.io/downloads/) (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks)
+- [Mosquitto](https://mosquitto.org/download/) (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*
+- [Nginx](https://github.com/nginx/nginx?tab=readme-ov-file#downloading-and-installing) (optional): Load balancer for AI/Algorithm services and RTMP server for streams
+- [Dashboard](https://openmmla-dashboard-ri2dd2eh1-lizaibeims-projects.vercel.app/) (optional): Next.js frontend & Flask backend server for real/post-time visualizations
 
 <details>
-<summary>Services Installation Instructions</summary>
+<summary>Services Installation</summary>
 
 #### InfluxDB Installation
 ```bash

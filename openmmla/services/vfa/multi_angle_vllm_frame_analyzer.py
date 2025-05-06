@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from io import BytesIO
 from typing import Dict, Any, cast
@@ -31,6 +32,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         self._setup_yaml()
         self._setup_objects()
+        self._load_prompt_templates()
 
     def _setup_yaml(self):
         analyzer_config = self.config['VLLMFrameAnalyzer']  # type: ignore
@@ -40,6 +42,14 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.top_p = float(analyzer_config['top_p'])
         self.temperature = float(analyzer_config['temperature'])
         self.end_to_end = analyzer_config.get('end_to_end', False)
+
+        # Get prompt templates directory
+        self.prompt_templates_dir = analyzer_config.get('prompt_templates_dir', 'prompts')
+        if not os.path.isabs(self.prompt_templates_dir):
+            self.prompt_templates_dir = os.path.join(self.project_dir, self.prompt_templates_dir)
+        if not os.path.exists(self.prompt_templates_dir):
+            raise FileNotFoundError(f"Prompt templates directory not found: {self.prompt_templates_dir}")
+        self.logger.info(f"Prompt templates directory: {self.prompt_templates_dir}")
 
         # Load participant descriptions from config
         self.participant_descriptions = analyzer_config.get('participant_descriptions', {})
@@ -76,6 +86,38 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"VLM Base URL: {self.vlm_base_url}")
         self.logger.info(f"LLM Base URL: {self.llm_base_url}")
         self.logger.info(f"End-to-End: {self.end_to_end}")
+
+    def _load_prompt_templates(self):
+        """Load prompt templates from files in the prompt_templates_dir."""
+        # Initialize with default values in case files are not found
+        self.multi_angle_system_prompt_template = ""
+        self.multi_angle_end_user_prompt_template = ""
+        self.multi_angle_vlm_user_prompt_template = ""
+        self.multi_angle_llm_system_prompt_template = ""
+        self.multi_angle_llm_user_prompt_template = ""
+        
+
+        # Define template files to load 
+        template_files = {
+            'multi_angle_system_prompt.txt': 'multi_angle_system_prompt_template',
+            'multi_angle_end_user_prompt.txt': 'multi_angle_end_user_prompt_template',
+            'multi_angle_vlm_user_prompt.txt': 'multi_angle_vlm_user_prompt_template',
+            'multi_angle_llm_system_prompt.txt': 'multi_angle_llm_system_prompt_template',
+            'multi_angle_llm_user_prompt.txt': 'multi_angle_llm_user_prompt_template',
+        }
+
+        try:
+            if os.path.exists(self.prompt_templates_dir):
+                for filename, attr_name in template_files.items():
+                    filepath = os.path.join(self.prompt_templates_dir, filename)
+                    if os.path.exists(filepath):
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            setattr(self, attr_name, f.read())
+                            self.logger.info(f"Loaded prompt template from {filepath}")
+            else:
+                self.logger.warning(f"Prompt templates directory not found: {self.prompt_templates_dir}")
+        except Exception as e:
+            self.logger.error(f"Error loading prompt templates: {e}")
 
     def _setup_objects(self):
         self.detector = Detector(families=self.families, nthreads=4)
@@ -217,7 +259,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 normalize_bbox=True,
                 normalize_target=True,
                 render=True,
-                show=False,
+                show=True,
                 inout_thresh=0.5,
                 render_heatmap=False,
                 save=False
@@ -248,16 +290,12 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         Returns:
             str: System prompt content
         """
-        system_content = (
-            f"You are an expert image analyst for lab experiments with expertise in analyzing {num_perspectives} camera angles simultaneously. "
-            f"Your task is to analyze {num_perspectives} synchronized images showing the same scene from different perspectives. "
-            "Focus specifically on two key elements across these views: "
-            "1) Gaze direction (shown by colored lines) and 2) Hand interactions with objects. "
-            "Use the multiple angles to resolve ambiguities - if something is obscured in one view, check if it's visible from another angle. "
-            "Base all observations primarily on what is directly visible across all images, while making reasonable inferences when necessary."
+        # Multi-angle prompt with template variable replacement
+        system_prompt = self.multi_angle_system_prompt_template.replace(
+            "{{num_perspectives}}", str(num_perspectives)
         )
 
-        return system_content
+        return system_prompt
 
     def _format_participant_descriptions(self, session_id=None):
         """Format participant descriptions from config into readable text for prompts.
@@ -300,111 +338,23 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         Returns:
             list: Messages for the VLM
         """
-        # Start with basic elements explanation
-        user_text = (
-            "# Multi-Perspective Lab Image Analysis\n\n"
-            "### Visual Elements in Images:\n"
-            "- Black squares with white numbers: These are AprilTags. Each person has a unique ID tag.\n"
-            "- Colored boxes around faces: These indicate detected faces.\n"
-            "- Colored lines from faces: These show gaze direction (where someone is looking).\n"
-            "- 'in: X.XX' values: These indicate the probability that the person's gaze is within the frame:\n"
-            "  * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
-            "  * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
-            "### Multiple Camera Views:\n"
-            f"You have been provided with {len(processed_images)} synchronized images of the same scene, each from a different perspective:\n"
-        )
-
-        # Add descriptions for each angle
+        # Format angle descriptions
+        angle_descriptions = []
         for angle, image_data in processed_images.items():
-            user_text += f"- **{angle}**: {image_data['angle_description']}\n"
+            angle_descriptions.append(f"- **{angle}**: {image_data['angle_description']}")
 
-        user_text += f"\nUse all {len(processed_images)} camera perspectives to resolve ambiguities. If something is obscured in one view, check if it's visible from another angle.\n\n"
-
-        # Add participant descriptions if available
+        # Create participant descriptions
         participant_descriptions = self._format_participant_descriptions(session_id)
-        if participant_descriptions:
-            user_text += participant_descriptions
 
-        # Add interpretation rules
-        user_text += (
-            "### MULTI-PERSPECTIVE OBSERVATION GUIDELINES:\n"
-            "1. GAZE FOCUS: Describe in detail what each person is looking at based on the colored gaze lines across all available perspectives.\n"
-            "   - Compare gaze lines across different perspectives for more accurate targeting\n"
-            "   - Include the specific target object/area where the gaze line points\n"
-            "   - Include the 'in: X.XX' probability value - this indicates the likelihood the gaze is within the frame:\n"
-            "     * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
-            "     * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
-            "   - When 'in' value is low (<0.3), this strongly suggests the person is looking outside the frame\n"
-            "   - DO NOT interpret low 'in' values as low confidence - they indicate gaze is likely outside frame\n"
-            "   - WHEN NO GAZE LINE IS VISIBLE IN ANY VIEW: You may make a cautious inference based on head orientation\n"
-            "   - Always mark gaze inferences with: 'INFERENCE (low confidence): Based on head orientation, likely looking at [object]'\n"
-            "2. HAND STATUS: Provide detailed description of hand positions and activities, combining information from all perspectives.\n"
-            "   - If hands are visible in one view but not another, prioritize the view where they're visible\n"
-            "   - Describe exact hand positions and what they are touching/interacting with\n"
-            "   - If hands are visible but inactive (resting, clasped), clearly state this\n"
-            "   - If hands are obscured in all views, clearly indicate this\n"
-            "3. RESOLVING AMBIGUITIES:\n"
-            "   - First check if information missing in one perspective is visible in another\n"
-            "   - Only make inferences when something is obscured in ALL available perspectives\n"
-            "   - When making inferences, be explicit about the visual cues you're using from multiple perspectives\n"
-            "4. CLEAR DISTINCTION BETWEEN OBSERVATION AND INFERENCE:\n"
-            "   - For direct observations, describe exactly what is visible in which camera view\n"
-            "   - For any inferences (when something is partially obscured in all views), clearly mark these by starting with 'INFERENCE:'\n\n"
-
-            "### 1. Describe each person by their AprilTag ID number\n"
-            "First, for each person with a visible AprilTag ID number in ANY view, map their identity with the shown ID number (e.g., \"6\", \"10\").\n"
-            "Second, for people without visible AprilTag IDs in ANY view, try to match their appearance and clothing with known participant descriptions, and use that ID number.\n"
-            "Finally, for anyone without a visible AprilTag ID in ANY view and no matching description, assign sequential numbers starting from 100 (e.g., \"100\", \"101\").\n"
-            "IMPORTANT: ALWAYS use only numeric IDs (e.g., \"6\", \"10\", \"100\") without words like \"Person\" or \"Tag\" when identifying people in your response.\n\n"
-
-            "### 2. For each person, describe ONLY these elements:\n"
-            "- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability and its interpretation. Note which camera view provides the clearest information.\n"
-            "- **Hands Status**: Describe visible hand positions and activities in detail. Note which camera view provides the clearest information about hands.\n"
-            "- **Position**: Basic location in frame for identification only.\n"
-            "- **Clothing**: Brief description for identification only, matching with known participant descriptions when possible.\n\n"
-
-            "### 3. Activity Classification\n"
-            f"```\n{self.action_definitions}\n```\n"
-            "- Classify each person's action based on your observations of their gaze focus and hand status, using the definitions above\n"
-            "- Use the combination of gaze focus and hand status as your primary criteria for classification\n"
-            "- When making reasonable inferences about obscured elements, clearly indicate this in your justification\n"
-            "- Provide detailed justification explaining how the observed gaze and hand status led to your classification\n\n"
-
-            "### Response Format\n"
-            "```json\n"
-            "{\n"
-            "  \"observations\": {\n"
-            "    \"0\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates gaze is within frame.\",\n"
-            "      \"hands_status\": \"In perspective_1: Both hands are on keyboard, actively typing. Left hand positioned over WASD keys, right hand near spacebar. perspective_2 partially obscures hands but confirms typing activity.\",\n"
-            "      \"position\": \"Center-right of frame in all views\",\n"
-            "      \"clothing\": \"Yellow sweater matching description of participant with Tag ID 0\"\n"
-            "    },\n"
-            "    \"1\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates gaze is within frame.\",\n"
-            "      \"hands_status\": \"In perspective_2: Hands are obscured by desk edge. In perspective_1: Hands clearly visible manipulating papers, sorting through documents.\",\n"
-            "      \"position\": \"Left side of frame in all views\",\n"
-            "      \"clothing\": \"Dark blue sweater matching description of participant with Tag ID 1\"\n"
-            "    }\n"
-            "  },\n"
-            "  \"classifications\": {\n"
-            "    \"0\": \"Working-Software\",\n"
-            "    \"1\": \"Working-Document\"\n"
-            "  },\n"
-            "  \"justifications\": {\n"
-            "    \"0\": \"Classified as 'Working-Software' because gaze is directed at colleague's face (in: 0.92) while hands are actively typing on keyboard as clearly visible in perspective_1.\",\n"
-            "    \"1\": \"Classified as 'Working-Document' because gaze is directed at documents on desk (in: 0.78) and hands are manipulating papers as visible in perspective_1.\"\n"
-            "  }\n"
-            "}\n"
-            "```\n\n"
-            "### CRITICAL ID ASSIGNMENT RULES:\n"
-            "1. ALWAYS use numeric IDs as keys in the JSON response, never use descriptive identifiers like 'Person 1' or 'Tag_1'\n"
-            "2. PRESERVE the same exact numeric IDs across all observations, classifications and justifications\n"
-            "3. Ensure you identify the same person consistently across all camera perspectives"
-        )
+        # Load template and replace variables
+        template = self.multi_angle_end_user_prompt_template
+        template = template.replace("{{num_perspectives}}", str(len(processed_images)))
+        template = template.replace("{{angle_descriptions}}", "\n".join(angle_descriptions))
+        template = template.replace("{{participant_descriptions}}", participant_descriptions)
+        template = template.replace("{{action_definitions}}", self.action_definitions)
 
         # Create message content with multiple images
-        content = [{"type": "text", "text": user_text}]
+        content = [{"type": "text", "text": template}]
 
         # Add all the images to the content - fixing the type error with proper casting
         for angle, image_data in processed_images.items():
@@ -434,95 +384,22 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         Returns:
             list: Messages for the VLM
         """
-        # Start with basic elements explanation
-        user_text = (
-            "# Multi-Perspective Lab Image Analysis\n\n"
-            "### Visual Elements in Images:\n"
-            "- Black squares with white numbers: These are AprilTags. Each person has a unique ID tag.\n"
-            "- Colored boxes around faces: These indicate detected faces.\n"
-            "- Colored lines from faces: These show gaze direction (where someone is looking).\n"
-            "- 'in: X.XX' values: These indicate the probability that the person's gaze is within the frame:\n"
-            "  * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
-            "  * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
-            "### Multiple Camera Views:\n"
-            f"You have been provided with {len(processed_images)} synchronized images of the same scene, each from a different perspective:\n"
-        )
-
-        # Add descriptions for each angle
+        # Format angle descriptions
+        angle_descriptions = []
         for angle, image_data in processed_images.items():
-            user_text += f"- **{angle}**: {image_data['angle_description']}\n"
+            angle_descriptions.append(f"- **{angle}**: {image_data['angle_description']}")
 
-        user_text += f"\nUse all {len(processed_images)} camera perspectives to resolve ambiguities. If something is obscured in one view, check if it's visible from another angle.\n\n"
-
-        # Add participant descriptions if available
+        # Create participant descriptions
         participant_descriptions = self._format_participant_descriptions(session_id)
-        if participant_descriptions:
-            user_text += participant_descriptions
 
-        # Add interpretation rules
-        user_text += (
-            "### MULTI-PERSPECTIVE OBSERVATION GUIDELINES:\n"
-            "1. GAZE FOCUS: Describe in detail what each person is looking at based on the colored gaze lines across all available perspectives.\n"
-            "   - Compare gaze lines across different perspectives for more accurate targeting\n"
-            "   - Include the specific target object/area where the gaze line points\n"
-            "   - Include the 'in: X.XX' probability value - this indicates the likelihood the gaze is within the frame:\n"
-            "     * HIGH values (0.5-1.0) indicate gaze is likely within frame\n"
-            "     * LOW values (0.0-0.5) indicate gaze is likely outside frame\n"
-            "   - When 'in' value is low (<0.3), this strongly suggests the person is looking outside the frame\n"
-            "   - DO NOT interpret low 'in' values as low confidence - they indicate gaze is likely outside frame\n"
-            "   - WHEN NO GAZE LINE IS VISIBLE IN ANY VIEW: You may make a cautious inference based on head orientation\n"
-            "   - Always mark gaze inferences with: 'INFERENCE (low confidence): Based on head orientation, likely looking at [object]'\n"
-            "2. HAND STATUS: Provide detailed description of hand positions and activities, combining information from all perspectives.\n"
-            "   - If hands are visible in one view but not another, prioritize the view where they're visible\n"
-            "   - Describe exact hand positions and what they are touching/interacting with\n"
-            "   - If hands are visible but inactive (resting, clasped), clearly state this\n"
-            "   - If hands are obscured in all views, clearly indicate this\n"
-            "3. RESOLVING AMBIGUITIES:\n"
-            "   - First check if information missing in one perspective is visible in another\n"
-            "   - Only make inferences when something is obscured in ALL available perspectives\n"
-            "   - When making inferences, be explicit about the visual cues you're using from multiple perspectives\n"
-            "4. CLEAR DISTINCTION BETWEEN OBSERVATION AND INFERENCE:\n"
-            "   - For direct observations, describe exactly what is visible in which camera view\n"
-            "   - For any inferences (when something is partially obscured in all views), clearly mark these by starting with 'INFERENCE:'\n\n"
-
-            "### 1. Describe each person by their AprilTag ID number\n"
-            "First, for each person with a visible AprilTag ID number in ANY view, map their identity with the shown ID number (e.g., \"6\", \"10\").\n"
-            "Second, for people without visible AprilTag IDs in ANY view, try to match their appearance and clothing with known participant descriptions, and use that ID number.\n"
-            "Finally, for anyone without a visible AprilTag ID in ANY view and no matching description, assign sequential numbers starting from 100 (e.g., \"100\", \"101\").\n"
-            "IMPORTANT: ALWAYS use only numeric IDs (e.g., \"6\", \"10\", \"100\") without words like \"Person\" or \"Tag\" when identifying people in your response.\n\n"
-
-            "### 2. For each person, describe ONLY these elements:\n"
-            "- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability and its interpretation. Note which camera view provides the clearest information.\n"
-            "- **Hands Status**: Describe visible hand positions and activities in detail. Note which camera view provides the clearest information about hands.\n"
-            "- **Position**: Basic location in frame for identification only.\n"
-            "- **Clothing**: Brief description for identification only, matching with known participant descriptions when possible.\n\n"
-
-            "### Response Format\n"
-            "```json\n"
-            "{\n"
-            "  \"observations\": {\n"
-            "    \"0\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates gaze is within frame.\",\n"
-            "      \"hands_status\": \"In perspective_1: Both hands are on keyboard, actively typing. Left hand positioned over WASD keys, right hand near spacebar. perspective_2 partially obscures hands but confirms typing activity.\",\n"
-            "      \"position\": \"Center-right of frame in all views\",\n"
-            "      \"clothing\": \"Yellow sweater matching description of participant with Tag ID 0\"\n"
-            "    },\n"
-            "    \"1\": {\n"
-            "      \"gaze_focus\": \"In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates gaze is within frame.\",\n"
-            "      \"hands_status\": \"In perspective_2: Hands are obscured by desk edge. In perspective_1: Hands clearly visible manipulating papers, sorting through documents.\",\n"
-            "      \"position\": \"Left side of frame in all views\",\n"
-            "      \"clothing\": \"Dark blue sweater matching description of participant with Tag ID 1\"\n"
-            "    }\n"
-            "  }\n"
-            "}\n"
-            "```\n\n"
-            "### CRITICAL ID ASSIGNMENT RULES:\n"
-            "1. ALWAYS use numeric IDs as keys in the JSON response, never use descriptive identifiers like 'Person 1' or 'Tag_1'\n"
-            "2. Ensure you identify the same person consistently across all camera perspectives"
-        )
+        # Load template and replace variables
+        template = self.multi_angle_vlm_user_prompt_template
+        template = template.replace("{{num_perspectives}}", str(len(processed_images)))
+        template = template.replace("{{angle_descriptions}}", "\n".join(angle_descriptions))
+        template = template.replace("{{participant_descriptions}}", participant_descriptions)
 
         # Create message content with multiple images
-        content = [{"type": "text", "text": user_text}]
+        content = [{"type": "text", "text": template}]
 
         # Add all the images to the content - fixing the type error with proper casting
         for angle, image_data in processed_images.items():
@@ -551,54 +428,18 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         Returns:
             list: Messages for the LLM
         """
-        system_content = (
-            "You are an expert action classifier focused on gaze focus and hand interactions. "
-            "Your task is to analyze detailed observations about people's gaze and hand activities "
-            "from multiple camera perspectives and classify their actions according to specific definitions."
-        )
+        system_content = self.multi_angle_llm_system_prompt_template
 
-        image_description = vlm_response.get('observations', {})
-        user_text = (
-            "# Multi-Perspective Action Classification\n\n"
-            "### 1. Observation Data (from multiple camera views):\n"
-            f"```\n{image_description}\n```\n\n"
+        image_description = json.dumps(vlm_response.get('observations', {}), indent=2)
 
-            "### 2. Action Categories:\n"
-            f"```\n{self.action_definitions}\n```\n\n"
-
-            "### 3. Classification Approach:\n"
-            "- Focus primarily on two key elements for classification:\n"
-            "  1. Gaze Focus - what the person is looking at (target of gaze line)\n"
-            "  2. Hands Status - what the hands are doing/touching (or inferred to be doing if partially obscured)\n"
-            "- Consider information from ALL available camera perspectives to make the most accurate assessment\n"
-            "- When one perspective provides clear information that another doesn't, prioritize the clearer view\n"
-            "- Classify each person based on the ACTION DEFINITIONS provided above\n"
-            "- Consider both direct observations and clearly marked inferences in the observations\n"
-            "- The combination of where someone is looking and what their hands are doing should determine classification\n"
-            "- Provide detailed justification for each classification, explicitly referencing the observed gaze and hand status from specific camera views\n\n"
-
-            "### Response Format\n"
-            "```json\n"
-            "{\n"
-            "  \"classifications\": {\n"
-            "    \"0\": \"Working-Software\",\n"
-            "    \"1\": \"Working-Document\"\n"
-            "  },\n"
-            "  \"justifications\": {\n"
-            "    \"0\": \"Classified as 'Working-Software' because gaze is directed at colleague's face (in: 0.92) while hands are actively typing on keyboard as clearly visible in perspective_1.\",\n"
-            "    \"1\": \"Classified as 'Working-Document' because gaze is directed at documents on desk (in: 0.78) and hands are manipulating papers as visible in perspective_1.\"\n"
-            "  }\n"
-            "}\n"
-            "```\n\n"
-            "### CRITICAL ID ASSIGNMENT RULES:\n"
-            "1. ALWAYS use numeric IDs as keys in the JSON response, never use descriptive identifiers like 'Person 1' or 'Tag_1'\n"
-            "2. PRESERVE the same exact numeric IDs that were used in the observation data\n"
-            "3. All IDs must be consistent across classifications and justifications"
-        )
+        # Load template and replace variables
+        template = self.multi_angle_llm_user_prompt_template
+        template = template.replace("{{image_description}}", image_description)
+        template = template.replace("{{action_definitions}}", self.action_definitions)
 
         llm_messages = [
             {"role": "system", "content": system_content},
-            {"role": "user", "content": user_text}
+            {"role": "user", "content": template}
         ]
 
         return llm_messages
