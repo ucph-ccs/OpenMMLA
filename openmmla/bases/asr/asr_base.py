@@ -269,6 +269,9 @@ class ASRBase(Base):
                                  os.path.join(self.logger_dir,
                                               f'{self.bucket_name}_asr_{self.base_type}_{self.id}.log'))
 
+        # Create a snapshot of the speaker profiles used in this session
+        self._create_speaker_profile_snapshot()
+
         self.last_speaker = None
         self.audio_dir = os.path.join(self.runtime_dir, f'{self.bucket_name}', f'{self.base_type}_{self.id}')
         self.audio_queue = queue.Queue()
@@ -304,6 +307,28 @@ class ASRBase(Base):
             exception_occurred = e
         finally:
             self._recognition_handler(exception_occurred)
+
+    def _create_speaker_profile_snapshot(self):
+        """Create a snapshot of the speaker profiles used in the current session.
+        
+        This copies the profile files from the base's audio_db to a bucket-specific
+        folder to record exactly which speaker profiles were used in this session.
+        The snapshot is stored in the runtime directory under the bucket folder.
+        """
+        if not self.bucket_name:
+            return
+            
+        snapshot_dir = os.path.join(self.runtime_dir, self.bucket_name, f'{self.base_type}_{self.id}', 'profiles')
+        if os.path.exists(snapshot_dir):
+            shutil.rmtree(snapshot_dir)  # Clear any existing snapshot
+        else:
+            os.makedirs(snapshot_dir)
+        
+        self.logger.info(f"Creating snapshot of speaker profiles for bucket '{self.bucket_name}'")
+        try:
+            shutil.copytree(self.audio_db, snapshot_dir, dirs_exist_ok=True)
+        except Exception as e:
+            self.logger.warning(f"Error creating speaker profile snapshot: {e}")
 
     def _recognition_handler(self, e: Exception | KeyboardInterrupt | None):
         """Handle exceptions during the recognition process and perform cleanup.
