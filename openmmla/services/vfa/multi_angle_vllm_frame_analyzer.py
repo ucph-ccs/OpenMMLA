@@ -90,17 +90,18 @@ class MultiAngleVLLMFrameAnalyzer(Server):
     def _load_prompt_templates(self):
         """Load prompt templates from files in the prompt_templates_dir."""
         # Initialize with default values in case files are not found
-        self.multi_angle_system_prompt_template = ""
+        self.multi_angle_end_system_prompt_template = ""
         self.multi_angle_end_user_prompt_template = ""
+        self.multi_angle_vlm_system_prompt_template = ""
         self.multi_angle_vlm_user_prompt_template = ""
         self.multi_angle_llm_system_prompt_template = ""
         self.multi_angle_llm_user_prompt_template = ""
-        
 
         # Define template files to load 
         template_files = {
-            'multi_angle_system_prompt.txt': 'multi_angle_system_prompt_template',
+            'multi_angle_end_system_prompt.txt': 'multi_angle_end_system_prompt_template',
             'multi_angle_end_user_prompt.txt': 'multi_angle_end_user_prompt_template',
+            'multi_angle_vlm_system_prompt.txt': 'multi_angle_vlm_system_prompt_template',
             'multi_angle_vlm_user_prompt.txt': 'multi_angle_vlm_user_prompt_template',
             'multi_angle_llm_system_prompt.txt': 'multi_angle_llm_system_prompt_template',
             'multi_angle_llm_user_prompt.txt': 'multi_angle_llm_user_prompt_template',
@@ -190,8 +191,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             # Analyze all processed images together
             if self.end_to_end:
                 # End-to-end approach: VLM does both observation and classification for multiple images
-                system_message = self._create_system_prompt(len(processed_images))
-                messages = self._create_end_to_end_messages(processed_images, system_message, session_id)
+                messages = self._create_end_to_end_messages(processed_images, session_id)
                 vlm_response = self._process_with_vlm(messages)
 
                 # Extract observations, classifications, and justifications
@@ -202,9 +202,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 }
             else:
                 # Two-step approach: VLM for observations, LLM for classification
-                system_message = self._create_system_prompt(len(processed_images))
-                vlm_messages = self._create_vlm_messages(processed_images, system_message, session_id)
+                vlm_messages = self._create_vlm_messages(processed_images, session_id)
                 vlm_response = self._process_with_vlm(vlm_messages)
+                self.logger.info(f"VLM response: {vlm_response}")
 
                 # Process with LLM for text classification
                 llm_messages = self._create_llm_messages(vlm_response)
@@ -281,22 +281,6 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "angle_description": angle_description
         }
 
-    def _create_system_prompt(self, num_perspectives: int):
-        """Create plain text system prompt without images.
-        
-        Args:
-            num_perspectives: Number of different perspectives/angles to be analyzed
-            
-        Returns:
-            str: System prompt content
-        """
-        # Multi-angle prompt with template variable replacement
-        system_prompt = self.multi_angle_system_prompt_template.replace(
-            "{{num_perspectives}}", str(num_perspectives)
-        )
-
-        return system_prompt
-
     def _format_participant_descriptions(self, session_id=None):
         """Format participant descriptions from config into readable text for prompts.
         
@@ -327,17 +311,21 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         return description_text + "\n"
 
-    def _create_end_to_end_messages(self, processed_images, system_message, session_id=None):
+    def _create_end_to_end_messages(self, processed_images, session_id=None):
         """Generate a context-aware prompt message for end-to-end approach with multiple images.
         
         Args:
             processed_images: Dictionary containing processed images from different angles
-            system_message: System prompt content
             session_id: The session_id of the current request
             
         Returns:
             list: Messages for the VLM
         """
+        # Create system prompt
+        system_prompt = self.multi_angle_end_system_prompt_template.replace(
+            "{{num_perspectives}}", str(len(processed_images))
+        )
+
         # Format angle descriptions
         angle_descriptions = []
         for angle, image_data in processed_images.items():
@@ -354,11 +342,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         template = template.replace("{{action_definitions}}", self.action_definitions)
 
         # Create message content with multiple images
-        content = [{"type": "text", "text": template}]
+        user_prompt = [{"type": "text", "text": template}]
 
         # Add all the images to the content - fixing the type error with proper casting
         for angle, image_data in processed_images.items():
-            content.append(cast(Dict[str, str], {
+            user_prompt.append(cast(Dict[str, str], {
                 "type": "image_url",
                 "image_url": {
                     "url": image_data["image_b64"],
@@ -367,23 +355,27 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             }))
 
         messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": content}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
 
         return messages
 
-    def _create_vlm_messages(self, processed_images, system_message, session_id=None):
+    def _create_vlm_messages(self, processed_images, session_id=None):
         """Generate a context-aware prompt message for VLM with multiple images.
         
         Args:
             processed_images: Dictionary containing processed images from different angles
-            system_message: System prompt content
             session_id: The session_id of the current request
             
         Returns:
             list: Messages for the VLM
         """
+        # Create system prompt
+        system_prompt = self.multi_angle_vlm_system_prompt_template.replace(
+            "{{num_perspectives}}", str(len(processed_images))
+        )
+
         # Format angle descriptions
         angle_descriptions = []
         for angle, image_data in processed_images.items():
@@ -399,11 +391,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         template = template.replace("{{participant_descriptions}}", participant_descriptions)
 
         # Create message content with multiple images
-        content = [{"type": "text", "text": template}]
+        user_prompt = [{"type": "text", "text": template}]
 
         # Add all the images to the content - fixing the type error with proper casting
         for angle, image_data in processed_images.items():
-            content.append(cast(Dict[str, str], {
+            user_prompt.append(cast(Dict[str, str], {
                 "type": "image_url",
                 "image_url": {
                     "url": image_data["image_b64"],
@@ -412,8 +404,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             }))
 
         messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": content}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
 
         return messages
@@ -428,7 +420,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         Returns:
             list: Messages for the LLM
         """
-        system_content = self.multi_angle_llm_system_prompt_template
+        system_prompt = self.multi_angle_llm_system_prompt_template
 
         image_description = json.dumps(vlm_response.get('observations', {}), indent=2)
 
@@ -437,12 +429,14 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         template = template.replace("{{image_description}}", image_description)
         template = template.replace("{{action_definitions}}", self.action_definitions)
 
-        llm_messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": template}
+        user_prompt = [{"type": "text", "text": template}]
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
 
-        return llm_messages
+        return messages
 
     def _process_with_vlm(self, messages):
         """Process the image with VLM API.

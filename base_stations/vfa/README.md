@@ -77,21 +77,21 @@ VFA now supports loading custom prompt templates from external files, allowing y
    ```
 
 3. Create the following template files:
-   - `system_prompt.txt`: System prompt for single image analysis
-   - `multi_angle_system_prompt.txt`: System prompt for multi-angle analysis
-   - `vlm_prompt.txt`: User prompt for vision model's image analysis
-   - `llm_prompt.txt`: User prompt for text classification
-   - `end_to_end_prompt.txt`: User prompt for end-to-end analysis
-   - `multi_angle_vlm_prompt.txt`: User prompt for multi-angle analysis
+   - `multi_angle_end_system_prompt.txt`: System prompt for end-to-end analysis (both observation and classification)
+   - `multi_angle_end_user_prompt.txt`: User prompt for end-to-end analysis
+   - `multi_angle_vlm_system_prompt.txt`: System prompt for vision-only observations
+   - `multi_angle_vlm_user_prompt.txt`: User prompt for vision-only observations
+   - `multi_angle_llm_system_prompt.txt`: System prompt for classification-only
+   - `multi_angle_llm_user_prompt.txt`: User prompt for classification-only
 
-4. Use template variables to make your prompts dynamic:
-   - `{{action_definitions}}`: Will be replaced with your defined actions
-   - `{{image_description}}`: Will be replaced with the VLM's observations
-   - `{{num_perspectives}}`: For multi-angle prompts, the number of camera angles
-   - `{{angle_descriptions}}`: For multi-angle prompts, descriptions of each camera angle
-   - `{{participant_descriptions}}`: Will be replaced with participant information
+   All templates can use variable substitution with the syntax `{{variable_name}}`. Supported variables:
+   - `{{num_perspectives}}`: Number of camera angles being analyzed
+   - `{{angle_descriptions}}`: Descriptions of each camera perspective
+   - `{{participant_descriptions}}`: Descriptions of known participants
+   - `{{action_definitions}}`: Definitions of actions to classify
+   - `{{image_description}}`: VLM observations (only for LLM prompts)
 
-This feature makes it easy to experiment with different prompt engineering approaches without modifying the code.
+   Use the variable directly in the template file, e.g. `Here below is the angle descriptions for the images: {{angle_descriptions}}`
 
 ### On Servers
 ```bash

@@ -6,7 +6,7 @@ from openmmla.utils.requests import send_request_with_retry
 
 
 def request_multi_angle_frame_analyze(image_paths: list[str], session_id: str, url: str,
-                                      angles: list[str] | None = None) -> dict[str, Any] | None:
+                                      angles: list[str] | None = None, timeout: int = 60) -> dict[str, Any] | None:
     """Request multi-angle frame analysis from the server.
     
     Args:
@@ -49,4 +49,4 @@ def request_multi_angle_frame_analyze(image_paths: list[str], session_id: str, u
             for angle in angles:
                 data.setdefault('angles', []).append(angle)
 
-    return send_request_with_retry(url, files, data, timeout=40, process_response=process_response)
+    return send_request_with_retry(url, files, data, timeout=timeout, process_response=process_response)
