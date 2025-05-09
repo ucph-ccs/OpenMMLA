@@ -125,8 +125,6 @@ class IPSBase(Base):
                                  os.path.join(self.logger_dir, f'{self.bucket_name}_ips_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
 
-        self._listen_for_start_signal()
-
         # MQTT client reinitialization
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
