@@ -79,17 +79,17 @@ e.g.
 ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
   -c:v libx264 -b:v 1M -preset ultrafast -tune zerolatency \
   -maxrate 2M -bufsize 2M \
-  -f flv rtmp://ericli.local/stream_01
+  -f flv rtmp://mac-01.local/stream_01
 
 # macOS
 ffmpeg -f avfoundation -framerate 30 -video_size 1280x720 -i "0:none" \
   -c:v libx264 -preset ultrafast -tune zerolatency \
   -maxrate 4000k -bufsize 4000k \
-  -f flv rtmp://ericli.local/stream_01
+  -f flv rtmp://mac-01.local/stream_01
 
 ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
   -c:v h264_videotoolbox -b:v 2000k -preset ultrafast \
-  -f flv rtmp://ericli.local/stream_01
+  -f flv rtmp://mac-01.local/stream_01
   
 # Audio Streaming
 ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:<card_number>,<device_number> \
@@ -99,7 +99,7 @@ ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:<card_number>,<device_number> \
 e.g.
 ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:3,0 \
   -c:a aac -b:a 128k \
-  -f flv rtmp://ericli.local/stream_01
+  -f flv rtmp://mac-01.local/stream_01
 
 
 # Both (more laggy since two source into one port)

@@ -2,12 +2,17 @@
 # Template configuration file for video frame analyzer pipeline components.
 # Fill in or update values as needed for your environment.
 VLLMFrameAnalyzer:
+  port: 5007 # port number
+  workers: 1 # number of workers
+  app: <path-to-vllm-frame-analyzer-app> # path to the vllm frame analyzer app
+
   families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
 
   backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek
   top_p: 0
   temperature: 0
   end_to_end: false
+  prompt_templates_dir: <path-to-prompt-templates-dir>  # either relative to the project directory or absolute path
 
   ollama:
     api_key: <OLLAMA_API_KEY>

@@ -2,24 +2,44 @@
 # Template configuration file for audio processing pipeline components.
 # Fill in or update values as needed for your environment.
 
-AudioEnhancer:
-  cuda: true # whether to use gpu acceleration, true/false
-
 AudioInferer:
-  cuda: true
+  cuda: true # whether to use gpu acceleration, true/false
   onnx: false # whether to use onnx runtime for inference, true/false (onnx runtime is faster but less precise)
   model: <neomo-speaking-embedding-model>  # e.g., titanet_large, ecapa_tdnn, etc.
+  port: 5001 # port number
+  workers: 1 # number of workers
+  app: <path-to-audio-inferer-app> # path to the audio inferer app
+
+AudioResampler:
+  port: 5002 
+  workers: 1 
+  app: <path-to-audio-resampler-app> 
+
+SpeechEnhancer:
+  cuda: true 
+  port: 5003 
+  workers: 1  
+  app: <path-to-speech-enhancer-app> 
 
 SpeechSeparator:
   cuda: true
   model: <modelscope-speech-separation-model> # e.g., damo/speech_mossformer2_separation_temporal_8k
   model_local: <modelscope-speech-separation-model-local-path>  # e.g., .cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
+  port: 5004 
+  workers: 1 
+  app: <path-to-speech-separator-app> 
 
 SpeechTranscriber:
   cuda: true
   model: <whisper-or-huggingface-transcription-model>  # e.g., base.en, small.en, medium.en, large.en
   language: en  # language code, e.g., en, zh, fr, etc.
+  port: 5005 
+  workers: 1 
+  app: <path-to-speech-transcriber-app> 
 
 VoiceActivityDetector:
   cuda: true
   onnx: true
+  port: 5006 
+  workers: 1 
+  app: <path-to-voice-activity-detector-app> 

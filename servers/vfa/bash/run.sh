@@ -1,26 +1,67 @@
 #!/bin/bash
 
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
+CONFIG_FILE="$BASH_DIR/../config.yml"
 
-# vfa services
-services=("vllm")
+# Conda environment setup
+CONDA_ENV="vfa-server"
+CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+
+# Function to get service names from config file
+get_session_names() {
+    # Activate conda environment to ensure we have yaml
+    eval "$CONDA_INIT" > /dev/null 2>&1
+    
+    # Try to parse config file
+    python -c "
+import yaml
+import sys
+try:
+    with open('$CONFIG_FILE', 'r') as f:
+        config = yaml.safe_load(f)
+    
+    # Extract service names and convert to lowercase for tmux sessions
+    for service_name, service_config in config.items():
+        if isinstance(service_config, dict) and 'port' in service_config:
+            # Convert service name to lowercase for tmux session name
+            print(service_name.lower())
+except Exception as e:
+    sys.stderr.write(f'Error reading config: {e}\\n')
+    sys.exit(1)
+" 2>/dev/null
+}
 
 shutdown_server() {
-    echo "Shutting down selected tmux sessions..."
-    active_sessions=$(tmux list-sessions -F "#S")
-
+    echo "Shutting down VFA services..."
+    active_sessions=$(tmux list-sessions -F "#S" 2>/dev/null || echo "")
+    
+    if [ -z "$active_sessions" ]; then
+        echo "No services are currently running."
+        return
+    fi
+    
+    # Get list of session names for our services
+    session_names=$(get_session_names)
+    
     # Filter and shut down the on-going service sessions
-    for service in "${services[@]}"; do
-        if [[ $active_sessions =~ $service ]]; then  # Check if the service is an active session
-            echo "Sending Ctrl+C to session: $service"
-            tmux send-keys -t "$service" C-c
-            tmux kill-session -t "$service"
+    for session in $session_names; do
+        if [[ $active_sessions =~ $session ]]; then  # Check if the service is an active session
+            echo "Sending Ctrl+C to session: $session"
+            tmux send-keys -t "$session" C-c
+            tmux kill-session -t "$session"
         fi
     done
-    echo "Video server shutdown process complete."
+    
+    # Also try to kill vfa-services session if it exists
+    if [[ $active_sessions =~ "vfa-services" ]]; then
+        tmux kill-session -t "vfa-services" 2>/dev/null
+    fi
+    
+    echo "VFA server shutdown process complete."
 }
 
 start_server() {
+    echo "Starting VFA services..."
     tmux new-session -s vfa-services "bash -c '$BASH_DIR/services.sh; exec bash'"
 }
 
@@ -35,11 +76,13 @@ while true; do
         [Yy])
             echo "Starting the server..."
             start_server
+            echo "Server started. Use 'tmux ls' to list all sessions, and 'tmux attach -t <service_name>' to view a specific service."
             break
             ;;
         [Nn])
             echo "Shutting down the server..."
             shutdown_server
+            echo "Server shutdown complete. Use 'tmux ls' to list all sessions."
             break
             ;;
         *)
