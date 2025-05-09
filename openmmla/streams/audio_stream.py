@@ -275,7 +275,7 @@ class AudioStream(StreamReceiver):
 
         return AudioFrame(timestamp=start_timestamp, data=audio_data, metadata=metadata)
 
-    def _initialize_pyaudio(self) -> None:
+    def _initialize_pyaudio(self, max_retries: int = 3) -> None:
         """Initialize PyAudio stream with configured parameters."""
         self.p = pyaudio.PyAudio()
         if self.format not in PA_FORMATS:
@@ -289,17 +289,34 @@ class AudioStream(StreamReceiver):
             input_device_index=self.input_device_index,
             frames_per_buffer=self.chunk_size
         )
+        if not self.stream.is_active():
+            if max_retries > 0:
+                logger.warning("Failed to initialize PyAudio stream, retrying...")
+                self._initialize_pyaudio(max_retries=max_retries - 1)
+            else:
+                raise RuntimeError(f"Failed to initialize PyAudio audio stream with input device index: {self.input_device_index}")
+        else:
+            logger.info(f"Successfully initialized PyAudio audio stream with input device index: {self.input_device_index}")
 
-    def _initialize_udp(self) -> None:
+    def _initialize_udp(self, max_retries: int = 3) -> None:
         """Initialize UDP socket."""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((self.host, self.port))
         clear_socket_udp(self.sock)
         self.sock.settimeout(3)
-        logger.info(f"UDP socket initialized on {self.host}:{self.port}")
+        try:
+            # Test if socket is bound by attempting a simple operation
+            self.sock.getsockname()
+            logger.info(f"Successfully initialized UDP audio stream on {self.host}:{self.port}")
+        except socket.error:
+            if max_retries > 0:
+                logger.warning(f"Failed to bind UDP socket on {self.host}:{self.port}, retrying...")
+                self._initialize_udp(max_retries=max_retries - 1)
+            else:
+                raise RuntimeError(f"Failed to initialize UDP audio stream on {self.host}:{self.port}")
 
-    def _initialize_tcp(self) -> None:
+    def _initialize_tcp(self, max_retries: int = 3) -> None:
         """Initialize TCP socket."""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -307,9 +324,16 @@ class AudioStream(StreamReceiver):
         self.sock.listen(1)
         self.conn, addr = self.sock.accept()
         self.conn.settimeout(3)
-        logger.info(f"TCP connection accepted from {addr}")
+        if not self.conn:
+            if max_retries > 0:
+                logger.warning(f"Failed to accept TCP connection from {addr}, retrying...")
+                self._initialize_tcp(max_retries=max_retries - 1)
+            else:
+                raise RuntimeError(f"Failed to initialize TCP audio stream on {self.host}:{self.port}")
+        else:
+            logger.info(f"Successfully initialized TCP audio stream on {self.host}:{self.port}")
 
-    def _initialize_rtmp(self) -> None:
+    def _initialize_rtmp(self, max_retries: int = 3) -> None:
         """Initialize RTMP stream using FFmpeg.
 
         Spawns an FFmpeg process that connects to the provided RTMP URL and outputs
@@ -333,12 +357,17 @@ class AudioStream(StreamReceiver):
                 command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
             )
             if self.ffmpeg_proc.stdout is None:
-                raise RuntimeError("Failed to capture stdout from ffmpeg process")
-            logger.info(f"RTMP stream initialized from {self.rtmp_url}")
+                if max_retries > 0:
+                    logger.warning("Failed to capture stdout from ffmpeg process, retrying...")
+                    self._initialize_rtmp(max_retries=max_retries - 1)
+                else:
+                    raise RuntimeError(f"Failed to initialize RTMP audio stream from {self.rtmp_url}")
+            else:
+                logger.info(f"Successfully initialized RTMP audio stream from {self.rtmp_url}")
         except Exception as e:
-            raise RuntimeError(f"Error initializing RTMP stream: {e}") from e
+           raise RuntimeError(f"Error initializing RTMP stream: {e}") from e
 
-    def _initialize_lsl(self):
+    def _initialize_lsl(self, max_retries: int = 3):
         """Initialize lab streaming layer stream."""
         if resolve_byprop is None or StreamInlet is None or local_clock is None:
             raise ImportError(
@@ -347,11 +376,15 @@ class AudioStream(StreamReceiver):
         
         streams = resolve_byprop('name', self.lsl_name)
         if not streams:
-            raise RuntimeError(f"No LSL stream found with name: {self.lsl_name}")
-            
-        self.lsl_inlet = StreamInlet(streams[0])
-        self.lsl_offset = time.time() - local_clock()
-        logger.info(f"Subscribe LSL stream: {self.lsl_name}")
+            if max_retries > 0:
+                logger.warning(f"No LSL stream found with name: {self.lsl_name}, retrying...")
+                self._initialize_lsl(max_retries=max_retries - 1)
+            else:
+                raise RuntimeError(f"Failed to initialize LSL audio stream with inlet: {self.lsl_name}")
+        else:
+            self.lsl_inlet = StreamInlet(streams[0])
+            self.lsl_offset = time.time() - local_clock()
+            logger.info(f"Successfully initialized LSL audio stream with inlet: {self.lsl_inlet}")
 
     def _cleanup_pyaudio(self) -> None:
         """Clean up PyAudio resources."""
@@ -386,11 +419,34 @@ class AudioStream(StreamReceiver):
 
     def _receive_loop(self) -> None:
         """Continuously receive data and store in buffer."""
+        failure_count = 0
         while not self._stop_event.is_set():
             try:
                 frame = self._read_chunk()
                 if frame:
                     self.buffer.push(frame)
+                    failure_count = 0
+                else:
+                    failure_count += 1
+                    if failure_count >= 10:
+                        logger.error("10 consecutive frame read failures. Reinitializing stream.")
+                        if self.source == 'pyaudio':
+                            self._cleanup_pyaudio()
+                            self._initialize_pyaudio()
+                        elif self.source == 'udp':
+                            self._cleanup_socket()
+                            self._initialize_udp()
+                        elif self.source == 'tcp':
+                            self._cleanup_socket()
+                            self._initialize_tcp()
+                        elif self.source == 'rtmp':
+                            self._cleanup_rtmp()
+                            self._initialize_rtmp()
+                        elif self.source == 'lsl':
+                            self._cleanup_lsl()
+                            self._initialize_lsl()
+                        failure_count = 0
+
             except Exception as e:
                 logger.error(f"Fatal error in receive loop: {e}")
                 self.stop()

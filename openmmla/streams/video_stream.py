@@ -38,8 +38,6 @@ class VideoStream(StreamReceiver):
             resample_method(ResampleMethod, optional): Resampling method for fps conversion (default: ResampleMethod.VIDEO_AVERAGE)
             camera_index(int, optional): Camera index for 'opencv' source (default: 0)
             rtmp_url(str, optional): RTMP URL for 'rtmp' source
-            max_reconnect_attempts (int, optional): Maximum number of reconnection attempts for RTMP (default: 3)
-            reconnect_delay (float, optional): Delay between reconnection attempts in seconds (default: 2.0)
         """
         super().__init__(**kwargs)
         self.source = source
@@ -59,10 +57,6 @@ class VideoStream(StreamReceiver):
             self.format = kwargs.get('format', 'MJPG')
             self.rtmp_url = self.require_kwarg(kwargs, 'rtmp_url', "RTMP source requires a 'rtmp_url' parameter")
             self.stream = None
-            self.max_reconnect_attempts = kwargs.get('max_reconnect_attempts', 3)
-            self.reconnect_delay = kwargs.get('reconnect_delay', 2.0)
-            self.consecutive_failures = 0
-            self.reconnect_threshold = 10  # Number of consecutive failures before attempting reconnection
         elif self.source == 'lsl':
             self.format = kwargs.get('format', 'raw')
             self.lsl_name = self.require_kwarg(kwargs, 'lsl_name', "LSL source requires a 'lsl_name'")
@@ -122,9 +116,10 @@ class VideoStream(StreamReceiver):
 
         self._last_read_pos = -1
 
-    def _initialize_opencv(self) -> None:
+    def _initialize_opencv(self, max_retries: int = 3) -> None:
         """Initialize OpenCV video capture with configured parameters."""
-        self.stream = cv2.VideoCapture(self.camera_index if self.source == 'opencv' else self.rtmp_url)
+        video_seed = self.camera_index if self.source == 'opencv' else self.rtmp_url
+        self.stream = cv2.VideoCapture(video_seed)
 
         # Set video properties
         self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.format))
@@ -132,16 +127,16 @@ class VideoStream(StreamReceiver):
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
         self.stream.set(cv2.CAP_PROP_FPS, self.fps)
         self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-        
-        # For RTMP, verify the connection was established
-        if self.source == 'rtmp':
-            if not self.stream.isOpened():
-                logger.warning(f"Failed to open RTMP stream at {self.rtmp_url}")
-            else:
-                logger.info(f"Successfully connected to RTMP stream at {self.rtmp_url}")
-                self.consecutive_failures = 0
 
-    def _initialize_lsl(self) -> None:
+        if not self.stream.isOpened():
+            if  max_retries > 0:
+                self._initialize_opencv(max_retries=max_retries - 1)
+            else:
+                raise RuntimeError("Failed to initialize OpenCV video capture")
+        else:
+            logger.info(f"Successfully initialized {self.source} video stream with seed: {video_seed}")
+
+    def _initialize_lsl(self, max_retries: int = 3) -> None:
         """Initialize LSL stream connection."""
         if resolve_byprop is None or StreamInlet is None or local_clock is None:
             raise ImportError(
@@ -150,11 +145,14 @@ class VideoStream(StreamReceiver):
             
         streams = resolve_byprop('name', self.lsl_name)
         if not streams:
-            raise RuntimeError(f"LSL stream '{self.lsl_name}' not found")
-        
-        self.lsl_inlet = StreamInlet(streams[0])
-        self.lsl_offset = time.time() - local_clock()
-        logger.info(f"Subscribed to LSL video stream: {self.lsl_name}")
+            if max_retries > 0:
+                self._initialize_lsl(max_retries=max_retries - 1)
+            else:
+                raise RuntimeError(f"LSL stream '{self.lsl_name}' not found")
+        else:        
+            self.lsl_inlet = StreamInlet(streams[0])
+            self.lsl_offset = time.time() - local_clock()
+            logger.info(f"Successfully initialized LSL video stream with inlet: {self.lsl_inlet}")
 
     def _cleanup_opencv(self) -> None:
         """Clean up OpenCV stream resources."""
@@ -169,44 +167,12 @@ class VideoStream(StreamReceiver):
         self.lsl_inlet = None
         self.lsl_offset = None
 
-    def _reconnect_rtmp(self) -> bool:
-        """Attempt to reconnect to the RTMP stream.
-        
-        Returns:
-            bool: True if reconnection was successful, False otherwise
-        """
-        if self.source != 'rtmp':
-            return False
-            
-        logger.info(f"Attempting to reconnect to RTMP stream at {self.rtmp_url}")
-        
-        # Clean up existing connection
-        self._cleanup_opencv()
-        
-        # Wait before reconnecting
-        time.sleep(self.reconnect_delay)
-        
-        # Try to reconnect
-        try:
-            self._initialize_opencv()
-            # Verify connection
-            if self.stream and self.stream.isOpened():
-                logger.info(f"Successfully reconnected to RTMP stream at {self.rtmp_url}")
-                return True
-            else:
-                logger.warning(f"Failed to reconnect to RTMP stream at {self.rtmp_url}")
-                return False
-        except Exception as e:
-            logger.error(f"Error during RTMP reconnection: {e}")
-            return False
-
     def _receive_loop(self) -> None:
         """Continuously receive frames and store in buffer."""
         frame_count = 0
+        failure_count = 0
         start_time = time.time()
         logger.info("Starting video stream receive loop.")
-        
-        reconnect_attempts = 0
 
         while not self._stop_event.is_set():
             try:
@@ -214,28 +180,24 @@ class VideoStream(StreamReceiver):
                 if frame:
                     self.buffer.push(frame)
                     frame_count += 1
-                    self.consecutive_failures = 0  # Reset failure counter on success
+                    failure_count = 0
                     if frame_count % 30 == 0:
                         elapsed_time = time.time() - start_time
                         fps = frame_count / elapsed_time
                         logger.debug(f"Video capture FPS: {fps:.2f}")
                         start_time = time.time()
                         frame_count = 0
-                elif self.source == 'rtmp':
-                    self.consecutive_failures += 1
-                    
-                    if self.consecutive_failures >= self.reconnect_threshold:
-                        logger.warning(f"Detected {self.consecutive_failures} consecutive frame grab failures, attempting to reconnect")
-                        if reconnect_attempts < self.max_reconnect_attempts:
-                            if self._reconnect_rtmp():
-                                reconnect_attempts = 0  # Reset on successful reconnection
-                                self.consecutive_failures = 0
-                            else:
-                                reconnect_attempts += 1
-                        else:
-                            logger.error(f"Maximum reconnection attempts ({self.max_reconnect_attempts}) reached. Giving up.")
-                            self.stop()
-                            break
+                else:
+                    failure_count += 1
+                    if failure_count >= 10:
+                        logger.error("10 consecutive frame read failures. Reinitializing stream.")
+                        if self.source in ['opencv', 'rtmp']:
+                            self._cleanup_opencv()
+                            self._initialize_opencv()
+                        elif self.source == 'lsl':
+                            self._cleanup_lsl()
+                            self._initialize_lsl()
+                        failure_count = 0
             except Exception as e:
                 logger.error(f"Fatal error in receive loop: {e}")
                 self.stop()
