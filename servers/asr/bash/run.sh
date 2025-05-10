@@ -60,6 +60,12 @@ shutdown_server() {
 }
 
 start_server() {
+    # Check if asr-services session exists and kill it
+    if tmux has-session -t asr-services 2>/dev/null; then
+        echo "Found existing asr-services session. Killing it..."
+        tmux kill-session -t asr-services
+    fi
+    
     echo "Starting ASR services..."
     tmux new-session -s asr-services "bash -c '$BASH_DIR/services.sh; exec bash'"
 }

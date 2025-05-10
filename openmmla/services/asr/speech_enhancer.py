@@ -29,7 +29,7 @@ class SpeechEnhancer(Server):
         self._setup_objects()
 
     def _setup_yaml(self):
-        self.cuda = self.config['AudioEnhancer'].get('cuda', True)
+        self.cuda = self.config['SpeechEnhancer'].get('cuda', True)
         self.cuda = self.cuda and torch.cuda.is_available()
 
     def _setup_objects(self):

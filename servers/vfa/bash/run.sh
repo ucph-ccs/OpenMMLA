@@ -61,6 +61,12 @@ shutdown_server() {
 }
 
 start_server() {
+    # Check if vfa-services session exists and kill it
+    if tmux has-session -t vfa-services 2>/dev/null; then
+        echo "Found existing vfa-services session. Killing it..."
+        tmux kill-session -t vfa-services
+    fi
+    
     echo "Starting VFA services..."
     tmux new-session -s vfa-services "bash -c '$BASH_DIR/services.sh; exec bash'"
 }
