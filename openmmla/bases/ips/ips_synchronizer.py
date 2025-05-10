@@ -196,6 +196,8 @@ class IPSSynchronizer(Synchronizer):
 
     def _upload_merged_result(self):
         """Log and upload merge segment result to InfluxDB"""
+        interval = 1.0
+        next_time = time.time() + interval
         while not self.stop_event.is_set():
             with self.lock:
                 if self.alive:
@@ -248,7 +250,10 @@ class IPSSynchronizer(Synchronizer):
                 self.time_bucket = time.time()  # Update time_bucket with current time
 
             # Schedule the next upload outside the lock to avoid potential deadlocks
-            time.sleep(1)
+            now = time.time()
+            sleep_duration = max(0, next_time - now)
+            time.sleep(sleep_duration)
+            next_time += interval
 
     def _load_transform_matrices(self):
         """Load transformation matrices."""
