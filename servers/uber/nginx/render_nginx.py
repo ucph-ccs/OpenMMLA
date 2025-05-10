@@ -57,6 +57,11 @@ async def resolve_and_check_servers(config, check_port=False, max_workers=20):
 
     tasks = []
 
+    # Ensure upstreams exists in config
+    if "upstreams" not in config:
+        config["upstreams"] = {}
+        return
+
     for service, servers in config.get("upstreams", {}).items():
         for server in servers:
             task = loop.run_in_executor(executor, resolve_and_check_one, server, check_port)
@@ -95,6 +100,14 @@ def resolve_and_check_one(server, check_port):
 def render_nginx_template(config, template_path, output_path):
     env = Environment(loader=FileSystemLoader(os.path.dirname(template_path)))
     template = env.get_template(os.path.basename(template_path))
+    
+    # Ensure required keys exist in config
+    if "upstreams" not in config:
+        config["upstreams"] = {}
+    
+    if "rtmp_apps" not in config:
+        config["rtmp_apps"] = []
+    
     rendered = template.render(config=config)
 
     with open(output_path, 'w') as f:
@@ -102,14 +115,26 @@ def render_nginx_template(config, template_path, output_path):
 
     print("\n Server Resolution Summary:")
     print("=" * 40)
-    for service, servers in config.get("upstreams", {}).items():
-        reachable_servers = [s for s in servers if s.get("reachable")]
-        if not reachable_servers:
-            print(f"⚠️  Skipped upstream '{service}': no reachable servers.")
-        else:
-            for s in servers:
-                status = f"✅ {s['ip']}" if s.get("reachable") else "❌ Not reachable"
-                print(f"{s['host']} ({service}) → {status}")
+    
+    if not config.get("upstreams"):
+        print("ℹ️ No upstream servers defined in config.")
+    else:
+        for service, servers in config.get("upstreams", {}).items():
+            reachable_servers = [s for s in servers if s.get("reachable")]
+            if not reachable_servers:
+                print(f"⚠️  Skipped upstream '{service}': no reachable servers.")
+            else:
+                for s in servers:
+                    status = f"✅ {s['ip']}" if s.get("reachable") else "❌ Not reachable"
+                    print(f"{s['host']} ({service}) → {status}")
+    
+    if not config.get("rtmp_apps"):
+        print("ℹ️ No RTMP applications defined in config.")
+    else:
+        print("\n RTMP Applications:")
+        print("=" * 40)
+        for app in config.get("rtmp_apps", []):
+            print(f"✅ {app}")
 
 
 # ========== 主入口 ==========

@@ -112,6 +112,7 @@ def main():
 
                     # Get the current time using the custom function
                     year, month, day, hour, minute, second, milliseconds = get_current_time()
+                    # print(f"Time: {year}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}.{milliseconds:03d}")
 
                     # Combine the packet counter, timestamp string, and audio data
                     time_bytes = ustruct.pack('>I7H', packet_counter, year, month, day, hour, minute, second,
@@ -128,8 +129,6 @@ def main():
         except OSError as e:
             print("OS Error:", e)
             connect_to_base()
-
-    audio.stop_streaming()
 
 
 if __name__ == '__main__':

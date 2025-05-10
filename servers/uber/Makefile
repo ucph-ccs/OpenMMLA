@@ -7,13 +7,11 @@ IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
 
 # extract command and arguments
 CMD := $(firstword $(MAKECMDGOALS))
-ARGS := $(wordlist 2, 99, $(MAKECMDGOALS))  # 最多支持 98 个参数
+ARGS := $(wordlist 2, 99, $(MAKECMDGOALS))
 
 # clean-ports，assign ARGS to PORTS
 ports := $(if $(filter clean-ports,$(CMD)),$(ARGS),)
-
-# nginx arg：make nginx true/false
-check_port ?= $(if $(filter nginx,$(CMD)),$(if $(filter true,$(ARGS)),1,0))
+check_port ?= $(if $(filter nginx,$(CMD)),$(if $(filter false,$(ARGS)),0,1),1)
 without ?=
 
 CONDA_PREFIX := $(shell conda info --base)

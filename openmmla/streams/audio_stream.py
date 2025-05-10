@@ -482,9 +482,11 @@ class AudioStream(StreamReceiver):
                 packet_counter, year, month, day, hour, minute, second, milliseconds = \
                     struct.unpack(metadata_format, data[:18])
 
+                # Create a datetime object in UTC and convert to timestamp
                 timestamp = datetime.datetime(
                     year, month, day, hour, minute, second,
-                    milliseconds * 1000
+                    milliseconds * 1000,  # Convert milliseconds to microseconds
+                    tzinfo=datetime.timezone.utc  # Explicitly mark as UTC
                 ).timestamp()
 
                 audio_data = np.frombuffer(data[18:], dtype=self.dtype)
