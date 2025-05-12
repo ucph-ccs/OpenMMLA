@@ -2,37 +2,38 @@
 # Template for configuring audio, stream, database and server endpoints for the system
 
 # base settings for badge devices (e.g., Nicla Vision)
-Badge:
-  register_duration: 15             # Seconds to record for registration
-  recognize_duration: 3             # Seconds to record for recognition
-  recognize_sp_duration: 4          # Seconds to record for recognition (with speech separate)
-  recognize_threshold: 0.4          # Similarity threshold for recognition
-  recognize_sp_threshold: 0.3       # Similarity threshold for recognition (with speech separate)
-  keep_threshold: 0.2               # Special threshold for keeping identity for speaker border cases
-  keep_sp_threshold: 0.1            # Special threshold for keeping identity for speaker border cases (with speech separate)
-  rms_threshold: 500                # Root Mean Square amplitude value threshold for VAD preprocessing
-  rms_peak_threshold: 2500          # Peak amplitude value threshold for VAD preprocessing
-  gain: 10                          # Volume gain multiplier in decibels for audio preprocessing
-  source: udp                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl)
-  port_offset: 50000                # Port offset for udp/tcp streams
-  stream_kwargs:                    # Additional stream settings
-    channels: 1                     # Number of audio channels (1 for mono, 2 for stereo)
-    rate: 16000                     # Sampling rate in Hz (e.g., 16000 for 16kHz)
-    format: int16                   # Audio format, e.g., int16, float32
-    chunk_size: 512                 # Size of each audio chunk in bytes (default to 512)
-    buffer_duration: 5.0            # Buffer duration in seconds for audio stream
-    resample_method: audio_librosa  # Resampling method for audio processing
-    host: 0.0.0.0                   # listening address for udp/tcp streams (0.0.0 for all interfaces)
+Base_Badge:
+  register_duration: 15             
+  recognize_duration: 3             
+  recognize_sp_duration: 4          
+  recognize_threshold: 0.4          
+  recognize_sp_threshold: 0.3       
+  keep_threshold: 0.2               
+  keep_sp_threshold: 0.1            
+  rms_threshold: 500                
+  rms_peak_threshold: 2500          
+  gain: 10                          
+  score_amplified: true             
+  source: udp                       
+  port_offset: 50000                
+  stream_kwargs:                    
+    channels: 1                     
+    rate: 16000                     
+    format: int16                   
+    chunk_size: 512                 
+    buffer_duration: 5.0            
+    resample_method: audio_librosa  
+    host: 0.0.0.0                   
 
-# base settings for Jabra speaker or built-in mic
-Jabra:
+# base settings for Jabra speaker
+Base_Jabra:
   register_duration: 15
   recognize_duration: 3
+  recognize_sp_duration: 4
   recognize_threshold: 0.3
+  recognize_sp_threshold: 0.3
   keep_threshold: 0.1
   keep_sp_threshold: 0.1
-  recognize_sp_duration: 4
-  recognize_sp_threshold: 0.3
   rms_threshold: 1000
   rms_peak_threshold: 5000
   gain: 0
@@ -45,6 +46,30 @@ Jabra:
     buffer_duration: 5.0
     resample_method: audio_librosa
 
+# base settings for your device
+Base_[Your_Device_Name]:
+  register_duration:            # Seconds to record for registration
+  recognize_duration:           # Seconds to record for recognition
+  recognize_sp_duration:        # Seconds to record for recognition (with speech separation)
+  recognize_threshold:          # Similarity threshold for recognition
+  recognize_sp_threshold:       # Similarity threshold for recognition (with speech separation)
+  keep_threshold:               # Similarity threshold for keeping identity for speaker border cases (with half-scaled recognition)
+  keep_sp_threshold:            # Similarity threshold for keeping identity for speaker border cases (with half-scaled recognition and speech separation)
+  rms_threshold:                # Root Mean Square amplitude value threshold for VAD preprocessing
+  rms_peak_threshold:           # Peak amplitude value threshold for VAD preprocessing
+  gain:                         # Volume gain multiplier in decibels for audio preprocessing
+  score_amplified:              # Whether to amplify the similarity score of the audio signal
+  source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl)
+  port_offset:                  # Port offset for udp/tcp streams
+  stream_kwargs:                # Additional stream settings
+    channels:                   # Number of audio channels to read (1 for mono, 2 for stereo)
+    rate:                       # Sampling rate in Hz (e.g., 16000 for 16kHz)
+    format:                     # Audio format, e.g., int16, float32
+    chunk_size:                 # Size of each audio chunk in bytes (default to 512)
+    buffer_duration:            # Buffer duration in seconds for audio stream
+    resample_method:            # Resampling method for audio processing
+    host:                       # listening address for udp/tcp streams (0.0.0 for all interfaces)
+ 
 # synchronizer settings
 Synchronizer:
   result_expiry_time: 5         # Time (sec) before a result expires

@@ -79,6 +79,7 @@ class AudioStream(StreamReceiver):
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 5.0)
             format (str, optional): Audio format (default: 'int16')
             channels (int, optional): Number of audio channels (default: 1)
+            channel_select (str, optional): For stereo input, select 'left', 'right', or None (default: None)
             rate (int, optional): Sample rate in Hz (default: 16000)
             chunk_size (int, optional): Size of audio chunk to read in frames (default: 512)
             resample_method (ResampleMethod, optional): Method for resampling (default: AUDIO_LIBROSA)
@@ -97,7 +98,8 @@ class AudioStream(StreamReceiver):
         self.sample_width = SUPPORTED_FORMATS[self.format]['sample_width']
         self.dtype = SUPPORTED_FORMATS[self.format]['dtype']
 
-        self.channels = kwargs.get('channels', 1)
+        self.channels = kwargs.get('channels', 1)   # Number of channels to read
+        self.channel_select = kwargs.get('channel_select', None)  # 'left', 'right', or None (use all)
         self.rate = kwargs.get('rate', 16000)
         self.chunk_size = kwargs.get('chunk_size', 512)
         self.resample_method = kwargs.get('resample_method', ResampleMethod.AUDIO_LIBROSA)
@@ -130,7 +132,7 @@ class AudioStream(StreamReceiver):
         # Frame metadata
         self._frame_metadata = {
             'sample_rate': self.rate,
-            'channels': self.channels,
+            'channels': self.channels if not self.channel_select else 1,
             'format': self.format
         }
 
@@ -281,6 +283,17 @@ class AudioStream(StreamReceiver):
         if self.format not in PA_FORMATS:
             raise ValueError(f"Unsupported audio format: {self.format} for {self.source}")
         stream_format = PA_FORMATS[self.format]
+
+        # check if the selected device has the correct number of channels
+        if self.input_device_index is not None:
+            device_info = self.p.get_device_info_by_index(self.input_device_index)
+            if device_info['maxInputChannels'] < self.channels:
+                raise ValueError(f"Selected device does not have enough channels. "
+                                 f"Device has {device_info['maxInputChannels']} channels, "
+                                 f"but {self.channels} channels are required.")
+            print(f"Selected device has {device_info['maxInputChannels']} channels")
+
+        
         self.stream = self.p.open(
             format=stream_format,
             channels=self.channels,
@@ -466,6 +479,14 @@ class AudioStream(StreamReceiver):
             if self.source == 'pyaudio':
                 data = self.stream.read(self.chunk_size, exception_on_overflow=False)
                 audio_data = np.frombuffer(data, dtype=self.dtype)
+                audio_data = audio_data.reshape(-1, self.channels)
+                if self.channels > 1 and self.channel_select:
+                    if self.channel_select == 'left':
+                        audio_data = audio_data[:, 0]
+                    elif self.channel_select == 'right':
+                        audio_data = audio_data[:, 1]
+                    elif self.channel_select == 'mix':
+                        audio_data = np.mean(audio_data, axis=1, dtype=self.dtype)
                 timestamp = time.time()
             elif self.source in ['udp', 'tcp']:
                 # For UDP/TCP, include 18 bytes of metadata.
@@ -477,18 +498,15 @@ class AudioStream(StreamReceiver):
 
                 if not data or len(data) < 18:
                     return None
-
+                
                 metadata_format = '>I7H'
                 packet_counter, year, month, day, hour, minute, second, milliseconds = \
                     struct.unpack(metadata_format, data[:18])
-
-                # Create a datetime object in UTC and convert to timestamp
                 timestamp = datetime.datetime(
                     year, month, day, hour, minute, second,
                     milliseconds * 1000,  # Convert milliseconds to microseconds
-                    tzinfo=datetime.timezone.utc  # Explicitly mark as UTC
+                    tzinfo=datetime.timezone.utc
                 ).timestamp()
-
                 audio_data = np.frombuffer(data[18:], dtype=self.dtype)
             elif self.source == 'rtmp':
                 # For RTMP, expected bytes is the raw audio data only.

@@ -13,7 +13,6 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('base_type', str, None, 'audio base type', shortname='-b', required=True)
     add_arg('mode', str, 'full', 'operating mode', choices=['record', 'recognize', 'full'], shortname='-m')
     add_arg('store', bool, True, 'whether to store audio', shortname='-s')
     add_arg('vad', bool, True, 'whether to use VAD', shortname='-vad')
@@ -36,7 +35,6 @@ def main():
     asr_base = ASRBase(
         project_dir=args.project_dir,
         config_path=args.config_path,
-        base_type=args.base_type,
         mode=args.mode,
         vad=args.vad,
         nr=args.nr,

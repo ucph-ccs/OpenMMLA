@@ -11,8 +11,7 @@ config_path = os.path.join(project_dir, 'config.yml')
 
 
 def run_asr_synchronizer(args):
-    synchronizer = ASRSynchronizer(project_dir=project_dir, config_path=args.config_path, base_type=args.base_type,
-                                     dominant=args.dominant, sp=args.sp)
+    synchronizer = ASRSynchronizer(project_dir=project_dir, config_path=args.config_path, dominant=args.dominant, sp=args.sp)
     synchronizer.run()
 
 

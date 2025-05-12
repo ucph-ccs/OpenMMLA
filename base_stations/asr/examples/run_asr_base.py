@@ -11,8 +11,8 @@ config_path = os.path.join(project_dir, 'config.yml')
 
 
 def run_asr_base(args):
-    asr_base = ASRBase(project_dir=args.project_dir, config_path=args.config_path, base_type=args.base_type,
-                       mode=args.mode, vad=args.vad, nr=args.nr, tr=args.tr, sp=args.sp, store=args.store, hsr=args.hsr)
+    asr_base = ASRBase(project_dir=args.project_dir, config_path=args.config_path, mode=args.mode, 
+                       vad=args.vad, nr=args.nr, tr=args.tr, sp=args.sp, store=args.store, hsr=args.hsr)
     asr_base.run()
 
 
@@ -21,7 +21,6 @@ if __name__ == "__main__":
     add_arg = functools.partial(add_arguments, argparser=parser)
     add_arg('project_dir', str, project_dir, 'path to the project directory', shortname='-p')
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
-    add_arg('base_type', str, None, 'audio base type', shortname='-b')
     add_arg('mode', str, 'full', 'operating mode', choices=['record', 'recognize', 'full'], shortname='-m')
     add_arg('store', bool, True, 'whether to store audio', shortname='-s')
     add_arg('vad', bool, True, 'whether to use the VAD', shortname='-vad')

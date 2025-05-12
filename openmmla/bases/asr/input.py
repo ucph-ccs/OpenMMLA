@@ -30,6 +30,26 @@ def get_name():
     return input("Please enter the name of the speaker: ")
 
 
+def get_base_type(config: dict) -> str:
+    """Get the base type from user input."""
+    while True:
+        try:
+            flush_input()
+            print("------------------------------------------------")
+            print("Please select the base type: ")
+            # base types is the keys of the config dictionary and start with 'Base_'    
+            base_types = [key for key in config.keys() if key.startswith('Base_')]
+            for i, base_type in enumerate(base_types):
+                print(f"{i} : {base_type}")
+            index = int(input("Please select the base type: "))
+            if 0 <= index < len(base_types):
+                return base_types[index]
+            else:
+                print(f"Invalid input. Please select a valid base type from 0 to {len(base_types)}.")
+        except ValueError:
+            print("Invalid input. Please enter a valid integer.")
+
+
 def get_id():
     """Get the unique base id from user input."""
     while True:
@@ -122,3 +142,40 @@ def get_function_synchronizer():
 
         except ValueError:
             print('Please enter a valid integer')
+
+
+def get_channel_selection(device_info: dict) -> str | None:
+    """Get the channel selection for stereo devices.
+
+    Args:
+        device_info: PyAudio device info dictionary.
+    Returns:
+        Channel selection: 'left', 'right', or None.
+    """
+    device_channels = device_info.get('maxInputChannels', 1)
+
+    if device_channels == 2:
+        while True:
+            try:
+                flush_input()
+                selection = input(f"\nDevice has {device_channels} channels (stereo). Select channel option:\n"
+                                  "1 : Left channel only\n"
+                                  "2 : Right channel only\n"
+                                  "3 : Mix (mono)\n"
+                                  "None: Stereo (left and right)\n"
+                                  "Selected option: ")
+
+                if selection.strip() == "":
+                    return None
+                elif selection == "1":
+                    return "left"
+                elif selection == "2":
+                    return "right"
+                elif selection == "3":
+                    return "mix"
+                else:
+                    print("Invalid selection. Please try again.")
+            except ValueError:
+                print("Invalid input. Please enter a valid integer or press enter for default.")
+
+    return None

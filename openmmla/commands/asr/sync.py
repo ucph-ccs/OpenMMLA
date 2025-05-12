@@ -14,7 +14,6 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('base_type', str, None, 'audio base type', shortname='-b', required=True)
     add_arg('dominant', bool, False, 'whether to select the dominant speaker or not', shortname='-d')
     add_arg('sp', bool, False, 'whether the audio bases do speech separation or not', shortname='-sp')
     return parser
@@ -31,7 +30,6 @@ def main():
     asr_synchronizer = ASRSynchronizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
-        base_type=args.base_type,
         dominant=args.dominant,
         sp=args.sp
     )

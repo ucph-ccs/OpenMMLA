@@ -12,7 +12,7 @@ from openmmla.utils.input import select_or_create_bucket, get_number_of_bases
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
-from .input import get_function_synchronizer
+from .input import get_function_synchronizer, get_base_type
 
 
 class ASRSynchronizer(Synchronizer):
@@ -20,19 +20,16 @@ class ASRSynchronizer(Synchronizer):
     uploading the segment result to InfluxDB."""
     logger = get_logger('asr-synchronizer')
 
-    def __init__(self, project_dir: str | None, config_path: str, base_type: str,
-                 dominant: bool = False, sp: bool = False):
+    def __init__(self, project_dir: str | None, config_path: str, dominant: bool = False, sp: bool = False):
         """Initialize the ASRSynchronizer class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
-            base_type: the audio base type
             dominant: whether to select the dominant speaker or not (default: False)
             sp: tag of whether the audio bases do speech separation (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
-        self.base_type = base_type.capitalize()
         self.dominant = dominant
         self.sp = sp
 
@@ -44,6 +41,8 @@ class ASRSynchronizer(Synchronizer):
         self.latest_time = None  # Record start time of the most recent received frame
         self.time_bucket_buffer = {}  # Buffer for {time_bucket: {base_id: {<speakers>, <similarities>, <durations>,
         # <record_start_times>}}} time_bucket represents the start time of a time window
+
+        self.base_type = get_base_type(self.config)
 
         self._setup_yaml()
         self._setup_directories()
@@ -86,7 +85,7 @@ class ASRSynchronizer(Synchronizer):
 
     def run(self):
         """Run the ASR synchronizer."""
-        print('\033]0;ASR Synchronizer\007')
+        print(f'\033]0;ASR Synchronizer for {self.base_type}\007')
         func_map = {1: self._start_synchronization}
 
         while True:

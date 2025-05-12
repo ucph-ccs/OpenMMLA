@@ -28,7 +28,8 @@ from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN
-from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_mode, get_name
+from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_mode, get_name, \
+    get_channel_selection, get_base_type
 
 
 class ASRBase(Base):
@@ -36,14 +37,13 @@ class ASRBase(Base):
 
     logger = get_logger(f'asr-base')
 
-    def __init__(self, project_dir: str | None, config_path: str, base_type: str, mode: str = 'full',
-                 store: bool = True, vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
+    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'full', store: bool = True,
+                 vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
         """Initialize the ASRBase class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
-            base_type: type of the ASR base
             mode: operating mode, 'record', 'recognize', or 'full' (default: 'full')
             store: whether to store audio files (default: True)
             vad: whether to apply Voice Activity Detection (default: True)
@@ -55,10 +55,6 @@ class ASRBase(Base):
         super().__init__(project_dir=project_dir, config_path=config_path)
 
         # ASRBase specific parameters
-        if not base_type:
-            raise ValueError("base_type must be specified.")
-
-        self.base_type = base_type
         self.mode = mode
         self.store = store
         self.vad = vad
@@ -77,8 +73,11 @@ class ASRBase(Base):
         self.stop_event = threading.Event()
         self.threads = []
 
+        self.base_type = get_base_type(self.config)
+        self.id = get_id()
+        print(f"\033]0;ASR Base {self.base_type} {self.id} \007")
+
         self._setup_yaml()
-        self._setup_input()
         self._setup_directories()
         self._setup_objects()
 
@@ -100,6 +99,7 @@ class ASRBase(Base):
         self.keep_threshold = float(base_config['keep_sp_threshold']) if self.sp else float(
             base_config['keep_threshold'])
         self.gain = float(base_config['gain'])
+        self.score_amplified = bool(base_config.get('score_amplified', False))
 
         self.source = base_config['source']
         self.stream_kwargs = base_config['stream_kwargs']
@@ -109,18 +109,9 @@ class ASRBase(Base):
         self.speech_enhancer_url = resolve_url(asr_server_config['speech_enhancer'])
         self.vad_url = resolve_url(asr_server_config['voice_activity_detector'])
 
-    def _setup_input(self):
-        """Set up the identifier for the base from user input.
-
-        Retrieve and assigns a unique identifier for this instance, calculates the port number by
-        adding the port offset to the unique identifier (id), and ensures the port is free.
-        """
-        self.id = get_id()
-        print(f"\033]0;ASR Base {self.base_type} {self.id} \007")
-
         # set port number for 'udp/tcp'
         if self.source in ['udp', 'tcp']:
-            self.port_offset = int(self.config[self.base_type].get('port_offset', 0))
+            self.port_offset = int(base_config.get('port_offset', 0))
             self.port = self.id + self.port_offset
             free_port(self.port)
             self.stream_kwargs['port'] = self.port
@@ -136,15 +127,21 @@ class ASRBase(Base):
             info = p.get_host_api_info_by_index(0)
             num_devices = info.get('deviceCount')
             available_indexes = []
+            channels = self.stream_kwargs['channels']
 
             for i in range(0, num_devices):
-                if (p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
-                    print(i, " - ", p.get_device_info_by_host_api_device_index(0, i).get('name'))
+                device_info = p.get_device_info_by_host_api_device_index(0, i)
+                max_input_channels = device_info.get('maxInputChannels')
+                if (max_input_channels) >= channels:
+                    print(i, " - ", device_info.get('name'), f" ({max_input_channels} channels)")
                     available_indexes.append(i)
-            p.terminate()
 
             self.input_device_index = get_input_device_index(available_indexes)
             self.stream_kwargs['input_device_index'] = self.input_device_index
+            device_info = p.get_device_info_by_host_api_device_index(0, self.input_device_index)
+            self.stream_kwargs['channel_select'] = get_channel_selection(device_info) if channels > 1 else None
+            self.logger.info(f"Selected channel option: {self.stream_kwargs['channel_select']}")
+            p.terminate()
 
         # set url for 'rtmp'
         elif self.source == 'rtmp':
@@ -232,7 +229,7 @@ class ASRBase(Base):
         self.audio_stream.stop()
         write_frame_to_wav(output_path, audio_frame)
 
-        apply_gain(output_path, self.gain)
+        apply_gain(output_path, self.gain)  # amplify the first channel of the audio with gain
         audio_path = self._audio_preprocessing(output_path, 1)
 
         if audio_path is None:
@@ -317,13 +314,13 @@ class ASRBase(Base):
         """
         if not self.bucket_name:
             return
-            
+
         snapshot_dir = os.path.join(self.runtime_dir, self.bucket_name, f'{self.base_type}_{self.id}', 'profiles')
         if os.path.exists(snapshot_dir):
             shutil.rmtree(snapshot_dir)  # Clear any existing snapshot
         else:
             os.makedirs(snapshot_dir)
-        
+
         self.logger.info(f"Creating snapshot of speaker profiles for bucket '{self.bucket_name}'")
         try:
             shutil.copytree(self.audio_db, snapshot_dir, dirs_exist_ok=True)
@@ -358,8 +355,8 @@ class ASRBase(Base):
         Reinitialize the ASR base by calling the constructor with the current configuration,
         logs the reset status, and performs garbage collection.
         """
-        self.__init__(project_dir=self.project_dir, config_path=self.config_path, base_type=self.base_type,
-                      mode=self.mode, vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store, hsr=self.hsr)
+        self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
+                      vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store, hsr=self.hsr)
         self.logger.info(f"Audio DB reset to {self.audio_db}")
         gc.collect()
 
@@ -389,7 +386,8 @@ class ASRBase(Base):
 
                 frames = audio_frame.to_bytes()
                 acquire_time = audio_frame.timestamp
-                output_path = os.path.join(self.audio_dir, sub_dir, f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
+                output_path = os.path.join(self.audio_dir, sub_dir,
+                                           f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
 
                 if self.mode == 'record':
                     write_frame_to_wav(output_path, audio_frame)
@@ -440,7 +438,7 @@ class ASRBase(Base):
 
                     if similarity > self.threshold:
                         speaker = name
-                        if self.base_type == 'Badge':
+                        if self.score_amplified:
                             energy_level_factor = np.log(rms_value) / np.log(self.rms_threshold)
                             similarity = min(similarity * energy_level_factor, 1)
                     else:
@@ -529,7 +527,7 @@ class ASRBase(Base):
                         else:
                             os.remove(save_file)
 
-                    if similarity > self.threshold and self.base_type == 'Badge':
+                    if similarity > self.threshold and self.score_amplified:
                         energy_level_factor = np.log(rms_value) / np.log(self.rms_threshold)
                         similarity = min(similarity * energy_level_factor, 1)
 
@@ -636,7 +634,8 @@ class ASRBase(Base):
 
                 # Perform half-scaled recognition on speaker turn border if hsr is enabled
                 if chunk_frames and self.hsr:
-                    self.logger.info(f"Performing half-scaled recognition on speaker turn border for {self.last_speaker} and {speaker}")
+                    self.logger.info(
+                        f"Performing half-scaled recognition on speaker turn border for {self.last_speaker} and {speaker}")
                     left_temp_path = os.path.join(self.audio_dir, 'temp', f'{self.base_type}_{self.id}_left_temp.wav')
                     right_temp_path = os.path.join(self.audio_dir, 'temp', f'{self.base_type}_{self.id}_right_temp.wav')
                     number_frames = int(len(frames) / 2)
@@ -644,9 +643,9 @@ class ASRBase(Base):
                     write_bytes_to_wav(left_temp_path, chunk_frames[-number_frames:], framerate=fr)
                     write_bytes_to_wav(right_temp_path, frames[:number_frames], framerate=fr)
 
-                    if not self.sp and self.base_type == 'Badge':
-                        apply_gain(left_temp_path)
-                        apply_gain(right_temp_path)
+                    if not self.sp:
+                        apply_gain(left_temp_path, self.gain)
+                        apply_gain(right_temp_path, self.gain)
 
                     if self._apply_vad(left_temp_path, inplace=0):
                         left_speaker, _ = self.audio_recognizer.recognize_among_candidates(

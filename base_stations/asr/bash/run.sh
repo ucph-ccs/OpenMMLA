@@ -197,34 +197,8 @@ echo "DOMINANT: $DOMINANT"
 echo "HALF-SCALED RECOGNITION: $HSR"
 echo "--------------------------------"
 
-# Prompt user to choose base type
-while true; do
-    echo "1: Badge"
-    echo "2: Jabra"
-    echo "Please select the base type:"
-    stty -echo -icanon time 0 min 0
-    read -r -n 1 BASE_TYPE_SELECTION
-    stty echo icanon
-
-    case $BASE_TYPE_SELECTION in
-        1)
-            BASE_TYPE='Badge'
-            echo "Selected: Badge"
-            break
-            ;;
-        2)
-            BASE_TYPE='Jabra'
-            echo "Selected: Jabra"
-            break
-            ;;
-        *)
-            echo "Invalid selection. Please choose either 1 or 2."
-            ;;
-    esac
-done
-
 # Run bases
-CMD="python3 $PROJECT_DIR/examples/run_asr_base.py -b $BASE_TYPE -s $STORE -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -tr $TRANSCRIBE -sp $SPEECH_SEPARATE -hsr $HSR"
+CMD="python3 $PROJECT_DIR/examples/run_asr_base.py -s $STORE -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -tr $TRANSCRIBE -sp $SPEECH_SEPARATE -hsr $HSR"
 if [ "$NUM_BASE" -gt 0 ]; then
     echo "Starting bases..."
     for i in $(seq 1 "$NUM_BASE"); do
@@ -244,7 +218,7 @@ if [ "$NUM_BASE" -gt 0 ]; then
 fi
 
 # Run synchronizer
-CMD="python3 $PROJECT_DIR/examples/run_asr_synchronizer.py -b $BASE_TYPE -d $DOMINANT -sp $SPEECH_SEPARATE"
+CMD="python3 $PROJECT_DIR/examples/run_asr_synchronizer.py -d $DOMINANT -sp $SPEECH_SEPARATE"
 if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
     echo "Starting synchronizer..."
     if [[ $OSTYPE == 'darwin'* ]]; then
