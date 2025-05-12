@@ -98,6 +98,7 @@ class ASRBase(Base):
             base_config['recognize_threshold'])
         self.keep_threshold = float(base_config['keep_sp_threshold']) if self.sp else float(
             base_config['keep_threshold'])
+        self.update_threshold = float(base_config.get('update_threshold', 0.6))
         self.gain = float(base_config['gain'])
         self.score_amplified = bool(base_config.get('score_amplified', False))
 
@@ -433,7 +434,7 @@ class ASRBase(Base):
 
                 if speaker == 'unknown':  # voice detected
                     normalize_decibel(segment_audio_path, rms_level=-20)
-                    name, similarity = self.audio_recognizer.recognize(segment_audio_path)
+                    name, similarity = self.audio_recognizer.recognize(segment_audio_path, update_threshold=self.update_threshold)
                     duration = calculate_audio_duration(segment_audio_path)
 
                     if similarity > self.threshold:
@@ -510,7 +511,7 @@ class ASRBase(Base):
                             continue
 
                         normalize_decibel(save_file, rms_level=-20)
-                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file)
+                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file, update_threshold=self.update_threshold)
 
                         # If a better result is found, update best info and remove any old file.
                         if temp_similarity > similarity:

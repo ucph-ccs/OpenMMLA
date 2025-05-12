@@ -114,7 +114,7 @@ def crop_and_concatenate_wav(input_file: str, clip_ranges: list[tuple[int, int]]
 
 
 def segment_wav(input_file: str, output_dir: str, step_length_ms: int = None, window_length_ms: int = None):
-    """Segments an audio file and exports each segment as a new .wav file.
+    """Segments an audio file and exports each segment with normalized decibel (RMS level = -20 dB) as a new .wav file.
 
     Args:
         input_file (str): Input .wav audio file path.

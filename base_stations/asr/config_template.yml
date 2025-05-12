@@ -11,7 +11,8 @@ Base_Badge:
   keep_threshold: 0.2               
   keep_sp_threshold: 0.1            
   rms_threshold: 500                
-  rms_peak_threshold: 2500          
+  rms_peak_threshold: 2500 
+  update_threshold: 0.6
   gain: 10                          
   score_amplified: true             
   source: udp                       
@@ -36,6 +37,7 @@ Base_Jabra:
   keep_sp_threshold: 0.1
   rms_threshold: 1000
   rms_peak_threshold: 5000
+  update_threshold: 0.6
   gain: 0
   source: pyaudio
   stream_kwargs:
@@ -57,6 +59,7 @@ Base_[Your_Device_Name]:
   keep_sp_threshold:            # Similarity threshold for keeping identity for speaker border cases (with half-scaled recognition and speech separation)
   rms_threshold:                # Root Mean Square amplitude value threshold for VAD preprocessing
   rms_peak_threshold:           # Peak amplitude value threshold for VAD preprocessing
+  update_threshold:             # Similarity threshold for incrementally updating speaker profile
   gain:                         # Volume gain multiplier in decibels for audio preprocessing
   score_amplified:              # Whether to amplify the similarity score of the audio signal
   source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl)
