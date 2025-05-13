@@ -62,7 +62,7 @@ ifconfig | grep inet
 hostname
 
 # Get your video & audio device details
-# Ubuntu
+# Ubuntu & Debian
 v4l2-ctl --list-devices
 arecord -l
 # macOS
@@ -75,7 +75,7 @@ ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i <Input
   -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<Stream_ID>
 
 e.g.
-# Ubuntu
+# Ubuntu & Debian
 ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
   -c:v libx264 -b:v 1M -preset ultrafast -tune zerolatency \
   -maxrate 2M -bufsize 2M \

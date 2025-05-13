@@ -2,6 +2,7 @@ import os
 import threading
 from abc import ABC, abstractmethod
 
+import time
 import yaml
 
 from openmmla.utils.client import RedisClientWrapper
@@ -102,11 +103,13 @@ class Base(ABC):
         """Listen on the redis bucket control channel for the START signal."""
         p = self.redis_client.subscribe(f"{self.bucket_control}")
         self.logger.info(f"Wait for START signal on {self.bucket_control}...")
+        
         while True:
-            message = p.get_message()
+            message = p.get_message(timeout=5)
             if message and message['data'] == b'START':
                 self.logger.info("Received START signal, start...")
                 break
+            time.sleep(0.05)
 
     def _listen_for_stop_signal(self):
         """Listen on the redis bucket control channel for the STOP signal."""
@@ -114,10 +117,11 @@ class Base(ABC):
         self.logger.info(f"Listening for STOP signal on {self.bucket_control}...")
 
         while not self.stop_event.is_set():
-            message = p.get_message()
+            message = p.get_message(timeout=5)
             if message and message['data'] == b'STOP':
                 self.logger.info("Received STOP signal, stop...")
                 self._stop_threads()
+            time.sleep(0.05)
 
     @abstractmethod
     def run(self, *args, **kwargs):
