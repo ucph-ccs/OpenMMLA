@@ -13,7 +13,8 @@ from pyecharts.charts import Pie, Bar
 from pyecharts.commons.utils import JsCode
 
 from openmmla.utils.querys import fetch_and_process_data, save_to_json_file, read_json_file, convert_json_to_dataframe
-from openmmla.utils.visualization import format_time, weight_to_width, draw_networkx_edge_labels, format_list_for_pyecharts, get_pyecharts_js_functions
+from openmmla.utils.visualization import format_time, weight_to_width, draw_networkx_edge_labels, \
+    format_list_for_pyecharts, get_pyecharts_js_functions
 from .transcription import convert_transcription_json_to_txt
 
 

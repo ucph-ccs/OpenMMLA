@@ -104,24 +104,27 @@ class ASRSynchronizer(Synchronizer):
 
     def _start_synchronization(self):
         """Start the synchronization process."""
+        # bucket selection
         self.bucket_name = select_or_create_bucket(self.influx_client)
         self.number_of_bases = get_number_of_bases()
-        self.latest_time = 0
-        self.time_bucket_buffer = {}  # Reset the time bucket buffer
-        self.logger = get_logger(f'synchronizer-{self.bucket_name}',
-                                 os.path.join(self.logger_dir, f'{self.bucket_name}_asr_synchronizer.log'))
+        self._create_bucket_logger()
 
+        # reset attributes
+        self.latest_time = 0
+        self.time_bucket_buffer = {}
+
+        # listen for start signal
         self._listen_for_start_signal()
 
-        # Reinitialize MQTT client with a new topic and on_message callback
+        # reinitialize mqtt client with a new topic and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/asr')
         self.mqtt_client.loop_start()
 
-        # Create threads
+        # create threads
         self._create_thread(self._send_start_regularly)
         self._create_thread(self._listen_for_stop_signal)
 
-        # Start threads
+        # start and join threads, handling exceptions if they occur
         exception_occurred = None
         try:
             self._start_threads()
@@ -133,6 +136,13 @@ class ASRSynchronizer(Synchronizer):
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
+
+    def _create_bucket_logger(self):
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        self.logger = get_logger(f'synchronizer-{self.bucket_name}',
+                                 os.path.join(self.bucket_logger_dir,
+                                              f'asr_synchronizer_{self.base_type}.log'))
 
     def _handle_base_result(self, client, userdata, message):
         """Handle the received base recognition result from MQTT message.

@@ -129,7 +129,7 @@ class VideoStream(StreamReceiver):
         self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 
         if not self.stream.isOpened():
-            if  max_retries > 0:
+            if max_retries > 0:
                 self._initialize_opencv(max_retries=max_retries - 1)
             else:
                 raise RuntimeError("Failed to initialize OpenCV video capture")
@@ -142,14 +142,14 @@ class VideoStream(StreamReceiver):
             raise ImportError(
                 "pylsl package is not installed. Please install it with 'pip install pylsl' to use LSL features."
             )
-            
+
         streams = resolve_byprop('name', self.lsl_name)
         if not streams:
             if max_retries > 0:
                 self._initialize_lsl(max_retries=max_retries - 1)
             else:
                 raise RuntimeError(f"LSL stream '{self.lsl_name}' not found")
-        else:        
+        else:
             self.lsl_inlet = StreamInlet(streams[0])
             self.lsl_offset = time.time() - local_clock()
             logger.info(f"Successfully initialized LSL video stream with inlet: {self.lsl_inlet}")
@@ -217,7 +217,7 @@ class VideoStream(StreamReceiver):
                 if not sample:
                     return None
 
-                if self.format == 'raw':    # raw RGB data
+                if self.format == 'raw':  # raw RGB data
                     data_array = np.array(sample, dtype=np.float32)
                     expected_size = self.resolution[0] * self.resolution[1] * 3  # width * height * RGB
                     if len(data_array) != expected_size:

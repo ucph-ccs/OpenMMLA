@@ -111,25 +111,33 @@ class VFABase(Base):
             return self._set_camera()
 
         self.bucket_name = select_or_create_bucket(self.influx_client)
-        self.logger = get_logger(f'vfa-{self.bucket_name}',
-                                 os.path.join(self.project_dir, f'logger/{self.bucket_name}_vfa_{self.base_id}.log'),
-                                 console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
-
-        self._listen_for_start_signal()
+        self._create_bucket_logger()
 
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
-        self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
-        self.video_stream.start()
+
+        self._configure_video_stream()
+        self._create_thread(self._listen_for_stop_signal)
 
         try:
-            self._create_thread(self._listen_for_stop_signal)
             self._start_threads()
             self._process_frames()
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("Interrupted: %s", e)
         finally:
             self._clean_up()
+
+    def _configure_video_stream(self):
+        """Configure video stream."""
+        self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
+        self.video_stream.start()
+
+    def _create_bucket_logger(self):
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        self.logger = get_logger(f'vfa-{self.bucket_name}',
+                                 os.path.join(self.bucket_logger_dir, f'vfa_base_{self.base_id}.log'),
+                                 console_level=logging.DEBUG if self.verbose else logging.INFO)
 
     def _switch_mode(self):
         """Switch the operating mode between 'record', 'analyze' and 'full'."""

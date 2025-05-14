@@ -115,4 +115,4 @@ def format_list_for_pyecharts(data):
     
     Converts None values to '0' and formats numbers to 4 decimal places.
     """
-    return [f"{x:.4f}" if x is not None else '0' for x in data] 
+    return [f"{x:.4f}" if x is not None else '0' for x in data]

@@ -256,7 +256,8 @@ def _audio_librosa_resample(data: np.ndarray, source_rate: int, target_rate: int
         np.ndarray: Resampled audio data in same format as input (int16 or float32)
     """
     if librosa is None:
-        raise ImportError("librosa is not installed. Please install it with 'pip install librosa' to use librosa features.")
+        raise ImportError(
+            "librosa is not installed. Please install it with 'pip install librosa' to use librosa features.")
 
     if data.dtype == np.int16:
         float_data = int16_to_float32(data)

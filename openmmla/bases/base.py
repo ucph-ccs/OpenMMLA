@@ -103,7 +103,7 @@ class Base(ABC):
         """Listen on the redis bucket control channel for the START signal."""
         p = self.redis_client.subscribe(f"{self.bucket_control}")
         self.logger.info(f"Wait for START signal on {self.bucket_control}...")
-        
+
         while True:
             message = p.get_message(timeout=5)
             if message and message['data'] == b'START':

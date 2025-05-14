@@ -119,22 +119,22 @@ class IPSBase(Base):
             self.logger.warning("Camera is not configured.")
             return self._set_camera()
 
-        # Bucket selection
+        # bucket selection
         self.bucket_name = select_or_create_bucket(self.influx_client)
-        self.logger = get_logger(f'ips-base-{self.bucket_name}',
-                                 os.path.join(self.logger_dir, f'{self.bucket_name}_ips_base_{self.base_id}.log'),
-                                 console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
+        self._create_bucket_logger()
 
-        # MQTT client reinitialization
+        # reinitialize mqtt client
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
 
-        # Start video stream
+        # configure video stream and start it
         self._configure_video_stream()
+
+        # create threads
+        self._create_thread(self._listen_for_stop_signal)
 
         exception_occurred = None
         try:
-            self._create_thread(self._listen_for_stop_signal)
             self._start_threads()
             self._process_frames()
         except (Exception, KeyboardInterrupt) as e:
@@ -142,6 +142,13 @@ class IPSBase(Base):
             exception_occurred = e
         finally:
             self._detection_handler(exception_occurred)
+
+    def _create_bucket_logger(self):
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        self.logger = get_logger(f'ips-base-{self.bucket_name}',
+                                 os.path.join(self.bucket_logger_dir, f'ips_base_{self.base_id}.log'),
+                                 console_level=logging.DEBUG if self.verbose else logging.INFO)
 
     def _detection_handler(self, e: Exception | None):
         """Handle exceptions and stop all threads.

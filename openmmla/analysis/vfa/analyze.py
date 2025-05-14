@@ -1,6 +1,7 @@
 import os
 from openmmla.utils.querys import fetch_and_process_data, save_to_json_file
 
+
 def vfa_session_analysis(project_dir, bucket_name, influx_client):
     """Retrieves action recognition data from InfluxDB and saves it to a JSON file.
     
@@ -20,8 +21,8 @@ def vfa_session_analysis(project_dir, bucket_name, influx_client):
     # Fetch and log action recognition data
     action_data = fetch_and_process_data(bucket_name, "action recognition", influx_client)
     action_json_file_path = save_to_json_file(bucket_name, action_data, "action_recognition", log_dir)
-    
+
     print(f"Action Recognition session analysis completed for session: {bucket_name}")
     print(f"Data saved to: {action_json_file_path}")
-    
+
     return action_json_file_path

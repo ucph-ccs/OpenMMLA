@@ -97,23 +97,22 @@ class IPSSynchronizer(Synchronizer):
 
         self.merged_relations = {}
         self.merged_tags = {}
-        self.bucket_name = select_or_create_bucket(self.influx_client)
-        self.logger = get_logger(f'ips-synchronizer-{self.bucket_name}',
-                                 os.path.join(self.logger_dir, f'{self.bucket_name}_ips_synchronizer.log'),
-                                 console_level=logging.DEBUG if self.verbose else logging.INFO, mode='a')
 
+        # select or create bucket
+        self.bucket_name = select_or_create_bucket(self.influx_client)
+        self._create_bucket_logger()
         self._listen_for_start_signal()
 
-        # Reinitialize MQTT client with new topics and on_message callback
+        # reinitialize mqtt client with new topics and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/ips')
         self.time_bucket = time.time()  # Initialize time_bucket with current time
         self.mqtt_client.loop_start()
 
-        # Create threads
+        # create threads
         self._create_thread(self._listen_for_stop_signal)
         self._create_thread(self._upload_merged_result)
 
-        # Start threads
+        # start threads and wait for them to finish
         exception_occurred = None
         try:
             self._start_threads()
@@ -126,6 +125,13 @@ class IPSSynchronizer(Synchronizer):
         finally:
             self._synchronization_handler(exception_occurred)
             return None
+
+    def _create_bucket_logger(self):
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        self.logger = get_logger(f'ips-synchronizer-{self.bucket_name}',
+                                 os.path.join(self.bucket_logger_dir, f'ips_synchronizer.log'),
+                                 console_level=logging.DEBUG if self.verbose else logging.INFO)
 
     def _synchronization_handler(self, e: Exception | KeyboardInterrupt | None):
         """Handle exceptions and stop all threads.

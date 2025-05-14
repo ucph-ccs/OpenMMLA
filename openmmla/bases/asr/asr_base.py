@@ -262,26 +262,25 @@ class ASRBase(Base):
             self.logger.info("Audio database is empty.")
             return
 
+        # select or create bucket
         self.bucket_name = select_or_create_bucket(self.influx_client) if not bucket_name else bucket_name
-        self.logger = get_logger(f'asr-base-{self.bucket_name}',
-                                 os.path.join(self.logger_dir,
-                                              f'{self.bucket_name}_asr_{self.base_type}_{self.id}.log'))
-
-        # Create a snapshot of the speaker profiles used in this session
+        self._create_bucket_logger()
         self._create_speaker_profile_snapshot()
 
+        # reset attributes
         self.last_speaker = None
-        self.audio_dir = os.path.join(self.runtime_dir, f'{self.bucket_name}', f'{self.base_type}_{self.id}')
         self.audio_queue = queue.Queue()
         self.transcription_queue = queue.Queue()
         self.speaker_frames_dict = {}
-        self.mqtt_client.reinitialise()
-        self.mqtt_client.loop_start()
 
         self._prepare_directories()
         self._listen_for_start_signal()
 
-        # Create threads based on the operating mode
+        # reinitialize mqtt client
+        self.mqtt_client.reinitialise()
+        self.mqtt_client.loop_start()
+
+        # create threads based on the operating mode
         if self.mode in ['record', 'full']:
             self._create_thread(self._continuous_recording)
         if self.mode == 'recognize':
@@ -293,7 +292,7 @@ class ASRBase(Base):
                 self._create_thread(self._continuous_transcribing)
         self._create_thread(self._listen_for_stop_signal)
 
-        # Start and join threads, handling exceptions if they occur
+        # start and join threads, handling exceptions if they occur
         exception_occurred = None
         try:
             self._start_threads()
@@ -305,6 +304,13 @@ class ASRBase(Base):
             exception_occurred = e
         finally:
             self._recognition_handler(exception_occurred)
+
+    def _create_bucket_logger(self):
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        self.logger = get_logger(f'asr-base-{self.bucket_name}',
+                                 os.path.join(self.bucket_logger_dir,
+                                              f'asr_{self.base_type}_{self.id}.log'))
 
     def _create_speaker_profile_snapshot(self):
         """Create a snapshot of the speaker profiles used in the current session.
@@ -434,7 +440,8 @@ class ASRBase(Base):
 
                 if speaker == 'unknown':  # voice detected
                     normalize_decibel(segment_audio_path, rms_level=-20)
-                    name, similarity = self.audio_recognizer.recognize(segment_audio_path, update_threshold=self.update_threshold)
+                    name, similarity = self.audio_recognizer.recognize(segment_audio_path,
+                                                                       update_threshold=self.update_threshold)
                     duration = calculate_audio_duration(segment_audio_path)
 
                     if similarity > self.threshold:
@@ -511,7 +518,8 @@ class ASRBase(Base):
                             continue
 
                         normalize_decibel(save_file, rms_level=-20)
-                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file, update_threshold=self.update_threshold)
+                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file,
+                                                                                     update_threshold=self.update_threshold)
 
                         # If a better result is found, update best info and remove any old file.
                         if temp_similarity > similarity:
@@ -893,6 +901,7 @@ class ASRBase(Base):
         Create subdirectories for segments, chunks, separations, temporary files, and records.
         Clear specific directories based on the current operating mode.
         """
+        self.audio_dir = os.path.join(self.runtime_dir, f'{self.bucket_name}', f'{self.base_type}_{self.id}')
         sub_dirs = ['segments', 'chunks', 'separations', 'temp', 'records']
         for subdir in sub_dirs:
             directory_path = os.path.join(self.audio_dir, subdir)

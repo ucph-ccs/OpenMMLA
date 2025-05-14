@@ -9,7 +9,7 @@ from .image import load_image
 
 
 def detect_apriltags(image_input, tag_detector, normalize=True, render=True, show=True, save=False, save_path=None) -> \
-tuple[dict[int, list], Image.Image | None]:
+        tuple[dict[int, list], Image.Image | None]:
     """Detect the apriltags in an image and return the ids, positions of the tags.
 
     Args:

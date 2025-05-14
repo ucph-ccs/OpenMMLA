@@ -44,7 +44,6 @@ class ASRPostAnalyzer(Base):
             sp: whether to use the separation model or not (default: False)
             tr: whether to transcribe the audio segments or not (default: True)
         """
-        # Ensure config_path is treated as a string for Base class
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.base_type = 'PostAnalyzer'
 
@@ -65,7 +64,6 @@ class ASRPostAnalyzer(Base):
 
         self.origin_dir: str = ''
         self.runtime_dir: str = ''
-        self.profiles_dir: str = ''
         self.temp_dir: str = ''
         self.logs_dir: str = ''
         self.logger_dir: str = ''
@@ -115,7 +113,6 @@ class ASRPostAnalyzer(Base):
                 raise ValueError(f"None of the specified files were found in {self.origin_dir}. "
                                  f"Please check the filenames and try again.")
         else:
-            # Process all audio files in the origin directory
             self.process_files = origin_files
 
         if not self.process_files:
@@ -141,7 +138,6 @@ class ASRPostAnalyzer(Base):
         """Set up the directory structure for the ASRPostAnalyzer."""
         self.runtime_dir = os.path.join(self.project_dir, 'post-time', 'runtime')
         self.origin_dir = os.path.join(self.project_dir, 'post-time', 'origin')
-        self.profiles_dir = os.path.join(self.project_dir, 'post-time', 'profiles')
         self.temp_dir = os.path.join(self.project_dir, 'post-time', 'temp')
         self.logs_dir = os.path.join(self.project_dir, 'logs')
         self.logger_dir = os.path.join(self.project_dir, 'logger')
@@ -156,13 +152,10 @@ class ASRPostAnalyzer(Base):
 
     def _setup_objects(self) -> None:
         """Initialize the AudioRecognizer object."""
-        # Create audio database directory
         first_file = os.path.splitext(self.process_files[0])[0]
-        db_path = os.path.join(self.profiles_dir, first_file)
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
-        # Initialize the recognizer with a valid config path
-        self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=db_path)
+        first_audio_db = os.path.join(self.runtime_dir, f'session_{first_file}', 'profiles')
+        os.makedirs(first_audio_db, exist_ok=True)
+        self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=first_audio_db)
 
     def run(self) -> None:
         """Process all specified files."""
@@ -171,10 +164,16 @@ class ASRPostAnalyzer(Base):
     def _process_audio_files(self) -> None:
         """Process each audio file in the list of files to process."""
         for audio_filename in tqdm(self.process_files, desc='Processing audio files', unit='session'):
-            self.logger = get_logger(f'asr-post-{audio_filename}',
-                                     os.path.join(self.logger_dir, f'{audio_filename}_asr_post.log'))
+            self._create_bucket_logger(audio_filename)
             self.logger.info(f"Processing file: {audio_filename}")
             self._process_single_audio_file(audio_filename)
+
+    def _create_bucket_logger(self, audio_filename: str):
+        self.file_logger_dir = os.path.join(self.logger_dir, f'{audio_filename}')
+        os.makedirs(self.file_logger_dir, exist_ok=True)
+        self.logger = get_logger(f'asr-post-{audio_filename}',
+                                 os.path.join(self.file_logger_dir,
+                                              f'asr_post_{audio_filename}.log'))
 
     def _process_single_audio_file(self, filename: str):
         """Process a single audio file.
@@ -202,24 +201,21 @@ class ASRPostAnalyzer(Base):
 
         self.session_logs_dir = os.path.join(self.logs_dir, f'session_{self.session_name}')
         self.session_runtime_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}')
-        self.session_segments_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}', 'segments')
-        self.session_chunks_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}', 'chunks')
+        self.session_segments_dir = os.path.join(self.session_runtime_dir, 'segments')
+        self.session_chunks_dir = os.path.join(self.session_runtime_dir, 'chunks')
+        self.session_audio_db = os.path.join(self.session_runtime_dir, 'profiles')
 
-        # Clean directories if they exist, otherwise create them
         for directory in [self.session_logs_dir, self.session_runtime_dir, self.session_segments_dir,
-                          self.session_chunks_dir]:
+                          self.session_chunks_dir, self.session_audio_db]:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
             os.makedirs(directory)
+        self.recognizer.reset_db(self.session_audio_db)
 
-        # Reset audio recognizer's audio database
-        audio_db = os.path.join(self.profiles_dir, self.session_name)
-        self.recognizer.reset_db(audio_db)
-
-        #  Register speakers' raw audio files, set enhance to True to apply NR and VAD
+        # register speakers with NR and VAD enhanced
         self._register_speakers(speakers_corpus_dir, enhance=True)
 
-        # Format the origin audio file, segment it, and process the segments
+        # format the origin audio file, segment it, and process the segments
         self._format_origin_file()
         self._segment_formatted_file()
         if self.sp:

@@ -98,7 +98,7 @@ class AudioStream(StreamReceiver):
         self.sample_width = SUPPORTED_FORMATS[self.format]['sample_width']
         self.dtype = SUPPORTED_FORMATS[self.format]['dtype']
 
-        self.channels = kwargs.get('channels', 1)   # Number of channels to read
+        self.channels = kwargs.get('channels', 1)  # Number of channels to read
         self.channel_select = kwargs.get('channel_select', None)  # 'left', 'right', or None (use all)
         self.rate = kwargs.get('rate', 16000)
         self.chunk_size = kwargs.get('chunk_size', 512)
@@ -293,7 +293,6 @@ class AudioStream(StreamReceiver):
                                  f"but {self.channels} channels are required.")
             print(f"Selected device has {device_info['maxInputChannels']} channels")
 
-        
         self.stream = self.p.open(
             format=stream_format,
             channels=self.channels,
@@ -307,9 +306,11 @@ class AudioStream(StreamReceiver):
                 logger.warning("Failed to initialize PyAudio stream, retrying...")
                 self._initialize_pyaudio(max_retries=max_retries - 1)
             else:
-                raise RuntimeError(f"Failed to initialize PyAudio audio stream with input device index: {self.input_device_index}")
+                raise RuntimeError(
+                    f"Failed to initialize PyAudio audio stream with input device index: {self.input_device_index}")
         else:
-            logger.info(f"Successfully initialized PyAudio audio stream with input device index: {self.input_device_index}")
+            logger.info(
+                f"Successfully initialized PyAudio audio stream with input device index: {self.input_device_index}")
 
     def _initialize_udp(self, max_retries: int = 3) -> None:
         """Initialize UDP socket."""
@@ -378,7 +379,7 @@ class AudioStream(StreamReceiver):
             else:
                 logger.info(f"Successfully initialized RTMP audio stream from {self.rtmp_url}")
         except Exception as e:
-           raise RuntimeError(f"Error initializing RTMP stream: {e}") from e
+            raise RuntimeError(f"Error initializing RTMP stream: {e}") from e
 
     def _initialize_lsl(self, max_retries: int = 3):
         """Initialize lab streaming layer stream."""
@@ -386,7 +387,7 @@ class AudioStream(StreamReceiver):
             raise ImportError(
                 "pylsl package is not installed. Please install it with 'pip install pylsl' to use LSL features."
             )
-        
+
         streams = resolve_byprop('name', self.lsl_name)
         if not streams:
             if max_retries > 0:
@@ -498,7 +499,7 @@ class AudioStream(StreamReceiver):
 
                 if not data or len(data) < 18:
                     return None
-                
+
                 metadata_format = '>I7H'
                 packet_counter, year, month, day, hour, minute, second, milliseconds = \
                     struct.unpack(metadata_format, data[:18])

@@ -114,7 +114,7 @@ def run_bucket_management(args):
                     cleanup_bucket_data(influx_client, bucket_name)
                 elif operation == '4':
                     cleanup_local_data(os.path.dirname(config_path), bucket_name)
-            elif operation == '1':  
+            elif operation == '1':
                 create_new_bucket(influx_client)
             elif operation == '0':
                 break

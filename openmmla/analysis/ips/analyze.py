@@ -13,7 +13,8 @@ from scipy.interpolate import interp1d
 from scipy.spatial.distance import euclidean
 
 from openmmla.utils.querys import fetch_and_process_data, save_to_json_file, read_json_file, convert_json_to_dataframe
-from openmmla.utils.visualization import weight_to_width, draw_networkx_edge_labels, format_list_for_pyecharts, get_pyecharts_js_functions
+from openmmla.utils.visualization import weight_to_width, draw_networkx_edge_labels, format_list_for_pyecharts, \
+    get_pyecharts_js_functions
 
 BADGE_COLOR_MAP = {
     '0': 'red',
@@ -480,12 +481,12 @@ def plot_interactive_ips_across_sessions_analysis(session_names, stm_lst, nstm_l
     """Visualize IPS across sessions analysis with pyecharts."""
     # Generate visualization page
     page = Page(page_title="IPS across sessions analysis", layout=Page.SimplePageLayout)
-    
+
     # Get JS functions for pyecharts
     js_funcs = get_pyecharts_js_functions()
     yaxis_min_js = js_funcs['yaxis_min_js']
     yaxis_max_js = js_funcs['yaxis_max_js']
-    
+
     # Format data for pyecharts
     stm_lst = format_list_for_pyecharts(stm_lst)
     nstm_lst = format_list_for_pyecharts(nstm_lst)

@@ -76,8 +76,7 @@ class IPSVisualizer(Base):
 
     def _start_visualization(self):
         self.bucket_name = select_or_create_bucket(self.influx_client_main)
-        self.logger = get_logger(f'ips-visualizer-{self.bucket_name}',
-                                 os.path.join(self.logger_dir, f'{self.bucket_name}_ips_visualizer.log'))
+        self._create_bucket_logger()
 
         if self.store:
             dir_path = os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time')
@@ -96,6 +95,12 @@ class IPSVisualizer(Base):
             self.logger.warning("%s, returning to main menu.", e, exc_info=True)
         finally:
             self.bucket_name = None
+
+    def _create_bucket_logger(self):
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        self.logger = get_logger(f'ips-visualizer-{self.bucket_name}',
+                                 os.path.join(self.bucket_logger_dir, f'ips_visualizer.log'))
 
     def _start_2d_plot(self):
         influx_client = InfluxDBClientWrapper(self.config_path)

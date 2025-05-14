@@ -39,7 +39,8 @@ def request_audio_inference(audio_path: str, base_id: str, url: str, timeout: in
     return send_request_with_retry(url, files, data, timeout=timeout, process_response=process_response)
 
 
-def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int, url: str, timeout: int = 10) -> str | None:
+def request_voice_activity_detection(audio_path: str, base_id: str, inplace: int, url: str,
+                                     timeout: int = 10) -> str | None:
     def process_response(response):
         if response.headers['Content-Type'] == 'audio/wav':
             with open(audio_path, 'wb') as f:
