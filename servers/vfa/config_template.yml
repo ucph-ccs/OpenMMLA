@@ -14,14 +14,46 @@ VLLMFrameAnalyzer:
   end_to_end: false
   prompt_templates_dir: <path-to-prompt-templates-dir>  # either relative to the project directory or absolute path
 
+  # Angle configuration for multi-perspective analysis
+  angle_config:
+    "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
+    "front": "Direct front view at eye level, showing participants face-on"
+    "top": "View from above, showing a top-down perspective of the workspace and participants"
+  
+  # Participant descriptions for identification (ID to description mapping)
+  participant_descriptions:
+    'osaka_case_0':
+      "6": "Male with black long-sleeve shirt/jacket and white mask."
+      "10": "Male with dark blue sweather"
+    'cph_case_0':
+      "0": "Male with yellow-brown patterned knit sweater"
+      "1": "Male with dark blue/black shirt with orange-red trim details"
+    'puzzle_case_0':
+      "0": "Male with dark green jacket"
+    'session_2025-04-28T22:29:52Z':
+      "0": "Male with yellow-brown patterned knit sweater"
+      "1": "Male with dark blue/black shirt with orange-red trim details"
+    # Add more participants as needed
+  
+  # Define the actions that you want to classify
+  defined_actions:
+    Working-Software: "when a person's GAZE is directed at a screen AND their HANDS are actively interacting with digital interface devices (keyboard, mouse, touchscreen)."
+    Working-Hardware: "when a person's GAZE is directed at physical components AND their HANDS are directly manipulating these non-screen hardware elements (circuit boards, wires, physical devices)."
+    Working-Document: "when a person's GAZE is directed at papers, books, or other physical documents AND their HANDS are interacting with these documents (holding, writing, pointing to content)."
+    Communicating: "when a person's GAZE is directed toward another person AND their HANDS are actively gesturing or pointing. This involves direct visual engagement with another person plus active hand movements for communication purposes."
+    Observing: "When a person's GAZE is directed at work-related elements (such as laptops, screens, hardware, documents, or another person's work), AND their HANDS are either inactive OR interacting with something unrelated to their gaze target."
+    Distracted: "when a person's GAZE is directed at non-work elements (such as personal phones) OR outside of the frame, AND their HANDS are either inactive OR interacting with non-work items."
+    Unclear: "when either GAZE or HAND status cannot be confidently determined due to occlusion, ambiguous positioning, or insufficient visibility in the image."
+  
+  # Supported backends
   ollama:
     api_key: <OLLAMA_API_KEY>
-    vlm_base_url: "http://localhost:11434/v1"
-    llm_base_url: "http://localhost:11434/v1" 
-    vlm_model: "llava:13b"
-    llm_model: "llama3.1"
-    VLMExtraBody: {}
-    LLMExtraBody: {}
+    vlm_base_url: "http://localhost:11434/v1" # base url for vlm
+    llm_base_url: "http://localhost:11434/v1" # base url for llm
+    vlm_model: "llava:13b" # vlm model name
+    llm_model: "llama3.1" # llm model name
+    VLMExtraBody: {} # extra body for vlm
+    LLMExtraBody: {} # extra body for llm
 
   vllm:
     api_key: <VLLM_API_KEY>
@@ -29,10 +61,10 @@ VLLMFrameAnalyzer:
     llm_base_url: "http://localhost:8001/v1"
     vlm_model: "openbmb/MiniCPM-V-2_6"
     llm_model: "microsoft/Phi-3-small-128k-instruct"
-    VLMExtraBody:
-      stop_token_ids: [151645, 151643]
+    VLMExtraBody: 
+      stop_token_ids: [151645, 151643] # stop token ids for MiniCPM-V-2_6
     LLMExtraBody: {}
-
+    
   openai:
     api_key: <OPENAI_API_KEY>
     vlm_model: "gpt-4o"
@@ -59,11 +91,11 @@ VLLMFrameAnalyzer:
     vlm_model: "deepseek-reasoner"
     llm_model: "deepseek-reasoner"
 
-  # Define the actions that you want to classify
-  defined_actions:
-    Communicating: "when a person is directly facing another person, with their hands away from keyboards, mice, screens, or hardware. Communication may involve gestures, pointing, or other non-verbal cues."
-    Observing: "when a person is looking at a screen or table, such as laptop or tablet, with no active interaction."
-    Working-Software: "when a person is actively interacting with a device that has a screen, such as a laptop or tablet, typically using a keyboard, mouse, or touchscreen. This includes typing, coding, navigating interfaces, or running software, with no physical interaction with hardware components."
-    Working-Hardware: "when a person is physically interacting with non-screen-based devices or components, such as breadboards, microcontrollers, LEDs, resistors, or wires. This includes assembling, adjusting, or troubleshooting hardware connections, with no active engagement with a screen or keyboard/mouse."
-    Distracted: "when a person is disengaged from the experiment, focusing on unrelated activities such as using a mobile phone, looking away, or showing signs of inattention."
-    Unclear: "when the activity cannot be confidently categorized into any of the above classes due to obscured views, ambiguous body language, or lack of sufficient context."
+  llamacpp:
+    api_key: "sk-no-key-required"
+    vlm_base_url: "http://localhost:8001/v1"
+    llm_base_url: "http://localhost:8001/v1"
+    vlm_model: "ggml-org/SmolVLM-500M-Instruct-GGUF"
+    llm_model: "ggml-org/SmolVLM-500M-Instruct-GGUF"
+    VLMExtraBody: {}
+    LLMExtraBody: {}

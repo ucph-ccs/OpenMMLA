@@ -9,14 +9,16 @@ from celery import Celery
 from flask import Flask, request, jsonify, send_from_directory, url_for
 from flask_socketio import SocketIO
 
-from utils.analyze import session_analysis
-from utils.influx_client import InfluxDBClientWrapper
-from utils.querys import fetch_latest_entry, get_node_positions
+from openmmla.analysis.asr.analyze import asr_session_analysis
+from openmmla.analysis.ips.analyze import ips_session_analysis
+from openmmla.utils.querys import fetch_latest_entry, get_node_positions
+from openmmla.utils.client import InfluxDBClientWrapper
 
 project_dir = os.getcwd()
 config_path = os.path.join(project_dir, 'config.yml')
-logs_dir = os.path.join(project_dir, 'static/logs')
-visualizations_dir = os.path.join(project_dir, 'static/visualizations')
+static_dir = os.path.join(project_dir, 'static')
+logs_dir = os.path.join(static_dir, 'logs')
+visualizations_dir = os.path.join(static_dir, 'visualizations')
 os.makedirs(logs_dir, exist_ok=True)
 os.makedirs(visualizations_dir, exist_ok=True)
 
@@ -72,7 +74,9 @@ def get_buckets():
 def generate_post_time_visualization(bucket_name):
     try:
         print("Generating post-time visualization...")
-        session_analysis(project_dir, bucket_name, influx_client)
+
+        asr_session_analysis(static_dir, bucket_name, influx_client)
+        ips_session_analysis(static_dir, bucket_name, influx_client)
     except KeyError as e:
         print(f"Key not found, {e}")
 

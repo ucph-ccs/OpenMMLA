@@ -60,7 +60,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(
             f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
 
-        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek']:
+        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp']:
             backend_config = analyzer_config[self.backend]
         else:
             raise ValueError(f"Unsupported backend: {self.backend}")

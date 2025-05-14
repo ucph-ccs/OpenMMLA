@@ -108,13 +108,13 @@ vfa-server = [
 
 uber-base = [
     "influxdb_client==1.44.0",
-    "redis==5.0.7",
-    "pyyaml==6.0.2",
+    "jiwer==3.0.4",
     "matplotlib==3.9.2",
     "networkx==3.3",
-    "pyecharts==2.0.6",
     "pandas==2.2.2",
-    "jiwer==3.0.4",
+    "pyyaml==6.0.2",    
+    "pyecharts==2.0.6",
+    "redis==5.0.7",
     "scipy==1.14.0",
 ]
 
@@ -126,13 +126,14 @@ uber-server = [
     "gunicorn==23.0.0",
     "gevent==24.2.1",
     "influxdb_client==1.44.0",
+    "jiwer==3.0.4",
     "matplotlib==3.9.2",
     "networkx==3.3",
     "numpy==2.1.0",
     "pandas==2.2.2",
+    "pyyaml==6.0.2",
     "pyecharts==2.0.6",
     "scipy==1.14.0",
-    "pyyaml==6.0.2",
 ]
 
 [project.urls]

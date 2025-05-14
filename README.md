@@ -4,7 +4,7 @@ The OpenMMLA repository consists of two main components:
 
 1. The `openmmla` toolkit: An IoT-based multimodal data collection toolkit for learning analytics, providing the core classes, utilities, and pipeline implementations.
 
-2. The runtime platform, represented by the `base_stations`, `servers`, and `wearable_devices` directories. These directories provide the structured environments for deploying and executing pipelines built with the `openmmla` toolkit. They house runtime data, service initiation scripts, logging configurations and outputs, and device-specific adaptation scripts for wearable technology during operation.
+2. The runtime platform, represented by the `base_stations`, `servers`, and `wearables` directories. These directories provide the structured environments for deploying and executing pipelines built with the `openmmla` toolkit. They house runtime data, service initiation scripts, logging configurations and outputs, and device-specific adaptation scripts for wearable technology during operation.
 
 ## Platform Design
 
