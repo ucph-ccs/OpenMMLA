@@ -65,7 +65,7 @@ Base_[Your_Device_Name]:
   source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl)
   port_offset:                  # Port offset for udp/tcp streams
   stream_kwargs:                # Additional stream settings
-    channels:                   # Number of audio channels to read (1 for mono, 2 for stereo)
+    channels:                   # Number of audio channels of the input device (if channels >1, channel selection is required)
     rate:                       # Sampling rate in Hz (e.g., 16000 for 16kHz)
     format:                     # Audio format, e.g., int16, float32
     chunk_size:                 # Size of each audio chunk in bytes (default to 512)

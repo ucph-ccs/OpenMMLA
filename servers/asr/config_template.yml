@@ -30,12 +30,20 @@ SpeechSeparator:
   app: <path-to-speech-separator-app> 
 
 SpeechTranscriber:
-  cuda: true
-  model: <whisper-or-huggingface-transcription-model>  # e.g., base.en, small.en, medium.en, large.en
-  language: en  # language code, e.g., en, zh, fr, etc.
   port: 5005 
   workers: 1 
   app: <path-to-speech-transcriber-app> 
+
+  backend: <backend> # e.g., azure, local
+  azure:
+    subscription_key: <azure-subscription-key>
+    region: <azure-region>
+    language: <azure-language>
+    profanity_option: <azure-profanity-option>
+  local:
+    cuda: true
+    model: <whisper-or-huggingface-transcription-model>  # e.g., base.en, small.en, medium.en, large.en
+    language: en  # language code, e.g., en, zh, fr, etc.
 
 VoiceActivityDetector:
   cuda: true

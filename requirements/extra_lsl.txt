@@ -1,2 +1,2 @@
-pip install pylsl
 conda install -c conda-forge liblsl
+pip install pylsl

@@ -284,23 +284,15 @@ class AudioStream(StreamReceiver):
             raise ValueError(f"Unsupported audio format: {self.format} for {self.source}")
         stream_format = PA_FORMATS[self.format]
 
-        # check if the selected device has the correct number of channels
-        if self.input_device_index is not None:
-            device_info = self.p.get_device_info_by_index(self.input_device_index)
-            if device_info['maxInputChannels'] < self.channels:
-                raise ValueError(f"Selected device does not have enough channels. "
-                                 f"Device has {device_info['maxInputChannels']} channels, "
-                                 f"but {self.channels} channels are required.")
-            print(f"Selected device has {device_info['maxInputChannels']} channels")
-
         self.stream = self.p.open(
             format=stream_format,
-            channels=self.channels,
             rate=self.rate,
+            channels=self.channels,
             input=True,
             input_device_index=self.input_device_index,
             frames_per_buffer=self.chunk_size
         )
+
         if not self.stream.is_active():
             if max_retries > 0:
                 logger.warning("Failed to initialize PyAudio stream, retrying...")
@@ -320,7 +312,6 @@ class AudioStream(StreamReceiver):
         clear_socket_udp(self.sock)
         self.sock.settimeout(3)
         try:
-            # Test if socket is bound by attempting a simple operation
             self.sock.getsockname()
             logger.info(f"Successfully initialized UDP audio stream on {self.host}:{self.port}")
         except socket.error:

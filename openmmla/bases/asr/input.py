@@ -150,23 +150,21 @@ def get_channel_selection(device_info: dict) -> int | None:
     Args:
         device_info: PyAudio device info dictionary.
     Returns:
-        Channel selection: channel index, or None.
+        Channel selection: channel index.
     """
     device_channels = device_info.get('maxInputChannels', 1)
     while True:
         try:
             flush_input()
             selection = input(f"\nDevice has {device_channels} channels. Select channel option:\n"
-                        f"0 : Left channel only\n"
-                        f"1 : Right channel only\n"
-                        f"<channel_index> : Specify channel index (0-{device_channels-1})\n"
-                        f"Please select your channel option or directly press enter to use all channels: ")
-            if selection.strip() == "":
-                return None
+                              f"<channel_index> : Specify channel index (0-{device_channels-1})\n"
+                              f"e.g: 0 -> Left channel only\n"
+                              f"e.g: 1 -> Right channel only\n"
+                              f"Please select your channel option: ")
             selection = int(selection.strip())
             if 0 <= selection < device_channels:
                 return selection
             else:
                 print(f"Invalid selection. Please enter a valid integer from 0 to {device_channels - 1}.")
         except ValueError:
-            print("Invalid input. Please enter a valid integer or press enter to use all channels.")
+            print("Invalid input. Please enter a valid integer.")

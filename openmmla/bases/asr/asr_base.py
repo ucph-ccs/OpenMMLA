@@ -419,7 +419,7 @@ class ASRBase(Base):
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
                 record_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
-                write_bytes_to_wav(segment_audio_path, frames)
+                write_bytes_to_wav(segment_audio_path, frames) # default: 16000 Hz, 16-bit, mono
 
                 # Audio pre-processing
                 apply_gain(segment_audio_path, self.gain)

@@ -11,9 +11,7 @@ logger/
 
 # Ignore deprecated repositories
 deprecated/
-mbox-audio/
-mbox-video/
-mbox-uber/
+version_control/
 
 # Ignore directories at any level
 **/tests/
