@@ -390,12 +390,9 @@ class ASRBase(Base):
             try:
                 audio_frame = self.audio_stream.read(duration=self.recognize_duration, latest=first_time)
                 first_time = False
-
                 frames = audio_frame.to_bytes()
                 acquire_time = audio_frame.timestamp
-                output_path = os.path.join(self.audio_dir, sub_dir,
-                                           f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
-
+                output_path = os.path.join(self.audio_dir, sub_dir, f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
                 if self.mode == 'record':
                     write_frame_to_wav(output_path, audio_frame)
                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
@@ -440,8 +437,7 @@ class ASRBase(Base):
 
                 if speaker == 'unknown':  # voice detected
                     normalize_decibel(segment_audio_path, rms_level=-20)
-                    name, similarity = self.audio_recognizer.recognize(segment_audio_path,
-                                                                       update_threshold=self.update_threshold)
+                    name, similarity = self.audio_recognizer.recognize(segment_audio_path, update_threshold=self.update_threshold)
                     duration = calculate_audio_duration(segment_audio_path)
 
                     if similarity > self.threshold:
@@ -518,8 +514,7 @@ class ASRBase(Base):
                             continue
 
                         normalize_decibel(save_file, rms_level=-20)
-                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file,
-                                                                                     update_threshold=self.update_threshold)
+                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file, update_threshold=self.update_threshold)
 
                         # If a better result is found, update best info and remove any old file.
                         if temp_similarity > similarity:

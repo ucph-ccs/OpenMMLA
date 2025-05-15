@@ -79,7 +79,7 @@ class AudioStream(StreamReceiver):
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 5.0)
             format (str, optional): Audio format (default: 'int16')
             channels (int, optional): Number of audio channels (default: 1)
-            channel_select (str, optional): For stereo input, select 'left', 'right', or None (default: None)
+            channel_select (int, optional): selected channel index (default: None)
             rate (int, optional): Sample rate in Hz (default: 16000)
             chunk_size (int, optional): Size of audio chunk to read in frames (default: 512)
             resample_method (ResampleMethod, optional): Method for resampling (default: AUDIO_LIBROSA)
@@ -99,7 +99,7 @@ class AudioStream(StreamReceiver):
         self.dtype = SUPPORTED_FORMATS[self.format]['dtype']
 
         self.channels = kwargs.get('channels', 1)  # Number of channels to read
-        self.channel_select = kwargs.get('channel_select', None)  # 'left', 'right', or None (use all)
+        self.channel_select = kwargs.get('channel_select', None)
         self.rate = kwargs.get('rate', 16000)
         self.chunk_size = kwargs.get('chunk_size', 512)
         self.resample_method = kwargs.get('resample_method', ResampleMethod.AUDIO_LIBROSA)
@@ -481,13 +481,11 @@ class AudioStream(StreamReceiver):
                 data = self.stream.read(self.chunk_size, exception_on_overflow=False)
                 audio_data = np.frombuffer(data, dtype=self.dtype)
                 audio_data = audio_data.reshape(-1, self.channels)
-                if self.channels > 1 and self.channel_select:
-                    if self.channel_select == 'left':
-                        audio_data = audio_data[:, 0]
-                    elif self.channel_select == 'right':
-                        audio_data = audio_data[:, 1]
-                    elif self.channel_select == 'mix':
-                        audio_data = np.mean(audio_data, axis=1, dtype=self.dtype)
+                if self.channels > 1 and self.channel_select is not None:
+                    if 0 <= self.channel_select < self.channels:
+                        audio_data = audio_data[:, self.channel_select]
+                    else:
+                        logger.warning(f"Invalid channel index: {self.channel_select}. Using all channels.")
                 timestamp = time.time()
             elif self.source in ['udp', 'tcp']:
                 # For UDP/TCP, include 18 bytes of metadata.

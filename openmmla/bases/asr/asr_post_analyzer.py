@@ -169,7 +169,7 @@ class ASRPostAnalyzer(Base):
             self._process_single_audio_file(audio_filename)
 
     def _create_bucket_logger(self, audio_filename: str):
-        self.file_logger_dir = os.path.join(self.logger_dir, f'{audio_filename}')
+        self.file_logger_dir = os.path.join(self.logger_dir, f'session_{audio_filename}')
         os.makedirs(self.file_logger_dir, exist_ok=True)
         self.logger = get_logger(f'asr-post-{audio_filename}',
                                  os.path.join(self.file_logger_dir,
