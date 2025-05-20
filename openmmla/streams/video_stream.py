@@ -130,6 +130,8 @@ class VideoStream(StreamReceiver):
 
         if not self.stream.isOpened():
             if max_retries > 0:
+                logger.warning("Failed to initialize OpenCV video capture, retrying...")
+                self._cleanup_opencv()
                 self._initialize_opencv(max_retries=max_retries - 1)
             else:
                 raise RuntimeError("Failed to initialize OpenCV video capture")
@@ -146,6 +148,8 @@ class VideoStream(StreamReceiver):
         streams = resolve_byprop('name', self.lsl_name)
         if not streams:
             if max_retries > 0:
+                logger.warning("Failed to initialize LSL video stream, retrying...")
+                self._cleanup_lsl()
                 self._initialize_lsl(max_retries=max_retries - 1)
             else:
                 raise RuntimeError(f"LSL stream '{self.lsl_name}' not found")

@@ -153,4 +153,4 @@ def segment_wav(input_file: str, output_dir: str, step_length_ms: int = None, wi
         segment = audio[start_time:end_time]
         output_file = os.path.join(output_dir, f"segment_{existing_segments + i}.wav")
         segment.export(output_file, format="wav")
-        normalize_decibel(output_file)
+        normalize_decibel(output_file, rms_level=-20)

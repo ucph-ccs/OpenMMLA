@@ -123,12 +123,13 @@ class IPSBase(Base):
         self.bucket_name = select_or_create_bucket(self.influx_client)
         self._create_bucket_logger()
 
+        # configure video stream and start it
+        self._configure_video_stream()
+        self._listen_for_start_signal()
+        
         # reinitialize mqtt client
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
-
-        # configure video stream and start it
-        self._configure_video_stream()
 
         # create threads
         self._create_thread(self._listen_for_stop_signal)

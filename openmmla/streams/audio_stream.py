@@ -296,6 +296,7 @@ class AudioStream(StreamReceiver):
         if not self.stream.is_active():
             if max_retries > 0:
                 logger.warning("Failed to initialize PyAudio stream, retrying...")
+                self._cleanup_pyaudio()
                 self._initialize_pyaudio(max_retries=max_retries - 1)
             else:
                 raise RuntimeError(
@@ -317,6 +318,7 @@ class AudioStream(StreamReceiver):
         except socket.error:
             if max_retries > 0:
                 logger.warning(f"Failed to bind UDP socket on {self.host}:{self.port}, retrying...")
+                self._cleanup_socket()
                 self._initialize_udp(max_retries=max_retries - 1)
             else:
                 raise RuntimeError(f"Failed to initialize UDP audio stream on {self.host}:{self.port}")
@@ -332,6 +334,7 @@ class AudioStream(StreamReceiver):
         if not self.conn:
             if max_retries > 0:
                 logger.warning(f"Failed to accept TCP connection from {addr}, retrying...")
+                self._cleanup_socket()
                 self._initialize_tcp(max_retries=max_retries - 1)
             else:
                 raise RuntimeError(f"Failed to initialize TCP audio stream on {self.host}:{self.port}")
@@ -364,6 +367,7 @@ class AudioStream(StreamReceiver):
             if self.ffmpeg_proc.stdout is None:
                 if max_retries > 0:
                     logger.warning("Failed to capture stdout from ffmpeg process, retrying...")
+                    self._cleanup_rtmp()
                     self._initialize_rtmp(max_retries=max_retries - 1)
                 else:
                     raise RuntimeError(f"Failed to initialize RTMP audio stream from {self.rtmp_url}")
@@ -383,6 +387,7 @@ class AudioStream(StreamReceiver):
         if not streams:
             if max_retries > 0:
                 logger.warning(f"No LSL stream found with name: {self.lsl_name}, retrying...")
+                self._cleanup_lsl()
                 self._initialize_lsl(max_retries=max_retries - 1)
             else:
                 raise RuntimeError(f"Failed to initialize LSL audio stream with inlet: {self.lsl_name}")
