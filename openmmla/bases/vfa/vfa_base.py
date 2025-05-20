@@ -15,6 +15,7 @@ from openmmla.utils.input import select_or_create_bucket, get_id, flush_input
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
 from .input import get_function_base, get_mode
+from .enums import ROTATIONS
 
 
 class VFABase(Base):
@@ -320,6 +321,13 @@ class VFABase(Base):
             video_frame = self.video_stream.read()[-1]
             frame = video_frame.data
             current_time = time.time()
+
+            if self.camera_info.get("fisheye", False):
+                frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
+                                  interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+                
+            if self.rotate in ROTATIONS:
+                frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
             if self.graphics:
                 display_frame = cv2.resize(frame, (960, 540))

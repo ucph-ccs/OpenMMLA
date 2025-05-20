@@ -34,8 +34,8 @@ class SpeechTranscriber(Server):
     def _setup_yaml(self):
         """Load configuration settings from YAML."""
         config = self.config['SpeechTranscriber']
-        
-        # determine which backend to use (local or azure)
+        self.cuda = config.get('cuda', True)
+        self.cuda = self.cuda and torch.cuda.is_available()
         self.backend = config.get('backend', 'local')
         
         if self.backend == 'azure':
@@ -53,14 +53,13 @@ class SpeechTranscriber(Server):
         else:
             # local model configuration
             local_config = config.get('local', {})
-            self.cuda = local_config.get('cuda', True)
-            self.cuda = self.cuda and torch.cuda.is_available()
             self.tr_model = local_config.get('model', 'base.en')
             self.language = local_config.get('language', 'en')
             self.logger.info(f"Using local transcription model: {self.tr_model}, language: {self.language}")
 
     def _setup_objects(self):
         """Initialize necessary objects based on the selected backend."""
+        self.nr_model = pretrained.dns64().cuda() if self.cuda else pretrained.dns64()
         if self.backend == 'azure':
             try:
                 import azure.cognitiveservices.speech as speechsdk
@@ -83,8 +82,6 @@ class SpeechTranscriber(Server):
                 self.logger.error("Failed to import Azure Speech SDK. Install it with 'pip install azure-cognitiveservices-speech'")
                 raise
         else:
-            # initialize local models
-            self.nr_model = pretrained.dns64().cuda() if self.cuda else pretrained.dns64()
             self.transcriber = get_transcriber(self.tr_model, self.language, use_cuda=self.cuda)
             self.logger.info("Local speech transcription models initialized")
             
@@ -107,9 +104,12 @@ class SpeechTranscriber(Server):
                     audio_file_path = self._get_temp_file_path('transcribe_audio', base_id, 'wav')
                     write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
-                    self.logger.info(f"Starting transcription for {base_id}...")
-                    
+                    # apply noise reduction and normalize decibel
+                    self._apply_nr(audio_file_path)
+                    normalize_decibel(infile=audio_file_path, rms_level=-20)
+
                     # route to appropriate transcription method
+                    self.logger.info(f"Starting transcription for {base_id}...")
                     if self.backend == 'azure':
                         text = self._transcribe_with_azure(audio_file_path)
                     else:
@@ -144,8 +144,6 @@ class SpeechTranscriber(Server):
         Returns:
             Transcribed text
         """
-        self._apply_nr(audio_file_path)
-        normalize_decibel(infile=audio_file_path, rms_level=-20)
         return self.transcriber.transcribe(audio_file_path)
 
     def _transcribe_with_azure(self, audio_file_path):

@@ -180,7 +180,7 @@ class ASRSynchronizer(Synchronizer):
             merged_result = self._merge_base_results(frame_set)
             merged_result['time_bucket'] = t  # t is the time_bucket (start time of the bucket)
             self.logger.debug(
-                f"\033[91mExpired frame set {t} with result {self.time_bucket_buffer[t]}\033[0m")
+                f"Expired frame set {t} with result {self.time_bucket_buffer[t]}")
             self._upload_merged_result(merged_result)
             del self.time_bucket_buffer[t]
 
@@ -195,15 +195,15 @@ class ASRSynchronizer(Synchronizer):
 
         # Handle the current message
         if closest_time is None:
-            if self.latest_time > acquired_time:  # outdated message
-                self.logger.debug(
-                    f"\033[91m{base_result['base_id']} results is outdated, acquired time is {acquired_time}\033[0m")
-                return
-            else:
+            if acquired_time > self.latest_time:
                 # Create new time bucket for new message
                 self.latest_time = acquired_time
                 self.time_bucket_buffer[self.latest_time] = {}
                 self._update_time_bucket_buffer(self.latest_time, base_result)
+            else:  # outdated message
+                self.logger.debug(
+                    f"{base_result['base_id']} couldn't find a time bucket and is outdated, the acquired time is {acquired_time}")
+                return
         else:
             # Add to existing time bucket
             self._update_time_bucket_buffer(closest_time, base_result)
@@ -270,7 +270,7 @@ class ASRSynchronizer(Synchronizer):
         base_id = latest_base_result['base_id']
         if base_id in self.time_bucket_buffer[time_bucket]:
             self.logger.debug(
-                f"\033[91mOverwrite results: {self.time_bucket_buffer[time_bucket][base_id]}\033[0m")
+                f"Overwrite results: {self.time_bucket_buffer[time_bucket][base_id]}")
 
         # Store parsed (decoded from JSON) values in the buffer
         self.time_bucket_buffer[time_bucket][base_id] = {

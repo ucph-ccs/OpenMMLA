@@ -21,6 +21,10 @@ def get_parser():
 def cleanup_bucket_data(influx_client, bucket_name) -> None:
     """Clean up all data in the specified bucket."""
     try:
+        confirm = input(f"Database data for bucket: {bucket_name} will be cleaned up. Are you sure? (y/n): ")
+        if confirm.lower() != 'y':
+            print("Cleanup cancelled.")
+            return
         influx_client.delete_bucket(bucket_name)
         influx_client.create_bucket(bucket_name)
         print(f"✅ Successfully cleaned up bucket: {bucket_name}")
@@ -31,6 +35,10 @@ def cleanup_bucket_data(influx_client, bucket_name) -> None:
 def delete_bucket(influx_client, bucket_name) -> None:
     """Delete the specified bucket."""
     try:
+        confirm = input(f"Bucket: {bucket_name} will be deleted. Are you sure? (y/n): ")
+        if confirm.lower() != 'y':
+            print("Deletion cancelled.")
+            return
         influx_client.delete_bucket(bucket_name)
         print(f"✅ Successfully deleted bucket: {bucket_name}")
     except Exception as e:
@@ -51,13 +59,16 @@ def create_new_bucket(influx_client) -> None:
 def cleanup_local_data(project_dir, bucket_name) -> None:
     """Clean up local data associated with the bucket."""
     try:
+        confirm = input(f"Local data for bucket: {bucket_name} will be cleaned up. Are you sure? (y/n): ")
+        if confirm.lower() != 'y':
+            print("Cleanup cancelled.")
+            return
         directories = [
             os.path.join(project_dir, 'logger', f'*{bucket_name}*'),
             os.path.join(project_dir, 'logs', f'*{bucket_name}*'),
             os.path.join(project_dir, 'visualizations', f'*{bucket_name}*'),
             os.path.join(project_dir, 'real-time', 'runtime', bucket_name)
         ]
-
         for dir_pattern in directories:
             import glob
             for dir_path in glob.glob(dir_pattern):
@@ -67,7 +78,6 @@ def cleanup_local_data(project_dir, bucket_name) -> None:
                     else:
                         os.remove(dir_path)
                     print(f"✅ Cleaned up: {dir_path}")
-
         print(f"✅ Successfully cleaned up local data for bucket: {bucket_name}")
     except Exception as e:
         print(f"❌ Failed to clean up local data: {e}")
