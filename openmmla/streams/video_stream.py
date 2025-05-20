@@ -54,7 +54,7 @@ class VideoStream(StreamReceiver):
             self.camera_index = kwargs.get('camera_index', 0)
             self.stream = None
         elif self.source == 'rtmp':
-            self.format = kwargs.get('format', 'MJPG')
+            self.format = kwargs.get('format', 'H264')
             self.rtmp_url = self.require_kwarg(kwargs, 'rtmp_url', "RTMP source requires a 'rtmp_url' parameter")
             self.stream = None
         elif self.source == 'lsl':

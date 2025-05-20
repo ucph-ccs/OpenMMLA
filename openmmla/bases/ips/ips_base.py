@@ -125,7 +125,6 @@ class IPSBase(Base):
 
         # configure video stream and start it
         self._configure_video_stream()
-        self._listen_for_start_signal()
         
         # reinitialize mqtt client
         self.mqtt_client.reinitialise()
@@ -270,10 +269,10 @@ class IPSBase(Base):
                 print(f"{available_source_idx} : RTMP stream {url} is available.")
                 available_sources.append(url)
                 available_source_idx += 1
-            else:
-                self.logger.warning("No RTMP video streams found in the configuration, please set it in "
-                                    "yaml config file ['RTMP']['video_streams'].")
 
+        if not available_sources:
+            self.logger.warning(f"No video sources found for {self.source}.")
+            
         return available_sources
 
     def _choose_video_source(self, available_sources):

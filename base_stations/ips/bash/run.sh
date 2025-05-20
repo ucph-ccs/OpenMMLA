@@ -16,11 +16,12 @@ STORE=true
 VERBOSE=false
 
 print_usage() {
-    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]"
+    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-nv NUM_VISUALIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]"
     echo ""
     echo "options:"
     echo "  -nb NUM_BASE         : Number of IPS bases to run (default: 1)"
     echo "  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)"
+    echo "  -nv NUM_VISUALIZER   : Number of visualizers to run (default: 1)"
     echo "  -g GRAPHICS          : Enable graphics (default: true)"
     echo "  -s STORE             : Enable store (default: false)"
     echo "  -v VERBOSE           : Enable verbose mode (default: false)"
@@ -81,6 +82,15 @@ while [ $i -le $# ]; do
                 NUM_SYNCHRONIZER="${!i}"
             else
                 echo "Error: -ns requires a value"
+                print_usage
+            fi
+            ;;
+        -nv)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                NUM_VISUALIZER="${!i}"
+            else
+                echo "Error: -nv requires a value"
                 print_usage
             fi
             ;;

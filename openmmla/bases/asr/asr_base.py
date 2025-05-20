@@ -234,7 +234,7 @@ class ASRBase(Base):
         audio_path = self._audio_preprocessing(output_path, 1)
 
         if audio_path is None:
-            self.logger.info("The recorded audio file is not long enough, please record again.")
+            self.logger.info("The recorded audio file is not long enough or audio pre-processing failed, please record again.")
             return
 
         name = get_name()
