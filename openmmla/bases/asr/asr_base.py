@@ -188,6 +188,24 @@ class ASRBase(Base):
         self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db, store=self.store)
         self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
 
+    def _clean_up(self):
+        """Clean up runtime variables and free memory.
+
+        Resets runtime attributes and calls garbage collection to free memory.
+        """
+        self.mqtt_client.loop_stop()
+        if self.audio_stream:
+            self.audio_stream.stop()
+            self.audio_stream = None
+        self.bucket_name = None
+        self.last_speaker = None
+        self.audio_dir = None
+        self.audio_queue = None
+        self.transcription_queue = None
+        self.speaker_frames_dict = None
+        self.threads.clear()
+        gc.collect()
+
     def run(self):
         """Run the ASR base.
 
@@ -209,10 +227,11 @@ class ASRBase(Base):
                     break
                 func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
             except (Exception, KeyboardInterrupt) as e:
-                self._clean_up()
                 self.logger.warning(
                     f"During running the ASR base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+            finally:
+                self._clean_up()
 
     def _start_registration(self):
         """Start the speaker profile registration process.
@@ -234,7 +253,8 @@ class ASRBase(Base):
         audio_path = self._audio_preprocessing(output_path, 1)
 
         if audio_path is None:
-            self.logger.info("The recorded audio file is not long enough or audio pre-processing failed, please record again.")
+            self.logger.info(
+                "The recorded audio file is not long enough or audio pre-processing failed, please record again.")
             return
 
         name = get_name()
@@ -349,8 +369,6 @@ class ASRBase(Base):
             self.logger.info("All threads stopped properly.")
 
         current_bucket = self.bucket_name  # assign bucket name before cleaning up
-        self.mqtt_client.loop_stop()
-        self.audio_stream.stop()
         self._clean_up()
         if isinstance(e, RecordingError):
             self.logger.info("Restarting recognizing service.")
@@ -392,7 +410,8 @@ class ASRBase(Base):
                 first_time = False
                 frames = audio_frame.to_bytes()
                 acquire_time = audio_frame.timestamp
-                output_path = os.path.join(self.audio_dir, sub_dir, f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
+                output_path = os.path.join(self.audio_dir, sub_dir,
+                                           f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
                 if self.mode == 'record':
                     write_frame_to_wav(output_path, audio_frame)
                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
@@ -419,7 +438,7 @@ class ASRBase(Base):
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
                 record_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
-                write_bytes_to_wav(segment_audio_path, frames) # default: 16000 Hz, 16-bit, mono
+                write_bytes_to_wav(segment_audio_path, frames)  # default: 16000 Hz, 16-bit, mono
 
                 # Audio pre-processing
                 apply_gain(segment_audio_path, self.gain)
@@ -437,7 +456,8 @@ class ASRBase(Base):
 
                 if speaker == 'unknown':  # voice detected
                     normalize_decibel(segment_audio_path, rms_level=-20)
-                    name, similarity = self.audio_recognizer.recognize(segment_audio_path, update_threshold=self.update_threshold)
+                    name, similarity = self.audio_recognizer.recognize(segment_audio_path,
+                                                                       update_threshold=self.update_threshold)
                     duration = calculate_audio_duration(segment_audio_path)
 
                     if similarity > self.threshold:
@@ -514,7 +534,8 @@ class ASRBase(Base):
                             continue
 
                         normalize_decibel(save_file, rms_level=-20)
-                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file, update_threshold=self.update_threshold)
+                        temp_name, temp_similarity = self.audio_recognizer.recognize(save_file,
+                                                                                     update_threshold=self.update_threshold)
 
                         # If a better result is found, update best info and remove any old file.
                         if temp_similarity > similarity:
@@ -907,19 +928,6 @@ class ASRBase(Base):
                 clear_directory(os.path.join(self.audio_dir, subdir))
 
         clear_directory(os.path.join(self.audio_dir, 'temp'))
-
-    def _clean_up(self):
-        """Clean up runtime variables and free memory.
-
-        Resets runtime attributes and calls garbage collection to free memory.
-        """
-        self.bucket_name = None
-        self.last_speaker = None
-        self.audio_dir = None
-        self.audio_queue = None
-        self.transcription_queue = None
-        self.speaker_frames_dict = None
-        gc.collect()
 
     @staticmethod
     def warm_up_resampler(sample_rate_original: int = 44100, sample_rate_target: int = 16000):

@@ -55,69 +55,84 @@ On your devices which you want to stream data to the RTMP server, could be Raspb
  ```
 
 ### Stream to RTMP
-
-```bash
-# Check your ip address or hostname on your Mac server
-ifconfig | grep inet
-hostname
-
-# Get your video & audio device details
-# Ubuntu & Debian
-v4l2-ctl --list-devices
-arecord -l
-# macOS
-ffmpeg -f avfoundation -list_devices true -i ""
- 
-# Video Streaming
-ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i <Input_Device> \
-  -c:v libx264 -b:v 1M -preset ultrafast -tune zerolatency \
-  -maxrate 2M -bufsize 2M \
-  -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<Stream_ID>
-
-e.g.
-# Ubuntu & Debian
-ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
-  -c:v libx264 -b:v 1M -preset ultrafast -tune zerolatency \
-  -maxrate 2M -bufsize 2M \
-  -f flv rtmp://mac-01.local/stream_01
-
-# macOS
-ffmpeg -f avfoundation -framerate 30 -video_size 1280x720 -i "0:none" \
-  -c:v libx264 -preset ultrafast -tune zerolatency \
-  -maxrate 4000k -bufsize 4000k \
-  -f flv rtmp://mac-01.local/stream_01
-
-ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
-  -c:v h264_videotoolbox -b:v 2000k -preset ultrafast \
-  -f flv rtmp://mac-01.local/stream_01
-  
-# Audio Streaming
-ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:<card_number>,<device_number> \
-  -c:a aac -b:a 128k \
-  -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<Stream_ID>
-
-e.g.
-ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:3,0 \
-  -c:a aac -b:a 128k \
-  -f flv rtmp://mac-01.local/stream_01
-
-
-# Both (more laggy since two source into one port)
-ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i <Input_Device> \
-  -f alsa -ac 2 -ar 44100 -i plughw:<card_number>,<device_number> \
-  -c:v libx264 -b:v 1M \
-  -bufsize 2M -maxrate 2M \
-  -preset ultrafast -tune zerolatency \
-  -c:a aac -b:a 128k -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<Stream_ID>
-
-e.g.
-ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
-  -f alsa -ac 2 -ar 44100 -i plughw:3,0 \
-  -c:v libx264 -b:v 1M \
-  -bufsize 2M -maxrate 2M \
-  -preset ultrafast -tune zerolatency \
-  -c:a aac -b:a 128k -f flv rtmp://uber-server.local/stream_01
-```
+1. Check your IP address or hostname on your RTMP server
+   ```sh
+   # macOS
+   ifconfig | grep inet
+   hostname
+   
+   # Ubuntu
+   ip addr show
+   hostname -I
+   ```
+2. Get your video & audio device details
+   ```sh
+   # macOS
+   ffmpeg -f avfoundation -list_devices true -i ""
+     
+   # Ubuntu & Debian
+   v4l2-ctl --list-devices
+   arecord -l
+   ```
+3. Publish the stream to RTMP server
+   ```sh
+   # Video Streaming
+   ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i <Input_Device> \
+     -c:v libx264 -preset ultrafast -tune zerolatency \
+     -g 30 -keyint_min 30 -sc_threshold 0 \
+     -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
+     -b:v 1M -maxrate 2M -bufsize 2M \
+     -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<App-Name>/<Stream-Name>
+   
+   # Example on Ubuntu/Debian:
+   ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
+     -c:v libx264 -preset ultrafast -tune zerolatency \
+     -g 30 -keyint_min 30 -sc_threshold 0 \
+     -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
+     -b:v 1M -maxrate 2M -bufsize 2M \
+     -f flv rtmp://mac-01.local/ips/m
+   
+   # Example on macOS:
+   ffmpeg -f avfoundation -framerate 30 -video_size 1280x720 -i "0:none" \
+     -c:v libx264 -preset ultrafast -tune zerolatency \
+     -maxrate 4000k -bufsize 4000k \
+     -f flv rtmp://mac-01.local/ips/m
+     
+   # Or using hardware encoder (macOS with h264_videotoolbox)
+   ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
+     -c:v h264_videotoolbox -b:v 2000k -preset ultrafast \
+     -f flv rtmp://mac-01.local/ips/m
+   
+   # Audio Streaming only
+   ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:<card_number>,<device_number> \
+     -c:a aac -b:a 128k \
+     -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<App-Name>/<Stream-Name>
+     
+   e.g.
+   ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:3,0 \
+     -c:a aac -b:a 128k \
+     -f flv rtmp://mac-01.local/ips/m
+   
+   # Audio + Video Streaming
+   ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i <Input_Device> \
+     -f alsa -ac 2 -ar 44100 -i plughw:<card_number>,<device_number> \
+     -c:v libx264 -preset ultrafast -tune zerolatency \
+     -g 30 -keyint_min 30 -sc_threshold 0 \
+     -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
+     -b:v 1M -maxrate 2M -bufsize 2M \
+     -c:a aac -b:a 128k \
+     -f flv rtmp://<Mac-IP-Address or Mac-Host-Name>/<App-Name>/<Stream-Name>
+   
+   # Example on Ubuntu:
+   ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
+     -f alsa -ac 2 -ar 44100 -i plughw:2,0 \
+     -c:v libx264 -preset ultrafast -tune zerolatency \
+     -g 30 -keyint_min 30 -sc_threshold 0 \
+     -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
+     -b:v 1M -maxrate 2M -bufsize 2M \
+     -c:a aac -b:a 128k \
+     -f flv rtmp://mac-01.local/ips/f
+   ```
 
 ## Record the streams with OBS
 You can record the streams from RTMP server via the OBS on your devices by following the instructions:
@@ -139,3 +154,16 @@ You can record the streams from RTMP server via the OBS on your devices by follo
     - Adjust the sync offset for audio sources to match the video.
 
 6. Start recording
+
+## Troubleshooting
+1. Check the publishing stream is up and running, go to the `http://<rtmp-server-ip-address>/8080/stat`
+2. Check the stream is in correct format and can be read by ffmpeg and ffplay
+   ```sh
+   ffmpeg -i rtmp://<host>/<app>/<stream> -f null -
+   e.g.
+   ffmpeg -i rtmp://mac-01.local/ips/m -f null -
+   
+   ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://<host>/<app>/<stream>
+   e.g.
+   ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://mac-01.local/ips/a
+   ```

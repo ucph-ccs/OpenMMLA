@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 
@@ -18,6 +19,7 @@ from .frame import VideoFrame
 from .stream_buffer import RingBuffer
 from .stream_receiver import StreamReceiver
 
+# logger = get_logger(__name__, console_level=logging.DEBUG)
 logger = get_logger(__name__)
 
 
@@ -121,12 +123,12 @@ class VideoStream(StreamReceiver):
         video_seed = self.camera_index if self.source == 'opencv' else self.rtmp_url
         self.stream = cv2.VideoCapture(video_seed)
 
-        # Set video properties
-        self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.format))
-        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-        self.stream.set(cv2.CAP_PROP_FPS, self.fps)
-        self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        if self.source == 'opencv':
+            self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.format))
+            self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+            self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+            self.stream.set(cv2.CAP_PROP_FPS, self.fps)
+            self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 
         if not self.stream.isOpened():
             if max_retries > 0:

@@ -1,4 +1,5 @@
 import datetime
+import gc
 import json
 import logging
 import os
@@ -14,8 +15,8 @@ from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, Redi
 from openmmla.utils.input import select_or_create_bucket, get_id, flush_input
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
-from .input import get_function_base, get_mode
 from .enums import ROTATIONS
+from .input import get_function_base, get_mode
 
 
 class VFABase(Base):
@@ -88,6 +89,18 @@ class VFABase(Base):
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
 
+    def _clean_up(self):
+        self.stop_event.set()
+        self.mqtt_client.loop_stop()
+        if self.video_stream:
+            self.video_stream.stop()
+            self.video_stream = None
+        if self.graphics:
+            cv2.destroyWindow(f'VFA Base {self.base_id}, Camera {self.selected_source}')
+            cv2.waitKey(1)
+        self.threads.clear()
+        gc.collect()
+
     def run(self):
         """Run the VFA base."""
         print('\033]0;VFA Base\007')
@@ -105,6 +118,8 @@ class VFABase(Base):
                 self.logger.warning(
                     f"During running the VFA base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+            finally:
+                self._clean_up()
 
     def _start(self):
         if not self.camera_configured:
@@ -114,10 +129,12 @@ class VFABase(Base):
         self.bucket_name = select_or_create_bucket(self.influx_client)
         self._create_bucket_logger()
 
+        self._configure_video_stream()
+        self._listen_for_start_signal()
+
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
 
-        self._configure_video_stream()
         self._create_thread(self._listen_for_stop_signal)
 
         try:
@@ -267,7 +284,7 @@ class VFABase(Base):
                 print(f"{available_source_idx} : RTMP stream {url} is available.")
                 available_sources.append(url)
                 available_source_idx += 1
-                
+
         if not available_sources:
             self.logger.warning(f"No video sources found for {self.source}.")
 
@@ -295,15 +312,6 @@ class VFABase(Base):
             except ValueError:
                 self.logger.warning("Please enter a valid number or press Enter for default.")
 
-    def _clean_up(self):
-        self.stop_event.set()
-        self.video_stream.stop()
-        self.mqtt_client.loop_stop()
-        if self.graphics:
-            cv2.destroyWindow(f'VFA Base {self.base_id}, Camera {self.selected_source}')
-            cv2.waitKey(1)
-        self.threads.clear()
-
     def _process_frames(self):
         print("Processing VFA frames...")
         save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/{self.chosen_camera}_{self.base_id}')
@@ -325,7 +333,7 @@ class VFABase(Base):
             if self.camera_info.get("fisheye", False):
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                                   interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-                
+
             if self.rotate in ROTATIONS:
                 frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 

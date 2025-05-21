@@ -157,7 +157,7 @@ def get_channel_selection(device_info: dict) -> int | None:
         try:
             flush_input()
             selection = input(f"\nDevice has {device_channels} channels. Select channel option:\n"
-                              f"<channel_index> : Specify channel index (0-{device_channels-1})\n"
+                              f"<channel_index> : Specify channel index (0-{device_channels - 1})\n"
                               f"e.g: 0 -> Left channel only\n"
                               f"e.g: 1 -> Right channel only\n"
                               f"Please select your channel option: ")

@@ -77,10 +77,12 @@ class ASRSynchronizer(Synchronizer):
         collector to free resources. This is important for ensuring the system
         doesn't leak memory between synchronization sessions.
         """
+        self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}
+        self.threads.clear()
         gc.collect()
 
     def run(self):
@@ -101,6 +103,8 @@ class ASRSynchronizer(Synchronizer):
                 self.logger.warning(
                     f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+            finally:
+                self._clean_up()
 
     def _start_synchronization(self):
         """Start the synchronization process."""
@@ -233,7 +237,6 @@ class ASRSynchronizer(Synchronizer):
         else:
             self.logger.info("All threads stopped.")
 
-        self.mqtt_client.loop_stop()
         asr_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
         clear_directory(self.temp_dir)
         self._clean_up()

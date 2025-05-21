@@ -73,10 +73,12 @@ class VFASynchronizer(Synchronizer):
 
     def _clean_up(self):
         """Free memory by resetting attributes."""
+        self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}
+        self.threads.clear()
         gc.collect()
 
     def run(self):
@@ -97,6 +99,8 @@ class VFASynchronizer(Synchronizer):
                 self.logger.warning(
                     f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+            finally:
+                self._clean_up()
 
     def _start_synchronization(self):
         """Start the synchronization process."""
@@ -225,8 +229,6 @@ class VFASynchronizer(Synchronizer):
             self.vllm_queue.join(timeout=5.0)  # Wait up to 5 seconds for queue to be processed
         except Exception as e:
             self.logger.warning(f"Error while waiting for VLLM queue to be processed: {e}")
-
-        self.mqtt_client.loop_stop()
         vfa_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
         clear_directory(self.temp_dir)
         self._clean_up()

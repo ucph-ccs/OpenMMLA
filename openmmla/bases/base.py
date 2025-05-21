@@ -1,8 +1,8 @@
 import os
 import threading
+import time
 from abc import ABC, abstractmethod
 
-import time
 import yaml
 
 from openmmla.utils.client import RedisClientWrapper

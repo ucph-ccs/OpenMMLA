@@ -67,9 +67,11 @@ class IPSSynchronizer(Synchronizer):
 
     def _clean_up(self):
         """Free memory by resetting dictionaries."""
+        self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.merged_relations = None
         self.merged_tags = None
+        self.threads.clear()
         gc.collect()
 
     def run(self):
@@ -88,6 +90,8 @@ class IPSSynchronizer(Synchronizer):
                 self.logger.warning(
                     f"During running the synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+            finally:
+                self._clean_up()
 
     def _start_synchronization(self):
         """Start the synchronization process."""
@@ -143,8 +147,6 @@ class IPSSynchronizer(Synchronizer):
             self._stop_threads()
         else:
             self.logger.info("All threads stopped properly.")
-
-        self.mqtt_client.loop_stop()
         ips_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
         self._clean_up()
 

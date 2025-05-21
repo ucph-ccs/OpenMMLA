@@ -48,6 +48,7 @@ http {
         location /stat {
             rtmp_stat all;
             rtmp_stat_stylesheet stat.xsl;
+            add_header Cache-Control no-cache;
         }
 
         location /stat.xsl {

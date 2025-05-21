@@ -1,4 +1,5 @@
 import datetime
+import gc
 import json
 import logging
 import os
@@ -96,6 +97,19 @@ class IPSBase(Base):
         self.normal_stabilizer = NormalVectorStabilizer(smoothing=0.7)
         self.relation_tracker = TagRelationTracker(min_consistent_frames=2)
 
+    def _clean_up(self):
+        """Clean up resources."""
+        self.stop_event.set()
+        self.mqtt_client.loop_stop()
+        if self.video_stream:
+            self.video_stream.stop()
+            self.video_stream = None
+        if self.graphics:
+            cv2.destroyWindow(f'AprilTags Detection from camera {self.base_id}')
+            cv2.waitKey(1)
+        self.threads.clear()
+        gc.collect()
+
     def run(self):
         """Run the IPS base."""
         print('\033]0;IPS Base\007')
@@ -112,6 +126,8 @@ class IPSBase(Base):
                 self.logger.warning(
                     f"During running the IPS base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+            finally:
+                self._clean_up()
 
     def _start_detection(self):
         """Start AprilTag detection"""
@@ -125,7 +141,8 @@ class IPSBase(Base):
 
         # configure video stream and start it
         self._configure_video_stream()
-        
+        self._listen_for_start_signal()
+
         # reinitialize mqtt client
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
@@ -161,16 +178,6 @@ class IPSBase(Base):
         else:
             self.logger.info("All threads stopped properly.")
         self._clean_up()
-
-    def _clean_up(self):
-        """Clean up resources."""
-        self.stop_event.set()
-        self.video_stream.stop()
-        self.mqtt_client.loop_stop()
-        if self.graphics:
-            cv2.destroyWindow(f'AprilTags Detection from camera {self.base_id}')
-            cv2.waitKey(1)
-        self.threads.clear()
 
     def _set_camera(self):
         """Set up video source and base id."""
@@ -272,7 +279,7 @@ class IPSBase(Base):
 
         if not available_sources:
             self.logger.warning(f"No video sources found for {self.source}.")
-            
+
         return available_sources
 
     def _choose_video_source(self, available_sources):

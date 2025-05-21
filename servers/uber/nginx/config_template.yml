@@ -119,10 +119,6 @@ upstreams:
 
 # RTMP application names for video streaming
 # These are the application names that will be used in RTMP URLs
-# Format: rtmp://<nginx-host>/<stream-app-name>
+# Format: rtmp://<nginx-host>/<stream-app-name>/<stream-name>
 rtmp_apps:
-  - <stream-01>  # e.g., replace it with your actual name like camera_01, microphone_01, stream_01, etc.
-  - <stream-02>
-  - <stream-03>
-  - <stream-04>
-  - <stream-05>
+  - <stream-app-name>  # e.g., replace it with your actual stream app name, e.g., ips, vfa
