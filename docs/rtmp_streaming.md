@@ -93,14 +93,14 @@ On your devices which you want to stream data to the RTMP server, could be Raspb
      -f flv rtmp://mac-01.local/ips/m
    
    # Example on macOS:
-   ffmpeg -f avfoundation -framerate 30 -video_size 1280x720 -i "0:none" \
+   ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
      -c:v libx264 -preset ultrafast -tune zerolatency \
-     -maxrate 4000k -bufsize 4000k \
      -f flv rtmp://mac-01.local/ips/m
      
    # Or using hardware encoder (macOS with h264_videotoolbox)
    ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
-     -c:v h264_videotoolbox -b:v 2000k -preset ultrafast \
+     -c:v h264_videotoolbox -preset ultrafast -tune zerolatency \
+     -b:v 2M \
      -f flv rtmp://mac-01.local/ips/m
    
    # Audio Streaming only
@@ -165,5 +165,5 @@ You can record the streams from RTMP server via the OBS on your devices by follo
    
    ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://<host>/<app>/<stream>
    e.g.
-   ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://mac-01.local/ips/a
+   ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://mac-01.local/ips/m
    ```
