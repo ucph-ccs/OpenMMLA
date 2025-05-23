@@ -37,7 +37,7 @@ class IPSSynchronizer(Synchronizer):
         self.merged_tags = None
         self.merged_relations = None
         self.bucket_name = None
-        self.time_bucket = None  # time_bucket represents the start time of a time window
+        self.time_bucket_key = None  # time_bucket_key represents the start time of a time bucket
         self.alive = False
 
         # Threading attributes
@@ -109,7 +109,7 @@ class IPSSynchronizer(Synchronizer):
 
         # reinitialize mqtt client with new topics and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/ips')
-        self.time_bucket = time.time()  # Initialize time_bucket with current time
+        self.time_bucket_key = time.time()  # Initialize time_bucket_key with current time
         self.mqtt_client.loop_start()
 
         # create threads
@@ -131,6 +131,7 @@ class IPSSynchronizer(Synchronizer):
             return None
 
     def _create_bucket_logger(self):
+        """Create logger for the bucket."""
         self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
         self.logger = get_logger(f'ips-synchronizer-{self.bucket_name}',
@@ -170,9 +171,9 @@ class IPSSynchronizer(Synchronizer):
                 self.alive = True
                 base_result = json.loads(msg.payload)
                 base_id = base_result["base_id"]
-                acquired_time = float(base_result["acquired_time"])
+                base_result_time = float(base_result["acquired_time"])
 
-                if self.time_bucket < acquired_time < self.time_bucket + self.window_size:
+                if self.time_bucket_key < base_result_time < self.time_bucket_key + self.window_size:
                     if base_id.isnumeric():  # results from nicla vision's onboard apriltag detection
                         self.merged_relations.setdefault(base_id, []).extend(base_result['detected_tags'])
                     else:  # msg from base camera
@@ -219,8 +220,8 @@ class IPSSynchronizer(Synchronizer):
                     translation_data = {
                         "measurement": "badge translations",
                         "fields": {
-                            "time_bucket": self.time_bucket,
-                            "window_size": self.window_size,
+                            "window_start_time": self.time_bucket_key,
+                            "window_end_time": self.time_bucket_key + self.window_size,
                             "translations": json.dumps(translations_dict),
                         }
                     }
@@ -228,8 +229,8 @@ class IPSSynchronizer(Synchronizer):
                     rotation_data = {
                         "measurement": "badge rotations",
                         "fields": {
-                            "time_bucket": self.time_bucket,
-                            "window_size": self.window_size,
+                            "window_start_time": self.time_bucket_key,
+                            "window_end_time": self.time_bucket_key + self.window_size,
                             "rotations": json.dumps(rotations_dict),
                         }
                     }
@@ -237,8 +238,8 @@ class IPSSynchronizer(Synchronizer):
                     relation_data = {
                         "measurement": "badge relations",
                         "fields": {
-                            "time_bucket": self.time_bucket,
-                            "window_size": self.window_size,
+                            "window_start_time": self.time_bucket_key,
+                            "window_end_time": self.time_bucket_key + self.window_size,
                             "graph": json.dumps(self.merged_relations),
                         }
                     }
@@ -255,7 +256,7 @@ class IPSSynchronizer(Synchronizer):
                 self.merged_relations.clear()
                 self.merged_tags.clear()
                 self.alive = False
-                self.time_bucket = time.time()  # Update time_bucket with current time
+                self.time_bucket_key = time.time()  # Update time_bucket_key with current time
 
             # Schedule the next upload outside the lock to avoid potential deadlocks
             now = time.time()

@@ -16,12 +16,12 @@ def generate_query(bucket_name, measurement):
 
 
 def fetch_and_process_data(bucket_name, measurement, influx_client):
-    """Queries InfluxDB for specified data, converts it to JSON, and sorts it based on 'segment_start_time'."""
+    """Queries InfluxDB for specified data, converts it to JSON, and sorts it based on 'window_start_time'."""
     query = generate_query(bucket_name, measurement)
     tables = influx_client.query(query)
     json_str = tables.to_json(indent=5)
     data = json.loads(json_str)
-    data.sort(key=lambda x: x['time_bucket'])
+    data.sort(key=lambda x: x['window_start_time'])
     return json.dumps(data, ensure_ascii=False, indent=5)
 
 
@@ -45,20 +45,20 @@ def fetch_latest_entry(bucket_name, measurement, influx_client):
     if measurement == "badge relations":
         graph_dict_str = data[0]["graph"]
         graph_dict = json.loads(graph_dict_str)
-        time_bucket = data[0]["time_bucket"]
-        return graph_dict, time_bucket
+        window_start_time = data[0]["window_start_time"]
+        return graph_dict, window_start_time
     else:
         return data[0]
 
 
-def get_node_positions(bucket_name, influx_client, time_bucket, dimension='2d'):
+def get_node_positions(bucket_name, influx_client, timestamp, dimension='2d'):
     """Retrieve segments' badge positions from InfluxDB and return as a dictionary of badge_id, position tuples."""
-    start_time = int(time_bucket) - 20
+    start_time = int(timestamp) - 20
     query = f"""from(bucket: "{bucket_name}")
                |> range(start: {start_time})
                |> filter(fn: (r) => r._measurement == "badge translations")
                |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-               |> filter(fn: (r) => r.time_bucket == {time_bucket})
+               |> filter(fn: (r) => r.window_start_time == {timestamp})
               """
     tables = influx_client.query(query)
     data = json.loads(tables.to_json(indent=5))

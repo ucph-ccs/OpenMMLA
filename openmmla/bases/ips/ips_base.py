@@ -282,7 +282,7 @@ class IPSBase(Base):
 
         return available_sources
 
-    def _choose_video_source(self, available_sources):
+    def _choose_video_source(self, available_sources: list[str] | None) -> str | None:
         """Choose a video source (camera index or RTMP URL)."""
         if not available_sources:
             return None

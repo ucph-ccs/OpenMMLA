@@ -1,6 +1,7 @@
 import json
 
 import cv2
+import gc
 import numpy as np
 from pupil_apriltags import Detector
 
@@ -60,6 +61,14 @@ class CameraTagDetector(Base):
         self.detector = Detector(families=self.families, nthreads=4)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
 
+    def _clean_up(self):
+        """Clean up resources."""
+        self.mqtt_client.loop_stop()
+        if self.video_stream:
+            self.video_stream.stop()
+            self.video_stream = None
+        gc.collect()
+
     def run(self):
         """Run the camera tag detector."""
         print('\033]0;Camera Detector\007')
@@ -76,6 +85,8 @@ class CameraTagDetector(Base):
                 self.logger.warning(
                     f"During running the tag detector, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+            finally:
+                self._clean_up()
 
     def _start_detection(self):
         """Start AprilTag detection"""
@@ -95,8 +106,6 @@ class CameraTagDetector(Base):
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("%s, capture interrupted.", e, exc_info=False)
         finally:
-            self.video_stream.stop()
-            self.mqtt_client.loop_stop()
             cv2.destroyAllWindows()
             cv2.waitKey(1)
 

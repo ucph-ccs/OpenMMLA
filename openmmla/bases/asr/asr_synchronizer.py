@@ -39,8 +39,8 @@ class ASRSynchronizer(Synchronizer):
         self.bucket_name = None  # Session bucket name
         self.number_of_bases = None  # Number of group members
         self.latest_time = None  # Record start time of the most recent received frame
-        self.time_bucket_buffer = {}  # Buffer for {time_bucket: {base_id: {<speakers>, <similarities>, <durations>,
-        # <record_start_times>}}} time_bucket represents the start time of a time window
+        self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<speakers>, <similarities>, <durations>,
+        # <segment_start_times>}}} time_bucket_key represents the start time of a time window
 
         self.base_type = get_base_type(self.config)
 
@@ -163,18 +163,18 @@ class ASRSynchronizer(Synchronizer):
             message: MQTT message instance containing the ASR base result payload
         """
         base_result = json.loads(message.payload.decode('utf-8'))
-        acquired_time = float(base_result['record_start_time'])
+        base_result_time = float(base_result['segment_start_time'])
 
         # Initialize for the first received message
         if not self.latest_time:
-            self.latest_time = acquired_time
+            self.latest_time = base_result_time
             self.time_bucket_buffer[self.latest_time] = {}
             self._update_time_bucket_buffer(self.latest_time, base_result)
             return
 
         # Check and clean up expired frames based on buffer expiry time
         expired_times = TimeBucketSynchronizer.get_expired_buckets(
-            acquired_time,
+            base_result_time,
             self.time_bucket_buffer,
             self.buffer_expiry_time
         )
@@ -182,7 +182,7 @@ class ASRSynchronizer(Synchronizer):
         for t in expired_times:
             frame_set = self.time_bucket_buffer[t]
             merged_result = self._merge_base_results(frame_set)
-            merged_result['time_bucket'] = t  # t is the time_bucket (start time of the bucket)
+            merged_result['window_start_time'] = t  # t is the start time of the time bucket
             self.logger.debug(
                 f"Expired frame set {t} with result {self.time_bucket_buffer[t]}")
             self._upload_merged_result(merged_result)
@@ -190,7 +190,7 @@ class ASRSynchronizer(Synchronizer):
 
         # Find closest time bucket for the current message
         closest_time = TimeBucketSynchronizer.find_closest_time_bucket(
-            acquired_time,
+            base_result_time,
             self.time_bucket_buffer,
             base_result['base_id'],
             self.time_range,
@@ -199,28 +199,28 @@ class ASRSynchronizer(Synchronizer):
 
         # Handle the current message
         if closest_time is None:
-            if acquired_time > self.latest_time:
+            if base_result_time > self.latest_time:
                 # Create new time bucket for new message
-                self.latest_time = acquired_time
+                self.latest_time = base_result_time
                 self.time_bucket_buffer[self.latest_time] = {}
                 self._update_time_bucket_buffer(self.latest_time, base_result)
             else:  # outdated message
                 self.logger.debug(
-                    f"{base_result['base_id']} couldn't find a time bucket and is outdated, the acquired time is {acquired_time}")
+                    f"{base_result['base_id']} couldn't find a time bucket and is outdated, the base result time is {base_result_time}")
                 return
         else:
             # Add to existing time bucket
             self._update_time_bucket_buffer(closest_time, base_result)
 
         # Process complete time buckets (all bases have reported)
-        time_bucket = closest_time if closest_time else self.latest_time
+        time_bucket_key = closest_time if closest_time else self.latest_time
         self.logger.debug(
-            f"Time bucket {time_bucket} is selected for {base_result['base_id']} acquired time is {acquired_time}")
-        if len(self.time_bucket_buffer[time_bucket]) == self.number_of_bases:
-            merged_result = self._merge_base_results(self.time_bucket_buffer[time_bucket])
-            merged_result['time_bucket'] = time_bucket
+            f"Time bucket {time_bucket_key} is selected for {base_result['base_id']} base result time is {base_result_time}")
+        if len(self.time_bucket_buffer[time_bucket_key]) == self.number_of_bases:
+            merged_result = self._merge_base_results(self.time_bucket_buffer[time_bucket_key])
+            merged_result['window_start_time'] = time_bucket_key
             self._upload_merged_result(merged_result)
-            del self.time_bucket_buffer[time_bucket]
+            del self.time_bucket_buffer[time_bucket_key]
 
     def _synchronization_handler(self, e: Exception | KeyboardInterrupt | None):
         """Handle exceptions during synchronization and perform cleanup.
@@ -254,7 +254,7 @@ class ASRSynchronizer(Synchronizer):
             self.redis_client.publish(f"{self.bucket_name}/asr/control", 'START')
             time.sleep(self.time_range)
 
-    def _update_time_bucket_buffer(self, time_bucket: float, latest_base_result: dict):
+    def _update_time_bucket_buffer(self, time_bucket_key: float, latest_base_result: dict):
         """Update the time bucket buffer with the latest base recognition result.
 
         Stores or updates recognition results from a specific base in the appropriate time bucket.
@@ -262,25 +262,25 @@ class ASRSynchronizer(Synchronizer):
         with the newer result.
 
         Args:
-            time_bucket: Timestamp representing the start time of the time bucket
+            time_bucket_key: timestamp representing the start time of the time bucket
             latest_base_result: Recognition result dictionary from a single ASR base, containing:
-                               - base_id: Identifier of the source base
+                               - base_id: identifier of the source base
                                - speakers: JSON string of recognized speaker names
                                - similarities: JSON string of similarity scores
                                - durations: JSON string of audio durations
-                               - record_start_time: Timestamp when audio was recorded
+                               - segment_start_time: start time of the recorded segment
         """
         base_id = latest_base_result['base_id']
-        if base_id in self.time_bucket_buffer[time_bucket]:
+        if base_id in self.time_bucket_buffer[time_bucket_key]:
             self.logger.debug(
-                f"Overwrite results: {self.time_bucket_buffer[time_bucket][base_id]}")
+                f"Overwrite results: {self.time_bucket_buffer[time_bucket_key][base_id]}")
 
         # Store parsed (decoded from JSON) values in the buffer
-        self.time_bucket_buffer[time_bucket][base_id] = {
+        self.time_bucket_buffer[time_bucket_key][base_id] = {
             'speakers': json.loads(latest_base_result['speakers']),
             'similarities': json.loads(latest_base_result['similarities']),
             'durations': json.loads(latest_base_result['durations']),
-            'record_start_time': latest_base_result['record_start_time'],
+            'segment_start_time': latest_base_result['segment_start_time'],
         }
 
     def _merge_base_results(self, frame_results: dict) -> dict:
@@ -293,21 +293,21 @@ class ASRSynchronizer(Synchronizer):
         Args:
             frame_results: Dictionary of base results for one time bucket.
                            Format: {base_id: {'speakers': [...], 'similarities': [...], 
-                                   'durations': [...], 'record_start_time': float}}
+                                   'durations': [...], 'segment_start_time': float}}
 
         Returns:
             Dictionary with merged results containing:
             - speakers: List of recognized speaker names
             - similarities: List of corresponding similarity scores
             - durations: List of corresponding audio durations
-            - record_start_times: List of corresponding recording start times
+            - segment_start_times: List of corresponding segment start times
         """
-        speakers, similarities, durations, record_start_times = [], [], [], []
+        speakers, similarities, durations, segment_start_times = [], [], [], []
 
         if self.dominant:
             # Dominant speaker mode: only select the single most confident recognition
             best_result, i = self.find_best_base_result(frame_results)
-            record_start_times.append(best_result['record_start_time'])
+            segment_start_times.append(best_result['segment_start_time'])
             speakers.append(best_result['speakers'][i])
             similarities.append(best_result['similarities'][i])
             durations.append(best_result['durations'][i])
@@ -317,7 +317,7 @@ class ASRSynchronizer(Synchronizer):
                 # Append real speakers (exclude unknown and silent segments)
                 for i, speaker in enumerate(res['speakers']):
                     if speaker not in ['unknown', 'silent']:
-                        record_start_times.append(res['record_start_time'])
+                        segment_start_times.append(res['segment_start_time'])
                         speakers.append(res['speakers'][i])
                         similarities.append(res['similarities'][i])
                         durations.append(res['durations'][i])
@@ -325,7 +325,7 @@ class ASRSynchronizer(Synchronizer):
             # Fallback to best result if no valid speakers were found
             if not speakers:
                 best_result, i = self.find_best_base_result(frame_results)
-                record_start_times.append(best_result['record_start_time'])
+                segment_start_times.append(best_result['segment_start_time'])
                 speakers.append(best_result['speakers'][i])
                 similarities.append(best_result['similarities'][i])
                 durations.append(best_result['durations'][i])
@@ -333,8 +333,8 @@ class ASRSynchronizer(Synchronizer):
         return {
             'speakers': speakers,
             'similarities': similarities,
-            'record_start_times': record_start_times,
-            'durations': durations
+            'durations': durations,
+            'segment_start_times': segment_start_times,
         }
 
     def _upload_merged_result(self, merged_result: dict):
@@ -346,24 +346,24 @@ class ASRSynchronizer(Synchronizer):
         
         Args:
             merged_result: Dictionary containing consolidated speaker recognition data:
-                          - time_bucket: Start time of the time bucket
+                          - window_start_time: Start time of the aggregated time bucket
                           - speakers: List of recognized speaker names
                           - similarities: List of corresponding similarity scores
                           - durations: List of corresponding audio durations
-                          - record_start_times: List of base recording start times
+                          - segment_start_times: List of base recording start times
         """
         recognition_data = {
             "measurement": "speaker recognition",
             "fields": {
-                "time_bucket": float(merged_result['time_bucket']),
-                "window_size": float(self.window_size),
+                "window_start_time": float(merged_result['window_start_time']),
+                "window_end_time": float(merged_result['window_start_time']) + float(self.window_size),
                 "speakers": json.dumps(merged_result['speakers']),
                 "similarities": json.dumps(merged_result['similarities']),
                 "durations": json.dumps(merged_result['durations']),
-                "record_start_times": json.dumps(merged_result['record_start_times']),
+                "segment_start_times": json.dumps(merged_result['segment_start_times']),
             },
         }
-        print(f"{BLUE}[Speaker Recognition]{ENDC}{recognition_data['fields']['time_bucket']}: "
+        print(f"{BLUE}[Speaker Recognition]{ENDC}{recognition_data['fields']['window_start_time']}: "
               f"{BLUE}{recognition_data['fields']['speakers']}{ENDC}, "
               f"similarity: {recognition_data['fields']['similarities']}")
         self.influx_client.write(self.bucket_name, recognition_data)
@@ -379,7 +379,7 @@ class ASRSynchronizer(Synchronizer):
         Args:
             segment_results: Dictionary of base results for one time segment.
                             Format: {base_id: {'speakers': [...], 'similarities': [...], 
-                                    'durations': [...], 'record_start_time': float}}
+                                    'durations': [...], 'segment_start_time': float}}
 
         Returns:
             Tuple containing:

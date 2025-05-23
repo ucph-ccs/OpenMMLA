@@ -61,7 +61,7 @@ def plot_speaker_diarization_interactive(json_file_path, save_dir):
     with open(json_file_path, 'r') as f:
         json_dicts = json.load(f)
     l = len(json_dicts)
-    first_time_bucket = datetime.fromtimestamp(int(json_dicts[0]['time_bucket']))  # First time bucket
+    first_time = datetime.fromtimestamp(int(json_dicts[0]['window_start_time'])) 
 
     x_bar = []
     count = 0
@@ -69,11 +69,11 @@ def plot_speaker_diarization_interactive(json_file_path, save_dir):
         speaker_list = json.loads(json_dicts[i]['speakers'])
         probability_list = json.loads(json_dicts[i]['similarities'])
         duration_list = json.loads(json_dicts[i]['durations'])
-        current_time_bucket = datetime.fromtimestamp(json_dicts[i]['time_bucket'])  # Current time bucket
+        current_time = datetime.fromtimestamp(json_dicts[i]['window_start_time']) 
 
         # Increase the timeline axis values
         count += 1
-        period = current_time_bucket - first_time_bucket
+        period = current_time - first_time
         # Convert timedelta to hours, minutes, and seconds.
         hours, remainder = divmod(period.total_seconds(), 3600)
         minutes, seconds = divmod(remainder, 60)
@@ -308,7 +308,7 @@ def plot_speaking_interaction_network(json_file_path, save_dir):
 def calculate_speaker_interactions(json_file_path):
     """Calculates the frequency of interactions between speakers in a conversation."""
     json_data = read_json_file(json_file_path)
-    df = convert_json_to_dataframe(json_data, ['speakers', 'time_bucket'])
+    df = convert_json_to_dataframe(json_data, ['speakers', 'window_start_time'])
     normalize_factor = len(df)  # Normalized by number of segments
     interaction_counts = defaultdict(lambda: defaultdict(float))
 

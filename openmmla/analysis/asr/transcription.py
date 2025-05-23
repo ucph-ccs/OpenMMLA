@@ -19,12 +19,12 @@ def convert_transcription_json_to_txt(json_file_path):
         if not data:
             return ""
 
-        first_timestamp = data[0]["chunk_start_time"]
+        first_timestamp = data[0]["window_start_time"]
         formatted_text = ""
         for entry in data:
             speaker = entry["speaker"].capitalize()
-            start_time = unix_to_hms(entry["chunk_start_time"], first_timestamp)
-            end_time = unix_to_hms(entry["chunk_end_time"], first_timestamp)
+            start_time = unix_to_hms(entry["window_start_time"], first_timestamp)
+            end_time = unix_to_hms(entry["window_end_time"], first_timestamp)
             text = entry.get("text")
             text = text.strip() if text is not None else ""
             formatted_text += f"{speaker}  {start_time}  {end_time}\n{text}\n\n"

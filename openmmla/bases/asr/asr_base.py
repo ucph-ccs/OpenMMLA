@@ -196,7 +196,6 @@ class ASRBase(Base):
         self.mqtt_client.loop_stop()
         if self.audio_stream:
             self.audio_stream.stop()
-            self.audio_stream = None
         self.bucket_name = None
         self.last_speaker = None
         self.audio_dir = None
@@ -242,8 +241,9 @@ class ASRBase(Base):
         """
         print("------------------------------------------------")
         output_path = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_register.wav')
+        self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
         self.recording_prompt(self.register_duration)
-
+        
         self.audio_stream.start()
         audio_frame = self.audio_stream.read(duration=self.register_duration, latest=True)
         self.audio_stream.stop()
@@ -326,6 +326,7 @@ class ASRBase(Base):
             self._recognition_handler(exception_occurred)
 
     def _create_bucket_logger(self):
+        """Create a logger for a bucket."""
         self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
         self.logger = get_logger(f'asr-base-{self.bucket_name}',
@@ -402,6 +403,7 @@ class ASRBase(Base):
         """
         first_time = True
         sub_dir = 'records' if self.mode == 'record' else 'temp'
+        self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
         self.audio_stream.start()
 
         while not self.stop_event.is_set():
@@ -409,9 +411,9 @@ class ASRBase(Base):
                 audio_frame = self.audio_stream.read(duration=self.recognize_duration, latest=first_time)
                 first_time = False
                 frames = audio_frame.to_bytes()
-                acquire_time = audio_frame.timestamp
+                acquired_time = audio_frame.timestamp
                 output_path = os.path.join(self.audio_dir, sub_dir,
-                                           f'{self.base_type}_{self.id}_record_{acquire_time:.4f}.wav')
+                                           f'{self.base_type}_{self.id}_record_{acquired_time:.4f}.wav')
                 if self.mode == 'record':
                     write_frame_to_wav(output_path, audio_frame)
                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
@@ -436,7 +438,7 @@ class ASRBase(Base):
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
-                record_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
+                segment_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
                 write_bytes_to_wav(segment_audio_path, frames)  # default: 16000 Hz, 16-bit, mono
 
@@ -471,13 +473,13 @@ class ASRBase(Base):
                         ratio = c1 / (c1 + c2)
                         similarity = self.threshold * ratio
 
-                self._assemble_chunk_with_hsr(speaker, record_start_time, frames)
-                self._publish_recognition(record_start_time, recognize_start_time, [speaker],
+                self._assemble_chunk_with_hsr(speaker, segment_start_time, frames)
+                self._publish_recognition(segment_start_time, recognize_start_time, [speaker],
                                           [np.round(np.float64(similarity), 4)], [duration])
 
                 if self.store:
                     shutil.move(segment_audio_path,
-                                os.path.join(self.audio_dir, 'segments', f'{speaker}_{record_start_time}.wav'))
+                                os.path.join(self.audio_dir, 'segments', f'{speaker}_{segment_start_time}.wav'))
                 else:
                     os.remove(segment_audio_path)
             except queue.Empty:
@@ -503,7 +505,7 @@ class ASRBase(Base):
         while not self.stop_event.is_set():
             try:
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
-                record_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
+                segment_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
                 write_bytes_to_wav(segment_audio_path, frames)
 
@@ -560,16 +562,16 @@ class ASRBase(Base):
                     speaker = 'silent'
 
                 resampled_segment_bytes = read_bytes_from_wav(segment_audio_path)
-                self._assemble_chunk_with_hsr(speaker, record_start_time, resampled_segment_bytes, best_separate_frames)
-                self._publish_recognition(record_start_time, recognize_start_time, [speaker],
+                self._assemble_chunk_with_hsr(speaker, segment_start_time, resampled_segment_bytes, best_separate_frames)
+                self._publish_recognition(segment_start_time, recognize_start_time, [speaker],
                                           [np.round(np.float64(similarity), 4)], [duration])
 
                 if self.store:
                     if best_separate_path:
                         shutil.move(best_separate_path, os.path.join(self.audio_dir, 'separations',
-                                                                     f'{speaker}_{record_start_time}_spk.wav'))
+                                                                     f'{speaker}_{segment_start_time}_spk.wav'))
                     shutil.move(segment_audio_path,
-                                os.path.join(self.audio_dir, 'segments', f'{speaker}_{record_start_time}.wav'))
+                                os.path.join(self.audio_dir, 'segments', f'{speaker}_{segment_start_time}.wav'))
                 else:
                     if best_separate_path:
                         os.remove(best_separate_path)
@@ -628,7 +630,7 @@ class ASRBase(Base):
             except Exception as e:
                 raise TranscribingError(f'TranscribingError occurred when transcribing: {e}') from e
 
-    def _assemble_chunk_with_hsr(self, speaker: str, record_start_time: float, origin_frames: bytes,
+    def _assemble_chunk_with_hsr(self, speaker: str, segment_start_time: float, origin_frames: bytes,
                                  separate_frames: bytes | None = None):
         """Assemble and process audio chunks with half-scaled recognition (HSR) at speaker boundaries.
 
@@ -638,16 +640,16 @@ class ASRBase(Base):
         to the transcription queue if applicable.
 
         Args:
-            speaker: The recognized speaker of the current segment.
-            record_start_time: The start time of the current segment.
-            origin_frames: The original audio frames of the current segment.
-            separate_frames: Optional; speech separated frames from the current segment.
+            speaker: Recognized speaker of the current segment.
+            segment_start_time: Start time of the current segment.
+            origin_frames: Original audio frames of the current segment.
+            separate_frames (Optional): Speech separated frames from the current segment.
         """
         frames = separate_frames if separate_frames else origin_frames
         fr = 8000 if self.sp else 16000
 
         if not self.last_speaker:
-            self.speaker_frames_dict[speaker] = (record_start_time, frames)
+            self.speaker_frames_dict[speaker] = (segment_start_time, frames)
         else:
             if speaker == self.last_speaker:
                 chunk_start_time, last_speaker_frames = self.speaker_frames_dict[speaker]
@@ -655,7 +657,7 @@ class ASRBase(Base):
                 self.speaker_frames_dict[speaker] = (chunk_start_time, last_speaker_frames)
             else:
                 chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(self.last_speaker)
-                chunk_end_time = record_start_time
+                chunk_end_time = segment_start_time
 
                 # Perform half-scaled recognition on speaker turn border if hsr is enabled
                 if chunk_frames and self.hsr:
@@ -684,9 +686,9 @@ class ASRBase(Base):
                     else:
                         right_speaker = 'silent'
 
-                    chunk_frames, frames, record_start_time, chunk_end_time = self._update_chunk_list(
+                    chunk_frames, frames, segment_start_time, chunk_end_time = self._update_chunk_list(
                         left_speaker, right_speaker, self.last_speaker, speaker, chunk_frames, frames,
-                        record_start_time)
+                        segment_start_time)
 
                     os.remove(left_temp_path)
                     os.remove(right_temp_path)
@@ -703,51 +705,51 @@ class ASRBase(Base):
                         if self.last_speaker != 'silent':
                             normalize_decibel(chunk_audio_path, rms_level=-20)
 
-                self.speaker_frames_dict[speaker] = (record_start_time, frames)
+                self.speaker_frames_dict[speaker] = (segment_start_time, frames)
 
         self.last_speaker = speaker
 
     def _update_chunk_list(self, left_speaker: str, right_speaker: str, last_speaker: str, current_speaker: str,
-                           chunk_frames: bytes, frames: bytes, record_start_time: float) -> tuple:
+                           chunk_frames: bytes, frames: bytes, segment_start_time: float) -> tuple:
         """Update the chunk list based on recognition results at a speaker turn boundary.
 
         Adjust the audio chunks based on recognition outcomes from different segments,
         handling various cases such as extending the chunk to include additional audio.
 
         Args:
-            left_speaker: Recognized speaker from the left half of the segment.
-            right_speaker: Recognized speaker from the right half of the segment.
-            last_speaker: Recognized speaker from the previous segment.
-            current_speaker: Recognized speaker from the current segment.
-            chunk_frames: Audio frames of the current chunk associated with the last speaker.
-            frames: Audio frames of the current segment.
-            record_start_time: Start time of the current audio segment.
+            left_speaker: recognized speaker from the left half of the segment.
+            right_speaker: recognized speaker from the right half of the segment.
+            last_speaker: recognized speaker from the previous segment.
+            current_speaker: recognized speaker from the current segment.
+            chunk_frames: audio frames (bytes) of the current chunk associated with the last speaker.
+            frames: audio frames (bytes) of the current segment.
+            segment_start_time: start time of the current segment.
 
         Returns:
-            tuple: Updated chunk_frames, remaining frames, new record_start_time, and chunk_end_time.
+            A tuple containing the updated chunk_frames, remaining frames, updated segment_start_time, and chunk_end_time.
         """
         num_frames = int(len(frames) / 2)
 
         if left_speaker == right_speaker and left_speaker == last_speaker:  # Case AAAB: Extend the left chunk
             chunk_frames = chunk_frames + frames[:num_frames]
             frames = frames[num_frames:]
-            record_start_time = record_start_time + self.recognize_duration / 2
-            chunk_end_time = record_start_time
+            segment_start_time = segment_start_time + self.recognize_duration / 2
+            chunk_end_time = segment_start_time
         elif left_speaker == right_speaker and right_speaker == current_speaker:  # Case ABBB: Extend the right chunk
             frames = chunk_frames[-num_frames:] + frames
             chunk_frames = chunk_frames[:-num_frames]
-            record_start_time = record_start_time - self.recognize_duration / 2
-            chunk_end_time = record_start_time
+            segment_start_time = segment_start_time - self.recognize_duration / 2
+            chunk_end_time = segment_start_time
         else:  # Other cases: AABB, A_BB, AA_B, A__B (excluding ABAB, AB_B, A_AB)
-            chunk_end_time = record_start_time
+            chunk_end_time = segment_start_time
             if left_speaker != last_speaker:
                 chunk_frames = chunk_frames[:-num_frames]
-                chunk_end_time = record_start_time - self.recognize_duration / 2
+                chunk_end_time = segment_start_time - self.recognize_duration / 2
             if right_speaker != current_speaker:
                 frames = frames[num_frames:]
-                record_start_time = record_start_time + self.recognize_duration / 2
+                segment_start_time = segment_start_time + self.recognize_duration / 2
 
-        return chunk_frames, frames, record_start_time, chunk_end_time
+        return chunk_frames, frames, segment_start_time, chunk_end_time
 
     def _enqueue_transcription(self, frames: bytes, speaker: str, chunk_start_time: float, chunk_end_time: float):
         """Add an audio chunk to the transcription queue.
@@ -755,10 +757,10 @@ class ASRBase(Base):
         If transcription is enabled (self.tr), enqueues the audio frames along with speaker and timing details.
 
         Args:
-            frames: Audio frames to be transcribed.
-            speaker: Recognized speaker for the audio chunk.
-            chunk_start_time: Start time of the audio chunk.
-            chunk_end_time: End time of the audio chunk.
+            frames: audio frames (bytes) to be transcribed.
+            speaker: recognized speaker for the audio chunk.
+            chunk_start_time: start time of the audio chunk.
+            chunk_end_time: end time of the audio chunk.
         """
         if self.tr:
             self.transcription_queue.put((frames, speaker, chunk_start_time, chunk_end_time))
@@ -771,8 +773,8 @@ class ASRBase(Base):
         to maintain context in multi-device setups.
 
         Args:
-            frames: Raw audio byte data to be transcribed.
-            frame_rate: Sample rate of the audio frames in Hz (typically 8000 or 16000).
+            frames: audio frames (bytes) to be transcribed.
+            frame_rate: sample rate of the audio frames in Hz (typically 8000 or 16000).
 
         Returns:
             The transcribed text as a string. Empty string if transcription failed.
@@ -789,26 +791,25 @@ class ASRBase(Base):
         in the console for real-time monitoring.
 
         Args:
-            speaker: Identified speaker for the transcribed chunk.
-            text: Transcribed text content from the audio chunk.
-            chunk_start_time: Start timestamp of the audio chunk.
-            chunk_end_time: End timestamp of the audio chunk.
+            speaker: identified speaker for the transcribed chunk.
+            text: transcribed text content from the audio chunk.
+            chunk_start_time: start timestamp of the audio chunk.
+            chunk_end_time: end timestamp of the audio chunk.
         """
         transcription_record = {
             "measurement": "speaker transcription",
             "fields": {
-                "time_bucket": chunk_start_time,
+                "window_start_time": chunk_start_time,
+                "window_end_time": chunk_end_time,
                 "text": text,
                 "speaker": speaker,
-                "chunk_start_time": chunk_start_time,
-                "chunk_end_time": chunk_end_time,
             },
         }
-        print(f"{GREEN}[Speaker Transcription]{ENDC}{transcription_record['fields']['time_bucket']}: "
+        print(f"{GREEN}[Speaker Transcription]{ENDC}{transcription_record['fields']['window_start_time']}: "
               f"{GREEN}{speaker} : {text}{ENDC}")
         self.influx_client.write(self.bucket_name, record=transcription_record)
 
-    def _publish_recognition(self, record_start_time: float, recognize_start_time: float, speakers: list[str],
+    def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],
                              similarities: list[float], durations: list[float]):
         """Log and publish speaker recognition results via MQTT.
 
@@ -816,40 +817,40 @@ class ASRBase(Base):
         The record includes speaker identities, similarity scores, and timing information.
 
         Args:
-            record_start_time: Start time of the recorded segment (timestamp).
-            recognize_start_time: Start time of the recognition process (timestamp).
-            speakers: List of recognized speakers.
-            similarities: List of similarity scores (0.0-1.0) corresponding to speakers.
-            durations: List of audio durations in seconds for each speaker segment.
+            segment_start_time: start time of the recorded segment (timestamp).
+            recognize_start_time: start time of the recognition process (timestamp).
+            speakers: list of recognized speakers.
+            similarities: list of similarity scores (0.0-1.0) corresponding to speakers.
+            durations: list of audio durations in seconds for each speaker segment.
         """
         base_recognition_result = {
             'base_id': f'{self.base_type.lower()}_{self.id}',
             'speakers': json.dumps(speakers),
             'similarities': json.dumps(similarities),
             'durations': json.dumps(durations),
-            'record_start_time': record_start_time
+            'segment_start_time': segment_start_time
         }
-        print(f"{BLUE}[Speaker Recognition]{ENDC}{base_recognition_result['record_start_time']}: "
+        print(f"{BLUE}[Speaker Recognition]{ENDC}{base_recognition_result['segment_start_time']}: "
               f"{BLUE}{base_recognition_result['speakers']}{ENDC}, similarity: {base_recognition_result['similarities']},"
               f"processed time: {time.time() - recognize_start_time} seconds")
         result_str = json.dumps(base_recognition_result)
         self.mqtt_client.publish(f'{self.bucket_name}/asr', result_str)
 
-    def _separate_speech(self, segment_audio_path: str) -> list[bytes]:
-        """Separate overlapping speech from an audio segment using source separation.
+    def _separate_speech(self, audio_path: str) -> list[bytes]:
+        """Separate overlapping speech from an audio file using source separation.
 
         Uses an external speech separation service to process the audio file, identifying and
         isolating different speakers in the recording. The separated signals are returned as
         raw audio bytes for further processing.
 
         Args:
-            segment_audio_path: Path to the audio segment file containing potentially overlapped speech.
+            audio_path: path to the audio file to process.
 
         Returns:
             A list of separated speech signals as raw bytes (decoded from base64). Each element 
             represents an isolated speaker's audio. Returns an empty list if separation fails.
         """
-        separated_result = request_speech_separation(segment_audio_path, f'{self.base_type.lower()}_{self.id}',
+        separated_result = request_speech_separation(audio_path, f'{self.base_type.lower()}_{self.id}',
                                                      self.speech_separator_url)
         if separated_result is None:
             return []
@@ -857,7 +858,7 @@ class ASRBase(Base):
         result = [base64.b64decode(encoded_bytes_stream) for encoded_bytes_stream in separated_result]
         return result
 
-    def _audio_preprocessing(self, input_path: str, inplace: int) -> str | None:
+    def _audio_preprocessing(self, audio_path: str, inplace: int) -> str | None:
         """Preprocess an audio file by applying noise reduction and voice activity detection.
         
         Performs a sequence of audio enhancement steps to improve recognition quality:
@@ -865,51 +866,51 @@ class ASRBase(Base):
         2. Voice activity detection (if enabled) - Identifies and isolates speech segments
         
         Args:
-            input_path: Path to the input audio file to be processed.
-            inplace: Flag indicating whether to modify the input file (1) when VAD is enabled.
+            audio_path: path to the audio file to process.
+            inplace: flag indicating whether to modify the input file (1) when VAD is enabled.
         
         Returns:
             Path to the processed audio file if successful, or None if processing failed
             (e.g., if no voice activity was detected in the file).
         """
-        self._apply_nr(input_path)
-        return self._apply_vad(input_path, inplace)
+        self._apply_nr(audio_path)
+        return self._apply_vad(audio_path, inplace)
 
-    def _apply_vad(self, input_path: str, inplace: int) -> str | None:
+    def _apply_vad(self, audio_path: str, inplace: int) -> str | None:
         """Apply Voice Activity Detection (VAD) to an audio file.
 
         Uses an external VAD service to identify speech segments in the audio file. 
         This helps filter out silence and non-speech portions to improve recognition quality.
 
         Args:
-            input_path: Path to the input audio file to process.
-            inplace: Flag indicating whether to modify the input file (1).
+            audio_path: path to the audio file to process.
+            inplace: flag indicating whether to modify the input file (1).
 
         Returns:
             Path to the processed audio file if VAD is enabled and successful, the original path if VAD 
             is disabled, or None if no speech was detected.
         """
         if self.vad:
-            return request_voice_activity_detection(input_path, f'{self.base_type.lower()}_{self.id}', inplace,
+            return request_voice_activity_detection(audio_path, f'{self.base_type.lower()}_{self.id}', inplace,
                                                     self.vad_url)
-        return input_path
+        return audio_path
 
-    def _apply_nr(self, input_path: str) -> str:
+    def _apply_nr(self, audio_path: str) -> str:
         """Apply Noise Reduction (NR) to an audio file.
 
         Uses an external speech enhancement service to reduce background noise in the audio file.
         This improves speech clarity for better recognition results.
 
         Args:
-            input_path: Path to the input audio file to process.
+            audio_path: path to the audio file to process.
 
         Returns:
-            Path to the audio file after noise reduction (the same as input_path, as the file is
+            Path to the audio file after noise reduction (the same as audio_path, as the file is
             modified in place by the external service).
         """
         if self.nr:
-            request_speech_enhancement(input_path, f'{self.base_type.lower()}_{self.id}', self.speech_enhancer_url)
-        return input_path
+            request_speech_enhancement(audio_path, f'{self.base_type.lower()}_{self.id}', self.speech_enhancer_url)
+        return audio_path
 
     def _prepare_directories(self):
         """Prepare subdirectories for audio processing based on the operating mode.
@@ -938,8 +939,8 @@ class ASRBase(Base):
         important for real-time processing scenarios.
 
         Args:
-            sample_rate_original: Original sample rate in Hz (default is 44100 Hz).
-            sample_rate_target: Target sample rate in Hz (default is 16000 Hz).
+            sample_rate_original: original sample rate in Hz (default is 44100 Hz).
+            sample_rate_target: target sample rate in Hz (default is 16000 Hz).
         """
         dummy_audio = np.zeros(sample_rate_original)
         _ = librosa.resample(dummy_audio, orig_sr=sample_rate_original, target_sr=sample_rate_target)
@@ -954,7 +955,7 @@ class ASRBase(Base):
         to capture various speech characteristics for more accurate speaker identification.
 
         Args:
-            seconds: Duration (in seconds) allowed for recording the prompt sentences.
+            seconds: duration allowed for recording the prompt sentences.
         """
         input(f"Press the Enter key to start recording, and read the following sentence in {seconds} seconds:\n"
               "1. The boy was there when the sun rose.\n"

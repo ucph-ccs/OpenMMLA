@@ -122,6 +122,7 @@ class VFABase(Base):
                 self._clean_up()
 
     def _start(self):
+        """Start the video streaming and MQTT client for the VFA base."""
         if not self.camera_configured:
             self.logger.warning("Camera is not configured.")
             return self._set_camera()
@@ -151,6 +152,7 @@ class VFABase(Base):
         self.video_stream.start()
 
     def _create_bucket_logger(self):
+        """Create logger for the bucket."""
         self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
         self.logger = get_logger(f'vfa-{self.bucket_name}',

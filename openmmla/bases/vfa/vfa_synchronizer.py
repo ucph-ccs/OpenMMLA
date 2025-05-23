@@ -37,8 +37,8 @@ class VFASynchronizer(Synchronizer):
         self.bucket_name = None
         self.number_of_bases = None
         self.latest_time = None
-        self.time_bucket_buffer = {}  # Buffer for {time_bucket: {base_id: {<angle>, <path>, <acquired_time>}}}
-        # time_bucket represents the start time of a time window
+        self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<angle>, <path>, <base_result_time>}}}
+        # time_bucket_key represents the start time of a time bucket
 
         # VLLM request queue and processing thread
         self.vllm_queue = queue.Queue()
@@ -148,7 +148,7 @@ class VFASynchronizer(Synchronizer):
         """Handle received frame from a VFA base."""
         try:
             base_result = json.loads(message.payload.decode('utf-8'))
-            acquired_time = float(base_result['acquired_time'])
+            base_result_time = float(base_result['acquired_time'])
             base_id = base_result['base_id']
             angle = base_result['angle']
             image_path = base_result['image_path']
@@ -159,7 +159,7 @@ class VFASynchronizer(Synchronizer):
 
             # Clean up expired frame sets
             expired_times = TimeBucketSynchronizer.get_expired_buckets(
-                acquired_time,
+                base_result_time,
                 self.time_bucket_buffer,
                 self.buffer_expiry_time
             )
@@ -171,7 +171,7 @@ class VFASynchronizer(Synchronizer):
                         f"Processing incomplete frame set at {t} with {len(frame_set)}/{self.number_of_bases} frames")
                     # Add to VLLM queue instead of processing directly
                     self.vllm_queue.put({
-                        'time_bucket': t,
+                        'time_bucket_key': t,
                         'frames': frame_set
                     })
                 else:
@@ -180,7 +180,7 @@ class VFASynchronizer(Synchronizer):
 
             # Find the closest time bucket using the utility class
             closest_time = TimeBucketSynchronizer.find_closest_time_bucket(
-                acquired_time,
+                base_result_time,
                 self.time_bucket_buffer,
                 base_id,
                 self.time_range,
@@ -188,7 +188,7 @@ class VFASynchronizer(Synchronizer):
             )
 
             if not closest_time:
-                closest_time = acquired_time  # Create a new time bucket starting at acquired_time
+                closest_time = base_result_time  # Create a new time bucket starting at base_result_time
                 self.time_bucket_buffer[closest_time] = {}
 
             # Store frame info
@@ -198,14 +198,14 @@ class VFASynchronizer(Synchronizer):
             self.time_bucket_buffer[closest_time][base_id] = {
                 'angle': angle,
                 'path': image_path,
-                'acquired_time': acquired_time
+                'base_result_time': base_result_time
             }
 
             # Check if we've received frames from all cameras for this time bucket
             if len(self.time_bucket_buffer[closest_time]) == self.number_of_bases:
                 # Add to VLLM queue instead of processing directly
                 self.vllm_queue.put({
-                    'time_bucket': closest_time,  # closest_time is the time_bucket (start time of the bucket)
+                    'time_bucket_key': closest_time,  # closest_time is the time_bucket_key (start time of the bucket)
                     'frames': self.time_bucket_buffer[closest_time]
                 })
                 del self.time_bucket_buffer[closest_time]
@@ -245,7 +245,7 @@ class VFASynchronizer(Synchronizer):
             try:
                 # Get a frame set from the queue with a timeout
                 frame_set = self.vllm_queue.get(timeout=1.0)
-                time_bucket = frame_set['time_bucket']  # The start time of this time bucket
+                time_bucket_key = frame_set['time_bucket_key']  # The start time of this time bucket
                 frames = frame_set['frames']
 
                 try:
@@ -261,7 +261,7 @@ class VFASynchronizer(Synchronizer):
                             self.logger.warning(f"Image path no longer exists: {frame_info['path']}")
 
                     if not images:
-                        self.logger.warning(f"No valid images found for time bucket {time_bucket}")
+                        self.logger.warning(f"No valid images found for time bucket {time_bucket_key}")
                         continue
 
                     # Request analysis from VLLM server
@@ -273,7 +273,7 @@ class VFASynchronizer(Synchronizer):
                     )
 
                     # Upload results
-                    self._upload_result(time_bucket, result)
+                    self._upload_result(time_bucket_key, result)
 
                 except Exception as e:
                     self.logger.error(f"Error processing frame set: {e}", exc_info=True)
@@ -287,26 +287,26 @@ class VFASynchronizer(Synchronizer):
             except Exception as e:
                 self.logger.error(f"Error in VLLM processing thread: {e}", exc_info=True)
 
-    def _upload_result(self, time_bucket: float, result: dict[str, Any] | None):
+    def _upload_result(self, time_bucket_key: float, result: dict[str, Any] | None):
         """Upload analysis results to InfluxDB.
         
         Args:
-            time_bucket: timestamp of the processed frame set (the start time of the time bucket)
+            time_bucket_key: timestamp of the processed frame set (the start time of the time bucket)
             result: analysis results from the multi-angle frame analyzer, or None if analysis failed
         """
         if result is None:
-            self.logger.warning(f"No analysis results for time bucket {time_bucket}")
+            self.logger.warning(f"No analysis results for time bucket {time_bucket_key}")
             return
 
         analysis_data = {
             "measurement": "action recognition",
             "fields": {
-                "time_bucket": time_bucket,
-                "window_size": self.window_size,
+                "window_start_time": time_bucket_key,
+                "window_end_time": time_bucket_key,
                 "action_recognition": json.dumps(result)
             },
         }
-        print(f"{BLUE}[Action Recognition]{ENDC} {analysis_data['fields']['time_bucket']}: "
+        print(f"{BLUE}[Action Recognition]{ENDC} {analysis_data['fields']['window_start_time']}: "
               f"{BLUE}Multi-angle analysis results: {result}{ENDC}")
         self.influx_client.write(self.bucket_name, analysis_data)
 

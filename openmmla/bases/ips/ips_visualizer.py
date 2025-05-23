@@ -119,10 +119,10 @@ class IPSVisualizer(Base):
     def _animate(self, i, influx_client: InfluxDBClientWrapper):
         plt.cla()
         # Get node relations and positions
-        graph_dict, time_bucket = self._get_node_relations(influx_client)
+        graph_dict, timestamp = self._get_node_relations(influx_client)
         if graph_dict is None:
             return
-        pos = self._get_node_positions(influx_client, time_bucket=time_bucket, dimension='2d')
+        pos = self._get_node_positions(influx_client, timestamp=timestamp, dimension='2d')
         G = self._build_graph(graph_dict, pos)
 
         options = {
@@ -141,7 +141,7 @@ class IPSVisualizer(Base):
 
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{time_bucket}_2d.png'))
+                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{timestamp}_2d.png'))
 
     def _switch_dimension(self):
         self.use_3d = not self.use_3d
@@ -149,10 +149,10 @@ class IPSVisualizer(Base):
     def _animate_3d(self, i, fig, ax, influx_client: InfluxDBClientWrapper):
         plt.cla()
         # Get node relations and positions
-        graph_dict, time_bucket = self._get_node_relations(influx_client)
+        graph_dict, timestamp = self._get_node_relations(influx_client)
         if graph_dict is None:
             return
-        pos_3d = self._get_node_positions(time_bucket=time_bucket, dimension='3d', influx_client=influx_client)
+        pos_3d = self._get_node_positions(timestamp=timestamp, dimension='3d', influx_client=influx_client)
         G = self._build_graph(graph_dict, pos_3d)
 
         # Draw the 3D graph
@@ -174,7 +174,7 @@ class IPSVisualizer(Base):
         ax.view_init(elev=20., azim=30)
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{time_bucket}_3d.png'))
+                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{timestamp}_3d.png'))
 
     def _build_graph(self, graph_dict: dict, pos: dict) -> nx.DiGraph:
         G = nx.DiGraph()
@@ -210,17 +210,17 @@ class IPSVisualizer(Base):
             return None, None
         graph_dict_str = data[0]["graph"]
         graph_dict = json.loads(graph_dict_str)
-        time_bucket = data[0]["time_bucket"]
-        return graph_dict, time_bucket
+        timestamp = data[0]["window_start_time"]
+        return graph_dict, timestamp
 
-    def _get_node_positions(self, influx_client: InfluxDBClientWrapper, time_bucket: float,
+    def _get_node_positions(self, influx_client: InfluxDBClientWrapper, timestamp: float,
                             dimension: str = '2d') -> dict:
-        start_time = int(time_bucket) - 20
+        start_time = int(timestamp) - 20
         query = f"""from(bucket: "{self.bucket_name}")
                    |> range(start: {start_time})
                    |> filter(fn: (r) => r._measurement == "badge translations")
                    |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-                   |> filter(fn: (r) => r.time_bucket == {time_bucket})
+                   |> filter(fn: (r) => r.window_start_time == {timestamp})
                   """
         tables = influx_client.query(query)
         data = json.loads(tables.to_json(indent=5))

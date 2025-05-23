@@ -150,30 +150,35 @@ class ASRPostAnalyzer(Base):
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.visualizations_dir, exist_ok=True)
 
-    def _setup_objects(self) -> None:
+    def _setup_objects(self):
         """Initialize the AudioRecognizer object."""
         first_file = os.path.splitext(self.process_files[0])[0]
         first_audio_db = os.path.join(self.runtime_dir, f'session_{first_file}', 'profiles')
         os.makedirs(first_audio_db, exist_ok=True)
         self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=first_audio_db)
 
-    def run(self) -> None:
+    def run(self):
         """Process all specified files."""
         self._process_audio_files()
 
-    def _process_audio_files(self) -> None:
+    def _process_audio_files(self):
         """Process each audio file in the list of files to process."""
         for audio_filename in tqdm(self.process_files, desc='Processing audio files', unit='session'):
             self._create_bucket_logger(audio_filename)
             self.logger.info(f"Processing file: {audio_filename}")
             self._process_single_audio_file(audio_filename)
 
-    def _create_bucket_logger(self, audio_filename: str):
-        self.file_logger_dir = os.path.join(self.logger_dir, f'session_{audio_filename}')
+    def _create_bucket_logger(self, filename: str):
+        """Create a logger for a single audio file.
+        
+        Args:
+            filename: the name of the audio file to process
+        """
+        self.file_logger_dir = os.path.join(self.logger_dir, f'session_{filename}')
         os.makedirs(self.file_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'asr-post-{audio_filename}',
+        self.logger = get_logger(f'asr-post-{filename}',
                                  os.path.join(self.file_logger_dir,
-                                              f'asr_post_{audio_filename}.log'))
+                                              f'asr_post_{filename}.log'))
 
     def _process_single_audio_file(self, filename: str):
         """Process a single audio file.
@@ -227,7 +232,7 @@ class ASRPostAnalyzer(Base):
         """Register speakers' raw audio files to the recognizer.
 
         Args:
-            speakers_corpus_dir: the directory containing the raw audio files of the speakers
+            speakers_corpus_dir: the path of the directory containing the raw audio files of the speakers
             enhance: whether to apply NR and VAD to the audio files or not
         """
         speaker_corpus = [f for f in os.listdir(speakers_corpus_dir) if
@@ -312,7 +317,8 @@ class ASRPostAnalyzer(Base):
                 segment_start_time = float((start_time + time).timestamp())
                 recognition_entry = {
                     "segment_no": segment_no,
-                    "time_bucket": segment_start_time,
+                    "window_start_time": segment_start_time,
+                    "window_end_time": segment_start_time + self.segment_duration,
                     "speakers": json.dumps([speaker]),
                     "similarities": json.dumps([np.round(np.float64(similarity), 4)]),
                     "durations": json.dumps([duration]),
@@ -370,10 +376,10 @@ class ASRPostAnalyzer(Base):
         convert_transcription_json_to_txt(speaker_transcription_log_path)
 
     def _process_segments_sp(self):
-        """Process segments of the audio file with using the separation model.
+        """Process segments of the audio file with speech separation.
 
         Outputs:
-            JSON files containing the speaker recognition and transcription results for the session
+            JSON files containing the speaker recognition and transcription results for the audio file
         """
         speaker_recognition_log_path = os.path.join(self.logs_dir, f'session_{self.session_name}',
                                                     f'session_{self.session_name}_speaker_recognition.json')
@@ -458,14 +464,14 @@ class ASRPostAnalyzer(Base):
 
         convert_transcription_json_to_txt(speaker_transcription_log_path)
 
-    def _aggregate_segments_by_speaker(self, speaker_recognition_log_path):
+    def _aggregate_segments_by_speaker(self, speaker_recognition_log_path: str) -> list[tuple[str, tuple[float, float]]]:
         """Aggregate segments by speaker.
 
         Args:
-            speaker_recognition_log_path: the path to the speaker recognition log file
+            speaker_recognition_log_path: path to the speaker recognition log file
 
         Returns:
-            A list of tuples, each containing the speaker and the start and end times of the segment
+            A list of tuples, each containing the speaker and the start and end times of the chunk
         """
         with open(speaker_recognition_log_path, 'r') as file:
             speaker_recognition_log = json.load(file)
@@ -473,7 +479,7 @@ class ASRPostAnalyzer(Base):
         speakers_segments = {}  # Dictionary to hold the current speaker segments
         chunk_list = []
         for entry in speaker_recognition_log:
-            segment_start_time = entry['time_bucket']
+            segment_start_time = entry['window_start_time']
             segment_end_time = segment_start_time + self.segment_duration
             speakers = json.loads(entry['speakers'])
 
@@ -494,7 +500,7 @@ class ASRPostAnalyzer(Base):
 
         # Handle the last segment for remaining speakers
         if speaker_recognition_log:
-            last_segment_start_time = speaker_recognition_log[-1]['time_bucket']
+            last_segment_start_time = speaker_recognition_log[-1]['window_start_time']
             last_segment_end_time = last_segment_start_time + self.segment_duration
             for speaker, times in speakers_segments.items():
                 times[1] = last_segment_end_time
@@ -502,14 +508,14 @@ class ASRPostAnalyzer(Base):
 
         return chunk_list
 
-    def _transcribe_by_chunks(self, chunk_list):
+    def _transcribe_by_chunks(self, chunk_list: list[tuple[str, tuple[float, float]]]) -> list[dict]:
         """Transcribe the audio by chunk.
 
         Args:
-            chunk_list: chunk list containing speaker and start and end times
+            chunk_list: a list of tuples, each containing the speaker and the start and end times of the chunk
 
         Returns:
-            A list of transcription entries
+            A list of dictionaries, each containing the transcription results for a chunk
         """
         formatted_audio_path = os.path.join(self.session_runtime_dir, f'{self.session_name}.wav')
         entries = []
@@ -530,11 +536,10 @@ class ASRPostAnalyzer(Base):
                     text = self._transcribe(chunk_path) if speaker != 'silent' else ''
                     transcription_entry = {
                         "chunk_no": index,
-                        "time_bucket": chunk_start_time,
-                        "chunk_start_time": chunk_start_time,
-                        "chunk_end_time": chunk_end_time,
-                        "speaker": speaker,
+                        "window_start_time": chunk_start_time,
+                        "window_end_time": chunk_end_time,
                         "text": text,
+                        "speaker": speaker,
                     }
                     print(transcription_entry)
                     entries.append(transcription_entry)
@@ -542,16 +547,16 @@ class ASRPostAnalyzer(Base):
 
         return entries
 
-    def _transcribe(self, input_path):
+    def _transcribe(self, audio_path: str) -> str:
         """Transcribe audio file to text.
 
         Args:
-            input_path: input audio file path
+            audio_path: path to the audio file to transcribe
 
         Returns:
             transcribed text
         """
-        with wave.open(input_path, 'rb') as wav_file:
+        with wave.open(audio_path, 'rb') as wav_file:
             frames = wav_file.readframes(wav_file.getnframes())
             frame_rate = wav_file.getframerate()
 
@@ -559,71 +564,71 @@ class ASRPostAnalyzer(Base):
                                             self.speech_transcriber_url)
         return text
 
-    def _separate_speech(self, segment_audio_path) -> list:
+    def _separate_speech(self, audio_path: str) -> list:
         """Separate speech from the overlapped segment audio.
 
         Args:
-            segment_audio_path: input audio file path
+            audio_path: path to the audio file to separate speech from
 
         Returns:
             separated speech signals
         """
-        separated_result = request_speech_separation(segment_audio_path, f'{self.base_type.lower()}',
+        separated_result = request_speech_separation(audio_path, f'{self.base_type.lower()}',
                                                      self.speech_separator_url)
         result = [base64.b64decode(encoded_bytes_stream) for encoded_bytes_stream in separated_result]
         return result
 
-    def _audio_preprocessing(self, input_path: str, inplace: int) -> str | None:
+    def _audio_preprocessing(self, audio_path: str, inplace: int) -> str | None:
         """Apply both NR and VAD processing to audio file.
 
 
         Args:
-            input_path: input audio file path
+            audio_path: path to the audio file to process
             inplace: whether to overwrite the input file when applying vad
 
         Returns:
             processed audio file path
         """
-        self._apply_nr(input_path)
-        return self._apply_vad(input_path, inplace)
+        self._apply_nr(audio_path)
+        return self._apply_vad(audio_path, inplace)
 
-    def _apply_vad(self, input_path: str, inplace: int) -> str | None:
+    def _apply_vad(self, audio_path: str, inplace: int) -> str | None:
         """Apply voice activity detection to audio file.
 
         Args:
-            input_path: input audio file path
+            audio_path: path to the audio file to process
             inplace: whether to overwrite the input file
 
         Returns:
             processed audio file path
         """
         if self.vad:
-            return request_voice_activity_detection(input_path, f'{self.base_type.lower()}', inplace, self.vad_url)
-        return input_path
+            return request_voice_activity_detection(audio_path, f'{self.base_type.lower()}', inplace, self.vad_url)
+        return audio_path
 
-    def _apply_nr(self, input_path: str) -> str:
+    def _apply_nr(self, audio_path: str) -> str:
         """Apply noise reduction to audio file.
 
         Args:
-            input_path: input audio file path
+            audio_path: path to the audio file to process
 
         Returns:
             processed audio file path
         """
         if self.nr:
-            request_speech_enhancement(input_path, f'{self.base_type.lower()}', self.speech_enhancer_url)
-        return input_path
+            request_speech_enhancement(audio_path, f'{self.base_type.lower()}', self.speech_enhancer_url)
+        return audio_path
 
-    def _finalize_separated_speaker_recognition(self, speakers, similarities, durations):
+    def _finalize_separated_speaker_recognition(self, speakers: list[str], similarities: list[float], durations: list[float]) -> tuple[list[str], list[float], list[float]]:
         """Finalize the speaker recognition results of separated signals to handle edge cases.
 
         Args:
             speakers: list of recognized speakers
             similarities: list of speaker recognition similarities
-            durations: list of speaking durations
+            durations: list of speaking durations in seconds
 
         Returns:
-            A tuple containing the final speakers, similarities, and durations
+            A tuple containing the finalized speakers, similarities, and durations
         """
         # If there's only one speaker, keep it as is
         if len(speakers) == 1:
@@ -655,16 +660,16 @@ class ASRPostAnalyzer(Base):
         return [], [], []
 
     @staticmethod
-    def filter_real_speakers(speakers, similarities, durations):
+    def filter_real_speakers(speakers: list[str], similarities: list[float], durations: list[float]) -> tuple[list[str], list[float], list[float]]:
         """Filter out 'silent' and 'unknown' from speakers and their associated similarities and durations.
 
         Args:
             speakers: list of recognized speakers
             similarities: list of speaker recognition similarities
-            durations: list of speaking durations
+            durations: list of speaking durations in seconds
 
         Returns:
-            A tuple containing the filtered real speakers, similarities, and durations
+            A tuple containing the filtered speakers, similarities, and durations
         """
         real_speakers = []
         real_similarities = []
@@ -677,24 +682,24 @@ class ASRPostAnalyzer(Base):
 
         return real_speakers, real_similarities, real_durations
 
-    @staticmethod
-    def speaker_recognition_results(segment_no, segment_start_time, final_speakers=None,
-                                    final_similarities=None, final_durations=None, ):
+    def speaker_recognition_results(self, segment_no: int, segment_start_time: float, final_speakers: list[str],
+                                    final_similarities: list[float], final_durations: list[float]) -> dict:
         """Create a speaker recognition log entry.
 
         Args:
             segment_no: segment number
             segment_start_time: segment start time
-            final_speakers: final recognized speakers
-            final_similarities: final speaker recognition similarities
-            final_durations: final speaking durations
+            final_speakers: finalized recognized speakers list
+            final_similarities: finalized speaker recognition similarities list
+            final_durations: finalized speaking durations list
 
         Returns:
             A dictionary containing the speaker recognition results
         """
         recognition_entry = {
             "segment_no": segment_no,
-            "time_bucket": segment_start_time,
+            "window_start_time": segment_start_time,
+            "window_end_time": segment_start_time + self.segment_duration,
             "speakers": json.dumps(final_speakers),
             "similarities": json.dumps(final_similarities),
             "durations": json.dumps(final_durations),
@@ -702,16 +707,16 @@ class ASRPostAnalyzer(Base):
         return recognition_entry
 
     @staticmethod
-    def identify_speaker_change_borders(chunk_list):
+    def identify_speaker_change_borders(chunk_list: list[tuple[str, tuple[float, float]]]) -> list[tuple[float, list[str]]]:
         """Identify speaker change borders from the chunk list.
 
         Note: this function only applicable to recognition without speech separation
 
         Args:
-            chunk_list: A list of tuples, each containing the speaker and the start and end times of the segment
+            chunk_list: a list of tuples, each containing the speaker and the start and end times of the chunk
 
         Returns:
-            A list of tuples, each containing the time of the speaker change and the candidates
+            A list of tuples, each containing the time of the speaker change and the candidates for the speaker change
         """
 
         borders = []
@@ -725,20 +730,20 @@ class ASRPostAnalyzer(Base):
         return borders
 
     @staticmethod
-    def update_chunk_list(chunk_list, border_index, left_speaker, right_speaker, segment_half_duration):
+    def update_chunk_list(chunk_list: list[tuple[str, tuple[float, float]]], border_index: int, left_speaker: str, right_speaker: str, segment_half_duration: float) -> int:
         """Update the chunk list by adding two new half-scaled recognized chunks at the speaker change border.
 
         Note: this function only applicable to recognition without speech separation
 
         Args:
-            chunk_list: A list of tuples, each containing the speaker and the start and end times of the segment
+            chunk_list: a list of tuples, each containing the speaker and the start and end times of the chunk
             border_index: the index of the speaker change border
             left_speaker: the speaker on the left side of the border
             right_speaker: the speaker on the right side of the border
-            segment_half_duration: half of the segment duration
+            segment_half_duration: half of the segment duration in seconds
 
         Returns:
-            The number of added chunks
+            The number of added chunks (2)
         """
         left_chunk_speaker = chunk_list[border_index][0]
         right_chunk_speaker = chunk_list[border_index + 1][0]
@@ -762,14 +767,14 @@ class ASRPostAnalyzer(Base):
         return 2
 
     @staticmethod
-    def aggregate_chunks(chunk_list):
+    def aggregate_chunks(chunk_list: list[tuple[str, tuple[float, float]]]) -> list[tuple[str, tuple[float, float]]]:
         """Aggregate the chunks by combining consecutive chunks with the same speaker.
 
         Args:
-            chunk_list: a list of tuples, each containing the speaker and the start and end times of the segment
+            chunk_list: a list of tuples, each containing the speaker and the start and end times of the chunk
 
         Returns:
-            A list of aggregated chunks
+            A list of tuples, each containing the speaker and the start and end times of the aggregated chunk
         """
         aggregated_chunks = []
         current_speaker = None
@@ -801,11 +806,11 @@ class ASRPostAnalyzer(Base):
         return aggregated_chunks
 
     @staticmethod
-    def calculate_audio_duration(audio_path):
+    def calculate_audio_duration(audio_path: str) -> float:
         """Calculate the duration of an audio file in seconds.
 
         Args:
-            audio_path: audio file path
+            audio_path: path to the audio file
 
         Returns:
             The duration of the audio file in seconds
