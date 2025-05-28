@@ -8,6 +8,8 @@ dist/
 build/
 temp/
 logger/
+openmmla/analysis/indicator/
+openmmla/analysis/config/
 
 # Ignore deprecated repositories
 deprecated/
