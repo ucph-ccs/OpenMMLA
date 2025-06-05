@@ -35,15 +35,17 @@ SpeechTranscriber:
   workers: 1 
   app: <path-to-speech-transcriber-app> 
 
-  backend: <backend> # e.g., azure, local
+  backend: <backend> # azure or local
   azure:
     subscription_key: <azure-subscription-key>
     region: <azure-region>
     language: <azure-language>
-    profanity_option: <azure-profanity-option>
+    profanity_option: <azure-profanity-option> # raw, masked, removed
+    word_level: <bool> # word-level timestamps, true/false
   local:
-    model: <whisper-or-huggingface-transcription-model>  # e.g., base.en, small.en, medium.en, large.en
-    language: en  # language code, e.g., en, zh, fr, etc.
+    model: <model>  # e.g., base.en, small.en, medium.en, large.en for regular Whisper, or whisperx/large-v3, whisperx/medium for WhisperX with word-level timestamps
+    language: en  # language code, e.g., en, zh, fr, etc. Set to null for auto-detection (WhisperX only)
+    word_level: <bool>
 
 VoiceActivityDetector:
   cuda: true

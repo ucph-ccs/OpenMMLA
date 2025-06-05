@@ -1,10 +1,6 @@
-from datetime import datetime
-
 import influxdb_client
 import yaml
 from influxdb_client.client.write_api import SYNCHRONOUS
-from influxdb_client.domain.delete_predicate_request import DeletePredicateRequest
-from influxdb_client.domain.bucket import Bucket
 
 
 class InfluxDBClientWrapper(influxdb_client.InfluxDBClient):

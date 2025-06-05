@@ -481,7 +481,7 @@ class AudioStream(StreamReceiver):
                     if 0 <= self.channel_select < self.channels:
                         audio_data = audio_data[:, self.channel_select]
                     else:
-                        logger.warning(f"Invalid channel index: {self.channel_select}. Using all channels.")
+                        logger.warning(f"Invalid channel index: {self.channel_select}, but only {self.channels} channels available. Using all channels.")
                 timestamp = time.time()
             elif self.source in ['udp', 'tcp']:
                 # For UDP/TCP, include 18 bytes of metadata.

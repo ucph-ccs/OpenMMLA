@@ -623,8 +623,8 @@ class ASRBase(Base):
         while not self.stop_event.is_set():
             try:
                 frames, speaker, chunk_start_time, chunk_end_time = self.transcription_queue.get(timeout=2)
-                text = self._transcribe(frames, frame_rate)
-                self._upload_transcription(speaker, text, chunk_start_time, chunk_end_time)
+                transcribe_result = self._transcribe(frames, frame_rate)
+                self._upload_transcription(speaker, transcribe_result, chunk_start_time, chunk_end_time)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -765,7 +765,7 @@ class ASRBase(Base):
         if self.tr:
             self.transcription_queue.put((frames, speaker, chunk_start_time, chunk_end_time))
 
-    def _transcribe(self, frames: bytes, frame_rate: int) -> str:
+    def _transcribe(self, frames: bytes, frame_rate: int) -> dict:
         """Transcribe audio frames to text using an external speech-to-text service.
 
         Sends the audio frames to a remote transcription service and retrieves the 
@@ -777,13 +777,13 @@ class ASRBase(Base):
             frame_rate: sample rate of the audio frames in Hz (typically 8000 or 16000).
 
         Returns:
-            The transcribed text as a string. Empty string if transcription failed.
+            The transcription result as a dictionary. Empty dictionary if transcription failed.
         """
-        text = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
+        response = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
                                             self.speech_transcriber_url)
-        return text if text is not None else ""
+        return response if response is not None else {}
 
-    def _upload_transcription(self, speaker: str, text: str, chunk_start_time: float, chunk_end_time: float):
+    def _upload_transcription(self, speaker: str, transcribe_result: dict, chunk_start_time: float, chunk_end_time: float):
         """Upload the transcribed speech chunk to the database.
 
         Constructs a transcription record with speaker, text content, and timing information,
@@ -792,7 +792,7 @@ class ASRBase(Base):
 
         Args:
             speaker: identified speaker for the transcribed chunk.
-            text: transcribed text content from the audio chunk.
+            transcribe_result: the result of the transcription, including text and words.
             chunk_start_time: start timestamp of the audio chunk.
             chunk_end_time: end timestamp of the audio chunk.
         """
@@ -801,12 +801,13 @@ class ASRBase(Base):
             "fields": {
                 "window_start_time": chunk_start_time,
                 "window_end_time": chunk_end_time,
-                "text": text,
+                "text": transcribe_result.get("text", ""),
+                "words": json.dumps(transcribe_result.get("words", [])),
                 "speaker": speaker,
             },
         }
         print(f"{GREEN}[Speaker Transcription]{ENDC}{transcription_record['fields']['window_start_time']}: "
-              f"{GREEN}{speaker} : {text}{ENDC}")
+              f"{GREEN}{speaker} : {transcribe_result['text']}{ENDC}")
         self.influx_client.write(self.bucket_name, record=transcription_record)
 
     def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],

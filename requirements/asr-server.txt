@@ -16,3 +16,4 @@ rotary-embedding-torch==0.6.4
 silero-vad==5.1.2
 speechbrain==1.0.0
 transformers==4.33.3
+whisperx==3.3.1

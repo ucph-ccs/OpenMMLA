@@ -80,11 +80,10 @@ def request_speech_transcription(
         base_id: str,
         url: str,
         timeout: int = 15
-) -> str | None:
+) -> dict | None:
     def process_response(response):
-        response_json = response.json()
-        transcription_text = response_json.get('text')
-        return transcription_text
+        response_dict = response.json() # {text: str, words: list[dict]}, words is optional
+        return response_dict
 
     files = {'audio': ('audio.wav', frames, 'audio/wav')}
     data = {'base_id': base_id, 'fr': frame_rate}

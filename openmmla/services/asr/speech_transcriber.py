@@ -37,7 +37,7 @@ class SpeechTranscriber(Server):
         self.cuda = config.get('cuda', True)
         self.cuda = self.cuda and torch.cuda.is_available()
         self.backend = config.get('backend', 'local')
-        
+
         if self.backend == 'azure':
             # azure configuration
             azure_config = config.get('azure', {})
@@ -45,17 +45,29 @@ class SpeechTranscriber(Server):
             self.region = azure_config.get('region')
             self.language = azure_config.get('language', 'en-US')
             self.profanity_option = azure_config.get('profanity_option', 'masked')
-            
+            self.word_level = azure_config.get('word_level', False)
+
             if not self.subscription_key or not self.region:
                 raise ValueError("Azure Speech requires subscription_key and region to be configured")
-                
-            self.logger.info(f"Using Azure Speech-to-Text backend, region: {self.region}, language: {self.language}")
+
+            self.logger.info(
+                f"Using Azure Speech-to-Text backend, region: {self.region}, language: {self.language}, word_level: {self.word_level}")
         else:
             # local model configuration
             local_config = config.get('local', {})
             self.tr_model = local_config.get('model', 'base.en')
             self.language = local_config.get('language', 'en')
-            self.logger.info(f"Using local transcription model: {self.tr_model}, language: {self.language}")
+            self.word_level = local_config.get('word_level', False)
+
+            if self.word_level and not self.tr_model.startswith('whisperx/'):
+                raise ValueError(
+                    "Word-level timestamps are only supported with Azure backend or WhisperX models. "
+                    f"Current model '{self.tr_model}' does not support word-level timestamps. "
+                    "Use Azure backend or switch to WhisperX model with format 'whisperx/model-name' (e.g., 'whisperx/large-v3')"
+                )
+
+            self.logger.info(
+                f"Using local transcription model: {self.tr_model}, language: {self.language}, word_level: {self.word_level}")
 
     def _setup_objects(self):
         """Initialize necessary objects based on the selected backend."""
@@ -64,27 +76,35 @@ class SpeechTranscriber(Server):
             try:
                 import azure.cognitiveservices.speech as speechsdk
                 self.speechsdk = speechsdk
-                
+
                 # create speech config
                 self.speech_config = speechsdk.SpeechConfig(
-                    subscription=self.subscription_key, 
+                    subscription=self.subscription_key,
                     region=self.region
                 )
                 self.speech_config.speech_recognition_language = self.language
-                
+
+                # enable detailed results for word-level timestamps if requested
+                if self.word_level:
+                    self.speech_config.request_word_level_timestamps()
+                    self.speech_config.enable_dictation()
+
                 # set profanity filter if specified
                 if hasattr(speechsdk.ProfanityOption, self.profanity_option.upper()):
                     profanity_enum = getattr(speechsdk.ProfanityOption, self.profanity_option.upper())
                     self.speech_config.set_profanity(profanity_enum)
-                
+
                 self.logger.info("Azure Speech SDK initialized successfully")
             except ImportError:
-                self.logger.error("Failed to import Azure Speech SDK. Install it with 'pip install azure-cognitiveservices-speech'")
+                self.logger.error(
+                    "Failed to import Azure Speech SDK. Install it with 'pip install azure-cognitiveservices-speech'")
                 raise
         else:
-            self.transcriber = get_transcriber(self.tr_model, self.language, use_cuda=self.cuda)
+            # local model - automatically handles both regular whisper and whisperx
+            self.transcriber = get_transcriber(self.tr_model, self.language, word_level=self.word_level,
+                                               use_cuda=self.cuda)
             self.logger.info("Local speech transcription models initialized")
-            
+
         # common lock for thread safety
         self.transcriber_lock = threading.Lock()
 
@@ -111,13 +131,13 @@ class SpeechTranscriber(Server):
                     # route to appropriate transcription method
                     self.logger.info(f"Starting transcription for {base_id}...")
                     if self.backend == 'azure':
-                        text = self._transcribe_with_azure(audio_file_path)
+                        response = self._transcribe_with_azure(audio_file_path)
                     else:
-                        text = self._transcribe_with_local_model(audio_file_path)
-                    
+                        response = self._transcribe_with_local_model(audio_file_path)
+
                     self.logger.info(f"Finished transcription for {base_id}")
-                    return jsonify({"text": text}), 200
-                    
+                    return jsonify(response), 200
+
             except Exception as e:
                 self.logger.error(f"Exception during transcribing", exc_info=True)
                 return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
@@ -128,7 +148,7 @@ class SpeechTranscriber(Server):
                         os.remove(audio_file_path)
                     except Exception as e:
                         self.logger.warning(f"Failed to remove temporary file {audio_file_path}: {e}")
-                
+                        
                 if self.backend != 'azure':
                     torch.cuda.empty_cache()
                 gc.collect()
@@ -144,7 +164,14 @@ class SpeechTranscriber(Server):
         Returns:
             Transcribed text
         """
-        return self.transcriber.transcribe(audio_file_path)
+        result = self.transcriber.transcribe(audio_file_path)
+        if self.word_level:
+            return {
+                "text": result[0],
+                "words": result[1]
+            }
+        else:
+            return {"text": result[0]}
 
     def _transcribe_with_azure(self, audio_file_path):
         """Transcribe audio using Azure Speech-to-Text service.
@@ -153,39 +180,53 @@ class SpeechTranscriber(Server):
             audio_file_path: Path to the audio file
             
         Returns:
-            Transcribed text
+            Dict containing transcribed text and optionally word-level timestamps if word_level=True
         """
-        self.logger.info(f"Transcribing with Azure: {audio_file_path}")
-        
-        # create audio configuration from file
         audio_config = self.speechsdk.audio.AudioConfig(filename=audio_file_path)
-        
-        # create speech recognizer
         speech_recognizer = self.speechsdk.SpeechRecognizer(
-            speech_config=self.speech_config, 
+            speech_config=self.speech_config,
             audio_config=audio_config
         )
-        
-        # start recognition and get result
-        self.logger.debug("Starting Azure speech recognition")
         result = speech_recognizer.recognize_once_async().get()
         
-        # check results
         if result.reason == self.speechsdk.ResultReason.RecognizedSpeech:
-            self.logger.debug(f"Azure recognition successful: {result.text}")
-            return result.text
-        elif result.reason == self.speechsdk.ResultReason.NoMatch:
-            self.logger.warning("Azure could not recognize speech")
-            return ""
-        elif result.reason == self.speechsdk.ResultReason.Canceled:
-            cancellation = result.cancellation_details
-            self.logger.error(f"Azure speech recognition canceled: {cancellation.reason}")
-            if cancellation.reason == self.speechsdk.CancellationReason.Error:
-                self.logger.error(f"Azure error details: {cancellation.error_details}")
-            return ""
+            text = result.text
+            
+            # base response
+            response = {"text": text}
+            
+            # add word-level timestamps if requested and available
+            if self.word_level and hasattr(result, 'json') and result.json:
+                try:
+                    import json
+                    json_result = json.loads(result.json)
+                    
+                    # extract word-level timestamps from NBest results
+                    if 'NBest' in json_result and json_result['NBest']:
+                        nbest = json_result['NBest'][0]
+                        if 'Words' in nbest and nbest['Words']:
+                            words = []
+                            for word_data in nbest['Words']:
+                                word_info = {
+                                    'word': word_data.get('Word', ''),
+                                    'start': word_data.get('Offset', 0) / 10000000,  # convert ticks to seconds
+                                    'end': (word_data.get('Offset', 0) + word_data.get('Duration', 0)) / 10000000,
+                                    'confidence': word_data.get('Confidence', 0.0)
+                                }
+                                words.append(word_info)
+                            response["words"] = words
+                            self.logger.debug(f"Extracted {len(words)} word-level timestamps")
+                        else:
+                            self.logger.warning("Word-level timestamps requested but not available in Azure response")
+                except Exception as e:
+                    self.logger.error(f"Failed to parse Azure JSON result for word timestamps: {e}")
+            
+            return response
+          
+        else:
+            error_msg = f"Azure recognition failed with reason: {result.reason}"
+            raise RuntimeError(error_msg)
         
-        # fallback
-        return ""
 
     def _apply_nr(self, input_path: str):
         """Apply noise reduction to the audio.
