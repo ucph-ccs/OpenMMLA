@@ -181,31 +181,31 @@ class CameraTagDetector(Base):
     def _detect_video_sources(self):
         """Detect available video sources based on the source type."""
         available_sources = []
-        number_of_detected_sources = 0
+        available_source_idx = 0
 
         if self.source == 'opencv':
             # Detect available camera indices
             for i in range(4):
                 cap = cv2.VideoCapture(i)
                 if cap.isOpened():
-                    print(f"{number_of_detected_sources} : Camera index {i} is available.")
-                    number_of_detected_sources += 1
+                    print(f"{available_source_idx} : Camera index {i} is available.")
+                    available_source_idx += 1
                     available_sources.append(i)
                 cap.release()
 
         elif self.source == 'rtmp':
             # Get RTMP URLs from configuration
-            rtmp_config = self.config.get('RTMP', {})
-            if 'video_streams' in rtmp_config:
-                video_stream_list = rtmp_config['video_streams'].split(',')
-                for url in video_stream_list:
-                    if url:
-                        print(f"{number_of_detected_sources} : RTMP stream {url} is available.")
-                        available_sources.append(url)
-                        number_of_detected_sources += 1
-            else:
-                self.logger.warning("No RTMP video streams found in the configuration, please set it in "
-                                    "yaml config file ['RTMP']['video_streams'].")
+            if 'RTMP' not in self.config:
+                raise ValueError("RTMP configuration is missing in the YAML file.")
+            if 'video_streams' not in self.config['RTMP']:
+                raise ValueError("RTMP: video_streams configuration is missing in the YAML file.")
+            for url in self.config['RTMP']['video_streams']:
+                print(f"{available_source_idx} : RTMP stream {url} is available.")
+                available_sources.append(url)
+                available_source_idx += 1
+
+        if not available_sources:
+            self.logger.warning(f"No video sources found for {self.source}.")
 
         return available_sources
 

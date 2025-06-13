@@ -13,7 +13,7 @@ NUM_SYNCHRONIZER=1
 NUM_VISUALIZER=1
 GRAPHICS=true
 STORE=true
-VERBOSE=false
+VERBOSE=true
 
 print_usage() {
     echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-nv NUM_VISUALIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]"

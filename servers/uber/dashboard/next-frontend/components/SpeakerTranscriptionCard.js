@@ -20,7 +20,7 @@ const SpeakerTranscriptionCard = ({ data }) => {
       <div ref={logContainerRef} className="log-container">
         {data.map((entry, index) => (
           <div key={index} className="log-entry">
-            <span>Time: {formatUnixTime(entry.chunk_start_time)}</span>
+            <span>Time: {formatUnixTime(entry.window_start_time)}</span>
             <span>Speaker: {entry.speaker}</span>
             <span>Text: {entry.text}</span>
           </div>

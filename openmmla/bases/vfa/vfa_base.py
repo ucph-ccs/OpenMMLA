@@ -280,9 +280,7 @@ class VFABase(Base):
                 raise ValueError("RTMP configuration is missing in the YAML file.")
             if 'video_streams' not in self.config['RTMP']:
                 raise ValueError("RTMP: video_streams configuration is missing in the YAML file.")
-
-            video_stream_list = [url.strip() for url in self.config['RTMP']['video_streams'].split(',') if url.strip()]
-            for url in video_stream_list:
+            for url in self.config['RTMP']['video_streams']:
                 print(f"{available_source_idx} : RTMP stream {url} is available.")
                 available_sources.append(url)
                 available_source_idx += 1

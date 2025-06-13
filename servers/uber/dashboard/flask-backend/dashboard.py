@@ -74,7 +74,6 @@ def get_buckets():
 def generate_post_time_visualization(bucket_name):
     try:
         print("Generating post-time visualization...")
-
         asr_session_analysis(static_dir, bucket_name, influx_client)
         ips_session_analysis(static_dir, bucket_name, influx_client)
     except KeyError as e:
@@ -153,7 +152,8 @@ def emit_realtime_data(bucket_name, stop_event):
             recognition_data = fetch_latest_entry(bucket_name, "speaker_recognition", influx_client)
             transcription_data = fetch_latest_entry(bucket_name, "speaker_transcription", influx_client)
             relations = fetch_latest_entry(bucket_name, "badge_relation", influx_client)
-            graph_data, timestamp = relations if relations else (None, None)
+            graph_data = relations.get('graph', None) if relations else None
+            timestamp = relations.get('window_start_time', None) if relations else None
             position_data = {}
             if timestamp:
                 position_data = get_node_positions(bucket_name, influx_client, timestamp)

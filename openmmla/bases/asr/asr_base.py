@@ -150,11 +150,8 @@ class ASRBase(Base):
                 raise ValueError("RTMP configuration is missing in the YAML file.")
             if 'audio_streams' not in self.config['RTMP']:
                 raise ValueError("RTMP: audio_streams configuration is missing in the YAML file.")
-
-            audio_stream_list = [url.strip() for url in self.config['RTMP']['audio_streams'].split(',') if url.strip()]
-            for i, stream_rul in enumerate(audio_stream_list):
-                print(f'{i} : {stream_rul}')
-            self.url = get_rtmp_url(audio_stream_list)
+            print(self.config['RTMP']['audio_streams'])
+            self.url = get_rtmp_url(self.config['RTMP']['audio_streams'])
             self.stream_kwargs['url'] = self.url
 
     def _setup_directories(self):

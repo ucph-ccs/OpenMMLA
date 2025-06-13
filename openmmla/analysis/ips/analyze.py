@@ -85,7 +85,7 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
 
     # Extract and store badge locations from the JSON data
     for entry in json_data:
-        coords_dict = json.loads(entry['translations'])
+        coords_dict = entry['translations']
         timestamp = entry['window_start_time']
         for badge, coords in coords_dict.items():
             if badge in CANDIDATES:
@@ -281,7 +281,7 @@ def plot_2d_heatmap(json_file_path, visualization_dir):
 
     # Iterate over the JSON data to extract and store badge translations
     for entry in json_data:
-        coords_dict = json.loads(entry['translations'])
+        coords_dict = entry['translations']
         for badge, coords in coords_dict.items():
             if badge in CANDIDATES:
                 x, y, z = coords  # Extracting x, y, and z coordinates
@@ -407,10 +407,10 @@ def ips_across_sessions_analysis(logs_dir, visualizations_dir):
             # Initialize metrics with null values
             stm, nstm, srm, nsrm = None, None, None, None
             for filename in os.listdir(bucket_dir_path):
-                if filename.endswith("_translations.json"):
+                if filename.endswith("badge_translation.json"):
                     translation_file = os.path.join(bucket_dir_path, filename)
                     _, stm, nstm = analyze_translations_log(translation_file)
-                if filename.endswith("_rotations.json"):
+                if filename.endswith("badge_rotation.json"):
                     rotation_file = os.path.join(bucket_dir_path, filename)
                     _, srm, nsrm = analyze_rotations_log(rotation_file)
             session_data.append((session_name, stm, nstm, srm, nsrm))

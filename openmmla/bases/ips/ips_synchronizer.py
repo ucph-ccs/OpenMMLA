@@ -174,9 +174,11 @@ class IPSSynchronizer(Synchronizer):
                 base_result_time = float(base_result["acquired_time"])
 
                 if self.time_bucket_key < base_result_time < self.time_bucket_key + self.window_size:
-                    if base_id.isnumeric():  # results from nicla vision's onboard apriltag detection
-                        self.merged_relations.setdefault(base_id, []).extend(base_result['detected_tags'])
-                    else:  # msg from base camera
+                    if base_id.isnumeric():  # msg from nicla vision's onboard apriltag detection (if used)
+                        if base_id not in self.merged_relations:
+                            self.merged_relations[base_id] = set()
+                        self.merged_relations[base_id].update(base_result['detected_tags'])
+                    else:  # msg from environmental camera
                         tags = base_result["tags"]
                         tag_relations = base_result["tag_relations"]
 
@@ -190,18 +192,21 @@ class IPSSynchronizer(Synchronizer):
                         else:
                             self.merged_tags.update(tags)
 
-                        # Store tag relations into graph
+                        # store tag relations into graph (avoid duplicates)
                         for tag_id, look_at_tags in tag_relations.items():
-                            self.merged_relations.setdefault(tag_id, []).extend(look_at_tags)
+                            if tag_id not in self.merged_relations:
+                                self.merged_relations[tag_id] = set()
+                            self.merged_relations[tag_id].update(look_at_tags)
 
-                        # Detect tag relations again under main camera's coordinate system
+                        # detect tag relations again under main camera's coordinate system
                         for tag_id, tag_data in self.merged_tags.items():
-                            self.merged_relations.setdefault(tag_id, [])
+                            if tag_id not in self.merged_relations:
+                                self.merged_relations[tag_id] = set()
                             for target_id, target_data in self.merged_tags.items():
                                 if target_id != tag_id and target_id not in self.merged_relations[tag_id]:
-                                    if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.7,
+                                    if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.94,
                                                                     distance_threshold=1.2):
-                                        self.merged_relations[tag_id].append(target_id)
+                                        self.merged_relations[tag_id].add(target_id)
 
     def _upload_merged_result(self):
         """Log and upload merge segment result to InfluxDB"""
@@ -216,7 +221,7 @@ class IPSSynchronizer(Synchronizer):
                         rotations_dict[tag_id] = rotation
                         translations_dict[tag_id] = translation
 
-                    # Prepare and upload the data for badge translations, rotations and relations
+                    # prepare and upload the data for badge translations, rotations and relations
                     translation_data = {
                         "measurement": "badge_translation",
                         "fields": {
@@ -235,12 +240,15 @@ class IPSSynchronizer(Synchronizer):
                         }
                     }
 
+                    # convert sets to lists for JSON serialization
+                    relations_dict = {tag_id: list(relations) for tag_id, relations in self.merged_relations.items()}
+                    
                     relation_data = {
                         "measurement": "badge_relation",
                         "fields": {
                             "window_start_time": self.time_bucket_key,
                             "window_end_time": self.time_bucket_key + self.window_size,
-                            "graph": json.dumps(self.merged_relations),
+                            "graph": json.dumps(relations_dict),
                         }
                     }
 
@@ -252,13 +260,13 @@ class IPSSynchronizer(Synchronizer):
                     self.influx_client.write(self.bucket_name, rotation_data)
                     self.influx_client.write(self.bucket_name, relation_data)
 
-                # Reset for next cycle
+                # reset for next cycle
                 self.merged_relations.clear()
                 self.merged_tags.clear()
                 self.alive = False
-                self.time_bucket_key = time.time()  # Update time_bucket_key with current time
+                self.time_bucket_key = time.time()  # update time_bucket_key with current time
 
-            # Schedule the next upload outside the lock to avoid potential deadlocks
+            # schedule the next upload outside the lock to avoid potential deadlocks
             now = time.time()
             sleep_duration = max(0, next_time - now)
             time.sleep(sleep_duration)
@@ -274,7 +282,7 @@ class IPSSynchronizer(Synchronizer):
         if not transformation_choices:
             return None
 
-        default_selection = 0  # Default to the first transformation matrix
+        default_selection = 0  # default to the first transformation matrix
         while True:
             try:
                 selection_input = input(f"Choose your main transformation matrices with number [{default_selection}]: ")

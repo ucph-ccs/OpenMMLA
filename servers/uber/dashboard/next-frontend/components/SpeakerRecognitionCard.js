@@ -20,7 +20,7 @@ const SpeakerRecognitionCard = ({ data }) => {
       <div ref={logContainerRef} className="log-container">
         {data.map((entry, index) => (
           <div key={index} className="log-entry">
-            <span>Time: {formatUnixTime(entry.segment_start_time)}</span>
+            <span>Time: {formatUnixTime(entry.window_start_time)}</span>
             <span>Speaker: {entry.speakers}</span>
             <span>Similarity: {entry.similarities}</span>
             <span>Duration: {entry.durations}</span>

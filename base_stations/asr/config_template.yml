@@ -90,8 +90,8 @@ RTMP:
   # =================================================================================
   # e.g., if your RTMP server is on uber-server.local machine and its IP address is 192.168.1.12, and it has two streams
   # app named stream_01 and stream_02, then the following line should be:
-  # audio_streams: rtmp://uber-server.local/stream_01,rtmp://192.168.1.12/stream_02
-  audio_streams: rtmp://<rtmp-example-server>/<stream_id>,rtmp://<rtmp-example-server>/<stream_id>
+  # audio_streams: ['rtmp://uber-server.local/stream_01', 'rtmp://192.168.1.12/stream_02']
+  audio_streams: ['rtmp://<rtmp-example-server>/<stream_id>', ..]
 
 # Database settings
 InfluxDB:

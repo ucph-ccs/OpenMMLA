@@ -65,9 +65,9 @@ def plot_speaker_diarization_interactive(json_file_path, save_dir):
     x_bar = []
     count = 0
     for i in range(l):
-        speaker_list = json.loads(json_dicts[i]['speakers'])
-        probability_list = json.loads(json_dicts[i]['similarities'])
-        duration_list = json.loads(json_dicts[i]['durations'])
+        speaker_list = json_dicts[i]['speakers']
+        probability_list = json_dicts[i]['similarities']
+        duration_list = json_dicts[i]['durations']
         current_time = datetime.fromtimestamp(json_dicts[i]['window_start_time'])
 
         # Increase the timeline axis values
@@ -337,7 +337,7 @@ def asr_across_sessions_analysis(logs_dir, visualizations_dir):
         if os.path.isdir(bucket_dir_path):
             apd, peq, nttc, sr = None, None, None, None
             for filename in os.listdir(bucket_dir_path):
-                if filename.endswith("_recognition.json"):
+                if filename.endswith("speaker_recognition.json"):
                     json_path = os.path.join(bucket_dir_path, filename)
                     apd, peq, nttc, sr = analyze_recognition_log(json_path)
             session_data.append((session_name, apd, peq, nttc, sr))
@@ -375,9 +375,9 @@ def analyze_recognition_log(json_file_path, unknown=False):
     for j in range(len(logs) - 1):
         log = logs[j]
         next_log = logs[j + 1]
-        speakers = json.loads(log['speakers'])
-        durations = json.loads(log['durations'])
-        next_speakers = json.loads(next_log['speakers'])
+        speakers = log['speakers']
+        durations = log['durations']
+        next_speakers = next_log['speakers']
 
         for i, speaker in enumerate(speakers):
             duration = durations[i]
@@ -395,7 +395,7 @@ def analyze_recognition_log(json_file_path, unknown=False):
                 turn_taking_count += 1
 
         if j == len(logs) - 2:
-            next_durations = json.loads(next_log['durations'])
+            next_durations = next_log['durations']
             for i, speaker in enumerate(next_speakers):
                 duration = next_durations[i]
                 speaker_counter[speaker] += 1
