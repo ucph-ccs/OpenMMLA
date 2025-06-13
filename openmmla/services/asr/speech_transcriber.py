@@ -1,4 +1,5 @@
 import gc
+import json
 import math
 import os
 import threading
@@ -148,7 +149,7 @@ class SpeechTranscriber(Server):
                         os.remove(audio_file_path)
                     except Exception as e:
                         self.logger.warning(f"Failed to remove temporary file {audio_file_path}: {e}")
-                        
+
                 if self.backend != 'azure':
                     torch.cuda.empty_cache()
                 gc.collect()
@@ -188,19 +189,18 @@ class SpeechTranscriber(Server):
             audio_config=audio_config
         )
         result = speech_recognizer.recognize_once_async().get()
-        
+
         if result.reason == self.speechsdk.ResultReason.RecognizedSpeech:
             text = result.text
-            
+
             # base response
             response = {"text": text}
-            
+
             # add word-level timestamps if requested and available
             if self.word_level and hasattr(result, 'json') and result.json:
                 try:
-                    import json
                     json_result = json.loads(result.json)
-                    
+
                     # extract word-level timestamps from NBest results
                     if 'NBest' in json_result and json_result['NBest']:
                         nbest = json_result['NBest'][0]
@@ -220,13 +220,12 @@ class SpeechTranscriber(Server):
                             self.logger.warning("Word-level timestamps requested but not available in Azure response")
                 except Exception as e:
                     self.logger.error(f"Failed to parse Azure JSON result for word timestamps: {e}")
-            
+
             return response
-          
+
         else:
             error_msg = f"Azure recognition failed with reason: {result.reason}"
             raise RuntimeError(error_msg)
-        
 
     def _apply_nr(self, input_path: str):
         """Apply noise reduction to the audio.

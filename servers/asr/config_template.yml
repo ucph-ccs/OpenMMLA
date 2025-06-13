@@ -44,7 +44,7 @@ SpeechTranscriber:
     word_level: <bool> # word-level timestamps, true/false
   local:
     model: <model>  # e.g., base.en, small.en, medium.en, large.en for regular Whisper, or whisperx/large-v3, whisperx/medium for WhisperX with word-level timestamps
-    language: en  # language code, e.g., en, zh, fr, etc. Set to null for auto-detection (WhisperX only)
+    language: en  # language code, e.g., en, zh, fr, etc. Set to null for auto-detection
     word_level: <bool>
 
 VoiceActivityDetector:
