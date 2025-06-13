@@ -1,4 +1,5 @@
 import os
+
 from openmmla.utils.querys import fetch_and_process_data, save_to_json_file
 
 
@@ -19,7 +20,7 @@ def vfa_session_analysis(project_dir, bucket_name, influx_client):
     os.makedirs(log_dir, exist_ok=True)
 
     # Fetch and log action recognition data
-    action_data = fetch_and_process_data(bucket_name, "action recognition", influx_client)
+    action_data = fetch_and_process_data(bucket_name, "action_recognition", influx_client)
     action_json_file_path = save_to_json_file(bucket_name, action_data, "action_recognition", log_dir)
 
     print(f"Action Recognition session analysis completed for session: {bucket_name}")

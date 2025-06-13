@@ -353,7 +353,7 @@ class ASRSynchronizer(Synchronizer):
                           - segment_start_times: List of base recording start times
         """
         recognition_data = {
-            "measurement": "speaker recognition",
+            "measurement": "speaker_recognition",
             "fields": {
                 "window_start_time": float(merged_result['window_start_time']),
                 "window_end_time": float(merged_result['window_start_time']) + float(self.window_size),

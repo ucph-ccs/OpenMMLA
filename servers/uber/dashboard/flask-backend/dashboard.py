@@ -150,9 +150,9 @@ def emit_realtime_data(bucket_name, stop_event):
 
     while not stop_event.is_set():
         try:
-            recognition_data = fetch_latest_entry(bucket_name, "speaker recognition", influx_client)
-            transcription_data = fetch_latest_entry(bucket_name, "speaker transcription", influx_client)
-            relations = fetch_latest_entry(bucket_name, "badge relations", influx_client)
+            recognition_data = fetch_latest_entry(bucket_name, "speaker_recognition", influx_client)
+            transcription_data = fetch_latest_entry(bucket_name, "speaker_transcription", influx_client)
+            relations = fetch_latest_entry(bucket_name, "badge_relation", influx_client)
             graph_data, timestamp = relations if relations else (None, None)
             position_data = {}
             if timestamp:

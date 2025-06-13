@@ -5,7 +5,6 @@ from datetime import datetime
 
 import matplotlib.pyplot as plt
 import networkx as nx
-import numpy as np
 from pyecharts import options as opts
 from pyecharts.charts import Line
 from pyecharts.charts import Page
@@ -33,8 +32,8 @@ def asr_session_analysis(project_dir, bucket_name, influx_client):
     os.makedirs(visualization_dir, exist_ok=True)
 
     # Log
-    recognition_data = fetch_and_process_data(bucket_name, "speaker recognition", influx_client)
-    transcription_data = fetch_and_process_data(bucket_name, "speaker transcription", influx_client)
+    recognition_data = fetch_and_process_data(bucket_name, "speaker_recognition", influx_client)
+    transcription_data = fetch_and_process_data(bucket_name, "speaker_transcription", influx_client)
     recognition_json_file_path = save_to_json_file(bucket_name, recognition_data, "speaker_recognition", log_dir)
     transcription_json_file_path = save_to_json_file(bucket_name, transcription_data, "speaker_transcription", log_dir)
     convert_transcription_json_to_txt(transcription_json_file_path)
@@ -61,7 +60,7 @@ def plot_speaker_diarization_interactive(json_file_path, save_dir):
     with open(json_file_path, 'r') as f:
         json_dicts = json.load(f)
     l = len(json_dicts)
-    first_time = datetime.fromtimestamp(int(json_dicts[0]['window_start_time'])) 
+    first_time = datetime.fromtimestamp(int(json_dicts[0]['window_start_time']))
 
     x_bar = []
     count = 0
@@ -69,7 +68,7 @@ def plot_speaker_diarization_interactive(json_file_path, save_dir):
         speaker_list = json.loads(json_dicts[i]['speakers'])
         probability_list = json.loads(json_dicts[i]['similarities'])
         duration_list = json.loads(json_dicts[i]['durations'])
-        current_time = datetime.fromtimestamp(json_dicts[i]['window_start_time']) 
+        current_time = datetime.fromtimestamp(json_dicts[i]['window_start_time'])
 
         # Increase the timeline axis values
         count += 1

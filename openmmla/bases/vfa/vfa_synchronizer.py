@@ -299,7 +299,7 @@ class VFASynchronizer(Synchronizer):
             return
 
         analysis_data = {
-            "measurement": "action recognition",
+            "measurement": "action_recognition",
             "fields": {
                 "window_start_time": time_bucket_key,
                 "window_end_time": time_bucket_key,

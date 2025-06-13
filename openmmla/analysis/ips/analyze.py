@@ -8,7 +8,6 @@ import numpy as np
 from pyecharts import options as opts
 from pyecharts.charts import Line
 from pyecharts.charts import Page
-from pyecharts.commons.utils import JsCode
 from scipy.interpolate import interp1d
 from scipy.spatial.distance import euclidean
 
@@ -56,12 +55,12 @@ def ips_session_analysis(project_dir, bucket_name, influx_client):
     os.makedirs(visualization_dir, exist_ok=True)
 
     # Log
-    relations_data = fetch_and_process_data(bucket_name, "badge relations", influx_client)
-    translations_data = fetch_and_process_data(bucket_name, "badge translations", influx_client)
-    rotations_data = fetch_and_process_data(bucket_name, "badge rotations", influx_client)
-    translation_json_file = save_to_json_file(bucket_name, translations_data, "badge_translations", log_dir)
-    relations_json_file = save_to_json_file(bucket_name, relations_data, "badge_relations", log_dir)
-    save_to_json_file(bucket_name, rotations_data, "badge_rotations", log_dir)
+    relations_data = fetch_and_process_data(bucket_name, "badge_relation", influx_client)
+    translations_data = fetch_and_process_data(bucket_name, "badge_translation", influx_client)
+    rotations_data = fetch_and_process_data(bucket_name, "badge_rotation", influx_client)
+    translation_json_file = save_to_json_file(bucket_name, translations_data, "badge_translation", log_dir)
+    relations_json_file = save_to_json_file(bucket_name, relations_data, "badge_relation", log_dir)
+    save_to_json_file(bucket_name, rotations_data, "badge_rotation", log_dir)
 
     # Visualize
     plot_badge_locations_and_trajectories(translation_json_file, visualization_dir)

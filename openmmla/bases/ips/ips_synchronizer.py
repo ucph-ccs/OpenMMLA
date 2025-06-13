@@ -218,7 +218,7 @@ class IPSSynchronizer(Synchronizer):
 
                     # Prepare and upload the data for badge translations, rotations and relations
                     translation_data = {
-                        "measurement": "badge translations",
+                        "measurement": "badge_translation",
                         "fields": {
                             "window_start_time": self.time_bucket_key,
                             "window_end_time": self.time_bucket_key + self.window_size,
@@ -227,7 +227,7 @@ class IPSSynchronizer(Synchronizer):
                     }
 
                     rotation_data = {
-                        "measurement": "badge rotations",
+                        "measurement": "badge_rotation",
                         "fields": {
                             "window_start_time": self.time_bucket_key,
                             "window_end_time": self.time_bucket_key + self.window_size,
@@ -236,7 +236,7 @@ class IPSSynchronizer(Synchronizer):
                     }
 
                     relation_data = {
-                        "measurement": "badge relations",
+                        "measurement": "badge_relation",
                         "fields": {
                             "window_start_time": self.time_bucket_key,
                             "window_end_time": self.time_bucket_key + self.window_size,

@@ -200,7 +200,7 @@ class IPSVisualizer(Base):
         query = f"""from(bucket: "{self.bucket_name}")
                     |> range(start: {start_time})
                     |> last()
-                    |> filter(fn: (r) => r._measurement == "badge relations")
+                    |> filter(fn: (r) => r._measurement == "badge_relation")
                     |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
                     """
         tables = influx_client.query(query)
@@ -218,7 +218,7 @@ class IPSVisualizer(Base):
         start_time = int(timestamp) - 20
         query = f"""from(bucket: "{self.bucket_name}")
                    |> range(start: {start_time})
-                   |> filter(fn: (r) => r._measurement == "badge translations")
+                   |> filter(fn: (r) => r._measurement == "badge_translation")
                    |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
                    |> filter(fn: (r) => r.window_start_time == {timestamp})
                   """

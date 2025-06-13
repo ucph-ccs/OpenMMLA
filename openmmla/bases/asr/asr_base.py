@@ -797,7 +797,7 @@ class ASRBase(Base):
             chunk_end_time: end timestamp of the audio chunk.
         """
         transcription_record = {
-            "measurement": "speaker transcription",
+            "measurement": "speaker_transcription",
             "fields": {
                 "window_start_time": chunk_start_time,
                 "window_end_time": chunk_end_time,
