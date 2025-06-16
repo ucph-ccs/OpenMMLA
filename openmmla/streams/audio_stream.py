@@ -78,8 +78,8 @@ class AudioStream(StreamReceiver):
         Keyword Args:
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 5.0)
             format (str, optional): Audio format (default: 'int16')
-            channels (int, optional): Number of audio channels (default: 1)
-            channel_select (int, optional): selected channel index (default: None)
+            channels (int, optional): Number of channels of the audio stream (default: 1)
+            channel_select (int, optional): selected channel index of the audio stream (pyaudio only) (default: None)
             rate (int, optional): Sample rate in Hz (default: 16000)
             chunk_size (int, optional): Size of audio chunk to read in frames (default: 512)
             resample_method (ResampleMethod, optional): Method for resampling (default: AUDIO_LIBROSA)
@@ -98,7 +98,7 @@ class AudioStream(StreamReceiver):
         self.sample_width = SUPPORTED_FORMATS[self.format]['sample_width']
         self.dtype = SUPPORTED_FORMATS[self.format]['dtype']
 
-        self.channels = kwargs.get('channels', 1)  # Number of channels to read
+        self.channels = kwargs.get('channels', 1)
         self.channel_select = kwargs.get('channel_select', None)
         self.rate = kwargs.get('rate', 16000)
         self.chunk_size = kwargs.get('chunk_size', 512)

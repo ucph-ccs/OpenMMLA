@@ -2,7 +2,7 @@ from openmmla.utils.clean import flush_input
 from .enums import LIGHT_BLUE, ENDC
 
 
-def get_mode():
+def get_base_mode():
     """Get the operating mode from user input."""
     while True:
         try:
@@ -23,6 +23,23 @@ def get_mode():
         except ValueError:
             print("Invalid input. Please enter a valid integer.")
 
+def get_synchronizer_mode():
+    """Get the operating mode from user input."""
+    while True:
+        try:
+            flush_input()
+            selected_mode = int(input("Please select the mode:"
+                                      "\n1. Recognize, recognize locally stored audio"
+                                      "\n2. Full, recognize on-the-fly"
+                                      "\nSelected mode:"))
+            if selected_mode == 1:
+                return 'recognize'
+            elif selected_mode == 2:
+                return 'full'
+            else:
+                print("Invalid mode, please select again.")
+        except ValueError:
+            print("Invalid input. Please enter a valid integer.")
 
 def get_name():
     """Get the name of the speaker from user input."""
@@ -118,17 +135,18 @@ def get_function_base(id: int, mode: str):
             print('Please enter a valid integer')
 
 
-def get_function_synchronizer():
+def get_function_synchronizer(mode: str):
     """Get the function to be performed from user input for synchronizer."""
     while True:
         try:
             flush_input()
             print("------------------------------------------------")
             select_fun = input(
-                "Please select your function:\n"
-                "1 : start\n"
-                "0 : exit\n"
-                "Selected function: ")
+                f"Please select your function:\n"
+                f"1 : start\n"
+                f"2 : switch (mode:{LIGHT_BLUE}{mode}{ENDC})\n"
+                f"0 : exit\n"
+                f"Selected function: ")
 
             if select_fun.strip():  # check if input is not empty after removing leading/trailing whitespace
                 return int(select_fun)
@@ -158,8 +176,8 @@ def get_channel_selection(device_info: dict) -> int | None:
             flush_input()
             selection = input(f"\nDevice has {device_channels} channels. Select channel option:\n"
                               f"<channel_index> : Specify channel index (0-{device_channels - 1})\n"
-                              f"e.g: 0 -> Left channel only\n"
-                              f"e.g: 1 -> Right channel only\n"
+                              f"e.g: 0 -> First channel only\n"
+                              f"e.g: 1 -> Second channel only\n"
                               f"Please select your channel option: ")
             selection = int(selection.strip())
             if 0 <= selection < device_channels:

@@ -14,7 +14,7 @@ from .io import read_signal_from_wav, write_signal_to_wav
 
 
 def apply_gain(infile: str, gain: float = 10, inplace: bool = True) -> None:
-    """Apply gain to the audio file.
+    """Apply gain to the audio file, read the first channel of the audio (if multi-channel) and amplify it with gain.
 
     Args:
         infile: Input audio file path

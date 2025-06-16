@@ -28,7 +28,7 @@ from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN
-from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_mode, get_name, \
+from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_base_mode, get_name, \
     get_channel_selection, get_base_type
 
 
@@ -246,7 +246,7 @@ class ASRBase(Base):
         self.audio_stream.stop()
         write_frame_to_wav(output_path, audio_frame)
 
-        apply_gain(output_path, self.gain)  # amplify the first channel of the audio with gain
+        apply_gain(output_path, self.gain)
         audio_path = self._audio_preprocessing(output_path, 1)
 
         if audio_path is None:
@@ -385,7 +385,7 @@ class ASRBase(Base):
 
     def _switch_mode(self):
         """Switch the operating mode between 'record', 'recognize' and 'full'."""
-        self.mode = get_mode()
+        self.mode = get_base_mode()
         self.logger.info(f"Switched to {self.mode} mode.")
 
     def _continuous_recording(self):

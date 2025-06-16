@@ -132,6 +132,15 @@ On your devices which you want to stream data to the RTMP server, could be Raspb
      -b:v 1M -maxrate 2M -bufsize 2M \
      -c:a aac -b:a 128k \
      -f flv rtmp://mac-01.local/ips/f
+
+   # Recording on Ubuntu:
+   START_TIME=$(date +"%Y%m%d_%H%M%S")
+   ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
+    -c:v libx264 -preset veryfast -tune zerolatency \
+    -g 30 -keyint_min 30 -sc_threshold 0 \
+    -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
+    -b:v 3M -maxrate 6M -bufsize 10M \
+    -f mp4 "record_$START_TIME.mp4"
    ```
 
 ## Record the streams with OBS

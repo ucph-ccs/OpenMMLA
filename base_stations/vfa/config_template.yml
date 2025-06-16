@@ -10,7 +10,7 @@ Base:
   resolution: [1920, 1080]                          # Image resolution in pixels (width, height)
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
-  interval: 30                                      # Interval in seconds between image captures
+  interval: 1                                       # Interval in seconds between image captures
 
   # VideoStream settings
   source: opencv                                    # VideoStream source type (opencv/rtmp)
@@ -31,7 +31,7 @@ RTMP:
   # e.g., if your RTMP server is on uber-server.local machine and its IP address is 192.168.1.12, and it has two streams
   # app named stream_01 and stream_02, then the following line should be:
   # video_streams: rtmp://uber-server.local/stream_01,rtmp://192.168.1.12/stream_02
-  video_streams: rtmp://<rtmp-example-server>/<stream_id>,rtmp://<rtmp-example-server>/<stream_id>
+  video_streams: ['rtmp://<rtmp-example-server>/<stream_id>', ..]
 
 # Database settings
 InfluxDB:

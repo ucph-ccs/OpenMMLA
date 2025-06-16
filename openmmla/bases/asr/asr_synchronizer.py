@@ -12,7 +12,7 @@ from openmmla.utils.input import select_or_create_bucket, get_number_of_bases
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
-from .input import get_function_synchronizer, get_base_type
+from .input import get_function_synchronizer, get_base_type, get_synchronizer_mode
 
 
 class ASRSynchronizer(Synchronizer):
@@ -20,7 +20,7 @@ class ASRSynchronizer(Synchronizer):
     uploading the segment result to InfluxDB."""
     logger = get_logger('asr-synchronizer')
 
-    def __init__(self, project_dir: str | None, config_path: str, dominant: bool = False, sp: bool = False):
+    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'full', dominant: bool = False, sp: bool = False):
         """Initialize the ASRSynchronizer class.
 
         Args:
@@ -30,6 +30,7 @@ class ASRSynchronizer(Synchronizer):
             sp: tag of whether the audio bases do speech separation (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
+        self.mode = mode
         self.dominant = dominant
         self.sp = sp
 
@@ -88,11 +89,11 @@ class ASRSynchronizer(Synchronizer):
     def run(self):
         """Run the ASR synchronizer."""
         print(f'\033]0;ASR Synchronizer for {self.base_type}\007')
-        func_map = {1: self._start_synchronization}
+        func_map = {1: self._start_synchronization, 2: self._switch_mode}
 
         while True:
             try:
-                select_fun = get_function_synchronizer()
+                select_fun = get_function_synchronizer(self.mode)
                 if select_fun == 0:
                     print("------------------------------------------------")
                     clear_directory(os.path.join(self.temp_dir))
@@ -140,6 +141,16 @@ class ASRSynchronizer(Synchronizer):
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
+
+    def _switch_mode(self):
+        """Switch the operating mode between 'record', 'recognize' and 'full'."""
+        self.mode = get_synchronizer_mode()
+        if self.mode == 'recognize': # post-time analysis
+            self.buffer_expiry_time = 1000000000
+        else:
+            self.buffer_expiry_time = int(self.config['Synchronizer']['result_expiry_time'])
+
+        self.logger.info(f"Switched to {self.mode} mode.")
 
     def _create_bucket_logger(self):
         self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
