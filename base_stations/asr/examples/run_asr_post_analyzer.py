@@ -13,7 +13,6 @@ config_path = os.path.join(project_dir, 'config.yml')
 def run_asr_post_analyzer(args):
     print("\033]0;Audio Post Analyzer\007")
     post_audio_analyzer = ASRPostAnalyzer(project_dir=args.project_dir, config_path=args.config_path,
-                                          custom_origin_dir=args.custom_origin_dir, filenames=args.filenames,
                                           vad=args.vad, nr=args.nr, sp=args.sp, tr=args.tr)
     post_audio_analyzer.run()
 
@@ -23,8 +22,6 @@ if __name__ == "__main__":
     add_arg = functools.partial(add_arguments, argparser=parser)
     add_arg('project_dir', str, project_dir, 'path to the project directory', shortname='-p')
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
-    add_arg('custom_origin_dir', str, None, 'path to the custom origin directory, default to <project_dir>/post-time/origin/ when not specified', shortname='-custom')
-    add_arg('filenames', str, None, 'comma-separated list of filenames in <custom_origin_dir> to process, default to all files when not specified', shortname='-f')
     add_arg('vad', bool, True, 'whether to use the VAD or not', shortname='-vad')
     add_arg('nr', bool, True, 'whether to use the denoiser to enhance speech or not', shortname='-nr')
     add_arg('sp', bool, False, 'whether to use the separation model or not', shortname='-sp')

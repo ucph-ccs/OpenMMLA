@@ -86,11 +86,9 @@ options:
   -h                          : Display this help message
 
 # Run post-time audio analyzer
-usage: ./run_post.sh [-f FILENAMES] [-custom CUSTOM_ORIGIN_DIR] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-sp SPEECH_SEPARATE] [-tr TRANSCRIBE] [-h]
+usage: ./run_post.sh [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-sp SPEECH_SEPARATE] [-tr TRANSCRIBE] [-h]
 
 options:
-  -f FILENAMES                 : Comma-separated list of filenames in <custom_origin_dir> to process, default to all files when not specified.
-  -custom CUSTOM_ORIGIN_DIR    : Path to the custom origin directory, default to <project_dir>/post-time/origin/ when not specified.
   -vad VOICE_ACTIVITY_DETECT   : Whether to use Voice Activity Detection (true/false, default: true)
   -nr NOISE_REDUCE             : Whether to use Noise Reduction (true/false, default: true)
   -sp SPEECH_SEPARATE          : Whether to use Speech Separation (true/false, default: false)
@@ -106,5 +104,5 @@ mmla asr-base -b <base_type> -c <config_file_path> # start an asr base
 mmla asr-sync -c <config_file_path> # start an asr base synchronizer
 
 # Run post-time audio analyzer
-mmla asr-post -f [-custom <custom_origin_dir>] [-f <filenames>] -c <config_file_path>
+mmla asr-post -f -c <config_file_path>
 ``` 

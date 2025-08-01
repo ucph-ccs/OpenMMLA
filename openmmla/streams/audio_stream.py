@@ -73,7 +73,7 @@ class AudioStream(StreamReceiver):
         """Initialize audio stream.
 
         Args:
-            source (str): Stream source type ('pyaudio', 'udp', 'tcp', 'rtmp', 'lsl').
+            source (str): Stream source type ('pyaudio', 'udp', 'tcp', 'rtmp', 'lsl', 'file').
 
         Keyword Args:
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 5.0)
@@ -86,6 +86,7 @@ class AudioStream(StreamReceiver):
             host (str, optional): Socket host (required for 'udp' or 'tcp' sources)
             port (int, optional): Socket port (required for 'udp' or 'tcp' sources)
             url (str, optional): RTMP URL (required for 'rtmp' source)
+            file_path (str, optional): Path to the audio file (required for 'file' source)
         """
         super().__init__(**kwargs)
         self.source = source
@@ -129,6 +130,13 @@ class AudioStream(StreamReceiver):
             self.lsl_inlet = None
             self.lsl_offset = None
 
+        # File objects
+        if self.source == 'file':
+            self.file_path = self.require_kwarg(kwargs, 'file_path', "File source requires a 'file_path' parameter")
+            self.file_data = None
+            self.file_sample_rate = None
+            self._converted_file_path = None  # Track if we created a temporary converted file
+
         # Frame metadata
         self._frame_metadata = {
             'sample_rate': self.rate,
@@ -148,7 +156,7 @@ class AudioStream(StreamReceiver):
         self._receive_thread = None
 
     def start(self) -> None:
-        """Start the audio stream and begin capturing data."""
+        """Start the audio stream and initialize data capturing source."""
         self.stop()
 
         if self.source == 'pyaudio':
@@ -161,6 +169,11 @@ class AudioStream(StreamReceiver):
             self._initialize_rtmp()
         elif self.source == 'lsl':
             self._initialize_lsl()
+        elif self.source == 'file':
+            self._initialize_file()
+            # File source doesn't need a receive thread - data is read on demand
+            logger.info(f"Audio stream started with source: {self.source}")
+            return
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
@@ -195,11 +208,13 @@ class AudioStream(StreamReceiver):
             self._cleanup_rtmp()
         elif self.source == 'lsl':
             self._cleanup_lsl()
+        elif self.source == 'file':
+            self._cleanup_file()
 
         self._last_read_pos = -1
 
     def read(self, duration: float, target_rate: int | None = None, timeout: float = 5.0,
-             latest: bool = False) -> AudioFrame | None:
+             latest: bool = False, start_time: float = 0.0) -> AudioFrame | None:
         """Read audio data with optional resampling.
 
         Args:
@@ -207,13 +222,19 @@ class AudioStream(StreamReceiver):
             target_rate (int, optional): Optional target sample rate for resampling.
             timeout (float): Maximum time to wait for data in seconds.
             latest (bool): Whether to read from the most recent data or continue from last position.
+            start_time (float): Start time in seconds for file source (only used with file source).
 
         Returns:
             AudioFrame: Containing the requested duration of audio data, or None if timeout is reached.
         """
+        # File source - direct read without buffering
+        if self.source == 'file':
+            return self._read_from_file(start_time, duration, target_rate)
+        
+        # Other sources
         frames_needed = int(duration * self.rate / self.chunk_size)
         total_frames = []
-        start_time = time.time()
+        start_time_actual = time.time()
 
         if latest:
             self._last_read_pos = -1
@@ -226,7 +247,7 @@ class AudioStream(StreamReceiver):
                 continue
 
             if current_tail == self._last_read_pos:
-                if time.time() - start_time > timeout:
+                if time.time() - start_time_actual > timeout:
                     logger.warning("Timeout reached while waiting for frames.")
                     break
                 time.sleep(1)
@@ -240,7 +261,7 @@ class AudioStream(StreamReceiver):
             new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
             total_frames.extend(new_frames)
             self._last_read_pos = end_pos
-            start_time = time.time()
+            start_time_actual = time.time()
 
         return self._process_frames(total_frames, target_rate)
 
@@ -276,6 +297,73 @@ class AudioStream(StreamReceiver):
         }
 
         return AudioFrame(timestamp=start_timestamp, data=audio_data, metadata=metadata)
+
+    def _read_from_file(self, start_time: float, duration: float, target_rate: int | None = None) -> AudioFrame | None:
+        """Read audio data directly from file based on start time and duration.
+        
+        Args:
+            start_time (float): Start time in seconds.
+            duration (float): Duration to read in seconds.
+            target_rate (int, optional): Target sample rate for resampling.
+            
+        Returns:
+            AudioFrame: Audio data for the specified time range, or None if invalid range.
+        """
+        if self.file_data is None:
+            logger.error("File data not loaded")
+            return None
+            
+        # Calculate start and end positions in samples
+        start_sample = int(start_time * self.file_sample_rate)
+        duration_samples = int(duration * self.file_sample_rate)
+        end_sample = start_sample + duration_samples
+
+        # Check bounds
+        if start_sample >= len(self.file_data) or start_sample < 0:
+            logger.warning(f"Start time {start_time} is out of bounds")
+            return None
+            
+        # Adjust end sample if it exceeds file length
+        if end_sample > len(self.file_data):
+            end_sample = len(self.file_data)
+            logger.info(f"Adjusting duration to fit file length: {(end_sample - start_sample) / self.file_sample_rate:.3f}s")
+        
+        # Extract audio data
+        if self.file_data.ndim == 1:
+            audio_data = self.file_data[start_sample:end_sample]
+        else:
+            audio_data = self.file_data[start_sample:end_sample, :]
+            
+        # Apply channel selection if needed
+        if self.file_data.ndim > 1 and self.channel_select is not None:
+            if 0 <= self.channel_select < self.file_data.shape[1]:
+                audio_data = audio_data[:, self.channel_select]
+            else:
+                logger.warning(f"Invalid channel index: {self.channel_select}")
+                audio_data = audio_data.mean(axis=1)
+        elif self.file_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+            
+        # Convert to the requested format
+        if audio_data.dtype != self.dtype:
+            audio_data = audio_data.astype(self.dtype)
+            
+        # Resample if necessary
+        current_rate = self.file_sample_rate
+        if target_rate and target_rate != current_rate:
+            audio_data = resample_audio(audio_data, current_rate, target_rate, method=self.resample_method)
+            current_rate = target_rate
+        elif self.rate != self.file_sample_rate:
+            audio_data = resample_audio(audio_data, self.file_sample_rate, self.rate, method=self.resample_method)
+            current_rate = self.rate
+            
+        metadata = {
+            'sample_rate': current_rate,
+            'channels': 1 if audio_data.ndim == 1 else audio_data.shape[1],
+            'format': self.format,
+        }
+        
+        return AudioFrame(timestamp=start_time, data=audio_data, metadata=metadata)
 
     def _initialize_pyaudio(self, max_retries: int = 3) -> None:
         """Initialize PyAudio stream with configured parameters."""
@@ -396,6 +484,63 @@ class AudioStream(StreamReceiver):
             self.lsl_offset = time.time() - local_clock()
             logger.info(f"Successfully initialized LSL audio stream with inlet: {self.lsl_inlet}")
 
+    def _initialize_file(self):
+        """Initialize file source."""
+        try:
+            # Check if file needs format conversion
+            actual_file_path = self._prepare_audio_file()
+            
+            self.file_data, self.file_sample_rate = sf.read(actual_file_path, dtype=self.dtype)
+            logger.info(f"Successfully loaded audio file: {actual_file_path}")
+            logger.info(f"File duration: {len(self.file_data) / self.file_sample_rate:.2f} seconds, "
+                       f"Sample rate: {self.file_sample_rate} Hz, "
+                       f"Channels: {1 if self.file_data.ndim == 1 else self.file_data.shape[1]}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load audio file {self.file_path}: {e}") from e
+            
+    def _prepare_audio_file(self):
+        """Prepare audio file for processing, converting format if necessary.
+        
+        Returns:
+            str: Path to the processed audio file (may be the original or a converted version).
+        """
+        import os
+        import tempfile
+        from openmmla.utils.audio.files import format_wav
+        
+        # If already a WAV file with correct parameters, use as-is
+        if self.file_path.lower().endswith('.wav'):
+            try:
+                import wave
+                with wave.open(self.file_path, 'rb') as wav_file:
+                    if (wav_file.getframerate() == self.rate and 
+                        wav_file.getnchannels() == self.channels):
+                        logger.info(f"Audio file already in correct format: {self.file_path}")
+                        return self.file_path
+            except (wave.Error, Exception):
+                pass  # Fall through to conversion
+        
+        # Need to convert format - create temporary file
+        temp_dir = tempfile.gettempdir()
+        base_name = os.path.splitext(os.path.basename(self.file_path))[0]
+        temp_wav_path = os.path.join(temp_dir, f"{base_name}_converted.wav")
+        
+        logger.info(f"Converting audio file to standard format: {self.file_path} -> {temp_wav_path}")
+        
+        # Convert using format_wav
+        converted_path = format_wav(
+            input_file=self.file_path,
+            output_file=temp_wav_path,
+            codec="pcm_s16le",
+            sample_rate=self.rate,
+            channels=self.channels
+        )
+        
+        # Track the converted file for cleanup
+        self._converted_file_path = converted_path
+        logger.info(f"Audio file converted successfully: {converted_path}")
+        return converted_path
+
     def _cleanup_pyaudio(self) -> None:
         """Clean up PyAudio resources."""
         if self.stream:
@@ -426,6 +571,23 @@ class AudioStream(StreamReceiver):
             self.lsl_inlet.close_stream()
         self.lsl_inlet = None
         self.lsl_offset = None
+
+    def _cleanup_file(self):
+        """Clean up file resources."""
+        self.file_data = None
+        self.file_sample_rate = None
+        
+        # Clean up converted file if we created one
+        if self._converted_file_path and self._converted_file_path != self.file_path:
+            try:
+                import os
+                if os.path.exists(self._converted_file_path):
+                    os.remove(self._converted_file_path)
+                    logger.info(f"Cleaned up converted file: {self._converted_file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up converted file {self._converted_file_path}: {e}")
+            finally:
+                self._converted_file_path = None
 
     def _receive_loop(self) -> None:
         """Continuously receive data and store in buffer."""

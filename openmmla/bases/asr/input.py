@@ -1,3 +1,5 @@
+import os
+
 from openmmla.utils.clean import flush_input
 from .enums import LIGHT_BLUE, ENDC
 
@@ -77,9 +79,27 @@ def get_id():
         except ValueError:
             print("Invalid input. Please enter an integer as your unique base id.")
 
+def get_file(files: list[str]) -> str:
+    """Get the file as audio stream source from user input."""
+    while True:
+        try:
+            flush_input()
+            print("------------------------------------------------")
+            print("Please select an audio file:")
+            for i, file_path in enumerate(files):
+                filename = os.path.basename(file_path)
+                print(f"{i}: {filename}")
+            
+            index = int(input("Please select the file index: "))
+            if 0 <= index < len(files):
+                return files[index]
+            else:
+                print(f"Invalid input. Please select a valid file index from 0 to {len(files) - 1}.")
+        except ValueError:
+            print("Invalid input. Please enter a valid integer.")
 
 def get_input_device_index(available_indexes: list[int]) -> int:
-    "Get the input device index from user input."""
+    """Get the input device index from user input."""
     while True:
         try:
             flush_input()
@@ -93,7 +113,7 @@ def get_input_device_index(available_indexes: list[int]) -> int:
 
 
 def get_rtmp_url(available_urls: list[str]) -> str:
-    "Get the RTMP URL from user input."""
+    """Get the RTMP URL from user input."""
     while True:
         try:
             flush_input()

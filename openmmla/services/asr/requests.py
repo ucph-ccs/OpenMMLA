@@ -79,7 +79,7 @@ def request_speech_transcription(
         frame_rate: int,
         base_id: str,
         url: str,
-        timeout: int = 15
+        timeout: int = 60
 ) -> dict | None:
     def process_response(response):
         response_dict = response.json() # {text: str, words: list[dict]}, words is optional

@@ -28,3 +28,4 @@ twine.txt
 
 # Unignore specific files
 !.gitkeep
+CLAUDE.md

@@ -30,15 +30,12 @@ class ASRPostAnalyzer(Base):
     logger = get_logger('asr-post-analyzer')
 
     def __init__(self, project_dir: str | None = None, config_path: str | None = None,
-                 custom_origin_dir: str | None = None, filenames: str | None = None, vad: bool = True,
-                 nr: bool = True, sp: bool = False, tr: bool = True):
+                 vad: bool = True, nr: bool = True, sp: bool = False, tr: bool = True):
         """Initialize the ASRPostAnalyzer class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
-            custom_origin_dir: path to the custom origin directory, default to <project_dir>/post-time/origin/ when not specified.
-            filenames: comma-separated list of filenames in <custom_origin_dir> to process, default to all files when not specified.
             vad: whether to use the VAD or not (default: True)
             nr: whether to use the denoiser to enhance speech or not (default: True)
             sp: whether to use the separation model or not (default: False)
@@ -51,7 +48,8 @@ class ASRPostAnalyzer(Base):
         self.nr = nr
         self.sp = sp
         self.tr = tr
-        self.custom_origin_dir = custom_origin_dir
+        self.custom_origin_dir = None
+        self.filenames = None
         self.process_files: list[str] = []
 
         self.segment_duration: int = 0
@@ -82,8 +80,13 @@ class ASRPostAnalyzer(Base):
 
         # Use custom origin directory if provided
         if self.custom_origin_dir:
-            if os.path.isdir(self.custom_origin_dir):
-                self.origin_dir = os.path.abspath(self.custom_origin_dir)
+            if not os.path.isabs(self.custom_origin_dir):
+                custom_origin_dir = os.path.join(os.getcwd(), self.custom_origin_dir)
+            else:
+                custom_origin_dir = self.custom_origin_dir
+
+            if os.path.isdir(custom_origin_dir):
+                self.origin_dir = custom_origin_dir
                 self.logger.info(f"Using custom origin directory: {self.origin_dir}")
             else:
                 self.logger.warning(f"Custom origin directory {self.custom_origin_dir} is not a valid directory. "
@@ -103,8 +106,15 @@ class ASRPostAnalyzer(Base):
                         f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg', '.m4a'))]
 
         # Process specific files if filenames is provided, otherwise process all files in the origin directory
-        if filenames:
-            specified_files = [f.strip() for f in str(filenames).split(',') if f.strip()]
+        if self.filenames:
+            # Handle both string (comma-separated) and list formats
+            if isinstance(self.filenames, str):
+                specified_files = [f.strip() for f in self.filenames.split(',') if f.strip()]
+            elif isinstance(self.filenames, list):
+                specified_files = [str(f).strip() for f in self.filenames if str(f).strip()]
+            else:
+                specified_files = []
+                
             self.process_files = [f for f in specified_files if os.path.isfile(os.path.join(self.origin_dir, f))]
 
             if not self.process_files:
@@ -126,9 +136,17 @@ class ASRPostAnalyzer(Base):
         """Load and assign configuration parameters from the YAML configuration file."""
         post_analyzer_config = self.config['PostAnalyzer']
         asr_server_config = self.config['Server']['asr']
+        
+        # Load processing parameters
         self.segment_duration = int(post_analyzer_config['segment_duration'])
         self.threshold = float(post_analyzer_config['threshold'])
         self.keep_threshold = float(post_analyzer_config['keep_threshold'])
+        
+        # Load path configurations from config file
+        self.custom_origin_dir = post_analyzer_config.get('custom_origin_dir')
+        self.filenames = post_analyzer_config.get('filenames')
+        
+        # Load server URLs
         self.speech_transcriber_url = resolve_url(asr_server_config['speech_transcriber'])
         self.speech_separator_url = resolve_url(asr_server_config['speech_separator'])
         self.speech_enhancer_url = resolve_url(asr_server_config['speech_enhancer'])
@@ -319,9 +337,9 @@ class ASRPostAnalyzer(Base):
                     "segment_no": segment_no,
                     "window_start_time": segment_start_time,
                     "window_end_time": segment_start_time + self.segment_duration,
-                    "speakers": json.dumps([speaker]),
-                    "similarities": json.dumps([np.round(np.float64(similarity), 4)]),
-                    "durations": json.dumps([duration]),
+                    "speakers": [speaker],
+                    "similarities": [np.round(np.float64(similarity), 4)],
+                    "durations": [duration],
                 }
                 speaker_recognition_log_entries.append(recognition_entry)
                 segment_no += 1
@@ -481,7 +499,7 @@ class ASRPostAnalyzer(Base):
         for entry in speaker_recognition_log:
             segment_start_time = entry['window_start_time']
             segment_end_time = segment_start_time + self.segment_duration
-            speakers = json.loads(entry['speakers'])
+            speakers = entry['speakers']
 
             # Update existing speakers' end time and add new speakers
             for speaker in speakers:
@@ -533,13 +551,17 @@ class ASRPostAnalyzer(Base):
                     crop_and_concatenate_wav(formatted_audio_path, [(start_offset_ms, end_offset_ms)], chunk_path)
                     self._apply_nr(chunk_path)
                     normalize_decibel(chunk_path, rms_level=-20)
-                    text = self._transcribe(chunk_path) if speaker != 'silent' else ''
+
+                    transcribe_result = self._transcribe(chunk_path) if speaker != 'silent' else None
+                    transcribe_result = {} if transcribe_result is None else transcribe_result
+
                     transcription_entry = {
                         "chunk_no": index,
                         "window_start_time": chunk_start_time,
                         "window_end_time": chunk_end_time,
-                        "text": text,
                         "speaker": speaker,
+                        "text": transcribe_result.get("text", ""),
+                        "words": transcribe_result.get("words", []),
                     }
                     print(transcription_entry)
                     entries.append(transcription_entry)
@@ -560,8 +582,7 @@ class ASRPostAnalyzer(Base):
             frames = wav_file.readframes(wav_file.getnframes())
             frame_rate = wav_file.getframerate()
 
-        text = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}',
-                                            self.speech_transcriber_url)
+        text = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}', self.speech_transcriber_url)
         return text
 
     def _separate_speech(self, audio_path: str) -> list:

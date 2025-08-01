@@ -29,7 +29,7 @@ from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN
 from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_base_mode, get_name, \
-    get_channel_selection, get_base_type
+    get_channel_selection, get_base_type, get_file
 
 
 class ASRBase(Base):
@@ -154,6 +154,22 @@ class ASRBase(Base):
             self.url = get_rtmp_url(self.config['RTMP']['audio_streams'])
             self.stream_kwargs['url'] = self.url
 
+        # set file_path for 'file'
+        elif self.source == 'file':
+            if 'files' not in base_config:
+                raise ValueError("File configuration is missing in the YAML file.")
+            file_path = get_file(base_config['files'])
+            if not os.path.isabs(file_path):
+                # make relative paths relative to project directory
+                file_path = os.path.join(self.project_dir, file_path)
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Audio file not found: {file_path}")
+            self.stream_kwargs['file_path'] = file_path
+            self.logger.info(f"Using audio file: {file_path}")
+
+        else:
+            raise ValueError(f"Unknown source: {self.source}")
+
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations.
 
@@ -237,6 +253,11 @@ class ASRBase(Base):
         is skipped.
         """
         print("------------------------------------------------")
+        if self.source == 'file':
+            self.logger.info("Please create a folder named with the <speaker_name> under real-time/profiles/<base_folder>"
+                             " and place speaker's wav file inside and reset the ASR base.")
+            return
+
         output_path = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_register.wav')
         self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
         self.recording_prompt(self.register_duration)
@@ -398,6 +419,11 @@ class ASRBase(Base):
         Raises:
             RecordingError: If an error occurs during the recording process.
         """
+        # Handle file source differently - files need sequential time-based reading
+        if self.source == 'file':
+            self._continuous_file_reading()
+            return
+            
         first_time = True
         sub_dir = 'records' if self.mode == 'record' else 'temp'
         self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
@@ -418,6 +444,65 @@ class ASRBase(Base):
                     self.audio_queue.put((output_path, frames))
             except Exception as e:
                 raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
+
+    def _continuous_file_reading(self):
+        """Read audio segments from a file sequentially to simulate continuous recording.
+        
+        This method reads segments from the audio file in sequence, mimicking the behavior
+        of continuous recording but from a pre-recorded file.
+        
+        Raises:
+            RecordingError: If an error occurs during the file reading process.
+        """
+        try:
+            sub_dir = 'records' if self.mode == 'record' else 'temp'
+            self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
+            self.audio_stream.start()
+            
+            # Get file duration to know when to stop
+            file_duration = len(self.audio_stream.file_data) / self.audio_stream.file_sample_rate
+            current_time = 0.0
+            
+            while not self.stop_event.is_set():
+                try:
+                    if current_time < file_duration:
+                        # Read segment from file at current time
+                        audio_frame = self.audio_stream.read(
+                            start_time=current_time,
+                            duration=self.recognize_duration
+                        )
+
+                        if audio_frame is None:
+                            self.logger.warning(f"Audio file {os.path.basename(output_path)} at time {current_time} not readable.")
+                            continue
+
+                        frames = audio_frame.to_bytes()
+                        # use file time as timestamp
+                        acquired_time = current_time
+                        output_path = os.path.join(self.audio_dir, sub_dir,
+                                                   f'{self.base_type}_{self.id}_record_{acquired_time:.4f}.wav')
+
+                        if self.mode == 'record':
+                            write_frame_to_wav(output_path, audio_frame)
+                            print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
+                        else:
+                            self.audio_queue.put((output_path, frames))
+
+                        # advance to next segment
+                        current_time += self.recognize_duration
+                    else:
+                        self.logger.info("Reach the end of the file.")
+                    
+                except Exception as e:
+                    raise RecordingError(f'RecordingError occurred when reading file segment at {current_time}s: {e}') from e
+                    
+            # signal end of file
+            if current_time >= file_duration:
+                self.logger.info(f"Finished reading entire file (duration: {file_duration:.2f}s)")
+                self.stop_event.set()
+                
+        except Exception as e:
+            raise RecordingError(f'RecordingError occurred when continuous file reading: {e}') from e
 
     def _continuous_recognizing(self):
         """Continuously process and recognize audio segments from the audio queue.

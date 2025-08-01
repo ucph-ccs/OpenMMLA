@@ -47,6 +47,7 @@ Base_Jabra:
     chunk_size: 512
     buffer_duration: 5.0
     resample_method: audio_librosa
+  files: ['path/to/audio/file', '...']  # List of file paths when source type is file
 
 # base settings for your device
 Base_[Your_Device_Name]:
@@ -62,7 +63,7 @@ Base_[Your_Device_Name]:
   update_threshold:             # Similarity threshold for incrementally updating speaker profile
   gain:                         # Volume gain multiplier in decibels for audio preprocessing
   score_amplified:              # Whether to amplify the similarity score of the audio signal
-  source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl)
+  source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl/file)
   port_offset:                  # Port offset for udp/tcp streams
   stream_kwargs:                # Additional stream settings
     channels:                   # Number of audio channels of the input device (if channels >1, channel selection is required)
@@ -79,9 +80,11 @@ Synchronizer:
 
 # post analyzer settings
 PostAnalyzer:
-  threshold: 0.2                # Similarity threshold for recognition
-  keep_threshold: 0.1           # Special threshold for keeping identity for speaker border cases
-  segment_duration: 3           # Duration of each audio segment for analysis
+  threshold: 0.2                                  # Similarity threshold for recognition
+  keep_threshold: 0.1                             # Special threshold for keeping identity for speaker border cases
+  segment_duration: 3                             # Duration of each audio segment for analysis
+  custom_origin_dir: path/to/origin/directory     # Default to <project_dir>/post-time/origin if null
+  filenames: ['file_name.wav', 'file_name2.m4a']  # List of filenames in origin directory to process
 
 # RTMP streams settings
 RTMP:

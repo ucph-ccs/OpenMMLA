@@ -12,6 +12,11 @@ Base:
   fps: 30                                           # Frames per second of the image capture
   interval: 1                                       # Interval in seconds between image captures
 
+  # Camera angle settings (optional)
+  angle_config:
+    "front": "Direct front view at eye level, showing participants face-on"
+    "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
+
   # VideoStream settings
   source: opencv                                    # VideoStream source type (opencv/rtmp)
   stream_kwargs:
@@ -99,15 +104,15 @@ Cameras:
   # Template for camera calibration parameters
   # You can either config the camera by editing the parameters manually or use the camera calibration tool,
   # `openmmla ips-ccal` to calibrate the camera and generate the parameters.
-  camera_name:
-    fisheye: true               # Set to true if the camera uses a fisheye lens
-    params: [fx, fy, cx, cy]    # Camera intrinsic parameters
-    K:
-      - [fx, 0.0, cx]             # Intrinsic matrix row 1
-      - [0.0, fy, cy]             # Intrinsic matrix row 2
-      - [0.0, 0.0, 1.0]           # Intrinsic matrix row 3
-    D:
-      - [k1, k2, p1, p2, k3]      # Distortion coefficients (radial + tangential)
+  # camera_name:
+  #   fisheye: true               # Set to true if the camera uses a fisheye lens
+  #   params: [fx, fy, cx, cy]    # Camera intrinsic parameters
+  #   K:
+  #     - [fx, 0.0, cx]             # Intrinsic matrix row 1
+  #     - [0.0, fy, cy]             # Intrinsic matrix row 2
+  #     - [0.0, 0.0, 1.0]           # Intrinsic matrix row 3
+  #   D:
+  #     - [k1, k2, p1, p2, k3]      # Distortion coefficients (radial + tangential)
 
   # Example calibrated camera: logitech C920
   logitechC920:

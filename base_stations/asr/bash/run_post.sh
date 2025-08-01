@@ -8,19 +8,15 @@ PYTHON_PATH="$BASH_DIR/../../.."
 CONDA_ENV="asr-base"
 CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
 
-FILENAMES="''"
-CUSTOM_ORIGIN_DIR="''"
 VOICE_ACTIVITY_DETECT=true
 NOISE_REDUCE=true
 SPEECH_SEPARATE=false
 TRANSCRIBE=true
 
 print_usage() {
-    echo "usage: $0 [-f FILENAMES] [-custom CUSTOM_ORIGIN_DIR] [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-sp SPEECH_SEPARATE] [-tr TRANSCRIBE] [-h]"
+    echo "usage: $0 [-vad VOICE_ACTIVITY_DETECT] [-nr NOISE_REDUCE] [-sp SPEECH_SEPARATE] [-tr TRANSCRIBE] [-h]"
     echo ""
     echo "options:"
-    echo "  -f FILENAMES                 : Comma-separated list of filenames in <custom_origin_dir> to process, default to all files when not specified."
-    echo "  -custom CUSTOM_ORIGIN_DIR    : Path to the custom origin directory, default to <project_dir>/post-time/origin/ when not specified."
     echo "  -vad VOICE_ACTIVITY_DETECT   : Whether to use Voice Activity Detection (true/false, default: true)"
     echo "  -nr NOISE_REDUCE             : Whether to use Noise Reduction (true/false, default: true)"
     echo "  -sp SPEECH_SEPARATE          : Whether to use Speech Separation (true/false, default: false)"
@@ -63,24 +59,6 @@ i=1
 while [ $i -le $# ]; do
     arg="${!i}"
     case "$arg" in
-        -f)
-            i=$((i+1))
-            if [ $i -le $# ]; then
-                FILENAMES="${!i}"
-            else
-                echo "Error: -f requires a value"
-                print_usage
-            fi
-            ;;  
-        -custom)
-            i=$((i+1))
-            if [ $i -le $# ]; then
-                CUSTOM_ORIGIN_DIR="${!i}"
-            else
-                echo "Error: -custom requires a value"
-                print_usage
-            fi
-            ;;
         -vad)
             i=$((i+1))
             if [ $i -le $# ]; then
@@ -149,7 +127,7 @@ echo "--------------------------------"
 echo "Starting audio post analyzer..."
 
 # Compose command
-CMD="python3 $PROJECT_DIR/examples/run_asr_post_analyzer.py -f $FILENAMES -custom $CUSTOM_ORIGIN_DIR -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -sp $SPEECH_SEPARATE -tr $TRANSCRIBE"
+CMD="python3 $PROJECT_DIR/examples/run_asr_post_analyzer.py -vad $VOICE_ACTIVITY_DETECT -nr $NOISE_REDUCE -sp $SPEECH_SEPARATE -tr $TRANSCRIBE"
 
 # Run
 if [[ $OSTYPE == 'darwin'* ]]; then
