@@ -17,7 +17,7 @@ class TimeBucketSynchronizer:
             current_time: float,
             time_buckets: dict[float, Any],
             base_id: str,
-            time_range: float,
+            match_tolerance: float,
             strategy: SyncStrategy = SyncStrategy.EARLIEST
     ) -> float | None:
         """Find the closest time bucket based on the specified strategy.
@@ -26,7 +26,7 @@ class TimeBucketSynchronizer:
             current_time: The current time to find closest bucket for
             time_buckets: Dictionary of time buckets and their contents
             base_id: ID of the base sending the data
-            time_range: Maximum time difference allowed for synchronization
+            match_tolerance: maximum allowed |current_time - bucket_key| for synchronization
             strategy: The synchronization strategy to use
             
         Returns:
@@ -44,7 +44,7 @@ class TimeBucketSynchronizer:
         # Filter valid buckets based on time difference and exclude buckets where base_id exists
         valid_buckets = {
             key: diff for key, diff in time_differences.items()
-            if diff <= time_range and base_id not in time_buckets[key]
+            if diff <= match_tolerance and base_id not in time_buckets[key]
         }
 
         if not valid_buckets:

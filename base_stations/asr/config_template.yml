@@ -47,7 +47,6 @@ Base_Jabra:
     chunk_size: 512
     buffer_duration: 5.0
     resample_method: audio_librosa
-  files: ['path/to/audio/file', '...']  # List of file paths when source type is file
 
 # base settings for your device
 Base_[Your_Device_Name]:
@@ -64,6 +63,8 @@ Base_[Your_Device_Name]:
   gain:                         # Volume gain multiplier in decibels for audio preprocessing
   score_amplified:              # Whether to amplify the similarity score of the audio signal
   source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl/file)
+  file_dir:                     # Directory path containing audio files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
+  initial_sync_time:            # Unix timestamp to start synchronizing from when source type is 'file'
   port_offset:                  # Port offset for udp/tcp streams
   stream_kwargs:                # Additional stream settings
     channels:                   # Number of audio channels of the input device (if channels >1, channel selection is required)
@@ -76,7 +77,9 @@ Base_[Your_Device_Name]:
  
 # synchronizer settings
 Synchronizer:
-  result_expiry_time: 5         # Time (sec) before a result expires
+  result_expiry_time: 10        # cleanup timeout (seconds)
+  bucket_duration: 3            # time bucket duration (seconds) for synchronized result (default: recognize_duration)
+  match_tolerance: 1.5          # matching tolerance (seconds) for incoming result to time buckets (default: ~bucket_duration/2)
 
 # post analyzer settings
 PostAnalyzer:

@@ -38,7 +38,6 @@ class VFASynchronizer(Synchronizer):
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<angle>, <path>, <base_result_time>}}}
-        # time_bucket_key represents the start time of a time bucket
 
         # VLLM request queue and processing thread
         self.vllm_queue = queue.Queue()
@@ -53,9 +52,8 @@ class VFASynchronizer(Synchronizer):
         sync_config = self.config['Synchronizer']
         vfa_server_config = self.config['Server']['vfa']
 
-        self.buffer_expiry_time = int(sync_config.get('result_expiry_time', 30))
-        self.time_range = float(sync_config.get('time_range', 0.5))  # Time window for syncing frames (in seconds)
-        self.window_size = int(self.config['Base']['interval'])  # Time window size for analysis (in seconds)
+        self.buffer_expiry_time = float(sync_config.get('result_expiry_time', 30))
+        self.match_tolerance = float(sync_config.get('match_tolerance', 0.5))
         self.vllm_frame_analyzer_url = vfa_server_config['vllm_frame_analyzer']
 
     def _setup_directories(self):
@@ -180,11 +178,11 @@ class VFASynchronizer(Synchronizer):
 
             # Find the closest time bucket using the utility class
             closest_time = TimeBucketSynchronizer.find_closest_time_bucket(
-                base_result_time,
-                self.time_bucket_buffer,
-                base_id,
-                self.time_range,
-                SyncStrategy.NEAREST  # Using nearest strategy for VFA
+                current_time=base_result_time,
+                time_buckets=self.time_bucket_buffer,
+                base_id=base_id,
+                match_tolerance=self.match_tolerance,
+                strategy=SyncStrategy.NEAREST  # Using nearest strategy for VFA
             )
 
             if not closest_time:

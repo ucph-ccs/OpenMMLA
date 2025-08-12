@@ -40,8 +40,7 @@ class ASRSynchronizer(Synchronizer):
         self.bucket_name = None  # Session bucket name
         self.number_of_bases = None  # Number of group members
         self.latest_time = None  # Record start time of the most recent received frame
-        self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<speakers>, <similarities>, <durations>,
-        # <segment_start_times>}}} time_bucket_key represents the start time of a time window
+        self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<speakers>, <similarities>, <durations>, <segment_start_times>}}}
 
         self.base_type = get_base_type(self.config)
 
@@ -51,12 +50,12 @@ class ASRSynchronizer(Synchronizer):
 
     def _setup_yaml(self):
         """Set up attributes from YAML configuration."""
-        self.buffer_expiry_time = int(
-            self.config['Synchronizer']['result_expiry_time'])  # Expiry time of retained results
-        self.time_range = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
-            self.config[self.base_type]['recognize_duration'])  # Time range for finding the closest time bucket
-        self.window_size = int(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
+        sync_config = self.config['Synchronizer']
+        self.buffer_expiry_time = float(sync_config['result_expiry_time'])  # Expiry time of retained results
+        recognize_duration = float(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
             self.config[self.base_type]['recognize_duration'])
+        self.bucket_duration = float(sync_config.get('bucket_duration', recognize_duration))
+        self.match_tolerance = float(sync_config.get('match_tolerance', recognize_duration))
 
     def _setup_directories(self):
         """Set up required directories."""
@@ -190,22 +189,22 @@ class ASRSynchronizer(Synchronizer):
             self.buffer_expiry_time
         )
 
-        for t in expired_times:
-            frame_set = self.time_bucket_buffer[t]
+        for time_bucket_key in expired_times:
+            frame_set = self.time_bucket_buffer[time_bucket_key]
             merged_result = self._merge_base_results(frame_set)
-            merged_result['window_start_time'] = t  # t is the start time of the time bucket
+            merged_result['window_start_time'] = time_bucket_key  # start timestamp of the time bucket
             self.logger.debug(
-                f"Expired frame set {t} with result {self.time_bucket_buffer[t]}")
+                f"Expired frame set {time_bucket_key} with result {self.time_bucket_buffer[time_bucket_key]}")
             self._upload_merged_result(merged_result)
-            del self.time_bucket_buffer[t]
+            del self.time_bucket_buffer[time_bucket_key]
 
-        # Find closest time bucket for the current message
+        # Find the closest time bucket for the current message
         closest_time = TimeBucketSynchronizer.find_closest_time_bucket(
-            base_result_time,
-            self.time_bucket_buffer,
-            base_result['base_id'],
-            self.time_range,
-            SyncStrategy.EARLIEST  # Using earliest strategy for ASR
+            current_time=base_result_time,
+            time_buckets=self.time_bucket_buffer,
+            base_id=base_result['base_id'],
+            match_tolerance=self.match_tolerance,
+            strategy=SyncStrategy.EARLIEST  # Using the earliest strategy for ASR
         )
 
         # Handle the current message
@@ -256,14 +255,14 @@ class ASRSynchronizer(Synchronizer):
         """Send periodic START signals to ASR bases.
 
         Continuously sends START control signals to all ASR bases at regular intervals
-        defined by self.time_range. This ensures that bases keep recording and processing
+        defined by self.bucket_duration_sec. This ensures that bases keep recording and processing
         audio even if they miss an initial start signal.
 
         The loop continues until the stop_event is set during shutdown.
         """
         while not self.stop_event.is_set():
             self.redis_client.publish(f"{self.bucket_name}/asr/control", 'START')
-            time.sleep(self.time_range)
+            time.sleep(self.bucket_duration)
 
     def _update_time_bucket_buffer(self, time_bucket_key: float, latest_base_result: dict):
         """Update the time bucket buffer with the latest base recognition result.
@@ -367,7 +366,7 @@ class ASRSynchronizer(Synchronizer):
             "measurement": "speaker_recognition",
             "fields": {
                 "window_start_time": float(merged_result['window_start_time']),
-                "window_end_time": float(merged_result['window_start_time']) + float(self.window_size),
+                "window_end_time": float(merged_result['window_start_time']) + float(self.bucket_duration),
                 "speakers": json.dumps(merged_result['speakers']),
                 "similarities": json.dumps(merged_result['similarities']),
                 "durations": json.dumps(merged_result['durations']),

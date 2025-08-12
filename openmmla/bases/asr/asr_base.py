@@ -3,6 +3,7 @@ import gc
 import json
 import os
 import queue
+import re
 import shutil
 import threading
 import time
@@ -110,6 +111,10 @@ class ASRBase(Base):
         self.speech_enhancer_url = resolve_url(asr_server_config['speech_enhancer'])
         self.vad_url = resolve_url(asr_server_config['voice_activity_detector'])
 
+        source_list = ['udp', 'tcp', 'pyaudio', 'rtmp', 'lsl', 'file']
+        if self.source not in source_list:
+            raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
+
         # set port number for 'udp/tcp'
         if self.source in ['udp', 'tcp']:
             self.port_offset = int(base_config.get('port_offset', 0))
@@ -156,19 +161,43 @@ class ASRBase(Base):
 
         # set file_path for 'file'
         elif self.source == 'file':
-            if 'files' not in base_config:
-                raise ValueError("File configuration is missing in the YAML file.")
-            file_path = get_file(base_config['files'])
-            if not os.path.isabs(file_path):
-                # make relative paths relative to project directory
-                file_path = os.path.join(self.project_dir, file_path)
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"Audio file not found: {file_path}")
+            if 'initial_sync_time' not in base_config:
+                raise ValueError("initial_sync_time configuration is missing in the YAML file.")
+            self.initial_sync_time = float(base_config['initial_sync_time'])
+            if not self._validate_unix_timestamp(self.initial_sync_time):
+                raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
+            
+            if 'file_dir' not in base_config:
+                raise ValueError("File directory configuration is missing in the YAML file.")
+            file_dir = base_config['file_dir']
+            if not os.path.isabs(file_dir):
+                file_dir = os.path.join(self.project_dir, file_dir)
+            if not os.path.exists(file_dir):
+                raise ValueError(f"File directory does not exist: {file_dir}")
+            
+            # find all audio files in directory
+            audio_extensions = {'.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma'}
+            audio_files = []
+            for filename in sorted(os.listdir(file_dir)):
+                match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
+                if match:
+                    file_start_time = float(match.group(1))
+                    if not self._validate_unix_timestamp(file_start_time):
+                        self.logger.warning(f"Skipping file {filename}: invalid file_start_time ({file_start_time})")
+                        continue
+                    if file_start_time > self.initial_sync_time:
+                        self.logger.warning(
+                            f"Skipping file {filename}: file_start_time ({file_start_time}) is greater than initial_sync_time ({self.initial_sync_time})")
+                        continue
+                    file_path = os.path.join(file_dir, filename)
+                    if any(filename.lower().endswith(ext) for ext in audio_extensions):
+                        audio_files.append(file_path)
+            
+            if not audio_files:
+                raise ValueError(f"No valid audio files found in directory: {file_dir}")
+            file_path = get_file(audio_files)
             self.stream_kwargs['file_path'] = file_path
             self.logger.info(f"Using audio file: {file_path}")
-
-        else:
-            raise ValueError(f"Unknown source: {self.source}")
 
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations.
@@ -387,6 +416,9 @@ class ASRBase(Base):
         else:
             self.logger.info("All threads stopped properly.")
 
+        # Process any remaining audio chunks before cleanup
+        self._process_final_chunks()
+        
         current_bucket = self.bucket_name  # assign bucket name before cleaning up
         self._clean_up()
         if isinstance(e, RecordingError):
@@ -458,29 +490,33 @@ class ASRBase(Base):
             sub_dir = 'records' if self.mode == 'record' else 'temp'
             self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
             self.audio_stream.start()
+
+            # extract timestamp from audio filename (format: <prefix>_<timestamp>.<affix>)
+            filename = os.path.basename(self.stream_kwargs['file_path'])
+            match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
+            file_start_time = float(match.group(1))
+            timestamp_offset = file_start_time
             
-            # Get file duration to know when to stop
             file_duration = len(self.audio_stream.file_data) / self.audio_stream.file_sample_rate
-            current_time = 0.0
-            
+            start_time = (self.initial_sync_time - file_start_time)
+            self.logger.info(f"file_duration: {file_duration}, start_time: {start_time}")
+
             while not self.stop_event.is_set():
                 try:
-                    if current_time < file_duration:
-                        # Read segment from file at current time
+                    if start_time < file_duration:
+                        # read segment from file at current time
                         audio_frame = self.audio_stream.read(
-                            start_time=current_time,
+                            start_time=start_time,
                             duration=self.recognize_duration
                         )
 
                         if audio_frame is None:
-                            self.logger.warning(f"Audio file {os.path.basename(output_path)} at time {current_time} not readable.")
+                            self.logger.warning(f"Audio file {os.path.basename(output_path)} at time {start_time} not readable.")
                             continue
 
                         frames = audio_frame.to_bytes()
-                        # use file time as timestamp
-                        acquired_time = current_time
-                        output_path = os.path.join(self.audio_dir, sub_dir,
-                                                   f'{self.base_type}_{self.id}_record_{acquired_time:.4f}.wav')
+                        acquired_time = start_time + timestamp_offset
+                        output_path = os.path.join(self.audio_dir, sub_dir, f'{self.base_type}_{self.id}_record_{acquired_time:.4f}.wav')
 
                         if self.mode == 'record':
                             write_frame_to_wav(output_path, audio_frame)
@@ -489,17 +525,13 @@ class ASRBase(Base):
                             self.audio_queue.put((output_path, frames))
 
                         # advance to next segment
-                        current_time += self.recognize_duration
+                        start_time += self.recognize_duration
                     else:
-                        self.logger.info("Reach the end of the file.")
+                        self.logger.info(f"Reach the end of the file, start time {start_time}.")
+                        break
                     
                 except Exception as e:
-                    raise RecordingError(f'RecordingError occurred when reading file segment at {current_time}s: {e}') from e
-                    
-            # signal end of file
-            if current_time >= file_duration:
-                self.logger.info(f"Finished reading entire file (duration: {file_duration:.2f}s)")
-                self.stop_event.set()
+                    raise RecordingError(f'RecordingError occurred when reading file segment at {start_time}s: {e}') from e
                 
         except Exception as e:
             raise RecordingError(f'RecordingError occurred when continuous file reading: {e}') from e
@@ -847,6 +879,45 @@ class ASRBase(Base):
         if self.tr:
             self.transcription_queue.put((frames, speaker, chunk_start_time, chunk_end_time))
 
+    def _process_final_chunks(self):
+        """Process any remaining audio chunks when recording ends.
+        
+        This method handles the edge case where the recording ends while someone is still speaking.
+        It processes any remaining audio in speaker_frames_dict that hasn't been transcribed yet.
+        """
+        if not self.speaker_frames_dict or not self.last_speaker:
+            return
+            
+        fr = 8000 if self.sp else 16000
+        
+        # Process each remaining speaker's audio
+        for speaker, (chunk_start_time, chunk_frames) in self.speaker_frames_dict.items():
+            if not chunk_frames:
+                continue
+                
+            # Calculate end time based on audio duration
+            chunk_duration = len(chunk_frames) / (fr * 2)  # Assuming 16-bit audio (2 bytes per sample)
+            chunk_end_time = chunk_start_time + chunk_duration
+            
+            self.logger.info(f"Processing final chunk for speaker {speaker} from {chunk_start_time:.2f}s to {chunk_end_time:.2f}s")
+            
+            # Process transcription directly since transcription thread has stopped
+            if self.tr and speaker not in ['silent', 'unknown']:
+                try:
+                    transcribe_result = self._transcribe(chunk_frames, fr)
+                    self._upload_transcription(speaker, transcribe_result, chunk_start_time, chunk_end_time)
+                    self.logger.info(f"Final chunk transcription completed for speaker {speaker}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to transcribe final chunk for speaker {speaker}: {e}")
+            
+            # Store the audio chunk locally if enabled
+            if self.store:
+                chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
+                                                f'{speaker}_chunk_{chunk_start_time}.wav')
+                write_bytes_to_wav(chunk_audio_path, chunk_frames, framerate=fr)
+                if speaker != 'silent':
+                    normalize_decibel(chunk_audio_path, rms_level=-20)
+
     def _transcribe(self, frames: bytes, frame_rate: int) -> dict:
         """Transcribe audio frames to text using an external speech-to-text service.
 
@@ -1069,3 +1140,21 @@ class ASRBase(Base):
         if self.bucket_name:
             return f'{self.bucket_name}/asr/control'
         return None
+    
+    @staticmethod
+    def _validate_unix_timestamp(timestamp: float):
+        """Validate that a timestamp is a reasonable Unix timestamp.
+
+        Args:
+            timestamp: the timestamp to validate
+        """
+        # unix timestamps should be positive and within reasonable bounds
+        # January 1, 1970 00:00:00 UTC = 0
+        # January 1, 2100 00:00:00 UTC ≈ 4102444800
+        min_timestamp = 0
+        max_timestamp = 4102444800  # year 2100
+
+        if isinstance(timestamp, (int, float)) and min_timestamp < timestamp < max_timestamp:
+            return True
+        else:
+            return False

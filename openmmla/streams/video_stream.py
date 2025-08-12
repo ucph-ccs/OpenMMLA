@@ -1,4 +1,3 @@
-import logging
 import threading
 import time
 
@@ -30,16 +29,17 @@ class VideoStream(StreamReceiver):
         """Initialize video stream.
 
         Args:
-            source (str): Stream source type ('opencv' or 'rtmp')
+            source (str): Stream source type ('opencv', 'rtmp', 'lsl', or 'file')
 
         Keyword Args:
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 0.08)
-            format(str, optional): Video format, 'MJPG', 'JPEG', 'raw' (default: 'MJPG')
+            format(str, optional): Video format, 'MJPG', 'JPEG', 'H264', 'raw' (default: 'MJPG')
             resolution(tuple, optional): Tuple of (width, height) (default: (1920, 1080))
             fps(int, optional): Frames per second (default: 30)
             resample_method(ResampleMethod, optional): Resampling method for fps conversion (default: ResampleMethod.VIDEO_AVERAGE)
             camera_index(int, optional): Camera index for 'opencv' source (default: 0)
             rtmp_url(str, optional): RTMP URL for 'rtmp' source
+            file_path(str, optional): Path to the video file (required for 'file' source)
         """
         super().__init__(**kwargs)
         self.source = source
@@ -64,6 +64,12 @@ class VideoStream(StreamReceiver):
             self.lsl_name = self.require_kwarg(kwargs, 'lsl_name', "LSL source requires a 'lsl_name'")
             self.lsl_offset = None
             self.lsl_inlet: StreamInlet | None = None
+        elif self.source == 'file':
+            self.format = kwargs.get('format', 'H264')
+            self.file_path = self.require_kwarg(kwargs, 'file_path', "File source requires a 'file_path' parameter")
+            self.video_capture = None
+            self.total_frames = None
+            self.file_fps = None
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
@@ -90,6 +96,11 @@ class VideoStream(StreamReceiver):
             self._initialize_opencv()
         elif self.source == 'lsl':
             self._initialize_lsl()
+        elif self.source == 'file':
+            self._initialize_file()
+            # 'file' source doesn't need a receive thread - data is read on demand
+            logger.info(f"Video stream started with source: {self.source}")
+            return
         else:
             raise ValueError(f"Unsupported source type: {self.source}")
 
@@ -115,6 +126,8 @@ class VideoStream(StreamReceiver):
             self._cleanup_opencv()
         elif self.source == 'lsl':
             self._cleanup_lsl()
+        elif self.source == 'file':
+            self._cleanup_file()
 
         self._last_read_pos = -1
 
@@ -160,6 +173,47 @@ class VideoStream(StreamReceiver):
             self.lsl_offset = time.time() - local_clock()
             logger.info(f"Successfully initialized LSL video stream with inlet: {self.lsl_inlet}")
 
+    def _initialize_file(self) -> None:
+        """Initialize file source for video."""
+        try:
+            self.video_capture = cv2.VideoCapture(self.file_path)
+            if not self.video_capture.isOpened():
+                raise RuntimeError(f"Failed to open video file: {self.file_path}")
+            
+            # Get actual video properties from file
+            self.total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.file_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+            file_width = int(self.video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            file_height = int(self.video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            file_resolution = (file_width, file_height)
+            
+            # Check if kwargs resolution matches file resolution
+            if self.resolution != file_resolution:
+                logger.warning(f"Requested resolution {self.resolution} doesn't match file resolution {file_resolution}. "
+                              f"Using file resolution: {file_resolution}")
+                self.resolution = file_resolution
+            
+            # Check if kwargs fps matches file fps
+            if abs(self.fps - self.file_fps) > 0.1:  # Allow small floating point differences
+                logger.warning(f"Requested FPS {self.fps} doesn't match file FPS {self.file_fps}. "
+                              f"Using file FPS: {self.file_fps}")
+                self.fps = self.file_fps
+            
+            # Update frame metadata with actual file properties
+            self._frame_metadata = {
+                'resolution': self.resolution,
+                'fps': self.fps,
+                'format': self.format
+            }
+            
+            logger.info(f"Successfully loaded video file: {self.file_path}")
+            logger.info(f"File duration: {self.total_frames / self.file_fps:.2f} seconds, "
+                       f"FPS: {self.file_fps}, "
+                       f"Resolution: {file_width}x{file_height}, "
+                       f"Total frames: {self.total_frames}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load video file {self.file_path}: {e}") from e
+
     def _cleanup_opencv(self) -> None:
         """Clean up OpenCV stream resources."""
         if self.stream:
@@ -172,6 +226,14 @@ class VideoStream(StreamReceiver):
             self.lsl_inlet.close_stream()
         self.lsl_inlet = None
         self.lsl_offset = None
+
+    def _cleanup_file(self) -> None:
+        """Clean up file resources."""
+        if self.video_capture:
+            self.video_capture.release()
+            self.video_capture = None
+        self.total_frames = None
+        self.file_fps = None
 
     def _receive_loop(self) -> None:
         """Continuously receive frames and store in buffer."""
@@ -259,7 +321,7 @@ class VideoStream(StreamReceiver):
             return None
 
     def read(self, duration: float = None, target_fps: float = None, timeout: float = 10.0,
-             latest: bool = False) -> VideoFrame | list[VideoFrame] | None:
+             latest: bool = False, start_time: float = 0.0) -> VideoFrame | list[VideoFrame] | None:
         """Read video frames with optional fps conversion.
 
         Args:
@@ -267,6 +329,7 @@ class VideoStream(StreamReceiver):
             target_fps: Optional target frame rate for resampling
             timeout: Maximum time to wait for frames in seconds
             latest: Whether to read from the most recent frame or continue from last position
+            start_time: Start time in seconds for file source (only used with file source)
 
         Returns:
             Single VideoFrame if duration is None/0, or list of VideoFrames if duration > 0.
@@ -275,13 +338,17 @@ class VideoStream(StreamReceiver):
             If buffer duration is set too short, the read operation may timeout since the
             last_read_pos might be always equal to the current tail.
         """
+        # File source - direct read without buffering
+        if self.source == 'file':
+            return self._read_from_file(start_time, duration, target_fps)
+        
         if duration is None or duration == 0:
             frames_needed = 1
         else:
             frames_needed = int(duration * self.fps)
 
         total_frames = []
-        start_time = time.time()
+        start_time_actual = time.time()
 
         if latest:
             self._last_read_pos = -1
@@ -295,7 +362,7 @@ class VideoStream(StreamReceiver):
                 continue
 
             if current_tail == self._last_read_pos:
-                if time.time() - start_time > timeout:
+                if time.time() - start_time_actual > timeout:
                     logger.warning("Timeout reached while waiting for frames.")
                     break
                 time.sleep(0.01)
@@ -309,7 +376,7 @@ class VideoStream(StreamReceiver):
             new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
             total_frames.extend(new_frames)
             self._last_read_pos = end_pos
-            start_time = time.time()
+            start_time_actual = time.time()
 
         return self._process_frames(total_frames, target_fps)
 
@@ -359,6 +426,90 @@ class VideoStream(StreamReceiver):
             ))
 
         return resampled_frames
+
+    def _read_from_file(self, start_time: float, duration: float = None, target_fps: float = None) -> VideoFrame | list[VideoFrame] | None:
+        """Read video frames directly from file based on start time and duration.
+        
+        Args:
+            start_time (float): Start time in seconds.
+            duration (float, optional): Duration to read in seconds. If None, returns single frame at start_time.
+            target_fps (float, optional): Target frame rate for resampling.
+            
+        Returns:
+            VideoFrame or list[VideoFrame]: Video frame(s) for the specified time range, or None if invalid range.
+        """
+        if self.video_capture is None:
+            logger.error("Video capture not initialized")
+            return None
+            
+        # Calculate start frame position
+        start_frame = int(start_time * self.file_fps)
+        
+        # Check bounds
+        if start_frame >= self.total_frames or start_frame < 0:
+            logger.warning(f"Start time {start_time} is out of bounds")
+            return None
+            
+        # Set video position to start frame
+        self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        
+        if duration is None or duration == 0:
+            # Read single frame
+            ret, frame = self.video_capture.read()
+            if not ret:
+                logger.warning(f"Failed to read frame at time {start_time}")
+                return None
+                
+            return VideoFrame(
+                data=frame,
+                timestamp=start_time,
+                metadata={
+                    'resolution': (frame.shape[1], frame.shape[0]),
+                    'fps': self.file_fps,
+                    'format': self.format
+                }
+            )
+        else:
+            # Read multiple frames for duration
+            frames_to_read = int(duration * self.file_fps)
+            end_frame = start_frame + frames_to_read
+            
+            # Adjust end frame if it exceeds file length
+            if end_frame > self.total_frames:
+                end_frame = self.total_frames
+                actual_duration = (end_frame - start_frame) / self.file_fps
+                logger.info(f"Adjusting duration to fit file length: {actual_duration:.3f}s")
+                
+            frames = []
+            current_frame = start_frame
+            
+            while current_frame < end_frame:
+                ret, frame = self.video_capture.read()
+                if not ret:
+                    logger.warning(f"Failed to read frame {current_frame}")
+                    break
+                    
+                timestamp = current_frame / self.file_fps
+                frames.append(VideoFrame(
+                    data=frame,
+                    timestamp=timestamp,
+                    metadata={
+                        'resolution': (frame.shape[1], frame.shape[0]),
+                        'fps': self.file_fps,
+                        'format': self.format
+                    }
+                ))
+                current_frame += 1
+                
+            if not frames:
+                logger.warning("No frames read from file")
+                return None
+                
+            # Apply fps conversion if needed
+            if target_fps and target_fps != self.file_fps:
+                return self._process_frames(frames, target_fps)
+                
+            return frames
 
     @staticmethod
     def require_kwarg(kwargs, key, message):

@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import threading
-import time
 
 from openmmla.analysis.ips.analyze import ips_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
@@ -37,7 +36,8 @@ class IPSSynchronizer(Synchronizer):
         self.merged_tags = None
         self.merged_relations = None
         self.bucket_name = None
-        self.time_bucket_key = None  # time_bucket_key represents the start time of a time bucket
+        self.time_bucket_key = None  # start timestamp of time bucket
+        self.time_bucket_end = None
         self.alive = False
 
         # Threading attributes
@@ -50,7 +50,7 @@ class IPSSynchronizer(Synchronizer):
         self._setup_objects()
 
     def _setup_yaml(self):
-        self.window_size = float(self.config['Synchronizer']['window_size'])
+        self.bucket_duration = float(self.config['Synchronizer']['bucket_duration'])
 
     def _setup_directories(self):
         """Set up directories."""
@@ -109,12 +109,10 @@ class IPSSynchronizer(Synchronizer):
 
         # reinitialize mqtt client with new topics and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/ips')
-        self.time_bucket_key = time.time()  # Initialize time_bucket_key with current time
         self.mqtt_client.loop_start()
 
         # create threads
         self._create_thread(self._listen_for_stop_signal)
-        self._create_thread(self._upload_merged_result)
 
         # start threads and wait for them to finish
         exception_occurred = None
@@ -128,7 +126,6 @@ class IPSSynchronizer(Synchronizer):
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
-            return None
 
     def _create_bucket_logger(self):
         """Create logger for the bucket."""
@@ -166,111 +163,118 @@ class IPSSynchronizer(Synchronizer):
             userdata: the private user data as a set in Client() or user_data_set()
             message: an instance of MQTTMessage
         """
-        with self.lock:
-            if not self.stop_event.is_set():
-                self.alive = True
-                base_result = json.loads(msg.payload)
-                base_id = base_result["base_id"]
-                base_result_time = float(base_result["acquired_time"])
+        if not self.stop_event.is_set():
+            self.alive = True
+            base_result = json.loads(msg.payload)
+            base_id = base_result["base_id"]
+            base_result_time = float(base_result["acquired_time"])
 
-                if self.time_bucket_key < base_result_time < self.time_bucket_key + self.window_size:
-                    if base_id.isnumeric():  # msg from nicla vision's onboard apriltag detection (if used)
-                        if base_id not in self.merged_relations:
-                            self.merged_relations[base_id] = set()
-                        self.merged_relations[base_id].update(base_result['detected_tags'])
-                    else:  # msg from environmental camera
-                        tags = base_result["tags"]
-                        tag_relations = base_result["tag_relations"]
+            # unified timing logic for both file and real-time modes
+            if self.time_bucket_key is None:
+                self.time_bucket_key = base_result_time
+                self.time_bucket_end = self.time_bucket_key + self.bucket_duration
+                self.logger.info(
+                    f"Initialized time bucket: {self.time_bucket_key:.2f}s - {self.time_bucket_end:.2f}s")
 
-                        if base_id != self.main_id:  # convert to main coordinates
-                            R = self.transform_matrices_dict[base_id]['R']
-                            T = self.transform_matrices_dict[base_id]['T']
-                            for tag_id, tag_data in tags.items():
-                                main_rotation = transform_rotation(R, tag_data[0])
-                                main_translation = transform_point(tag_data[1], R, T)
-                                self.merged_tags[tag_id] = [main_rotation, main_translation]
-                        else:
-                            self.merged_tags.update(tags)
+            # check if we need to upload current bucket and advance to next
+            elif base_result_time >= self.time_bucket_end:
+                self._upload_current_bucket()
+                self.time_bucket_key = base_result_time
+                self.time_bucket_end = self.time_bucket_key + self.bucket_duration
+                self.logger.info(
+                    f"Advanced to time bucket: {self.time_bucket_key:.2f}s - {self.time_bucket_end:.2f}s)")
 
-                        # store tag relations into graph (avoid duplicates)
-                        for tag_id, look_at_tags in tag_relations.items():
-                            if tag_id not in self.merged_relations:
-                                self.merged_relations[tag_id] = set()
-                            self.merged_relations[tag_id].update(look_at_tags)
+            # check if result falls within current bucket
+            valid = self.time_bucket_key <= base_result_time < self.time_bucket_end
+            if valid:
+                if base_id.isnumeric():  # msg from nicla vision's onboard apriltag detection (if used)
+                    if base_id not in self.merged_relations:
+                        self.merged_relations[base_id] = set()
+                    self.merged_relations[base_id].update(base_result['detected_tags'])
+                else:  # msg from environmental camera
+                    tags = base_result["tags"]
+                    tag_relations = base_result["tag_relations"]
 
-                        # detect tag relations again under main camera's coordinate system
-                        for tag_id, tag_data in self.merged_tags.items():
-                            if tag_id not in self.merged_relations:
-                                self.merged_relations[tag_id] = set()
-                            for target_id, target_data in self.merged_tags.items():
-                                if target_id != tag_id and target_id not in self.merged_relations[tag_id]:
-                                    if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.94,
-                                                                    distance_threshold=1.2):
-                                        self.merged_relations[tag_id].add(target_id)
+                    if base_id != self.main_id:  # convert to main coordinates
+                        R = self.transform_matrices_dict[base_id]['R']
+                        T = self.transform_matrices_dict[base_id]['T']
+                        for tag_id, tag_data in tags.items():
+                            main_rotation = transform_rotation(R, tag_data[0])
+                            main_translation = transform_point(tag_data[1], R, T)
+                            self.merged_tags[tag_id] = [main_rotation, main_translation]
+                    else:
+                        self.merged_tags.update(tags)
 
-    def _upload_merged_result(self):
-        """Log and upload merge segment result to InfluxDB"""
-        interval = 1.0
-        next_time = time.time() + interval
-        while not self.stop_event.is_set():
-            with self.lock:
-                if self.alive:
-                    rotations_dict = {}
-                    translations_dict = {}
-                    for tag_id, (rotation, translation) in self.merged_tags.items():
-                        rotations_dict[tag_id] = rotation
-                        translations_dict[tag_id] = translation
+                    # store tag relations into graph (avoid duplicates)
+                    for tag_id, look_at_tags in tag_relations.items():
+                        if tag_id not in self.merged_relations:
+                            self.merged_relations[tag_id] = set()
+                        self.merged_relations[tag_id].update(look_at_tags)
 
-                    # prepare and upload the data for badge translations, rotations and relations
-                    translation_data = {
-                        "measurement": "badge_translation",
-                        "fields": {
-                            "window_start_time": self.time_bucket_key,
-                            "window_end_time": self.time_bucket_key + self.window_size,
-                            "translations": json.dumps(translations_dict),
-                        }
-                    }
+                    # detect tag relations again under main camera's coordinate system
+                    for tag_id, tag_data in self.merged_tags.items():
+                        if tag_id not in self.merged_relations:
+                            self.merged_relations[tag_id] = set()
+                        for target_id, target_data in self.merged_tags.items():
+                            if target_id != tag_id and target_id not in self.merged_relations[tag_id]:
+                                if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.94,
+                                                                distance_threshold=1.2):
+                                    self.merged_relations[tag_id].add(target_id)
 
-                    rotation_data = {
-                        "measurement": "badge_rotation",
-                        "fields": {
-                            "window_start_time": self.time_bucket_key,
-                            "window_end_time": self.time_bucket_key + self.window_size,
-                            "rotations": json.dumps(rotations_dict),
-                        }
-                    }
+    def _upload_current_bucket(self):
+        """Upload the current time bucket's aggregated results for both file and real-time modes."""
+        rotations_dict = {}
+        translations_dict = {}
+        for tag_id, (rotation, translation) in self.merged_tags.items():
+            rotations_dict[tag_id] = rotation
+            translations_dict[tag_id] = translation
 
-                    # convert sets to lists for JSON serialization
-                    relations_dict = {tag_id: list(relations) for tag_id, relations in self.merged_relations.items()}
-                    
-                    relation_data = {
-                        "measurement": "badge_relation",
-                        "fields": {
-                            "window_start_time": self.time_bucket_key,
-                            "window_end_time": self.time_bucket_key + self.window_size,
-                            "graph": json.dumps(relations_dict),
-                        }
-                    }
+        # prepare and upload the data for badge translations, rotations and relations
+        translation_data = {
+            "measurement": "badge_translation",
+            "fields": {
+                "window_start_time": self.time_bucket_key,
+                "window_end_time": self.time_bucket_end,
+                "translations": json.dumps(translations_dict),
+            }
+        }
 
-                    self.logger.debug(translation_data)
-                    self.logger.debug(rotation_data)
-                    self.logger.debug(relation_data)
+        rotation_data = {
+            "measurement": "badge_rotation",
+            "fields": {
+                "window_start_time": self.time_bucket_key,
+                "window_end_time": self.time_bucket_end,
+                "rotations": json.dumps(rotations_dict),
+            }
+        }
 
-                    self.influx_client.write(self.bucket_name, translation_data)
-                    self.influx_client.write(self.bucket_name, rotation_data)
-                    self.influx_client.write(self.bucket_name, relation_data)
+        relations_dict = {}
+        for tag_id, relations in self.merged_relations.items():
+            relations_dict[tag_id] = list(relations)
 
-                # reset for next cycle
-                self.merged_relations.clear()
-                self.merged_tags.clear()
-                self.alive = False
-                self.time_bucket_key = time.time()  # update time_bucket_key with current time
+        relation_data = {
+            "measurement": "badge_relation",
+            "fields": {
+                "window_start_time": self.time_bucket_key,
+                "window_end_time": self.time_bucket_end,
+                "graph": json.dumps(relations_dict),
+            }
+        }
 
-            # schedule the next upload outside the lock to avoid potential deadlocks
-            now = time.time()
-            sleep_duration = max(0, next_time - now)
-            time.sleep(sleep_duration)
-            next_time += interval
+        self.logger.debug(translation_data)
+        self.logger.debug(rotation_data)
+        self.logger.debug(relation_data)
+
+        self.influx_client.write(self.bucket_name, translation_data)
+        self.influx_client.write(self.bucket_name, rotation_data)
+        self.influx_client.write(self.bucket_name, relation_data)
+
+        self.logger.info(f"Uploaded bucket: {self.time_bucket_key:.2f}s - {self.time_bucket_end:.2f}s "
+                         f"({len(self.merged_tags)} tags, {len(self.merged_relations)} relations)")
+
+        # reset for next cycle
+        self.merged_relations.clear()
+        self.merged_tags.clear()
 
     def _load_transform_matrices(self):
         """Load transformation matrices."""

@@ -12,14 +12,16 @@ Base:
   fps: 30                                           # Frames per second of the image capture
 
   # VideoStream settings
-  source: opencv                                    # VideoStream source type (opencv/rtmp/lsl)
+  source: opencv                                    # VideoStream source type (opencv/rtmp/lsl/file)
+  file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
+  initial_sync_time: 1754398113.0                   # Unix timestamp to start synchronizing from
   stream_kwargs:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
-    format: MJPG                                    # Source format (e.g., MJPG, H264, JPEG, raw)
+    format: MJPG                                    # Source format (e.g., MJPG (live camera), H264 (file), JPEG (lsl), raw (lsl))
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
 
 Synchronizer:
-  window_size: 1                                    # Size of the synchronization window (seconds)
+  bucket_duration: 1                                # time bucket duration (seconds) for synchronized result
 
 # RTMP streams settings
 RTMP:

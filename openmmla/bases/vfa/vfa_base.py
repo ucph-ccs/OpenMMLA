@@ -3,8 +3,8 @@ import gc
 import json
 import logging
 import os
+import re
 import threading
-import time
 
 import cv2
 import numpy as np
@@ -14,7 +14,6 @@ from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_bucket, get_id, flush_input
 from openmmla.utils.logger import get_logger
-from openmmla.utils.requests import resolve_url
 from .enums import ROTATIONS
 from .input import get_function_base, get_mode
 
@@ -60,7 +59,6 @@ class VFABase(Base):
     def _setup_yaml(self):
         """Load and assign configuration parameters from the YAML configuration file."""
         base_config = self.config['Base']
-        vfa_server_config = self.config['Server']['vfa']
 
         # Load angle configurations
         self.angle_config = base_config.get('angle_config', {})
@@ -74,7 +72,9 @@ class VFABase(Base):
         self.source = base_config['source']
         self.stream_kwargs = base_config['stream_kwargs']
 
-        self.vllm_frame_analyzer_url = resolve_url(vfa_server_config['vllm_frame_analyzer'])
+        source_list = ['opencv', 'rtmp', 'lsl', 'file']
+        if self.source not in source_list:
+            raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
 
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations."""
@@ -186,6 +186,8 @@ class VFABase(Base):
             self.stream_kwargs['camera_index'] = self.selected_source
         elif self.source == 'rtmp':
             self.stream_kwargs['rtmp_url'] = self.selected_source
+        elif self.source == 'file':
+            self.stream_kwargs['file_path'] = self.selected_source
 
         self.base_id = get_id()
         self.camera_configured = True
@@ -285,6 +287,42 @@ class VFABase(Base):
                 available_sources.append(url)
                 available_source_idx += 1
 
+        elif self.source == 'file':
+            base_config = self.config.get('Base', {})
+
+            if 'initial_sync_time' not in base_config:
+                raise ValueError("initial_sync_time configuration is missing in the YAML file.")
+            self.initial_sync_time = float(base_config['initial_sync_time'])
+            if not self._validate_unix_timestamp(self.initial_sync_time):
+                raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
+
+            if 'file_dir' not in base_config:
+                raise ValueError("File directory configuration is missing in the YAML file.")
+            file_dir = base_config['file_dir']
+            if not os.path.isabs(file_dir):
+                file_dir = os.path.join(self.project_dir, file_dir)
+            if not os.path.exists(file_dir):
+                raise ValueError(f"File directory does not exist: {file_dir}")
+
+            # find all video files in directory (opencv-supported formats)
+            video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
+            for filename in sorted(os.listdir(file_dir)):
+                match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
+                if match:
+                    file_start_time = float(match.group(1))
+                    if not self._validate_unix_timestamp(file_start_time):
+                        self.logger.warning(f"Skipping file {filename}: invalid file_start_time ({file_start_time})")
+                        continue
+                    if file_start_time > self.initial_sync_time:
+                        self.logger.warning(
+                            f"Skipping file {filename}: file_start_time ({file_start_time}) is greater than initial_sync_time ({self.initial_sync_time})")
+                        continue
+                    file_path = os.path.join(file_dir, filename)
+                    if any(filename.lower().endswith(ext) for ext in video_extensions):
+                        print(f"{available_source_idx} : File {file_path} is available.")
+                        available_sources.append(file_path)
+                        available_source_idx += 1
+
         if not available_sources:
             self.logger.warning(f"No video sources found for {self.source}.")
 
@@ -316,19 +354,34 @@ class VFABase(Base):
         print("Processing VFA frames...")
         save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/{self.chosen_camera}_{self.base_id}')
         os.makedirs(save_path, exist_ok=True)
+        timestamp_offset = 0
 
-        if self.mode == 'analyze':
-            # Process existing images in analyze mode
+        # Initialize frame reading based on source type
+        if self.source == 'file':
+            filename = os.path.basename(self.selected_source)
+            match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
+            file_start_time = float(match.group(1))
+            timestamp_offset = file_start_time
+            frames_read_pos = (self.initial_sync_time - file_start_time) * self.fps
+
+        if self.mode == 'analyze':  # processing existing frames
             self._analyze_existing_frames(save_path)
             return
 
         # For record and full modes, process live frames
-        last_saved_time = time.time() - self.interval + 1
-
+        last_saved_time = 0
         while not self.stop_event.is_set():
-            video_frame = self.video_stream.read()[-1]
+            if self.source == 'file':  # read frame by frame
+                frame_start_time = frames_read_pos / self.fps
+                frames_read_pos += 1
+                video_frame = self.video_stream.read(start_time=frame_start_time)
+                if video_frame is None:
+                    self.logger.info("Reached end of video file")
+                    break
+            else:
+                video_frame = self.video_stream.read()[-1]
             frame = video_frame.data
-            current_time = time.time()
+            acquired_time = video_frame.timestamp + timestamp_offset
 
             if self.camera_info.get("fisheye", False):
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
@@ -339,16 +392,15 @@ class VFABase(Base):
 
             if self.graphics:
                 display_frame = cv2.resize(frame, (960, 540))
-                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                timestamp = datetime.datetime.fromtimestamp(acquired_time).strftime("%Y-%m-%d %H:%M:%S")
                 cv2.putText(display_frame, timestamp, (display_frame.shape[1] - 300, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.imshow(f'VFA Base {self.base_id}, Camera {self.selected_source}', display_frame)
 
-            if current_time - last_saved_time >= self.interval:
-                acquired_time = video_frame.timestamp
+            if acquired_time - last_saved_time >= self.interval:
                 image_path = os.path.join(save_path, f'{acquired_time}.jpg')
                 cv2.imwrite(image_path, frame)
-                last_saved_time = current_time
+                last_saved_time = acquired_time
 
                 if self.mode == 'full':
                     try:
@@ -398,3 +450,21 @@ class VFABase(Base):
         if self.bucket_name:
             return f'{self.bucket_name}/vfa/control'
         return None
+
+    @staticmethod
+    def _validate_unix_timestamp(timestamp: float):
+        """Validate that a timestamp is a reasonable Unix timestamp.
+
+        Args:
+            timestamp: the timestamp to validate
+        """
+        # unix timestamps should be positive and within reasonable bounds
+        # January 1, 1970 00:00:00 UTC = 0
+        # January 1, 2100 00:00:00 UTC ≈ 4102444800
+        min_timestamp = 0
+        max_timestamp = 4102444800  # year 2100
+
+        if isinstance(timestamp, (int, float)) and min_timestamp < timestamp < max_timestamp:
+            return True
+        else:
+            return False
