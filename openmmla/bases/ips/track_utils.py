@@ -23,13 +23,13 @@ class PoseStabilizer:
         rvec, _ = cv2.Rodrigues(R)
         t = np.asarray(t).reshape(3, 1)
 
-        # 如果是第一次
+        # if first time
         if tag_id not in self.rotation_history:
             self.rotation_history[tag_id] = rvec
             self.translation_history[tag_id] = t
             return R, t
 
-        # 平滑
+        # smoothing
         prev_rvec = self.rotation_history[tag_id]
         prev_t = self.translation_history[tag_id]
 

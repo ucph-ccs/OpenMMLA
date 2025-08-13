@@ -11,11 +11,10 @@ CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activat
 NUM_BASE=1
 NUM_SYNCHRONIZER=1
 GRAPHICS=true
-STORE=false
-VERBOSE=false
+VERBOSE=true
 
 print_usage() {
-    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]"
+    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-v VERBOSE] [-h]"
     echo ""
     echo "options:"
     echo "  -nb NUM_BASE         : Number of VFA bases to run (default: 1)"
@@ -120,7 +119,7 @@ for arg_name in "NUM_BASE" "NUM_SYNCHRONIZER"; do
     fi
 done
 
-for arg_name in "GRAPHICS" "STORE" "VERBOSE"; do
+for arg_name in "GRAPHICS" "VERBOSE"; do
     arg_value="${!arg_name}"
     if ! is_boolean "$arg_value"; then
         echo "Error: $arg_name must be either 'true' or 'false'."

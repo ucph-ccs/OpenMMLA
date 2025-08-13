@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -68,6 +69,11 @@ class VFABase(Base):
         self.rotate = int(base_config.get('rotate', 0))
         self.fps = int(base_config.get('fps', 30))
         self.interval = int(base_config.get('interval', 30))
+
+        # file processing configuration (file sources always use keyframe processing)
+        self.keyframe_interval = float(base_config.get('keyframe_interval', 30.0))
+        self.processing_rate = float(base_config.get('processing_rate', 1.0))
+        self.enable_timing_sync = base_config.get('enable_timing_sync', True)
 
         self.source = base_config['source']
         self.stream_kwargs = base_config['stream_kwargs']
@@ -351,55 +357,101 @@ class VFABase(Base):
                 self.logger.warning("Please enter a valid number or press Enter for default.")
 
     def _process_frames(self):
-        print("Processing VFA frames...")
-        save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/{self.chosen_camera}_{self.base_id}')
-        os.makedirs(save_path, exist_ok=True)
-        timestamp_offset = 0
-
-        # Initialize frame reading based on source type
-        if self.source == 'file':
-            filename = os.path.basename(self.selected_source)
-            match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
-            file_start_time = float(match.group(1))
-            timestamp_offset = file_start_time
-            frames_read_pos = (self.initial_sync_time - file_start_time) * self.fps
+        """Process video frames and handle frame analysis."""
+        self.save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/{self.chosen_camera}_{self.base_id}')
+        os.makedirs(self.save_path, exist_ok=True)
 
         if self.mode == 'analyze':  # processing existing frames
-            self._analyze_existing_frames(save_path)
+            self._analyze_existing_frames(self.save_path)
             return
 
-        # For record and full modes, process live frames
-        last_saved_time = 0
+        if self.source == 'file':
+            self._process_keyframes()
+        else:
+            self._process_continuous_frames()
+
+    def _process_keyframes(self):
+        """Process video frames using keyframe synchronization for file mode."""
+        print("Processing VFA keyframes with timing synchronization...")
+        
+        filename = os.path.basename(self.selected_source)
+        match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
+        file_start_time = float(match.group(1))
+        timestamp_offset = file_start_time
+        
+        # start from initial sync time, advance by keyframe_interval
+        current_video_time = self.initial_sync_time - file_start_time
+        target_interval = self.keyframe_interval / self.processing_rate
+        
+        # accumulative timing to prevent drift
+        expected_real_time = time.time()
+        frame_count = 0
+        
+        self.logger.info(f"VFA keyframe processing: interval={self.keyframe_interval}s, rate={self.processing_rate}x, "
+                        f"target_interval={target_interval:.3f}s, effective FPS: {1/self.keyframe_interval:.3f}")
+        
         while not self.stop_event.is_set():
-            if self.source == 'file':  # read frame by frame
-                frame_start_time = frames_read_pos / self.fps
-                frames_read_pos += 1
-                video_frame = self.video_stream.read(start_time=frame_start_time)
-                if video_frame is None:
-                    self.logger.info("Reached end of video file")
-                    break
-            else:
-                video_frame = self.video_stream.read()[-1]
+            # read frame at specific time (keyframe)
+            video_frame = self.video_stream.read(start_time=current_video_time)
+            if video_frame is None:
+                self.logger.info("Reached end of video file")
+                break
+                
             frame = video_frame.data
-            acquired_time = video_frame.timestamp + timestamp_offset
+            acquired_time = current_video_time + timestamp_offset
+            
+            # process the frame
+            processed_frame = self._process_single_frame(frame, acquired_time)
+            
+            # save and publish frame
+            image_path = os.path.join(self.save_path, f'{acquired_time}.jpg')
+            cv2.imwrite(image_path, processed_frame)
+            
+            if self.mode == 'full':
+                try:
+                    self._publish_frame(image_path, acquired_time)
+                except Exception as e:
+                    self.logger.warning(f"VFA publish failed: {e}")
+            
+            # accumulative timing synchronization
+            if self.enable_timing_sync:
+                frame_count += 1
+                next_expected_time = expected_real_time + (frame_count * target_interval)
+                current_time = time.time()
+                
+                if current_time < next_expected_time:
+                    sleep_time = next_expected_time - current_time
+                    self.logger.debug(f"Frame {frame_count}: sleeping {sleep_time:.3f}s to maintain sync")
+                    time.sleep(sleep_time)
+                else:
+                    drift = current_time - next_expected_time
+                    self.logger.debug(f"Frame {frame_count}: running {drift:.3f}s behind schedule (catching up)")
+            
+            # advance to next keyframe
+            current_video_time += self.keyframe_interval
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
-            if self.camera_info.get("fisheye", False):
-                frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
-                                  interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    def _process_continuous_frames(self):
+        """Process real-time video streams continuously (opencv, rtmp, lsl)."""
+        print("Processing VFA real-time streams...")
+        last_saved_time = 0
 
-            if self.rotate in ROTATIONS:
-                frame = cv2.rotate(frame, ROTATIONS[self.rotate])
+        while not self.stop_event.is_set():
+            video_frame = self.video_stream.read()[-1]  # read latest frame
+            if video_frame is None:
+                continue
 
-            if self.graphics:
-                display_frame = cv2.resize(frame, (960, 540))
-                timestamp = datetime.datetime.fromtimestamp(acquired_time).strftime("%Y-%m-%d %H:%M:%S")
-                cv2.putText(display_frame, timestamp, (display_frame.shape[1] - 300, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.imshow(f'VFA Base {self.base_id}, Camera {self.selected_source}', display_frame)
+            frame = video_frame.data
+            acquired_time = video_frame.timestamp
+
+            # process the frame
+            processed_frame = self._process_single_frame(frame, acquired_time)
 
             if acquired_time - last_saved_time >= self.interval:
-                image_path = os.path.join(save_path, f'{acquired_time}.jpg')
-                cv2.imwrite(image_path, frame)
+                image_path = os.path.join(self.save_path, f'{acquired_time}.jpg')
+                cv2.imwrite(image_path, processed_frame)
                 last_saved_time = acquired_time
 
                 if self.mode == 'full':
@@ -411,11 +463,26 @@ class VFABase(Base):
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
+    def _process_single_frame(self, frame, acquired_time):
+        """Process a single frame and return the processed frame."""
+        if self.camera_info.get("fisheye", False):
+            frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
+                              interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+
+        if self.rotate in ROTATIONS:
+            frame = cv2.rotate(frame, ROTATIONS[self.rotate])
+
+        if self.graphics:
+            display_frame = cv2.resize(frame, (960, 540))
+            timestamp = datetime.datetime.fromtimestamp(acquired_time).strftime("%Y-%m-%d %H:%M:%S")
+            cv2.putText(display_frame, timestamp, (display_frame.shape[1] - 300, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.imshow(f'VFA Base {self.base_id}, Camera {self.selected_source}', display_frame)
+
+        return frame
+
     def _analyze_existing_frames(self, save_path: str):
         """Analyze existing frames in the save path."""
-        if not os.path.exists(save_path):
-            self.logger.warning(f"No frames found in {save_path}")
-            return
 
         # Get all image files and sort by timestamp
         frame_files = [f for f in os.listdir(save_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
@@ -452,15 +519,18 @@ class VFABase(Base):
         return None
 
     @staticmethod
-    def _validate_unix_timestamp(timestamp: float):
+    def _validate_unix_timestamp(timestamp: float) -> bool:
         """Validate that a timestamp is a reasonable Unix timestamp.
 
         Args:
             timestamp: the timestamp to validate
+
+        Returns:
+            True if the timestamp is a valid Unix timestamp, False otherwise.
         """
         # unix timestamps should be positive and within reasonable bounds
         # January 1, 1970 00:00:00 UTC = 0
-        # January 1, 2100 00:00:00 UTC ≈ 4102444800
+        # January 1, 2100 00:00:00 UTC = 4102444800
         min_timestamp = 0
         max_timestamp = 4102444800  # year 2100
 

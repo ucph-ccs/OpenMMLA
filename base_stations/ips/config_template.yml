@@ -11,6 +11,17 @@ Base:
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
 
+  # File processing settings (file sources always use keyframe processing for synchronization)
+  keyframe_interval: 1.0                           # Interval between keyframes in seconds (1.0 = 1 FPS, 0.033 = ~30 FPS, 0.5 = 2 FPS)
+  processing_rate: 1.0                             # Real-time rate multiplier (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
+  enable_timing_sync: true                         # Enforce accumulative timing synchronization between bases (prevents drift and race conditions)
+  
+  # Examples:
+  # keyframe_interval: 1.0, processing_rate: 1.0   → 1 FPS in real-time (1s per frame)
+  # keyframe_interval: 0.033, processing_rate: 1.0 → 30 FPS in real-time (0.033s per frame)  
+  # keyframe_interval: 0.033, processing_rate: 0.5 → 30 FPS with 2x time allowance (0.066s per frame)
+  # keyframe_interval: 1.0, processing_rate: 2.0   → 1 FPS with half time allowance (0.5s per frame)
+
   # VideoStream settings
   source: opencv                                    # VideoStream source type (opencv/rtmp/lsl/file)
   file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>

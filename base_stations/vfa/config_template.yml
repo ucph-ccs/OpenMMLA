@@ -10,7 +10,18 @@ Base:
   resolution: [1920, 1080]                          # Image resolution in pixels (width, height)
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
-  interval: 1                                       # Interval in seconds between image captures
+  interval: 1                                       # Interval in seconds between image captures (for real-time sources)
+
+  # File processing settings (file sources always use keyframe processing for synchronization)
+  keyframe_interval: 30.0                          # Interval between keyframes in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
+  processing_rate: 1.0                             # Real-time rate multiplier (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
+  enable_timing_sync: true                         # Enforce accumulative timing synchronization between bases (prevents drift and race conditions)
+  
+  # Examples:
+  # keyframe_interval: 30.0, processing_rate: 1.0  → 1 frame per 30s in real-time
+  # keyframe_interval: 1.0, processing_rate: 1.0   → 1 FPS in real-time  
+  # keyframe_interval: 1.0, processing_rate: 0.5   → 1 FPS with 2x time allowance (2s per frame)
+  # keyframe_interval: 10.0, processing_rate: 2.0  → 1 frame per 10s with half time allowance (5s per frame)
 
   # Camera angle settings (optional)
   angle_config:

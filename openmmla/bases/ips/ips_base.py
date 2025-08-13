@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -71,6 +72,11 @@ class IPSBase(Base):
         self.res = tuple(base_config.get('resolution', (1920, 1080)))
         self.rotate = int(base_config.get('rotate', 0))
         self.fps = int(base_config.get('fps', 30))
+
+        # file processing configuration (file sources always use keyframe processing)
+        self.keyframe_interval = float(base_config.get('keyframe_interval', 1.0))
+        self.processing_rate = float(base_config.get('processing_rate', 1.0))
+        self.enable_timing_sync = base_config.get('enable_timing_sync', True)
 
         self.source = base_config['source']
         self.stream_kwargs = base_config['stream_kwargs']
@@ -365,95 +371,100 @@ class IPSBase(Base):
         self.video_stream.start()
 
     def _process_frames(self):
-        """Process video frames and detect AprilTags with pose and relation stability."""
-        print("Processing frames...")
+        """Process video frames and detect AprilTags."""
+        if self.source == 'file':
+            self._process_keyframes()
+        else:
+            self._process_continuous_frames()
+
+    def _process_keyframes(self):
+        """Process video frames using keyframe synchronization for file mode."""
+        print("Processing keyframes with timing synchronization...")
+        save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/ips_{self.base_id}')
+        os.makedirs(save_path, exist_ok=True)
+        
+        filename = os.path.basename(self.selected_source)
+        match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
+        file_start_time = float(match.group(1))
+        timestamp_offset = file_start_time
+        
+        # start from initial sync time, advance by keyframe_interval
+        current_video_time = self.initial_sync_time - file_start_time
+        target_interval = self.keyframe_interval / self.processing_rate
+        
+        # accumulative timing to prevent drift
+        expected_real_time = time.time()
+        frame_count = 0
+        
+        self.logger.info(f"Keyframe processing: interval={self.keyframe_interval}s, rate={self.processing_rate}x, "
+                         f"target_interval={target_interval:.3f}s, effective FPS: {1/self.keyframe_interval:.1f}")
+        
+        while not self.stop_event.is_set():
+            # read frame at specific time (keyframe)
+            video_frame = self.video_stream.read(start_time=current_video_time)
+            if video_frame is None:
+                self.logger.info("Reached end of video file")
+                break
+                
+            frame = video_frame.data
+            acquired_time = current_video_time + timestamp_offset
+            
+            # process the frame
+            tags, tag_relations = self._process_single_frame(frame, acquired_time)
+            
+            # save frame if store is enabled
+            if self.store:
+                cv2.imwrite(os.path.join(save_path, f'{acquired_time}.jpg'), frame)
+            
+            # publish result
+            message = {
+                "base_id": self.base_id,
+                "tags": tags,
+                "tag_relations": tag_relations,
+                "acquired_time": acquired_time
+            }
+            self.logger.debug(message)
+            message_str = json.dumps(message)
+            self.mqtt_client.publish(f'{self.bucket_name}/ips', message_str, qos=0, retain=False)
+            
+            # accumulative timing synchronization
+            if self.enable_timing_sync:
+                frame_count += 1
+                next_expected_time = expected_real_time + (frame_count * target_interval)
+                current_time = time.time()
+                
+                if current_time < next_expected_time:
+                    sleep_time = next_expected_time - current_time
+                    self.logger.debug(f"Frame {frame_count}: sleeping {sleep_time:.3f}s to maintain sync")
+                    time.sleep(sleep_time)
+                else:
+                    drift = current_time - next_expected_time
+                    self.logger.debug(f"Frame {frame_count}: running {drift:.3f}s behind schedule (catching up)")
+            
+            # advance to next keyframe
+            current_video_time += self.keyframe_interval
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    def _process_continuous_frames(self):
+        """Process real-time video streams continuously (opencv, rtmp, lsl)."""
+        print("Processing real-time streams...")
         save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/ips_{self.base_id}')
         os.makedirs(save_path, exist_ok=True)
         frames_count = 0
-        timestamp_offset = 0
-
-        # initialize frame reading based on source type
-        if self.source == 'file':
-            filename = os.path.basename(self.selected_source)
-            match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
-            file_start_time = float(match.group(1))
-            timestamp_offset = file_start_time
-            frames_read_pos = (self.initial_sync_time - file_start_time) * self.fps
 
         while not self.stop_event.is_set():
-            if self.source == 'file': # read frame by frame
-                frame_start_time = frames_read_pos / self.fps
-                frames_read_pos += 1
-                video_frame = self.video_stream.read(start_time=frame_start_time)
-                if video_frame is None:
-                    self.logger.info("Reached end of video file")
-                    break
-            else:
-                video_frame = self.video_stream.read()[-1] # read latest frame
+            video_frame = self.video_stream.read()[-1]  # read latest frame
+            if video_frame is None:
+                continue
 
             frame = video_frame.data
             frames_count += 1
-            acquired_time = video_frame.timestamp + timestamp_offset
+            acquired_time = video_frame.timestamp
 
-            if self.camera_info.get("fisheye", False):
-                frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
-                                  interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-            if self.rotate in ROTATIONS:
-                frame = cv2.rotate(frame, ROTATIONS[self.rotate])
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=self.camera_info["params"],
-                                           tag_size=self.tag_size)
-
-            self.relation_tracker.step()
-
-            tags = {}
-            tag_relations = {}
-
-            for tag in results:
-                if tag.decision_margin < 10 or int(tag.tag_id) > self.max_badge_id:
-                    continue
-
-                # stabilize pose
-                stabilized_R, stabilized_t = self.pose_stabilizer.update(tag.tag_id, tag.pose_R, tag.pose_t)
-                tag.pose_R = stabilized_R
-                tag.pose_t = stabilized_t
-
-                # stabilize normal
-                normal, tag = get_2d_outward_normal_vector(tag)
-                smoothed_normal = self.normal_stabilizer.update(tag.tag_id, normal)
-
-                tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
-                tag_relations.setdefault(tag.tag_id, [])
-
-                # decide if the tag is looking at another tag
-                other_tags = [t for t in results if t.tag_id != tag.tag_id]
-                for other_tag in other_tags:
-                    is_seeing = is_tag_looking_at_another_2d(tag, other_tag, cosine_threshold=-0.94,
-                                                             distance_threshold=1)
-                    self.relation_tracker.update(tag.tag_id, other_tag.tag_id, is_seeing)
-
-                    if self.relation_tracker.is_confirmed(tag.tag_id, other_tag.tag_id):
-                        tag_relations[tag.tag_id].append(str(other_tag.tag_id))
-
-                # draw visualizations
-                if self.graphics:
-                    corners = np.int32(tag.corners)
-                    tag_center = np.mean(corners, axis=0)
-                    arrow_dir = smoothed_normal[:2]
-                    scale_factor = 50
-                    end_point = tag_center + scale_factor * arrow_dir
-                    cv2.arrowedLine(frame, tuple(np.int32(tag_center)), tuple(np.int32(end_point)), (0, 0, 255), 2)
-                    cv2.polylines(frame, [corners], True, (0, 255, 0), thickness=2)
-                    cv2.putText(frame, str(tag.tag_id), org=(int(tag_center[0]) + 10, int(tag_center[1]) + 10),
-                                fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.8, color=(0, 255, 0), thickness=2)
-
-            if self.graphics:
-                display_frame = cv2.resize(frame, (960, 540))
-                timestamp = datetime.datetime.fromtimestamp(acquired_time).strftime("%Y-%m-%d %H:%M:%S")
-                cv2.putText(display_frame, timestamp, (display_frame.shape[1] - 300, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.imshow(f'AprilTags Detection from camera {self.base_id}', display_frame)
+            # process the frame
+            tags, tag_relations = self._process_single_frame(frame, acquired_time)
 
             if self.store and frames_count % self.fps == 0:
                 frames_count = 0
@@ -471,6 +482,70 @@ class IPSBase(Base):
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
+    def _process_single_frame(self, frame, acquired_time):
+        """Process a single frame and return detected tags and relations."""
+        if self.camera_info.get("fisheye", False):
+            frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
+                              interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        if self.rotate in ROTATIONS:
+            frame = cv2.rotate(frame, ROTATIONS[self.rotate])
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=self.camera_info["params"],
+                                       tag_size=self.tag_size)
+
+        self.relation_tracker.step()
+
+        tags = {}
+        tag_relations = {}
+
+        for tag in results:
+            if tag.decision_margin < 10 or int(tag.tag_id) > self.max_badge_id:
+                continue
+
+            # stabilize pose
+            stabilized_R, stabilized_t = self.pose_stabilizer.update(tag.tag_id, tag.pose_R, tag.pose_t)
+            tag.pose_R = stabilized_R
+            tag.pose_t = stabilized_t
+
+            # stabilize normal
+            normal, tag = get_2d_outward_normal_vector(tag)
+            smoothed_normal = self.normal_stabilizer.update(tag.tag_id, normal)
+
+            tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
+            tag_relations.setdefault(tag.tag_id, [])
+
+            # decide if the tag is looking at another tag
+            other_tags = [t for t in results if t.tag_id != tag.tag_id]
+            for other_tag in other_tags:
+                is_seeing = is_tag_looking_at_another_2d(tag, other_tag, cosine_threshold=-0.94,
+                                                         distance_threshold=1)
+                self.relation_tracker.update(tag.tag_id, other_tag.tag_id, is_seeing)
+
+                if self.relation_tracker.is_confirmed(tag.tag_id, other_tag.tag_id):
+                    tag_relations[tag.tag_id].append(str(other_tag.tag_id))
+
+            # draw visualizations
+            if self.graphics:
+                corners = np.int32(tag.corners)
+                tag_center = np.mean(corners, axis=0)
+                arrow_dir = smoothed_normal[:2]
+                scale_factor = 50
+                end_point = tag_center + scale_factor * arrow_dir
+                cv2.arrowedLine(frame, tuple(np.int32(tag_center)), tuple(np.int32(end_point)), (0, 0, 255), 2)
+                cv2.polylines(frame, [corners], True, (0, 255, 0), thickness=2)
+                cv2.putText(frame, str(tag.tag_id), org=(int(tag_center[0]) + 10, int(tag_center[1]) + 10),
+                            fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.8, color=(0, 255, 0), thickness=2)
+
+        if self.graphics:
+            display_frame = cv2.resize(frame, (960, 540))
+            timestamp = datetime.datetime.fromtimestamp(acquired_time).strftime("%Y-%m-%d %H:%M:%S")
+            cv2.putText(display_frame, timestamp, (display_frame.shape[1] - 300, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.imshow(f'AprilTags Detection from camera {self.base_id}', display_frame)
+
+        return tags, tag_relations
 
     def _load_transform_matrices(self):
         """Load transformation matrices."""
@@ -510,15 +585,18 @@ class IPSBase(Base):
         return None
     
     @staticmethod
-    def _validate_unix_timestamp(timestamp: float):
+    def _validate_unix_timestamp(timestamp: float) -> bool:
         """Validate that a timestamp is a reasonable Unix timestamp.
 
         Args:
             timestamp: the timestamp to validate
+
+        Returns:
+            True if the timestamp is a valid Unix timestamp, False otherwise.
         """
         # unix timestamps should be positive and within reasonable bounds
         # January 1, 1970 00:00:00 UTC = 0
-        # January 1, 2100 00:00:00 UTC ≈ 4102444800
+        # January 1, 2100 00:00:00 UTC = 4102444800
         min_timestamp = 0
         max_timestamp = 4102444800  # year 2100
 
