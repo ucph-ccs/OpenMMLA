@@ -12,6 +12,16 @@ Base:
   fps: 30                                           # Frames per second of the image capture
   interval: 1                                       # Interval in seconds between image captures (for real-time sources)
 
+  # Camera angle settings (optional)
+  angle_config:
+    "front": "Direct front view at eye level, showing participants face-on"
+    "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
+
+  # VideoStream settings
+  source: opencv                                    # VideoStream source type (opencv/rtmp/file)
+  file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
+  initial_sync_time: 1754398113.0                   # Unix timestamp to start synchronizing from
+  
   # File processing settings (file sources always use keyframe processing for synchronization)
   keyframe_interval: 30.0                          # Interval between keyframes in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
   processing_rate: 1.0                             # Real-time rate multiplier (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
@@ -23,15 +33,6 @@ Base:
   # keyframe_interval: 1.0, processing_rate: 0.5   → 1 FPS with 2x time allowance (2s per frame)
   # keyframe_interval: 10.0, processing_rate: 2.0  → 1 frame per 10s with half time allowance (5s per frame)
 
-  # Camera angle settings (optional)
-  angle_config:
-    "front": "Direct front view at eye level, showing participants face-on"
-    "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
-
-  # VideoStream settings
-  source: opencv                                    # VideoStream source type (opencv/rtmp/file)
-  file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
-  initial_sync_time: 1754398113.0                   # Unix timestamp to start synchronizing from
   stream_kwargs:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
     format: MJPG                                    # Video format (e.g., MJPG, H264)
