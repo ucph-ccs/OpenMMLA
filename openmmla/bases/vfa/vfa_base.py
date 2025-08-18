@@ -68,9 +68,8 @@ class VFABase(Base):
         self.res = tuple(base_config.get('resolution', (1920, 1080)))
         self.rotate = int(base_config.get('rotate', 0))
         self.fps = int(base_config.get('fps', 30))
-        self.interval = int(base_config.get('interval', 30))
-
-        # file processing configuration (file sources always use keyframe processing)
+        
+        # frame processing configuration (unified for all sources)
         self.keyframe_interval = float(base_config.get('keyframe_interval', 30.0))
         self.processing_rate = float(base_config.get('processing_rate', 1.0))
         self.enable_timing_sync = base_config.get('enable_timing_sync', True)
@@ -107,11 +106,31 @@ class VFABase(Base):
         self.threads.clear()
         gc.collect()
 
+    def _reinit(self):
+        """Reinitialize VFABase by calling __init__ again with stored parameters."""
+        self.logger.info("Starting VFA base reinitialization...")
+        
+        # Store the original initialization parameters
+        project_dir = getattr(self, 'project_dir', None)
+        config_path = getattr(self, 'config_path', None)
+        mode = getattr(self, 'mode', 'full')
+        graphics = getattr(self, 'graphics', True)
+        verbose = getattr(self, 'verbose', False)
+        
+        # Clean up current state
+        self._clean_up()
+        
+        # Call __init__ again with the original parameters
+        self.__init__(project_dir=project_dir, config_path=config_path, 
+                     mode=mode, graphics=graphics, verbose=verbose)
+        
+        self.logger.info("VFA base reinitialization completed successfully")
+
     def run(self):
         """Run the VFA base."""
         print('\033]0;VFA Base\007')
 
-        func_map = {1: self._start, 2: self._set_camera, 3: self._switch_mode}
+        func_map = {1: self._start, 2: self._set_camera, 3: self._switch_mode, 4: self._reinit}
         while True:
             try:
                 select_fun = get_function_base(self.chosen_camera, self.selected_source, self.camera_angle,
@@ -434,7 +453,7 @@ class VFABase(Base):
                 break
 
     def _process_continuous_frames(self):
-        """Process real-time video streams continuously (opencv, rtmp, lsl)."""
+        """Process real-time video streams continuously (opencv, rtmp, lsl) using keyframe_interval for frame saving."""
         print("Processing VFA real-time streams...")
         last_saved_time = 0
 
@@ -449,7 +468,7 @@ class VFABase(Base):
             # process the frame
             processed_frame = self._process_single_frame(frame, acquired_time)
 
-            if acquired_time - last_saved_time >= self.interval:
+            if acquired_time - last_saved_time >= self.keyframe_interval:
                 image_path = os.path.join(self.save_path, f'{acquired_time}.jpg')
                 cv2.imwrite(image_path, processed_frame)
                 last_saved_time = acquired_time
@@ -482,22 +501,57 @@ class VFABase(Base):
         return frame
 
     def _analyze_existing_frames(self, save_path: str):
-        """Analyze existing frames in the save path."""
+        """Analyze existing frames in the save path with timing synchronization."""
+        print("Analyzing VFA existing frames with timing synchronization...")
 
         # Get all image files and sort by timestamp
         frame_files = [f for f in os.listdir(save_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        frame_files.sort(key=lambda x: float(x.split('.')[0].split('_')[1]))  # Sort by timestamp
+        frame_files.sort(key=lambda x: float(x.split('.')[0].split('_')[1]))  # Sort by timestamp (assuming filename format: _timestamp.jpg)
+
+        if not frame_files:
+            self.logger.warning("No image files found in save path for analysis")
+            return
+
+        # Calculate timing parameters based on keyframe_interval and processing_rate
+        target_interval = self.keyframe_interval / self.processing_rate 
+        expected_real_time = time.time()
+        frame_count = 0
+        
+        self.logger.info(f"VFA analyze mode: interval={self.keyframe_interval}s, rate={self.processing_rate}x, "
+                        f"target_interval={target_interval:.3f}s, total frames: {len(frame_files)}")
 
         for frame_file in frame_files:
-            acquired_time = float(frame_file.split('.')[0].split('_')[1])
             if self.stop_event.is_set():
                 break
 
-            image_path = os.path.join(save_path, frame_file)
             try:
+                # Extract timestamp from filename (assuming format: timestamp.jpg)
+                acquired_time = float(frame_file.split('.')[0].split('_')[1])
+                image_path = os.path.join(save_path, frame_file)
+                
+                # Publish frame
                 self._publish_frame(image_path, acquired_time)
+                
+                # Apply timing synchronization to simulate real-time behavior
+                if self.enable_timing_sync:
+                    frame_count += 1
+                    next_expected_time = expected_real_time + (frame_count * target_interval)
+                    current_time = time.time()
+                    
+                    if current_time < next_expected_time:
+                        sleep_time = next_expected_time - current_time
+                        self.logger.debug(f"Frame {frame_count}: sleeping {sleep_time:.3f}s to maintain sync")
+                        time.sleep(sleep_time)
+                    else:
+                        drift = current_time - next_expected_time
+                        self.logger.debug(f"Frame {frame_count}: running {drift:.3f}s behind schedule (catching up)")
+                        
+            except (ValueError, IndexError) as e:
+                self.logger.warning(f"Failed to parse timestamp from filename {frame_file}: {e}")
+                continue
             except Exception as e:
                 self.logger.warning(f"VFA publish failed for {frame_file}: {e}")
+                continue
 
     def _publish_frame(self, image_path: str, acquired_time: float):
         """Publish frame to MQTT for synchronization."""
@@ -509,7 +563,7 @@ class VFABase(Base):
         }
 
         self.mqtt_client.publish(f"{self.bucket_name}/vfa", json.dumps(frame_data))
-        self.logger.info(f"Published frame with angle {self.camera_angle} at {acquired_time}")
+        self.logger.info(f"Published frame path {image_path} with angle {self.camera_angle} at {acquired_time}")
 
     @property
     def bucket_control(self) -> str | None:

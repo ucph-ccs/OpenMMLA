@@ -52,6 +52,26 @@ class Server(ABC):
     def _get_temp_file_path(self, prefix, base_id, extension):
         """Generate a temporary file path."""
         return os.path.join(self.server_temp_folder, f'{prefix}_{base_id}.{extension}')
+    
+    def _clean_up(self):
+        """Free memory by resetting attributes."""
+        pass
+
+    def _reinit(self):
+        """Reinitialize the server by calling __init__ again with stored parameters."""
+        self.logger.info("Starting server reinitialization...")
+        
+        # Store the original initialization parameters
+        project_dir = getattr(self, 'project_dir', None)
+        config_path = getattr(self, 'config_path', None)
+        
+        # Clean up current state
+        self._clean_up()
+        
+        # Call __init__ again with the original parameters
+        self.__init__(project_dir=project_dir, config_path=config_path)
+        
+        self.logger.info("Server reinitialization completed successfully")
 
     @abstractmethod
     def process_request(self):

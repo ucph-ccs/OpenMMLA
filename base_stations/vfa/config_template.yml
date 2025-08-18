@@ -10,7 +10,6 @@ Base:
   resolution: [1920, 1080]                          # Image resolution in pixels (width, height)
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
-  interval: 1                                       # Interval in seconds between image captures (for real-time sources)
 
   # Camera angle settings (optional)
   angle_config:
@@ -22,12 +21,17 @@ Base:
   file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
   initial_sync_time: 1754398113.0                   # Unix timestamp to start synchronizing from
   
-  # File processing settings (file sources always use keyframe processing for synchronization)
-  keyframe_interval: 30.0                          # Interval between keyframes in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
-  processing_rate: 1.0                             # Real-time rate multiplier (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
-  enable_timing_sync: true                         # Enforce accumulative timing synchronization between bases (prevents drift and race conditions)
+  # Frame processing settings (applies to all video sources)
+  keyframe_interval: 30.0                          # Interval between processed frames in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
+  processing_rate: 1.0                             # Real-time rate multiplier for file sources (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
+  enable_timing_sync: true                         # Enforce accumulative timing synchronization for file sources (prevents drift and race conditions)
   
   # Examples:
+  # For real-time sources (opencv/rtmp): keyframe_interval controls frame saving frequency
+  # keyframe_interval: 30.0 → Save 1 frame every 30 seconds
+  # keyframe_interval: 1.0  → Save 1 frame every second (1 FPS)
+  #
+  # For file sources: keyframe_interval + processing_rate control playback timing
   # keyframe_interval: 30.0, processing_rate: 1.0  → 1 frame per 30s in real-time
   # keyframe_interval: 1.0, processing_rate: 1.0   → 1 FPS in real-time  
   # keyframe_interval: 1.0, processing_rate: 0.5   → 1 FPS with 2x time allowance (2s per frame)
@@ -94,6 +98,21 @@ Redis:
   host: <redis-example-server>
   port: <port-number>
   db: <database-number>
+
+# Participant descriptions for identification (ID to description mapping)
+participant_descriptions:
+  'osaka_case_0':
+    "6": "Male with black long-sleeve shirt/jacket and white mask."
+    "10": "Male with dark blue sweater"
+  'cph_case_0':
+    "0": "Male with yellow-brown patterned knit sweater"
+    "1": "Male with dark blue/black shirt with orange-red trim details"
+  'puzzle_case_0':
+    "0": "Male with dark green jacket"
+  'session_2025-08-15T11:14:50Z':
+    "0": "Male with yellow-brown patterned knit sweater"
+    "1": "Male with dark blue/black shirt with orange-red trim details"
+  # Add more participants as needed
 
 # Server settings
 Server:

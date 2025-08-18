@@ -44,7 +44,7 @@ class ContextAwareVLLMFrameAnalyzer(Server):
         self.participant_descriptions = analyzer_config.get('participant_descriptions', {})
         self.logger.info(f"Loaded {len(self.participant_descriptions)} participant descriptions")
 
-        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek']:
+        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok']:
             backend_config = analyzer_config[self.backend]
         else:
             raise ValueError(f"Unsupported backend: {self.backend}")

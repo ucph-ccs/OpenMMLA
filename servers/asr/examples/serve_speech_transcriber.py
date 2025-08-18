@@ -1,7 +1,7 @@
 """This script runs the speech transcriber server."""
 import os
 
-from openmmla.services.asr import SpeechTranscriber
+from openmmla.services.asr.speech_transcriber import SpeechTranscriber
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

@@ -1,7 +1,7 @@
 """This script runs the audio enhancer server."""
 import os
 
-from openmmla.services.asr import SpeechEnhancer
+from openmmla.services.asr.speech_enhancer import SpeechEnhancer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

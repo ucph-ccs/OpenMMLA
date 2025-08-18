@@ -1,7 +1,7 @@
 """This script runs the voice activity detector server."""
 import os
 
-from openmmla.services.asr import VoiceActivityDetector
+from openmmla.services.asr.voice_activity_detector import VoiceActivityDetector
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

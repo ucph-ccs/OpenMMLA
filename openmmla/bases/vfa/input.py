@@ -17,6 +17,7 @@ def get_function_base(chosen_camera: str | None, camera_seed: str | None, camera
                                f"base:{LIGHT_BLUE}{base_id}{ENDC}, "
                                f"mode:{LIGHT_BLUE}{mode}{ENDC})\n"
                                f"3: switch mode\n"
+                               f"4: reinitialize (reload config)\n"
                                f"0: exit\n"
                                f"Selected function: ")
 
@@ -41,6 +42,7 @@ def get_function_synchronizer():
             flush_input()
             select_fun = input(f"Please input your operation:\n"
                                f"1: start\n"
+                               f"2: reinitialize (reload config)\n"
                                f"0: exit\n"
                                f"Selected function: ")
             if select_fun.strip():

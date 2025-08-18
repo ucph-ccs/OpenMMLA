@@ -6,7 +6,9 @@ from openmmla.utils.requests import send_request_with_retry
 
 
 def request_multi_angle_frame_analyze(image_paths: list[str], session_id: str, url: str,
-                                      angles: list[str] | None = None, timeout: int = 60) -> dict[str, Any] | None:
+                                      angles: list[str] | None = None, 
+                                      participant_descriptions: dict | None = None,
+                                      timeout: int = 120) -> dict[str, Any] | None:
     """Request multi-angle frame analysis from the server.
     
     Args:
@@ -14,6 +16,8 @@ def request_multi_angle_frame_analyze(image_paths: list[str], session_id: str, u
         session_id: Session ID for identification
         url: URL of the frame analyzer service
         angles: List of angle labels corresponding to each image (optional)
+        participant_descriptions: Dictionary of participant descriptions for this session (optional)
+        timeout: Request timeout in seconds
         
     Returns:
         dict: Analysis results, or None if request fails
@@ -32,6 +36,10 @@ def request_multi_angle_frame_analyze(image_paths: list[str], session_id: str, u
 
     data = {}
     data['session_id'] = session_id
+
+    # Add participant descriptions if provided
+    if participant_descriptions:
+        data['participant_descriptions'] = json.dumps(participant_descriptions)
 
     files = []
 

@@ -1,7 +1,7 @@
 """This script runs the audio inferer server."""
 import os
 
-from openmmla.services.asr import AudioInferer
+from openmmla.services.asr.audio_inferer import AudioInferer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

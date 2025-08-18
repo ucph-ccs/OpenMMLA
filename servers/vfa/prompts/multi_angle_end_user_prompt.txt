@@ -55,10 +55,17 @@ IMPORTANT: ALWAYS use only numeric IDs (e.g., "6", "10", "100") without words li
 ### 3. Activity Classification
 {{action_definitions}}
 
-- Classify each person's action based on your observations of their gaze focus and hand status, using the definitions above
-- Use the combination of gaze focus and hand status as your primary criteria for classification
-- When making reasonable inferences about obscured elements, clearly indicate this in your justification
-- Provide detailed justification explaining how the observed gaze and hand status led to your classification
+**STRICT CLASSIFICATION RULES:**
+- Each action definition contains multiple conditions numbered (1), (2), etc. - ALL numbered conditions must be satisfied simultaneously
+- If ANY numbered condition is not met, you CANNOT use that classification
+- If no definition fits perfectly, use "Unclear" rather than forcing a classification
+
+**Classification Process:**
+1. For each person, systematically check EVERY numbered condition in each action definition
+2. Only classify as an action if ALL numbered conditions are verified
+3. If multiple definitions fit completely, choose the most specific one
+4. If no definition has all conditions satisfied, classify as "Unclear"
+5. Provide detailed justification showing how each numbered condition was verified or failed
 
 ### Response Format
 ```json
@@ -78,12 +85,12 @@ IMPORTANT: ALWAYS use only numeric IDs (e.g., "6", "10", "100") without words li
     }
   },
   "classifications": {
-    "0": "Working-Software",
-    "1": "Working-Document"
+    "0": "Communicating",
+    "1": "Manipulating"
   },
   "justifications": {
-    "0": "Classified as 'Working-Software' because gaze is directed at colleague's face (in: 0.92) while hands are actively typing on keyboard as clearly visible in perspective_1.",
-    "1": "Classified as 'Working-Document' because gaze is directed at documents on desk (in: 0.78) and hands are manipulating papers as visible in perspective_1."
+    "0": "Classified as 'Communicating' because: Condition (1) ✓ - gaze is directed toward another person (colleague's face, in: 0.92), Condition (2) ✓ - hands are visibly gesturing while typing to support communication. Both numbered conditions satisfied.",
+    "1": "Classified as 'Manipulating' because: Condition (1) ✓ - gaze is directed at work-related element (documents on desk, in: 0.78), Condition (2) ✓ - hands are clearly interacting with that same element (manipulating papers). Both numbered conditions satisfied."
   }
 }
 ```

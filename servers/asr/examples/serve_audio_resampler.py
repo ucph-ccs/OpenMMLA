@@ -1,7 +1,7 @@
 """This script runs the audio resampler server."""
 import os
 
-from openmmla.services.asr import AudioResampler
+from openmmla.services.asr.audio_resampler import AudioResampler
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

@@ -1,7 +1,7 @@
 """This script runs the VLLM frame analyzer server."""
 import os
 
-from openmmla.services.vfa import VLLMFrameAnalyzer
+from openmmla.services.vfa.vllm_frame_analyzer import VLLMFrameAnalyzer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
@@ -14,7 +14,8 @@ app = create_app(
     class_args={'project_dir': project_dir, 'config_path': config_path},
 )
 
-# gunicorn -w 1 -b 0.0.0.0:5007 image_processor_server:app
+# Run with: python serve_vllm_frame_analyzer.py
+# Or with gunicorn: gunicorn -w 1 -b 0.0.0.0:5007 serve_vllm_frame_analyzer:app
 # To kill the server: kill -9 $(lsof -ti:5007)
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5007)

@@ -1,7 +1,7 @@
 """This script runs the speech separator server."""
 import os
 
-from openmmla.services.asr import SpeechSeparator
+from openmmla.services.asr.speech_separator import SpeechSeparator
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')

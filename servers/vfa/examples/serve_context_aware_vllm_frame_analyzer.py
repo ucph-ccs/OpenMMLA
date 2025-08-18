@@ -1,14 +1,14 @@
 """This script runs the Context-Aware VLLM frame analyzer server."""
 import os
 
-from openmmla.services.vfa import context_aware_vllm_frame_analyzer
+from openmmla.services.vfa.context_aware_vllm_frame_analyzer import ContextAwareVLLMFrameAnalyzer
 from openmmla.utils.apps import create_app
 
 project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 config_path = os.path.join(project_dir, 'config.yml')  # Use your own config file
 
 app = create_app(
-    class_type=context_aware_vllm_frame_analyzer.ContextAwareVLLMFrameAnalyzer,
+    class_type=ContextAwareVLLMFrameAnalyzer,
     endpoint='vllm',
     method_name='process_request',
     class_args={'project_dir': project_dir, 'config_path': config_path},

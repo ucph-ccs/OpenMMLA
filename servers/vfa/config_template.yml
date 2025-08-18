@@ -8,11 +8,12 @@ VLLMFrameAnalyzer:
 
   families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
 
-  backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek
-  top_p: 0
-  temperature: 0
-  end_to_end: false
+  backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek, llamacpp, grok
+  top_p: 0 # top_p for LLM (from 0 to 1)
+  temperature: 0 # temperature for LLM (from 0 to 1)
+  end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
   prompt_templates_dir: <path-to-prompt-templates-dir>  # either relative to the project directory or absolute path
+  apriltag_examples_dir: <path-to-apriltag-examples-dir>  # either relative to the project directory or absolute path
 
   # Angle configuration for multi-perspective analysis
   angle_config:

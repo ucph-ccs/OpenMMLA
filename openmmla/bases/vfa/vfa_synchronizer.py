@@ -11,7 +11,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket, get_number_of_bases
+from openmmla.utils.input import select_or_create_bucket, get_number_of_bases, select_participant_descriptions
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
@@ -38,6 +38,7 @@ class VFASynchronizer(Synchronizer):
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<angle>, <path>, <base_result_time>}}}
+        self.selected_participant_descriptions = None  # Selected participant descriptions for current session
 
         # VLLM request queue and processing thread
         self.vllm_queue = queue.Queue()
@@ -55,6 +56,10 @@ class VFASynchronizer(Synchronizer):
         self.buffer_expiry_time = float(sync_config.get('result_expiry_time', 30))
         self.match_tolerance = float(sync_config.get('match_tolerance', 0.5))
         self.vllm_frame_analyzer_url = vfa_server_config['vllm_frame_analyzer']
+        
+        # Load participant descriptions from config
+        self.participant_descriptions = self.config.get('participant_descriptions', {})
+        self.logger.info(f"Loaded {len(self.participant_descriptions)} participant description sets")
 
     def _setup_directories(self):
         """Set up required directories."""
@@ -76,13 +81,14 @@ class VFASynchronizer(Synchronizer):
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}
+        self.selected_participant_descriptions = None
         self.threads.clear()
         gc.collect()
 
     def run(self):
         """Run the VFA synchronizer."""
         print('\033]0;VFA Synchronizer\007')
-        func_map = {1: self._start_synchronization}
+        func_map = {1: self._start_synchronization, 2: self._reinit}
 
         while True:
             try:
@@ -109,6 +115,10 @@ class VFASynchronizer(Synchronizer):
         # bucket selection
         self.bucket_name = select_or_create_bucket(self.influx_client)
         self.number_of_bases = get_number_of_bases()
+        
+        # select participant descriptions
+        self.selected_participant_descriptions = select_participant_descriptions(self.participant_descriptions)
+        
         self._create_bucket_logger()
 
         # listen for start signal
@@ -119,7 +129,6 @@ class VFASynchronizer(Synchronizer):
         self.mqtt_client.loop_start()
 
         # create threads
-        self._create_thread(self._send_start_regularly)
         self._create_thread(self._listen_for_stop_signal)
         self._create_thread(self._process_vllm_requests)  # add vllm processing thread
 
@@ -222,20 +231,27 @@ class VFASynchronizer(Synchronizer):
         else:
             self.logger.info("All threads stopped.")
 
-        # Wait for VLLM queue to be processed
+        self.stop_event.set()  # Signal all threads to stop
+        
+        # Wait for VLLM queue to be processed before cleanup
         try:
-            self.vllm_queue.join(timeout=5.0)  # Wait up to 5 seconds for queue to be processed
+            self.logger.info("Waiting for VLLM queue to be processed...")
+            # Wait for queue to be empty with timeout
+            timeout = 10.0
+            start_time = time.time()
+            while not self.vllm_queue.empty() and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
+            
+            if self.vllm_queue.empty():
+                self.logger.info("VLLM queue processing completed")
+            else:
+                self.logger.warning(f"VLLM queue still has {self.vllm_queue.qsize()} items after {timeout}s timeout")
         except Exception as e:
             self.logger.warning(f"Error while waiting for VLLM queue to be processed: {e}")
+        
         vfa_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
         clear_directory(self.temp_dir)
         self._clean_up()
-
-    def _send_start_regularly(self):
-        """Send the START signal to all bases regularly."""
-        while not self.stop_event.is_set():
-            self.redis_client.publish(f"{self.bucket_name}/vfa/control", 'START')
-            time.sleep(5)  # Send START every 5 seconds
 
     def _process_vllm_requests(self):
         """Process VLLM requests from the queue."""
@@ -267,7 +283,8 @@ class VFASynchronizer(Synchronizer):
                         image_paths=images,
                         session_id=self.bucket_name,
                         url=self.vllm_frame_analyzer_url,
-                        angles=angles
+                        angles=angles,
+                        participant_descriptions=self.selected_participant_descriptions
                     )
 
                     # Upload results
@@ -296,6 +313,11 @@ class VFASynchronizer(Synchronizer):
             self.logger.warning(f"No analysis results for time bucket {time_bucket_key}")
             return
 
+        # Check if bucket_name is available (might be None if cleanup has already occurred)
+        if self.bucket_name is None:
+            self.logger.warning(f"Cannot upload result for time bucket {time_bucket_key}: bucket_name is None (synchronizer may be shutting down)")
+            return
+
         analysis_data = {
             "measurement": "action_recognition",
             "fields": {
@@ -306,7 +328,11 @@ class VFASynchronizer(Synchronizer):
         }
         print(f"{BLUE}[Action Recognition]{ENDC} {analysis_data['fields']['window_start_time']}: "
               f"{BLUE}Multi-angle analysis results: {result}{ENDC}")
-        self.influx_client.write(self.bucket_name, analysis_data)
+        
+        try:
+            self.influx_client.write(self.bucket_name, analysis_data)
+        except Exception as e:
+            self.logger.error(f"Failed to upload result for time bucket {time_bucket_key}: {e}")
 
     @property
     def bucket_control(self) -> str | None:

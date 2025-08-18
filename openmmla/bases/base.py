@@ -72,6 +72,22 @@ class Base(ABC):
         """Free memory by resetting attributes."""
         pass
 
+    def _reinit(self):
+        """Reinitialize by calling __init__ again with stored parameters."""
+        self.logger.info("Starting reinitialization...")
+        
+        # Store the original initialization parameters
+        project_dir = getattr(self, 'project_dir', None)
+        config_path = getattr(self, 'config_path', None)
+        
+        # Clean up current state
+        self._clean_up()
+        
+        # Call __init__ again with the original parameters
+        self.__init__(project_dir=project_dir, config_path=config_path)
+        
+        self.logger.info("Reinitialization completed successfully")
+
     def _create_thread(self, target, *args):
         """Create a new thread and add it to the thread list."""
         t = RaisingThread(target=target, args=args)

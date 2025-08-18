@@ -42,7 +42,7 @@ class FewShotVLLMFrameAnalyzer(Server):
         if not os.path.isabs(self.apriltag_examples_dir):
             self.apriltag_examples_dir = os.path.join(self.project_dir, self.apriltag_examples_dir)
 
-        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek']:
+        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok']:
             backend_config = analyzer_config[self.backend]
         else:
             raise ValueError(f"Unsupported backend: {self.backend}")

@@ -44,6 +44,13 @@ class Synchronizer(ABC):
         self.bucket_name: str | None = None
         self.redis_client: RedisClientWrapper | None = None
 
+    @property
+    def bucket_control(self):
+        """Dynamic property that returns the control channel name based on current bucket_name."""
+        if self.bucket_name:
+            return f"{self.bucket_name}/control"
+        return None
+
     def _load_config(self):
         """Load the configuration file."""
         with open(self.config_path, 'r') as config_file:
@@ -64,6 +71,22 @@ class Synchronizer(ABC):
     def _clean_up(self):
         """Free memory by resetting attributes."""
         pass
+
+    def _reinit(self):
+        """Reinitialize by calling __init__ again with stored parameters."""
+        self.logger.info("Starting synchronizer reinitialization...")
+        
+        # Store the original initialization parameters
+        project_dir = getattr(self, 'project_dir', None)
+        config_path = getattr(self, 'config_path', None)
+        
+        # Clean up current state
+        self._clean_up()
+        
+        # Call __init__ again with the original parameters
+        self.__init__(project_dir=project_dir, config_path=config_path)
+        
+        self.logger.info("Synchronizer reinitialization completed successfully")
 
     def _create_thread(self, target, *args):
         """Create a new thread and add it to the thread list."""
