@@ -2,6 +2,7 @@ import json
 import os
 import re
 from io import BytesIO
+from PIL import Image
 from typing import Dict, Any, cast
 
 import torch
@@ -37,7 +38,18 @@ class MultiAngleVLLMFrameAnalyzer(Server):
     def _setup_yaml(self):
         analyzer_config = self.config['VLLMFrameAnalyzer']  # type: ignore
 
-        self.families = analyzer_config['families']
+        # Load processing options from config first (needed for conditional setup)
+        self.april_tag_enabled = analyzer_config.get('april_tag', True)
+        self.gaze_detect_enabled = analyzer_config.get('gaze_detect', True)
+        
+        # Only load families if AprilTag detection is enabled
+        if self.april_tag_enabled:
+            if 'families' not in analyzer_config:
+                raise ValueError("AprilTag detection is enabled but 'families' parameter is missing from config")
+            self.families = analyzer_config['families']
+        else:
+            self.families = None
+            
         self.backend = analyzer_config['backend']
         self.top_p = float(analyzer_config['top_p'])
         self.temperature = float(analyzer_config['temperature'])
@@ -68,9 +80,12 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.llm_base_url = backend_config.get('llm_base_url', None)
 
         # Load action definitions from config
-        self.defined_actions = analyzer_config['defined_actions']
+        self.action_definitions_dict = analyzer_config['action_definitions']
         self.action_definitions = '\n'.join(
-            [f"'{key}': {value}" for key, value in self.defined_actions.items()])
+            [f"'{key}': {value}" for key, value in self.action_definitions_dict.items()])
+        
+        # Load decision priority from config
+        self.decision_priority = analyzer_config.get('decision_priority', '')
 
         # Load VLM extra body from config
         self.vlm_extra_body = backend_config.get('VLMExtraBody', {})
@@ -82,6 +97,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"VLM Base URL: {self.vlm_base_url}")
         self.logger.info(f"LLM Base URL: {self.llm_base_url}")
         self.logger.info(f"End-to-End: {self.end_to_end}")
+        self.logger.info(f"AprilTag Detection: {self.april_tag_enabled}")
+        self.logger.info(f"Gaze Detection: {self.gaze_detect_enabled}")
 
     def _load_prompt_templates(self):
         """Load prompt templates from files in the prompt_templates_dir."""
@@ -117,25 +134,41 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.error(f"Error loading prompt templates: {e}")
 
     def _setup_objects(self):
-        self.detector = Detector(families=self.families, nthreads=4)
-        self.face_detector = RetinaFace.detect_faces
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        try:
-            self.gazelle_model, self.gazelle_transform = torch.hub.load(
-                'fkryan/gazelle',
-                'gazelle_dinov2_vitl14_inout',
-                trust_repo=True
-            )
-            self.gazelle_model.eval()
-            self.gazelle_model.to(device)
-            self.device = device
-            self.logger.info(f"Gazelle model loaded on {device}")
-        except Exception as e:
-            self.logger.error(f"Error loading Gazelle model: {e}")
+        # Conditionally setup AprilTag detector
+        if self.april_tag_enabled and self.families:
+            self.detector = Detector(families=self.families, nthreads=4)
+            self.logger.info(f"AprilTag detector initialized with families: {self.families}")
+        else:
+            self.detector = None
+            self.logger.info("AprilTag detection disabled - detector not initialized")
+        
+        # Conditionally setup gaze detection objects
+        if self.gaze_detect_enabled:
+            self.face_detector = RetinaFace.detect_faces
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            try:
+                self.gazelle_model, self.gazelle_transform = torch.hub.load(
+                    'fkryan/gazelle',
+                    'gazelle_dinov2_vitl14_inout',
+                    trust_repo=True
+                )
+                self.gazelle_model.eval()
+                self.gazelle_model.to(device)
+                self.device = device
+                self.logger.info(f"Gazelle model loaded on {device}")
+            except Exception as e:
+                self.logger.error(f"Error loading Gazelle model: {e}")
+                self.gazelle_model = None
+                self.gazelle_transform = None
+                self.device = None
+        else:
+            self.face_detector = None
             self.gazelle_model = None
             self.gazelle_transform = None
             self.device = None
+            self.logger.info("Gaze detection disabled - models not initialized")
 
+        # Always setup VLM/LLM clients (required for analysis)
         self.vlm_client = OpenAI(
             api_key=self.api_key,
             base_url=self.vlm_base_url,
@@ -194,7 +227,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
                 # Process the image with AprilTag detection and gaze detection
                 self.logger.info(f"Processed image from {angle} perspective")
-                processed_image = self._process_single_image(image_bytes, angle, original_filename, session_id)
+                processed_image = self._process_single_image(image_bytes, angle, original_filename, session_id, april_tag=self.april_tag_enabled, gaze_detect=self.gaze_detect_enabled)
                 processed_images[angle] = processed_image
 
             # Analyze all processed images together
@@ -232,7 +265,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.error("Exception during processing images", exc_info=True)
             return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
 
-    def _process_single_image(self, image_bytes: bytes, angle: str, original_filename: str | None = None, session_id: str | None = None) -> Dict[str, Any]:
+    def _process_single_image(self, image_bytes: bytes, angle: str, original_filename: str | None = None, session_id: str | None = None, april_tag: bool = True, gaze_detect: bool = True) -> Dict[str, Any]:
         """Process a single image with AprilTag detection and gaze detection.
         
         Args:
@@ -240,48 +273,31 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             angle: The angle label for this image
             original_filename: Original filename from the request (optional)
             session_id: Session ID for organizing temp files (optional)
+            april_tag: Whether to perform AprilTag detection (default: True)
+            gaze_detect: Whether to perform gaze detection (default: True)
             
         Returns:
             dict: Processed image information including base64 encoding and metadata
         """
-        # Step 1: Detect AprilTags and render them on the image
-        tag_pos, apriltag_image = detect_apriltags(
-            image_bytes,
-            self.detector,
-            normalize=True,
-            render=True,
-            show=False,
-            save=False
-        )
+        # Step 1: Conditionally detect AprilTags and render them on the image
+        if april_tag and self.detector is not None:
+            tag_pos, apriltag_image = detect_apriltags(
+                image_bytes,
+                self.detector,
+                normalize=True,
+                render=True,
+                show=False,
+                save=False
+            )
 
-        # If AprilTags were detected and rendered, use that image for gaze detection
-        if tag_pos:
-            image_bytes = pil_image_to_bytes(apriltag_image)
+            # If AprilTags were detected and rendered, use that image for further processing
+            if tag_pos:
+                image_bytes = pil_image_to_bytes(apriltag_image)
 
-        # Step 2: Detect gaze on the AprilTag rendered image if gaze detection is available
-        if self.gazelle_model and self.gazelle_transform:
+        # Step 2: Conditionally detect gaze on the processed image if gaze detection is available
+        if gaze_detect and self.gazelle_model and self.gazelle_transform:
             device = self.device if self.device is not None else 'cpu'
             
-            # create session-specific temp directory and unique save path
-            if session_id:
-                temp_session_dir = os.path.join(self.project_dir, 'temp', session_id)
-            else:
-                temp_session_dir = os.path.join(self.project_dir, 'temp', 'default')
-            
-            # ensure the session directory exists
-            os.makedirs(temp_session_dir, exist_ok=True)
-            self.logger.debug(f"Using temp directory: {temp_session_dir}")
-            
-            # create unique filename using original filename and angle
-            if original_filename:
-                # use original filename (e.g., "1754398113.456.jpg") + angle for uniqueness
-                base_name = os.path.splitext(original_filename)[0]  # remove extension
-                unique_filename = f'{base_name}_{angle}.png'
-            else:
-                # fallback to angle only if no original filename
-                unique_filename = f'{angle}.png'
-            
-            save_path = os.path.join(temp_session_dir, unique_filename)
             gaze_results, rendered_image = detect_gaze(
                 image_input=image_bytes,
                 face_detector=self.face_detector,
@@ -294,12 +310,35 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 show=False,
                 inout_thresh=0.5,
                 render_heatmap=False,
-                save=True,
-                save_path=save_path
+                save=False
             )
             if gaze_results:
                 image_bytes = pil_image_to_bytes(rendered_image)
-                self.logger.debug(f"Saved gaze detection result to: {save_path}")
+
+        # Step 3: Save the final image (processed or original)
+        # create session-specific temp directory and unique save path
+        if session_id:
+            temp_session_dir = os.path.join(self.project_dir, 'temp', session_id)
+        else:
+            temp_session_dir = os.path.join(self.project_dir, 'temp', 'default')
+        
+        # ensure the session directory exists
+        os.makedirs(temp_session_dir, exist_ok=True)
+        self.logger.debug(f"Using temp directory: {temp_session_dir}")
+        
+        # create unique filename using original filename and angle
+        if original_filename:
+            # use original filename (e.g., "1754398113.456.jpg") + angle for uniqueness
+            base_name = os.path.splitext(original_filename)[0]  # remove extension
+            unique_filename = f'{base_name}_{angle}.png'
+        else:
+            # fallback to angle only if no original filename
+            unique_filename = f'{angle}.png'
+        
+        save_path = os.path.join(temp_session_dir, unique_filename)
+        image = Image.open(BytesIO(image_bytes))
+        image.save(save_path)
+        self.logger.debug(f"Saved image to: {save_path}")
 
         # Create a result dictionary with the processed image and metadata
         image_b64 = encode_image_base64(image_bytes)
@@ -365,6 +404,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         template = template.replace("{{angle_descriptions}}", "\n".join(angle_descriptions))
         template = template.replace("{{participant_descriptions}}", formatted_participant_descriptions)
         template = template.replace("{{action_definitions}}", self.action_definitions)
+        template = template.replace("{{decision_priority}}", self.decision_priority)
 
         # Create message content with multiple images
         user_prompt = [{"type": "text", "text": template}]
@@ -453,6 +493,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         template = self.multi_angle_llm_user_prompt_template
         template = template.replace("{{image_description}}", image_description)
         template = template.replace("{{action_definitions}}", self.action_definitions)
+        template = template.replace("{{decision_priority}}", self.decision_priority)
 
         user_prompt = [{"type": "text", "text": template}]
 

@@ -6,16 +6,20 @@
 ### 2. Action Categories:
 {{action_definitions}}
 
-### 3. Classification Approach:
+### 3. Hierarchical Decision Process:
+{{decision_priority}}
+
+### 4. Classification Approach:
 - Focus primarily on two key elements for classification:
   1. Gaze Focus - what the person is looking at (target of gaze line)
   2. Hands Status - what the hands are doing/touching (or inferred to be doing if partially obscured)
+- Apply the hierarchical decision process above to resolve edge cases and ambiguities
 - Consider information from ALL available camera perspectives to make the most accurate assessment
 - When one perspective provides clear information that another doesn't, prioritize the clearer view
-- Classify each person based on the ACTION DEFINITIONS provided above
+- Classify each person based on the ACTION DEFINITIONS provided above AND the hierarchical decision process
 - Consider both direct observations and clearly marked inferences in the observations
 - The combination of where someone is looking and what their hands are doing should determine classification
-- Provide detailed justification for each classification, explicitly referencing the observed gaze and hand status from specific camera views
+- Provide detailed justification for each classification, explicitly referencing the observed gaze and hand status from specific camera views, and how the hierarchical decision process was applied
 
 ### Response Format
 ```json

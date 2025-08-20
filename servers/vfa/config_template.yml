@@ -37,7 +37,7 @@ VLLMFrameAnalyzer:
     # Add more participants as needed
   
   # Define the actions that you want to classify
-  defined_actions:
+  action_definitions:
     Working-Software: "when a person's GAZE is directed at a screen AND their HANDS are actively interacting with digital interface devices (keyboard, mouse, touchscreen)."
     Working-Hardware: "when a person's GAZE is directed at physical components AND their HANDS are directly manipulating these non-screen hardware elements (circuit boards, wires, physical devices)."
     Working-Document: "when a person's GAZE is directed at papers, books, or other physical documents AND their HANDS are interacting with these documents (holding, writing, pointing to content)."

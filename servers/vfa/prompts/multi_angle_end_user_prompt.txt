@@ -48,24 +48,39 @@ IMPORTANT: ALWAYS use only numeric IDs (e.g., "6", "10", "100") without words li
 
 ### 2. For each person, describe ONLY these elements:
 - **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability and its interpretation. Note which camera view provides the clearest information.
-- **Hands Status**: Describe visible hand positions and activities in detail. Note which camera view provides the clearest information about hands.
+- **Hands Status**: Describe visible hand positions and activities with SPECIFIC SPATIAL ANALYSIS:
+  * **Contact Evidence**: Look for fingertips/palm touching surfaces, hand occluding objects, or object deformation
+  * **Hovering/Proximity**: Hand positioned near but NOT touching (look for clear gaps or shadows)
+  * **Spatial Relationship**: Describe hand distance from objects using visual cues from multiple angles
+  * **Best View**: Note which camera perspective provides clearest hand-object spatial information
 - **Position**: Basic location in frame for identification only.
 - **Clothing**: Brief description for identification only, matching with known participant descriptions when possible.
 
 ### 3. Activity Classification
 {{action_definitions}}
 
+**HIERARCHICAL DECISION PROCESS:**
+{{decision_priority}}
+
 **STRICT CLASSIFICATION RULES:**
 - Each action definition contains multiple conditions numbered (1), (2), etc. - ALL numbered conditions must be satisfied simultaneously
 - If ANY numbered condition is not met, you CANNOT use that classification
+- Use the hierarchical decision process above to resolve edge cases and ambiguities
 - If no definition fits perfectly, use "Unclear" rather than forcing a classification
 
 **Classification Process:**
 1. For each person, systematically check EVERY numbered condition in each action definition
-2. Only classify as an action if ALL numbered conditions are verified
-3. If multiple definitions fit completely, choose the most specific one
-4. If no definition has all conditions satisfied, classify as "Unclear"
-5. Provide detailed justification showing how each numbered condition was verified or failed
+2. **CRITICAL for actions requiring hand-object contact**: You must identify SPECIFIC CONTACT EVIDENCE when the action definition requires it:
+   - Are fingertips/palm visibly touching object surfaces?
+   - Is the hand occluding/overlapping the target object?
+   - Do you see object deformation (bent wires, moved papers)?
+   - Is there clear grasping posture with engaged fingertips?
+   - If you cannot confirm actual contact when required by the definition, use appropriate alternative classification or "Unclear"
+3. Apply the hierarchical decision process to determine the most appropriate classification
+4. Only classify as an action if ALL numbered conditions are verified AND it aligns with the decision priority
+5. If multiple definitions fit completely, use the hierarchical decision process to choose the correct one
+6. If no definition has all conditions satisfied, classify as "Unclear"
+7. Provide detailed justification showing how each numbered condition was verified or failed, with SPECIFIC SPATIAL EVIDENCE for manipulation claims
 
 ### Response Format
 ```json
@@ -73,24 +88,24 @@ IMPORTANT: ALWAYS use only numeric IDs (e.g., "6", "10", "100") without words li
   "observations": {
     "0": {
       "gaze_focus": "In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates gaze is within frame.",
-      "hands_status": "In perspective_1: Both hands are on keyboard, actively typing. Left hand positioned over WASD keys, right hand near spacebar. perspective_2 partially obscures hands but confirms typing activity.",
+      "hands_status": "CONTACT EVIDENCE - perspective_1: Fingertips clearly pressing keyboard keys, hands occluding key surfaces. perspective_2: Confirms typing motion with finger contact on keys. SPATIAL: No gap visible between fingers and keyboard surface.",
       "position": "Center-right of frame in all views",
       "clothing": "Yellow sweater matching description of participant with Tag ID 0"
     },
     "1": {
-      "gaze_focus": "In perspective_1: Gaze line (orange) points at documents on desk. perspective_2 confirms this. In probability 0.78 indicates gaze is within frame.",
-      "hands_status": "In perspective_2: Hands are obscured by desk edge. In perspective_1: Hands clearly visible manipulating papers, sorting through documents.",
+      "gaze_focus": "In perspective_1: Gaze line (orange) points at breadboard on desk. perspective_2 confirms this target. In probability 0.78 indicates gaze is within frame.",
+      "hands_status": "HOVERING/PROXIMITY - perspective_1: Right hand positioned 2-3cm above breadboard, visible shadow gap between hand and surface. perspective_2: Confirms hand is NOT touching breadboard - clear separation visible. SPATIAL: No contact evidence or object deformation.",
       "position": "Left side of frame in all views",
       "clothing": "Dark blue sweater matching description of participant with Tag ID 1"
     }
   },
   "classifications": {
-    "0": "Communicating",
-    "1": "Manipulating"
+    "0": "[ActionName]",
+    "1": "[ActionName]"
   },
   "justifications": {
-    "0": "Classified as 'Communicating' because: Condition (1) ✓ - gaze is directed toward another person (colleague's face, in: 0.92), Condition (2) ✓ - hands are visibly gesturing while typing to support communication. Both numbered conditions satisfied.",
-    "1": "Classified as 'Manipulating' because: Condition (1) ✓ - gaze is directed at work-related element (documents on desk, in: 0.78), Condition (2) ✓ - hands are clearly interacting with that same element (manipulating papers). Both numbered conditions satisfied."
+    "0": "Classified as '[ActionName]' because: Condition (1) ✓ - [specific evidence], Condition (2) ✓ - [specific evidence with spatial details]. All conditions satisfied with specific spatial evidence.",
+    "1": "Classified as '[ActionName]' because: Condition (1) ✓ - [specific evidence], Condition (2) ✓ - [specific evidence]. [Explain why contact-based actions were ruled out if applicable based on spatial evidence]."
   }
 }
 ```

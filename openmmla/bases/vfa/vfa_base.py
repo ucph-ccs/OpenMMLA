@@ -155,7 +155,9 @@ class VFABase(Base):
         self.bucket_name = select_or_create_bucket(self.influx_client)
         self._create_bucket_logger()
 
-        self._configure_video_stream()
+        if self.mode != 'analyze':
+            self._configure_video_stream()
+            
         self._listen_for_start_signal()
 
         self.mqtt_client.reinitialise()

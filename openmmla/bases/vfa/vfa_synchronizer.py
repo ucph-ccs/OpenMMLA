@@ -279,6 +279,9 @@ class VFASynchronizer(Synchronizer):
                         continue
 
                     # Request analysis from VLLM server
+                    self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
+                                   f"{len(images)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
+                    
                     result = request_multi_angle_frame_analyze(
                         image_paths=images,
                         session_id=self.bucket_name,
@@ -286,6 +289,11 @@ class VFASynchronizer(Synchronizer):
                         angles=angles,
                         participant_descriptions=self.selected_participant_descriptions
                     )
+                    
+                    if result:
+                        self.logger.info(f"Successfully received analysis result for time bucket {time_bucket_key}")
+                    else:
+                        self.logger.warning(f"Received null/empty analysis result for time bucket {time_bucket_key}")
 
                     # Upload results
                     self._upload_result(time_bucket_key, result)
