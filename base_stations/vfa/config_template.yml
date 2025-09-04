@@ -11,11 +11,12 @@ Base:
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
 
-  # Camera angle settings (optional)
+  # camera angle configuration (key: angle_name, value: angle_description)
   angle_config:
     "front": "Direct front view at eye level, showing participants face-on"
     "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
-
+    "top": "View from above, showing a top-down perspective of the workspace and participants"
+    
   # VideoStream settings
   source: opencv                                    # VideoStream source type (opencv/rtmp/file)
   file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
@@ -45,6 +46,21 @@ Base:
 Synchronizer:
   result_expiry_time: 30                            # cleanup timeout (seconds)
   match_tolerance: 0.5                              # matching tolerance (seconds) for incoming result to time buckets
+
+  # participant configuration for identification (key: session_key, value: {tag_id: description})
+  participant_config:
+    'osaka_case_0':
+      "6": "Male with black long-sleeve shirt/jacket and white mask."
+      "10": "Male with dark blue sweater"
+    'cph_case_0':
+      "0": "Male with yellow-brown patterned knit sweater"
+      "1": "Male with dark blue/black shirt with orange-red trim details"
+    'puzzle_case_0':
+      "0": "Male with dark green jacket"
+    'session_2025-08-15T11:14:50Z':
+      "0": "Male with yellow-brown patterned knit sweater"
+      "1": "Male with dark blue/black shirt with orange-red trim details"
+    # Add more participants as needed
 
 # RTMP streams settings
 RTMP:
@@ -98,21 +114,6 @@ Redis:
   host: <redis-example-server>
   port: <port-number>
   db: <database-number>
-
-# Participant descriptions for identification (ID to description mapping)
-participant_descriptions:
-  'osaka_case_0':
-    "6": "Male with black long-sleeve shirt/jacket and white mask."
-    "10": "Male with dark blue sweater"
-  'cph_case_0':
-    "0": "Male with yellow-brown patterned knit sweater"
-    "1": "Male with dark blue/black shirt with orange-red trim details"
-  'puzzle_case_0':
-    "0": "Male with dark green jacket"
-  'session_2025-08-15T11:14:50Z':
-    "0": "Male with yellow-brown patterned knit sweater"
-    "1": "Male with dark blue/black shirt with orange-red trim details"
-  # Add more participants as needed
 
 # Server settings
 Server:

@@ -267,26 +267,26 @@ class VFABase(Base):
             print("Available camera angles:")
             for idx, angle in enumerate(angles):
                 print(f"{idx}: {angle} - {self.angle_config[angle]}")
-            print(f"{len(angles)}: None - No specific angle")
+            print(f"{len(angles)}: unspecified - No specific angle")
 
             while True:
                 try:
                     flush_input()
-                    angle_input = input("Choose camera angle (press Enter for None): ")
+                    angle_input = input("Choose camera angle (press Enter for unspecified): ")
                     if angle_input == '':
-                        return None
+                        return 'unspecified'
 
                     angle_idx = int(angle_input)
                     if 0 <= angle_idx < len(angles):
                         return angles[angle_idx]
                     elif angle_idx == len(angles):
-                        return None
+                        return 'unspecified'
                     else:
                         print("Invalid selection. Please choose a valid option.")
                 except ValueError:
-                    print("Please enter a valid number or press Enter for None.")
+                    print("Please enter a valid number or press Enter for unspecified.")
         else:
-            return None
+            return 'unspecified'
 
     def _detect_video_sources(self) -> list[str | int]:
         """Detect available video sources based on the source type."""
@@ -383,6 +383,7 @@ class VFABase(Base):
         os.makedirs(self.save_path, exist_ok=True)
 
         if self.mode == 'analyze':  # processing existing frames
+            time.sleep(2) # wait for the synchronizer to start
             self._analyze_existing_frames(self.save_path)
             return
 

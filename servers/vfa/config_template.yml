@@ -12,30 +12,10 @@ VLLMFrameAnalyzer:
   top_p: 0 # top_p for LLM (from 0 to 1)
   temperature: 0 # temperature for LLM (from 0 to 1)
   end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
+  image_detail: "auto"  # Image detail for vision models: "low" (faster, less detail), "high" (slower, more detail), "auto" (model decides)
   prompt_templates_dir: <path-to-prompt-templates-dir>  # either relative to the project directory or absolute path
   apriltag_examples_dir: <path-to-apriltag-examples-dir>  # either relative to the project directory or absolute path
 
-  # Angle configuration for multi-perspective analysis
-  angle_config:
-    "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
-    "front": "Direct front view at eye level, showing participants face-on"
-    "top": "View from above, showing a top-down perspective of the workspace and participants"
-  
-  # Participant descriptions for identification (ID to description mapping)
-  participant_descriptions:
-    'osaka_case_0':
-      "6": "Male with black long-sleeve shirt/jacket and white mask."
-      "10": "Male with dark blue sweather"
-    'cph_case_0':
-      "0": "Male with yellow-brown patterned knit sweater"
-      "1": "Male with dark blue/black shirt with orange-red trim details"
-    'puzzle_case_0':
-      "0": "Male with dark green jacket"
-    'session_2025-04-28T22:29:52Z':
-      "0": "Male with yellow-brown patterned knit sweater"
-      "1": "Male with dark blue/black shirt with orange-red trim details"
-    # Add more participants as needed
-  
   # Define the actions that you want to classify
   action_definitions:
     Working-Software: "when a person's GAZE is directed at a screen AND their HANDS are actively interacting with digital interface devices (keyboard, mouse, touchscreen)."

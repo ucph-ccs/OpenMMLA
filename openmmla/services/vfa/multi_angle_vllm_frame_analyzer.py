@@ -15,7 +15,7 @@ from openmmla.services.server import Server
 from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze
 from openmmla.utils.video.image import encode_image_base64
-
+from zai import ZhipuAiClient
 
 class MultiAngleVLLMFrameAnalyzer(Server):
     """Multi-angle VLLM frame analyzer that processes multiple images captured simultaneously from different angles.
@@ -54,6 +54,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.top_p = float(analyzer_config['top_p'])
         self.temperature = float(analyzer_config['temperature'])
         self.end_to_end = analyzer_config.get('end_to_end', False)
+        
+        # Image detail setting for vision models (low/high/auto)
+        self.image_detail = analyzer_config.get('image_detail', 'auto')
 
         # Get prompt templates directory
         self.prompt_templates_dir = analyzer_config.get('prompt_templates_dir', 'prompts')
@@ -63,12 +66,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             raise FileNotFoundError(f"Prompt templates directory not found: {self.prompt_templates_dir}")
         self.logger.info(f"Prompt templates directory: {self.prompt_templates_dir}")
 
-        # Load angle configuration (we'll be flexible with arbitrary angles)
-        self.angle_config = analyzer_config.get('angle_config', {})
-        self.logger.info(
-            f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
 
-        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok']:
+        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok', 'zhipuai']:
             backend_config = analyzer_config[self.backend]
         else:
             raise ValueError(f"Unsupported backend: {self.backend}")
@@ -168,66 +167,77 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.device = None
             self.logger.info("Gaze detection disabled - models not initialized")
 
-        # Always setup VLM/LLM clients (required for analysis)
-        self.vlm_client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.vlm_base_url,
-        )
-        self.llm_client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.llm_base_url,
-        )
+        # Setup VLM/LLM clients (required for analysis)
+        if self.backend == 'zhipuai':
+            self.vlm_client = ZhipuAiClient(
+                api_key=self.api_key
+            )
+            self.llm_client = ZhipuAiClient(
+                api_key=self.api_key
+            )
+        else:
+            self.vlm_client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.vlm_base_url
+            )
+            self.llm_client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.llm_base_url
+            )
 
     def process_request(self):
         """Process multiple images from different angles with contextual awareness."""
         try:
             session_id = request.values.get('session_id')
             
-            # Extract participant descriptions from request if provided
-            participant_descriptions_json = request.values.get('participant_descriptions')
-            if participant_descriptions_json:
-                try:
-                    participant_descriptions = json.loads(participant_descriptions_json)
-                    self.logger.info(f"Using participant descriptions from request for session {session_id}")
-                except json.JSONDecodeError as e:
-                    self.logger.warning(f"Failed to parse participant descriptions from request: {e}")
-                    participant_descriptions = None
-            else:
-                participant_descriptions = None
+            # Parse JSON parameters with fallback to defaults
+            try:
+                participant_descriptions = json.loads(request.values.get('participant_descriptions', '{}'))
+            except (json.JSONDecodeError, TypeError):
+                participant_descriptions = {}
+                
+            try:
+                angles = json.loads(request.values.get('angles', '[]'))
+            except (json.JSONDecodeError, TypeError):
+                angles = []
+                
+            try:
+                angle_descriptions = json.loads(request.values.get('angle_descriptions', '[]'))
+            except (json.JSONDecodeError, TypeError):
+                angle_descriptions = []
 
-            # check if using images or image parameter
-            if 'images' in request.files:
-                image_files = request.files.getlist('images')
-                angle_labels = request.values.getlist('angles')
-            elif 'image' in request.files:
-                # compatible with single image case, convert to list format
-                image_files = [request.files['image']]
-                angle_labels = []
-            else:
-                return jsonify({'error': 'No image files provided'}), 400
-
-            # Validate we have at least one image
+            image_files = request.files.getlist('images')
             if not image_files:
-                return jsonify({'error': 'No images found in request'}), 400
-
-            # Generate generic perspective labels if none provided
-            if not angle_labels:
-                angle_labels = [f"perspective_{i + 1}" for i in range(len(image_files))]
-            elif len(angle_labels) != len(image_files):
-                return jsonify({'error': 'Number of angles does not match number of images'}), 400
-
+                return jsonify({'error': 'No images provided in request'}), 400
+                
             self.logger.info(
-                f"Starting multi-angle analysis for {session_id} with {len(image_files)} images from angles: {angle_labels}")
+                f"Starting multi-angle analysis for {session_id} with {len(image_files)} images from angles: {angles}")
 
             # Process each image
             processed_images = {}
-            for i, (image_file, angle) in enumerate(zip(image_files, angle_labels)):
+            for i, image_file in enumerate(image_files):
                 image_bytes = image_file.read()
                 original_filename = image_file.filename  # get the original filename
-
+                
+                # Use provided angle or fallback to generic
+                if i < len(angles):
+                    angle = angles[i]
+                else:
+                    angle = f"perspective_{i + 1}"  # Fallback to generic angle
+                
+                # Use provided angle description or create generic one
+                if i < len(angle_descriptions):
+                    angle_description = angle_descriptions[i]
+                else:
+                    angle_description = f"Image from {angle} perspective"
+                
+                self.logger.info(f"Processing image from {angle} perspective: {angle_description}")
+                
                 # Process the image with AprilTag detection and gaze detection
-                self.logger.info(f"Processed image from {angle} perspective")
-                processed_image = self._process_single_image(image_bytes, angle, original_filename, session_id, april_tag=self.april_tag_enabled, gaze_detect=self.gaze_detect_enabled)
+                processed_image = self._process_single_image(
+                    image_bytes, angle, angle_description, original_filename, session_id, 
+                    april_tag=self.april_tag_enabled, gaze_detect=self.gaze_detect_enabled
+                )
                 processed_images[angle] = processed_image
 
             # Analyze all processed images together
@@ -265,12 +275,15 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.error("Exception during processing images", exc_info=True)
             return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
 
-    def _process_single_image(self, image_bytes: bytes, angle: str, original_filename: str | None = None, session_id: str | None = None, april_tag: bool = True, gaze_detect: bool = True) -> Dict[str, Any]:
+    def _process_single_image(self, image_bytes: bytes, angle: str, angle_description: str, 
+                             original_filename: str | None = None, session_id: str | None = None,
+                             april_tag: bool = True, gaze_detect: bool = True) -> Dict[str, Any]:
         """Process a single image with AprilTag detection and gaze detection.
         
         Args:
             image_bytes: Raw image bytes
             angle: The angle label for this image
+            angle_description: Description of what this angle shows
             original_filename: Original filename from the request (optional)
             session_id: Session ID for organizing temp files (optional)
             april_tag: Whether to perform AprilTag detection (default: True)
@@ -343,11 +356,6 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         # Create a result dictionary with the processed image and metadata
         image_b64 = encode_image_base64(image_bytes)
 
-        # Get angle description if available, otherwise create a generic one
-        angle_description = self.angle_config.get(angle)
-        if not angle_description:
-            angle_description = f"Image from {angle} perspective"
-
         return {
             "image_b64": image_b64,
             "angle": angle,
@@ -375,7 +383,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         return description_text + "\n"
 
-    def _create_end_to_end_messages(self, processed_images, participant_descriptions=None):
+    def _create_end_to_end_messages(self, processed_images, participant_descriptions={}):
         """Generate a context-aware prompt message for end-to-end approach with multiple images.
         
         Args:
@@ -415,7 +423,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 "type": "image_url",
                 "image_url": {
                     "url": image_data["image_b64"],
-                    "detail": "high"
+                    "detail": self.image_detail
                 }
             }))
 
@@ -426,7 +434,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         return messages
 
-    def _create_vlm_messages(self, processed_images, participant_descriptions=None):
+    def _create_vlm_messages(self, processed_images, participant_descriptions={}):
         """Generate a context-aware prompt message for VLM with multiple images.
         
         Args:
@@ -464,7 +472,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 "type": "image_url",
                 "image_url": {
                     "url": image_data["image_b64"],
-                    "detail": "high"
+                    "detail": self.image_detail
                 }
             }))
 

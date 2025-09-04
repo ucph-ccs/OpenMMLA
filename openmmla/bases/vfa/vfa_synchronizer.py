@@ -52,14 +52,17 @@ class VFASynchronizer(Synchronizer):
         """Load configuration parameters."""
         sync_config = self.config['Synchronizer']
         vfa_server_config = self.config['Server']['vfa']
+        base_config = self.config['Base']
 
         self.buffer_expiry_time = float(sync_config.get('result_expiry_time', 30))
         self.match_tolerance = float(sync_config.get('match_tolerance', 0.5))
         self.vllm_frame_analyzer_url = vfa_server_config['vllm_frame_analyzer']
         
-        # Load participant descriptions from config
-        self.participant_descriptions = self.config.get('participant_descriptions', {})
-        self.logger.info(f"Loaded {len(self.participant_descriptions)} participant description sets")
+        self.participant_config = sync_config.get('participant_config', {})
+        self.angle_config = base_config.get('angle_config', {})
+        
+        self.logger.info(f"Loaded participant configurations: {list(self.participant_config.keys()) if self.participant_config else 'None'}")
+        self.logger.info(f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
 
     def _setup_directories(self):
         """Set up required directories."""
@@ -117,7 +120,7 @@ class VFASynchronizer(Synchronizer):
         self.number_of_bases = get_number_of_bases()
         
         # select participant descriptions
-        self.selected_participant_descriptions = select_participant_descriptions(self.participant_descriptions)
+        self.selected_participant_descriptions = select_participant_descriptions(self.participant_config)
         
         self._create_bucket_logger()
 
@@ -264,30 +267,37 @@ class VFASynchronizer(Synchronizer):
 
                 try:
                     # Prepare data for multi-angle analysis
-                    images = []
+                    image_paths = []
                     angles = []
+                    angle_descriptions = []
 
                     for base_id, frame_info in sorted(frames.items()):
                         if os.path.exists(frame_info['path']):
-                            images.append(frame_info['path'])
-                            angles.append(frame_info['angle'])
+                            angle = frame_info['angle']
+                            image_paths.append(frame_info['path'])
+                            angles.append(angle)
+                            
+                            # Get angle description from config, or create generic one if not found
+                            angle_desc = self.angle_config.get(angle, f"Image from {angle} perspective")
+                            angle_descriptions.append(angle_desc)
                         else:
                             self.logger.warning(f"Image path no longer exists: {frame_info['path']}")
 
-                    if not images:
+                    if not image_paths:
                         self.logger.warning(f"No valid images found for time bucket {time_bucket_key}")
                         continue
 
                     # Request analysis from VLLM server
                     self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
-                                   f"{len(images)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
+                                   f"{len(image_paths)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
                     
                     result = request_multi_angle_frame_analyze(
-                        image_paths=images,
+                        image_paths=image_paths,
+                        angles=angles,
+                        angle_descriptions=angle_descriptions,
                         session_id=self.bucket_name,
                         url=self.vllm_frame_analyzer_url,
-                        angles=angles,
-                        participant_descriptions=self.selected_participant_descriptions
+                        participant_descriptions=self.selected_participant_descriptions,
                     )
                     
                     if result:

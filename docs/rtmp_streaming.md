@@ -165,16 +165,28 @@ You can record the streams from RTMP server via the OBS on your devices by follo
 6. Start recording
 
 ## Record the streams with FFMPEG
-  ```sh
-  START_TIME=$(date +"%s.%3N")
-  ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
-    -c:v libx264 -preset veryfast -tune zerolatency \
-    -g 30 -keyint_min 30 -sc_threshold 0 \
-    -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
-    -b:v 3M -maxrate 6M -bufsize 10M \
-    -f mp4 "record_${START_TIME}.mp4"
-  ```
+  + Video recording on Ubuntu
+    ```sh
+    START_TIME=$(date +"%s.%3N")
+    ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
+      -c:v libx264 -preset veryfast -tune zerolatency \
+      -g 30 -keyint_min 30 -sc_threshold 0 \
+      -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
+      -b:v 3M -maxrate 6M -bufsize 10M \
+      -f mp4 "record_${START_TIME}.mp4"
+    ```
   
+  + Video recording on Mac
+    ```sh
+    START_TIME=$(python3 -c 'import time; print(f"{time.time():.3f}")')
+
+    ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
+      -c:v h264_videotoolbox -realtime true \
+      -g 30 -b:v 2M -maxrate 2M -bufsize 4M \
+      -movflags +faststart \
+      -f mp4 "record_${START_TIME}.mp4"
+    ```
+
 ## Troubleshooting
 1. Check the publishing stream is up and running, go to the `http://<rtmp-server-ip-address>/8080/stat`
 2. Check the stream is in correct format and can be read by ffmpeg and ffplay
