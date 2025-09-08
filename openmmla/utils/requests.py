@@ -39,17 +39,19 @@ def send_request_with_retry(url, files, data, max_retries=4, timeout=10, process
     for attempt in range(max_retries):
         try:
             response = requests.post(url, files=files, data=data, timeout=timeout)
-            if response.status_code == 200 and process_response:
-                return process_response(response)
-            else:
-                logger.warning(
-                    f"Error in sending/requesting {url} with status code {response.status_code}: {response.text}")
+            if response.status_code == 200:
+                return process_response(response) if process_response else response
+            elif 500 <= response.status_code < 600:  # retry on all server errors (5xx)
+                logger.warning(f"Server error {response.status_code}, {response.text} retrying... ({attempt + 1}/{max_retries})")
+                time.sleep(2)
+            else:  # client errors (4xx) or other status codes - don't retry
+                logger.warning(f"Client error {response.status_code} - {response.text} - not retrying")
                 return None
-        except requests.exceptions.Timeout as e:
-            logger.warning(f"Timeout occurred: {e}, retrying... Attempt {attempt + 1} of {max_retries}")
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout, retrying... ({attempt + 1}/{max_retries})")
             time.sleep(2)
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Request failed: {e}, retrying... Attempt {attempt + 1} of {max_retries}")
+            logger.warning(f"Request error: {e}, retrying... ({attempt + 1}/{max_retries})")
             time.sleep(2)
-    logger.warning("Max retries exceeded.")
+    logger.warning("Max retries exceeded")
     return None

@@ -51,8 +51,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.families = None
             
         self.backend = analyzer_config['backend']
-        self.top_p = float(analyzer_config['top_p'])
-        self.temperature = float(analyzer_config['temperature'])
+        # make temperature and top_p optional - some models don't support them
+        self.top_p = float(analyzer_config['top_p']) if 'top_p' in analyzer_config else None
+        self.temperature = float(analyzer_config['temperature']) if 'temperature' in analyzer_config else None
         self.end_to_end = analyzer_config.get('end_to_end', False)
         
         # Image detail setting for vision models (low/high/auto)
@@ -67,7 +68,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"Prompt templates directory: {self.prompt_templates_dir}")
 
 
-        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok', 'zhipuai']:
+        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok', 'zhipuai', 'intern']:
             backend_config = analyzer_config[self.backend]
         else:
             raise ValueError(f"Unsupported backend: {self.backend}")
@@ -96,6 +97,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"VLM Base URL: {self.vlm_base_url}")
         self.logger.info(f"LLM Base URL: {self.llm_base_url}")
         self.logger.info(f"End-to-End: {self.end_to_end}")
+        self.logger.info(f"Temperature: {self.temperature if self.temperature is not None else 'not configured'}")
+        self.logger.info(f"Top-p: {self.top_p if self.top_p is not None else 'not configured'}")
         self.logger.info(f"AprilTag Detection: {self.april_tag_enabled}")
         self.logger.info(f"Gaze Detection: {self.gaze_detect_enabled}")
 
@@ -521,14 +524,20 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         Returns:
             dict: Response from the VLM
         """
-        response = self.vlm_client.chat.completions.create(
-            model=self.vlm_model,
-            messages=messages,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            response_format={"type": "json_object"},
-            extra_body=self.vlm_extra_body
-        )
+        # build parameters dynamically - only include temperature and top_p if configured
+        params = {
+            "model": self.vlm_model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "extra_body": self.vlm_extra_body
+        }
+        
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
+        if self.top_p is not None:
+            params["top_p"] = self.top_p
+            
+        response = self.vlm_client.chat.completions.create(**params)
 
         result = response.choices[0].message.content
         if result:
@@ -551,14 +560,20 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         Returns:
             dict: Classification results from the LLM
         """
-        llm_response = self.llm_client.chat.completions.create(
-            model=self.llm_model,
-            messages=messages,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            response_format={"type": "json_object"},
-            extra_body=self.llm_extra_body
-        )
+        # build parameters dynamically - only include temperature and top_p if configured
+        params = {
+            "model": self.llm_model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "extra_body": self.llm_extra_body
+        }
+        
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
+        if self.top_p is not None:
+            params["top_p"] = self.top_p
+            
+        llm_response = self.llm_client.chat.completions.create(**params)
 
         llm_result = llm_response.choices[0].message.content
         if llm_result:

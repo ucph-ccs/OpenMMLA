@@ -85,6 +85,7 @@ class VFASynchronizer(Synchronizer):
         self.latest_time = None
         self.time_bucket_buffer = {}
         self.selected_participant_descriptions = None
+        self.vllm_queue = queue.Queue()
         self.threads.clear()
         gc.collect()
 
@@ -302,11 +303,9 @@ class VFASynchronizer(Synchronizer):
                     
                     if result:
                         self.logger.info(f"Successfully received analysis result for time bucket {time_bucket_key}")
+                        self._upload_result(time_bucket_key, result)
                     else:
                         self.logger.warning(f"Received null/empty analysis result for time bucket {time_bucket_key}")
-
-                    # Upload results
-                    self._upload_result(time_bucket_key, result)
 
                 except Exception as e:
                     self.logger.error(f"Error processing frame set: {e}", exc_info=True)
