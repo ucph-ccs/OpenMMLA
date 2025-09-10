@@ -100,20 +100,23 @@ class Synchronizer(ABC):
             t.start()
 
     def _join_threads(self):
-        """Wait for all threads to finish."""
+        """Wait for all threads to finish with timeout."""
         for t in self.threads:
             t.join()
 
     def _stop_threads(self):
-        """Stop all threads and free memory."""
+        """Stop all threads other than the current thread."""
         self.stop_event.set()
         for t in self.threads:
             if threading.current_thread() != t:
                 try:
                     t.join(timeout=5)
+                    if t.is_alive():
+                        self.logger.warning(f"Thread {t.name or 'unnamed'} did not stop within 5 second timeout")
                 except Exception as e:
                     self.logger.warning(f"During thread stopping, catch: {e}", exc_info=True)
-        self.threads.clear()
+        # Do NOT clear threads here - let _join_threads() handle the final join
+        # self.threads.clear()  # Moved to cleanup after all threads actually finish
 
     def _listen_for_start_signal(self):
         """Listen on the redis bucket control channel for the START signal."""

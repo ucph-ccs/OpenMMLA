@@ -3,7 +3,7 @@ import json
 import os
 import queue
 import threading
-import time
+
 from typing import Any
 
 from openmmla.analysis.vfa.analyze import vfa_session_analysis
@@ -234,24 +234,11 @@ class VFASynchronizer(Synchronizer):
             self._stop_threads()
         else:
             self.logger.info("All threads stopped.")
-
-        self.stop_event.set()  # Signal all threads to stop
-        
-        # Wait for VLLM queue to be processed before cleanup
-        try:
-            self.logger.info("Waiting for VLLM queue to be processed...")
-            # Wait for queue to be empty with timeout
-            timeout = 10.0
-            start_time = time.time()
-            while not self.vllm_queue.empty() and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-            
-            if self.vllm_queue.empty():
-                self.logger.info("VLLM queue processing completed")
-            else:
-                self.logger.warning(f"VLLM queue still has {self.vllm_queue.qsize()} items after {timeout}s timeout")
-        except Exception as e:
-            self.logger.warning(f"Error while waiting for VLLM queue to be processed: {e}")
+    
+        if self.vllm_queue.empty():
+            self.logger.info("VLLM queue processing completed")
+        else:
+            self.logger.warning(f"VLLM queue still has {self.vllm_queue.qsize()} items")
         
         vfa_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
         clear_directory(self.temp_dir)
@@ -312,8 +299,9 @@ class VFASynchronizer(Synchronizer):
                             self.logger.error(f"Error processing frame set: {e}", exc_info=True)
                 
                 finally:
-                    # always mark the task as done after getting an item from the queue
-                    self.vllm_queue.task_done()
+                    # if not stopped, mark the task as done since vllm_queue is still existing
+                    if not self.stop_event.is_set():
+                        self.vllm_queue.task_done()
 
             except queue.Empty:
                 continue

@@ -111,6 +111,8 @@ class Base(ABC):
             if threading.current_thread() != t:
                 try:
                     t.join(timeout=5)
+                    if t.is_alive():
+                        self.logger.warning(f"Thread {t.name or 'unnamed'} did not stop within 5 second timeout")
                 except Exception as e:
                     self.logger.warning(f"During thread stopping, catch: {e}", exc_info=True)
         self.threads.clear()
