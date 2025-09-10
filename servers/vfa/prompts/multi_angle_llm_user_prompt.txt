@@ -1,41 +1,49 @@
 # Multi-Perspective Action Classification
 
-### 1. Observation Data (from multiple camera views):
+## 1. OBSERVATION DATA
 {{image_description}}
 
-### 2. Action Categories:
+## 2. ACTION CLASSIFICATION SYSTEM
+
+### Action Definitions:
 {{action_definitions}}
 
-### 3. Hierarchical Decision Process:
-{{decision_priority}}
+### Decision Process (Follow in Order):
+{{decision_process}}
 
-### 4. Classification Approach:
-- Focus primarily on two key elements for classification:
-  1. Gaze Focus - what the person is looking at (target of gaze line)
-  2. Hands Status - what the hands are doing/touching (or inferred to be doing if partially obscured)
-- Apply the hierarchical decision process above to resolve edge cases and ambiguities
-- Consider information from ALL available camera perspectives to make the most accurate assessment
-- When one perspective provides clear information that another doesn't, prioritize the clearer view
-- Classify each person based on the ACTION DEFINITIONS provided above AND the hierarchical decision process
-- Consider both direct observations and clearly marked inferences in the observations
-- The combination of where someone is looking and what their hands are doing should determine classification
-- Provide detailed justification for each classification, explicitly referencing the observed gaze and hand status from specific camera views, and how the hierarchical decision process was applied
+### Classification Logic:
+- **Logical Operators**: Uppercase "AND"/"OR" are used consistently throughout
+  - "AND": ALL connected elements must be satisfied simultaneously
+  - "OR": At least ONE of the connected elements must be satisfied
+- **Spatial Evidence**: Contact-based actions require specific visual proof of touch
 
-### Response Format
+## 3. CLASSIFICATION WORKFLOW
+
+1. **Follow Decision Process**: Apply the step-by-step rule-based if-else chain above
+2. **Stop at First Match**: Use the first step in the decision process that is satisfied
+3. **Verify Contact Evidence** (when required):
+   - Fingertips/palm visibly touching surfaces
+   - Hand occluding/overlapping target object
+   - Object deformation (bent wires, moved papers)
+   - Clear grasping posture with engaged fingers
+4. **Multi-angle Analysis**: Consider information from ALL camera perspectives
+5. **Evidence Priority**: Direct observations over inferences when possible
+
+## 4. RESPONSE FORMAT
+
 ```json
 {
   "classifications": {
-    "0": "Working-Software",
-    "1": "Working-Document"
+    "[ID]": "[ActionName]"
   },
   "justifications": {
-    "0": "Classified as 'Working-Software' because gaze is directed at colleague's face (in: 0.92) while hands are actively typing on keyboard as clearly visible in perspective_1.",
-    "1": "Classified as 'Working-Document' because gaze is directed at documents on desk (in: 0.78) and hands are manipulating papers as visible in perspective_1."
+    "[ID]": "Classified as '[ActionName]' because: Decision Process Step [X] satisfied - [specific evidence from observations]. [For AND operators] All conditions met: [evidence]. [For OR operators] Condition set satisfied: [evidence]."
   }
 }
 ```
 
-### CRITICAL ID ASSIGNMENT RULES:
-1. ALWAYS use numeric IDs as keys in the JSON response, never use descriptive identifiers like 'Person 1' or 'Tag_1'
-2. PRESERVE the same exact numeric IDs that were used in the observation data
-3. All IDs must be consistent across classifications and justifications 
+## 5. CRITICAL REQUIREMENTS
+- Use ONLY numeric IDs from observation data (never "Person 1" or "Tag_1")
+- Reference specific evidence from multi-angle observations
+- Follow Decision Process step-by-step in order
+- Provide clear justification for each classification

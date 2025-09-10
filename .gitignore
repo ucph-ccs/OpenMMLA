@@ -4,6 +4,7 @@ venv/
 .cursor/
 .vscode/
 *.egg-info/
+.*/
 dist/
 build/
 temp/

@@ -261,13 +261,14 @@ class VFASynchronizer(Synchronizer):
         """Process VLLM requests from the queue."""
         while not self.stop_event.is_set():
             try:
-                # Get a frame set from the queue with a timeout
+                # get a frame set from the queue with a timeout
                 frame_set = self.vllm_queue.get(timeout=1.0)
-                time_bucket_key = frame_set['time_bucket_key']  # The start time of this time bucket
-                frames = frame_set['frames']
-
+                
                 try:
-                    # Prepare data for multi-angle analysis
+                    time_bucket_key = frame_set['time_bucket_key']  # the start time of this time bucket
+                    frames = frame_set['frames']
+
+                    # prepare data for multi-angle analysis
                     image_paths = []
                     angles = []
                     angle_descriptions = []
@@ -278,7 +279,7 @@ class VFASynchronizer(Synchronizer):
                             image_paths.append(frame_info['path'])
                             angles.append(angle)
                             
-                            # Get angle description from config, or create generic one if not found
+                            # get angle description from config, or create generic one if not found
                             angle_desc = self.angle_config.get(angle, f"Image from {angle} perspective")
                             angle_descriptions.append(angle_desc)
                         else:
@@ -286,35 +287,35 @@ class VFASynchronizer(Synchronizer):
 
                     if not image_paths:
                         self.logger.warning(f"No valid images found for time bucket {time_bucket_key}")
-                        continue
-
-                    # Request analysis from VLLM server
-                    self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
-                                   f"{len(image_paths)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
-                    
-                    result = request_multi_angle_frame_analyze(
-                        image_paths=image_paths,
-                        angles=angles,
-                        angle_descriptions=angle_descriptions,
-                        session_id=self.bucket_name,
-                        url=self.vllm_frame_analyzer_url,
-                        participant_descriptions=self.selected_participant_descriptions,
-                    )
-                    
-                    if result:
-                        self.logger.info(f"Successfully received analysis result for time bucket {time_bucket_key}")
-                        self._upload_result(time_bucket_key, result)
                     else:
-                        self.logger.warning(f"Received null/empty analysis result for time bucket {time_bucket_key}")
+                        try:
+                            # request analysis from VLLM server
+                            self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
+                                           f"{len(image_paths)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
+                            
+                            result = request_multi_angle_frame_analyze(
+                                image_paths=image_paths,
+                                angles=angles,
+                                angle_descriptions=angle_descriptions,
+                                session_id=self.bucket_name,
+                                url=self.vllm_frame_analyzer_url,
+                                participant_descriptions=self.selected_participant_descriptions,
+                            )
+                            
+                            if result:
+                                self.logger.info(f"Successfully received analysis result for time bucket {time_bucket_key}")
+                                self._upload_result(time_bucket_key, result)
+                            else:
+                                self.logger.warning(f"Received null/empty analysis result for time bucket {time_bucket_key}")
 
-                except Exception as e:
-                    self.logger.error(f"Error processing frame set: {e}", exc_info=True)
+                        except Exception as e:
+                            self.logger.error(f"Error processing frame set: {e}", exc_info=True)
+                
                 finally:
-                    # Mark the task as done
+                    # always mark the task as done after getting an item from the queue
                     self.vllm_queue.task_done()
 
             except queue.Empty:
-                # Queue is empty, continue waiting
                 continue
             except Exception as e:
                 self.logger.error(f"Error in VLLM processing thread: {e}", exc_info=True)

@@ -14,9 +14,9 @@ def get_logger(name: str,
     Args:
         name (str): The name of the logger.
         log_file (str, optional): The file path to write the log output. Defaults to None.
-        level (int): The threshold level for the logger. Defaults to logging.INFO.
+        level (int): The threshold level for the logger. Defaults to logging.DEBUG.
         console_level (int): The threshold level for logging output to the console. Defaults to logging.INFO.
-        file_level (int): The threshold level for logging output to the file. Defaults to logging.INFO.
+        file_level (int): The threshold level for logging output to the file. Defaults to logging.DEBUG.
         mode (str): The mode in which the file is opened ('w'-write, 'a'-append). Defaults to 'a'.
 
     Raises:

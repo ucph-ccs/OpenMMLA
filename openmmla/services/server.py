@@ -41,7 +41,7 @@ class Server(ABC):
         os.makedirs(self.server_logger_dir, exist_ok=True)
         os.makedirs(self.server_temp_folder, exist_ok=True)
         self.logger = get_logger(f'{self.__class__.__name__}_{time.time()}',
-                                 os.path.join(self.server_logger_dir, f'{self.__class__.__name__.lower()}_server.log'),
+                                 os.path.join(self.server_logger_dir, f'{self.__class__.__name__}_{time.time()}_server.log'),
                                  mode='a')
 
     def _load_config(self):

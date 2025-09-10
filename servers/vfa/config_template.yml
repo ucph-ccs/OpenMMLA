@@ -9,8 +9,6 @@ VLLMFrameAnalyzer:
   families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
 
   backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek, llamacpp, grok
-  top_p: 0 # top_p for LLM (from 0 to 1) - OPTIONAL: omit if model doesn't support it
-  temperature: 0 # temperature for LLM (from 0 to 1) - OPTIONAL: omit if model doesn't support it
   end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
   image_detail: "auto"  # Image detail for vision models: "low" (faster, less detail), "high" (slower, more detail), "auto" (model decides)
   prompt_templates_dir: <path-to-prompt-templates-dir>  # either relative to the project directory or absolute path
@@ -18,14 +16,10 @@ VLLMFrameAnalyzer:
 
   # Define the actions that you want to classify
   action_definitions:
-    Working-Software: "when a person's GAZE is directed at a screen AND their HANDS are actively interacting with digital interface devices (keyboard, mouse, touchscreen)."
-    Working-Hardware: "when a person's GAZE is directed at physical components AND their HANDS are directly manipulating these non-screen hardware elements (circuit boards, wires, physical devices)."
-    Working-Document: "when a person's GAZE is directed at papers, books, or other physical documents AND their HANDS are interacting with these documents (holding, writing, pointing to content)."
-    Communicating: "when a person's GAZE is directed toward another person AND their HANDS are actively gesturing or pointing. This involves direct visual engagement with another person plus active hand movements for communication purposes."
-    Observing: "When a person's GAZE is directed at work-related elements (such as laptops, screens, hardware, documents, or another person's work), AND their HANDS are either inactive OR interacting with something unrelated to their gaze target."
-    Distracted: "when a person's GAZE is directed at non-work elements (such as personal phones) OR outside of the frame, AND their HANDS are either inactive OR interacting with non-work items."
-    Unclear: "when either GAZE or HAND status cannot be confidently determined due to occlusion, ambiguous positioning, or insufficient visibility in the image."
   
+  # Decision process for action classification (Rule-based if-else chain)
+  decision_process:
+
   # Supported backends
   ollama:
     api_key: <OLLAMA_API_KEY>
@@ -33,6 +27,8 @@ VLLMFrameAnalyzer:
     llm_base_url: "http://localhost:11434/v1" # base url for llm
     vlm_model: "llava:13b" # vlm model name
     llm_model: "llama3.1" # llm model name
+    top_p: 0 # top_p for LLM (from 0 to 1) - OPTIONAL: omit if model doesn't support it
+    temperature: 0 # temperature for LLM (from 0 to 1) - OPTIONAL: omit if model doesn't support it
     VLMExtraBody: {} # extra body for vlm
     LLMExtraBody: {} # extra body for llm
 

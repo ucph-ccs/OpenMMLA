@@ -1,116 +1,109 @@
-# Multi-Perspective Lab Image Analysis
+# Multi-Perspective Lab Activity Analysis
 
-### Visual Elements in Images:
-- Black squares with white numbers: These are AprilTags. Each person has a unique ID tag.
-- Colored boxes around faces: These indicate detected faces.
-- Colored lines from faces: These show gaze direction (where someone is looking).
-- 'in: X.XX' values: These indicate the probability that the person's gaze is within the frame:
-  * HIGH values (0.5-1.0) indicate gaze is likely within frame
-  * LOW values (0.0-0.5) indicate gaze is likely outside frame
+## 1. IMAGE UNDERSTANDING
 
-### Multiple Camera Views:
-You have been provided with {{num_perspectives}} synchronized images of the same scene, each from a different perspective:
+### Visual Elements Guide:
+- **AprilTags**: Black squares with white numbers - unique ID for each person
+- **Face Boxes**: Colored rectangles around detected faces
+- **Gaze Lines**: Colored lines showing gaze direction from faces
+- **'in: X.XX' Values**: Probability that gaze is within frame
+  - HIGH (0.5-1.0): Gaze likely within frame
+  - LOW (0.0-0.5): Gaze likely outside frame
+  - Values <0.3 strongly indicate looking outside frame
+
+### Camera Setup:
+You are analyzing {{num_perspectives}} synchronized camera views of the same scene:
 {{angle_descriptions}}
 
-Use all {{num_perspectives}} camera perspectives to resolve ambiguities. If something is obscured in one view, check if it's visible from another angle.
+**Key Principle**: Use ALL camera angles to resolve ambiguities. Information missing in one view may be visible in another.
 
 {{participant_descriptions}}
 
-### MULTI-PERSPECTIVE OBSERVATION GUIDELINES:
-1. GAZE FOCUS: Describe in detail what each person is looking at based on the colored gaze lines across all available perspectives.
-   - Compare gaze lines across different perspectives for more accurate targeting
-   - Include the specific target object/area where the gaze line points
-   - Include the 'in: X.XX' probability value - this indicates the likelihood the gaze is within the frame:
-     * HIGH values (0.5-1.0) indicate gaze is likely within frame
-     * LOW values (0.0-0.5) indicate gaze is likely outside frame
-   - When 'in' value is low (<0.3), this strongly suggests the person is looking outside the frame
-   - DO NOT interpret low 'in' values as low confidence - they indicate gaze is likely outside frame
-   - WHEN NO GAZE LINE IS VISIBLE IN ANY VIEW: You may make a cautious inference based on head orientation
-   - Always mark gaze inferences with: 'INFERENCE (low confidence): Based on head orientation, likely looking at [object]'
-2. HAND STATUS: Provide detailed description of hand positions and activities, combining information from all perspectives.
-   - If hands are visible in one view but not another, prioritize the view where they're visible
-   - Describe exact hand positions and what they are touching/interacting with
-   - If hands are visible but inactive (resting, clasped), clearly state this
-   - If hands are obscured in all views, clearly indicate this
-3. RESOLVING AMBIGUITIES:
-   - First check if information missing in one perspective is visible in another
-   - Only make inferences when something is obscured in ALL available perspectives
-   - When making inferences, be explicit about the visual cues you're using from multiple perspectives
-4. CLEAR DISTINCTION BETWEEN OBSERVATION AND INFERENCE:
-   - For direct observations, describe exactly what is visible in which camera view
-   - For any inferences (when something is partially obscured in all views), clearly mark these by starting with 'INFERENCE:'
+## 2. OBSERVATION METHODOLOGY
 
-### 1. Describe each person by their AprilTag ID number
-First, for each person with a visible AprilTag ID number in ANY view, map their identity with the shown ID number (e.g., "6", "10").
-Second, for people without visible AprilTag IDs in ANY view, try to match their appearance and clothing with known participant descriptions, and use that ID number.
-Finally, for anyone without a visible AprilTag ID in ANY view and no matching description, assign sequential numbers starting from 100 (e.g., "100", "101").
-IMPORTANT: ALWAYS use only numeric IDs (e.g., "6", "10", "100") without words like "Person" or "Tag" when identifying people in your response.
+### Person Identification:
+1. **Primary**: Use visible AprilTag ID numbers (e.g., "6", "10")
+2. **Secondary**: Match clothing/appearance to participant descriptions if tag not visible
+3. **Fallback**: Assign sequential IDs starting from 100 for unidentified persons
+4. **CRITICAL**: Use ONLY numeric IDs in all responses (never "Person 6" or "Tag_6")
 
-### 2. For each person, describe ONLY these elements:
-- **Gaze Focus**: Describe exactly where the gaze line points and what object/area is at that endpoint. Include 'in' probability and its interpretation. Note which camera view provides the clearest information.
-- **Hands Status**: Describe visible hand positions and activities with SPECIFIC SPATIAL ANALYSIS:
-  * **Contact Evidence**: Look for fingertips/palm touching surfaces, hand occluding objects, or object deformation
-  * **Hovering/Proximity**: Hand positioned near but NOT touching (look for clear gaps or shadows)
-  * **Spatial Relationship**: Describe hand distance from objects using visual cues from multiple angles
-  * **Best View**: Note which camera perspective provides clearest hand-object spatial information
-- **Position**: Basic location in frame for identification only.
-- **Clothing**: Brief description for identification only, matching with known participant descriptions when possible.
+### Required Observations per Person:
 
-### 3. Activity Classification
+#### A. Gaze Focus:
+- Trace gaze lines across all camera views
+- Identify specific target (object/person/area) at gaze endpoint
+- Report 'in' probability value and interpretation
+- Note which camera view provides clearest gaze information
+- **No visible gaze line**: Mark as "INFERENCE (low confidence): Based on head orientation..."
+
+#### B. Hand Status:
+- Compare hand visibility across all camera angles
+- Analyze spatial relationships with precision:
+  - **Contact**: Fingertips/palm touching surfaces, hand occluding objects, object deformation
+  - **Hovering**: Clear gap/shadow between hand and object (specify distance if possible)
+  - **Inactive**: Hands resting, clasped, or in pockets
+- Specify which camera angle provides best hand-object spatial information
+- **Hands obscured**: Clearly state if not visible in ANY view
+
+#### C. Supporting Details:
+- **Position**: Basic location for identification
+- **Clothing**: Brief description for cross-reference with participant list
+
+### Evidence Standards:
+- **Direct Observation**: What you can see clearly in at least one camera view
+- **Inference**: Conclusions when something is obscured in ALL views (mark with "INFERENCE:")
+- Always specify which camera perspective supports each observation
+
+## 3. ACTION CLASSIFICATION SYSTEM
+
+### Action Definitions:
 {{action_definitions}}
 
-**HIERARCHICAL DECISION PROCESS:**
-{{decision_priority}}
+### Decision Process (Follow in Order):
+{{decision_process}}
 
-**STRICT CLASSIFICATION RULES:**
-- Each action definition contains multiple conditions numbered (1), (2), etc. - ALL numbered conditions must be satisfied simultaneously
-- If ANY numbered condition is not met, you CANNOT use that classification
-- Use the hierarchical decision process above to resolve edge cases and ambiguities
-- If no definition fits perfectly, use "Unclear" rather than forcing a classification
+### Classification Logic:
+- **Logical Operators**: Uppercase "AND"/"OR" are used consistently throughout
+  - "AND": ALL connected elements must be satisfied
+  - "OR": At least ONE of the connected elements must be satisfied
+- **Spatial Evidence**: Contact-based actions require specific visual proof of touch
 
-**Classification Process:**
-1. For each person, systematically check EVERY numbered condition in each action definition
-2. **CRITICAL for actions requiring hand-object contact**: You must identify SPECIFIC CONTACT EVIDENCE when the action definition requires it:
-   - Are fingertips/palm visibly touching object surfaces?
-   - Is the hand occluding/overlapping the target object?
-   - Do you see object deformation (bent wires, moved papers)?
-   - Is there clear grasping posture with engaged fingertips?
-   - If you cannot confirm actual contact when required by the definition, use appropriate alternative classification or "Unclear"
-3. Apply the hierarchical decision process to determine the most appropriate classification
-4. Only classify as an action if ALL numbered conditions are verified AND it aligns with the decision priority
-5. If multiple definitions fit completely, use the hierarchical decision process to choose the correct one
-6. If no definition has all conditions satisfied, classify as "Unclear"
-7. Provide detailed justification showing how each numbered condition was verified or failed, with SPECIFIC SPATIAL EVIDENCE for manipulation claims
+### Classification Workflow:
+1. Follow the Decision Process above step-by-step (it's a rule-based if-else chain)
+2. Stop at the first matching step in the Decision Process
+3. For contact requirements, verify specific spatial evidence:
+   - Fingertips/palm visibly touching surfaces
+   - Hand occluding/overlapping target object
+   - Object deformation (bent wires, moved papers)
+   - Clear grasping posture with engaged fingers
+4. Justify classification with specific evidence for each condition
 
-### Response Format
+## 4. RESPONSE FORMAT
+
 ```json
 {
   "observations": {
-    "0": {
-      "gaze_focus": "In perspective_1: Gaze line (green) points at colleague's face. In perspective_2: Gaze line confirms attention directed at person with Tag ID 1. In probability 0.92 indicates gaze is within frame.",
-      "hands_status": "CONTACT EVIDENCE - perspective_1: Fingertips clearly pressing keyboard keys, hands occluding key surfaces. perspective_2: Confirms typing motion with finger contact on keys. SPATIAL: No gap visible between fingers and keyboard surface.",
-      "position": "Center-right of frame in all views",
-      "clothing": "Yellow sweater matching description of participant with Tag ID 0"
-    },
-    "1": {
-      "gaze_focus": "In perspective_1: Gaze line (orange) points at breadboard on desk. perspective_2 confirms this target. In probability 0.78 indicates gaze is within frame.",
-      "hands_status": "HOVERING/PROXIMITY - perspective_1: Right hand positioned 2-3cm above breadboard, visible shadow gap between hand and surface. perspective_2: Confirms hand is NOT touching breadboard - clear separation visible. SPATIAL: No contact evidence or object deformation.",
-      "position": "Left side of frame in all views",
-      "clothing": "Dark blue sweater matching description of participant with Tag ID 1"
+    "[ID]": {
+      "gaze_focus": "perspective_1: [gaze description]. perspective_2: [confirmation/additional detail]. 'in' probability: [value] indicates [interpretation].",
+      "hands_status": "[CONTACT/HOVERING/INACTIVE] - perspective_1: [specific spatial details]. perspective_2: [confirmation/additional view]. SPATIAL: [distance/contact evidence].",
+      "position": "[location in frame]",
+      "clothing": "[brief description, note if matches participant ID]"
     }
   },
   "classifications": {
-    "0": "[ActionName]",
-    "1": "[ActionName]"
+    "[ID]": "[ActionName]"
   },
   "justifications": {
-    "0": "Classified as '[ActionName]' because: Condition (1) ✓ - [specific evidence], Condition (2) ✓ - [specific evidence with spatial details]. All conditions satisfied with specific spatial evidence.",
-    "1": "Classified as '[ActionName]' because: Condition (1) ✓ - [specific evidence], Condition (2) ✓ - [specific evidence]. [Explain why contact-based actions were ruled out if applicable based on spatial evidence]."
+    "[ID]": "Classified as '[ActionName]' because: [For AND operators] All conditions satisfied: (1) ✓ [evidence], (2) ✓ [evidence]. [For OR operators] Condition set [X] satisfied: [specific evidence]. Hierarchical decision: [explain if applicable]."
   }
 }
 ```
 
-### CRITICAL ID ASSIGNMENT RULES:
-1. ALWAYS use numeric IDs as keys in the JSON response, never use descriptive identifiers like 'Person 1' or 'Tag_1'
-2. PRESERVE the same exact numeric IDs across all observations, classifications and justifications
-3. Ensure you identify the same person consistently across all camera perspectives 
+## 5. QUALITY CHECKLIST
+□ All visible persons identified with numeric IDs
+□ Multi-angle observations synthesized for each person
+□ Spatial relationships precisely described with evidence
+□ Decision Process followed step-by-step in order
+□ Logical operators (AND/OR) correctly applied
+□ All justifications reference specific visual evidence
+□ Inferences clearly marked when direct observation impossible 
