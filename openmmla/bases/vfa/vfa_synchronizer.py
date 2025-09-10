@@ -78,7 +78,7 @@ class VFASynchronizer(Synchronizer):
         self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
 
     def _clean_up(self):
-        """Free memory by resetting attributes."""
+        """Clean up runtime variables and free memory."""
         self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.number_of_bases = None
@@ -86,7 +86,7 @@ class VFASynchronizer(Synchronizer):
         self.time_bucket_buffer = {}
         self.selected_participant_descriptions = None
         self.vllm_queue = queue.Queue()
-        self.threads.clear()
+        self._clear_threads()
         gc.collect()
 
     def run(self):

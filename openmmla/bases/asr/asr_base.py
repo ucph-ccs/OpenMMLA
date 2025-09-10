@@ -231,10 +231,7 @@ class ASRBase(Base):
         self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
 
     def _clean_up(self):
-        """Clean up runtime variables and free memory.
-
-        Resets runtime attributes and calls garbage collection to free memory.
-        """
+        """Clean up runtime variables and free memory."""
         self.mqtt_client.loop_stop()
         if self.audio_stream:
             self.audio_stream.stop()
@@ -244,7 +241,7 @@ class ASRBase(Base):
         self.audio_queue = None
         self.transcription_queue = None
         self.speaker_frames_dict = None
-        self.threads.clear()
+        self._clear_threads()
         gc.collect()
 
     def run(self):

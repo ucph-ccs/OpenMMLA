@@ -103,7 +103,7 @@ class VFABase(Base):
         if self.graphics:
             cv2.destroyWindow(f'VFA Base {self.base_id}, Camera {self.selected_source}')
             cv2.waitKey(1)
-        self.threads.clear()
+        self._clear_threads()
         gc.collect()
 
     def _reinit(self):

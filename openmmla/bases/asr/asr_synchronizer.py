@@ -71,18 +71,13 @@ class ASRSynchronizer(Synchronizer):
         self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
 
     def _clean_up(self):
-        """Free memory by resetting runtime attributes.
-        
-        Clears all buffers and runtime state variables, then calls the garbage
-        collector to free resources. This is important for ensuring the system
-        doesn't leak memory between synchronization sessions.
-        """
+        """Clean up runtime variables and free memory."""
         self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}
-        self.threads.clear()
+        self._clear_threads()
         gc.collect()
 
     def run(self):

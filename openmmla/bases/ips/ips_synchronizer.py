@@ -66,12 +66,12 @@ class IPSSynchronizer(Synchronizer):
         self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
 
     def _clean_up(self):
-        """Free memory by resetting dictionaries."""
+        """Clean up runtime variables and free memory."""
         self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.merged_relations = None
         self.merged_tags = None
-        self.threads.clear()
+        self._clear_threads()
         gc.collect()
 
     def run(self):

@@ -109,7 +109,7 @@ class IPSBase(Base):
         self.relation_tracker = TagRelationTracker(min_consistent_frames=2)
 
     def _clean_up(self):
-        """Clean up resources."""
+        """Clean up runtime variables and free memory."""
         self.stop_event.set()
         self.mqtt_client.loop_stop()
         if self.video_stream:
@@ -118,7 +118,7 @@ class IPSBase(Base):
         if self.graphics:
             cv2.destroyWindow(f'AprilTags Detection from camera {self.base_id}')
             cv2.waitKey(1)
-        self.threads.clear()
+        self._clear_threads()
         gc.collect()
 
     def run(self):

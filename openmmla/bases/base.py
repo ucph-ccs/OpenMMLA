@@ -93,6 +93,10 @@ class Base(ABC):
         t = RaisingThread(target=target, args=args)
         self.threads.append(t)
 
+    def _clear_threads(self):
+        """Clear all threads."""
+        self.threads.clear()
+
     def _start_threads(self):
         """Start all threads."""
         self.stop_event.clear()
@@ -100,12 +104,12 @@ class Base(ABC):
             t.start()
 
     def _join_threads(self):
-        """Wait for all threads to finish."""
+        """Wait for all threads to finish without timeout."""
         for t in self.threads:
             t.join()
 
     def _stop_threads(self):
-        """Stop all threads and free memory."""
+        """Stop all threads other than the current thread with timeout."""
         self.stop_event.set()
         for t in self.threads:
             if threading.current_thread() != t:
@@ -115,7 +119,6 @@ class Base(ABC):
                         self.logger.warning(f"Thread {t.name or 'unnamed'} did not stop within 5 second timeout")
                 except Exception as e:
                     self.logger.warning(f"During thread stopping, catch: {e}", exc_info=True)
-        self.threads.clear()
 
     def _listen_for_start_signal(self):
         """Listen on the redis bucket control channel for the START signal."""
