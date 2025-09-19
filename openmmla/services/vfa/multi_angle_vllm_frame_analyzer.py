@@ -218,7 +218,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.info(
                 f"Starting multi-angle analysis for {session_id} with {len(image_files)} images from angles: {angles}")
 
-            # Process each image
+            # Process each image (apriltag and gaze detection)
             processed_images = {}
             for i, image_file in enumerate(image_files):
                 image_bytes = image_file.read()
@@ -245,10 +245,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 )
                 processed_images[angle] = processed_image
 
-            # Analyze all processed images together
+            # Analyze all processed images together (end-to-end or two-step approach)
             if self.end_to_end:
                 # End-to-end approach: VLM does both observation and classification for multiple images
                 messages = self._create_end_to_end_messages(processed_images, participant_descriptions)
+                self.logger.info(f"End-to-end messages: {messages}")
                 vlm_response = self._process_with_vlm(messages)
 
                 # Extract observations, classifications, and justifications
@@ -261,7 +262,6 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 # Two-step approach: VLM for observations, LLM for classification
                 vlm_messages = self._create_vlm_messages(processed_images, participant_descriptions)
                 vlm_response = self._process_with_vlm(vlm_messages)
-                self.logger.info(f"VLM response: {vlm_response}")
 
                 # Process with LLM for text classification
                 llm_messages = self._create_llm_messages(vlm_response)
@@ -367,26 +367,6 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             "angle_description": angle_description
         }
 
-    def _format_participant_descriptions(self, participant_descriptions):
-        """Format participant descriptions into readable text for prompts.
-        
-        Args:
-            participant_descriptions: Dictionary of participant descriptions (tag_id -> description)
-            
-        Returns:
-            str: Formatted participant descriptions
-        """
-        if not participant_descriptions:
-            return ""
-
-        description_text = "### Known Participants Reference:\n"
-        description_text += "The following people may appear in the images. Use this information to help identify them by AprilTag ID:\n\n"
-
-        # participant descriptions are already filtered and passed as a flat structure (tag_id -> description)
-        for tag_id, description in participant_descriptions.items():
-            description_text += f"Person with Tag ID {tag_id}: {description}\n"
-
-        return description_text + "\n"
 
     def _create_end_to_end_messages(self, processed_images, participant_descriptions={}):
         """Generate a context-aware prompt message for end-to-end approach with multiple images.
@@ -408,14 +388,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         for angle, image_data in processed_images.items():
             angle_descriptions.append(f"- **{angle}**: {image_data['angle_description']}")
 
-        # Create participant descriptions
-        formatted_participant_descriptions = self._format_participant_descriptions(participant_descriptions)
-
         # Load template and replace variables
         template = self.multi_angle_end_user_prompt_template
         template = template.replace("{{num_perspectives}}", str(len(processed_images)))
         template = template.replace("{{angle_descriptions}}", "\n".join(angle_descriptions))
-        template = template.replace("{{participant_descriptions}}", formatted_participant_descriptions)
+        template = template.replace("{{participant_descriptions}}", json.dumps(participant_descriptions, indent=2) if participant_descriptions else "")
         template = template.replace("{{action_definitions}}", self.action_definitions)
         template = template.replace("{{decision_process}}", self.decision_process)
 
@@ -459,14 +436,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         for angle, image_data in processed_images.items():
             angle_descriptions.append(f"- **{angle}**: {image_data['angle_description']}")
 
-        # Create participant descriptions
-        formatted_participant_descriptions = self._format_participant_descriptions(participant_descriptions)
-
         # Load template and replace variables
         template = self.multi_angle_vlm_user_prompt_template
         template = template.replace("{{num_perspectives}}", str(len(processed_images)))
         template = template.replace("{{angle_descriptions}}", "\n".join(angle_descriptions))
-        template = template.replace("{{participant_descriptions}}", formatted_participant_descriptions)
+        template = template.replace("{{participant_descriptions}}", json.dumps(participant_descriptions, indent=2) if participant_descriptions else "")
 
         # Create message content with multiple images
         user_prompt = [{"type": "text", "text": template}]

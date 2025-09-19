@@ -24,6 +24,7 @@ def run_session_analysis(args):
     from openmmla.utils.client import InfluxDBClientWrapper
     from openmmla.analysis.asr.analyze import asr_session_analysis
     from openmmla.analysis.ips.analyze import ips_session_analysis
+    from openmmla.analysis.vfa.analyze import vfa_session_analysis
 
     logger = get_logger('session_analysis')
 
@@ -42,6 +43,7 @@ def run_session_analysis(args):
                 "Please input your operation:\n"
                 "1: ASR diarization analysis\n"
                 "2: Indoor positioning analysis\n"
+                "3: Video frame analysis\n"
                 "0: Exit\n"
                 "Selected function: "
             ).strip()
@@ -51,10 +53,13 @@ def run_session_analysis(args):
             elif operation == '2':
                 bucket_name = select_bucket(influx_client)
                 ips_session_analysis(None, bucket_name, influx_client)
+            elif operation == '3':
+                bucket_name = select_bucket(influx_client)
+                vfa_session_analysis(None, bucket_name, influx_client)
             elif operation == '0':
                 break
             else:
-                print("Invalid operation. Please input 1, 2, or 0.")
+                print("Invalid operation. Please input 1, 2, 3, or 0.")
         except (Exception, KeyboardInterrupt) as e:
             logger.warning(
                 f"Session analysis interrupted: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}. Returning to main menu.",

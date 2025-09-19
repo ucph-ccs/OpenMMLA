@@ -1,8 +1,8 @@
 # Multi-Perspective Lab Activity Analysis
 
-## 1. IMAGE UNDERSTANDING
+## 1. Context
 
-### Visual Elements Guide:
+### 1.1 Visual Elements (Legend)
 - **AprilTags**: Black squares with white numbers - unique ID for each person
 - **Face Boxes**: Colored rectangles around detected faces
 - **Gaze Lines**: Colored lines showing gaze direction from faces
@@ -11,23 +11,23 @@
   - LOW (0.0-0.5): Gaze likely outside frame
   - Values <0.3 strongly indicate looking outside frame
 
-### Camera Setup:
+### 1.2 Camera Setup
 You are analyzing {{num_perspectives}} synchronized camera views of the same scene:
 {{angle_descriptions}}
 
-**Key Principle**: Use ALL camera angles to resolve ambiguities. Information missing in one view may be visible in another.
-
+### 1.3 Participant Descriptions
+The following people may appear in the images. The following people may appear in the images. Use this information to match clothing/appearance to the correct participant ID:
 {{participant_descriptions}}
 
-## 2. OBSERVATION METHODOLOGY
+## 2. Image Observation
 
-### Person Identification:
+### 2.1 Person Identification
 1. **Primary**: Use visible AprilTag ID numbers (e.g., "6", "10")
-2. **Secondary**: Match clothing/appearance to participant descriptions if tag not visible
-3. **Fallback**: Assign sequential IDs starting from 100 for unidentified persons
+2. **Secondary**: Match clothing/appearance to participant descriptions - USE the correct participant ID from descriptions
+3. **Fallback**: Only assign sequential IDs starting from 100 for truly unidentified persons NOT in participant descriptions
 4. **CRITICAL**: Use ONLY numeric IDs in all responses (never "Person 6" or "Tag_6")
 
-### Required Observations per Person:
+### 2.2 Evidence Extraction (Per Person, Multi-View)
 
 #### A. Gaze Focus:
 - Trace gaze lines across all camera views
@@ -49,36 +49,38 @@ You are analyzing {{num_perspectives}} synchronized camera views of the same sce
 - **Position**: Basic location for identification
 - **Clothing**: Brief description for cross-reference with participant list
 
-### Evidence Standards:
+### 2.3 Observation Rules
+- **Multi-view synthesis**: use all camera angles to resolve ambiguities
 - **Direct Observation**: What you can see clearly in at least one camera view
 - **Inference**: Conclusions when something is obscured in ALL views (mark with "INFERENCE:")
 - Always specify which camera perspective supports each observation
 
-## 3. ACTION CLASSIFICATION SYSTEM
+## 3. Action Classification
 
-### Action Definitions:
+### 3.1 Action Definitions
 {{action_definitions}}
 
-### Decision Process (Follow in Order):
+### 3.2 Decision Process:
 {{decision_process}}
 
-### Classification Logic:
-- **Logical Operators**: Uppercase "AND"/"OR" are used consistently throughout
-  - "AND": ALL connected elements must be satisfied
-  - "OR": At least ONE of the connected elements must be satisfied
-- **Spatial Evidence**: Contact-based actions require specific visual proof of touch
-
-### Classification Workflow:
-1. Follow the Decision Process above step-by-step (it's a rule-based if-else chain)
-2. Stop at the first matching step in the Decision Process
-3. For contact requirements, verify specific spatial evidence:
-   - Fingertips/palm visibly touching surfaces
-   - Hand occluding/overlapping target object
-   - Object deformation (bent wires, moved papers)
-   - Clear grasping posture with engaged fingers
-4. Justify classification with specific evidence for each condition
+### 3.3 Classification Rules
+- **Logical operators**:
+  - AND = all connected conditions must be satisfied
+  - OR = at least one connected condition must be satisfied
+- **Contact evidence required** when any rule involves CONTACT:
+  - Fingertips/palm visibly touching
+  - Hand occluding/overlapping target
+  - Object deformation or displacement
+  - Clear grasp posture with engaged fingers
+- **Execution**:
+  - 1. Follow the **Decision Process** in order; **stop at the first match**
+  - 2. Verify required contact evidence
+  - 3. Assign the action label
+  - 4. Justify with **view-specific** evidence for each satisfied condition.
 
 ## 4. RESPONSE FORMAT
+
+Please generate your analysis results using the following JSON format:
 
 ```json
 {
@@ -99,11 +101,11 @@ You are analyzing {{num_perspectives}} synchronized camera views of the same sce
 }
 ```
 
-## 5. QUALITY CHECKLIST
-□ All visible persons identified with numeric IDs
-□ Multi-angle observations synthesized for each person
-□ Spatial relationships precisely described with evidence
-□ Decision Process followed step-by-step in order
-□ Logical operators (AND/OR) correctly applied
-□ All justifications reference specific visual evidence
-□ Inferences clearly marked when direct observation impossible 
+## 5. OUTPUT VALIDATION CHECKLIST
+
+Before submitting your response, verify:
+- **ID Consistency**: Same numeric IDs used across observations, classifications, and justifications
+- **ID Accuracy**: If clothing matches participant description, use the correct participant ID (not fallback 100+)
+- **JSON Structure**: All required fields present with proper formatting
+- **Evidence Quality**: Specific visual details provided for gaze focus and hand status
+- **Multi-view Integration**: Information synthesized from all available camera perspectives 

@@ -11,6 +11,7 @@ temp/
 logger/
 analysis/
 openmmla/analysis/framework/
+lak26/
 
 # Ignore deprecated repositories
 deprecated/
@@ -30,3 +31,4 @@ twine.txt
 # Unignore specific files
 !.gitkeep
 CLAUDE.md
+AGENTS.md
