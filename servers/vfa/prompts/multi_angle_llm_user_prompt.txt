@@ -1,5 +1,7 @@
 # Multi-Perspective Action Classification
 
+Let's think step by step across all views when classifying participants.
+
 ## 1. Observation Data
 {{image_description}}
 
@@ -26,9 +28,9 @@
   - 3. Assign the action label
   - 4. Justify with **view-specific** evidence for each satisfied condition.
 
-## 3. RESPONSE FORMAT
+## 3. Response & Validation
 
-Please generate your analysis results using the following JSON format:
+Return the response in JSON format:
 
 ```json
 {
@@ -41,11 +43,9 @@ Please generate your analysis results using the following JSON format:
 }
 ```
 
-## 4. OUTPUT VALIDATION CHECKLIST
-
 Before submitting your response, verify:
 - **ID Consistency**: Same numeric IDs used across classifications and justifications (use IDs from observation data)
-- **JSON Structure**: All required fields present with proper formatting
 - **Decision Process**: Followed step-by-step in order, stopping at first match
 - **Logical Operators**: AND/OR correctly applied with evidence for each condition
 - **Contact Evidence**: Verified when required by action definitions
+- **JSON Structure**: All required fields present with proper formatting

@@ -116,8 +116,12 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         # Define template files to load 
         template_files = {
-            'multi_angle_end_system_prompt.txt': 'multi_angle_end_system_prompt_template',
-            'multi_angle_end_user_prompt.txt': 'multi_angle_end_user_prompt_template',
+            # 'multi_angle_end_system_prompt.txt': 'multi_angle_end_system_prompt_template',
+            # 'multi_angle_end_user_prompt.txt': 'multi_angle_end_user_prompt_template',
+            'multi_angle_end_system_prompt_baseline.txt': 'multi_angle_end_system_prompt_template',
+            'multi_angle_end_user_prompt_baseline.txt': 'multi_angle_end_user_prompt_template',
+            # 'multi_angle_end_system_prompt_baseline_no_pre.txt': 'multi_angle_end_system_prompt_template',
+            # 'multi_angle_end_user_prompt_baseline_no_pre.txt': 'multi_angle_end_user_prompt_template',
             'multi_angle_vlm_system_prompt.txt': 'multi_angle_vlm_system_prompt_template',
             'multi_angle_vlm_user_prompt.txt': 'multi_angle_vlm_user_prompt_template',
             'multi_angle_llm_system_prompt.txt': 'multi_angle_llm_system_prompt_template',
@@ -249,7 +253,6 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             if self.end_to_end:
                 # End-to-end approach: VLM does both observation and classification for multiple images
                 messages = self._create_end_to_end_messages(processed_images, participant_descriptions)
-                self.logger.info(f"End-to-end messages: {messages}")
                 vlm_response = self._process_with_vlm(messages)
 
                 # Extract observations, classifications, and justifications

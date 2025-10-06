@@ -1,9 +1,12 @@
 # Multi-Perspective Lab Activity Observation
 
+Let's think step by step across all views when identifying, and observing participants.
+
 ## 1. Context
 
 ### 1.1 Visual Elements (Legend)
-- **AprilTags**: Black squares with white numbers - unique ID for each person
+- **Non-detected AprilTags**: a tag with black and white pattern worn by participants
+- **Detected AprilTags**: a tag rendered as a single black square with a white ID number 
 - **Face Boxes**: Colored rectangles around detected faces
 - **Gaze Lines**: Colored lines showing gaze direction from faces
 - **'in: X.XX' Values**: Probability that gaze is within frame
@@ -22,10 +25,10 @@ The following people may appear in the images. Use this information to match clo
 ## 2. Image Observation
 
 ### 2.1 Person Identification
-1. **Primary**: Use visible AprilTag ID numbers (e.g., "6", "10")
-2. **Secondary**: Match clothing/appearance to participant descriptions - USE the correct participant ID from descriptions
-3. **Fallback**: Only assign sequential IDs starting from 100 for truly unidentified persons NOT in participant descriptions
-4. **CRITICAL**: Use ONLY numeric IDs in all responses (never "Person 6" or "Tag_6")
+1. **Primary**: If worn AprilTag is detected, use its displayed tag ID number
+2. **Secondary**: If AprilTag is non-detected or no AprilTag worn, match clothing/appearance to participant descriptions - USE the correct participant ID from descriptions
+3. **Fallback**: Only assign sequential IDs starting from '100' for truly unidentified persons NOT in participant descriptions
+4. **CRITICAL**: Use ONLY numeric IDs in all responses and must not contain any prefixes or suffixes
 
 ### 2.2 Evidence Extraction (Per Person, Multi-View)
 
@@ -55,9 +58,9 @@ The following people may appear in the images. Use this information to match clo
 - **Inference**: Conclusions when something is obscured in ALL views (mark with "INFERENCE:")
 - Always specify which camera perspective supports each observation
 
-## 3. RESPONSE FORMAT
+## 3. Response & Validation
 
-Please generate your analysis results using the following JSON format:
+Return the response in JSON format:
 
 ```json
 {
@@ -72,11 +75,9 @@ Please generate your analysis results using the following JSON format:
 }
 ```
 
-## 4. OUTPUT VALIDATION CHECKLIST
-
 Before submitting your response, verify:
-- **ID Consistency**: Same numeric IDs used across observations
-- **ID Accuracy**: If clothing matches participant description, use the correct participant ID (not fallback 100+)
-- **JSON Structure**: All required fields present with proper formatting
+- **ID Consistency**: Same numeric IDs used across observations, classifications, and justifications
+- **ID Accuracy**: Participant IDs must be clearly documented in the participant description
 - **Evidence Quality**: Specific visual details provided for gaze focus and hand status
 - **Multi-view Integration**: Information synthesized from all available camera perspectives
+- **JSON Structure**: All required fields present with proper formatting

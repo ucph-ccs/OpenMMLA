@@ -1,0 +1,14 @@
+You are analyzing {{num_perspectives}} synchronized camera views ({{angle_descriptions}}) with participants ({{participant_descriptions}}).  
+
+Visuals may include AprilTags, face boxes, gaze lines, and "in: X.XX" values (0 means gazing outside frame, 1 means gazing inside frame).  
+Identify each person's ID by the detected AprilTag, otherwise match by appearance. Classify each person’s action into one of the following
+categories {{action_definitions}} across all views.
+
+Return the result in JSON:
+
+```json
+{
+  "classifications": {
+    "[ID]": "[ActionName]"
+  }
+}
