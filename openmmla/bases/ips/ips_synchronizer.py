@@ -187,7 +187,7 @@ class IPSSynchronizer(Synchronizer):
             # check if result falls within current bucket
             valid = self.time_bucket_key <= base_result_time < self.time_bucket_end
             if valid:
-                if base_id.isnumeric():  # msg from nicla vision's onboard apriltag detection (if used)
+                if base_id.isnumeric() and int(base_id) > 50000:  # msg from nicla vision's onboard apriltag detection (if used)
                     if base_id not in self.merged_relations:
                         self.merged_relations[base_id] = set()
                     self.merged_relations[base_id].update(base_result['detected_tags'])
