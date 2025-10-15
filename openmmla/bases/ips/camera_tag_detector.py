@@ -132,10 +132,9 @@ class CameraTagDetector(Base):
             self.stream_kwargs['rtmp_url'] = self.selected_source
 
         # Config camera base id
-        self.base_id = input("Input your sender id, 'm' for main camera, and 'a', 'b', 'c', 'd' for alternatives "
-                             "camera [m]: ")
+        self.base_id = input("Input your sender (camera) id: ")
         if not self.base_id:
-            self.base_id = 'm'
+            self.base_id = '1'
         self.camera_configured = True
         print(f'\033]0;Camera Detector {self.base_id}\007')
 

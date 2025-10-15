@@ -90,7 +90,7 @@ On your devices which you want to stream data to the RTMP server, could be Raspb
      -g 30 -keyint_min 30 -sc_threshold 0 \
      -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
      -b:v 1M -maxrate 2M -bufsize 2M \
-     -f flv rtmp://mac-01.local/ips/m
+     -f flv rtmp://mac-01.local/ips/1
    
    # Example on macOS:
    ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
@@ -101,7 +101,7 @@ On your devices which you want to stream data to the RTMP server, could be Raspb
    ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
      -c:v h264_videotoolbox -preset ultrafast -tune zerolatency \
      -b:v 2M \
-     -f flv rtmp://mac-01.local/ips/m
+     -f flv rtmp://mac-01.local/ips/1
    
    # Audio Streaming only
    ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:<card_number>,<device_number> \
@@ -111,7 +111,7 @@ On your devices which you want to stream data to the RTMP server, could be Raspb
    e.g.
    ffmpeg -f alsa -ac 2 -ar 44100 -i plughw:3,0 \
      -c:a aac -b:a 128k \
-     -f flv rtmp://mac-01.local/ips/m
+     -f flv rtmp://mac-01.local/ips/1
    
    # Audio + Video Streaming
    ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i <Input_Device> \
@@ -131,16 +131,7 @@ On your devices which you want to stream data to the RTMP server, could be Raspb
      -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
      -b:v 1M -maxrate 2M -bufsize 2M \
      -c:a aac -b:a 128k \
-     -f flv rtmp://mac-01.local/ips/f
-
-   # Recording on Ubuntu:
-   START_TIME=$(date +"%Y%m%d_%H%M%S")
-   ffmpeg -f v4l2 -input_format mjpeg -framerate 30 -video_size 1920x1080 -i /dev/video0 \
-    -c:v libx264 -preset veryfast -tune zerolatency \
-    -g 30 -keyint_min 30 -sc_threshold 0 \
-    -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
-    -b:v 3M -maxrate 6M -bufsize 10M \
-    -f mp4 "record_$START_TIME.mp4"
+     -f flv rtmp://mac-01.local/ips/1
    ```
 
 ## Record the streams with OBS
@@ -193,9 +184,9 @@ You can record the streams from RTMP server via the OBS on your devices by follo
    ```sh
    ffmpeg -i rtmp://<host>/<app>/<stream> -f null -
    e.g.
-   ffmpeg -i rtmp://mac-01.local/ips/m -f null -
+   ffmpeg -i rtmp://mac-01.local/ips/1 -f null -
    
    ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://<host>/<app>/<stream>
    e.g.
-   ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://mac-01.local/ips/m
+   ffplay -fflags nobuffer -analyzeduration 0 -loglevel verbose rtmp://mac-01.local/ips/1
    ```
