@@ -20,20 +20,24 @@ def get_parser():
 
 
 def main():
+    """Main function."""
     parser = get_parser()
     args = parser.parse_args()
-
-    from openmmla.bases.asr import ASRSynchronizer
+    
+    # Only import when actually running the logic
+    from openmmla.bases.asr import start_asr_synchronizer
     from openmmla.utils.args import print_arguments
 
     print_arguments(args)
-    asr_synchronizer = ASRSynchronizer(
+    
+    # Call the centralized start_asr_synchronizer function with restart capability
+    start_asr_synchronizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
+        mode='full',  # Default mode for synchronizer
         dominant=args.dominant,
         sp=args.sp
     )
-    asr_synchronizer.run()
 
 
 if __name__ == "__main__":

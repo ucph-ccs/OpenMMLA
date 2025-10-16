@@ -1,10 +1,61 @@
-"""This script runs the control base."""
+"""Control utility for managing ASR, IPS, and VFA services."""
 import os
+import sys
+import tty
+import termios
 
-from openmmla.utils.input import select_or_create_bucket
-from openmmla.utils.clean import flush_input
-from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
-from openmmla.utils.logger import get_logger
+from .input import interactive_menu
+from .client import InfluxDBClientWrapper, RedisClientWrapper
+from .logger import get_logger
+
+
+def get_key():
+    """Get a single keypress from stdin."""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        ch = sys.stdin.read(1)
+        # Handle arrow keys (multi-character sequences)
+        if ch == '\x1b':
+            ch = sys.stdin.read(1)
+            if ch == '[':
+                ch = sys.stdin.read(1)
+                if ch == 'A':
+                    return 'UP'
+                elif ch == 'B':
+                    return 'DOWN'
+                elif ch == 'C':
+                    return 'RIGHT'
+                elif ch == 'D':
+                    return 'LEFT'
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def clear_screen():
+    """Clear the terminal screen."""
+    os.system('clear' if os.name == 'posix' else 'cls')
+
+
+def get_operation() -> int:
+    """Get the operation to perform using interactive menu."""
+    options = [
+        "Reconnect nodes",
+        "Disconnect nodes"
+    ]
+    descriptions = [
+        "Send START signal to selected services",
+        "Send STOP signal to selected services"
+    ]
+    
+    selected_index = interactive_menu("Select Operation", options, descriptions)
+    
+    if selected_index == -1:
+        raise KeyboardInterrupt("Operation cancelled")
+    
+    return selected_index + 1  # Return 1 or 2
 
 
 def select_services() -> list[str]:
@@ -92,50 +143,51 @@ def select_services() -> list[str]:
         return []
 
 
-project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = os.path.join(project_dir, 'config.yml')
-logger = get_logger('control')
+def start_control(config_path: str):
+    """Start control interface with restart capability.
+    
+    Args:
+        config_path: Path to the configuration file
+    """
+    logger = get_logger('control')
 
-print(f"\033]0; Control Base \007")
-while True:
-    try:
-        influx_client = InfluxDBClientWrapper(config_path)
-        redis_client = RedisClientWrapper(config_path)
+    print(f"\033]0; Control Base \007")
+    
+    # Restart loop - allows restarting the entire process
+    while True:
+        try:
+            influx_client = InfluxDBClientWrapper(config_path)
+            redis_client = RedisClientWrapper(config_path)
 
-        flush_input()
-        operation = input(
-            "Please input your operation:\n"
-            "1: Reconnect nodes\n"
-            "2: Disconnect nodes\n"
-            "0: Exit\n"
-            "Selected function: "
-        ).strip()
-
-        if operation in ['1', '2']:
+            operation = get_operation()
+            
+            from .input import select_or_create_bucket
             bucket_name = select_or_create_bucket(influx_client)
             if not bucket_name:
                 continue
                 
-            command = 'START' if operation == '1' else 'STOP'
+            command = 'START' if operation == 1 else 'STOP'
             selected_services = select_services()
             
             if not selected_services:
                 continue
-                
-            print(f"Selected services: {', '.join(selected_services)}")
             
             # Send control signal to each selected service
             for service in selected_services:
                 channel = f"{bucket_name}/{service}/control"
                 redis_client.publish(channel, command)
                 print(f"{'✅' if command == 'START' else '🛑'} {command} signal sent to {service}.")
-                
-        elif operation == '0':
-            break
-        else:
-            print("Invalid operation. Please input 1, 2, or 0.")
-    except (Exception, KeyboardInterrupt) as e:
-        logger.warning(
-            f"Interrupted: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}. Returning to main menu.",
-            exc_info=True
-        )
+            
+            input("\nPress Enter to continue...")
+            
+        except KeyboardInterrupt as e:
+            if "Operation cancelled" in str(e):
+                print("\n👋 Goodbye!")
+                break  # Exit completely when 'q' is pressed
+            else:
+                print("\n🔄 Restarting Control Base...")
+                continue  # Restart on Ctrl+C during runtime
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            print("🔄 Restarting Control Base...")
+            continue  # Restart on error

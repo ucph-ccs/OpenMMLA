@@ -30,7 +30,41 @@ from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN
 from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_base_mode, get_name, \
-    get_channel_selection, get_base_type, get_file
+    get_channel_selection, get_base_type, get_interactive_file
+
+
+def start_asr_base(project_dir: str, config_path: str, mode: str = 'record', store: bool = True,
+                   vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
+    """Start ASR Base with restart capability.
+    
+    Args:
+        project_dir: Path to the project directory
+        config_path: Path to the configuration file
+        mode: Operating mode ('record', 'recognize', or 'full')
+        store: Whether to store audio files
+        vad: Whether to apply Voice Activity Detection
+        nr: Whether to use denoiser to enhance speech
+        tr: Whether to transcribe speech to text
+        sp: Whether to do speech separation for overlapped segments
+        hsr: Whether to apply Half-Scaled Recognition at speaker boundaries
+    """
+    # Restart loop - allows restarting the entire process
+    while True:
+        try:
+            asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode, 
+                              vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr)
+            asr_base.run()
+        except KeyboardInterrupt as e:
+            if "Operation cancelled" in str(e):
+                print("\n👋 Goodbye!")
+                break  # Exit completely when 'q' is pressed
+            else:
+                print("\n🔄 Restarting ASR Base...")
+                continue  # Restart on Ctrl+C during runtime
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            print("\n🔄 Restarting ASR Base...")
+            continue
 
 
 class ASRBase(Base):
@@ -38,14 +72,14 @@ class ASRBase(Base):
 
     logger = get_logger(f'asr-base')
 
-    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'full', store: bool = True,
+    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'record', store: bool = True,
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
         """Initialize the ASRBase class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
-            mode: operating mode, 'record', 'recognize', or 'full' (default: 'full')
+            mode: operating mode, 'record', 'recognize', or 'full' (default: 'record')
             store: whether to store audio files (default: True)
             vad: whether to apply Voice Activity Detection (default: True)
             nr: whether to apply noise reduction (default: True)
@@ -133,19 +167,27 @@ class ASRBase(Base):
             info = p.get_host_api_info_by_index(0)
             num_devices = info.get('deviceCount')
             available_indexes = []
-            channels = self.stream_kwargs['channels']
+            device_info_list = []
 
+            # Show all available devices regardless of channel count
             for i in range(0, num_devices):
                 device_info = p.get_device_info_by_host_api_device_index(0, i)
                 max_input_channels = device_info.get('maxInputChannels')
-                if (max_input_channels) >= channels:
-                    print(i, " - ", device_info.get('name'), f" ({max_input_channels} channels)")
+                if max_input_channels > 0:  # Only show devices that can input audio
                     available_indexes.append(i)
+                    device_info_list.append(device_info)
 
-            self.input_device_index = get_input_device_index(available_indexes)
+            self.input_device_index = get_input_device_index(available_indexes, device_info_list)
             self.stream_kwargs['input_device_index'] = self.input_device_index
             device_info = p.get_device_info_by_host_api_device_index(0, self.input_device_index)
-            self.stream_kwargs['channel_select'] = get_channel_selection(device_info) if channels > 1 else None
+            
+            # Update channels based on selected device capabilities
+            device_channels = device_info.get('maxInputChannels', 1)
+            self.stream_kwargs['channels'] = device_channels
+            
+            # Allow channel selection if device has multiple channels
+            self.stream_kwargs['channel_select'] = get_channel_selection(device_info) if device_channels > 1 else None
+            self.logger.info(f"Selected device: {device_info.get('name')} with {device_channels} channels")
             self.logger.info(f"Selected channel option: {self.stream_kwargs['channel_select']}")
             p.terminate()
 
@@ -161,43 +203,33 @@ class ASRBase(Base):
 
         # set file_path for 'file'
         elif self.source == 'file':
-            if 'initial_sync_time' not in base_config:
-                raise ValueError("initial_sync_time configuration is missing in the YAML file.")
-            self.initial_sync_time = float(base_config['initial_sync_time'])
+            if 'file_dir' not in base_config:
+                # Default to project directory if not specified
+                file_dir = self.project_dir
+                self.logger.info(f"No file_dir specified in config, using project directory: {file_dir}")
+            else:
+                file_dir = base_config['file_dir']
+                if not os.path.isabs(file_dir):
+                    file_dir = os.path.join(self.project_dir, file_dir)
+                
+                if not os.path.exists(file_dir):
+                    # Fallback to project directory if specified directory doesn't exist
+                    self.logger.warning(f"Specified file directory does not exist: {file_dir}")
+                    file_dir = self.project_dir
+                    self.logger.info(f"Using project directory instead: {file_dir}")
+            
+            # use interactive file browser to select file and get initial_sync_time
+            file_path, initial_sync_time = get_interactive_file(file_dir)
+            if file_path is None:
+                raise ValueError("No file selected or file selection cancelled.")
+            
+            self.initial_sync_time = initial_sync_time
             if not self._validate_unix_timestamp(self.initial_sync_time):
                 raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
             
-            if 'file_dir' not in base_config:
-                raise ValueError("File directory configuration is missing in the YAML file.")
-            file_dir = base_config['file_dir']
-            if not os.path.isabs(file_dir):
-                file_dir = os.path.join(self.project_dir, file_dir)
-            if not os.path.exists(file_dir):
-                raise ValueError(f"File directory does not exist: {file_dir}")
-            
-            # find all audio files in directory
-            audio_extensions = {'.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma'}
-            audio_files = []
-            for filename in sorted(os.listdir(file_dir)):
-                match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
-                if match:
-                    file_start_time = float(match.group(1))
-                    if not self._validate_unix_timestamp(file_start_time):
-                        self.logger.warning(f"Skipping file {filename}: invalid file_start_time ({file_start_time})")
-                        continue
-                    if file_start_time > self.initial_sync_time:
-                        self.logger.warning(
-                            f"Skipping file {filename}: file_start_time ({file_start_time}) is greater than initial_sync_time ({self.initial_sync_time})")
-                        continue
-                    file_path = os.path.join(file_dir, filename)
-                    if any(filename.lower().endswith(ext) for ext in audio_extensions):
-                        audio_files.append(file_path)
-            
-            if not audio_files:
-                raise ValueError(f"No valid audio files found in directory: {file_dir}")
-            file_path = get_file(audio_files)
             self.stream_kwargs['file_path'] = file_path
             self.logger.info(f"Using audio file: {file_path}")
+            self.logger.info(f"Using initial_sync_time: {self.initial_sync_time}")
 
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations.
@@ -258,16 +290,19 @@ class ASRBase(Base):
         while True:
             try:
                 select_fun = get_function_base(self.id, self.mode)
-                if select_fun == 0:
-                    print("------------------------------------------------")
-                    clear_directory(self.temp_dir)
-                    self.logger.info("Exiting the program...")
-                    break
                 func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
-            except (Exception, KeyboardInterrupt) as e:
-                self.logger.warning(
-                    f"During running the ASR base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
-                    exc_info=True)
+                input("\nPress Enter to continue...")
+            except KeyboardInterrupt as e:
+                if "Operation cancelled" in str(e):
+                    # 'q' was pressed - re-raise to be caught by outer restart loop
+                    raise
+                else:
+                    # Ctrl+C during runtime - log and continue
+                    self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
+                    input("\nPress Enter to continue...")
+            except Exception as e:
+                self.logger.warning(f"During running the ASR base, catch: {e}, Come back to the main menu.", exc_info=True)
+                input("\nPress Enter to continue...")
             finally:
                 self._clean_up()
 
@@ -307,6 +342,7 @@ class ASRBase(Base):
             return
 
         self.audio_recognizer.register(audio_path, name)
+        self.logger.info(f"Speaker '{name}' has been successfully registered!")
 
     def _start_recognition(self, bucket_name: str | None = None):
         """Start the real-time voice recognition process.
@@ -323,8 +359,11 @@ class ASRBase(Base):
         """
         if self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
-            self.logger.info("Audio database is empty.")
+            self.logger.info("Audio database is empty, please register speaker profiles or either switch the mode to 'record'.")
             return
+        elif self.mode == 'record' and len(self.audio_recognizer.speaker_names) == 0:
+            print("------------------------------------------------")
+            self.logger.warning("Audio database is empty. Recording will continue without speaker recognition.")
 
         # select or create bucket
         self.bucket_name = select_or_create_bucket(self.influx_client) if not bucket_name else bucket_name
@@ -957,7 +996,7 @@ class ASRBase(Base):
             },
         }
         print(f"{GREEN}[Speaker Transcription]{ENDC}{transcription_record['fields']['window_start_time']}: "
-              f"{GREEN}{speaker} : {transcribe_result['text']}{ENDC}")
+              f"{GREEN}{speaker} : {transcribe_result.get('text', 'N/A')}{ENDC}")
         self.influx_client.write(self.bucket_name, record=transcription_record)
 
     def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],

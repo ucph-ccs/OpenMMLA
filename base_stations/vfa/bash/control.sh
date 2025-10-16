@@ -34,7 +34,7 @@ run_py_in_new_tab_gnome() {
 }
 
 # Run controller
-CMD="python3 $PROJECT_DIR/examples/control.py"
+CMD="python3 $PROJECT_DIR/examples/run_control.py"
 if [[ "$OSTYPE" == "darwin"* ]]; then
     run_py_in_new_tab_mac "$CMD"
 elif is_raspberry_pi; then

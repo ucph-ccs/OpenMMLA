@@ -15,6 +15,35 @@ from .enums import BLUE, ENDC
 from .input import get_function_synchronizer, get_base_type, get_synchronizer_mode
 
 
+def start_asr_synchronizer(project_dir: str, config_path: str, mode: str = 'full', dominant: bool = False, sp: bool = False):
+    """Start ASR Synchronizer with restart capability.
+    
+    Args:
+        project_dir: Path to the project directory
+        config_path: Path to the configuration file
+        mode: Operating mode ('recognize' or 'full')
+        dominant: Whether to select the dominant speaker
+        sp: Whether the audio bases do speech separation
+    """
+    # Restart loop - allows restarting the entire process
+    while True:
+        try:
+            synchronizer = ASRSynchronizer(project_dir=project_dir, config_path=config_path, 
+                                          mode=mode, dominant=dominant, sp=sp)
+            synchronizer.run()
+        except KeyboardInterrupt as e:
+            if "Operation cancelled" in str(e):
+                print("\n👋 Goodbye!")
+                break  # Exit completely when 'q' is pressed
+            else:
+                print("\n🔄 Restarting ASR Synchronizer...")
+                continue  # Restart on Ctrl+C during runtime
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            print("\n🔄 Restarting ASR Synchronizer...")
+            continue
+
+
 class ASRSynchronizer(Synchronizer):
     """ASRSynchronizer class for synchronizing speaker recognition results from ASRBases among the same session and
     uploading the segment result to InfluxDB."""
@@ -83,21 +112,24 @@ class ASRSynchronizer(Synchronizer):
     def run(self):
         """Run the ASR synchronizer."""
         print(f'\033]0;ASR Synchronizer for {self.base_type}\007')
-        func_map = {1: self._start_synchronization, 2: self._switch_mode}
+        func_map = {1: self._start_synchronization, 2: self._switch_mode, 3: self._reset}
 
         while True:
             try:
                 select_fun = get_function_synchronizer(self.mode)
-                if select_fun == 0:
-                    print("------------------------------------------------")
-                    clear_directory(os.path.join(self.temp_dir))
-                    self.logger.info("Exiting ASR synchronizer...")
-                    break
                 func_map.get(select_fun, lambda: print("Invalid option."))()
-            except (Exception, KeyboardInterrupt) as e:
-                self.logger.warning(
-                    f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
-                    exc_info=True)
+                input("\nPress Enter to continue...")
+            except KeyboardInterrupt as e:
+                if "Operation cancelled" in str(e):
+                    # 'q' was pressed - re-raise to be caught by outer restart loop
+                    raise
+                else:
+                    # Ctrl+C during runtime - log and continue
+                    self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
+                    input("\nPress Enter to continue...")
+            except Exception as e:
+                self.logger.warning(f"During running synchronizer, catch: {e}, Come back to the main menu.", exc_info=True)
+                input("\nPress Enter to continue...")
             finally:
                 self._clean_up()
 
@@ -145,6 +177,17 @@ class ASRSynchronizer(Synchronizer):
             self.buffer_expiry_time = int(self.config['Synchronizer']['result_expiry_time'])
 
         self.logger.info(f"Switched to {self.mode} mode.")
+
+    def _reset(self):
+        """Reset the ASR synchronizer.
+        
+        Reinitialize the ASR synchronizer by calling the constructor with the current configuration,
+        logs the reset status, and performs garbage collection.
+        """
+        self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
+                      dominant=self.dominant, sp=self.sp)
+        self.logger.info(f"ASR Synchronizer reset successfully.")
+        gc.collect()
 
     def _create_bucket_logger(self):
         self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')

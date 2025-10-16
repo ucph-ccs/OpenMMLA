@@ -13,7 +13,7 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('mode', str, 'full', 'operating mode', choices=['record', 'recognize', 'full'], shortname='-m')
+    add_arg('mode', str, 'record', 'operating mode', choices=['record', 'recognize', 'full'], shortname='-m')
     add_arg('store', bool, True, 'whether to store audio', shortname='-s')
     add_arg('vad', bool, True, 'whether to use VAD', shortname='-vad')
     add_arg('nr', bool, True, 'whether to use noise reduction', shortname='-nr')
@@ -24,26 +24,28 @@ def get_parser():
 
 
 def main():
+    """Main function."""
     parser = get_parser()
     args = parser.parse_args()
-
+    
     # Only import when actually running the logic
-    from openmmla.bases.asr import ASRBase
+    from openmmla.bases.asr import start_asr_base
     from openmmla.utils.args import print_arguments
 
     print_arguments(args)
-    asr_base = ASRBase(
+    
+    # Call the centralized start_asr_base function with restart capability
+    start_asr_base(
         project_dir=args.project_dir,
         config_path=args.config_path,
         mode=args.mode,
+        store=args.store,
         vad=args.vad,
         nr=args.nr,
         tr=args.tr,
         sp=args.sp,
-        store=args.store,
         hsr=args.hsr
     )
-    asr_base.run()
 
 
 if __name__ == "__main__":

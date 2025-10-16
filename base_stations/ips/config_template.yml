@@ -40,8 +40,8 @@ RTMP:
   # the actual stream application in your RTMP server.
   # =================================================================================
   # e.g., if your RTMP server is on uber-server.local machine and its IP address is 192.168.1.12, and it has two streams
-  # app named ips and vfa, and with camera m, a, b, c linked to ips, with camera e, f linked to vfa:
-  # video_streams: ['rtmp://uber-server.local/ips/a', 'rtmp://uber-server.local/ips/b', 'rtmp://uber-server.local/ips/c']
+  # app named ips and vfa, and with camera 1, 2, 3, 4 linked to ips, with camera 5, 6 linked to vfa:
+  # video_streams: ['rtmp://uber-server.local/ips/1', 'rtmp://uber-server.local/ips/2', 'rtmp://uber-server.local/ips/3', 'rtmp://uber-server.local/ips/4']
   video_streams: ['rtmp://<rtmp-example-server>/<stream-app-name>/<stream-name>', ..]
 
 # Database settings
