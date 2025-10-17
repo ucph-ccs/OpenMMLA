@@ -55,6 +55,9 @@ def format_wav(input_file: str, output_file: str = None, codec: str = "pcm_s16le
                         wav_file.getsampwidth() == expected_sample_width):
                     print(f"File {input_file} is already in the desired format. Skipping conversion.")
                     if output_file is not None:
+                        # Check if input and output are the same file
+                        if os.path.abspath(input_file) == os.path.abspath(output_file):
+                            return output_file
                         shutil.copy(input_file, output_file)
                         return output_file
                     return input_file

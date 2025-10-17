@@ -118,7 +118,6 @@ class ASRSynchronizer(Synchronizer):
             try:
                 select_fun = get_function_synchronizer(self.mode)
                 func_map.get(select_fun, lambda: print("Invalid option."))()
-                input("\nPress Enter to continue...")
             except KeyboardInterrupt as e:
                 if "Operation cancelled" in str(e):
                     # 'q' was pressed - re-raise to be caught by outer restart loop
@@ -126,10 +125,8 @@ class ASRSynchronizer(Synchronizer):
                 else:
                     # Ctrl+C during runtime - log and continue
                     self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
-                    input("\nPress Enter to continue...")
             except Exception as e:
                 self.logger.warning(f"During running synchronizer, catch: {e}, Come back to the main menu.", exc_info=True)
-                input("\nPress Enter to continue...")
             finally:
                 self._clean_up()
 

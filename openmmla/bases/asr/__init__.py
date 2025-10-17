@@ -14,5 +14,8 @@ def __getattr__(name):
     elif name == 'start_asr_synchronizer':
         from .asr_synchronizer import start_asr_synchronizer
         return start_asr_synchronizer
+    elif name == 'start_asr_post_analyzer':
+        from .asr_post_analyzer import start_asr_post_analyzer
+        return start_asr_post_analyzer
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")

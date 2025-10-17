@@ -11,11 +11,11 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket, get_number_of_bases, select_participant_descriptions
+from openmmla.utils.input import select_or_create_bucket, get_number_of_bases
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
-from .input import get_function_synchronizer
+from .input import get_function_synchronizer, select_participant_descriptions
 
 
 class VFASynchronizer(Synchronizer):

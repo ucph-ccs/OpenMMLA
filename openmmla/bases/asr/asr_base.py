@@ -23,14 +23,14 @@ from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket
+from openmmla.utils.input import select_or_create_bucket, get_id, get_interactive_files, get_rtmp_url
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
+from openmmla.utils.validation import validate_unix_timestamp
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN
-from .input import get_function_base, get_id, get_input_device_index, get_rtmp_url, get_base_mode, get_name, \
-    get_channel_selection, get_base_type, get_interactive_file
+from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection
 
 
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'record', store: bool = True,
@@ -219,18 +219,19 @@ class ASRBase(Base):
                     self.logger.info(f"Using project directory instead: {file_dir}")
             
             # use interactive file browser to select file and get initial_sync_time
-            file_path, initial_sync_time = get_interactive_file(file_dir)
+            audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
+            file_path, initial_sync_time = get_interactive_files(file_dir, file_extensions=audio_extensions, multiple=False, sync_input=True)
             if file_path is None:
                 raise ValueError("No file selected or file selection cancelled.")
             
             self.initial_sync_time = initial_sync_time
-            if not self._validate_unix_timestamp(self.initial_sync_time):
+            if not validate_unix_timestamp(self.initial_sync_time):
                 raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
             
             self.stream_kwargs['file_path'] = file_path
             self.logger.info(f"Using audio file: {file_path}")
             self.logger.info(f"Using initial_sync_time: {self.initial_sync_time}")
-
+        
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations.
 
@@ -291,7 +292,6 @@ class ASRBase(Base):
             try:
                 select_fun = get_function_base(self.id, self.mode)
                 func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
-                input("\nPress Enter to continue...")
             except KeyboardInterrupt as e:
                 if "Operation cancelled" in str(e):
                     # 'q' was pressed - re-raise to be caught by outer restart loop
@@ -299,10 +299,8 @@ class ASRBase(Base):
                 else:
                     # Ctrl+C during runtime - log and continue
                     self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
-                    input("\nPress Enter to continue...")
             except Exception as e:
                 self.logger.warning(f"During running the ASR base, catch: {e}, Come back to the main menu.", exc_info=True)
-                input("\nPress Enter to continue...")
             finally:
                 self._clean_up()
 
@@ -1177,23 +1175,3 @@ class ASRBase(Base):
             return f'{self.bucket_name}/asr/control'
         return None
     
-    @staticmethod
-    def _validate_unix_timestamp(timestamp: float) -> bool:
-        """Validate that a timestamp is a reasonable Unix timestamp.
-
-        Args:
-            timestamp: the timestamp to validate
-
-        Returns:
-            True if the timestamp is a valid Unix timestamp, False otherwise.
-        """
-        # unix timestamps should be positive and within reasonable bounds
-        # January 1, 1970 00:00:00 UTC = 0
-        # January 1, 2100 00:00:00 UTC = 4102444800
-        min_timestamp = 0
-        max_timestamp = 4102444800  # year 2100
-
-        if isinstance(timestamp, (int, float)) and min_timestamp < timestamp < max_timestamp:
-            return True
-        else:
-            return False

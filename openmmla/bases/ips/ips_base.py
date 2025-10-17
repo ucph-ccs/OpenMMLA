@@ -16,6 +16,7 @@ from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_bucket
 from openmmla.utils.logger import get_logger
+from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
 from .input import get_function_base
 from .track_utils import PoseStabilizer, NormalVectorStabilizer, TagRelationTracker
@@ -295,7 +296,7 @@ class IPSBase(Base):
             if 'initial_sync_time' not in base_config:
                 raise ValueError("initial_sync_time configuration is missing in the YAML file.")
             self.initial_sync_time = float(base_config['initial_sync_time'])
-            if not self._validate_unix_timestamp(self.initial_sync_time):
+            if not validate_unix_timestamp(self.initial_sync_time):
                 raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
             
             if 'file_dir' not in base_config:
@@ -312,7 +313,7 @@ class IPSBase(Base):
                 match = re.search(r'_(\d+(?:\.\d+)?)\.', filename)
                 if match:
                     file_start_time = float(match.group(1))
-                    if not self._validate_unix_timestamp(file_start_time):
+                    if not validate_unix_timestamp(file_start_time):
                         self.logger.warning(f"Skipping file {filename}: invalid file_start_time ({file_start_time})")
                         continue
                     if file_start_time > self.initial_sync_time:
@@ -584,23 +585,3 @@ class IPSBase(Base):
             return f'{self.bucket_name}/ips/control'
         return None
     
-    @staticmethod
-    def _validate_unix_timestamp(timestamp: float) -> bool:
-        """Validate that a timestamp is a reasonable Unix timestamp.
-
-        Args:
-            timestamp: the timestamp to validate
-
-        Returns:
-            True if the timestamp is a valid Unix timestamp, False otherwise.
-        """
-        # unix timestamps should be positive and within reasonable bounds
-        # January 1, 1970 00:00:00 UTC = 0
-        # January 1, 2100 00:00:00 UTC = 4102444800
-        min_timestamp = 0
-        max_timestamp = 4102444800  # year 2100
-
-        if isinstance(timestamp, (int, float)) and min_timestamp < timestamp < max_timestamp:
-            return True
-        else:
-            return False

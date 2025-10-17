@@ -20,9 +20,11 @@ from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.files import format_wav, segment_wav, crop_and_concatenate_wav
 from openmmla.utils.audio.properties import get_audio_properties
+from openmmla.utils.input import get_interactive_files, PURPLE, GREEN, GREY, ENDC
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
+from .input import get_function_post
 
 
 class ASRPostAnalyzer(Base):
@@ -48,9 +50,8 @@ class ASRPostAnalyzer(Base):
         self.nr = nr
         self.sp = sp
         self.tr = tr
-        self.custom_origin_dir = None
-        self.filenames = None
-        self.process_files: list[str] = []
+        self.selected_files: list[str] = []
+        self.selected_speaker_files: list[str] = []
 
         self.segment_duration: int = 0
         self.threshold: float = 0.0
@@ -78,60 +79,6 @@ class ASRPostAnalyzer(Base):
         self._setup_yaml()
         self._setup_directories()
 
-        # Use custom origin directory if provided
-        if self.custom_origin_dir:
-            if not os.path.isabs(self.custom_origin_dir):
-                custom_origin_dir = os.path.join(os.getcwd(), self.custom_origin_dir)
-            else:
-                custom_origin_dir = self.custom_origin_dir
-
-            if os.path.isdir(custom_origin_dir):
-                self.origin_dir = custom_origin_dir
-                self.logger.info(f"Using custom origin directory: {self.origin_dir}")
-            else:
-                self.logger.warning(f"Custom origin directory {self.custom_origin_dir} is not a valid directory. "
-                                    f"Using default origin directory: {self.origin_dir}")
-
-        # Check if the origin directory exists
-        if not os.path.exists(self.origin_dir):
-            os.makedirs(self.origin_dir)
-            self.logger.warning(f"Created empty origin directory: {self.origin_dir}")
-            raise ValueError(f"Origin directory {self.origin_dir} was empty. "
-                             f"Please add audio files to process.")
-
-        # Get list of audio files to process
-        origin_files = [f for f in os.listdir(self.origin_dir) if
-                        not f.startswith('.') and not f.endswith('.DS_Store') and os.path.isfile(
-                            os.path.join(self.origin_dir, f)) and
-                        f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg', '.m4a'))]
-
-        # Process specific files if filenames is provided, otherwise process all files in the origin directory
-        if self.filenames:
-            # Handle both string (comma-separated) and list formats
-            if isinstance(self.filenames, str):
-                specified_files = [f.strip() for f in self.filenames.split(',') if f.strip()]
-            elif isinstance(self.filenames, list):
-                specified_files = [str(f).strip() for f in self.filenames if str(f).strip()]
-            else:
-                specified_files = []
-                
-            self.process_files = [f for f in specified_files if os.path.isfile(os.path.join(self.origin_dir, f))]
-
-            if not self.process_files:
-                self.logger.warning(f"None of the specified files {specified_files} were found in {self.origin_dir}")
-                self.logger.info(f"Available files: {origin_files}")
-                raise ValueError(f"None of the specified files were found in {self.origin_dir}. "
-                                 f"Please check the filenames and try again.")
-        else:
-            self.process_files = origin_files
-
-        if not self.process_files:
-            raise ValueError(
-                f"No audio files found in {self.origin_dir}. "
-                f"Please add audio files to process or specify valid filenames.")
-
-        self._setup_objects()
-
     def _setup_yaml(self):
         """Load and assign configuration parameters from the YAML configuration file."""
         post_analyzer_config = self.config['PostAnalyzer']
@@ -141,10 +88,6 @@ class ASRPostAnalyzer(Base):
         self.segment_duration = int(post_analyzer_config['segment_duration'])
         self.threshold = float(post_analyzer_config['threshold'])
         self.keep_threshold = float(post_analyzer_config['keep_threshold'])
-        
-        # Load path configurations from config file
-        self.custom_origin_dir = post_analyzer_config.get('custom_origin_dir')
-        self.filenames = post_analyzer_config.get('filenames')
         
         # Load server URLs
         self.speech_transcriber_url = resolve_url(asr_server_config['speech_transcriber'])
@@ -170,21 +113,102 @@ class ASRPostAnalyzer(Base):
 
     def _setup_objects(self):
         """Initialize the AudioRecognizer object."""
-        first_file = os.path.splitext(self.process_files[0])[0]
-        first_audio_db = os.path.join(self.runtime_dir, f'session_{first_file}', 'profiles')
-        os.makedirs(first_audio_db, exist_ok=True)
-        self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=first_audio_db)
+        if self.selected_files:
+            first_file_name = os.path.splitext(os.path.basename(self.selected_files[0]))[0]
+            audio_db = os.path.join(self.runtime_dir, f'session_{first_file_name}', 'profiles')
+            os.makedirs(audio_db, exist_ok=True)
+            self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=audio_db)
 
     def run(self):
-        """Process all specified files."""
-        self._process_audio_files()
+        """Run the ASR Post Analyzer with interactive menu."""
+        print('\033]0;ASR Post Analyzer\007')
+        func_map = {1: self._select_speaker_profiles, 2: self._select_files, 3: self._start_processing}
 
-    def _process_audio_files(self):
-        """Process each audio file in the list of files to process."""
-        for audio_filename in tqdm(self.process_files, desc='Processing audio files', unit='session'):
-            self._create_bucket_logger(audio_filename)
-            self.logger.info(f"Processing file: {audio_filename}")
-            self._process_single_audio_file(audio_filename)
+        while True:
+            try:
+                select_fun = get_function_post(self.selected_speaker_files, self.selected_files)
+                func_map.get(select_fun, lambda: print("Invalid option."))()
+            except KeyboardInterrupt as e:
+                if "Operation cancelled" in str(e):
+                    # 'q' was pressed - re-raise to be caught by outer restart loop
+                    raise
+                else:
+                    # Ctrl+C during runtime - log and continue
+                    self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
+            except Exception as e:
+                self.logger.warning(f"During running the ASR post analyzer, catch: {e}, Come back to the main menu.", exc_info=True)
+            finally:
+                self._clean_up()
+
+    def _clean_up(self):
+        """Clean up runtime variables and free memory."""
+        pass
+
+    def _select_speaker_profiles(self):
+        """Select speaker profile files."""
+        print(f"\n{PURPLE}🎤 Select Speaker Profile Files{ENDC}")
+        print(f"{GREY}Choose speaker audio files for recognition (e.g., speaker1.wav, speaker2.wav){ENDC}")
+        
+        try:
+            audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
+            selected_speaker_files = get_interactive_files(self.project_dir, file_extensions=audio_extensions)
+            if not selected_speaker_files:
+                self.logger.warning("No speaker files selected.")
+                return
+            
+            self.selected_speaker_files = selected_speaker_files
+
+            # validate speaker files are in proper audio format
+            supported_formats = ('.wav', '.mp3', '.flac', '.ogg', '.m4a')
+            for speaker_file in self.selected_speaker_files:
+                if not speaker_file.lower().endswith(supported_formats):
+                    self.selected_speaker_files.remove(speaker_file)
+            self.logger.info(f"Selected {len(selected_speaker_files)} speaker files: {selected_speaker_files}")
+
+        except Exception as e:
+            self.logger.error(f"Error selecting speaker profiles: {e}")
+
+    def _select_files(self):
+        """Select audio files to process."""
+        print(f"\n{PURPLE}📁 Select Audio Files{ENDC}")
+        print(f"{GREY}Choose audio files to analyze (multiple selection supported){ENDC}")
+        
+        try:
+            audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
+            selected_files = get_interactive_files(self.project_dir, file_extensions=audio_extensions)
+            if not selected_files:
+                self.logger.warning("No files selected.")
+                return
+            
+            self.selected_files = selected_files
+            self.logger.info(f"Selected {len(selected_files)} files: {selected_files}")
+            # Initialize recognizer
+            self._setup_objects()
+                
+        except Exception as e:
+            self.logger.error(f"Error selecting files: {e}")
+
+    def _start_processing(self):
+        """Start processing the selected files."""
+        if not self.selected_speaker_files:
+            self.logger.warning("Please select speaker profile files first.")
+            return
+        
+        if not self.selected_files:
+            self.logger.warning("Please select audio files first.")
+            return
+        
+        self.logger.info("Starting ASR Post Analysis...")
+        self.logger.info(f"Speaker profile files: {self.selected_speaker_files}")
+        self.logger.info(f"Files to process: {self.selected_files}")
+        
+        # Process each selected file
+        for audio_file in tqdm(self.selected_files, desc='Processing audio files', unit='session'):
+            filename = os.path.basename(audio_file)
+            self._create_bucket_logger(filename)
+            self.logger.info(f"Processing file: {audio_file}")
+            self._process_single_audio_file(audio_file)
+
 
     def _create_bucket_logger(self, filename: str):
         """Create a logger for a single audio file.
@@ -198,30 +222,14 @@ class ASRPostAnalyzer(Base):
                                  os.path.join(self.file_logger_dir,
                                               f'asr_post_{filename}.log'))
 
-    def _process_single_audio_file(self, filename: str):
+    def _process_single_audio_file(self, audio_file_path: str):
         """Process a single audio file.
 
         Args:
-            filename: the name of the audio file to process
+            audio_file_path: the full path to the audio file to process
         """
-        self.filename = filename
-        self.session_name = os.path.splitext(filename)[0]
-
-        speakers_corpus_dir = os.path.join(self.origin_dir, self.session_name)
-        if not os.path.exists(speakers_corpus_dir):
-            os.makedirs(speakers_corpus_dir)
-            self.logger.error(f"Speaker corpus directory not found: {speakers_corpus_dir}")
-            raise ValueError(
-                f"Speaker corpus directory not found: {speakers_corpus_dir}\n"
-                f"Please create this directory and add your raw speaker audio files for {filename}\n"
-                f"Each speaker should have their own audio file named <speaker_name>.wav")
-
-        if not os.listdir(speakers_corpus_dir):
-            self.logger.error(f"Speaker corpus directory is empty: {speakers_corpus_dir}")
-            raise ValueError(
-                f"Speaker corpus directory is empty: {speakers_corpus_dir}\n"
-                f"Please add your raw speaker audio files for {filename}")
-
+        self.filename = os.path.basename(audio_file_path)
+        self.session_name = os.path.splitext(self.filename)[0]
         self.session_logs_dir = os.path.join(self.logs_dir, f'session_{self.session_name}')
         self.session_runtime_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}')
         self.session_segments_dir = os.path.join(self.session_runtime_dir, 'segments')
@@ -236,30 +244,29 @@ class ASRPostAnalyzer(Base):
         self.recognizer.reset_db(self.session_audio_db)
 
         # register speakers with NR and VAD enhanced
-        self._register_speakers(speakers_corpus_dir, enhance=True)
+        self._register_speakers(self.selected_speaker_files, enhance=True)
 
-        # format the origin audio file, segment it, and process the segments
-        self._format_origin_file()
+        # format the audio file, segment it, and process the segments
+        self._format_runtime_audio(audio_file_path)
         self._segment_formatted_file()
         if self.sp:
             self._process_segments_sp()
         else:
             self._process_segments()
 
-    def _register_speakers(self, speakers_corpus_dir: str, enhance: bool = True):
+    def _register_speakers(self, speaker_files: list[str], enhance: bool = True):
         """Register speakers' raw audio files to the recognizer.
 
         Args:
-            speakers_corpus_dir: the path of the directory containing the raw audio files of the speakers
+            speaker_files: list of paths to the raw audio files of the speakers
             enhance: whether to apply NR and VAD to the audio files or not
         """
-        speaker_corpus = [f for f in os.listdir(speakers_corpus_dir) if
-                          not f.startswith('.') and not f.endswith('.DS_Store')]
-
-        for speaker_raw_filename in speaker_corpus:
-            speaker_name = speaker_raw_filename.split('.')[0]
-            speaker_raw_filepath = os.path.join(speakers_corpus_dir, speaker_raw_filename)
-            format_wav(speaker_raw_filepath)
+        for speaker_raw_filepath in speaker_files:
+            speaker_raw_filename = os.path.basename(speaker_raw_filepath)
+            speaker_name = os.path.splitext(speaker_raw_filename)[0]
+            # the foramtted path should be in the same directory as the raw file with the same name but different extension
+            formatted_speaker_filepath = os.path.join(os.path.dirname(speaker_raw_filepath), f'{speaker_name}.wav')
+            format_wav(speaker_raw_filepath, formatted_speaker_filepath )
 
             speaker_audio_db = os.path.join(self.recognizer.audio_db, speaker_name)
             if os.path.exists(speaker_audio_db):
@@ -268,18 +275,17 @@ class ASRPostAnalyzer(Base):
             if enhance:
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
                     temp_audio_path = temp_file.name
-                shutil.copy2(speaker_raw_filepath, temp_audio_path)
+                shutil.copy2(formatted_speaker_filepath, temp_audio_path)
                 self._audio_preprocessing(temp_audio_path, inplace=1)
                 self.recognizer.register(temp_audio_path, speaker_name)
                 os.unlink(temp_audio_path)
             else:
-                self.recognizer.register(speaker_raw_filepath, speaker_name)
+                self.recognizer.register(formatted_speaker_filepath, speaker_name)
 
-    def _format_origin_file(self):
-        """Format the origin audio file to 16kHz, 16-bit PCM WAV format."""
-        origin_path = os.path.join(self.origin_dir, self.filename)
+    def _format_runtime_audio(self, audio_file_path: str):
+        """Format the audio file to 16kHz, 16-bit PCM WAV format."""
         formatted_audio_path = os.path.join(self.session_runtime_dir, f'{self.session_name}.wav')
-        format_wav(origin_path, formatted_audio_path)
+        format_wav(audio_file_path, formatted_audio_path)
         properties = get_audio_properties(formatted_audio_path)
         for key, value in properties.items():
             print(f'{key}: {value}')
@@ -838,3 +844,24 @@ class ASRPostAnalyzer(Base):
         """
         with sf.SoundFile(audio_path) as f:
             return len(f) / f.samplerate
+
+
+def start_asr_post_analyzer(project_dir: str, config_path: str, vad: bool = True, nr: bool = True, 
+                           sp: bool = False, tr: bool = True):
+    """Start ASR Post Analyzer with restart capability."""
+    while True:
+        try:
+            post_analyzer = ASRPostAnalyzer(project_dir=project_dir, config_path=config_path,
+                                           vad=vad, nr=nr, sp=sp, tr=tr)
+            post_analyzer.run()
+        except KeyboardInterrupt as e:
+            if "Operation cancelled" in str(e):
+                print("\n👋 Goodbye!")
+                break  # Exit completely when 'q' is pressed
+            else:
+                print("\n🔄 Restarting ASR Post Analyzer...")
+                continue  # Restart on Ctrl+C during runtime
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            print("\n🔄 Restarting ASR Post Analyzer...")
+            continue
