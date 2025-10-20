@@ -17,6 +17,7 @@ from openmmla.bases.base import Base
 from openmmla.services.asr.requests import request_speech_transcription, request_speech_separation, \
     request_speech_enhancement, request_voice_activity_detection
 from openmmla.streams.audio_stream import AudioStream, write_frame_to_wav
+from openmmla.utils.audio.files import format_wav
 from openmmla.utils.audio.auga import normalize_decibel, apply_gain
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
@@ -27,10 +28,9 @@ from openmmla.utils.input import select_or_create_bucket, get_id, get_interactiv
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
-from openmmla.utils.validation import validate_unix_timestamp
 from .audio_recognizer import AudioRecognizer
-from .enums import BLUE, ENDC, GREEN
-from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection
+from .enums import BLUE, ENDC, GREEN, PURPLE, GREY
+from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion
 
 
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'record', store: bool = True,
@@ -48,14 +48,14 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'record', sto
         sp: Whether to do speech separation for overlapped segments
         hsr: Whether to apply Half-Scaled Recognition at speaker boundaries
     """
-    # Restart loop - allows restarting the entire process
+    # restart loop - allows restarting the entire process
     while True:
         try:
             asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode, 
                               vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr)
             asr_base.run()
         except KeyboardInterrupt as e:
-            if "Operation cancelled" in str(e):
+            if "Exit" in str(e):
                 print("\n👋 Goodbye!")
                 break  # Exit completely when 'q' is pressed
             else:
@@ -89,7 +89,7 @@ class ASRBase(Base):
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
-        # ASRBase specific parameters
+        # base specific parameters
         self.mode = mode
         self.store = store
         self.vad = vad
@@ -98,7 +98,7 @@ class ASRBase(Base):
         self.sp = sp
         self.hsr = hsr
 
-        # Runtime attributes
+        # runtime attributes
         self.bucket_name = None
         self.last_speaker = None
         self.audio_dir = None
@@ -107,6 +107,7 @@ class ASRBase(Base):
         self.speaker_frames_dict = None
         self.stop_event = threading.Event()
         self.threads = []
+        self.selected_speakers = None
 
         self.base_type = get_base_type(self.config)
         self.id = get_id()
@@ -169,7 +170,7 @@ class ASRBase(Base):
             available_indexes = []
             device_info_list = []
 
-            # Show all available devices regardless of channel count
+            # show all available devices regardless of channel count
             for i in range(0, num_devices):
                 device_info = p.get_device_info_by_host_api_device_index(0, i)
                 max_input_channels = device_info.get('maxInputChannels')
@@ -181,11 +182,11 @@ class ASRBase(Base):
             self.stream_kwargs['input_device_index'] = self.input_device_index
             device_info = p.get_device_info_by_host_api_device_index(0, self.input_device_index)
             
-            # Update channels based on selected device capabilities
+            # update channels based on selected device capabilities
             device_channels = device_info.get('maxInputChannels', 1)
             self.stream_kwargs['channels'] = device_channels
             
-            # Allow channel selection if device has multiple channels
+            # allow channel selection if device has multiple channels
             self.stream_kwargs['channel_select'] = get_channel_selection(device_info) if device_channels > 1 else None
             self.logger.info(f"Selected device: {device_info.get('name')} with {device_channels} channels")
             self.logger.info(f"Selected channel option: {self.stream_kwargs['channel_select']}")
@@ -197,14 +198,14 @@ class ASRBase(Base):
                 raise ValueError("RTMP configuration is missing in the YAML file.")
             if 'audio_streams' not in self.config['RTMP']:
                 raise ValueError("RTMP: audio_streams configuration is missing in the YAML file.")
-            print(self.config['RTMP']['audio_streams'])
             self.url = get_rtmp_url(self.config['RTMP']['audio_streams'])
             self.stream_kwargs['url'] = self.url
+            self.logger.info(f"Using RTMP URL: {self.url}")
 
         # set file_path for 'file'
         elif self.source == 'file':
             if 'file_dir' not in base_config:
-                # Default to project directory if not specified
+                # default to project directory if not specified
                 file_dir = self.project_dir
                 self.logger.info(f"No file_dir specified in config, using project directory: {file_dir}")
             else:
@@ -213,7 +214,7 @@ class ASRBase(Base):
                     file_dir = os.path.join(self.project_dir, file_dir)
                 
                 if not os.path.exists(file_dir):
-                    # Fallback to project directory if specified directory doesn't exist
+                    # fallback to project directory if specified directory doesn't exist
                     self.logger.warning(f"Specified file directory does not exist: {file_dir}")
                     file_dir = self.project_dir
                     self.logger.info(f"Using project directory instead: {file_dir}")
@@ -221,12 +222,7 @@ class ASRBase(Base):
             # use interactive file browser to select file and get initial_sync_time
             audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
             file_path, initial_sync_time = get_interactive_files(file_dir, file_extensions=audio_extensions, multiple=False, sync_input=True)
-            if file_path is None:
-                raise ValueError("No file selected or file selection cancelled.")
-            
             self.initial_sync_time = initial_sync_time
-            if not validate_unix_timestamp(self.initial_sync_time):
-                raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
             
             self.stream_kwargs['file_path'] = file_path
             self.logger.info(f"Using audio file: {file_path}")
@@ -242,13 +238,11 @@ class ASRBase(Base):
         self.runtime_dir = os.path.join(self.project_dir, 'real-time', 'runtime')
         self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
         self.profiles_dir = os.path.join(self.project_dir, 'real-time', 'profiles')
-        self.audio_db = os.path.join(self.profiles_dir, f'{self.base_type}_{self.id}')
 
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.runtime_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
         os.makedirs(self.profiles_dir, exist_ok=True)
-        os.makedirs(self.audio_db, exist_ok=True)
 
     def _setup_objects(self):
         """Initialize external service clients and internal processing objects.
@@ -260,7 +254,7 @@ class ASRBase(Base):
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.warm_up_resampler()
-        self.audio_recognizer = AudioRecognizer(config_path=self.config_path, audio_db=self.audio_db, store=self.store)
+        self.audio_recognizer = AudioRecognizer(config_path=self.config_path, profiles_dir=self.profiles_dir, store=self.store, selected_speakers=self.selected_speakers)
         self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
 
     def _clean_up(self):
@@ -287,34 +281,106 @@ class ASRBase(Base):
 
         Continuously prompts the user for input until termination.
         """
-        func_map = {1: self._start_registration, 2: self._start_recognition, 3: self._reset, 4: self._switch_mode}
+        func_map = {1: self._edit_speakers, 2: self._start_recognition, 3: self._reset, 4: self._switch_mode}
         while True:
             try:
                 select_fun = get_function_base(self.id, self.mode)
                 func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
             except KeyboardInterrupt as e:
-                if "Operation cancelled" in str(e):
-                    # 'q' was pressed - re-raise to be caught by outer restart loop
+                if "Exit" in str(e):
+                    # 'q' was pressed in top-level menu - re-raise to be caught by outer restart loop
                     raise
                 else:
-                    # Ctrl+C during runtime - log and continue
-                    self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
+                    # ctrl+c during runtime or 'q' in lower-level menu - log and continue
+                    self.logger.warning(f"During running the ASR base, catch: {e}, Come back to main menu.", exc_info=True)
             except Exception as e:
                 self.logger.warning(f"During running the ASR base, catch: {e}, Come back to the main menu.", exc_info=True)
             finally:
                 self._clean_up()
 
-    def _start_registration(self):
-        """Start the speaker profile registration process.
-
-        Prompt the user to record a segment sample, applies gain and preprocessing, and then registers the speaker
-        profile using the audio recognizer. If the recorded audio is too short or no name is provided, the registration
-        is skipped.
-        """
+    def _edit_speakers(self):
+        """Edit speaker profiles - register, select/deselect, or delete speakers."""
         print("------------------------------------------------")
+        
+        # get available speakers from profiles directory
+        available_speakers = []
+        if os.path.exists(self.profiles_dir):
+            available_speakers = [d for d in os.listdir(self.profiles_dir) 
+                                if os.path.isdir(os.path.join(self.profiles_dir, d)) and not d.startswith('.')]
+        
+        # get currently selected speakers (default to all if None)
+        if self.selected_speakers is None:
+            self.selected_speakers = available_speakers.copy()
+        
+        while True:
+            try:
+                option = get_edit_speaker_options(available_speakers, self.selected_speakers)
+                
+                if option == 0:  # Register from stream
+                    self._register_speaker_from_stream()
+                    # refresh available speakers
+                    available_speakers = []
+                    if os.path.exists(self.profiles_dir):
+                        available_speakers = [d for d in os.listdir(self.profiles_dir) 
+                                            if os.path.isdir(os.path.join(self.profiles_dir, d)) and not d.startswith('.')]
+                    # add new speaker to selected list if not already there
+                    if available_speakers and available_speakers[-1] not in self.selected_speakers:
+                        self.selected_speakers.append(available_speakers[-1])
+                
+                elif option == 1:  # Register from files
+                    self._register_speaker_from_files()
+                    # refresh available speakers
+                    available_speakers = []
+                    if os.path.exists(self.profiles_dir):
+                        available_speakers = [d for d in os.listdir(self.profiles_dir) 
+                                            if os.path.isdir(os.path.join(self.profiles_dir, d)) and not d.startswith('.')]
+                    # add new speaker to selected list if not already there
+                    if available_speakers and available_speakers[-1] not in self.selected_speakers:
+                        self.selected_speakers.append(available_speakers[-1])
+                
+                elif option == 2:  # Select/deselect speakers
+                    if not available_speakers:
+                        print(f"{GREY}No speakers available for selection.{ENDC}")
+                        continue
+                    self.selected_speakers = get_speaker_selection(available_speakers, self.selected_speakers)
+                    # update recognizer with new selection
+                    self.audio_recognizer.reset_profiles(self.profiles_dir, self.selected_speakers)
+                
+                elif option == 3:  # Delete speaker
+                    if not available_speakers:
+                        print(f"{GREY}No speakers available for deletion.{ENDC}")
+                        continue
+                    speakers_to_delete = get_speaker_deletion(available_speakers)
+                    if speakers_to_delete:
+                        # confirm deletion
+                        if len(speakers_to_delete) == 1:
+                            confirm_msg = f"Are you sure you want to delete speaker '{speakers_to_delete[0]}'? (y/N): "
+                        else:
+                            speakers_list = "', '".join(speakers_to_delete)
+                            confirm_msg = f"Are you sure you want to delete speakers '{speakers_list}'? (y/N): "
+                        
+                        confirm = input(confirm_msg).strip().lower()
+                        if confirm == 'y':
+                            for speaker_to_delete in speakers_to_delete:
+                                self.audio_recognizer.delete_speaker_profile(speaker_to_delete)
+                                # remove from available and selected lists
+                                if speaker_to_delete in available_speakers:
+                                    available_speakers.remove(speaker_to_delete)
+                                if speaker_to_delete in self.selected_speakers:
+                                    self.selected_speakers.remove(speaker_to_delete)
+                                print(f"{GREEN}Speaker '{speaker_to_delete}' deleted successfully.{ENDC}")
+                        else:
+                            print("Deletion cancelled.")
+                
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                self.logger.warning(f"Error in speaker editing: {e}")
+
+    def _register_speaker_from_stream(self):
+        """Register a new speaker profile from audio stream."""
         if self.source == 'file':
-            self.logger.info("Please create a folder named with the <speaker_name> under real-time/profiles/<base_folder>"
-                             " and place speaker's wav file inside and reset the ASR base.")
+            self.logger.info("Cannot register from stream when source is 'file'. Please use 'Register from Files' option.")
             return
 
         output_path = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_register.wav')
@@ -340,7 +406,72 @@ class ASRBase(Base):
             return
 
         self.audio_recognizer.register(audio_path, name)
-        self.logger.info(f"Speaker '{name}' has been successfully registered!")
+        self.logger.info(f"Speaker '{name}' has been successfully registered from stream!")
+
+    def _register_speaker_from_files(self):
+        """Register a new speaker profile from reference audio files."""
+        print(f"\n{PURPLE}📁 Select Reference Audio Files{ENDC}")
+        print(f"{GREY}Choose reference audio files for speaker registration (multiple selection supported){ENDC}")
+        
+        try:
+            # use interactive file browser to select reference files
+            audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
+            reference_files = get_interactive_files(self.project_dir, file_extensions=audio_extensions, multiple=True, sync_input=False)
+            
+            if not reference_files:
+                self.logger.info("No files selected, registration cancelled.")
+                return
+            
+            # get speaker name
+            name = get_name()
+            if name == '':
+                self.logger.info('Empty name, skip the registering process.')
+                return
+            
+            # process each reference file
+            processed_files = []
+            for i, file_path in enumerate(reference_files):
+                try:
+                    temp_file = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_ref_{i}.wav')
+                    formatted_file = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_formatted_{i}.wav')
+                    format_wav(file_path, formatted_file)
+                    
+                    # apply gain and preprocessing
+                    processed_path = self._audio_preprocessing(formatted_file, 1)
+                    
+                    if processed_path is None:
+                        self.logger.warning(f"Preprocessing failed for {os.path.basename(file_path)}, skipping.")
+                        continue
+                    
+                    # copy processed file to temp location
+                    shutil.copy2(processed_path, temp_file)
+                    processed_files.append(temp_file)
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error processing {os.path.basename(file_path)}: {e}")
+                    continue
+            
+            if not processed_files:
+                self.logger.error("No files could be processed successfully.")
+                return
+            
+            # register speaker using the first processed file (AudioRecognizer will handle multiple files internally)
+            # for now, we'll register each file separately - this could be enhanced to batch process
+            for i, processed_file in enumerate(processed_files):
+                try:
+                    if i == 0:
+                        # first file - register as new speaker
+                        self.audio_recognizer.register(processed_file, name)
+                    else:
+                        # additional files - add to existing speaker profile
+                        self.audio_recognizer.register(processed_file, name)
+                except Exception as e:
+                    self.logger.warning(f"Error registering file {i+1}: {e}")
+            
+            self.logger.info(f"Speaker '{name}' has been successfully registered from {len(processed_files)} reference files!")
+            
+        except Exception as e:
+            self.logger.error(f"Error in file-based registration: {e}")
 
     def _start_recognition(self, bucket_name: str | None = None):
         """Start the real-time voice recognition process.
@@ -355,14 +486,33 @@ class ASRBase(Base):
         Args:
             bucket_name: The bucket name for storing recognition results. If not provided, it is obtained interactively.
         """
-        if self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
+        # check if any speakers are selected for recognition
+        if not self.selected_speakers or len(self.selected_speakers) == 0:
+            print("------------------------------------------------")
+            if self.mode in ['full', 'recognize']:
+                self.logger.info("No speakers selected for recognition. Please register and select speaker profiles or switch to 'record' mode.")
+                return
+            elif self.mode == 'record':
+                self.logger.warning("No speakers selected. Recording will continue without speaker recognition.")
+        elif self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.info("Audio database is empty, please register speaker profiles or either switch the mode to 'record'.")
             return
         elif self.mode == 'record' and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.warning("Audio database is empty. Recording will continue without speaker recognition.")
-
+        
+        # show selected speakers and ask for confirmation
+        print("------------------------------------------------")
+        print(f"{PURPLE}Selected speakers for recognition:{ENDC}")
+        if self.selected_speakers and len(self.selected_speakers) > 0:
+            for i, speaker in enumerate(self.selected_speakers, 1):
+                print(f"  {i}. {speaker}")
+        else:
+            print(f"  {GREY}No speakers selected{ENDC}")
+        
+        print(f"\n{GREEN}Total speakers: {len(self.selected_speakers) if self.selected_speakers else 0}{ENDC}")
+        
         # select or create bucket
         self.bucket_name = select_or_create_bucket(self.influx_client) if not bucket_name else bucket_name
         self._create_bucket_logger()
@@ -432,7 +582,12 @@ class ASRBase(Base):
 
         self.logger.info(f"Creating snapshot of speaker profiles for bucket '{self.bucket_name}'")
         try:
-            shutil.copytree(self.audio_db, snapshot_dir, dirs_exist_ok=True)
+            # copy only selected speaker profiles
+            for speaker_name in self.selected_speakers:
+                speaker_source_dir = os.path.join(self.profiles_dir, speaker_name)
+                speaker_dest_dir = os.path.join(snapshot_dir, speaker_name)
+                if os.path.exists(speaker_source_dir):
+                    shutil.copytree(speaker_source_dir, speaker_dest_dir)
         except Exception as e:
             self.logger.warning(f"Error creating speaker profile snapshot: {e}")
 
@@ -450,7 +605,7 @@ class ASRBase(Base):
         else:
             self.logger.info("All threads stopped properly.")
 
-        # Process any remaining audio chunks before cleanup
+        # process any remaining audio chunks before cleanup
         self._process_final_chunks()
         
         current_bucket = self.bucket_name  # assign bucket name before cleaning up
@@ -467,7 +622,7 @@ class ASRBase(Base):
         """
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
                       vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store, hsr=self.hsr)
-        self.logger.info(f"Audio DB reset to {self.audio_db}")
+        self.logger.info(f"Profiles directory reset to {self.profiles_dir}")
         gc.collect()
 
     def _switch_mode(self):
@@ -485,7 +640,7 @@ class ASRBase(Base):
         Raises:
             RecordingError: If an error occurs during the recording process.
         """
-        # Handle file source differently - files need sequential time-based reading
+        # handle file source differently - files need sequential time-based reading
         if self.source == 'file':
             self._continuous_file_reading()
             return
@@ -590,11 +745,11 @@ class ASRBase(Base):
                 recognize_start_time = time.time()
                 write_bytes_to_wav(segment_audio_path, frames)  # default: 16000 Hz, 16-bit, mono
 
-                # Audio pre-processing
+                # audio pre-processing
                 apply_gain(segment_audio_path, self.gain)
                 processed_audio_path = self._audio_preprocessing(segment_audio_path, inplace=1)
 
-                # Evaluate energy levels for quality check
+                # evaluate energy levels for quality check
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
                 if processed_audio_path and rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
                     speaker = 'unknown'
@@ -657,7 +812,7 @@ class ASRBase(Base):
                 recognize_start_time = time.time()
                 write_bytes_to_wav(segment_audio_path, frames)
 
-                # Audio pre-processing
+                # audio pre-processing
                 apply_gain(segment_audio_path, self.gain)
                 processed_audio_path = self._audio_preprocessing(segment_audio_path, inplace=0)
 
@@ -672,13 +827,13 @@ class ASRBase(Base):
                 if processed_audio_path and rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
                     sp_result = self._separate_speech(segment_audio_path)
 
-                    # Recognize separated audio streams
+                    # recognize separated audio streams
                     for i, signal in enumerate(sp_result):
                         save_file = f'{segment_audio_path[:-4]}_spk{i}.wav'
                         sf.write(save_file, np.frombuffer(signal, dtype=np.int16), 8000)
                         processed_save_file = self._apply_vad(save_file, inplace=1)
 
-                        # Skip file if VAD fails, removing it immediately.
+                        # skip file if vad fails, removing it immediately.
                         if not processed_save_file:
                             os.remove(save_file)
                             continue
@@ -687,7 +842,7 @@ class ASRBase(Base):
                         temp_name, temp_similarity = self.audio_recognizer.recognize(save_file,
                                                                                      update_threshold=self.update_threshold)
 
-                        # If a better result is found, update best info and remove any old file.
+                        # if a better result is found, update best info and remove any old file.
                         if temp_similarity > similarity:
                             similarity = temp_similarity
                             duration = calculate_audio_duration(save_file)
@@ -807,7 +962,7 @@ class ASRBase(Base):
                 chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(self.last_speaker)
                 chunk_end_time = segment_start_time
 
-                # Perform half-scaled recognition on speaker turn border if hsr is enabled
+                # perform half-scaled recognition on speaker turn border if hsr is enabled
                 if chunk_frames and self.hsr:
                     self.logger.info(
                         f"Performing half-scaled recognition on speaker turn border for {self.last_speaker} and {speaker}")
@@ -845,7 +1000,7 @@ class ASRBase(Base):
                     if self.last_speaker not in ['silent', 'unknown']:
                         self._enqueue_transcription(chunk_frames, self.last_speaker, chunk_start_time, chunk_end_time)
 
-                    # Optionally store the audio chunk locally
+                    # optionally store the audio chunk locally
                     if self.store:
                         chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
                                                         f'{self.last_speaker}_chunk_{chunk_start_time}.wav')
@@ -924,18 +1079,18 @@ class ASRBase(Base):
             
         fr = 8000 if self.sp else 16000
         
-        # Process each remaining speaker's audio
+        # process each remaining speaker's audio
         for speaker, (chunk_start_time, chunk_frames) in self.speaker_frames_dict.items():
             if not chunk_frames:
                 continue
                 
-            # Calculate end time based on audio duration
+            # calculate end time based on audio duration
             chunk_duration = len(chunk_frames) / (fr * 2)  # Assuming 16-bit audio (2 bytes per sample)
             chunk_end_time = chunk_start_time + chunk_duration
             
             self.logger.info(f"Processing final chunk for speaker {speaker} from {chunk_start_time:.2f}s to {chunk_end_time:.2f}s")
             
-            # Process transcription directly since transcription thread has stopped
+            # process transcription directly since transcription thread has stopped
             if self.tr and speaker not in ['silent', 'unknown']:
                 try:
                     transcribe_result = self._transcribe(chunk_frames, fr)
@@ -944,7 +1099,7 @@ class ASRBase(Base):
                 except Exception as e:
                     self.logger.warning(f"Failed to transcribe final chunk for speaker {speaker}: {e}")
             
-            # Store the audio chunk locally if enabled
+            # store the audio chunk locally if enabled
             if self.store:
                 chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
                                                 f'{speaker}_chunk_{chunk_start_time}.wav')

@@ -61,7 +61,7 @@ Base_[Your_Device_Name]:
   rms_peak_threshold:           # Peak amplitude value threshold for VAD preprocessing
   update_threshold:             # Similarity threshold for incrementally updating speaker profile
   gain:                         # Volume gain multiplier in decibels for audio preprocessing
-  score_amplified:              # Whether to amplify the similarity score of the audio signal
+  score_amplified:              # Whether to amplify the similarity score of the audio signal based on the energy level
   source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl/file)
   file_dir:                     # Directory path containing audio files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
   initial_sync_time:            # Unix timestamp to start synchronizing from when source type is 'file'

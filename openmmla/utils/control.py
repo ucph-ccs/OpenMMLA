@@ -50,11 +50,7 @@ def get_operation() -> int:
         "Send STOP signal to selected services"
     ]
     
-    selected_index = interactive_menu("Select Operation", options, descriptions)
-    
-    if selected_index == -1:
-        raise KeyboardInterrupt("Operation cancelled")
-    
+    selected_index = interactive_menu("Select Operation", options, descriptions, exit_on_q=False)
     return selected_index + 1  # Return 1 or 2
 
 
@@ -163,8 +159,6 @@ def start_control(config_path: str):
             
             from .input import select_or_create_bucket
             bucket_name = select_or_create_bucket(influx_client)
-            if not bucket_name:
-                continue
                 
             command = 'START' if operation == 1 else 'STOP'
             selected_services = select_services()
@@ -181,9 +175,12 @@ def start_control(config_path: str):
             input("\nPress Enter to continue...")
             
         except KeyboardInterrupt as e:
-            if "Operation cancelled" in str(e):
+            if "Exit" in str(e):
                 print("\n👋 Goodbye!")
                 break  # Exit completely when 'q' is pressed
+            elif "Operation Cancelled" in str(e):
+                print("\n🔄 Restarting Control Base...")
+                continue  # Restart on 'q' pressed in lower-level menu
             else:
                 print("\n🔄 Restarting Control Base...")
                 continue  # Restart on Ctrl+C during runtime

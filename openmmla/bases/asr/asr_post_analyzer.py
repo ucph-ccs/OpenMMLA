@@ -129,11 +129,11 @@ class ASRPostAnalyzer(Base):
                 select_fun = get_function_post(self.selected_speaker_files, self.selected_files)
                 func_map.get(select_fun, lambda: print("Invalid option."))()
             except KeyboardInterrupt as e:
-                if "Operation cancelled" in str(e):
-                    # 'q' was pressed - re-raise to be caught by outer restart loop
+                if "Exit" in str(e):
+                    # 'q' was pressed in top-level menu - re-raise to be caught by outer restart loop
                     raise
                 else:
-                    # Ctrl+C during runtime - log and continue
+                    # Ctrl+C during runtime or 'q' in lower-level menu - log and continue
                     self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
             except Exception as e:
                 self.logger.warning(f"During running the ASR post analyzer, catch: {e}, Come back to the main menu.", exc_info=True)
@@ -855,7 +855,7 @@ def start_asr_post_analyzer(project_dir: str, config_path: str, vad: bool = True
                                            vad=vad, nr=nr, sp=sp, tr=tr)
             post_analyzer.run()
         except KeyboardInterrupt as e:
-            if "Operation cancelled" in str(e):
+            if "Exit" in str(e):
                 print("\n👋 Goodbye!")
                 break  # Exit completely when 'q' is pressed
             else:

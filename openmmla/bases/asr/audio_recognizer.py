@@ -44,16 +44,17 @@ class AudioRecognizer:
 
     logger = get_logger('audio-recognizer')
 
-    def __init__(self, config_path: str, audio_db: str, store: bool = False):
+    def __init__(self, config_path: str, profiles_dir: str, store: bool = False, selected_speakers: list[str] = None):
         """Initialize the AudioRecognizer.
 
         Args:
             config_path: path to the configuration file
-            audio_db: path to the audio database directory
+            profiles_dir: path to the profiles directory containing speaker profiles
             store: whether to store audio files or not (default: False)
+            selected_speakers: list of speaker names to load (default: None, loads all)
         """
         config = yaml.safe_load(open(config_path, 'r'))
-        self.audio_db = audio_db
+        self.profiles_dir = profiles_dir
         self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inferer'])
         self.store = store
         print(f"Audio inferer URL: {self.audio_inferer_url}")
@@ -62,11 +63,18 @@ class AudioRecognizer:
         self.speaker_features = None  # np.array of origin embeddings (each row is a speaker's embedding)
         self.speaker_adaptive_features = None  # np.array of updated embeddings (same shape/order as speaker_features)
         self.speaker_adaptive_features_counts = {}  # Dict of speaker names to the weight of updated embeddings
+        self.selected_speakers = selected_speakers  # Track which speakers are currently selected
 
-        self._load_audio_db(self.audio_db)
+        self._load_profiles(self.profiles_dir, selected_speakers)
         self.logger.info("Successfully initialize audio recognizer.")
 
     def register(self, path: str, user_name: str):
+        """Register a new user or add new embeddings to an existing user, it will normalize the audio and extract the embeddings.
+        
+        Args:
+            path: path to the audio file to register
+            user_name: name of the user to register
+        """
         # Check if user already exists
         if user_name in self.speaker_names:
             self.logger.info(f"User '{user_name}' already exists. Adding new embeddings to existing profile.")
@@ -76,7 +84,7 @@ class AudioRecognizer:
             user_index = None
 
         # Create embeddings directory for user
-        user_embeddings_dir = os.path.join(self.audio_db, user_name)
+        user_embeddings_dir = os.path.join(self.profiles_dir, user_name)
         os.makedirs(user_embeddings_dir, exist_ok=True)
 
         # Create a temporary directory to store segmented audio
@@ -222,26 +230,98 @@ class AudioRecognizer:
             self.logger.warning(f'{e} happens when inferring, discard this segment')
             return '', -1
 
-    def reset_db(self, audio_db: str):
-        self.audio_db = audio_db
-        self._load_audio_db(self.audio_db)
+    def reset_profiles(self, profiles_dir: str, selected_speakers: list[str] = None):
+        """Reset and reload speaker profiles from the profiles directory.
+        
+        Args:
+            profiles_dir: path to the profiles directory
+            selected_speakers: list of speaker names to load (default: None, loads all)
+        """
+        self.profiles_dir = profiles_dir
+        self.selected_speakers = selected_speakers
+        self._load_profiles(self.profiles_dir, selected_speakers)
         self.logger.info("Successfully reload audio database.")
 
-    def _load_audio_db(self, audio_db_path: str):
+    def deregister(self, speaker_name: str):
+        """Deregister a speaker from the recognizer.
+        
+        Args:
+            speaker_name: name of the speaker to deregister
+        """
+        if speaker_name not in self.speaker_names:
+            self.logger.warning(f"Speaker '{speaker_name}' not found in recognizer.")
+            return
+            
+        # Find the index of the speaker
+        speaker_index = self.speaker_names.index(speaker_name)
+        
+        # Remove from all arrays
+        self.speaker_names.pop(speaker_index)
+        
+        if len(self.speaker_names) == 0:
+            # If no speakers left, reset arrays
+            self.speaker_features = None
+            self.speaker_adaptive_features = None
+        else:
+            # Remove the corresponding row from feature arrays
+            self.speaker_features = np.delete(self.speaker_features, speaker_index, axis=0)
+            self.speaker_adaptive_features = np.delete(self.speaker_adaptive_features, speaker_index, axis=0)
+        
+        # Remove from counts dictionary
+        if speaker_name in self.speaker_adaptive_features_counts:
+            del self.speaker_adaptive_features_counts[speaker_name]
+            
+        self.logger.info(f"Successfully deregistered speaker '{speaker_name}'.")
+
+    def delete_speaker_profile(self, speaker_name: str):
+        """Delete a speaker's profile files from disk and deregister from recognizer.
+        
+        Args:
+            speaker_name: name of the speaker to delete
+        """
+        speaker_dir = os.path.join(self.profiles_dir, speaker_name)
+        
+        if not os.path.exists(speaker_dir):
+            self.logger.warning(f"Speaker profile directory not found: {speaker_dir}")
+            return
+            
+        try:
+            # Delete the entire speaker directory
+            import shutil
+            shutil.rmtree(speaker_dir)
+            self.logger.info(f"Deleted speaker profile directory: {speaker_dir}")
+            
+            # Deregister from recognizer
+            self.deregister(speaker_name)
+            
+        except Exception as e:
+            self.logger.error(f"Error deleting speaker profile '{speaker_name}': {e}")
+
+    def _load_profiles(self, profiles_dir: str, selected_speakers: list[str] = None):
+        """Load speaker profiles from the profiles directory.
+        
+        Args:
+            profiles_dir: path to the profiles directory
+            selected_speakers: list of speaker names to load (default: None, loads all)
+        """
         # Initialize/reinitialize speaker profiles
         self.speaker_names = []
         self.speaker_features = None
         self.speaker_adaptive_features = None
         self.speaker_adaptive_features_counts = {}
 
-        if not os.path.exists(audio_db_path):
-            os.makedirs(audio_db_path)
+        if not os.path.exists(profiles_dir):
+            os.makedirs(profiles_dir)
 
         # List directories (each speaker has its own directory)
-        speaker_dirs = [d for d in os.listdir(audio_db_path)
-                        if os.path.isdir(os.path.join(audio_db_path, d)) and not d.startswith('.')]
+        speaker_dirs = [d for d in os.listdir(profiles_dir)
+                        if os.path.isdir(os.path.join(profiles_dir, d)) and not d.startswith('.')]
+        
+        # Filter by selected speakers if specified
+        if selected_speakers is not None:
+            speaker_dirs = [d for d in speaker_dirs if d in selected_speakers]
         for speaker_name in speaker_dirs:
-            speaker_dir = os.path.join(audio_db_path, speaker_name)
+            speaker_dir = os.path.join(profiles_dir, speaker_name)
             self.logger.info(f"Loading embeddings for {speaker_name}")
             person_features = []
 
@@ -295,7 +375,7 @@ class AudioRecognizer:
             self.logger.info(f"Loaded {num_features} embeddings for {speaker_name}")
 
     def _infer(self, audio_path: str) -> np.ndarray:
-        return request_audio_inference(audio_path, os.path.basename(self.audio_db), self.audio_inferer_url)[0]
+        return request_audio_inference(audio_path, os.path.basename(self.profiles_dir), self.audio_inferer_url)[0]
 
     def _update_features(self, speaker_name: str, new_feature: np.ndarray):
         new_feature_normalized = new_feature / np.linalg.norm(new_feature, ord=2)
