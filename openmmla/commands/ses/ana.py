@@ -19,8 +19,7 @@ def run_session_analysis(args):
     print(f"\033]0; Session Analysis \007")
 
     from openmmla.utils.logger import get_logger
-    from openmmla.utils.input import select_bucket
-    from openmmla.utils.clean import flush_input
+    from openmmla.utils.input import select_bucket, interactive_menu
     from openmmla.utils.client import InfluxDBClientWrapper
     from openmmla.analysis.asr.analyze import asr_session_analysis
     from openmmla.analysis.ips.analyze import ips_session_analysis
@@ -37,34 +36,40 @@ def run_session_analysis(args):
     while True:
         try:
             influx_client = InfluxDBClientWrapper(config_path)
-
-            flush_input()
-            operation = input(
-                "Please input your operation:\n"
-                "1: ASR diarization analysis\n"
-                "2: Indoor positioning analysis\n"
-                "3: Video frame analysis\n"
-                "0: Exit\n"
-                "Selected function: "
-            ).strip()
-            if operation == '1':
+            options = [
+                "🎤 ASR Diarization Analysis",
+                "📍 Indoor Positioning Analysis", 
+                "📹 Video Frame Analysis",
+            ]
+            descriptions = [
+                "Analyze speaker diarization and transcription data",
+                "Analyze indoor positioning and movement data",
+                "Analyze video frame and object detection data",
+                "Exit the session analysis tool"
+            ]
+            
+            operation = interactive_menu("Session Analysis", options, descriptions, exit_on_q=True, prompt_enter=True)
+            
+            if operation == 0:
                 bucket_name = select_bucket(influx_client)
-                asr_session_analysis(None, bucket_name, influx_client)
-            elif operation == '2':
+                if bucket_name:
+                    asr_session_analysis(None, bucket_name, influx_client)
+            elif operation == 1:
                 bucket_name = select_bucket(influx_client)
-                ips_session_analysis(None, bucket_name, influx_client)
-            elif operation == '3':
+                if bucket_name:
+                    ips_session_analysis(None, bucket_name, influx_client)
+            elif operation == 2:
                 bucket_name = select_bucket(influx_client)
-                vfa_session_analysis(None, bucket_name, influx_client)
-            elif operation == '0':
+                if bucket_name:
+                    vfa_session_analysis(None, bucket_name, influx_client)
+        except KeyboardInterrupt as e:
+            if "Exit" in str(e):
+                print("\n👋 Goodbye!")
                 break
             else:
-                print("Invalid operation. Please input 1, 2, 3, or 0.")
-        except (Exception, KeyboardInterrupt) as e:
-            logger.warning(
-                f"Session analysis interrupted: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}. Returning to main menu.",
-                exc_info=True
-            )
+                logger.warning("During running session analysis, catch: KeyboardInterrupt, Come back to the main menu.", exc_info=True)
+        except Exception as e:
+            logger.warning(f"During running session analysis, catch: {e}, Come back to the main menu.", exc_info=True)
 
 
 def main():

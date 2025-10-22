@@ -86,9 +86,8 @@ def cleanup_local_data(project_dir, bucket_name) -> None:
 def run_bucket_management(args):
     print(f"\033]0;Bucket Cleanup\007")
 
-    from openmmla.utils.clean import flush_input
-    from openmmla.utils.input import select_bucket
     from openmmla.utils.logger import get_logger
+    from openmmla.utils.input import select_bucket, interactive_menu
     from openmmla.utils.client import InfluxDBClientWrapper
 
     logger = get_logger('cleanup')
@@ -102,39 +101,44 @@ def run_bucket_management(args):
     while True:
         try:
             influx_client = InfluxDBClientWrapper(config_path)
-
-            flush_input()
-            operation = input(
-                "Please select an operation:\n"
-                "1: Create new bucket (database)\n"
-                "2: Delete bucket (database)\n"
-                "3: Clean up bucket data (database)\n"
-                "4: Clean up local data (logs, visualizations, runtime, etc.)\n"
-                "0: Exit\n"
-                "Selected function: "
-            ).strip()
-
-            if operation in ['2', '3', '4']:
-                bucket_name = select_bucket(influx_client)
-                if bucket_name is None:
-                    continue
-                if operation == '2':
-                    delete_bucket(influx_client, bucket_name)
-                elif operation == '3':
-                    cleanup_bucket_data(influx_client, bucket_name)
-                elif operation == '4':
-                    cleanup_local_data(os.path.dirname(config_path), bucket_name)
-            elif operation == '1':
+            options = [
+                "➕ Create New Bucket",
+                "🗑️  Delete Bucket", 
+                "🧹 Clean Up Bucket Data",
+                "📁 Clean Up Local Data",
+            ]
+            descriptions = [
+                "Create a new session bucket in the database",
+                "Delete an existing bucket from the database",
+                "Clean up all data in an existing bucket",
+                "Clean up local files (logs, visualizations, runtime, etc.)",
+                "Exit the bucket management tool"
+            ]
+            
+            operation = interactive_menu("Bucket Management", options, descriptions, exit_on_q=True, prompt_enter=True)
+            
+            if operation == 0:
                 create_new_bucket(influx_client)
-            elif operation == '0':
+            elif operation == 1:
+                bucket_name = select_bucket(influx_client)
+                if bucket_name:
+                    delete_bucket(influx_client, bucket_name)
+            elif operation == 2:
+                bucket_name = select_bucket(influx_client)
+                if bucket_name:
+                    cleanup_bucket_data(influx_client, bucket_name)
+            elif operation == 3:
+                bucket_name = select_bucket(influx_client)
+                if bucket_name:
+                    cleanup_local_data(os.path.dirname(config_path), bucket_name)
+        except KeyboardInterrupt as e:
+            if "Exit" in str(e):
+                print("\n👋 Goodbye!")
                 break
             else:
-                print("Invalid operation. Please input 1, 2, 3, 4, or 0.")
-        except (Exception, KeyboardInterrupt) as e:
-            logger.warning(
-                f"Interrupted: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}. Returning to main menu.",
-                exc_info=True
-            )
+                logger.warning("During running bucket management, catch: KeyboardInterrupt, Come back to the main menu.", exc_info=True)
+        except Exception as e:
+            logger.warning(f"During running bucket management, catch: {e}, Come back to the main menu.", exc_info=True)
 
 
 def main():

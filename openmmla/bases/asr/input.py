@@ -7,15 +7,15 @@ def get_function_base(id: int, mode: str):
     """Get the function to be performed from user input for base."""
     options = [
         "Edit Speaker Profiles",    
-        "Start Voice Recognition", 
+        "Start", 
+        f"Switch Mode (mode: {LIGHT_BLUE}{mode}{ENDC})",
         f"Reset (id: {LIGHT_BLUE}{id}{ENDC})",
-        f"Switch Mode (mode: {LIGHT_BLUE}{mode}{ENDC})"
     ]
     descriptions = [
         "Register, select, or delete speaker profiles",
-        "Start real-time voice recognition",
-        "Reset the ASR base configuration",
-        "Switch between record/recognize/full modes"
+        "Start the ASR base to record and recognize audio",
+        "Switch the ASR base mode between between recording, recognizing and full mode",
+        "Reset the ASR base (reload config)",
     ]
     
     selected_index = interactive_menu("🎯 Select Base Function", options, descriptions, exit_on_q=True)
@@ -33,9 +33,9 @@ def get_function_synchronizer(mode: str):
         "Reset"
     ]
     descriptions = [
-        "Start the synchronizer",
-        "Switch between recognize/full modes",
-        "Reset the ASR synchronizer configuration"
+        "Start the ASR synchronizer to synchronize the ASR bases recognition results",
+        "Switch the ASR synchronizer mode between recognizing and full mode",
+        "Reset the ASR synchronizer (reload config)"
     ]
     
     selected_index = interactive_menu("🎯 Select Synchronizer Function", options, descriptions, exit_on_q=True)
@@ -86,7 +86,7 @@ def get_base_mode():
         "Record and recognize on-the-fly"
     ]
     
-    selected_index = interactive_menu("Select Operating Mode", options, descriptions)
+    selected_index = interactive_menu("Select Operating Mode", options, descriptions, prompt_enter=False)
     mode_map = ['record', 'recognize', 'full']
     return mode_map[selected_index]
 
@@ -102,7 +102,7 @@ def get_synchronizer_mode():
         "Recognize on-the-fly"
     ]
     
-    selected_index = interactive_menu("Select Synchronizer Mode", options, descriptions)
+    selected_index = interactive_menu("Select Synchronizer Mode", options, descriptions, prompt_enter=False)
     mode_map = ['recognize', 'full']
     return mode_map[selected_index]
 
@@ -121,7 +121,7 @@ def get_base_type(config: dict) -> str:
     if not base_types:
         raise ValueError("No base types found in configuration")
     
-    selected_index = interactive_menu("Select Base Type", base_types)
+    selected_index = interactive_menu("Select Base Type", base_types, prompt_enter=False)
     return base_types[selected_index]
 
 
@@ -153,7 +153,7 @@ def get_input_device_index(available_indexes: list[int], device_info_list: list[
             options.append(f"Device {device_index}")
             descriptions.append(f"Index: {device_index}")
     
-    selected_index = interactive_menu("Select Input Device", options, descriptions)
+    selected_index = interactive_menu("Select Input Device", options, descriptions, prompt_enter=False)
     return available_indexes[selected_index]
 
 
@@ -178,7 +178,7 @@ def get_channel_selection(device_info: dict) -> int | None:
         options.append(f"Channel {i}")
         descriptions.append(f"Use channel {i} only")
     
-    selected_index = interactive_menu(f"Select Channel (Device has {device_channels} channels)", options, descriptions)
+    selected_index = interactive_menu(f"Select Channel (Device has {device_channels} channels)", options, descriptions, prompt_enter=False)
     return selected_index
 
 
@@ -209,7 +209,7 @@ def get_edit_speaker_options(available_speakers: list[str], selected_speakers: l
         "Permanently delete a speaker profile from disk"
     ]
     
-    selected_index = interactive_menu("🎯 Edit Speaker Profiles", options, descriptions)
+    selected_index = interactive_menu("🎯 Edit Speaker Profiles", options, descriptions, prompt_enter=False)
     return selected_index
 
 

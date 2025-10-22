@@ -274,14 +274,9 @@ class ASRBase(Base):
     def run(self):
         """Run the ASR base.
 
-        Provides an interactive interface to:
-          1. Register speaker profiles.
-          2. Start real-time voice recognition.
-          3. Reset or switch the ASR base mode.
-
         Continuously prompts the user for input until termination.
         """
-        func_map = {1: self._edit_speakers, 2: self._start_recognition, 3: self._reset, 4: self._switch_mode}
+        func_map = {1: self._edit_speakers, 2: self._start_recognition, 3: self._switch_mode, 4: self._reset}
         while True:
             try:
                 select_fun = get_function_base(self.id, self.mode)

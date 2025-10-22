@@ -56,7 +56,7 @@ def clear_screen():
     os.system('clear' if os.name == 'posix' else 'cls')
 
 
-def interactive_menu(title: str, options: list[str], descriptions: list[str] = None, exit_on_q: bool = False) -> int:
+def interactive_menu(title: str, options: list[str], descriptions: list[str] = None, exit_on_q: bool = False, prompt_enter: bool = True) -> int:
     """Interactive menu with cursor navigation and highlighting.
     
     Args:
@@ -64,11 +64,13 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
         options: List of option strings
         descriptions: Optional list of descriptions for each option
         exit_on_q: Whether 'q' should exit the entire program (True) or just return to previous level (False)
+        prompt_enter: Whether to prompt user to press Enter before showing the menu (default: True)
         
     Returns:
         Selected option index, or -1 if 'q' was pressed
     """
-    input("\nPress Enter to continue...")
+    if prompt_enter:
+        input("\nPress Enter to continue...")
     if descriptions is None:
         descriptions = [''] * len(options)
     
@@ -118,6 +120,80 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
                 raise KeyboardInterrupt("Operation Cancelled")
         elif key == '\x03':  # Ctrl+C
             raise KeyboardInterrupt
+
+
+def services_menu(title: str, services: list[str], exit_on_q: bool = False) -> list[str]:
+    """Interactive service selection menu with toggle functionality.
+    
+    Args:
+        title: Menu title
+        services: List of service names to select from
+        exit_on_q: Whether 'q' should exit the entire program (True) or just return to previous level (False)
+        
+    Returns:
+        List of selected service names, or empty list if cancelled
+    """
+    if not services:
+        return []
+    
+    # Initialize selection state - all services selected by default
+    selected = [True] * len(services)
+    current_index = 0
+    
+    while True:
+        clear_screen()
+        print("=" * 80)
+        print(f"{PURPLE}{BOLD}{title}{ENDC}")
+        print("=" * 80)
+        if exit_on_q:
+            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space to toggle, Enter to confirm, 'q' to quit{ENDC}")
+        else:
+            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space to toggle, Enter to confirm, 'q' to go back{ENDC}")
+        print("-" * 80)
+        
+        # Create menu items with toggle all at the top
+        all_selected = all(selected)
+        menu_items = [f"[{'✓' if all_selected else ' '}] Toggle All"]
+        menu_items.extend([f"[{'✓' if selected[i] else ' '}] {service}" for i, service in enumerate(services)])
+        
+        for i, item in enumerate(menu_items):
+            if i == current_index:
+                # Highlighted selected option
+                print(f"{GREEN}{BOLD}▶ {item} ◀{ENDC}")
+            else:
+                # Normal option
+                print(f"  {item}")
+        
+        print("-" * 80)
+        selected_count = sum(selected)
+        print(f"{PURPLE}Selected: {selected_count}/{len(services)} services{ENDC}")
+        if exit_on_q:
+            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space = toggle, Enter = confirm, 'q' = quit{ENDC}")
+        else:
+            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space = toggle, Enter = confirm, 'q' = go back{ENDC}")
+        
+        key = get_key()
+        
+        if key == 'UP' or key == 'k':
+            current_index = (current_index - 1) % len(menu_items)
+        elif key == 'DOWN' or key == 'j':
+            current_index = (current_index + 1) % len(menu_items)
+        elif key == ' ':  # Space key to toggle
+            if current_index == 0:  # Toggle All option
+                all_selected = all(selected)
+                for i in range(len(selected)):
+                    selected[i] = not all_selected
+            else:  # Service options
+                selected[current_index - 1] = not selected[current_index - 1]
+        elif key == '\r' or key == '\n':  # Enter key
+            return [services[i] for i in range(len(services)) if selected[i]]
+        elif key == 'q':
+            if exit_on_q:
+                raise KeyboardInterrupt("Exit")
+            else:
+                raise KeyboardInterrupt("Operation Cancelled")
+        elif key == '\x03':  # Ctrl+C
+            raise KeyboardInterrupt("Ctrl+C pressed")
 
 
 def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None, 
@@ -356,37 +432,49 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
                 raise KeyboardInterrupt
 
 def select_bucket(influx_client: InfluxDBClientWrapper) -> str:
-    """Get the bucket name from the user."""
-    bucket_name = None
-
+    """Get the bucket name from the user using interactive menu."""
     while True:
-        flush_input()
-        print("------------------------------------------------")
+        # Get bucket list
         bucket_list = influx_client.get_buckets()
         bucket_names = [bucket.name for bucket in bucket_list.buckets if bucket.name not in ['_tasks', '_monitoring']]
         bucket_names = [name for name in bucket_names if 'session_' in name]
 
+        # Sort buckets by timestamp
         try:
             bucket_names = sorted(bucket_names, key=lambda x: datetime.strptime(x.split('_')[1], '%Y-%m-%dT%H:%M:%SZ'))
-            if len(bucket_names) == 0:
-                print("No bucket sessions found.")
-                break
-            for i, name in enumerate(bucket_names, start=1):
-                print(f"{i}. {name}")
-            bucket_idx = input("Enter the number of the bucket you want to select:")
         except Exception as e:
             print(f'No compatible bucket session to sort, {e}')
-            break
+            bucket_names = []
 
-        if bucket_idx.isdigit() and 1 <= int(bucket_idx) <= len(bucket_names):
-            bucket_name = bucket_names[int(bucket_idx) - 1]
-            print(f"Bucket: {bucket_name} has been selected.")
-            break
-        else:
-            print("Invalid input. Please enter a number from the list.")
-            continue
+        if not bucket_names:
+            print("No bucket sessions found.")
+            return None
 
-    return bucket_name
+        # Create options for interactive menu
+        options = []
+        descriptions = []
+        
+        # Add existing buckets
+        for name in bucket_names:
+            # Extract timestamp and format it nicely
+            try:
+                timestamp_str = name.split('_')[1]
+                dt = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
+                formatted_date = dt.strftime('%Y-%m-%d %H:%M:%S')
+                options.append(f"📁 {name}")
+                descriptions.append(f"Session from {formatted_date}")
+            except:
+                options.append(f"📁 {name}")
+                descriptions.append("Session bucket")
+
+        # Show interactive menu
+        selected_index = interactive_menu("Select Session Bucket", options, descriptions, prompt_enter=False)
+        
+        # Return the selected bucket name
+        bucket_name = bucket_names[selected_index]
+        clear_screen()
+        print(f"{GREEN}✅ Bucket: {bucket_name} has been selected.{ENDC}")
+        return bucket_name
 
 
 def select_or_create_bucket(influx_client):
@@ -507,6 +595,6 @@ def get_rtmp_url(available_urls: list[str]) -> str:
         options.append(f"RTMP Stream {i + 1}")
         descriptions.append(f"URL: {url}")
     
-    selected_index = interactive_menu("Select RTMP URL", options, descriptions)    
+    selected_index = interactive_menu("Select RTMP URL", options, descriptions, prompt_enter=False)    
     return available_urls[selected_index]
 

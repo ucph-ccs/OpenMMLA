@@ -115,9 +115,9 @@ class ASRPostAnalyzer(Base):
         """Initialize the AudioRecognizer object."""
         if self.selected_files:
             first_file_name = os.path.splitext(os.path.basename(self.selected_files[0]))[0]
-            audio_db = os.path.join(self.runtime_dir, f'session_{first_file_name}', 'profiles')
-            os.makedirs(audio_db, exist_ok=True)
-            self.recognizer = AudioRecognizer(config_path=self.config_path, audio_db=audio_db)
+            profiles_dir = os.path.join(self.runtime_dir, f'session_{first_file_name}', 'profiles')
+            os.makedirs(profiles_dir, exist_ok=True)
+            self.recognizer = AudioRecognizer(config_path=self.config_path, profiles_dir=profiles_dir)
 
     def run(self):
         """Run the ASR Post Analyzer with interactive menu."""
@@ -133,8 +133,8 @@ class ASRPostAnalyzer(Base):
                     # 'q' was pressed in top-level menu - re-raise to be caught by outer restart loop
                     raise
                 else:
-                    # Ctrl+C during runtime or 'q' in lower-level menu - log and continue
-                    self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
+                    # ctrl+c during runtime or 'q' in lower-level menu - log and continue
+                    self.logger.warning(f"During running the ASR post analyzer, catch: {e}, Come back to main menu.", exc_info=True)
             except Exception as e:
                 self.logger.warning(f"During running the ASR post analyzer, catch: {e}, Come back to the main menu.", exc_info=True)
             finally:
@@ -234,14 +234,14 @@ class ASRPostAnalyzer(Base):
         self.session_runtime_dir = os.path.join(self.runtime_dir, f'session_{self.session_name}')
         self.session_segments_dir = os.path.join(self.session_runtime_dir, 'segments')
         self.session_chunks_dir = os.path.join(self.session_runtime_dir, 'chunks')
-        self.session_audio_db = os.path.join(self.session_runtime_dir, 'profiles')
+        self.session_profiles_dir = os.path.join(self.session_runtime_dir, 'profiles')
 
         for directory in [self.session_logs_dir, self.session_runtime_dir, self.session_segments_dir,
-                          self.session_chunks_dir, self.session_audio_db]:
+                          self.session_chunks_dir, self.session_profiles_dir]:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
             os.makedirs(directory)
-        self.recognizer.reset_db(self.session_audio_db)
+        self.recognizer.reset_profiles(self.session_profiles_dir)
 
         # register speakers with NR and VAD enhanced
         self._register_speakers(self.selected_speaker_files, enhance=True)
@@ -268,9 +268,9 @@ class ASRPostAnalyzer(Base):
             formatted_speaker_filepath = os.path.join(os.path.dirname(speaker_raw_filepath), f'{speaker_name}.wav')
             format_wav(speaker_raw_filepath, formatted_speaker_filepath )
 
-            speaker_audio_db = os.path.join(self.recognizer.audio_db, speaker_name)
-            if os.path.exists(speaker_audio_db):
-                shutil.rmtree(speaker_audio_db)
+            speaker_profiles_dir = os.path.join(self.recognizer.profiles_dir, speaker_name)
+            if os.path.exists(speaker_profiles_dir):
+                shutil.rmtree(speaker_profiles_dir)
 
             if enhance:
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
@@ -284,6 +284,11 @@ class ASRPostAnalyzer(Base):
 
     def _format_runtime_audio(self, audio_file_path: str):
         """Format the audio file to 16kHz, 16-bit PCM WAV format."""
+        # Copy the original audio file to the origin directory
+        origin_audio_path = os.path.join(self.origin_dir, f'{self.session_name}{os.path.splitext(audio_file_path)[1]}')
+        shutil.copy2(audio_file_path, origin_audio_path)
+        
+        # Format the audio file to 16kHz, 16-bit PCM WAV format
         formatted_audio_path = os.path.join(self.session_runtime_dir, f'{self.session_name}.wav')
         format_wav(audio_file_path, formatted_audio_path)
         properties = get_audio_properties(formatted_audio_path)
@@ -352,8 +357,8 @@ class ASRPostAnalyzer(Base):
                 pbar.update()
 
         # Write all speaker_recognition_log_entries to the JSON file at once
-        with open(speaker_recognition_log_path, 'w') as f:
-            json.dump(speaker_recognition_log_entries, f, indent=5)
+        with open(speaker_recognition_log_path, 'w', encoding='utf-8') as f:
+            json.dump(speaker_recognition_log_entries, f, indent=5, ensure_ascii=False)
 
         # Visualize the speaker recognition results
         plot_speaking_interaction_network(speaker_recognition_log_path, visualization_dir)
@@ -394,8 +399,8 @@ class ASRPostAnalyzer(Base):
         chunk_list = self.aggregate_chunks(chunk_list)
         speaker_transcription_log_entries = self._transcribe_by_chunks(chunk_list)
 
-        with open(speaker_transcription_log_path, 'w') as f:
-            json.dump(speaker_transcription_log_entries, f, indent=5)
+        with open(speaker_transcription_log_path, 'w', encoding='utf-8') as f:
+            json.dump(speaker_transcription_log_entries, f, indent=5, ensure_ascii=False)
 
         convert_transcription_json_to_txt(speaker_transcription_log_path)
 
@@ -472,8 +477,8 @@ class ASRPostAnalyzer(Base):
                 pbar.update()
 
         # Write all speaker_recognition_log_entries to the JSON file at once
-        with open(speaker_recognition_log_path, 'w') as f:
-            json.dump(speaker_recognition_log_entries, f, indent=5)
+        with open(speaker_recognition_log_path, 'w', encoding='utf-8') as f:
+            json.dump(speaker_recognition_log_entries, f, indent=5, ensure_ascii=False)
 
         # Visualize the speaker recognition results
         plot_speaking_interaction_network(speaker_recognition_log_path, visualization_dir)
@@ -483,8 +488,8 @@ class ASRPostAnalyzer(Base):
         chunk_list = self._aggregate_segments_by_speaker(speaker_recognition_log_path)
         speaker_transcription_log_entries = self._transcribe_by_chunks(chunk_list)
 
-        with open(speaker_transcription_log_path, 'w') as f:
-            json.dump(speaker_transcription_log_entries, f, indent=5)
+        with open(speaker_transcription_log_path, 'w', encoding='utf-8') as f:
+            json.dump(speaker_transcription_log_entries, f, indent=5, ensure_ascii=False)
 
         convert_transcription_json_to_txt(speaker_transcription_log_path)
 
