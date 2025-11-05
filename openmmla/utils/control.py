@@ -1,6 +1,6 @@
 """Control utility for managing ASR, IPS, and VFA services."""
 
-from .input import interactive_menu, services_menu
+from .input import interactive_menu, multi_interactive_menu
 from .client import InfluxDBClientWrapper, RedisClientWrapper
 from .logger import get_logger
 
@@ -25,12 +25,13 @@ def select_services() -> list[str]:
     all_services = ["asr", "ips", "vfa"]
     
     try:
-        selected_services = services_menu("Select Services", all_services)
+        selected_indices = multi_interactive_menu("Select Services", all_services, prompt_enter=False)
         
-        if not selected_services:
+        if not selected_indices:
             print("No services selected, returning to main menu.")
             return []
-            
+        
+        selected_services = [all_services[i] for i in selected_indices]
         print(f"Selected services: {', '.join(selected_services)}")
         return selected_services
         

@@ -57,17 +57,17 @@ def clear_screen():
 
 
 def interactive_menu(title: str, options: list[str], descriptions: list[str] = None, exit_on_q: bool = False, prompt_enter: bool = True) -> int:
-    """Interactive menu with cursor navigation and highlighting.
+    """Interactive menu with cursor navigation and highlighting, single selection.
     
     Args:
         title: Menu title
-        options: List of option strings
+        options: List of option names to select from
         descriptions: Optional list of descriptions for each option
         exit_on_q: Whether 'q' should exit the entire program (True) or just return to previous level (False)
         prompt_enter: Whether to prompt user to press Enter before showing the menu (default: True)
         
     Returns:
-        Selected option index, or -1 if 'q' was pressed
+        Selected option index, or None if 'q' was pressed
     """
     if prompt_enter:
         input("\nPress Enter to continue...")
@@ -122,22 +122,44 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
             raise KeyboardInterrupt
 
 
-def services_menu(title: str, services: list[str], exit_on_q: bool = False) -> list[str]:
-    """Interactive service selection menu with toggle functionality.
+def multi_interactive_menu(title: str, options: list[str], descriptions: list[str] = None, 
+                           exit_on_q: bool = False, initial_selection: list[str] = None, 
+                           include_toggle_all: bool = True, prompt_enter: bool = True) -> list[int]:
+    """Interactive multi-select menu with toggle functionality.
+    
+    A general-purpose menu for selecting multiple items with:
+    - Single item selection (interactive_menu): arrow keys to navigate, Enter to select, returns int (index)
+    - Multiple item selection (multi_interactive_menu): arrow keys to navigate, Space to toggle, Enter to confirm, returns list[int] (indices)
     
     Args:
         title: Menu title
-        services: List of service names to select from
+        options: List of option names to select from
+        descriptions: Optional list of descriptions for each option
         exit_on_q: Whether 'q' should exit the entire program (True) or just return to previous level (False)
+        initial_selection: List of initially selected option names (default: all selected)
+        include_toggle_all: Whether to include a "Toggle All" option at the top (default: True)
+        prompt_enter: Whether to prompt user to press Enter before showing the menu (default: True)
         
     Returns:
-        List of selected service names, or empty list if cancelled
+        List of selected option indices, or empty list if cancelled
     """
-    if not services:
+    if prompt_enter:
+        input("\nPress Enter to continue...")
+    
+    if not options:
         return []
     
-    # Initialize selection state - all services selected by default
-    selected = [True] * len(services)
+    if descriptions is None:
+        descriptions = [''] * len(options)
+    
+    # Initialize selection state
+    if initial_selection is None:
+        # Default: all options selected
+        selected = [True] * len(options)
+    else:
+        # Use provided initial selection
+        selected = [option in initial_selection for option in options]
+    
     current_index = 0
     
     while True:
@@ -151,22 +173,31 @@ def services_menu(title: str, services: list[str], exit_on_q: bool = False) -> l
             print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space to toggle, Enter to confirm, 'q' to go back{ENDC}")
         print("-" * 80)
         
-        # Create menu items with toggle all at the top
-        all_selected = all(selected)
-        menu_items = [f"[{'✓' if all_selected else ' '}] Toggle All"]
-        menu_items.extend([f"[{'✓' if selected[i] else ' '}] {service}" for i, service in enumerate(services)])
+        # Create menu items
+        menu_items = []
+        menu_descriptions = []
+        if include_toggle_all:
+            all_selected = all(selected)
+            menu_items.append(f"[{'✓' if all_selected else ' '}] Toggle All")
+            menu_descriptions.append("Select or deselect all items")
+        menu_items.extend([f"[{'✓' if selected[i] else ' '}] {option}" for i, option in enumerate(options)])
+        menu_descriptions.extend(descriptions)
         
-        for i, item in enumerate(menu_items):
+        for i, (item, desc) in enumerate(zip(menu_items, menu_descriptions)):
             if i == current_index:
                 # Highlighted selected option
                 print(f"{GREEN}{BOLD}▶ {item} ◀{ENDC}")
+                if desc:
+                    print(f"   {GREY}└─ {desc}{ENDC}")
             else:
                 # Normal option
                 print(f"  {item}")
+                if desc:
+                    print(f"   {GREY}└─ {desc}{ENDC}")
         
         print("-" * 80)
         selected_count = sum(selected)
-        print(f"{PURPLE}Selected: {selected_count}/{len(services)} services{ENDC}")
+        print(f"{PURPLE}Selected: {selected_count}/{len(options)} options{ENDC}")
         if exit_on_q:
             print(f"{PURPLE}Commands: ↑/↓ = navigate, Space = toggle, Enter = confirm, 'q' = quit{ENDC}")
         else:
@@ -179,14 +210,16 @@ def services_menu(title: str, services: list[str], exit_on_q: bool = False) -> l
         elif key == 'DOWN' or key == 'j':
             current_index = (current_index + 1) % len(menu_items)
         elif key == ' ':  # Space key to toggle
-            if current_index == 0:  # Toggle All option
+            if include_toggle_all and current_index == 0:  # Toggle All option
                 all_selected = all(selected)
                 for i in range(len(selected)):
                     selected[i] = not all_selected
             else:  # Service options
-                selected[current_index - 1] = not selected[current_index - 1]
+                # Adjust index if toggle all is present
+                idx = current_index - 1 if include_toggle_all else current_index
+                selected[idx] = not selected[idx]
         elif key == '\r' or key == '\n':  # Enter key
-            return [services[i] for i in range(len(services)) if selected[i]]
+            return [i for i in range(len(options)) if selected[i]]
         elif key == 'q':
             if exit_on_q:
                 raise KeyboardInterrupt("Exit")
@@ -477,7 +510,7 @@ def select_bucket(influx_client: InfluxDBClientWrapper) -> str:
         return bucket_name
 
 
-def select_or_create_bucket(influx_client):
+def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
     """Get the bucket name from user input using interactive menu, either select an existing bucket or create a new one."""
     while True:
         # Get bucket list

@@ -2,8 +2,6 @@ import argparse
 import functools
 import os
 
-from openmmla.utils.control import start_control
-
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -19,6 +17,10 @@ def get_parser():
 
 def run_session_control(args):
     """Main session control function with restart capability."""
+    print(f"\033]0;Session Control\007")
+    
+    from openmmla.utils.control import start_control
+
     config_path = args.config_path
     if not os.path.isabs(config_path):
         config_path = os.path.join(os.getcwd(), config_path)

@@ -11,6 +11,7 @@ temp/
 logger/
 analysis/
 openmmla/analysis/framework/
+omini/
 
 # Ignore deprecated repositories
 deprecated/

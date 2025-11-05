@@ -1,5 +1,7 @@
 import influxdb_client
 import yaml
+
+from datetime import datetime, timedelta
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 
@@ -40,3 +42,29 @@ class InfluxDBClientWrapper(influxdb_client.InfluxDBClient):
         if not bucket:
             raise ValueError(f"Bucket {bucket_name} not found.")
         return self.bucket_api.delete_bucket(bucket)
+    
+    def delete_measurements(self, bucket_name, measurements):
+        """Delete specific measurements from a bucket.
+        
+        Args:
+            bucket_name: Name of the bucket
+            measurements: List of measurement names to delete
+        """
+        bucket = self.bucket_api.find_bucket_by_name(bucket_name)
+        if not bucket:
+            raise ValueError(f"Bucket {bucket_name} not found.")
+        
+        # Extract the bucket start time from the bucket name (format: session_2025-01-20T14:30:00Z)
+        try:
+            timestamp_str = bucket_name.split('_')[1]
+            start_time = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
+        except (IndexError, ValueError):
+            # If bucket name doesn't follow the expected format, use a very old date
+            start_time = datetime.now() - timedelta(days=365)
+        
+        end_time = datetime.now()
+        
+        # Build the delete predicate for each measurement
+        for measurement in measurements:
+            predicate = f'_measurement="{measurement}"'
+            self.delete_api.delete(start_time, end_time, predicate, bucket.name, self.org)

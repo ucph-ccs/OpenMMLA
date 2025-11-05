@@ -19,15 +19,52 @@ def get_parser():
 
 
 def cleanup_bucket_data(influx_client, bucket_name) -> None:
-    """Clean up all data in the specified bucket."""
+    """Clean up selected measurement data in the specified bucket."""
+    from openmmla.utils.input import multi_interactive_menu
+    
     try:
-        confirm = input(f"Database data for bucket: {bucket_name} will be cleaned up. Are you sure? (y/n): ")
+        # Define measurement groups by pipeline
+        measurement_groups = {
+            'asr': ['speaker_recognition', 'speaker_transcription'],
+            'ips': ['badge_relation', 'badge_translation', 'badge_rotation'],
+            'vfa': ['action_recognition']
+        }
+        
+        # Show interactive menu for measurement selection
+        pipeline_options = ['asr', 'ips', 'vfa']
+        descriptions = [
+            'Automatic Speech Recognition (speaker_recognition, speaker_transcription)',
+            'Indoor Positioning System (badge_relation, badge_translation, badge_rotation)',
+            'Video Frame Analysis (action_recognition)'
+        ]
+        
+        selected_indices = multi_interactive_menu("Select Pipelines to Clean Up", pipeline_options, descriptions, exit_on_q=False, prompt_enter=False)
+        
+        if not selected_indices:
+            print("No pipelines selected. Cleanup cancelled.")
+            return
+        
+        # Convert indices to pipeline names
+        selected_pipelines = [pipeline_options[i] for i in selected_indices]
+        
+        # Build list of measurements to delete
+        measurements_to_delete = []
+        for pipeline in selected_pipelines:
+            measurements_to_delete.extend(measurement_groups[pipeline])
+        
+        # Confirm deletion
+        print(f"\nThe following measurements will be deleted from bucket '{bucket_name}':")
+        for measurement in measurements_to_delete:
+            print(f"  - {measurement}")
+        
+        confirm = input("\nAre you sure? (y/n): ")
         if confirm.lower() != 'y':
             print("Cleanup cancelled.")
             return
-        influx_client.delete_bucket(bucket_name)
-        influx_client.create_bucket(bucket_name)
-        print(f"✅ Successfully cleaned up bucket: {bucket_name}")
+        
+        # Delete selected measurements
+        influx_client.delete_measurements(bucket_name, measurements_to_delete)
+        print(f"✅ Successfully cleaned up measurements in bucket: {bucket_name}")
     except Exception as e:
         print(f"❌ Failed to clean up bucket: {e}")
 
@@ -84,13 +121,13 @@ def cleanup_local_data(project_dir, bucket_name) -> None:
 
 
 def run_bucket_management(args):
-    print(f"\033]0;Bucket Cleanup\007")
+    print(f"\033]0;Bucket Management\007")
 
     from openmmla.utils.logger import get_logger
     from openmmla.utils.input import select_bucket, interactive_menu
     from openmmla.utils.client import InfluxDBClientWrapper
 
-    logger = get_logger('cleanup')
+    logger = get_logger('bucket_management')
 
     config_path = args.config_path
     if not os.path.isabs(config_path):
@@ -110,9 +147,8 @@ def run_bucket_management(args):
             descriptions = [
                 "Create a new session bucket in the database",
                 "Delete an existing bucket from the database",
-                "Clean up all data in an existing bucket",
+                "Clean up selected measurements in an existing bucket",
                 "Clean up local files (logs, visualizations, runtime, etc.)",
-                "Exit the bucket management tool"
             ]
             
             operation = interactive_menu("Bucket Management", options, descriptions, exit_on_q=True, prompt_enter=True)
