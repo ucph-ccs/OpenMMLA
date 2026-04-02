@@ -16,7 +16,7 @@ def main():
     add_arg = functools.partial(add_arguments, argparser=parser)
     add_arg('project_dir', str, project_dir, 'path to the project directory', shortname='-p')
     add_arg('config_path', str, config_path, 'path to the configuration file', shortname='-c')
-    add_arg('mode', str, 'record', 'operating mode', choices=['record', 'recognize', 'full'], shortname='-m')
+    add_arg('mode', str, 'full', 'operating mode', choices=['record', 'recognize', 'full'], shortname='-m')
     add_arg('store', bool, True, 'whether to store audio', shortname='-s')
     add_arg('vad', bool, True, 'whether to use the VAD', shortname='-vad')
     add_arg('nr', bool, True, 'whether to use the denoiser to enhance speech', shortname='-nr')

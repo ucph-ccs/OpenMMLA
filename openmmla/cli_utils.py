@@ -26,7 +26,8 @@ def print_main_help():
         ("ASR (Automatic Speech Recognition)", "asr-"),
         ("IPS (Indoor Positioning System)", "ips-"),
         ("VFA (Video Frame Analyzer)", "vfa-"),
-        ("Session-level Tools", "ses-")
+        ("Session-level Tools", "ses-"),
+        ("Management Console", "tui"),
     ]
 
     print("🛠️  Available Commands:\n")

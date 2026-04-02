@@ -1,0 +1,163 @@
+/* main app styles */
+
+Screen {
+    background: $surface;
+}
+
+#tab-bar {
+    dock: top;
+    height: 3;
+    padding: 0 1;
+    background: $panel;
+}
+
+#tab-bar Button {
+    margin: 0 1;
+    min-width: 18;
+}
+
+#tab-bar Button.active-tab {
+    background: $accent;
+    color: $text;
+    text-style: bold;
+}
+
+#sidebar {
+    width: 32;
+    border-right: solid $primary;
+    padding: 1;
+    background: $panel;
+}
+
+#sidebar Tree {
+    width: 1fr;
+    scrollbar-size: 1 1;
+}
+
+#main-area {
+    width: 1fr;
+    padding: 0 1;
+}
+
+#empty-state {
+    width: 1fr;
+    height: 1fr;
+    content-align: center middle;
+    color: $text-muted;
+    text-style: italic;
+}
+
+FieldRow {
+    layout: vertical;
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+FieldRow .field-label {
+    text-style: bold;
+    padding: 0;
+}
+
+FieldRow .field-desc {
+    color: $text-muted;
+    padding: 0;
+    margin-bottom: 0;
+}
+
+FieldRow .field-input {
+    width: 100%;
+}
+
+ConfigForm {
+    height: auto;
+    padding: 1 2;
+}
+
+ConfigForm .section-header {
+    text-style: bold;
+    color: $accent;
+    margin-top: 1;
+    margin-bottom: 1;
+    background: $panel;
+    padding: 0 1;
+}
+
+ConfigForm .form-actions {
+    height: auto;
+    padding: 1 0;
+    margin-top: 1;
+}
+
+ConfigForm .form-actions Button {
+    margin: 0 1;
+    min-width: 20;
+}
+
+.status-saved {
+    color: $success;
+    text-style: bold;
+    padding: 0 2;
+    margin-top: 1;
+}
+
+.status-info {
+    color: $accent;
+    padding: 0 1;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* launcher screen */
+
+.service-grid {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1;
+    padding: 1;
+}
+
+.service-card {
+    height: auto;
+    border: solid $primary;
+    padding: 1;
+    margin: 0;
+}
+
+.service-card .card-title {
+    text-style: bold;
+    color: $text;
+}
+
+.service-card .card-status-running {
+    color: $success;
+}
+
+.service-card .card-status-stopped {
+    color: $error;
+}
+
+.service-card .card-config-ok {
+    color: $success;
+}
+
+.service-card .card-config-missing {
+    color: $warning;
+}
+
+/* status screen */
+
+#status-summary {
+    dock: top;
+    height: 3;
+    padding: 0 2;
+    background: $panel;
+    content-align: center middle;
+}
+
+#log-panel {
+    height: 12;
+    border-top: solid $primary;
+    padding: 1;
+    background: $panel;
+}

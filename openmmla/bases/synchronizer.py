@@ -88,10 +88,11 @@ class Synchronizer(ABC):
         
         self.logger.info("Synchronizer reinitialization completed successfully")
 
-    def _create_thread(self, target, *args):
+    def _create_thread(self, target, daemon=True, name=None, *args):
         """Create a new thread and add it to the thread list."""
-        t = RaisingThread(target=target, args=args)
+        t = RaisingThread(target=target, args=args, daemon=daemon, name=name)
         self.threads.append(t)
+        return t
 
     def _clear_threads(self):
         """Clear all threads."""

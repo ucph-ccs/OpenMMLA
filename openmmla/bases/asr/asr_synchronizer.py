@@ -101,12 +101,14 @@ class ASRSynchronizer(Synchronizer):
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
+        if self.threads:
+            self._stop_threads()
+        self._clear_threads()
         self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}
-        self._clear_threads()
         gc.collect()
 
     def run(self):

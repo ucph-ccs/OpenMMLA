@@ -33,7 +33,7 @@ from .enums import BLUE, ENDC, GREEN, PURPLE, GREY
 from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion
 
 
-def start_asr_base(project_dir: str, config_path: str, mode: str = 'record', store: bool = True,
+def start_asr_base(project_dir: str, config_path: str, mode: str = 'full', store: bool = True,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
     """Start ASR Base with restart capability.
     
@@ -221,6 +221,8 @@ class ASRBase(Base):
             
             # use interactive file browser to select file and get initial_sync_time
             audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
+            print(f"\n{PURPLE}📁 Select Audio File{ENDC}")
+            print(f"{GREY}Choose audio file for ASR Base{ENDC}")
             file_path, initial_sync_time = get_interactive_files(file_dir, file_extensions=audio_extensions, multiple=False, sync_input=True)
             self.initial_sync_time = initial_sync_time
             
@@ -259,6 +261,9 @@ class ASRBase(Base):
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
+        if self.threads:
+            self._stop_threads()
+        self._clear_threads()
         self.mqtt_client.loop_stop()
         if self.audio_stream:
             self.audio_stream.stop()
@@ -268,7 +273,6 @@ class ASRBase(Base):
         self.audio_queue = None
         self.transcription_queue = None
         self.speaker_frames_dict = None
-        self._clear_threads()
         gc.collect()
 
     def run(self):

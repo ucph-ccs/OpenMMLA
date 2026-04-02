@@ -82,9 +82,9 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
         print(f"{PURPLE}{BOLD}{title}{ENDC}")
         print("=" * 80)
         if exit_on_q:
-            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Enter to select, 'q' to quit{ENDC}")
+            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space/Enter to select, 'q' to quit{ENDC}")
         else:
-            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Enter to select, 'q' to go back{ENDC}")
+            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space/Enter to select, 'q' to go back{ENDC}")
         print("-" * 80)
         
         for i, (option, desc) in enumerate(zip(options, descriptions)):
@@ -101,9 +101,9 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
         
         print("-" * 80)
         if exit_on_q:
-            print(f"{PURPLE}Commands: ↑/↓ = navigate, Enter = select, 'q' = quit{ENDC}")
+            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space/Enter = select, 'q' = quit{ENDC}")
         else:
-            print(f"{PURPLE}Commands: ↑/↓ = navigate, Enter = select, 'q' = go back{ENDC}")
+            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space/Enter = select, 'q' = go back{ENDC}")
         
         key = get_key()
         
@@ -111,11 +111,15 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
             selected_index = (selected_index - 1) % len(options)
         elif key == 'DOWN' or key == 'j':
             selected_index = (selected_index + 1) % len(options)
-        elif key == '\r' or key == '\n':  # Enter key
+        elif key == '\r' or key == '\n' or key == ' ':  # Enter or Space key to confirm
             return selected_index
         elif key == 'q':
             if exit_on_q:
-                raise KeyboardInterrupt("Exit")
+                confirm = input(f"{PURPLE}Are you sure you want to exit? (y/n): {ENDC}").strip().lower()
+                if confirm == 'y':
+                    raise KeyboardInterrupt("Exit")
+                else:
+                    continue
             else:
                 raise KeyboardInterrupt("Operation Cancelled")
         elif key == '\x03':  # Ctrl+C
@@ -147,6 +151,7 @@ def multi_interactive_menu(title: str, options: list[str], descriptions: list[st
         input("\nPress Enter to continue...")
     
     if not options:
+        input("No options available. Press Enter to continue...")
         return []
     
     if descriptions is None:
@@ -222,15 +227,19 @@ def multi_interactive_menu(title: str, options: list[str], descriptions: list[st
             return [i for i in range(len(options)) if selected[i]]
         elif key == 'q':
             if exit_on_q:
-                raise KeyboardInterrupt("Exit")
+                confirm = input(f"{PURPLE}Are you sure you want to exit? (y/n): {ENDC}").strip().lower()
+                if confirm == 'y':
+                    raise KeyboardInterrupt("Exit")
+                else:
+                    continue
             else:
                 raise KeyboardInterrupt("Operation Cancelled")
         elif key == '\x03':  # Ctrl+C
             raise KeyboardInterrupt("Ctrl+C pressed")
 
 
-def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None, 
-                         multiple: bool = True, sync_input: bool = False, exit_on_q: bool = False) -> list[str] | tuple[list[str], float] | tuple[str, float] | str:
+def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None, multiple: bool = True,
+                          sync_input: bool = False, exit_on_q: bool = False, prompt_enter: bool = True) -> list[str] | tuple[list[str], float] | tuple[str, float] | str:
     """Interactive file browser for file selection with flexible return types.
     
     Args:
@@ -247,7 +256,8 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
         - If multiple=False and sync_input=True: tuple[str, float]
         - Empty list/None if cancelled
     """
-    input("\nPress Enter to continue...")
+    if prompt_enter:
+        input("\nPress Enter to continue...")
     current_dir = base_dir
     selected_files = []
     selected_file = None  # For single file selection mode
@@ -316,7 +326,7 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
             items.insert(0, (".. (Parent Directory)", 'directory', parent_dir))
         
         if not items:
-            print("No files or directories found in this location.")
+            input("No files or directories found in this location.")
             if multiple:
                 return [] if not sync_input else ([], 0.0)
             else:
@@ -370,7 +380,7 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
             elif key == '\r' or key == '\n':  # Enter - confirm selection
                 if multiple:
                     if not selected_files:
-                        print("No files selected. Please select at least one file.")
+                        input("No files selected. Please select at least one file.")
                         continue
                     
                     if sync_input:
@@ -397,7 +407,7 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
                 else:
                     # Single file selection
                     if not selected_file:
-                        print("No file selected. Please select a file first.")
+                        input("No file selected. Please select a file first.")
                         continue
                     
                     if sync_input:
@@ -426,15 +436,15 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
                                         initial_sync_time = float(sync_input_text)
                                         # Validate that initial_sync_time is not smaller than file start time
                                         if initial_sync_time < default_sync_time:
-                                            print(f"Error: initial_sync_time ({initial_sync_time}) cannot be smaller than file start time ({default_sync_time})")
+                                            input(f"Error: initial_sync_time ({initial_sync_time}) cannot be smaller than file start time ({default_sync_time})")
                                             continue
                                     except ValueError:
-                                        print("Invalid timestamp format. Please try again.")
+                                        input("Invalid timestamp format. Please try again.")
                                         continue
                                 
                                 # Validate the timestamp using validate_unix_timestamp
                                 if not validate_unix_timestamp(initial_sync_time):
-                                    print(f"Error: Invalid initial_sync_time ({initial_sync_time})")
+                                    input(f"Error: Invalid initial_sync_time ({initial_sync_time})")
                                     continue
                                     
                                 return selected_file, initial_sync_time
@@ -448,21 +458,32 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
                                     initial_sync_time = float(sync_input_text)
                                     # Validate the timestamp using validate_unix_timestamp
                                     if not validate_unix_timestamp(initial_sync_time):
-                                        print(f"Error: Invalid initial_sync_time ({initial_sync_time})")
+                                        input(f"Error: Invalid initial_sync_time ({initial_sync_time})")
                                         continue
                                     return selected_file, initial_sync_time
                                 except ValueError:
-                                    print("Invalid timestamp format. Please try again.")
+                                    input("Invalid timestamp format. Please try again.")
                                     continue
                     else:
                         return selected_file
             elif key == 'q':
                 if exit_on_q:
-                    raise KeyboardInterrupt("Exit")
+                    # ask user to confirm exit
+                    confirm = input(f"{PURPLE}Are you sure you want to exit? (y/n): {ENDC}").strip().lower()
+                    if confirm == 'y':
+                        raise KeyboardInterrupt("Exit")
+                    else:
+                        continue
                 else:
                     raise KeyboardInterrupt("Operation Cancelled")
             elif key == '\x03':  # Ctrl+C
                 raise KeyboardInterrupt
+
+def parse_bucket_timestamp(bucket_name):
+        """Parse timestamp from bucket name."""
+        timestamp_str = bucket_name.split('_')[1]
+        # Try standard format first: YYYY-MM-DDTHH:MM:SSZ
+        return datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
 
 def select_bucket(influx_client: InfluxDBClientWrapper) -> str:
     """Get the bucket name from the user using interactive menu."""
@@ -474,13 +495,13 @@ def select_bucket(influx_client: InfluxDBClientWrapper) -> str:
 
         # Sort buckets by timestamp
         try:
-            bucket_names = sorted(bucket_names, key=lambda x: datetime.strptime(x.split('_')[1], '%Y-%m-%dT%H:%M:%SZ'))
+            bucket_names = sorted(bucket_names, key=parse_bucket_timestamp)
         except Exception as e:
-            print(f'No compatible bucket session to sort, {e}')
-            bucket_names = []
+            print(f'{YELLOW}Warning: Some buckets have incompatible formats: {e}{ENDC}')
+            # Don't set bucket_names to empty, just use unsorted list
 
         if not bucket_names:
-            print("No bucket sessions found.")
+            input("No bucket sessions found.")
             return None
 
         # Create options for interactive menu
@@ -520,10 +541,10 @@ def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
 
         # Sort buckets by timestamp
         try:
-            bucket_names = sorted(bucket_names, key=lambda x: datetime.strptime(x.split('_')[1], '%Y-%m-%dT%H:%M:%SZ'))
+            bucket_names = sorted(bucket_names, key=parse_bucket_timestamp)
         except Exception as e:
-            print(f'No compatible bucket session to sort, {e}')
-            bucket_names = []
+            print(f'{YELLOW}Warning: Some buckets have incompatible formats: {e}{ENDC}')
+            # Don't set bucket_names to empty, just use unsorted list
 
         # Create options for interactive menu
         options = []
@@ -544,18 +565,21 @@ def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
         
         # Add special options
         options.extend([
-            "➕ Create New Bucket",
+            "➕ Create New Bucket (Auto)",
+            "⌨️  Create New Bucket (Manual)",
             "🔄 Refresh List"
         ])
         descriptions.extend([
             "Create a new session bucket with current timestamp",
+            "Create a new session bucket with custom Unix timestamp",
             "Refresh the bucket list"
         ])
 
         if not options:
-            # No buckets available, only show create option
-            options = ["➕ Create New Bucket"]
-            descriptions = ["Create a new session bucket with current timestamp"]
+            # No buckets available, only show create options
+            options = ["➕ Create New Bucket (Auto)", "⌨️  Create New Bucket (Manual)"]
+            descriptions = ["Create a new session bucket with current timestamp", 
+                          "Create a new session bucket with custom Unix timestamp"]
 
         # Show interactive menu with exit_on_q=False to allow going back
         selected_index = interactive_menu("Select Session Bucket", options, descriptions)
@@ -567,14 +591,73 @@ def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
             clear_screen()
             print(f"{GREEN}✅ Bucket: {bucket_name} has been selected.{ENDC}")
             return bucket_name
-        elif options[selected_index] == "➕ Create New Bucket":
-            # Create new bucket
-            timestamp = datetime.now(timezone.utc).isoformat().split('.')[0] + 'Z'
+        elif options[selected_index] == "➕ Create New Bucket (Auto)":
+            # Create new bucket with current timestamp
+            # Use strftime to ensure exact format: YYYY-MM-DDTHH:MM:SSZ
+            timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
             bucket_name = 'session_' + timestamp
             influx_client.create_bucket(bucket_name)
             clear_screen()
             print(f"{GREEN}✅ Bucket: {bucket_name} has been created.{ENDC}")
             return bucket_name
+        elif options[selected_index] == "⌨️  Create New Bucket (Manual)":
+            # Create new bucket with user-provided Unix timestamp
+            clear_screen()
+            print("=" * 80)
+            print(f"{PURPLE}{BOLD}Create New Bucket with Custom Timestamp{ENDC}")
+            print("=" * 80)
+            print(f"{PURPLE}Enter a Unix timestamp (e.g., 1759904435.95792 or 1759904435){ENDC}")
+            print("-" * 80)
+            
+            while True:
+                try:
+                    user_input = input("Unix timestamp: ").strip()
+                    
+                    if not user_input:
+                        print(f"{RED}Timestamp cannot be empty. Please try again.{ENDC}")
+                        continue
+                    
+                    # Parse Unix timestamp
+                    unix_timestamp = float(user_input)
+                    
+                    # Validate the timestamp using validate_unix_timestamp
+                    if not validate_unix_timestamp(unix_timestamp):
+                        print(f"{RED}Error: Invalid Unix timestamp ({unix_timestamp}){ENDC}")
+                        print(f"{YELLOW}Timestamp should be a reasonable Unix time value.{ENDC}")
+                        continue
+                    
+                    # Convert Unix timestamp to ISO format (matching the expected format)
+                    dt = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
+                    timestamp_str = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    bucket_name = 'session_' + timestamp_str
+                    
+                    # Show preview
+                    print("-" * 80)
+                    print(f"{CYAN}Preview:{ENDC}")
+                    print(f"  Unix timestamp: {unix_timestamp}")
+                    print(f"  Human readable: {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                    print(f"  Bucket name: {bucket_name}")
+                    print("-" * 80)
+                    
+                    # Confirm
+                    confirm = input(f"{PURPLE}Create this bucket? (y/n): {ENDC}").strip().lower()
+                    if confirm == 'y':
+                        influx_client.create_bucket(bucket_name)
+                        clear_screen()
+                        print(f"{GREEN}✅ Bucket: {bucket_name} has been created.{ENDC}")
+                        return bucket_name
+                    else:
+                        print(f"{YELLOW}Bucket creation cancelled.{ENDC}")
+                        input("Press Enter to return to menu...")
+                        break
+                        
+                except ValueError:
+                    print(f"{RED}Invalid timestamp format. Please enter a valid Unix timestamp.{ENDC}")
+                    continue
+                except Exception as e:
+                    print(f"{RED}Error: {e}{ENDC}")
+                    input("Press Enter to return to menu...")
+                    break
         elif options[selected_index] == "🔄 Refresh List":
             # Refresh list and continue loop
             continue
@@ -591,8 +674,11 @@ def get_id():
             print("Invalid input. Please enter an integer as your unique base id.")
 
 
-def get_number_of_bases() -> int:
+def get_number_of_bases(default: int = 1) -> int:
     """Get the number of bases to synchronize.
+
+    Args:
+        default: Default number of bases if user presses Enter
 
     Returns:
         int: Number of bases
@@ -600,13 +686,20 @@ def get_number_of_bases() -> int:
     while True:
         try:
             flush_input()
-            num = int(input("Enter the number of bases to synchronize: ") or "1")
+            prompt = f"Enter the number of bases to synchronize [default: {default}]: "
+            user_input = input(prompt)
+            
+            # empty input uses default value
+            if not user_input.strip():
+                print(f"Using default value: {default}")
+                return default
+            
+            num = int(user_input)
             if num > 0:
                 return num
             print("Please enter a positive number.")
         except ValueError:
             print("Please enter a valid number.")
-
 
 def get_rtmp_url(available_urls: list[str]) -> str:
     """Get the RTMP URL from user input using interactive menu.

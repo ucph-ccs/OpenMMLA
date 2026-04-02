@@ -67,11 +67,13 @@ class IPSSynchronizer(Synchronizer):
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
+        if self.threads:
+            self._stop_threads()
+        self._clear_threads()
         self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.merged_relations = None
         self.merged_tags = None
-        self._clear_threads()
         gc.collect()
 
     def run(self):

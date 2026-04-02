@@ -23,6 +23,7 @@ OPTIONAL_DEP_MAP = {
     "ses-ctl": "uber-base",
     "ses-ana": "uber-base",
     "ses-man": "uber-base",
+    "tui": "tui",
 }
 
 # List of all available commands
@@ -110,5 +111,9 @@ COMMANDS = {
     "ses-man": (
         "openmmla.commands.ses.man:main",
         "Manage bucket data and local data."
+    ),
+    "tui": (
+        "openmmla.commands.tui:main",
+        "Launch TUI management console for config, services, and monitoring."
     ),
 }

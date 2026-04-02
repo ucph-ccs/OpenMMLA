@@ -96,6 +96,9 @@ class VFABase(Base):
         self.mqtt_client = MQTTClientWrapper(self.config_path)
 
     def _clean_up(self):
+        if self.threads:
+            self._stop_threads()
+        self._clear_threads()
         self.stop_event.set()
         self.mqtt_client.loop_stop()
         if self.video_stream:
@@ -104,7 +107,6 @@ class VFABase(Base):
         if self.graphics:
             cv2.destroyWindow(f'VFA Base {self.base_id}, Camera {self.selected_source}')
             cv2.waitKey(1)
-        self._clear_threads()
         gc.collect()
 
     def _reinit(self):

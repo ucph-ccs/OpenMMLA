@@ -79,6 +79,9 @@ class VFASynchronizer(Synchronizer):
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
+        if self.threads:
+            self._stop_threads()
+        self._clear_threads()
         self.mqtt_client.loop_stop()
         self.bucket_name = None
         self.number_of_bases = None
@@ -86,7 +89,6 @@ class VFASynchronizer(Synchronizer):
         self.time_bucket_buffer = {}
         self.selected_participant_descriptions = None
         self.vllm_queue = queue.Queue()
-        self._clear_threads()
         gc.collect()
 
     def run(self):

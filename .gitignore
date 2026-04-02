@@ -20,6 +20,7 @@ version_control/
 # Ignore directories at any level
 **/tests/
 **/__pycache__/
+**/data/
 
 # Ignore specific files
 .DS_Store

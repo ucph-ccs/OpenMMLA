@@ -111,7 +111,9 @@ class IPSBase(Base):
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
-        self.stop_event.set()
+        if self.threads:
+            self._stop_threads()
+        self._clear_threads()
         self.mqtt_client.loop_stop()
         if self.video_stream:
             self.video_stream.stop()
@@ -119,7 +121,6 @@ class IPSBase(Base):
         if self.graphics:
             cv2.destroyWindow(f'AprilTags Detection from camera {self.base_id}')
             cv2.waitKey(1)
-        self._clear_threads()
         gc.collect()
 
     def run(self):

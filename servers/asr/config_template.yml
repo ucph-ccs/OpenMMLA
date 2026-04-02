@@ -4,11 +4,15 @@
 
 AudioInferer:
   cuda: true # whether to use gpu acceleration, true/false
-  onnx: false # whether to use onnx runtime for inference, true/false (onnx runtime is faster but less precise)
-  model: <neomo-speaking-embedding-model>  # e.g., titanet_large, ecapa_tdnn, etc.
+  backend: nemo # nemo or wespeaker
   port: 5001 # port number
   workers: 1 # number of workers
   app: <path-to-audio-inferer-app> # path to the audio inferer app
+  # nemo-specific options
+  onnx: false # whether to use onnx runtime for inference, true/false (onnx runtime is faster but less precise)
+  model: <nemo-speaker-embedding-model>  # e.g., titanet_large, ecapa_tdnn, etc.
+  # wespeaker-specific options (set backend: wespeaker to use)
+  # model: w2vbert2_mfa  # chinese, english, campplus, eres2net, vblinkp, vblinkf, w2vbert2_mfa
 
 AudioResampler:
   port: 5002 
@@ -35,7 +39,7 @@ SpeechTranscriber:
   workers: 1 
   app: <path-to-speech-transcriber-app> 
 
-  backend: <backend> # azure or local
+  backend: <backend> # azure, local, or dashscope
   azure:
     subscription_key: <azure-subscription-key>
     region: <azure-region>
@@ -46,6 +50,16 @@ SpeechTranscriber:
     model: <model>  # e.g., base.en, small.en, medium.en, large.en for regular Whisper, or whisperx/large-v3, whisperx/medium for WhisperX with word-level timestamps
     language: en  # language code, e.g., en, zh, fr, etc. Set to null for auto-detection
     word_level: <bool>
+  dashscope:
+    api_key: <dashscope-api-key>  # or set DASHSCOPE_API_KEY environment variable
+    model: paraformer-realtime-v2  # paraformer-realtime-v2, qwen3-asr-flash, etc.
+    region: intl  # intl (Singapore) or cn (Beijing), endpoint selection for qwen3-asr models
+    word_level: <bool>  # word-level timestamps (paraformer only, not supported by qwen3-asr sync mode)
+    # paraformer-specific options
+    language_hints: [zh, en, ja]  # language hints for multi-language support
+    # qwen3-asr-specific options
+    language: zh  # single language code, omit for multilingual auto-detection
+    enable_itn: false  # inverse text normalization, Chinese and English only
 
 VoiceActivityDetector:
   cuda: true

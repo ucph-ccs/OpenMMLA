@@ -9,6 +9,7 @@ import torchaudio
 from denoiser import pretrained
 from denoiser.dsp import convert_audio
 from flask import request, jsonify
+from http import HTTPStatus
 
 from openmmla.services.server import Server
 from openmmla.utils.audio.auga import normalize_decibel
@@ -18,7 +19,7 @@ from openmmla.utils.audio.transcriber import get_transcriber
 
 class SpeechTranscriber(Server):
     """SpeechTranscriber transcribes the audio signal. It receives audio signal from base station and sends back the
-    transcribed text. Supports both local model and Azure Speech-to-Text backend."""
+    transcribed text. Supports local model, Azure, and DashScope (Paraformer / Qwen3-ASR) backends."""
 
     def __init__(self, project_dir: str | None, config_path: str):
         """Initialize the speech transcriber.
@@ -53,6 +54,53 @@ class SpeechTranscriber(Server):
 
             self.logger.info(
                 f"Using Azure Speech-to-Text backend, region: {self.region}, language: {self.language}, word_level: {self.word_level}")
+        elif self.backend in ('dashscope', 'paraformer'):
+            if self.backend == 'paraformer':
+                self.logger.warning("backend 'paraformer' is deprecated, use 'dashscope' instead")
+            self.backend = 'dashscope'
+
+            # read from 'dashscope' section, fall back to legacy 'paraformer' section
+            ds_config = config.get('dashscope', config.get('paraformer', {}))
+
+            self.api_key = ds_config.get('api_key')
+            self.model = ds_config.get('model', 'paraformer-realtime-v2')
+            self.word_level = ds_config.get('word_level', False)
+
+            # determine model family for API routing
+            self._is_paraformer = self.model.startswith('paraformer')
+            self._is_qwen_asr = self.model.startswith('qwen3-asr') or self.model.startswith('qwen-asr')
+
+            if not self._is_paraformer and not self._is_qwen_asr:
+                raise ValueError(
+                    f"Unsupported DashScope model '{self.model}'. "
+                    "Model name must start with 'paraformer' or 'qwen3-asr'."
+                )
+
+            if not self.api_key:
+                self.api_key = os.environ.get('DASHSCOPE_API_KEY')
+                if not self.api_key:
+                    raise ValueError(
+                        "DashScope backend requires api_key in config or DASHSCOPE_API_KEY environment variable"
+                    )
+
+            if self._is_paraformer:
+                self.language_hints = ds_config.get('language_hints', ['zh', 'en', 'ja'])
+                self.logger.info(
+                    f"Using DashScope Paraformer backend, model: {self.model}, "
+                    f"language_hints: {self.language_hints}, word_level: {self.word_level}")
+
+            if self._is_qwen_asr:
+                self.ds_region = ds_config.get('region', 'intl')
+                self.language = ds_config.get('language', None)
+                self.enable_itn = ds_config.get('enable_itn', False)
+                if self.word_level:
+                    self.logger.warning(
+                        "word_level timestamps are not supported by Qwen3-ASR-Flash in synchronous mode; ignoring"
+                    )
+                    self.word_level = False
+                self.logger.info(
+                    f"Using DashScope Qwen-ASR backend, model: {self.model}, "
+                    f"region: {self.ds_region}, language: {self.language}, enable_itn: {self.enable_itn}")
         else:
             # local model configuration
             local_config = config.get('local', {})
@@ -100,6 +148,35 @@ class SpeechTranscriber(Server):
                 self.logger.error(
                     "Failed to import Azure Speech SDK. Install it with 'pip install azure-cognitiveservices-speech'")
                 raise
+        elif self.backend == 'dashscope':
+            try:
+                import dashscope
+                dashscope.api_key = self.api_key
+
+                if self._is_paraformer:
+                    self.recognition = dashscope.audio.asr.Recognition(
+                        model=self.model,
+                        format='wav',
+                        sample_rate=16000,
+                        language_hints=self.language_hints,
+                        callback=None
+                    )
+                    self.logger.info("DashScope Paraformer Recognition initialized successfully")
+
+                elif self._is_qwen_asr:
+                    region_urls = {
+                        'intl': 'https://dashscope-intl.aliyuncs.com/api/v1',
+                        'cn': 'https://dashscope.aliyuncs.com/api/v1',
+                    }
+                    base_url = region_urls.get(self.ds_region, region_urls['intl'])
+                    dashscope.base_http_api_url = base_url
+                    self.logger.info(
+                        f"DashScope Qwen-ASR initialized (region={self.ds_region}, endpoint={base_url})")
+
+            except ImportError:
+                self.logger.error(
+                    "Failed to import DashScope SDK. Install it with 'pip install dashscope'")
+                raise
         else:
             # local model - automatically handles both regular whisper and whisperx
             self.transcriber = get_transcriber(self.tr_model, self.language, word_level=self.word_level,
@@ -125,15 +202,20 @@ class SpeechTranscriber(Server):
                     audio_file_path = self._get_temp_file_path('transcribe_audio', base_id, 'wav')
                     write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
-                    # apply noise reduction and normalize decibel
-                    self._apply_nr(audio_file_path)
-                    normalize_decibel(infile=audio_file_path, rms_level=-20)
-
                     # route to appropriate transcription method
                     self.logger.info(f"Starting transcription for {base_id}...")
                     if self.backend == 'azure':
+                        self._apply_nr(audio_file_path)
+                        normalize_decibel(infile=audio_file_path, rms_level=-20)
                         response = self._transcribe_with_azure(audio_file_path)
+                    elif self.backend == 'dashscope':
+                        if self._is_paraformer:
+                            response = self._transcribe_with_paraformer(audio_file_path)
+                        else:
+                            response = self._transcribe_with_qwen_asr(audio_file_path)
                     else:
+                        self._apply_nr(audio_file_path)
+                        normalize_decibel(infile=audio_file_path, rms_level=-20)
                         response = self._transcribe_with_local_model(audio_file_path)
 
                     self.logger.info(f"Finished transcription for {base_id}")
@@ -150,7 +232,7 @@ class SpeechTranscriber(Server):
                     except Exception as e:
                         self.logger.warning(f"Failed to remove temporary file {audio_file_path}: {e}")
 
-                if self.backend != 'azure':
+                if self.backend not in ['azure', 'dashscope']:
                     torch.cuda.empty_cache()
                 gc.collect()
         else:
@@ -226,6 +308,137 @@ class SpeechTranscriber(Server):
         else:
             error_msg = f"Azure recognition failed with reason: {result.reason}"
             raise RuntimeError(error_msg)
+
+    def _transcribe_with_paraformer(self, audio_file_path):
+        """Transcribe audio using Paraformer (DashScope) service with synchronous call.
+        
+        NOTE: Paraformer Recognition instances are single-use only (cannot be reused like Azure's speech_config).
+        We create a new instance for each request and properly clean it up afterward to avoid file descriptor leaks.
+        
+        Args:
+            audio_file_path: Path to the audio file
+            
+        Returns:
+            Dict containing transcribed text and optionally word-level timestamps if word_level=True
+        """
+        try:
+            # perform recognition
+            result = self.recognition.call(audio_file_path)
+            
+            # check if recognition was successful
+            if result.status_code != HTTPStatus.OK:
+                error_msg = f"Paraformer recognition failed: {result.message}"
+                self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
+            
+            # get sentence result - returns a list of sentence dictionaries
+            sentences = result.get_sentence()
+            
+            if not sentences or not isinstance(sentences, list):
+                self.logger.warning(f"No sentences found in result")
+                return {"text": ""}
+            
+            self.logger.debug(f"Paraformer returned {len(sentences)} sentences")
+            
+            # combine all sentences
+            all_text = []
+            all_words = []
+            
+            for sentence in sentences:
+                if 'text' in sentence and sentence['text']:
+                    all_text.append(sentence['text'])
+                    
+                    # collect word-level timestamps if requested and available
+                    if self.word_level and 'words' in sentence:
+                        for word in sentence['words']:
+                            # extract and convert timestamps, keeping only relevant fields
+                            word_info = {
+                                'text': word.get('text', ''),
+                                'start_time': word.get('begin_time', 0) / 1000.0,
+                                'end_time': word.get('end_time', 0) / 1000.0,
+                                'punctuation': word.get('punctuation', '')
+                            }
+                            all_words.append(word_info)
+            
+            # build response
+            full_text = ' '.join(all_text)
+            response = {"text": full_text}
+            
+            if self.word_level and all_words:
+                response['words'] = all_words
+                self.logger.debug(f"Extracted {len(all_words)} word-level timestamps")
+            
+            self.logger.debug(f"Paraformer transcription completed: {full_text}")
+            return response
+            
+        finally:
+            gc.collect()
+
+    def _transcribe_with_qwen_asr(self, audio_file_path):
+        """Transcribe audio using DashScope Qwen-ASR model via MultiModalConversation API.
+        
+        Args:
+            audio_file_path: Path to the audio file
+            
+        Returns:
+            Dict containing transcribed text and optional language/emotion metadata
+        """
+        try:
+            import dashscope
+
+            messages = [
+                {"role": "user", "content": [{"audio": audio_file_path}]}
+            ]
+
+            asr_options = {}
+            if self.language:
+                asr_options["language"] = self.language
+            if self.enable_itn:
+                asr_options["enable_itn"] = self.enable_itn
+
+            kwargs = dict(
+                api_key=self.api_key,
+                model=self.model,
+                messages=messages,
+                result_format="message",
+            )
+            if asr_options:
+                kwargs["asr_options"] = asr_options
+
+            response = dashscope.MultiModalConversation.call(**kwargs)
+
+            if response.status_code != HTTPStatus.OK:
+                error_msg = (
+                    f"Qwen-ASR recognition failed: code={response.status_code}, "
+                    f"message={response.message}"
+                )
+                self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            choices = response.output.get("choices", [])
+            if not choices:
+                self.logger.warning("No choices in Qwen-ASR response")
+                return {"text": ""}
+
+            message = choices[0].get("message", {})
+            content = message.get("content", [])
+            text = content[0].get("text", "") if content else ""
+
+            result = {"text": text}
+
+            annotations = message.get("annotations", [])
+            if annotations:
+                ann = annotations[0]
+                if "language" in ann:
+                    result["language"] = ann["language"]
+                if "emotion" in ann:
+                    result["emotion"] = ann["emotion"]
+
+            self.logger.debug(f"Qwen-ASR transcription completed: {text}")
+            return result
+
+        finally:
+            gc.collect()
 
     def _apply_nr(self, input_path: str):
         """Apply noise reduction to the audio.

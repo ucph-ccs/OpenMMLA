@@ -4,53 +4,65 @@ import json
 import os
 
 import librosa
-import nemo.collections.asr as nemo_asr
 import numpy as np
 import torch
 from flask import request, jsonify
-from nemo.core.classes import IterableDataset
-from nemo.core.neural_types import NeuralType, AudioSignal, LengthsType
-from torch.utils.data import DataLoader
 
 from openmmla.services.server import Server
 from openmmla.utils.audio.io import write_bytes_to_wav
+
+try:
+    import nemo.collections.asr as nemo_asr
+    from nemo.core.classes import IterableDataset
+    from nemo.core.neural_types import NeuralType, AudioSignal, LengthsType
+    from torch.utils.data import DataLoader
+    _NEMO_AVAILABLE = True
+except ImportError:
+    _NEMO_AVAILABLE = False
 
 try:
     import onnxruntime
 except ImportError:
     onnxruntime = None
 
+try:
+    import wespeaker as _wespeaker
+    _WESPEAKER_AVAILABLE = True
+except ImportError:
+    _WESPEAKER_AVAILABLE = False
 
-class AudioDataLayer(IterableDataset):
-    @property
-    def output_types(self):
-        return {
-            'audio_signal': NeuralType(('B', 'T'), AudioSignal(freq=self._sample_rate)),
-            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
-        }
 
-    def __init__(self, sample_rate):
-        super().__init__()
-        self._sample_rate = sample_rate
-        self.output = True
+if _NEMO_AVAILABLE:
+    class AudioDataLayer(IterableDataset):
+        @property
+        def output_types(self):
+            return {
+                'audio_signal': NeuralType(('B', 'T'), AudioSignal(freq=self._sample_rate)),
+                'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            }
 
-    def __iter__(self):
-        return self
+        def __init__(self, sample_rate):
+            super().__init__()
+            self._sample_rate = sample_rate
+            self.output = True
 
-    def __next__(self):
-        if not self.output:
-            raise StopIteration
-        self.output = False
-        return torch.as_tensor(self.signal, dtype=torch.float32), \
-            torch.as_tensor(self.signal_shape, dtype=torch.int64)
+        def __iter__(self):
+            return self
 
-    def set_signal(self, signal):
-        self.signal = signal.astype(np.float32) / 32768.
-        self.signal_shape = self.signal.size
-        self.output = True
+        def __next__(self):
+            if not self.output:
+                raise StopIteration
+            self.output = False
+            return torch.as_tensor(self.signal, dtype=torch.float32), \
+                torch.as_tensor(self.signal_shape, dtype=torch.int64)
 
-    def __len__(self):
-        return 1
+        def set_signal(self, signal):
+            self.signal = signal.astype(np.float32) / 32768.
+            self.signal_shape = self.signal.size
+            self.output = True
+
+        def __len__(self):
+            return 1
 
 
 class AudioInferer(Server):
@@ -70,18 +82,37 @@ class AudioInferer(Server):
         self._setup_objects()
 
     def _setup_yaml(self):
-        self.cuda = self.config['AudioInferer'].get('cuda', True)
-        self.onnx = self.config['AudioInferer'].get('onnx', False)
-        self.model_name = self.config['AudioInferer'].get('model', '')
-        self.onnx_model_name = self.config['AudioInferer'].get('model_onnx', '')
+        config = self.config['AudioInferer']
+        self.cuda = config.get('cuda', True)
         self.cuda = self.cuda and torch.cuda.is_available()
+        self.backend = config.get('backend', 'nemo')
+
+        if self.backend == 'nemo':
+            self.onnx = config.get('onnx', False)
+            self.model_name = config.get('model', '')
+            self.onnx_model_name = config.get('model_onnx', '')
+        elif self.backend == 'wespeaker':
+            self.model_name = config.get('model', 'w2vbert2_mfa')
+        else:
+            raise ValueError(f"Unsupported AudioInferer backend: '{self.backend}'. Use 'nemo' or 'wespeaker'.")
+
+        self.logger.info(f"AudioInferer backend: {self.backend}, model: {self.model_name}, cuda: {self.cuda}")
 
     def _setup_objects(self):
+        if self.backend == 'nemo':
+            self._setup_nemo()
+        elif self.backend == 'wespeaker':
+            self._setup_wespeaker()
+
+    def _setup_nemo(self):
+        if not _NEMO_AVAILABLE:
+            raise ImportError("NeMo is not installed. Install it with 'pip install nemo_toolkit[asr]'")
+
         if self.onnx:
             if not os.path.exists(self.onnx_model_name):
                 self.onnx_model_name = os.path.join(self.project_dir, f'{self.model_name}.onnx')
                 self.model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name=self.model_name)
-                cfg = copy.deepcopy(self.model._cfg)  # Preserve a copy of the full config
+                cfg = copy.deepcopy(self.model._cfg)
                 self.model.preprocessor = self.model.from_config_dict(cfg.preprocessor)
                 self.model.eval()
                 self.model = self.model.to(self.model.device)
@@ -95,7 +126,7 @@ class AudioInferer(Server):
             else:
                 self.ort_session = onnxruntime.InferenceSession(self.onnx_model_name,
                                                                 providers=['CPUExecutionProvider'])
-            self.logger.info("ONNX is enabled.")
+            self.logger.info("NeMo backend initialized with ONNX runtime")
         else:
             if self.cuda:
                 self.model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name=self.model_name)
@@ -103,7 +134,17 @@ class AudioInferer(Server):
                 self.model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name=self.model_name,
                                                                                      map_location='cpu')
             self.model.eval()
-            self.logger.info("ONNX is disabled.")
+            self.logger.info("NeMo backend initialized")
+
+    def _setup_wespeaker(self):
+        if not _WESPEAKER_AVAILABLE:
+            raise ImportError("WeSpeaker is not installed. Install it with 'pip install wespeaker'")
+
+        device = "cuda:0" if self.cuda else "cpu"
+        self.logger.info(f"Loading WeSpeaker model: {self.model_name}...")
+        self.ws_model = _wespeaker.load_model(self.model_name)
+        self.ws_model.set_device(device)
+        self.logger.info(f"WeSpeaker backend initialized (model={self.model_name}, device={device})")
 
     def process_request(self):
         """Perform inference on the audio.
@@ -135,7 +176,9 @@ class AudioInferer(Server):
             return jsonify({"error": "No audio file provided"}), 400
 
     def _infer(self, audio_path):
-        if self.onnx:
+        if self.backend == 'wespeaker':
+            feature = self._infer_wespeaker(audio_path)
+        elif self.onnx:
             audio, sample_rate = librosa.load(audio_path, sr=16000)
             feature, _ = self._infer_signal_onnx(audio)
         else:
@@ -143,6 +186,18 @@ class AudioInferer(Server):
         if self.cuda:
             torch.cuda.empty_cache()
         return feature
+
+    def _infer_wespeaker(self, audio_path):
+        audio, _ = librosa.load(audio_path, sr=16000, mono=True)
+        audio = audio.astype(np.float32)
+        device = "cuda:0" if self.cuda else "cpu"
+        audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(device)
+        embedding = self.ws_model.extract_embedding_from_pcm(audio_tensor, 16000)
+        if embedding is None:
+            raise RuntimeError("WeSpeaker failed to extract embedding")
+        if embedding.is_cuda:
+            embedding = embedding.cpu()
+        return embedding.detach().numpy().squeeze()
 
     def _infer_signal_onnx(self, signal):
         self.data_layer.set_signal(signal)
