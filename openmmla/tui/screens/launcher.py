@@ -9,11 +9,12 @@ import sys
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll, Vertical, Horizontal
 from textual.widget import Widget
-from textual.widgets import Static, RichLog
+from textual.widgets import Static
 
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.ssh import load_ssh_profiles, get_profile_by_name, ssh_run_sync
-from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef
+from openmmla.tui.widgets.command_session import CommandSession
+from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
 
 
 def _build_service_registry(root: str) -> list[ServiceDef]:
@@ -38,6 +39,12 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-d", "Dominant Speaker", "bool", False),
             ParamDef("-hsr", "Half-Scaled Recognition", "bool", True),
         ],
+        components=[
+            ComponentDef("base", "examples/run_asr_base.py", "-nb",
+                         ["-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
+            ComponentDef("synchronizer", "examples/run_asr_synchronizer.py", "-ns",
+                         ["-d", "-sp"]),
+        ],
     ))
 
     services.append(ServiceDef(
@@ -52,6 +59,11 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-ns", "Num Synchronizers", "int", 1),
             ParamDef("-g", "Graphics", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
+        ],
+        components=[
+            ComponentDef("base", "examples/run_vfa_base.py", "-nb",
+                         ["-g", "-v"]),
+            ComponentDef("synchronizer", "examples/run_vfa_synchronizer.py", "-ns"),
         ],
     ))
 
@@ -69,6 +81,14 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-g", "Graphics", "bool", True),
             ParamDef("-s", "Store", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
+        ],
+        components=[
+            ComponentDef("base", "examples/run_ips_base.py", "-nb",
+                         ["-g", "-s", "-v"]),
+            ComponentDef("synchronizer", "examples/run_ips_synchronizer.py", "-ns",
+                         ["-v"]),
+            ComponentDef("visualizer", "examples/run_ips_visualizer.py", "-nv",
+                         ["-s"]),
         ],
     ))
 
@@ -157,12 +177,6 @@ class LauncherPanel(Widget):
         width: 1fr;
         height: 1fr;
     }
-    #launch-log {
-        height: 12;
-        border-top: solid $primary;
-        margin-top: 1;
-        padding: 1;
-    }
     .category-header {
         text-style: bold;
         color: $accent;
@@ -200,7 +214,7 @@ class LauncherPanel(Widget):
                         is_running=is_running,
                         ssh_profile_names=self._ssh_profile_names,
                     )
-            yield RichLog(id="launch-log", highlight=True, markup=True)
+            yield CommandSession(id="launch-cmd-session")
 
     def on_show(self) -> None:
         self._ssh_profile_names = [p.name for p in load_ssh_profiles()]
@@ -223,8 +237,7 @@ class LauncherPanel(Widget):
 
     def _log(self, message: str) -> None:
         try:
-            log = self.query_one("#launch-log", RichLog)
-            log.write(message)
+            self.query_one("#launch-cmd-session", CommandSession).log(message)
         except Exception:
             pass
 
@@ -281,27 +294,128 @@ class LauncherPanel(Widget):
             self._log(f"[red]Error launching {svc.name}: {e}[/red]")
 
     def _launch_bash(self, svc: ServiceDef, params: dict) -> None:
-        bash_dir = os.path.join(svc.config_dir, "bash")
-        script = os.path.join(bash_dir, "run.sh")
-        if not os.path.isfile(script):
-            self._log(f"[red]Script not found: {script}[/red]")
+        if not svc.components:
+            self._log(f"[red]No components defined for {svc.name}[/red]")
             return
 
-        args = ["bash", script]
-        for flag, value in params.items():
-            if isinstance(value, bool):
-                args.extend([flag, "true" if value else "false"])
-            else:
-                args.extend([flag, str(value)])
-
-        self._log(f"  Command: {' '.join(args)}")
-        subprocess.Popen(
-            args,
-            cwd=bash_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        python_path = self._root
+        conda_env = svc.conda_env
+        preamble = (
+            f"export PYTHONPATH={python_path}/:$PYTHONPATH && "
+            f"source $(conda info --base)/etc/profile.d/conda.sh && "
+            f"conda activate {conda_env}"
         )
-        self._log(f"[green]{svc.name} launch initiated.[/green]")
+
+        tab_cmds: list[tuple[str, str]] = []
+        for comp in svc.components:
+            count = params.get(comp.count_flag, 0)
+            if isinstance(count, str):
+                try:
+                    count = int(count)
+                except ValueError:
+                    count = 0
+            if count <= 0:
+                continue
+
+            flag_parts = []
+            for f in comp.flags:
+                val = params.get(f)
+                if val is None:
+                    continue
+                if isinstance(val, bool):
+                    flag_parts.append(f"{f} {'true' if val else 'false'}")
+                else:
+                    flag_parts.append(f"{f} {val}")
+            flag_str = " ".join(flag_parts)
+
+            script_path = os.path.join(svc.config_dir, comp.script)
+            py_cmd = f"python3 {script_path}"
+            if flag_str:
+                py_cmd += f" {flag_str}"
+
+            full_cmd = f"{preamble} && {py_cmd}"
+
+            for i in range(count):
+                label = f"{comp.role} {i + 1}" if count > 1 else comp.role
+                tab_cmds.append((label, full_cmd))
+
+        if not tab_cmds:
+            self._log("[yellow]No components to launch (all counts are 0).[/yellow]")
+            return
+
+        self._log(f"  Launching {len(tab_cmds)} tab(s)...")
+        for label, cmd in tab_cmds:
+            self._log(f"    [{label}] {cmd.split(' && ')[-1]}")
+
+        if sys.platform == "darwin":
+            self._open_tabs_mac(tab_cmds)
+        elif self._is_ubuntu():
+            self._open_tabs_gnome(tab_cmds)
+        elif self._is_raspberry_pi():
+            self._open_tabs_lxterminal(tab_cmds)
+        else:
+            self._log("[yellow]Unsupported OS for terminal tab launch.[/yellow]")
+            return
+
+        self._log(f"[green]{svc.name} launched in new terminal window.[/green]")
+
+    def _open_tabs_mac(self, tab_cmds: list[tuple[str, str]]) -> None:
+        """open one Terminal.app window with N tabs on macOS."""
+        script_lines = []
+        _, first_cmd = tab_cmds[0]
+        escaped = first_cmd.replace("\\", "\\\\").replace('"', '\\"')
+        script_lines.append(f'tell application "Terminal" to do script "{escaped}"')
+        script_lines.append('tell application "Terminal" to activate')
+
+        for _, cmd in tab_cmds[1:]:
+            escaped = cmd.replace("\\", "\\\\").replace('"', '\\"')
+            script_lines.append("delay 0.5")
+            script_lines.append(
+                'tell application "System Events" to keystroke "t" using command down'
+            )
+            script_lines.append("delay 0.3")
+            script_lines.append(
+                f'tell application "Terminal" to do script "{escaped}" in the front window'
+            )
+
+        args = ["osascript"]
+        for line in script_lines:
+            args.extend(["-e", line])
+        subprocess.Popen(args)
+
+    def _open_tabs_gnome(self, tab_cmds: list[tuple[str, str]]) -> None:
+        """open one gnome-terminal window with N tabs."""
+        args = ["gnome-terminal", "--window"]
+        for _, cmd in tab_cmds:
+            args.extend(["--tab", "--", "bash", "-c", f"{cmd}; exec bash"])
+        subprocess.Popen(args)
+
+    def _open_tabs_lxterminal(self, tab_cmds: list[tuple[str, str]]) -> None:
+        """open one lxterminal window per component (no multi-tab support)."""
+        for _, cmd in tab_cmds:
+            subprocess.Popen([
+                "lxterminal",
+                f'--command=bash -c "{cmd}; exec bash"',
+            ])
+
+    @staticmethod
+    def _is_ubuntu() -> bool:
+        try:
+            with open("/etc/os-release") as f:
+                return "ID=ubuntu" in f.read()
+        except FileNotFoundError:
+            return False
+
+    @staticmethod
+    def _is_raspberry_pi() -> bool:
+        try:
+            with open("/etc/os-release") as f:
+                os_release = f.read()
+            with open("/proc/cpuinfo") as f:
+                cpuinfo = f.read()
+            return "ID=debian" in os_release and "Raspberry Pi" in cpuinfo
+        except FileNotFoundError:
+            return False
 
     def _launch_tmux_server(self, svc: ServiceDef) -> None:
         bash_dir = os.path.join(svc.config_dir, "bash")

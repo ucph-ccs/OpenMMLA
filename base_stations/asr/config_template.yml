@@ -1,53 +1,6 @@
 # ASR-BASE config_template.yml
 # Template for configuring audio, stream, database and server endpoints for the system
 
-# base settings for badge devices (e.g., Nicla Vision)
-Base_Badge:
-  register_duration: 15             
-  recognize_duration: 3             
-  recognize_sp_duration: 4          
-  recognize_threshold: 0.4          
-  recognize_sp_threshold: 0.3       
-  keep_threshold: 0.2               
-  keep_sp_threshold: 0.1            
-  rms_threshold: 500                
-  rms_peak_threshold: 2500 
-  update_threshold: 0.6
-  gain: 10                          
-  score_amplified: true             
-  source: udp                       
-  port_offset: 50000                
-  stream_kwargs:                    
-    channels: 1                     
-    rate: 16000                     
-    format: int16                   
-    chunk_size: 512                 
-    buffer_duration: 5.0            
-    resample_method: audio_librosa  
-    host: 0.0.0.0                   
-
-# base settings for Jabra speaker
-Base_Jabra:
-  register_duration: 15
-  recognize_duration: 3
-  recognize_sp_duration: 4
-  recognize_threshold: 0.3
-  recognize_sp_threshold: 0.3
-  keep_threshold: 0.1
-  keep_sp_threshold: 0.1
-  rms_threshold: 1000
-  rms_peak_threshold: 5000
-  update_threshold: 0.6
-  gain: 0
-  source: pyaudio
-  stream_kwargs:
-    channels: 1
-    rate: 16000
-    format: int16
-    chunk_size: 512
-    buffer_duration: 5.0
-    resample_method: audio_librosa
-
 # base settings for your device
 Base_[Your_Device_Name]:
   register_duration:            # Seconds to record for registration

@@ -5,7 +5,7 @@ import os
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll, Vertical
 from textual.widget import Widget
-from textual.widgets import Static, Tree, Button, Select
+from textual.widgets import Static, Tree, Button, Select, Input
 
 from openmmla.tui.schema.loader import (
     FieldDef as LoaderFieldDef,
@@ -52,6 +52,7 @@ class ConfigPanel(Widget):
         self._pipeline_map: dict[str, PipelineDef] = {}
         self._shared_values: dict[str, object] = get_shared_defaults()
         self._current_pipeline: PipelineDef | None = None
+        self._current_form: ConfigForm | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="sidebar"):
@@ -90,30 +91,18 @@ class ConfigPanel(Widget):
             label = f"{p.name}{marker}"
             if "Base" in p.name:
                 bases_node.add_leaf(label, data=p.name)
-            elif "Server" in p.name:
+            else:
                 servers_node.add_leaf(label, data=p.name)
 
         tree.root.add_leaf("SSH Profiles", data="__ssh_profiles__")
 
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+    async def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         node_data = event.node.data
         if node_data is None or str(node_data).startswith("__group"):
             return
 
         main_area = self.query_one("#main-area", VerticalScroll)
-
-        try:
-            main_area.query_one("#empty-state").remove()
-        except Exception:
-            pass
-        for old_form in main_area.query(ConfigForm):
-            old_form.remove()
-        for old_ssh in main_area.query(SSHForm):
-            old_ssh.remove()
-        for old_status in main_area.query(".status-saved"):
-            old_status.remove()
-        for old_sync in main_area.query(".sync-bar"):
-            old_sync.remove()
+        await main_area.remove_children()
 
         node_str = str(node_data)
 
@@ -165,8 +154,23 @@ class ConfigPanel(Widget):
             else:
                 values[f.path] = self._shared_values.get(f.path, f.default)
 
-        form = ConfigForm(pipeline.name, pipeline.fields, values)
+        dynamic_sections: dict[str, list[LoaderFieldDef]] = {}
+        if pipeline.base_template:
+            base_sections = [k for k in existing if k.startswith("Base_")]
+            for base_name in base_sections:
+                fields = self._clone_template_fields(pipeline.base_template, base_name)
+                dynamic_sections[base_name] = fields
+                for f in fields:
+                    val = get_nested_value(existing, f.path)
+                    if val is not None:
+                        values[f.path] = val
+
+        form = ConfigForm(pipeline.name, pipeline.fields, values, dynamic_sections)
         container.mount(form)
+        self._current_form = form
+
+        if pipeline.base_template:
+            container.mount(Button("+ Add Base", variant="success", id="btn-add-base"))
 
     def on_config_form_saved(self, event: ConfigForm.Saved) -> None:
         if event.pipeline_name.startswith("shared:"):
@@ -179,7 +183,9 @@ class ConfigPanel(Widget):
         if pipeline is None:
             return
 
-        save_config(pipeline.config_path, pipeline.fields, event.values)
+        form = self._current_form
+        all_fields = form.all_fields if form else pipeline.fields
+        save_config(pipeline.config_path, all_fields, event.values)
         self._show_status(f"Saved to {pipeline.config_path}")
         self._show_sync_bar(pipeline)
         self._build_tree()
@@ -198,14 +204,83 @@ class ConfigPanel(Widget):
         for old in main_area.query(".sync-bar"):
             old.remove()
         options = [(p.name, p.name) for p in profiles]
-        bar = Horizontal(classes="sync-bar")
-        bar.mount(Select(options, prompt="Select SSH profile...", id="sync-profile-select"))
-        bar.mount(Button("Sync to Remote", variant="warning", id="btn-sync-remote"))
+        bar = Horizontal(
+            Select(options, prompt="Select SSH profile...", id="sync-profile-select"),
+            Button("Sync to Remote", variant="warning", id="btn-sync-remote"),
+            classes="sync-bar",
+        )
         main_area.mount(bar)
+
+    def _clone_template_fields(self, base_template: list, new_name: str) -> list[LoaderFieldDef]:
+        """clone base_template fields with paths rewritten to a new section name."""
+        fields = []
+        for f in base_template:
+            old_top = f.path.split(".")[0]
+            new_path = new_name + f.path[len(old_top):]
+            old_sec_top = f.section.split(".")[0]
+            new_section = new_name + f.section[len(old_sec_top):]
+            fields.append(LoaderFieldDef(
+                path=new_path,
+                field_type=f.field_type,
+                default=f.default,
+                description=f.description,
+                required=f.required,
+                section=new_section,
+                choices=list(f.choices),
+            ))
+        return fields
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-sync-remote":
             self._sync_to_remote()
+        elif event.button.id == "btn-add-base":
+            self._show_add_base_input()
+        elif event.button.id == "btn-confirm-add-base":
+            self._confirm_add_base()
+        elif event.button.id == "btn-cancel-add-base":
+            self._cancel_add_base()
+
+    def _show_add_base_input(self) -> None:
+        main_area = self.query_one("#main-area", VerticalScroll)
+        try:
+            main_area.query_one("#btn-add-base").remove()
+        except Exception:
+            pass
+        bar = Horizontal(
+            Input(placeholder="Device name (e.g. Jabra)", id="add-base-input"),
+            Button("Add", variant="success", id="btn-confirm-add-base"),
+            Button("Cancel", id="btn-cancel-add-base"),
+            classes="add-base-bar",
+        )
+        main_area.mount(bar)
+
+    def _confirm_add_base(self) -> None:
+        try:
+            inp = self.query_one("#add-base-input", Input)
+            name = inp.value.strip()
+        except Exception:
+            return
+        if not name:
+            return
+
+        section_name = f"Base_{name}"
+        pipeline = self._current_pipeline
+        form = self._current_form
+        if not pipeline or not pipeline.base_template or not form:
+            return
+
+        fields = self._clone_template_fields(pipeline.base_template, section_name)
+        form.add_section(section_name, fields, {})
+        self._restore_add_base_button()
+
+    def _cancel_add_base(self) -> None:
+        self._restore_add_base_button()
+
+    def _restore_add_base_button(self) -> None:
+        main_area = self.query_one("#main-area", VerticalScroll)
+        for old in main_area.query(".add-base-bar"):
+            old.remove()
+        main_area.mount(Button("+ Add Base", variant="success", id="btn-add-base"))
 
     def _sync_to_remote(self) -> None:
         if self._current_pipeline is None:

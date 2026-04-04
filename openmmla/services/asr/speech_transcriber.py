@@ -83,15 +83,17 @@ class SpeechTranscriber(Server):
                         "DashScope backend requires api_key in config or DASHSCOPE_API_KEY environment variable"
                     )
 
+            language = ds_config.get('language', ds_config.get('language_hints', ['zh', 'en', 'ja']))
+
             if self._is_paraformer:
-                self.language_hints = ds_config.get('language_hints', ['zh', 'en', 'ja'])
+                self.language_hints = language if isinstance(language, list) else [language]
                 self.logger.info(
                     f"Using DashScope Paraformer backend, model: {self.model}, "
                     f"language_hints: {self.language_hints}, word_level: {self.word_level}")
 
             if self._is_qwen_asr:
                 self.ds_region = ds_config.get('region', 'intl')
-                self.language = ds_config.get('language', None)
+                self.language = language[0] if isinstance(language, list) else language
                 self.enable_itn = ds_config.get('enable_itn', False)
                 if self.word_level:
                     self.logger.warning(

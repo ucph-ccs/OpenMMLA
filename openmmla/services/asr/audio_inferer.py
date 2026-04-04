@@ -88,11 +88,13 @@ class AudioInferer(Server):
         self.backend = config.get('backend', 'nemo')
 
         if self.backend == 'nemo':
-            self.onnx = config.get('onnx', False)
-            self.model_name = config.get('model', '')
-            self.onnx_model_name = config.get('model_onnx', '')
+            nemo_config = config.get('nemo', {})
+            self.onnx = nemo_config.get('onnx', config.get('onnx', False))
+            self.model_name = nemo_config.get('model', config.get('model', ''))
+            self.onnx_model_name = nemo_config.get('model_onnx', config.get('model_onnx', ''))
         elif self.backend == 'wespeaker':
-            self.model_name = config.get('model', 'w2vbert2_mfa')
+            ws_config = config.get('wespeaker', {})
+            self.model_name = ws_config.get('model', config.get('model', 'w2vbert2_mfa'))
         else:
             raise ValueError(f"Unsupported AudioInferer backend: '{self.backend}'. Use 'nemo' or 'wespeaker'.")
 

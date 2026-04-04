@@ -185,6 +185,29 @@ async def scp_file_async(
     )
 
 
+CONDA_INIT = (
+    'for _p in ~/miniforge3 ~/miniconda3 ~/anaconda3 ~/mambaforge /opt/conda; do '
+    '[ -f "$_p/etc/profile.d/conda.sh" ] && . "$_p/etc/profile.d/conda.sh" && break; '
+    'done'
+)
+
+REMOTE_SHELL_INIT = f'export LANG=en_US.UTF-8 PYTHONUNBUFFERED=1; {CONDA_INIT}'
+
+
+def wrap_local(cmd: str, conda_env: str = "") -> str:
+    """wrap a local command with conda init and optional activate."""
+    activate = f"conda activate {conda_env} && " if conda_env else ""
+    escaped = cmd.replace("'", "'\\''")
+    return f"bash -c 'export PYTHONUNBUFFERED=1; {CONDA_INIT}; {activate}{escaped}'"
+
+
+def wrap_remote(cmd: str, conda_env: str = "") -> str:
+    """wrap a shell command with locale, conda init and optional activate for remote SSH."""
+    activate = f"conda activate {conda_env} && " if conda_env else ""
+    escaped = cmd.replace("'", "'\\''")
+    return f"bash -c '{REMOTE_SHELL_INIT}; {activate}{escaped}'"
+
+
 def git_remote_url() -> str:
     """return the git remote origin url of the local project."""
     root = _find_project_root()

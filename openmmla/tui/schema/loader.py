@@ -20,6 +20,10 @@ class FieldDef:
     required: bool
     section: str
     choices: list = field(default_factory=list)
+    entry_schema: dict = field(default_factory=dict)
+
+
+BASE_TEMPLATE_RE = re.compile(r'^Base_\[.*\]$')
 
 
 @dataclass
@@ -29,6 +33,7 @@ class PipelineDef:
     config_path: str
     fields: list = field(default_factory=list)
     sections: list = field(default_factory=list)
+    base_template: list = field(default_factory=list)
 
 
 def _infer_type(value):
@@ -55,8 +60,9 @@ def _is_placeholder(value):
 
 
 def _extract_comments(filepath):
-    """extract inline comments keyed by the yaml key on that line."""
+    """extract inline comments keyed by dot-path (e.g. 'SpeechTranscriber.azure.model')."""
     comments = {}
+    path_stack: list[tuple[int, str]] = []
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
@@ -68,12 +74,30 @@ def _extract_comments(filepath):
                     continue
                 indent = len(key_match.group(1))
                 key_name = key_match.group(2)
+                while path_stack and path_stack[-1][0] >= indent:
+                    path_stack.pop()
+                path_stack.append((indent, key_name))
+                dot_path = ".".join(k for _, k in path_stack)
                 comment_match = INLINE_COMMENT_RE.match(line)
                 desc = comment_match.group(1) if comment_match else ""
-                comments[(indent, key_name)] = desc
+                comments[dot_path] = desc
     except OSError:
         pass
     return comments
+
+
+def _infer_entry_schema(entries):
+    """infer dict-entry schema from a list of dicts, preferring non-placeholder values."""
+    schema = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for k, v in entry.items():
+            if k not in schema:
+                schema[k] = _infer_type(v)
+            elif schema[k] == "str" and not _is_placeholder(v):
+                schema[k] = _infer_type(v)
+    return schema
 
 
 def _walk_yaml(data, path_parts, section, comments, fields, indent_level=0):
@@ -81,15 +105,26 @@ def _walk_yaml(data, path_parts, section, comments, fields, indent_level=0):
     if not isinstance(data, dict):
         return
     for key, value in data.items():
+        if PLACEHOLDER_RE.match(str(key)):
+            continue
         current_path = path_parts + [str(key)]
         dot_path = ".".join(current_path)
-        child_indent = (indent_level + 1) * 2
-        desc = comments.get((child_indent, str(key)), "")
-        if desc == "":
-            desc = comments.get((indent_level * 2, str(key)), "")
+        desc = comments.get(dot_path, "")
 
         if isinstance(value, dict):
-            _walk_yaml(value, current_path, section, comments, fields, indent_level + 1)
+            sub_section = f"{section}.{key}"
+            _walk_yaml(value, current_path, sub_section, comments, fields, indent_level + 1)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            schema = _infer_entry_schema(value)
+            fields.append(FieldDef(
+                path=dot_path,
+                field_type="list_of_dicts",
+                default=value,
+                description=desc,
+                required=False,
+                section=section,
+                entry_schema=schema,
+            ))
         else:
             ft = _infer_type(value)
             req = _is_placeholder(value)
@@ -104,29 +139,34 @@ def _walk_yaml(data, path_parts, section, comments, fields, indent_level=0):
 
 
 def load_template(filepath):
-    """parse a config_template.yml and return list of FieldDef and section names."""
+    """parse a config_template.yml and return fields, sections, and base_template."""
     with open(filepath, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
 
     comments = _extract_comments(filepath)
     fields = []
-    sections = list(data.keys())
+    base_template = []
+    sections = [k for k in data.keys() if not k.startswith("Base_")]
 
     for section_key, section_value in data.items():
+        is_base_tpl = BASE_TEMPLATE_RE.match(section_key)
+        if section_key.startswith("Base_") and not is_base_tpl:
+            continue
+        target = base_template if is_base_tpl else fields
         if isinstance(section_value, dict):
             _walk_yaml(
                 section_value,
                 [section_key],
                 section_key,
                 comments,
-                fields,
+                target,
                 indent_level=0,
             )
         else:
             ft = _infer_type(section_value)
             req = _is_placeholder(section_value)
             desc = comments.get((0, section_key), "")
-            fields.append(FieldDef(
+            target.append(FieldDef(
                 path=section_key,
                 field_type=ft,
                 default=section_value,
@@ -135,7 +175,7 @@ def load_template(filepath):
                 section=section_key,
             ))
 
-    return fields, sections
+    return fields, sections, base_template
 
 
 def _find_project_root():
@@ -159,6 +199,7 @@ def discover_pipelines():
         ("IPS Base", "base_stations/ips"),
         ("ASR Server", "servers/asr"),
         ("VFA Server", "servers/vfa"),
+        ("Nginx", "servers/uber/nginx"),
     ]
 
     for name, rel_dir in registry:
@@ -166,13 +207,14 @@ def discover_pipelines():
         config = os.path.join(root, rel_dir, "config.yml")
         if not os.path.isfile(template):
             continue
-        fields, sections = load_template(template)
+        fields, sections, base_template = load_template(template)
         pipelines.append(PipelineDef(
             name=name,
             template_path=template,
             config_path=config,
             fields=fields,
             sections=sections,
+            base_template=base_template,
         ))
 
     return pipelines

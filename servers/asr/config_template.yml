@@ -8,11 +8,12 @@ AudioInferer:
   port: 5001 # port number
   workers: 1 # number of workers
   app: <path-to-audio-inferer-app> # path to the audio inferer app
-  # nemo-specific options
-  onnx: false # whether to use onnx runtime for inference, true/false (onnx runtime is faster but less precise)
-  model: <nemo-speaker-embedding-model>  # e.g., titanet_large, ecapa_tdnn, etc.
-  # wespeaker-specific options (set backend: wespeaker to use)
-  # model: w2vbert2_mfa  # chinese, english, campplus, eres2net, vblinkp, vblinkf, w2vbert2_mfa
+  nemo:
+    onnx: false # whether to use onnx runtime (faster but less precise)
+    model: <nemo-speaker-embedding-model> # e.g., titanet_large, ecapa_tdnn
+    model_onnx: <path-to-onnx-model> # optional pre-exported onnx model path
+  wespeaker:
+    model: w2vbert2_mfa # chinese, english, campplus, eres2net, vblinkp, vblinkf, w2vbert2_mfa
 
 AudioResampler:
   port: 5002 
@@ -55,11 +56,8 @@ SpeechTranscriber:
     model: paraformer-realtime-v2  # paraformer-realtime-v2, qwen3-asr-flash, etc.
     region: intl  # intl (Singapore) or cn (Beijing), endpoint selection for qwen3-asr models
     word_level: <bool>  # word-level timestamps (paraformer only, not supported by qwen3-asr sync mode)
-    # paraformer-specific options
-    language_hints: [zh, en, ja]  # language hints for multi-language support
-    # qwen3-asr-specific options
-    language: zh  # single language code, omit for multilingual auto-detection
-    enable_itn: false  # inverse text normalization, Chinese and English only
+    language: [zh, en, ja]  # list for paraformer multi-language hints, string for qwen-asr single language
+    enable_itn: false  # inverse text normalization, Chinese and English only (qwen3-asr only)
 
 VoiceActivityDetector:
   cuda: true

@@ -63,10 +63,17 @@ FieldRow .field-desc {
     color: $text-muted;
     padding: 0;
     margin-bottom: 0;
+    width: 100%;
+    overflow: hidden;
 }
 
 FieldRow .field-input {
     width: 100%;
+}
+
+FieldRow .field-textarea {
+    width: 100%;
+    height: 6;
 }
 
 ConfigForm {
@@ -74,13 +81,49 @@ ConfigForm {
     padding: 1 2;
 }
 
-ConfigForm .section-header {
-    text-style: bold;
-    color: $accent;
-    margin-top: 1;
+ConfigForm Collapsible {
     margin-bottom: 1;
-    background: $panel;
+}
+
+DictListField {
+    height: auto;
     padding: 0 1;
+    margin-bottom: 1;
+}
+
+.dict-entry {
+    height: auto;
+    border: dashed $primary;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.dict-entry-header {
+    text-style: bold;
+    color: $text-muted;
+    margin-bottom: 0;
+}
+
+.dict-entry-row {
+    height: auto;
+    margin-bottom: 0;
+}
+
+.dict-entry-label {
+    width: 12;
+    padding-top: 1;
+}
+
+.dict-entry-input {
+    width: 1fr;
+}
+
+.dle-rm-btn {
+    margin-top: 1;
+}
+
+.dle-add-btn {
+    margin-top: 1;
 }
 
 ConfigForm .form-actions {
@@ -92,6 +135,25 @@ ConfigForm .form-actions {
 ConfigForm .form-actions Button {
     margin: 0 1;
     min-width: 20;
+}
+
+#btn-add-base {
+    margin: 1 2;
+}
+
+.add-base-bar {
+    layout: horizontal;
+    height: auto;
+    padding: 1 2;
+}
+
+.add-base-bar Input {
+    width: 1fr;
+}
+
+.add-base-bar Button {
+    margin: 0 1;
+    min-width: 10;
 }
 
 .status-saved {

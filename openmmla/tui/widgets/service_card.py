@@ -17,6 +17,14 @@ def _safe_id(raw: str) -> str:
 
 
 @dataclass
+class ComponentDef:
+    role: str
+    script: str
+    count_flag: str
+    flags: list = field(default_factory=list)
+
+
+@dataclass
 class ServiceDef:
     name: str
     category: str
@@ -25,6 +33,7 @@ class ServiceDef:
     launch_type: str
     description: str = ""
     params: list = field(default_factory=list)
+    components: list = field(default_factory=list)
 
 
 @dataclass
