@@ -8,7 +8,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static, Button, Input, Switch, Label, Select
+from textual.widgets import Static, Button, Input, Switch, Label
 
 
 def _safe_id(raw: str) -> str:
@@ -48,17 +48,25 @@ class ServiceCard(Widget):
     """card widget displaying a service with start/stop controls and parameters."""
 
     class StartRequested(Message):
-        def __init__(self, service_name: str, params: dict, target: str = "local") -> None:
+        def __init__(self, service_name: str, params: dict) -> None:
             super().__init__()
             self.service_name = service_name
             self.params = params
-            self.target = target
 
     class StopRequested(Message):
-        def __init__(self, service_name: str, target: str = "local") -> None:
+        def __init__(self, service_name: str) -> None:
             super().__init__()
             self.service_name = service_name
-            self.target = target
+
+    class ViewLogsRequested(Message):
+        def __init__(self, service_name: str) -> None:
+            super().__init__()
+            self.service_name = service_name
+
+    class RefreshRequested(Message):
+        def __init__(self, service_name: str) -> None:
+            super().__init__()
+            self.service_name = service_name
 
     DEFAULT_CSS = """
     ServiceCard {
@@ -92,18 +100,6 @@ class ServiceCard(Widget):
     ServiceCard .param-input {
         width: 1fr;
     }
-    ServiceCard .card-target {
-        layout: horizontal;
-        height: auto;
-        margin-bottom: 1;
-    }
-    ServiceCard .target-label {
-        width: 20;
-        padding-top: 1;
-    }
-    ServiceCard .target-select {
-        width: 1fr;
-    }
     ServiceCard .card-actions {
         height: auto;
     }
@@ -117,12 +113,10 @@ class ServiceCard(Widget):
         self,
         service_def: ServiceDef,
         is_running: bool = False,
-        ssh_profile_names: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.service_def = service_def
         self._is_running = is_running
-        self._ssh_profile_names = ssh_profile_names or []
 
     def compose(self) -> ComposeResult:
         status_text = "[green]Running[/green]" if self._is_running else "[red]Stopped[/red]"
@@ -136,14 +130,6 @@ class ServiceCard(Widget):
             if self.service_def.description:
                 yield Static(f"  {self.service_def.description}", classes="card-meta")
             yield Static(f"  Status: {status_text}", classes="card-status")
-
-            target_options = [("Local", "local")] + [
-                (name, name) for name in self._ssh_profile_names
-            ]
-            target_id = _safe_id(f"target__{self.service_def.name}")
-            with Horizontal(classes="card-target"):
-                yield Label("Target:", classes="target-label")
-                yield Select(target_options, value="local", id=target_id, classes="target-select")
 
             if self.service_def.params:
                 with Vertical(classes="card-params"):
@@ -168,31 +154,26 @@ class ServiceCard(Widget):
                                 )
 
             with Horizontal(classes="card-actions"):
-                if self._is_running:
-                    yield Button(
-                        "Stop",
-                        variant="error",
-                        id=_safe_id(f"stop__{self.service_def.name}"),
-                    )
-                else:
-                    yield Button(
-                        "Start",
-                        variant="success",
-                        id=_safe_id(f"start__{self.service_def.name}"),
-                    )
-
-    def refresh_targets(self, profile_names: list[str]) -> None:
-        """update the target selector with fresh SSH profile names."""
-        target_id = _safe_id(f"target__{self.service_def.name}")
-        try:
-            sel = self.query_one(f"#{target_id}", Select)
-            current = sel.value
-            options = [("Local", "local")] + [(n, n) for n in profile_names]
-            sel.set_options(options)
-            if any(v == current for _, v in options):
-                sel.value = current
-        except Exception:
-            pass
+                yield Button(
+                    "Start",
+                    variant="success",
+                    id=_safe_id(f"start__{self.service_def.name}"),
+                )
+                yield Button(
+                    "Stop",
+                    variant="error",
+                    id=_safe_id(f"stop__{self.service_def.name}"),
+                )
+                yield Button(
+                    "View Logs",
+                    variant="primary",
+                    id=_safe_id(f"logs__{self.service_def.name}"),
+                )
+                yield Button(
+                    "Refresh",
+                    variant="primary",
+                    id=_safe_id(f"refresh__{self.service_def.name}"),
+                )
 
     def collect_params(self) -> dict:
         """gather current parameter values from the card inputs."""
@@ -219,22 +200,23 @@ class ServiceCard(Widget):
                 result[p.flag] = p.default
         return result
 
-    def _get_target(self) -> str:
-        target_id = _safe_id(f"target__{self.service_def.name}")
+    def update_status(self, is_running: bool) -> None:
+        """update the displayed status."""
+        self._is_running = is_running
+        status_text = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
         try:
-            sel = self.query_one(f"#{target_id}", Select)
-            val = sel.value
-            if val is Select.BLANK or val is None:
-                return "local"
-            return str(val)
+            self.query_one(".card-status", Static).update(f"  Status: {status_text}")
         except Exception:
-            return "local"
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
-        target = self._get_target()
         if btn_id.startswith("start__"):
             params = self.collect_params()
-            self.post_message(self.StartRequested(self.service_def.name, params, target))
+            self.post_message(self.StartRequested(self.service_def.name, params))
         elif btn_id.startswith("stop__"):
-            self.post_message(self.StopRequested(self.service_def.name, target))
+            self.post_message(self.StopRequested(self.service_def.name))
+        elif btn_id.startswith("logs__"):
+            self.post_message(self.ViewLogsRequested(self.service_def.name))
+        elif btn_id.startswith("refresh__"):
+            self.post_message(self.RefreshRequested(self.service_def.name))

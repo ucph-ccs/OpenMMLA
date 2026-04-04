@@ -7,7 +7,7 @@ from rich.markup import escape as rich_escape
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.widget import Widget
-from textual.widgets import Static, DataTable, Button
+from textual.widgets import Static, DataTable, Button, Select, Label
 
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.ssh import (
@@ -56,6 +56,18 @@ class EnvironmentPanel(Widget):
     #env-table {
         height: 1fr;
     }
+    #env-target-bar {
+        layout: horizontal;
+        height: auto;
+        padding: 0 1;
+    }
+    #env-target-bar Label {
+        width: 10;
+        padding-top: 1;
+    }
+    #env-target-bar Select {
+        width: 1fr;
+    }
     #env-actions {
         height: auto;
         padding: 1;
@@ -73,20 +85,27 @@ class EnvironmentPanel(Widget):
         self._selected_group: str | None = None
 
     def compose(self) -> ComposeResult:
+        from openmmla.tui.ssh import load_ssh_profiles
+        target_options = [("Local", "local")] + [
+            (p.name, p.name) for p in load_ssh_profiles()
+        ]
         with Vertical():
             yield Static(
                 "Conda Environment Manager — select a target and a row, then use actions",
                 id="env-header",
             )
             yield DataTable(id="env-table")
+            with Horizontal(id="env-target-bar"):
+                yield Label("Target:")
+                yield Select(target_options, value="local", id="env-target-select")
             with Horizontal(id="env-actions"):
-                yield Button("Connect", variant="default", id="btn-connect")
-                yield Button("Refresh", variant="default", id="btn-env-refresh")
+                yield Button("Connect", variant="primary", id="btn-connect")
+                yield Button("Refresh", variant="primary", id="btn-env-refresh")
                 yield Button("Git Clone", variant="warning", id="btn-git-clone")
                 yield Button("Git Pull", variant="warning", id="btn-git-pull")
-                yield Button("Create Env", variant="primary", id="btn-create-env")
+                yield Button("Create Env", variant="success", id="btn-create-env")
                 yield Button("Install Deps", variant="success", id="btn-install-deps")
-            yield CommandSession(id="env-cmd-session")
+            yield CommandSession(show_target=False, id="env-cmd-session")
 
     @property
     def _cmd(self) -> CommandSession:
@@ -108,8 +127,13 @@ class EnvironmentPanel(Widget):
         table.cursor_type = "row"
         self._refresh_table()
 
-    def on_command_session_target_changed(self, event: CommandSession.TargetChanged) -> None:
-        self._refresh_table()
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "env-target-select":
+            val = event.value
+            if val is Select.BLANK or val is None:
+                val = "local"
+            self._cmd.set_target(str(val))
+            self._refresh_table()
 
     # -- table -----------------------------------------------------------------
 

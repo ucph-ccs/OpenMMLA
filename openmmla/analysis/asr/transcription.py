@@ -3,8 +3,6 @@ import os
 import re
 from datetime import datetime, timedelta
 
-import jiwer
-
 
 def convert_transcription_json_to_txt(json_file_path):
     """Converts a JSON file with speech data to a formatted text file."""
@@ -140,6 +138,7 @@ def extract_transcription_without_unknown(file_path):
 
 def preprocess_text_with_jiwer(text):
     """ Preprocess the text using jiwer transformations. """
+    import jiwer
     transformation = jiwer.Compose([
         jiwer.ExpandCommonEnglishContractions(),
         jiwer.RemoveEmptyStrings(),

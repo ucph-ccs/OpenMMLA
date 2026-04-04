@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static, Input, Switch, Button, Collapsible, TextArea
 from textual.widget import Widget
@@ -115,7 +115,7 @@ def _parse_value(raw: str, field_type: str):
                 except ValueError:
                     pass
         return items
-    return raw
+    return _auto_parse(raw)
 
 
 def _auto_parse(raw: str):
@@ -242,6 +242,166 @@ class DictListField(Widget):
                 pass
 
 
+class _UpstreamService(Widget):
+    """a single upstream service with editable name, entries, and remove button."""
+
+    DEFAULT_CSS = """
+    _UpstreamService {
+        height: auto;
+        padding: 0 1;
+    }
+    .ue-name-row {
+        height: auto;
+        margin-bottom: 1;
+    }
+    """
+
+    def __init__(self, svc_id: str, name: str, entries: list[dict], schema: dict) -> None:
+        super().__init__(id=svc_id)
+        self._name = name
+        self._entries = list(entries) if entries else []
+        self._schema = schema
+        self._entry_idx = 0
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="ue-name-row"):
+            yield Static("name:", classes="dict-entry-label")
+            yield Input(value=self._name, id=f"{self.id}--name", classes="dict-entry-input")
+        for entry in self._entries:
+            yield from self._build_entry(entry)
+        yield Button("+ Add Entry", variant="success", id=f"{self.id}--add", classes="dle-add-btn")
+        yield Button("Remove Service", variant="error", id=f"{self.id}--rm")
+
+    def _build_entry(self, entry: dict) -> ComposeResult:
+        eidx = self._entry_idx
+        self._entry_idx += 1
+        eid = f"{self.id}--e{eidx}"
+        with Vertical(classes="dict-entry", id=eid):
+            yield Static(f"Entry {eidx + 1}", classes="dict-entry-header")
+            for key in self._schema:
+                val = entry.get(key, "")
+                with Horizontal(classes="dict-entry-row"):
+                    yield Static(f"{key}:", classes="dict-entry-label")
+                    yield Input(
+                        value=str(val) if val is not None else "",
+                        id=f"{eid}--{_safe_id(key)}",
+                        classes="dict-entry-input",
+                    )
+            yield Button("Remove", variant="error", id=f"{eid}--rm", classes="dle-rm-btn")
+
+    def add_entry(self) -> None:
+        eidx = self._entry_idx
+        self._entry_idx += 1
+        eid = f"{self.id}--e{eidx}"
+        children: list[Widget] = [Static(f"Entry {eidx + 1}", classes="dict-entry-header")]
+        for key in self._schema:
+            val = "" if self._schema[key] == "str" else 0
+            children.append(Horizontal(
+                Static(f"{key}:", classes="dict-entry-label"),
+                Input(value=str(val), id=f"{eid}--{_safe_id(key)}", classes="dict-entry-input"),
+                classes="dict-entry-row",
+            ))
+        children.append(Button("Remove", variant="error", id=f"{eid}--rm", classes="dle-rm-btn"))
+        container = Vertical(*children, classes="dict-entry", id=eid)
+        add_btn = self.query_one(f"#{self.id}--add", Button)
+        self.mount(container, before=add_btn)
+
+    @property
+    def service_name(self) -> str:
+        try:
+            return self.query_one(f"#{self.id}--name", Input).value.strip()
+        except Exception:
+            return self._name
+
+    @property
+    def entries(self) -> list[dict]:
+        result = []
+        for container in self.query(".dict-entry"):
+            cid = container.id or ""
+            if not cid.startswith(f"{self.id}--e"):
+                continue
+            entry = {}
+            for key in self._schema:
+                try:
+                    inp = container.query_one(f"#{cid}--{_safe_id(key)}", Input)
+                    entry[key] = _auto_parse(inp.value.strip())
+                except Exception:
+                    entry[key] = ""
+            result.append(entry)
+        return result
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if btn_id == f"{self.id}--add":
+            event.stop()
+            self.add_entry()
+        elif btn_id.startswith(f"{self.id}--e") and btn_id.endswith("--rm"):
+            event.stop()
+            entry_id = btn_id[:-4]
+            try:
+                self.query_one(f"#{entry_id}").remove()
+            except Exception:
+                pass
+
+
+class UpstreamsEditor(Widget):
+    """editor for a group of upstream services with nested collapsibles."""
+
+    DEFAULT_CSS = """
+    UpstreamsEditor {
+        height: auto;
+    }
+    """
+
+    def __init__(self, section_key: str, services: dict[str, list[dict]], entry_schema: dict) -> None:
+        super().__init__()
+        self.section_key = section_key
+        self._services = dict(services)
+        self._schema = entry_schema
+        self._svc_idx = 0
+
+    def compose(self) -> ComposeResult:
+        for svc_name, entries in self._services.items():
+            yield from self._build_service(svc_name, entries)
+        yield Button("+ Add Upstream", variant="success", id="ue-add-svc")
+
+    def _build_service(self, name: str, entries: list[dict]) -> ComposeResult:
+        svc_id = f"ue-svc-{self._svc_idx}"
+        self._svc_idx += 1
+        svc = _UpstreamService(svc_id, name, entries, self._schema)
+        yield Collapsible(svc, title=name, collapsed=True, id=f"{svc_id}-coll")
+
+    def _add_service(self) -> None:
+        svc_id = f"ue-svc-{self._svc_idx}"
+        self._svc_idx += 1
+        svc = _UpstreamService(svc_id, "", [], self._schema)
+        coll = Collapsible(svc, title="(new)", collapsed=False, id=f"{svc_id}-coll")
+        add_btn = self.query_one("#ue-add-svc", Button)
+        self.mount(coll, before=add_btn)
+
+    @property
+    def current_value(self) -> dict[str, list[dict]]:
+        result: dict[str, list[dict]] = {}
+        for svc in self.query(_UpstreamService):
+            name = svc.service_name
+            if name:
+                result[name] = svc.entries
+        return result
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if btn_id == "ue-add-svc":
+            event.stop()
+            self._add_service()
+        elif btn_id.endswith("--rm") and "--e" not in btn_id:
+            event.stop()
+            svc_id = btn_id[:-4]
+            try:
+                self.query_one(f"#{svc_id}-coll").remove()
+            except Exception:
+                pass
+
+
 class ConfigForm(Widget):
     """form widget that renders a list of FieldDefs grouped by section."""
 
@@ -253,8 +413,18 @@ class ConfigForm(Widget):
 
     DEFAULT_CSS = """
     ConfigForm {
-        height: auto;
+        height: 1fr;
         padding: 1 2;
+    }
+    .form-scroll {
+        height: 1fr;
+    }
+    .grp-inner {
+        height: auto;
+    }
+    .form-actions {
+        height: auto;
+        padding: 1 0;
     }
     """
 
@@ -264,12 +434,14 @@ class ConfigForm(Widget):
         fields: list[FieldDef],
         values: dict | None = None,
         dynamic_sections: dict[str, list[FieldDef]] | None = None,
+        group_add_buttons: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         super().__init__()
         self.pipeline_name = pipeline_name
         self._fields = fields
         self._values = values or {}
         self._dynamic_sections: dict[str, list[FieldDef]] = dict(dynamic_sections or {})
+        self._group_add_buttons = group_add_buttons or {}
 
     def _yield_field(self, f: FieldDef) -> ComposeResult:
         """yield the appropriate widget for a single field."""
@@ -280,26 +452,119 @@ class ConfigForm(Widget):
             yield FieldRow(f, initial_value=initial)
 
     def compose(self) -> ComposeResult:
-        tree = self._build_section_tree()
-        for top, direct, subs in tree:
-            with Collapsible(title=top, collapsed=True):
-                for f in direct:
-                    yield from self._yield_field(f)
-                for sub_name, sub_fields in subs:
-                    with Collapsible(title=sub_name, collapsed=True):
-                        for f in sub_fields:
+        with VerticalScroll(classes="form-scroll"):
+            tree = self._build_section_tree()
+            for top, direct, subs in tree:
+                if self._is_upstream_style(direct, subs):
+                    services: dict[str, list[dict]] = {}
+                    schema: dict = {}
+                    for f in direct:
+                        svc_name = f.path.split(".")[-1]
+                        services[svc_name] = self._values.get(f.path, f.default) or []
+                        if not schema and f.entry_schema:
+                            schema = dict(f.entry_schema)
+                    for k, v in self._values.items():
+                        if k.startswith(f"{top}.") and isinstance(v, list):
+                            svc_name = k.split(".", 1)[1]
+                            if svc_name not in services:
+                                services[svc_name] = v
+                    with Collapsible(title=top, collapsed=True):
+                        yield UpstreamsEditor(top, services, schema)
+                else:
+                    nested_subs = self._nest_subs(subs)
+                    with Collapsible(title=top, collapsed=True):
+                        for f in direct:
                             yield from self._yield_field(f)
+                        yield from self._render_nested_subs(nested_subs)
 
-        for section_name, fields in self._dynamic_sections.items():
-            coll_id = _safe_id(f"dyn-{section_name}")
-            btn_id = _safe_id(f"btn-remove-{section_name}")
-            with Collapsible(title=section_name, collapsed=True, id=coll_id):
-                yield from self._yield_nested_fields(section_name, fields)
-                yield Button("Remove", variant="error", id=btn_id)
+            dyn_groups: dict[str, list[str]] = {}
+            dyn_group_order: list[str] = []
+            ungrouped: list[str] = []
+            for section_name in self._dynamic_sections:
+                parts = section_name.split(".", 1)
+                if len(parts) > 1:
+                    group = parts[0]
+                    if group not in dyn_groups:
+                        dyn_groups[group] = []
+                        dyn_group_order.append(group)
+                    dyn_groups[group].append(section_name)
+                else:
+                    ungrouped.append(section_name)
+
+            for grp in self._group_add_buttons:
+                if grp not in dyn_groups:
+                    dyn_groups[grp] = []
+                    dyn_group_order.append(grp)
+
+            for group_name in dyn_group_order:
+                group_coll_id = _safe_id(f"grp-{group_name}")
+                inner_id = _safe_id(f"grp-inner-{group_name}")
+                with Collapsible(title=group_name, collapsed=False, id=group_coll_id):
+                    with Vertical(id=inner_id, classes="grp-inner"):
+                        for section_name in dyn_groups[group_name]:
+                            child_name = section_name.split(".", 1)[1]
+                            coll_id = _safe_id(f"dyn-{section_name}")
+                            btn_id = _safe_id(f"btn-remove-{section_name}")
+                            with Collapsible(title=child_name, collapsed=True, id=coll_id):
+                                yield from self._yield_nested_fields(section_name, self._dynamic_sections[section_name])
+                                yield Button("Remove", variant="error", id=btn_id)
+                    if group_name in self._group_add_buttons:
+                        label, bid = self._group_add_buttons[group_name]
+                        yield Button(label, variant="success", id=bid)
+
+            for section_name in ungrouped:
+                coll_id = _safe_id(f"dyn-{section_name}")
+                btn_id = _safe_id(f"btn-remove-{section_name}")
+                with Collapsible(title=section_name, collapsed=True, id=coll_id):
+                    yield from self._yield_nested_fields(section_name, self._dynamic_sections[section_name])
+                    yield Button("Remove", variant="error", id=btn_id)
 
         with Horizontal(classes="form-actions"):
             yield Button("Save", variant="primary", id="btn-save")
             yield Button("Reset to Defaults", variant="warning", id="btn-reset")
+
+    @staticmethod
+    def _is_upstream_style(direct: list[FieldDef], subs: list) -> bool:
+        """detect sections where all direct fields are list_of_dicts with no subsections."""
+        return (
+            len(direct) > 0
+            and not subs
+            and all(f.field_type == "list_of_dicts" for f in direct)
+        )
+
+    @staticmethod
+    def _nest_subs(subs: list[tuple]) -> list[tuple]:
+        """group flat sub-sections into a recursive tree.
+
+        Input:  [("vllm", fields), ("vllm.VLMExtraBody", fields), ("ollama", fields)]
+        Output: [("vllm", fields, [("VLMExtraBody", fields, [])]), ("ollama", fields, [])]
+        """
+        groups: dict[str, list] = {}
+        order: list[str] = []
+        for sub_name, sub_fields in subs:
+            parts = sub_name.split(".", 1)
+            top = parts[0]
+            if top not in groups:
+                groups[top] = [[], []]
+                order.append(top)
+            if len(parts) == 1:
+                groups[top][0] = sub_fields
+            else:
+                groups[top][1].append((parts[1], sub_fields))
+        result = []
+        for name in order:
+            fields, children_flat = groups[name]
+            nested = ConfigForm._nest_subs(children_flat) if children_flat else []
+            result.append((name, fields, nested))
+        return result
+
+    def _render_nested_subs(self, subs: list[tuple]) -> ComposeResult:
+        """recursively render nested sub-section collapsibles."""
+        for name, fields, children in subs:
+            with Collapsible(title=name, collapsed=True):
+                for f in fields:
+                    yield from self._yield_field(f)
+                yield from self._render_nested_subs(children)
 
     def _build_section_tree(self) -> list[list]:
         """build hierarchical section tree from static fields.
@@ -337,11 +602,10 @@ class ConfigForm(Widget):
         return entries
 
     def _yield_nested_fields(self, section_name: str, fields: list[FieldDef]) -> ComposeResult:
-        """yield FieldRows with nested Collapsibles for subsections."""
+        """yield field widgets with nested Collapsibles for subsections."""
         direct = [f for f in fields if f.section == section_name]
         for f in direct:
-            initial = self._values.get(f.path, f.default)
-            yield FieldRow(f, initial_value=initial)
+            yield from self._yield_field(f)
 
         sub_groups: dict[str, list[FieldDef]] = {}
         for f in fields:
@@ -352,16 +616,25 @@ class ConfigForm(Widget):
         for sub_name, sub_flds in sub_groups.items():
             with Collapsible(title=sub_name, collapsed=True):
                 for f in sub_flds:
-                    initial = self._values.get(f.path, f.default)
-                    yield FieldRow(f, initial_value=initial)
+                    yield from self._yield_field(f)
+
+    def _make_field_widget(self, f: FieldDef) -> Widget:
+        """create the appropriate widget for a single field."""
+        initial = self._values.get(f.path, f.default)
+        if f.field_type == "list_of_dicts":
+            return DictListField(f, initial_value=initial)
+        return FieldRow(f, initial_value=initial)
 
     def add_section(self, section_name: str, fields: list[FieldDef], values: dict) -> None:
         """dynamically add a new collapsible section with fields and a remove button."""
         self._dynamic_sections[section_name] = fields
+        for f in fields:
+            if f.path in values:
+                self._values[f.path] = values[f.path]
         direct = [f for f in fields if f.section == section_name]
         children: list[Widget] = []
         for f in direct:
-            children.append(FieldRow(f, initial_value=values.get(f.path, f.default)))
+            children.append(self._make_field_widget(f))
 
         sub_groups: dict[str, list[FieldDef]] = {}
         for f in fields:
@@ -369,15 +642,31 @@ class ConfigForm(Widget):
                 sub_name = f.section[len(section_name) + 1:]
                 sub_groups.setdefault(sub_name, []).append(f)
         for sub_name, sub_flds in sub_groups.items():
-            sub_children = [FieldRow(f, initial_value=values.get(f.path, f.default)) for f in sub_flds]
+            sub_children = [self._make_field_widget(f) for f in sub_flds]
             children.append(Collapsible(*sub_children, title=sub_name, collapsed=True))
 
         btn_id = _safe_id(f"btn-remove-{section_name}")
         children.append(Button("Remove", variant="error", id=btn_id))
         coll_id = _safe_id(f"dyn-{section_name}")
+
+        parts = section_name.split(".", 1)
+        if len(parts) > 1:
+            child_name = parts[1]
+            inner_id = _safe_id(f"grp-inner-{parts[0]}")
+            collapsible = Collapsible(*children, title=child_name, collapsed=False, id=coll_id)
+            try:
+                inner = self.query_one(f"#{inner_id}", Vertical)
+                inner.mount(collapsible)
+                return
+            except Exception:
+                pass
+
         collapsible = Collapsible(*children, title=section_name, collapsed=False, id=coll_id)
-        form_actions = self.query_one(".form-actions", Horizontal)
-        self.mount(collapsible, before=form_actions)
+        try:
+            scroll = self.query_one(".form-scroll", VerticalScroll)
+            scroll.mount(collapsible)
+        except Exception:
+            self.mount(collapsible)
 
     def remove_section(self, section_name: str) -> None:
         """remove a dynamic section by name."""
@@ -390,19 +679,33 @@ class ConfigForm(Widget):
 
     @property
     def all_fields(self) -> list[FieldDef]:
-        """return all fields including dynamic sections."""
-        result = list(self._fields)
+        """return all fields including dynamic sections and upstream editors."""
+        ue_sections = {ue.section_key for ue in self.query(UpstreamsEditor)}
+        result = [f for f in self._fields if not any(f.path.startswith(s + ".") for s in ue_sections)]
         for fields in self._dynamic_sections.values():
             result.extend(fields)
+        for ue in self.query(UpstreamsEditor):
+            for svc_name in ue.current_value:
+                result.append(FieldDef(
+                    path=f"{ue.section_key}.{svc_name}",
+                    field_type="list_of_dicts",
+                    default=[],
+                    description="",
+                    required=False,
+                    section=ue.section_key,
+                ))
         return result
 
     def collect_values(self) -> dict:
-        """gather current values from all field rows and dict-list fields."""
+        """gather current values from all field rows, dict-list fields, and upstream editors."""
         values = {}
         for row in self.query(FieldRow):
             values[row.field_def.path] = row.current_value
         for dl in self.query(DictListField):
             values[dl.field_def.path] = dl.current_value
+        for ue in self.query(UpstreamsEditor):
+            for svc_name, entries in ue.current_value.items():
+                values[f"{ue.section_key}.{svc_name}"] = entries
         return values
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

@@ -32,7 +32,7 @@ upstreams:
   # Audio inference service
   infer:  # reserved for asr-infer
     - host: <server-01-host>  # Hostname or IP address of the server, e.g. 192.168.1.12 or server-01.local
-      port: <port-number>     # Port number where the service is running, e.g. 5000
+      port: <port-number>     # Port number where the service is running, e.g. 5050
       weight: 3              # Weight for load balancing (higher = more requests)
     - host: <server-02-host>
       port: <port-number>

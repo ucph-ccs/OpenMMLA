@@ -22,31 +22,6 @@ Screen {
     text-style: bold;
 }
 
-#sidebar {
-    width: 32;
-    border-right: solid $primary;
-    padding: 1;
-    background: $panel;
-}
-
-#sidebar Tree {
-    width: 1fr;
-    scrollbar-size: 1 1;
-}
-
-#main-area {
-    width: 1fr;
-    padding: 0 1;
-}
-
-#empty-state {
-    width: 1fr;
-    height: 1fr;
-    content-align: center middle;
-    color: $text-muted;
-    text-style: italic;
-}
-
 FieldRow {
     layout: vertical;
     height: auto;
@@ -170,14 +145,7 @@ ConfigForm .form-actions Button {
     margin-bottom: 1;
 }
 
-/* launcher screen */
-
-.service-grid {
-    layout: grid;
-    grid-size: 2;
-    grid-gutter: 1;
-    padding: 1;
-}
+/* service panel */
 
 .service-card {
     height: auto;

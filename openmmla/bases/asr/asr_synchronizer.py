@@ -81,8 +81,8 @@ class ASRSynchronizer(Synchronizer):
         """Set up attributes from YAML configuration."""
         sync_config = self.config['Synchronizer']
         self.buffer_expiry_time = float(sync_config['result_expiry_time'])  # Expiry time of retained results
-        recognize_duration = float(self.config[self.base_type]['recognize_sp_duration']) if self.sp else int(
-            self.config[self.base_type]['recognize_duration'])
+        recognize_duration = float(self.config['Base'][self.base_type]['recognize_sp_duration']) if self.sp else int(
+            self.config['Base'][self.base_type]['recognize_duration'])
         self.bucket_duration = float(sync_config.get('bucket_duration', recognize_duration))
         self.match_tolerance = float(sync_config.get('match_tolerance', recognize_duration))
 

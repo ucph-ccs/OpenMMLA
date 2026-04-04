@@ -23,9 +23,6 @@ class FieldDef:
     entry_schema: dict = field(default_factory=dict)
 
 
-BASE_TEMPLATE_RE = re.compile(r'^Base_\[.*\]$')
-
-
 @dataclass
 class PipelineDef:
     name: str
@@ -34,6 +31,8 @@ class PipelineDef:
     fields: list = field(default_factory=list)
     sections: list = field(default_factory=list)
     base_template: list = field(default_factory=list)
+    base_section: str = ""
+    base_template_prefix: str = ""
 
 
 def _infer_type(value):
@@ -69,7 +68,7 @@ def _extract_comments(filepath):
                 stripped = line.strip()
                 if not stripped or stripped.startswith('#'):
                     continue
-                key_match = re.match(r'^(\s*)([A-Za-z_][\w\-\[\]]*)\s*:', line)
+                key_match = re.match(r'^(\s*)([A-Za-z_<][\w\-\[\]<>]*)\s*:', line)
                 if not key_match:
                     continue
                 indent = len(key_match.group(1))
@@ -138,35 +137,74 @@ def _walk_yaml(data, path_parts, section, comments, fields, indent_level=0):
             ))
 
 
+def fields_from_config_section(section_key, section_value):
+    """generate FieldDefs from an arbitrary config section not in the template."""
+    fields = []
+    if isinstance(section_value, dict):
+        _walk_yaml(section_value, [section_key], section_key, {}, fields)
+    return fields
+
+
+def _find_placeholder_child(section_value):
+    """find a placeholder child key only when it is the sole child.
+
+    This distinguishes a genuine base template section (e.g. Base: {<Device>: ...})
+    from a section that merely includes a placeholder example alongside real children
+    (e.g. upstreams: {infer: ..., <your-service>: ...}).
+    """
+    if not isinstance(section_value, dict):
+        return None
+    placeholder = None
+    for child_key in section_value:
+        if PLACEHOLDER_RE.match(str(child_key)):
+            placeholder = str(child_key)
+        else:
+            return None
+    return placeholder
+
+
 def load_template(filepath):
-    """parse a config_template.yml and return fields, sections, and base_template."""
+    """parse a config_template.yml and return fields, sections, base_template, and base metadata."""
     with open(filepath, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
 
     comments = _extract_comments(filepath)
     fields = []
     base_template = []
-    sections = [k for k in data.keys() if not k.startswith("Base_")]
+    base_section = ""
+    base_template_prefix = ""
+    sections = list(data.keys())
 
     for section_key, section_value in data.items():
-        is_base_tpl = BASE_TEMPLATE_RE.match(section_key)
-        if section_key.startswith("Base_") and not is_base_tpl:
-            continue
-        target = base_template if is_base_tpl else fields
         if isinstance(section_value, dict):
+            tpl_child = _find_placeholder_child(section_value)
+            if tpl_child is not None:
+                child_value = section_value[tpl_child]
+                base_section = section_key
+                base_template_prefix = f"{section_key}.{tpl_child}"
+                if isinstance(child_value, dict):
+                    _walk_yaml(
+                        child_value,
+                        [section_key, tpl_child],
+                        base_template_prefix,
+                        comments,
+                        base_template,
+                        indent_level=0,
+                    )
+                continue
             _walk_yaml(
                 section_value,
                 [section_key],
                 section_key,
                 comments,
-                target,
+                fields,
                 indent_level=0,
             )
         else:
             ft = _infer_type(section_value)
             req = _is_placeholder(section_value)
             desc = comments.get((0, section_key), "")
-            target.append(FieldDef(
+            fields.append(FieldDef(
                 path=section_key,
                 field_type=ft,
                 default=section_value,
@@ -175,7 +213,7 @@ def load_template(filepath):
                 section=section_key,
             ))
 
-    return fields, sections, base_template
+    return fields, sections, base_template, base_section, base_template_prefix
 
 
 def _find_project_root():
@@ -200,6 +238,7 @@ def discover_pipelines():
         ("ASR Server", "servers/asr"),
         ("VFA Server", "servers/vfa"),
         ("Nginx", "servers/uber/nginx"),
+        ("Flask Backend", "servers/uber/dashboard/flask-backend"),
     ]
 
     for name, rel_dir in registry:
@@ -207,7 +246,7 @@ def discover_pipelines():
         config = os.path.join(root, rel_dir, "config.yml")
         if not os.path.isfile(template):
             continue
-        fields, sections, base_template = load_template(template)
+        fields, sections, base_template, base_sec, base_tpl_prefix = load_template(template)
         pipelines.append(PipelineDef(
             name=name,
             template_path=template,
@@ -215,6 +254,8 @@ def discover_pipelines():
             fields=fields,
             sections=sections,
             base_template=base_template,
+            base_section=base_sec,
+            base_template_prefix=base_tpl_prefix,
         ))
 
     return pipelines

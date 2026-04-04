@@ -12,7 +12,7 @@ from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button
 
 from openmmla.tui.schema.loader import _find_project_root
-from openmmla.tui.ssh import load_ssh_profiles, ssh_check_port, ssh_check_tmux, SSHProfile
+from openmmla.tui.ssh import load_ssh_profiles, ssh_check_port, ssh_check_tmux, ssh_run_sync, get_profile_by_name, SSHProfile
 
 
 KNOWN_SERVICES = [
@@ -20,7 +20,7 @@ KNOWN_SERVICES = [
     {"name": "Redis", "port": 6379, "type": "system"},
     {"name": "Mosquitto", "port": 1883, "type": "system"},
     {"name": "Nginx", "port": 8080, "type": "system"},
-    {"name": "Flask Dashboard", "port": 5000, "type": "tmux", "session": "flask"},
+    {"name": "Flask Dashboard", "port": 5050, "type": "tmux", "session": "flask"},
     {"name": "Next.js Frontend", "port": 3000, "type": "tmux", "session": "next"},
     {"name": "Celery Worker", "port": None, "type": "tmux", "session": "celery"},
     {"name": "AudioInferer", "port": 5001, "type": "tmux", "session": "audioinferer"},
@@ -113,7 +113,7 @@ class StatusPanel(Widget):
     def __init__(self) -> None:
         super().__init__()
         self._tmux_sessions: dict[str, str] = {}
-        self._selected_session: str | None = None
+        self._selected_row: tuple[str, str, str, str] | None = None  # (name, host, status, session)
         self._ssh_profiles: list[SSHProfile] = []
         self._summary_text: str = ""
 
@@ -138,11 +138,11 @@ class StatusPanel(Widget):
         self.set_timer(5.0, self._auto_refresh)
 
     def _auto_refresh(self) -> None:
-        self._refresh_status()
+        self._refresh_status(include_remote=False)
         self._schedule_refresh()
 
-    def _refresh_status(self) -> None:
-        """refresh local services only (fast, non-blocking)."""
+    def _refresh_status(self, include_remote: bool = False) -> None:
+        """refresh service status. remote checks only when explicitly requested."""
         self._tmux_sessions = _list_tmux_sessions()
         self._ssh_profiles = load_ssh_profiles()
         table = self.query_one("#status-table", DataTable)
@@ -162,7 +162,7 @@ class StatusPanel(Widget):
             if svc["type"] == "system":
                 is_up = port_ok
             else:
-                is_up = session_ok or port_ok
+                is_up = session_ok
 
             status_str = "Running" if is_up else "Stopped"
             port_str = str(port) if port else "-"
@@ -200,7 +200,7 @@ class StatusPanel(Widget):
         summary = self.query_one("#status-summary", Static)
         summary.update(self._summary_text)
 
-        if self._ssh_profiles:
+        if include_remote and self._ssh_profiles:
             self.run_worker(self._refresh_remote_status(), exclusive=True)
 
     async def _refresh_remote_status(self) -> None:
@@ -247,29 +247,90 @@ class StatusPanel(Widget):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-refresh":
-            self._refresh_status()
+            self._refresh_status(include_remote=True)
         elif event.button.id == "btn-view-logs":
             self._view_selected_logs()
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         table = self.query_one("#status-table", DataTable)
         row_key = event.row_key
         try:
             row_data = table.get_row(row_key)
-            session = row_data[3]
-            if session and session != "-":
-                self._selected_session = str(session)
+            name = str(row_data[0])
+            host = str(row_data[1])
+            status = str(row_data[2])
+            session = str(row_data[4]) if row_data[4] and row_data[4] != "-" else ""
+            self._selected_row = (name, host, status, session)
         except Exception:
-            pass
+            self._selected_row = None
 
     def _view_selected_logs(self) -> None:
         log = self.query_one("#log-panel", RichLog)
-        if not self._selected_session:
-            log.write("[yellow]Select a row with a tmux session first.[/yellow]")
+        if not self._selected_row:
+            log.write("[yellow]Select a service row first.[/yellow]")
+            return
+
+        name, host, status, session = self._selected_row
+
+        if "Stopped" in status:
+            log.write(f"[yellow]{name} ({host}) is not running. Start the service first.[/yellow]")
             return
 
         log.clear()
-        log.write(f"[bold]Logs for session: {self._selected_session}[/bold]\n")
-        output = _capture_tmux_pane(self._selected_session, lines=40)
-        for line in output.splitlines():
-            log.write(line)
+        svc_def = next((s for s in KNOWN_SERVICES if s["name"] == name), None)
+        svc_type = svc_def["type"] if svc_def else ("tmux" if session else "unknown")
+        svc_key = name.lower().split()[0] if svc_def and svc_type == "system" else ""
+
+        if host == "local":
+            self._view_logs_local(log, name, svc_type, svc_key, session)
+        else:
+            self._view_logs_remote(log, name, host, svc_type, svc_key, session)
+
+    def _view_logs_local(self, log: RichLog, name: str, svc_type: str, svc_key: str, session: str) -> None:
+        if svc_type == "system" and svc_key:
+            from openmmla.tui.screens.launcher import _get_system_service_log
+            log.write(f"[bold]Logs for {name} (local)[/bold]\n")
+            output = _get_system_service_log(svc_key)
+            for line in output.splitlines():
+                log.write(line)
+        elif session:
+            log.write(f"[bold]Logs for {name} (session: {session})[/bold]\n")
+            output = _capture_tmux_pane(session, lines=40)
+            for line in output.splitlines():
+                log.write(line)
+        else:
+            log.write(f"[yellow]No logs available for {name}[/yellow]")
+
+    def _view_logs_remote(self, log: RichLog, name: str, host: str, svc_type: str, svc_key: str, session: str) -> None:
+        profile = get_profile_by_name(host)
+        if profile is None:
+            log.write(f"[red]SSH profile '{host}' not found.[/red]")
+            return
+
+        _REMOTE_LOG_CMDS: dict[str, str] = {
+            "influxdb": "journalctl -u influxdb -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/influxdb/influxd.log 2>/dev/null || echo '(no influxdb logs found)'",
+            "redis": "journalctl -u redis-server -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/redis/redis-server.log 2>/dev/null || echo '(no redis logs found)'",
+            "mosquitto": "journalctl -u mosquitto -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/mosquitto/mosquitto.log 2>/dev/null || echo '(no mosquitto logs found)'",
+            "nginx": "journalctl -u nginx -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/nginx/error.log 2>/dev/null || echo '(no nginx logs found)'",
+        }
+
+        if svc_type == "system" and svc_key in _REMOTE_LOG_CMDS:
+            log.write(f"[bold]Logs for {name} ({host})[/bold]\n")
+            try:
+                result = ssh_run_sync(profile, _REMOTE_LOG_CMDS[svc_key], timeout=15.0)
+                output = result.stdout if result.returncode == 0 else result.stderr
+                for line in output.splitlines():
+                    log.write(line)
+            except Exception as e:
+                log.write(f"[red]Failed to fetch remote logs: {e}[/red]")
+        elif session:
+            log.write(f"[bold]Logs for {name} ({host}, session: {session})[/bold]\n")
+            try:
+                result = ssh_run_sync(profile, f"tmux capture-pane -t {session} -p -S -80", timeout=10.0)
+                output = result.stdout if result.returncode == 0 else f"(could not capture tmux session '{session}')"
+                for line in output.splitlines():
+                    log.write(line)
+            except Exception as e:
+                log.write(f"[red]Failed to fetch remote logs: {e}[/red]")
+        else:
+            log.write(f"[yellow]No logs available for {name} on {host}[/yellow]")

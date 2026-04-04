@@ -114,12 +114,11 @@ def get_name():
 
 def get_base_type(config: dict) -> str:
     """Get the base type from user input."""
-    # base types is the keys of the config dictionary and start with 'Base_'    
-    base_types = [key for key in config.keys() if key.startswith('Base_')]
-    
+    base_types = list(config.get('Base', {}).keys())
+
     if not base_types:
         raise ValueError("No base types found in configuration")
-    
+
     selected_index = interactive_menu("Select Base Type", base_types, prompt_enter=False)
     return base_types[selected_index]
 

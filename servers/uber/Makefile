@@ -2,6 +2,7 @@
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
+SUDO ?= sudo
 CONDA_BASE := $(shell conda info --base)
 IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
 
@@ -36,8 +37,8 @@ all: sudo-keepalive clean-ports
 # ======= Autostart services =======
 sudo-keepalive:
 	@echo "🔐 Ensuring sudo session stays alive..."
-	@sudo -v
-	@while true; do sudo -n true; sleep 60; done 2>/dev/null &
+	@$(SUDO) -v
+	@while true; do $(SUDO) -n true; sleep 60; done 2>/dev/null &
 
 # ======= Individual services =======
 influxdb:
@@ -46,8 +47,8 @@ ifeq ($(IS_MAC), 1)
 	brew services restart influxdb
 else
 	@echo "🔁 Restarting InfluxDB (Linux)"
-	sudo systemctl enable influxdb
-	sudo systemctl restart influxdb
+	$(SUDO) systemctl enable influxdb
+	$(SUDO) systemctl restart influxdb
 endif
 
 redis:
@@ -56,8 +57,8 @@ ifeq ($(IS_MAC), 1)
 	brew services restart redis
 else
 	@echo "🔁 Restarting Redis (Linux)"
-	sudo systemctl enable redis-server
-	sudo systemctl restart redis-server
+	$(SUDO) systemctl enable redis-server
+	$(SUDO) systemctl restart redis-server
 endif
 
 mosquitto:
@@ -66,8 +67,8 @@ ifeq ($(IS_MAC), 1)
 	brew services restart mosquitto
 else
 	@echo "🔁 Restarting Mosquitto (Linux)"
-	sudo systemctl enable mosquitto
-	sudo systemctl restart mosquitto
+	$(SUDO) systemctl enable mosquitto
+	$(SUDO) systemctl restart mosquitto
 endif
 
 nginx:
@@ -78,22 +79,22 @@ else
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf
 endif
 ifeq ($(IS_MAC), 1)
-	sudo cp nginx/nginx.generated.conf /opt/homebrew/etc/nginx/nginx.conf
+	$(SUDO) cp nginx/nginx.generated.conf /opt/homebrew/etc/nginx/nginx.conf
 else
-	sudo cp nginx/nginx.generated.conf /etc/nginx/nginx.conf
+	$(SUDO) cp nginx/nginx.generated.conf /etc/nginx/nginx.conf
 endif
 ifeq ($(IS_MAC), 1)
 	@if pgrep nginx > /dev/null; then \
 		echo "🔁 Reloading NGINX (macOS)"; \
-		sudo nginx -t && sudo nginx -s reload; \
+		$(SUDO) nginx -t && $(SUDO) nginx -s reload; \
 	else \
 		echo "🚀 Starting NGINX (macOS)"; \
-		sudo nginx; \
+		$(SUDO) nginx; \
 	fi
 else
 	echo "🔁 Restarting NGINX (Linux)"; \
-	sudo systemctl enable nginx
-	sudo systemctl restart nginx
+	$(SUDO) systemctl enable nginx
+	$(SUDO) systemctl restart nginx
 endif
 
 next:
@@ -105,7 +106,7 @@ flask:
 	tmux new-session -d -s flask -n flask bash
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t flask 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
-	tmux send-keys -t flask 'gunicorn -k gevent -w 1 -b 0.0.0.0:5000 dashboard:app' C-m
+	tmux send-keys -t flask 'gunicorn -k gevent -w 1 -b 0.0.0.0:5050 dashboard:app' C-m
 
 celery:
 	@echo "🔁 Starting Celery worker"
@@ -120,7 +121,7 @@ clean-ports:
 	@if [ -n "$(ports)" ]; then \
 		for p in $(ports); do \
 			echo "  Cleaning port $$p..."; \
-			sudo lsof -ti:$$p | xargs -r sudo kill -9 || true; \
+			$(SUDO) lsof -ti:$$p | xargs -r $(SUDO) kill -9 || true; \
 		done; \
 	else \
 		echo "Cleaning default ports for services: $(FILTERED_SERVICES)"; \
@@ -129,9 +130,9 @@ clean-ports:
 				 $(filter 1883,$(if $(filter mosquitto,$(FILTERED_SERVICES)),1883,)) \
 				 $(filter 8080,$(if $(filter nginx,$(FILTERED_SERVICES)),8080,)) \
 				 $(filter 3000,$(if $(filter next,$(FILTERED_SERVICES)),3000,)) \
-				 $(filter 5000,$(if $(filter flask,$(FILTERED_SERVICES)),5000,)); do \
+				 $(filter 5050,$(if $(filter flask,$(FILTERED_SERVICES)),5050,)); do \
 			echo "  Cleaning port $$p..."; \
-			sudo lsof -ti:$$p | xargs -r sudo kill -9 || true; \
+			$(SUDO) lsof -ti:$$p | xargs -r $(SUDO) kill -9 || true; \
 		done; \
 	fi
 
@@ -143,8 +144,8 @@ ifeq ($(IS_MAC), 1)
 	@brew services stop influxdb 2>/dev/null || echo "⚠️ InfluxDB not running"
 else
 	@echo "🛑 Stopping InfluxDB (Linux)"
-	@sudo systemctl stop influxdb || echo "⚠️ InfluxDB not running"
-	@sudo systemctl disable influxdb || echo "⚠️ Could not disable InfluxDB"
+	@$(SUDO) systemctl stop influxdb || echo "⚠️ InfluxDB not running"
+	@$(SUDO) systemctl disable influxdb || echo "⚠️ Could not disable InfluxDB"
 endif
 
 stop-redis:
@@ -153,8 +154,8 @@ ifeq ($(IS_MAC), 1)
 	@brew services stop redis 2>/dev/null || echo "⚠️ Redis not running"
 else
 	@echo "🛑 Stopping Redis (Linux)"
-	@sudo systemctl stop redis-server || echo "⚠️ Redis not running"
-	@sudo systemctl disable redis-server || echo "⚠️ Could not disable Redis"
+	@$(SUDO) systemctl stop redis-server || echo "⚠️ Redis not running"
+	@$(SUDO) systemctl disable redis-server || echo "⚠️ Could not disable Redis"
 endif
 
 stop-mosquitto:
@@ -163,18 +164,20 @@ ifeq ($(IS_MAC), 1)
 	@brew services stop mosquitto 2>/dev/null || echo "⚠️ Mosquitto not running"
 else
 	@echo "🛑 Stopping Mosquitto (Linux)"
-	@sudo systemctl stop mosquitto || echo "⚠️ Mosquitto not running"
-	@sudo systemctl disable mosquitto || echo "⚠️ Could not disable Mosquitto"
+	@$(SUDO) systemctl stop mosquitto || echo "⚠️ Mosquitto not running"
+	@$(SUDO) systemctl disable mosquitto || echo "⚠️ Could not disable Mosquitto"
 endif
 
 stop-nginx:
 ifeq ($(IS_MAC), 1)
 	@echo "🛑 Stopping NGINX (macOS)"
-	@sudo nginx -s stop 2>/dev/null || echo "⚠️ NGINX not running"
+	@$(SUDO) launchctl bootout system/homebrew.mxcl.nginx-full 2>/dev/null; \
+	 $(SUDO) nginx -s stop 2>/dev/null; \
+	 $(SUDO) pkill -f "nginx: master" 2>/dev/null; true
 else
 	@echo "🛑 Stopping NGINX (Linux)"
-	@sudo systemctl stop nginx || echo "⚠️ NGINX not running"
-	@sudo systemctl disable nginx || echo "⚠️ Could not disable NGINX"
+	@$(SUDO) systemctl stop nginx || echo "⚠️ NGINX not running"
+	@$(SUDO) systemctl disable nginx || echo "⚠️ Could not disable NGINX"
 endif
 
 stop-next:

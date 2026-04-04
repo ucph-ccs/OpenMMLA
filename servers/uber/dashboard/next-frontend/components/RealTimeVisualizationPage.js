@@ -10,7 +10,7 @@ const RealVisualizePage = ({ bucketName }) => {
   const [transcriptionData, setTranscriptionData] = useState([]);
   const [graphData, setGraphData] = useState({ nodes: [], links: [] }); // State for graph data
   const flaskBackend = process.env.NEXT_PUBLIC_FLASK_BACKEND;
-  const flaskPort = process.env.NEXT_PUBLIC_FLASK_PORT || '5000';
+  const flaskPort = process.env.NEXT_PUBLIC_FLASK_PORT || '5050';
 
   useEffect(() => {
     const socket = io(`http://${flaskBackend}:${flaskPort}`);

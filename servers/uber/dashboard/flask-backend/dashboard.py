@@ -234,6 +234,6 @@ def handle_disconnect():
             del active_buckets[bucket]
 
 
-# gunicorn -k gevent -w 1 -b 0.0.0.0:5000 app:app
+# gunicorn -k gevent -w 1 -b 0.0.0.0:5050 app:app
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=5000, host='0.0.0.0')
+    socketio.run(app, debug=True, port=5050, host='0.0.0.0')

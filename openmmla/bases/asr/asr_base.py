@@ -122,7 +122,7 @@ class ASRBase(Base):
 
         Read various settings such as durations, thresholds, and service URLs required for the audio processing pipeline.
         """
-        base_config = self.config[self.base_type]
+        base_config = self.config['Base'][self.base_type]
         asr_server_config = self.config['Server']['asr']
 
         self.register_duration = int(base_config['register_duration'])

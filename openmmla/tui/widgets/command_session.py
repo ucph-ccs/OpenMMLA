@@ -102,6 +102,7 @@ class CommandSession(Widget):
         super().__init__(id=id)
         self._root = _find_project_root()
         self._show_target = show_target
+        self._target: str = "local"
         self._local_cwd: str = self._root
         self._remote_cwd: str = ""
         self._active_conda_env: str = ""
@@ -144,22 +145,26 @@ class CommandSession(Widget):
             pass
 
     def get_target(self) -> str:
-        try:
-            sel = self.query_one("#cmd-target-select", Select)
-            val = sel.value
-            if val is Select.BLANK or val is None:
-                return "local"
-            return str(val)
-        except Exception:
-            return "local"
+        if self._show_target:
+            try:
+                sel = self.query_one("#cmd-target-select", Select)
+                val = sel.value
+                if val is Select.BLANK or val is None:
+                    return "local"
+                return str(val)
+            except Exception:
+                pass
+        return self._target
 
     def set_target(self, target: str) -> None:
         """programmatically set the target and reset state."""
-        try:
-            sel = self.query_one("#cmd-target-select", Select)
-            sel.value = target
-        except Exception:
-            pass
+        self._target = target
+        if self._show_target:
+            try:
+                sel = self.query_one("#cmd-target-select", Select)
+                sel.value = target
+            except Exception:
+                pass
         self._reset_state()
 
     @property
@@ -172,6 +177,25 @@ class CommandSession(Widget):
             self.query_one(".cmd-log", RichLog).write(msg)
         except Exception:
             pass
+
+    def run(self, text: str) -> None:
+        """programmatically execute a command as if typed by the user."""
+        text = text.strip()
+        if not text:
+            return
+        target = self.get_target()
+        if target == "local":
+            self.log(f"[bold]{self._get_prompt()} {rich_escape(text)}[/bold]")
+            if text.startswith("cd ") or text == "cd":
+                self.run_worker(self._run_local_cd(text), exclusive=True)
+            else:
+                self.run_worker(self._run_local_cmd(text), exclusive=True)
+        else:
+            self.log(f"[bold]{self._get_prompt()} {rich_escape(text)}[/bold]")
+            if text.startswith("cd ") or text == "cd":
+                self.run_worker(self._run_remote_cd(target, text), exclusive=True)
+            else:
+                self.run_worker(self._run_remote_cmd(target, text), exclusive=True)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "cmd-target-select":
@@ -261,7 +285,7 @@ class CommandSession(Widget):
             assert self._running_proc is not None
             stdin = self._running_proc.stdin
             if stdin is not None:
-                self.log(f"[dim]> {rich_escape(text)}[/dim]")
+                self.log("[dim]> (input sent)[/dim]")
                 stdin.write((text + "\n").encode())
                 asyncio.ensure_future(stdin.drain())
             return

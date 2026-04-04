@@ -8,7 +8,7 @@ const PostVisualizePage = ({ bucketName }) => {
   const [logUrls, setLogUrls] = useState([]);
   const [selectedLogs, setSelectedLogs] = useState([]);
   const flaskBackend = process.env.NEXT_PUBLIC_FLASK_BACKEND;
-  const flaskPort = process.env.NEXT_PUBLIC_FLASK_PORT || '5000';
+  const flaskPort = process.env.NEXT_PUBLIC_FLASK_PORT || '5050';
 
   useEffect(() => {
     document.title = `Visualizations for ${bucketName} - OpenMMLA Dashboard`;
