@@ -6,7 +6,7 @@ import threading
 
 from typing import Any
 
-from openmmla.analysis.vfa.analyze import vfa_session_analysis
+from openmmla.analytics.vfa.analyze import vfa_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.clean import clear_directory

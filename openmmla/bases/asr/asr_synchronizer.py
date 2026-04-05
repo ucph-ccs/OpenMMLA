@@ -4,7 +4,7 @@ import os
 import threading
 import time
 
-from openmmla.analysis.asr.analyze import asr_session_analysis
+from openmmla.analytics.asr.analyze import asr_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper

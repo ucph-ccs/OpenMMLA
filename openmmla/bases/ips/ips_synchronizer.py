@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 
-from openmmla.analysis.ips.analyze import ips_session_analysis
+from openmmla.analytics.ips.analyze import ips_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_bucket

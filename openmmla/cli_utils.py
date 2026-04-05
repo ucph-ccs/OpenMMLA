@@ -28,6 +28,7 @@ def print_main_help():
         ("VFA (Video Frame Analyzer)", "vfa-"),
         ("Session-level Tools", "ses-"),
         ("Management Console", "tui"),
+        ("Security & Encryption", "crypto"),
     ]
 
     print("🛠️  Available Commands:\n")

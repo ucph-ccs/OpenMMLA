@@ -83,10 +83,12 @@ def delete_bucket(influx_client, bucket_name) -> None:
 
 
 def create_new_bucket(influx_client) -> None:
-    """Create a new bucket."""
+    """Create a new bucket with experiment/group naming."""
     try:
-        timestamp = datetime.now(timezone.utc).isoformat().split('.')[0] + 'Z'
-        bucket_name = 'session_' + timestamp
+        from openmmla.utils.experiments import select_experiment_and_group
+        from openmmla.utils.input import _make_bucket_name
+        exp_id, group_id = select_experiment_and_group()
+        bucket_name = _make_bucket_name(exp_id, group_id, datetime.now(timezone.utc))
         influx_client.create_bucket(bucket_name)
         print(f"✅ Successfully created new bucket: {bucket_name}")
     except Exception as e:

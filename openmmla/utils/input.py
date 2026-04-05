@@ -479,167 +479,165 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
             elif key == '\x03':  # Ctrl+C
                 raise KeyboardInterrupt
 
-def parse_bucket_timestamp(bucket_name):
-        """Parse timestamp from bucket name."""
-        timestamp_str = bucket_name.split('_')[1]
-        # Try standard format first: YYYY-MM-DDTHH:MM:SSZ
+_SYSTEM_BUCKETS = {'_tasks', '_monitoring'}
+
+def _is_user_bucket(name: str) -> bool:
+    """return True for any bucket that is not an InfluxDB system bucket."""
+    return name not in _SYSTEM_BUCKETS
+
+
+def parse_bucket_timestamp(bucket_name: str) -> datetime:
+    """parse the timestamp portion from a bucket name.
+
+    Supports both new format ``<exp>_<group>_YYMMDDTHHMMZ`` and
+    legacy format ``session_YYYY-MM-DDTHH:MM:SSZ``.
+    """
+    # new format: last segment is YYMMDDTHHMMZ
+    last_seg = bucket_name.rsplit('_', 1)[-1]
+    try:
+        return datetime.strptime(last_seg, '%y%m%dT%H%MZ')
+    except ValueError:
+        pass
+    # legacy: session_YYYY-MM-DDTHH:MM:SSZ
+    try:
+        timestamp_str = bucket_name.split('_', 1)[1]
         return datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
+    except (IndexError, ValueError):
+        return datetime.min
+
+
+def _format_bucket_description(name: str) -> str:
+    """build a human-readable description for a bucket name."""
+    # new format: <exp_id>_<group_id>_YYMMDDTHHMMZ
+    parts = name.rsplit('_', 1)
+    if len(parts) == 2:
+        try:
+            dt = datetime.strptime(parts[1], '%y%m%dT%H%MZ')
+            prefix_parts = parts[0].rsplit('_', 1)
+            if len(prefix_parts) == 2:
+                return f"{prefix_parts[0]} / {prefix_parts[1]} — {dt.strftime('%Y-%m-%d %H:%M')} UTC"
+        except ValueError:
+            pass
+    # legacy: session_YYYY-MM-DDTHH:MM:SSZ
+    try:
+        timestamp_str = name.split('_', 1)[1]
+        dt = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
+        return f"Session from {dt.strftime('%Y-%m-%d %H:%M:%S')}"
+    except (IndexError, ValueError):
+        return "Bucket"
 
 def select_bucket(influx_client: InfluxDBClientWrapper) -> str:
     """Get the bucket name from the user using interactive menu."""
     while True:
-        # Get bucket list
         bucket_list = influx_client.get_buckets()
-        bucket_names = [bucket.name for bucket in bucket_list.buckets if bucket.name not in ['_tasks', '_monitoring']]
-        bucket_names = [name for name in bucket_names if 'session_' in name]
+        bucket_names = [b.name for b in bucket_list.buckets if _is_user_bucket(b.name)]
 
-        # Sort buckets by timestamp
         try:
             bucket_names = sorted(bucket_names, key=parse_bucket_timestamp)
         except Exception as e:
             print(f'{YELLOW}Warning: Some buckets have incompatible formats: {e}{ENDC}')
-            # Don't set bucket_names to empty, just use unsorted list
 
         if not bucket_names:
             input("No bucket sessions found.")
             return None
 
-        # Create options for interactive menu
-        options = []
-        descriptions = []
-        
-        # Add existing buckets
-        for name in bucket_names:
-            # Extract timestamp and format it nicely
-            try:
-                timestamp_str = name.split('_')[1]
-                dt = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
-                formatted_date = dt.strftime('%Y-%m-%d %H:%M:%S')
-                options.append(f"📁 {name}")
-                descriptions.append(f"Session from {formatted_date}")
-            except:
-                options.append(f"📁 {name}")
-                descriptions.append("Session bucket")
+        options = [f"📁 {name}" for name in bucket_names]
+        descriptions = [_format_bucket_description(name) for name in bucket_names]
 
-        # Show interactive menu
         selected_index = interactive_menu("Select Session Bucket", options, descriptions, prompt_enter=False)
-        
-        # Return the selected bucket name
+
         bucket_name = bucket_names[selected_index]
         clear_screen()
         print(f"{GREEN}✅ Bucket: {bucket_name} has been selected.{ENDC}")
         return bucket_name
 
 
+def _make_bucket_name(exp_id: str, group_id: str, dt: datetime) -> str:
+    """build a bucket name in the ``<exp_id>_<group_id>_YYMMDDTHHMMZ`` format."""
+    return f"{exp_id}_{group_id}_{dt.strftime('%y%m%dT%H%MZ')}"
+
+
 def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
     """Get the bucket name from user input using interactive menu, either select an existing bucket or create a new one."""
-    while True:
-        # Get bucket list
-        bucket_list = influx_client.get_buckets()
-        bucket_names = [bucket.name for bucket in bucket_list.buckets if bucket.name not in ['_tasks', '_monitoring']]
-        bucket_names = [name for name in bucket_names if 'session_' in name]
+    from .experiments import select_experiment_and_group
 
-        # Sort buckets by timestamp
+    while True:
+        bucket_list = influx_client.get_buckets()
+        bucket_names = [b.name for b in bucket_list.buckets if _is_user_bucket(b.name)]
+
         try:
             bucket_names = sorted(bucket_names, key=parse_bucket_timestamp)
         except Exception as e:
             print(f'{YELLOW}Warning: Some buckets have incompatible formats: {e}{ENDC}')
-            # Don't set bucket_names to empty, just use unsorted list
 
-        # Create options for interactive menu
-        options = []
-        descriptions = []
-        
-        # Add existing buckets
-        for name in bucket_names:
-            # Extract timestamp and format it nicely
-            try:
-                timestamp_str = name.split('_')[1]
-                dt = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
-                formatted_date = dt.strftime('%Y-%m-%d %H:%M:%S')
-                options.append(f"📁 {name}")
-                descriptions.append(f"Session from {formatted_date}")
-            except:
-                options.append(f"📁 {name}")
-                descriptions.append("Session bucket")
-        
-        # Add special options
+        options = [f"📁 {name}" for name in bucket_names]
+        descriptions = [_format_bucket_description(name) for name in bucket_names]
+
         options.extend([
             "➕ Create New Bucket (Auto)",
             "⌨️  Create New Bucket (Manual)",
             "🔄 Refresh List"
         ])
         descriptions.extend([
-            "Create a new session bucket with current timestamp",
-            "Create a new session bucket with custom Unix timestamp",
+            "Select experiment & group, use current timestamp",
+            "Select experiment & group, provide custom Unix timestamp",
             "Refresh the bucket list"
         ])
 
-        if not options:
-            # No buckets available, only show create options
-            options = ["➕ Create New Bucket (Auto)", "⌨️  Create New Bucket (Manual)"]
-            descriptions = ["Create a new session bucket with current timestamp", 
-                          "Create a new session bucket with custom Unix timestamp"]
+        if not bucket_names:
+            options = options[-3:]
+            descriptions = descriptions[-3:]
 
-        # Show interactive menu with exit_on_q=False to allow going back
         selected_index = interactive_menu("Select Session Bucket", options, descriptions)
-        
-        # Handle selection
+
         if selected_index < len(bucket_names):
-            # Selected existing bucket
             bucket_name = bucket_names[selected_index]
             clear_screen()
             print(f"{GREEN}✅ Bucket: {bucket_name} has been selected.{ENDC}")
             return bucket_name
         elif options[selected_index] == "➕ Create New Bucket (Auto)":
-            # Create new bucket with current timestamp
-            # Use strftime to ensure exact format: YYYY-MM-DDTHH:MM:SSZ
-            timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-            bucket_name = 'session_' + timestamp
+            clear_screen()
+            exp_id, group_id = select_experiment_and_group()
+            bucket_name = _make_bucket_name(exp_id, group_id, datetime.now(timezone.utc))
             influx_client.create_bucket(bucket_name)
             clear_screen()
             print(f"{GREEN}✅ Bucket: {bucket_name} has been created.{ENDC}")
             return bucket_name
         elif options[selected_index] == "⌨️  Create New Bucket (Manual)":
-            # Create new bucket with user-provided Unix timestamp
+            clear_screen()
+            exp_id, group_id = select_experiment_and_group()
             clear_screen()
             print("=" * 80)
             print(f"{PURPLE}{BOLD}Create New Bucket with Custom Timestamp{ENDC}")
             print("=" * 80)
             print(f"{PURPLE}Enter a Unix timestamp (e.g., 1759904435.95792 or 1759904435){ENDC}")
             print("-" * 80)
-            
+
             while True:
                 try:
                     user_input = input("Unix timestamp: ").strip()
-                    
+
                     if not user_input:
                         print(f"{RED}Timestamp cannot be empty. Please try again.{ENDC}")
                         continue
-                    
-                    # Parse Unix timestamp
+
                     unix_timestamp = float(user_input)
-                    
-                    # Validate the timestamp using validate_unix_timestamp
+
                     if not validate_unix_timestamp(unix_timestamp):
                         print(f"{RED}Error: Invalid Unix timestamp ({unix_timestamp}){ENDC}")
                         print(f"{YELLOW}Timestamp should be a reasonable Unix time value.{ENDC}")
                         continue
-                    
-                    # Convert Unix timestamp to ISO format (matching the expected format)
+
                     dt = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
-                    timestamp_str = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
-                    bucket_name = 'session_' + timestamp_str
-                    
-                    # Show preview
+                    bucket_name = _make_bucket_name(exp_id, group_id, dt)
+
                     print("-" * 80)
                     print(f"{CYAN}Preview:{ENDC}")
                     print(f"  Unix timestamp: {unix_timestamp}")
                     print(f"  Human readable: {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
                     print(f"  Bucket name: {bucket_name}")
                     print("-" * 80)
-                    
-                    # Confirm
+
                     confirm = input(f"{PURPLE}Create this bucket? (y/n): {ENDC}").strip().lower()
                     if confirm == 'y':
                         influx_client.create_bucket(bucket_name)
@@ -650,7 +648,7 @@ def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
                         print(f"{YELLOW}Bucket creation cancelled.{ENDC}")
                         input("Press Enter to return to menu...")
                         break
-                        
+
                 except ValueError:
                     print(f"{RED}Invalid timestamp format. Please enter a valid Unix timestamp.{ENDC}")
                     continue
@@ -659,7 +657,6 @@ def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
                     input("Press Enter to return to menu...")
                     break
         elif options[selected_index] == "🔄 Refresh List":
-            # Refresh list and continue loop
             continue
 
 

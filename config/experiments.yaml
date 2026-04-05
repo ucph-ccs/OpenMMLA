@@ -1,0 +1,18 @@
+active_experiments:
+- experiment_id: exp_01
+  title: pair programming
+  status: active
+  task_type: programming
+- experiment_id: exp_02
+  title: lego
+  status: active
+  task_type: lego_building
+assignments:
+  exp_01:
+    zaibei:
+      group_id: group_02
+    danping:
+      group_id: group_02
+    Alice:
+      group_id: group_01
+  exp_02: {}

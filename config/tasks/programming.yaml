@@ -1,0 +1,44 @@
+domain: "software_engineering"
+semantic_mapping_rules:
+  hand_objects:
+    - object: "keyboard"
+      implication: "Likely (C2) Enacting Plans (implementing solution)."
+    - object: "mouse"
+      implication: "Likely (C2) Enacting Plans (navigation, debugging, test execution)."
+    - object: "notebook"
+      implication: "Likely (B1/B2) Building representations and decomposing tasks."
+    - object: "whiteboard_marker"
+      implication: "Likely (B1) Shared representation and (C1) explanation support."
+
+  gaze_targets:
+    - target: "problem_statement"
+      implication: "Likely (A1/B1) Interpreting task requirements and building shared understanding."
+    - target: "code_editor"
+      implication: "Likely (C2) Enacting coding plans."
+    - target: "test_output"
+      implication: "Likely (D2) Monitoring results and evaluating success."
+    - target: "complexity_notes"
+      implication: "Likely (D2) Evaluating efficiency trade-offs."
+    - target: "partner_face"
+      implication: "Likely (C1) Action communication and grounding."
+    - target: "partner_hands"
+      implication: "Likely (C3) Coordinating turn-taking and engagement rules."
+
+  audio_keywords:
+    - keywords: ["constraint", "input", "output", "edge case", "example"]
+      implication: "Likely (A1/B1) Problem framing and shared interpretation."
+    - keywords: ["array", "string", "tree", "graph", "hash map", "stack", "queue"]
+      implication: "Likely (B2) Task decomposition and strategy selection."
+    - keywords: ["implement", "refactor", "run", "submit", "test", "trace"]
+      implication: "Likely (C2) Execution of agreed plans."
+    - keywords: ["wrong answer", "time limit", "memory limit", "off by one", "bug", "fix"]
+      implication: "Likely (D1/D2) Repairing understanding and monitoring outcomes."
+    - keywords: ["you drive", "i navigate", "switch", "your turn", "confirm", "explain"]
+      implication: "Likely (A3/C3/D3) Team organization, rule-following, and adaptive coordination."
+
+  locomotion:
+    - status: "sitting"
+    - status: "standing"
+    - status: "static"
+    - status: "moving"
+

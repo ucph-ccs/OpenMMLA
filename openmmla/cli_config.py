@@ -24,6 +24,7 @@ OPTIONAL_DEP_MAP = {
     "ses-ana": "uber-base",
     "ses-man": "uber-base",
     "tui": "tui",
+    "crypto": "tui",
 }
 
 # List of all available commands
@@ -115,5 +116,9 @@ COMMANDS = {
     "tui": (
         "openmmla.commands.tui:main",
         "Launch TUI management console for config, services, and monitoring."
+    ),
+    "crypto": (
+        "openmmla.commands.crypto:main",
+        "Manage encryption keys for sensitive config values."
     ),
 }

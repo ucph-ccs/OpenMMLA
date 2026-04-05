@@ -27,8 +27,10 @@ from openmmla.tui.ssh import (
 )
 from openmmla.tui.widgets.command_session import CommandSession
 from openmmla.tui.widgets.config_form import ConfigForm
+from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
 from openmmla.tui.widgets.ssh_form import SSHForm
+from openmmla.tui.widgets.task_form import TaskForm
 
 
 _SVC_PIPELINE_NAMES: dict[str, str] = {
@@ -43,9 +45,9 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
 
     services.append(ServiceDef(
         name="ASR Base",
-        category="Base Stations",
+        category="ASR",
         conda_env="asr-base",
-        config_dir=os.path.join(root, "base_stations", "asr"),
+        config_dir=os.path.join(root, "pipelines", "asr-base"),
         launch_type="bash",
         description="Real-time audio analysis base stations and synchronizer",
         params=[
@@ -60,18 +62,18 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-hsr", "Half-Scaled Recognition", "bool", True),
         ],
         components=[
-            ComponentDef("base", "examples/run_asr_base.py", "-nb",
+            ComponentDef("base", "mmla asr-base", "-nb",
                          ["-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
-            ComponentDef("synchronizer", "examples/run_asr_synchronizer.py", "-ns",
+            ComponentDef("synchronizer", "mmla asr-sync", "-ns",
                          ["-d", "-sp"]),
         ],
     ))
 
     services.append(ServiceDef(
         name="VFA Base",
-        category="Base Stations",
+        category="VFA",
         conda_env="vfa-base",
-        config_dir=os.path.join(root, "base_stations", "vfa"),
+        config_dir=os.path.join(root, "pipelines", "vfa-base"),
         launch_type="bash",
         description="Video frame analysis base stations and synchronizer",
         params=[
@@ -81,17 +83,17 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-v", "Verbose", "bool", True),
         ],
         components=[
-            ComponentDef("base", "examples/run_vfa_base.py", "-nb",
+            ComponentDef("base", "mmla vfa-base", "-nb",
                          ["-g", "-v"]),
-            ComponentDef("synchronizer", "examples/run_vfa_synchronizer.py", "-ns"),
+            ComponentDef("synchronizer", "mmla vfa-sync", "-ns"),
         ],
     ))
 
     services.append(ServiceDef(
         name="IPS Base",
-        category="Base Stations",
+        category="IPS",
         conda_env="ips-base",
-        config_dir=os.path.join(root, "base_stations", "ips"),
+        config_dir=os.path.join(root, "pipelines", "ips-base"),
         launch_type="bash",
         description="Indoor positioning system base stations, synchronizer, and visualizer",
         params=[
@@ -103,34 +105,34 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-v", "Verbose", "bool", True),
         ],
         components=[
-            ComponentDef("base", "examples/run_ips_base.py", "-nb",
+            ComponentDef("base", "mmla ips-base", "-nb",
                          ["-g", "-s", "-v"]),
-            ComponentDef("synchronizer", "examples/run_ips_synchronizer.py", "-ns",
+            ComponentDef("synchronizer", "mmla ips-sync", "-ns",
                          ["-v"]),
-            ComponentDef("visualizer", "examples/run_ips_visualizer.py", "-nv",
+            ComponentDef("visualizer", "mmla ips-vis", "-nv",
                          ["-s"]),
         ],
     ))
 
     services.append(ServiceDef(
         name="ASR Server",
-        category="Servers",
+        category="ASR",
         conda_env="asr-server",
-        config_dir=os.path.join(root, "servers", "asr"),
+        config_dir=os.path.join(root, "pipelines", "asr-server"),
         launch_type="tmux",
         description="ASR inference services (inferer, resampler, enhancer, transcriber, ...)",
     ))
 
     services.append(ServiceDef(
         name="VFA Server",
-        category="Servers",
+        category="VFA",
         conda_env="vfa-server",
-        config_dir=os.path.join(root, "servers", "vfa"),
+        config_dir=os.path.join(root, "pipelines", "vfa-server"),
         launch_type="tmux",
         description="VFA inference services (VLLM frame analyzer, ...)",
     ))
 
-    uber_dir = os.path.join(root, "servers", "uber")
+    uber_dir = os.path.join(root, "pipelines", "uber-server")
     if os.path.isdir(uber_dir):
         for svc_name, desc in [
             ("InfluxDB", "Time series database"),
@@ -143,7 +145,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         ]:
             services.append(ServiceDef(
                 name=f"Uber: {svc_name}",
-                category="Uber Server",
+                category="Infrastructure",
                 conda_env="uber-server",
                 config_dir=uber_dir,
                 launch_type="make",
@@ -381,7 +383,7 @@ class ServicePanel(Widget):
             (name, name) for name in self._ssh_profile_names
         ]
         with Vertical(id="svc-sidebar"):
-            yield Static("[b]Services[/b]", classes="status-info")
+            yield Static("[b]Launcher[/b]", classes="status-info")
             tree: Tree[str] = Tree("OpenMMLA", id="svc-tree")
             tree.root.expand()
             yield tree
@@ -445,43 +447,49 @@ class ServicePanel(Widget):
         tree = self.query_one("#svc-tree", Tree)
         tree.clear()
 
-        tree.root.add_leaf("SSH Profiles", data="__ssh_profiles__")
-
         shared_node = tree.root.add("Global Defaults", data="__shared__")
         shared_node.expand()
         for sec in SHARED_SECTIONS:
             shared_node.add_leaf(sec, data=f"__shared__{sec}")
+        shared_node.add_leaf("Experiments", data="__experiments__")
+        shared_node.add_leaf("Tasks", data="__tasks__")
+        shared_node.add_leaf("SSH Profiles", data="__ssh_profiles__")
 
         categories: dict[str, list[ServiceDef]] = {}
         for svc in self._services:
             categories.setdefault(svc.category, []).append(svc)
 
-        _SUB_CATEGORIES = {"Uber Server": "Servers"}
+        _PIPELINE_CATS = ["ASR", "VFA", "IPS"]
 
-        parent_nodes: dict[str, object] = {}
-        for cat, svcs in categories.items():
-            parent_cat = _SUB_CATEGORIES.get(cat)
-            if parent_cat and parent_cat in parent_nodes:
-                cat_node = parent_nodes[parent_cat].add(cat, data=f"__cat_{cat}")
-            elif parent_cat:
-                parent_node = tree.root.add(parent_cat, data=f"__cat_{parent_cat}")
-                parent_node.expand()
-                parent_nodes[parent_cat] = parent_node
-                cat_node = parent_node.add(cat, data=f"__cat_{cat}")
-            else:
-                cat_node = tree.root.add(cat, data=f"__cat_{cat}")
-                parent_nodes[cat] = cat_node
+        pipeline_node = tree.root.add("Pipelines", data="__cat_Pipelines")
+        pipeline_node.expand()
+        for cat in _PIPELINE_CATS:
+            svcs = categories.get(cat, [])
+            if not svcs:
+                continue
+            cat_node = pipeline_node.add(cat, data=f"__cat_{cat}")
             cat_node.expand()
             for svc in svcs:
-                is_running = self._detect_running(svc)
-                self._svc_states[svc.name] = is_running
-                pipeline = self._pipeline_for_service(svc.name)
-                markers = ""
-                if pipeline and os.path.isfile(pipeline.config_path):
-                    markers += " [green]\\[OK][/green]"
-                if is_running:
-                    markers += " [green](R)[/green]"
-                cat_node.add_leaf(f"{svc.name}{markers}", data=svc.name)
+                cat_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
+
+        infra_svcs = categories.get("Infrastructure", [])
+        if infra_svcs:
+            infra_node = tree.root.add("Infrastructure", data="__cat_Infrastructure")
+            infra_node.expand()
+            for svc in infra_svcs:
+                infra_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
+
+    def _svc_markers(self, svc: ServiceDef) -> str:
+        """build status marker string for a service tree leaf."""
+        is_running = self._detect_running(svc)
+        self._svc_states[svc.name] = is_running
+        pipeline = self._pipeline_for_service(svc.name)
+        markers = ""
+        if pipeline and os.path.isfile(pipeline.config_path):
+            markers += " [green]\\[OK][/green]"
+        if is_running:
+            markers += " [green](R)[/green]"
+        return markers
 
     # ── tree node selection ──────────────────────────────────────
 
@@ -506,6 +514,14 @@ class ServicePanel(Widget):
             await content_area.mount(scroll)
             self._config_container = scroll
             self._show_shared_form(scroll, section_name)
+            return
+
+        if node_str == "__experiments__":
+            await content_area.mount(ExperimentForm())
+            return
+
+        if node_str == "__tasks__":
+            await content_area.mount(TaskForm())
             return
 
         if node_str == "__ssh_profiles__":
@@ -1028,8 +1044,11 @@ class ServicePanel(Widget):
                     flag_parts.append(f"{f} {val}")
             flag_str = " ".join(flag_parts)
 
-            script_path = os.path.join(svc.config_dir, comp.script)
-            py_cmd = f"python3 {script_path}"
+            if os.path.sep in comp.script or comp.script.endswith(".py"):
+                script_path = os.path.join(svc.config_dir, comp.script)
+                py_cmd = f"python3 {script_path}"
+            else:
+                py_cmd = comp.script
             if flag_str:
                 py_cmd += f" {flag_str}"
 

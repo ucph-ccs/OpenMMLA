@@ -21,9 +21,9 @@ def run_session_analysis(args):
     from openmmla.utils.logger import get_logger
     from openmmla.utils.input import select_bucket, interactive_menu
     from openmmla.utils.client import InfluxDBClientWrapper
-    from openmmla.analysis.asr.analyze import asr_session_analysis
-    from openmmla.analysis.ips.analyze import ips_session_analysis
-    from openmmla.analysis.vfa.analyze import vfa_session_analysis
+    from openmmla.analytics.asr.analyze import asr_session_analysis
+    from openmmla.analytics.ips.analyze import ips_session_analysis
+    from openmmla.analytics.vfa.analyze import vfa_session_analysis
 
     logger = get_logger('session_analysis')
 

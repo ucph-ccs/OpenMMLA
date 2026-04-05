@@ -10,7 +10,7 @@ build/
 temp/
 logger/
 analysis/
-openmmla/analysis/framework/
+openmmla/analytics/framework/
 omini/
 
 # Ignore deprecated repositories
@@ -21,6 +21,15 @@ version_control/
 **/tests/
 **/__pycache__/
 **/data/
+**/logs/
+**/real-time/
+**/visualizations/
+**/camera_sync/
+**/fine_tune/
+
+# Ignore generated files
+*.generated.conf
+**/.next/
 
 # Ignore specific files
 .DS_Store

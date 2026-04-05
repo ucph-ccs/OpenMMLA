@@ -1,0 +1,32 @@
+domain: "medical_simulation"
+semantic_mapping_rules:
+  hand_objects:
+    - object: "mannequin/patient"
+      implication: "Likely (C2) Enacting Plans (Performing procedure)."
+    - object: "medical_instrument"
+      implication: "Likely (C2) Enacting Plans (Using tools e.g., stethoscope, defibrillator)."
+    - object: "checklist/monitor"
+      implication: "Likely (D2) Monitoring Results or (C1) Planning."
+  
+  gaze_targets:
+    - target: "patient_face/chest"
+      implication: "Focus on critical task area."
+    - target: "vital_monitor"
+      implication: "Likely (D2) Monitoring Results (Checking vitals)."
+    - target: "partner_face"
+      implication: "Likely (C3) Team Organization (Closed-loop communication)."
+  
+  audio_keywords:
+    - keywords: ["bpm", "clear", "shock", "pulse", "airway", "breathing"]
+      implication: "Execution of medical protocols."
+    - keywords: ["count", "switch", "ready", "status"]
+      implication: "Team coordination and role switching."
+  
+  locomotion:
+    - status: "sitting"
+      implication: "Standard working posture."
+    - status: "standing"
+      implication: "Observing, supervising, or preparing for intervention."
+    - status: "moving"
+      implication: "Rapid response, positioning, or retrieving equipment."
+

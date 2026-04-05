@@ -1,0 +1,45 @@
+domain: "physical_computing"
+semantic_mapping_rules:
+  hand_objects:
+    - object: "microbit_board"
+      implication: "Likely (C2) Enacting Plans (core hardware setup)."
+    - object: "breadboard"
+      implication: "Likely (B2) Identifying task structure and (C2) Enacting Plans."
+    - object: "jumper_wire"
+      implication: "Likely (C2) Enacting Plans (wiring and re-wiring)."
+    - object: "sensor_module"
+      implication: "Likely (B2) Mapping sub-task dependencies and (D2) Testing outcomes."
+    - object: "usb_cable"
+      implication: "Likely (C2) Executing upload/test workflow."
+    - object: "wiring_diagram"
+      implication: "Likely (B1) Building shared representation and (D1) Repairing understanding."
+
+  gaze_targets:
+    - target: "wiring_diagram"
+      implication: "Likely (B1) Building common ground on circuit interpretation."
+    - target: "breadboard_layout"
+      implication: "Likely (D2) Monitoring implementation quality."
+    - target: "microbit_led_display"
+      implication: "Likely (D2) Monitoring action results."
+    - target: "serial_output"
+      implication: "Likely (D2) Evaluating runtime behavior and debugging clues."
+    - target: "partner_hands"
+      implication: "Likely (C1) Communicating actions and (C3) Coordinating turn-taking."
+    - target: "partner_face"
+      implication: "Likely (A1) Discovering perspectives and confirming understanding."
+
+  audio_keywords:
+    - keywords: ["pin", "ground", "vcc", "signal", "input", "output"]
+      implication: "Shared technical grounding for circuit planning (B1/B2/C1)."
+    - keywords: ["upload", "flash", "run", "test", "read value", "threshold"]
+      implication: "Likely (C2) Execution and (D2) runtime monitoring."
+    - keywords: ["not working", "reconnect", "reverse", "wrong pin", "check again", "debug"]
+      implication: "Likely (D1) Repairing shared understanding and (D2) evaluating outcomes."
+    - keywords: ["you wire", "i code", "switch", "your turn", "help me", "confirm"]
+      implication: "Likely (A3/C3/D3) Team organization, rule-following, and adaptive coordination."
+
+  locomotion:
+    - status: "sitting"
+    - status: "standing"
+    - status: "static"
+    - status: "moving"

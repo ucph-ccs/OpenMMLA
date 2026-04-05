@@ -1,0 +1,49 @@
+domain: "physical_construction"
+semantic_mapping_rules:
+  hand_objects:
+    - object: "lego_brick"
+      implication: "Likely (C2) Enacting Plans (Assembling)."
+    - object: "instruction_booklet"
+      implication: "Likely (C1) Planning or (D2) Monitoring (Verifying steps)."
+    - object: "sorting_tray"
+      implication: "Likely (A3) Team Organization (Resource management)."
+    - object: "base_plate"
+      implication: "Likely (B2) Identifying task structure and (C2) Enacting Plans."
+    - object: "assembled_submodule"
+      implication: "Likely (D2) Monitoring intermediate results and integration quality."
+    - object: "reference_model"
+      implication: "Likely (D1) Repairing shared understanding and (D2) Checking correctness."
+  
+  gaze_targets:
+    - target: "lego_model"
+      implication: "Focus on shared task space (Joint Attention)."
+    - target: "instruction_booklet"
+      implication: "Information seeking (Understanding rules)."
+    - target: "partner_hands"
+      implication: "Monitoring partner's action (Coordination)."
+    - target: "partner_face"
+      implication: "Likely (A1) Discovering perspectives and (C1) Action communication."
+    - target: "shared_subassembly"
+      implication: "Likely (B1) Building common ground about current build state."
+    - target: "missing_piece_area"
+      implication: "Likely (A2) Discovering needed collaboration to resolve resource gaps."
+  
+  audio_keywords:
+    - keywords: ["red", "blue", "piece", "block", "connect", "find"]
+      implication: "Resource identification and action coordination."
+    - keywords: ["step", "page", "next", "look"]
+      implication: "Process management (Team Organization)."
+    - keywords: ["you build", "i search", "let us split", "who does this", "switch role"]
+      implication: "Likely (A3) Role organization and (C3) Rules of engagement."
+    - keywords: ["align", "rotate", "flip", "press", "attach", "lock"]
+      implication: "Likely (C2) Enacting plans through concrete construction actions."
+    - keywords: ["wrong", "mismatch", "recheck", "undo", "fix", "try again"]
+      implication: "Likely (D1) Repairing understanding and (D2) Monitoring outcomes."
+    - keywords: ["help me", "your turn", "wait", "confirm", "good now"]
+      implication: "Likely (C1/C3) Team communication and adaptive coordination."
+  
+  locomotion:
+    - status: "sitting"
+    - status: "standing"
+    - status: "static"
+    - status: "moving"

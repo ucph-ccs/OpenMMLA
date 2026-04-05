@@ -232,13 +232,13 @@ def discover_pipelines():
     pipelines = []
 
     registry = [
-        ("ASR Base", "base_stations/asr"),
-        ("VFA Base", "base_stations/vfa"),
-        ("IPS Base", "base_stations/ips"),
-        ("ASR Server", "servers/asr"),
-        ("VFA Server", "servers/vfa"),
-        ("Nginx", "servers/uber/nginx"),
-        ("Flask Backend", "servers/uber/dashboard/flask-backend"),
+        ("ASR Base", "pipelines/asr-base"),
+        ("VFA Base", "pipelines/vfa-base"),
+        ("IPS Base", "pipelines/ips-base"),
+        ("ASR Server", "pipelines/asr-server"),
+        ("VFA Server", "pipelines/vfa-server"),
+        ("Nginx", "pipelines/uber-server/nginx"),
+        ("Flask Backend", "pipelines/uber-server/dashboard/flask-backend"),
     ]
 
     for name, rel_dir in registry:

@@ -192,10 +192,10 @@ class SSHForm(Widget):
             remote_project_path=vals["remote_project_path"] or "~/OpenMMLA",
         )
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
         if btn_id == "ssh-save":
-            self._save_profile()
+            await self._save_profile()
         elif btn_id == "ssh-test":
             self._test_connection()
         elif btn_id == "ssh-clear":
@@ -208,9 +208,9 @@ class SSHForm(Widget):
                 self._set_status(f"Editing profile '{name}'.")
         elif btn_id.startswith("ssh-del-"):
             name = btn_id[len("ssh-del-"):]
-            self._delete_profile(name)
+            await self._delete_profile(name)
 
-    def _save_profile(self) -> None:
+    async def _save_profile(self) -> None:
         profile = self._build_profile_from_form()
         if profile is None:
             return
@@ -219,16 +219,16 @@ class SSHForm(Widget):
         save_ssh_profiles(self._profiles)
         self._editing = None
         self._set_status(f"[green]Profile '{profile.name}' saved.[/green]")
-        self._rebuild_list()
+        await self._rebuild_list()
         self.post_message(self.ProfilesChanged())
 
-    def _delete_profile(self, name: str) -> None:
+    async def _delete_profile(self, name: str) -> None:
         self._profiles = [p for p in self._profiles if p.name != name]
         save_ssh_profiles(self._profiles)
         if self._editing == name:
             self._clear_form()
         self._set_status(f"[red]Profile '{name}' deleted.[/red]")
-        self._rebuild_list()
+        await self._rebuild_list()
         self.post_message(self.ProfilesChanged())
 
     def _test_connection(self) -> None:
@@ -242,20 +242,22 @@ class SSHForm(Widget):
         else:
             self._set_status(f"[red]{msg}[/red]")
 
-    def _rebuild_list(self) -> None:
+    async def _rebuild_list(self) -> None:
         """reload the profile list display by re-mounting."""
         try:
             container = self.query_one("#ssh-profile-list")
-            container.remove_children()
+            await container.remove_children()
             for p in self._profiles:
                 auth = "password" if p.password else ("key" if p.key_path else "default")
-                h = Horizontal(classes="profile-entry")
-                h.mount(Static(
-                    f"{p.name}  ({p.user}@{p.host}:{p.port})  [{auth}]",
-                    classes="profile-entry-name",
-                ))
-                h.mount(Button("Edit", id=f"ssh-edit-{p.name}"))
-                h.mount(Button("Delete", variant="error", id=f"ssh-del-{p.name}"))
-                container.mount(h)
+                h = Horizontal(
+                    Static(
+                        f"{p.name}  ({p.user}@{p.host}:{p.port})  [{auth}]",
+                        classes="profile-entry-name",
+                    ),
+                    Button("Edit", id=f"ssh-edit-{p.name}"),
+                    Button("Delete", variant="error", id=f"ssh-del-{p.name}"),
+                    classes="profile-entry",
+                )
+                await container.mount(h)
         except Exception:
             pass

@@ -10,9 +10,9 @@ import numpy as np
 import soundfile as sf
 from tqdm import tqdm
 
-from openmmla.analysis.asr.analyze import plot_speaking_interaction_network, \
+from openmmla.analytics.asr.analyze import plot_speaking_interaction_network, \
     plot_speaker_diarization_interactive
-from openmmla.analysis.asr.transcription import convert_transcription_json_to_txt
+from openmmla.analytics.asr.transcription import convert_transcription_json_to_txt
 from openmmla.bases.base import Base
 from openmmla.services.asr.requests import request_voice_activity_detection, request_speech_enhancement, \
     request_speech_separation, request_speech_transcription

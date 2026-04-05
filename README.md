@@ -4,7 +4,7 @@ The OpenMMLA repository consists of two main components:
 
 1. The `openmmla` toolkit: An IoT-based multimodal data collection toolkit for learning analytics, providing the core classes, utilities, and pipeline implementations.
 
-2. The runtime platform, represented by the `base_stations`, `servers`, and `wearables` directories. These directories provide the structured environments for deploying and executing pipelines built with the `openmmla` toolkit. They house runtime data, service initiation scripts, logging configurations and outputs, and device-specific adaptation scripts for wearable technology during operation.
+2. The runtime platform, represented by the `pipelines` directory. This directory provides the structured environments for deploying and executing pipelines built with the `openmmla` toolkit. It houses runtime data, service initiation scripts, logging configurations and outputs, and device-specific adaptation scripts for wearable technology during operation.
 
 ## Platform Design
 
@@ -170,13 +170,13 @@ After setting up the prerequisites, central services, and cloning the OpenMMLA r
 Follow the detailed instructions in the respective `README.md` files for each pipeline:
 
 1.  **Automatic Speech Recognition (ASR) with Diarization**
-    *   Setup Guide: [ASR Pipeline README](base_stations/asr/README.md)
+    *   Setup Guide: [ASR Pipeline README](pipelines/asr-base/README.md)
 
 2.  **Indoor Positioning System (IPS)**
-    *   Setup Guide: [IPS Pipeline README](base_stations/ips/README.md)
+    *   Setup Guide: [IPS Pipeline README](pipelines/ips-base/README.md)
 
 3.  **Video Frame Analyzer (VFA)**
-    *   Setup Guide: [VFA Pipeline README](base_stations/vfa/README.md)
+    *   Setup Guide: [VFA Pipeline README](pipelines/vfa-base/README.md)
 
 ## [FAQ](docs/faq.md)
 

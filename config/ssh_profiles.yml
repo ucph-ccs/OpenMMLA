@@ -1,0 +1,7 @@
+- name: dell-01
+  host: dell-01
+  user: admin
+  port: 22
+  password: '12341234'
+  key_path: ''
+  remote_project_path: ~/OpenMMLA

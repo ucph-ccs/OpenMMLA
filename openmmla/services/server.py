@@ -45,9 +45,19 @@ class Server(ABC):
                                  mode='a')
 
     def _load_config(self):
-        """Load the configuration file."""
+        """Load the configuration file, decrypting sensitive values and encrypting any
+        plaintext secrets back to the YAML file."""
         with open(self.config_path, 'r') as config_file:
-            return yaml.safe_load(config_file)
+            raw_data = yaml.safe_load(config_file)
+        try:
+            from openmmla.utils.crypto import process_config_dict
+            from openmmla.utils.yaml_dump import dump_yaml_pretty
+            runtime_data, needs_rewrite = process_config_dict(raw_data)
+            if needs_rewrite:
+                dump_yaml_pretty(raw_data, self.config_path)
+            return runtime_data
+        except (FileNotFoundError, ImportError):
+            return raw_data
 
     def _get_temp_file_path(self, prefix, base_id, extension):
         """Generate a temporary file path."""

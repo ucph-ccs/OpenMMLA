@@ -54,13 +54,20 @@ class InfluxDBClientWrapper(influxdb_client.InfluxDBClient):
         if not bucket:
             raise ValueError(f"Bucket {bucket_name} not found.")
         
-        # Extract the bucket start time from the bucket name (format: session_2025-01-20T14:30:00Z)
+        # extract the bucket start time from the bucket name
+        # new format: <exp>_<group>_YYMMDDTHHMMZ  |  legacy: session_YYYY-MM-DDTHH:MM:SSZ
+        start_time = None
+        last_seg = bucket_name.rsplit('_', 1)[-1]
         try:
-            timestamp_str = bucket_name.split('_')[1]
-            start_time = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
-        except (IndexError, ValueError):
-            # If bucket name doesn't follow the expected format, use a very old date
-            start_time = datetime.now() - timedelta(days=365)
+            start_time = datetime.strptime(last_seg, '%y%m%dT%H%MZ')
+        except ValueError:
+            pass
+        if start_time is None:
+            try:
+                timestamp_str = bucket_name.split('_', 1)[1]
+                start_time = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
+            except (IndexError, ValueError):
+                start_time = datetime.now() - timedelta(days=365)
         
         end_time = datetime.now()
         

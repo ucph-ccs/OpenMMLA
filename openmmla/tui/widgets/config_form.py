@@ -10,10 +10,18 @@ from textual.widget import Widget
 
 from openmmla.tui.schema.loader import FieldDef
 
+_SENSITIVE_SUFFIXES = {"api_key", "token", "password", "secret", "secret_key", "subscription_key"}
+
 
 def _safe_id(raw: str) -> str:
     """sanitize a string to be a valid textual widget id."""
     return re.sub(r'[^a-zA-Z0-9_-]', '_', raw)
+
+
+def _is_sensitive_field(path: str) -> bool:
+    """check if a field path ends with a sensitive key name."""
+    last = path.rsplit(".", 1)[-1].lower()
+    return last in _SENSITIVE_SUFFIXES
 
 
 class FieldRow(Widget):
@@ -50,6 +58,7 @@ class FieldRow(Widget):
             yield Switch(value=val, id=widget_id)
         else:
             display = self._to_display(self._initial)
+            sensitive = _is_sensitive_field(self.field_def.path)
             if "\n" in display or len(display) > 120:
                 yield TextArea(
                     display,
@@ -60,6 +69,7 @@ class FieldRow(Widget):
                 yield Input(
                     value=display,
                     placeholder=self.field_def.description or short_name,
+                    password=sensitive,
                     id=widget_id,
                     classes="field-input",
                 )

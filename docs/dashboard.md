@@ -27,7 +27,7 @@ cd OpenMMLA
 conda create -n uber-server -c conda-forge python=3.10.12 -y
 conda activate uber-server
 pip install -e .[uber-server]
-cd servers/uber/dashboard
+cd pipelines/uber-server/dashboard
 ```
 
 2. **Configure the backend**:
@@ -111,10 +111,10 @@ module.exports = {
 
 ## Running the Dashboard
 
-Run the dashboard using the provided Makefile commands from the main `servers/uber` directory:
+Run the dashboard using the provided Makefile commands from the main `pipelines/uber-server` directory:
 
 ```bash
-# Go back to servers/uber directory if you are at servers/uber/dashboard/next-frontend
+# go back to pipelines/uber-server directory if you are at pipelines/uber-server/dashboard/next-frontend
 cd ../..
 # Start the Flask backend on port 5000 using Gunicorn with the gevent worker
 make flask 

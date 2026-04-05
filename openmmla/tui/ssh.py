@@ -9,7 +9,7 @@ import yaml
 
 from openmmla.tui.schema.loader import _find_project_root
 
-PROFILES_DIR = ".openmmla"
+PROFILES_DIR = "config"
 PROFILES_FILE = "ssh_profiles.yml"
 
 

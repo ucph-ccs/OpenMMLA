@@ -15,7 +15,7 @@ CSS_PATH = Path(__file__).parent / "styles" / "app.tcss"
 
 class OpenMMLAApp(App):
     TITLE = "OpenMMLA Management Console"
-    SUB_TITLE = "Env / Services / Monitor"
+    SUB_TITLE = "Env / Launcher / Monitor"
 
     CSS_PATH = CSS_PATH
 
@@ -25,10 +25,10 @@ class OpenMMLAApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with TabbedContent("Environment", "Services", "Status"):
+        with TabbedContent("Environment", "Launcher", "Status"):
             with TabPane("Environment", id="tab-env"):
                 yield EnvironmentPanel()
-            with TabPane("Services", id="tab-services"):
+            with TabPane("Launcher", id="tab-launcher"):
                 yield ServicePanel()
             with TabPane("Status", id="tab-status"):
                 yield StatusPanel()
