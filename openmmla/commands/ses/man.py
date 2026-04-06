@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 def get_parser():
     parser = argparse.ArgumentParser(
         prog="mmla ses-man",
-        description="Manage bucket data and local data.",
+        description="Manage session data and local data.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=150)
     )
     from openmmla.utils.args import add_arguments
@@ -18,95 +18,91 @@ def get_parser():
     return parser
 
 
-def cleanup_bucket_data(influx_client, bucket_name) -> None:
-    """Clean up selected measurement data in the specified bucket."""
+def cleanup_session_events(influx_client, session_id) -> None:
+    """Clean up selected event types for a session."""
     from openmmla.utils.input import multi_interactive_menu
-    
+    from openmmla.utils.constants import EVENT_TYPES_ASR, EVENT_TYPES_IPS, EVENT_TYPES_VFA
+
     try:
-        # Define measurement groups by pipeline
-        measurement_groups = {
-            'asr': ['speaker_recognition', 'speaker_transcription'],
-            'ips': ['badge_relation', 'badge_translation', 'badge_rotation'],
-            'vfa': ['action_recognition']
+        event_type_groups = {
+            'asr': EVENT_TYPES_ASR,
+            'ips': EVENT_TYPES_IPS,
+            'vfa': EVENT_TYPES_VFA,
         }
-        
-        # Show interactive menu for measurement selection
+
         pipeline_options = ['asr', 'ips', 'vfa']
         descriptions = [
-            'Automatic Speech Recognition (speaker_recognition, speaker_transcription)',
-            'Indoor Positioning System (badge_relation, badge_translation, badge_rotation)',
-            'Video Frame Analysis (action_recognition)'
+            f'Automatic Speech Recognition ({", ".join(EVENT_TYPES_ASR)})',
+            f'Indoor Positioning System ({", ".join(EVENT_TYPES_IPS)})',
+            f'Video Frame Analysis ({", ".join(EVENT_TYPES_VFA)})',
         ]
-        
+
         selected_indices = multi_interactive_menu("Select Pipelines to Clean Up", pipeline_options, descriptions, exit_on_q=False, prompt_enter=False)
-        
+
         if not selected_indices:
             print("No pipelines selected. Cleanup cancelled.")
             return
-        
-        # Convert indices to pipeline names
+
         selected_pipelines = [pipeline_options[i] for i in selected_indices]
-        
-        # Build list of measurements to delete
-        measurements_to_delete = []
+
+        event_types_to_delete = []
         for pipeline in selected_pipelines:
-            measurements_to_delete.extend(measurement_groups[pipeline])
-        
-        # Confirm deletion
-        print(f"\nThe following measurements will be deleted from bucket '{bucket_name}':")
-        for measurement in measurements_to_delete:
-            print(f"  - {measurement}")
-        
+            event_types_to_delete.extend(event_type_groups[pipeline])
+
+        print(f"\nThe following event types will be deleted for session '{session_id}':")
+        for et in event_types_to_delete:
+            print(f"  - {et}")
+
         confirm = input("\nAre you sure? (y/n): ")
         if confirm.lower() != 'y':
             print("Cleanup cancelled.")
             return
-        
-        # Delete selected measurements
-        influx_client.delete_measurements(bucket_name, measurements_to_delete)
-        print(f"✅ Successfully cleaned up measurements in bucket: {bucket_name}")
+
+        influx_client.delete_event_types(session_id, event_types_to_delete)
+        print(f"✅ Successfully cleaned up event types for session: {session_id}")
     except Exception as e:
-        print(f"❌ Failed to clean up bucket: {e}")
+        print(f"❌ Failed to clean up session events: {e}")
 
 
-def delete_bucket(influx_client, bucket_name) -> None:
-    """Delete the specified bucket."""
+def delete_session(influx_client, mongo_client, session_id) -> None:
+    """Delete all data for a session from both InfluxDB and MongoDB."""
     try:
-        confirm = input(f"Bucket: {bucket_name} will be deleted. Are you sure? (y/n): ")
+        confirm = input(f"Session: {session_id} will be deleted from InfluxDB and MongoDB. Are you sure? (y/n): ")
         if confirm.lower() != 'y':
             print("Deletion cancelled.")
             return
-        influx_client.delete_bucket(bucket_name)
-        print(f"✅ Successfully deleted bucket: {bucket_name}")
+        influx_client.delete_session_data(session_id)
+        mongo_client.delete_session(session_id)
+        print(f"✅ Successfully deleted session: {session_id}")
     except Exception as e:
-        print(f"❌ Failed to delete bucket: {e}")
+        print(f"❌ Failed to delete session: {e}")
 
 
-def create_new_bucket(influx_client) -> None:
-    """Create a new bucket with experiment/group naming."""
+def create_new_session(mongo_client) -> None:
+    """Create a new session with experiment/group naming."""
     try:
         from openmmla.utils.experiments import select_experiment_and_group
-        from openmmla.utils.input import _make_bucket_name
+        from openmmla.utils.input import _make_session_id
         exp_id, group_id = select_experiment_and_group()
-        bucket_name = _make_bucket_name(exp_id, group_id, datetime.now(timezone.utc))
-        influx_client.create_bucket(bucket_name)
-        print(f"✅ Successfully created new bucket: {bucket_name}")
+        session_id = _make_session_id(exp_id, group_id, datetime.now(timezone.utc))
+        mongo_client.create_session(session_id, exp_id, group_id)
+        print(f"✅ Successfully created new session: {session_id}")
     except Exception as e:
-        print(f"❌ Failed to create new bucket: {e}")
+        print(f"❌ Failed to create new session: {e}")
 
 
-def cleanup_local_data(project_dir, bucket_name) -> None:
-    """Clean up local data associated with the bucket."""
+def cleanup_local_data(project_dir, session_id) -> None:
+    """Clean up local data associated with the session."""
     try:
-        confirm = input(f"Local data for bucket: {bucket_name} will be cleaned up. Are you sure? (y/n): ")
+        confirm = input(f"Local data for session: {session_id} will be cleaned up. Are you sure? (y/n): ")
         if confirm.lower() != 'y':
             print("Cleanup cancelled.")
             return
         directories = [
-            os.path.join(project_dir, 'logger', f'*{bucket_name}*'),
-            os.path.join(project_dir, 'logs', f'*{bucket_name}*'),
-            os.path.join(project_dir, 'visualizations', f'*{bucket_name}*'),
-            os.path.join(project_dir, 'real-time', 'runtime', bucket_name)
+            os.path.join(project_dir, 'logger', f'*{session_id}*'),
+            os.path.join(project_dir, 'logs', f'*{session_id}*'),
+            os.path.join(project_dir, 'visualizations', f'*{session_id}*'),
+            os.path.join(project_dir, 'real-time', 'runtime', session_id)
         ]
         for dir_pattern in directories:
             import glob
@@ -117,19 +113,19 @@ def cleanup_local_data(project_dir, bucket_name) -> None:
                     else:
                         os.remove(dir_path)
                     print(f"✅ Cleaned up: {dir_path}")
-        print(f"✅ Successfully cleaned up local data for bucket: {bucket_name}")
+        print(f"✅ Successfully cleaned up local data for session: {session_id}")
     except Exception as e:
         print(f"❌ Failed to clean up local data: {e}")
 
 
-def run_bucket_management(args):
-    print(f"\033]0;Bucket Management\007")
+def run_session_management(args):
+    print(f"\033]0;Session Management\007")
 
     from openmmla.utils.logger import get_logger
-    from openmmla.utils.input import select_bucket, interactive_menu
-    from openmmla.utils.client import InfluxDBClientWrapper
+    from openmmla.utils.input import select_session, interactive_menu
+    from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper
 
-    logger = get_logger('bucket_management')
+    logger = get_logger('session_management')
 
     config_path = args.config_path
     if not os.path.isabs(config_path):
@@ -140,43 +136,44 @@ def run_bucket_management(args):
     while True:
         try:
             influx_client = InfluxDBClientWrapper(config_path)
+            mongo_client = MongoDBClientWrapper(config_path)
             options = [
-                "➕ Create New Bucket",
-                "🗑️  Delete Bucket", 
-                "🧹 Clean Up Bucket Data",
+                "➕ Create New Session",
+                "🗑️  Delete Session",
+                "🧹 Clean Up Session Events",
                 "📁 Clean Up Local Data",
             ]
             descriptions = [
-                "Create a new session bucket in the database",
-                "Delete an existing bucket from the database",
-                "Clean up selected measurements in an existing bucket",
+                "Create a new session in the database",
+                "Delete a session from InfluxDB and MongoDB",
+                "Clean up selected event types for a session",
                 "Clean up local files (logs, visualizations, runtime, etc.)",
             ]
-            
-            operation = interactive_menu("Bucket Management", options, descriptions, exit_on_q=True, prompt_enter=True)
-            
+
+            operation = interactive_menu("Session Management", options, descriptions, exit_on_q=True, prompt_enter=True)
+
             if operation == 0:
-                create_new_bucket(influx_client)
+                create_new_session(mongo_client)
             elif operation == 1:
-                bucket_name = select_bucket(influx_client)
-                if bucket_name:
-                    delete_bucket(influx_client, bucket_name)
+                session_id = select_session(mongo_client)
+                if session_id:
+                    delete_session(influx_client, mongo_client, session_id)
             elif operation == 2:
-                bucket_name = select_bucket(influx_client)
-                if bucket_name:
-                    cleanup_bucket_data(influx_client, bucket_name)
+                session_id = select_session(mongo_client)
+                if session_id:
+                    cleanup_session_events(influx_client, session_id)
             elif operation == 3:
-                bucket_name = select_bucket(influx_client)
-                if bucket_name:
-                    cleanup_local_data(os.path.dirname(config_path), bucket_name)
+                session_id = select_session(mongo_client)
+                if session_id:
+                    cleanup_local_data(os.path.dirname(config_path), session_id)
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
                 print("\n👋 Goodbye!")
                 break
             else:
-                logger.warning("During running bucket management, catch: KeyboardInterrupt, Come back to the main menu.", exc_info=True)
+                logger.warning("During running session management, catch: KeyboardInterrupt, Come back to the main menu.", exc_info=True)
         except Exception as e:
-            logger.warning(f"During running bucket management, catch: {e}, Come back to the main menu.", exc_info=True)
+            logger.warning(f"During running session management, catch: {e}, Come back to the main menu.", exc_info=True)
 
 
 def main():
@@ -186,7 +183,7 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
-    run_bucket_management(args)
+    run_session_management(args)
 
 
 if __name__ == "__main__":

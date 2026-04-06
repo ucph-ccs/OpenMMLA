@@ -17,6 +17,7 @@ from openmmla.tui.ssh import load_ssh_profiles, ssh_check_port, ssh_check_tmux, 
 
 KNOWN_SERVICES = [
     {"name": "InfluxDB", "port": 8086, "type": "system"},
+    {"name": "MongoDB", "port": 27017, "type": "system"},
     {"name": "Redis", "port": 6379, "type": "system"},
     {"name": "Mosquitto", "port": 1883, "type": "system"},
     {"name": "Nginx", "port": 8080, "type": "system"},
@@ -309,6 +310,7 @@ class StatusPanel(Widget):
 
         _REMOTE_LOG_CMDS: dict[str, str] = {
             "influxdb": "journalctl -u influxdb -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/influxdb/influxd.log 2>/dev/null || echo '(no influxdb logs found)'",
+            "mongodb": "journalctl -u mongod -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/mongodb/mongod.log 2>/dev/null || echo '(no mongodb logs found)'",
             "redis": "journalctl -u redis-server -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/redis/redis-server.log 2>/dev/null || echo '(no redis logs found)'",
             "mosquitto": "journalctl -u mosquitto -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/mosquitto/mosquitto.log 2>/dev/null || echo '(no mosquitto logs found)'",
             "nginx": "journalctl -u nginx -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/nginx/error.log 2>/dev/null || echo '(no nginx logs found)'",

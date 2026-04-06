@@ -94,6 +94,9 @@ VFA now supports loading custom prompt templates from external files, allowing y
    Use the variable directly in the template file, e.g. `Here below is the angle descriptions for the images: {{angle_descriptions}}`
 
 ### On Servers
+
+> **Tip**: You can use `mmla tui` to configure and launch all services from the TUI Launcher, instead of running commands manually.
+
 ```bash
 # 1. Run uber services on uber server with conda env `uber-server`
 # Go to /pipelines/uber-server/ to run with scripts or run manually with brew or systemctl

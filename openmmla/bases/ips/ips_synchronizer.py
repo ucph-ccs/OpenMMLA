@@ -6,8 +6,8 @@ import threading
 
 from openmmla.analytics.ips.analyze import ips_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
-from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket
+from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import select_or_create_session
 from openmmla.utils.logger import get_logger
 from .input import get_function_synchronizer
 from .transform import transform_point, transform_rotation
@@ -35,7 +35,7 @@ class IPSSynchronizer(Synchronizer):
         self.transform_matrices_dict = None
         self.merged_tags = None
         self.merged_relations = None
-        self.bucket_name = None
+        self.session_id = None
         self.time_bucket_key = None  # start timestamp of time bucket
         self.time_bucket_end = None
         self.alive = False
@@ -61,9 +61,10 @@ class IPSSynchronizer(Synchronizer):
 
     def _setup_objects(self):
         """Set up client objects."""
-        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
-        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
-        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
+        self.redis_client = RedisClientWrapper(self.config_path)
+        self.mqtt_client = MQTTClientWrapper(self.config_path)
+        self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.mongo_client = MongoDBClientWrapper(self.config_path)
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
@@ -71,7 +72,7 @@ class IPSSynchronizer(Synchronizer):
             self._stop_threads()
         self._clear_threads()
         self.mqtt_client.loop_stop()
-        self.bucket_name = None
+        self.session_id = None
         self.merged_relations = None
         self.merged_tags = None
         gc.collect()
@@ -105,12 +106,12 @@ class IPSSynchronizer(Synchronizer):
         self.merged_tags = {}
 
         # select or create bucket
-        self.bucket_name = select_or_create_bucket(self.influx_client)
+        self.session_id = select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
         self._listen_for_start_signal()
 
         # reinitialize mqtt client with new topics and on_message callback
-        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/ips')
+        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/ips')
         self.mqtt_client.loop_start()
 
         # create threads
@@ -131,9 +132,9 @@ class IPSSynchronizer(Synchronizer):
 
     def _create_bucket_logger(self):
         """Create logger for the bucket."""
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'ips-synchronizer-{self.bucket_name}',
+        self.logger = get_logger(f'ips-synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_synchronizer.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
 
@@ -147,7 +148,7 @@ class IPSSynchronizer(Synchronizer):
             self._stop_threads()
         else:
             self.logger.info("All threads stopped properly.")
-        ips_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
+        ips_session_analysis(self.project_dir, self.session_id, self.influx_client)
         self._clean_up()
 
     def _set_main_camera(self):
@@ -225,51 +226,44 @@ class IPSSynchronizer(Synchronizer):
 
     def _upload_current_bucket(self):
         """Upload the current time bucket's aggregated results for both file and real-time modes."""
+        from openmmla.utils.constants import (
+            EVENT_TYPE_IPS_TRANSLATION, EVENT_TYPE_IPS_ROTATION, EVENT_TYPE_IPS_RELATION,
+        )
+
         rotations_dict = {}
         translations_dict = {}
         for tag_id, (rotation, translation) in self.merged_tags.items():
             rotations_dict[tag_id] = rotation
             translations_dict[tag_id] = translation
 
-        # prepare and upload the data for badge translations, rotations and relations
-        translation_data = {
-            "measurement": "badge_translation",
-            "fields": {
-                "window_start_time": self.time_bucket_key,
-                "window_end_time": self.time_bucket_end,
-                "translations": json.dumps(translations_dict),
-            }
+        translation_fields = {
+            "window_start_time": self.time_bucket_key,
+            "window_end_time": self.time_bucket_end,
+            "translations": json.dumps(translations_dict),
         }
-
-        rotation_data = {
-            "measurement": "badge_rotation",
-            "fields": {
-                "window_start_time": self.time_bucket_key,
-                "window_end_time": self.time_bucket_end,
-                "rotations": json.dumps(rotations_dict),
-            }
+        rotation_fields = {
+            "window_start_time": self.time_bucket_key,
+            "window_end_time": self.time_bucket_end,
+            "rotations": json.dumps(rotations_dict),
         }
 
         relations_dict = {}
         for tag_id, relations in self.merged_relations.items():
             relations_dict[tag_id] = list(relations)
 
-        relation_data = {
-            "measurement": "badge_relation",
-            "fields": {
-                "window_start_time": self.time_bucket_key,
-                "window_end_time": self.time_bucket_end,
-                "graph": json.dumps(relations_dict),
-            }
+        relation_fields = {
+            "window_start_time": self.time_bucket_key,
+            "window_end_time": self.time_bucket_end,
+            "graph": json.dumps(relations_dict),
         }
 
-        self.logger.debug(translation_data)
-        self.logger.debug(rotation_data)
-        self.logger.debug(relation_data)
+        self.logger.debug(translation_fields)
+        self.logger.debug(rotation_fields)
+        self.logger.debug(relation_fields)
 
-        self.influx_client.write(self.bucket_name, translation_data)
-        self.influx_client.write(self.bucket_name, rotation_data)
-        self.influx_client.write(self.bucket_name, relation_data)
+        self.influx_client.write_event(self.session_id, EVENT_TYPE_IPS_TRANSLATION, translation_fields)
+        self.influx_client.write_event(self.session_id, EVENT_TYPE_IPS_ROTATION, rotation_fields)
+        self.influx_client.write_event(self.session_id, EVENT_TYPE_IPS_RELATION, relation_fields)
 
         self.logger.info(f"Uploaded bucket: {self.time_bucket_key:.2f}s - {self.time_bucket_end:.2f}s "
                          f"({len(self.merged_tags)} tags, {len(self.merged_relations)} relations)")
@@ -309,8 +303,8 @@ class IPSSynchronizer(Synchronizer):
             return json.load(file)
 
     @property
-    def bucket_control(self) -> str | None:
-        """Dynamic property that returns the control channel name based on current bucket_name."""
-        if self.bucket_name:
-            return f'{self.bucket_name}/ips/control'
+    def session_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current session_id."""
+        if self.session_id:
+            return f'{self.session_id}/ips/control'
         return None

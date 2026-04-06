@@ -13,6 +13,11 @@ InfluxDB:
   url: http://<influxdb-example-server>:<port>
   token: <influxdb-token>
   org: <org-name>
+  bucket: mmla-data
+
+MongoDB:
+  url: mongodb://<mongodb-example-server>:<port>
+  db: openmmla
 
 Redis:
   # Replace <redis-example-server> with your actual sever address that runs the Redis server, and the <port-number>

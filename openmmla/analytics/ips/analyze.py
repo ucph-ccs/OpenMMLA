@@ -11,6 +11,7 @@ from pyecharts.charts import Page
 from scipy.interpolate import interp1d
 from scipy.spatial.distance import euclidean
 
+from openmmla.utils.constants import EVENT_TYPE_IPS_RELATION, EVENT_TYPE_IPS_TRANSLATION, EVENT_TYPE_IPS_ROTATION
 from openmmla.utils.querys import fetch_and_process_data, save_to_json_file, read_json_file, convert_json_to_dataframe
 from openmmla.utils.visualization import weight_to_width, draw_networkx_edge_labels, format_list_for_pyecharts, \
     get_pyecharts_js_functions
@@ -40,7 +41,7 @@ BADGE_COLOR_MAP = {
 CANDIDATES = [str(i) for i in range(20)]
 
 
-def ips_session_analysis(project_dir, bucket_name, influx_client):
+def ips_session_analysis(project_dir, session_id, influx_client):
     """Retrieves data from InfluxDB for badge relations, translations, and rotations, and then visualizes them."""
     if not project_dir or not os.path.exists(project_dir):
         print("Warning: project_dir is not set or does not exist. Please set it to a valid directory, set it to current"
@@ -48,19 +49,19 @@ def ips_session_analysis(project_dir, bucket_name, influx_client):
         project_dir = os.getcwd()
 
     logs_dir = os.path.join(project_dir, 'logs')
-    log_dir = os.path.join(logs_dir, f'{bucket_name}')
+    log_dir = os.path.join(logs_dir, f'{session_id}')
     visualizations_dir = os.path.join(project_dir, 'visualizations')
-    visualization_dir = os.path.join(visualizations_dir, bucket_name, "post-time")
+    visualization_dir = os.path.join(visualizations_dir, session_id, "post-time")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(visualization_dir, exist_ok=True)
 
     # Log
-    relations_data = fetch_and_process_data(bucket_name, "badge_relation", influx_client)
-    translations_data = fetch_and_process_data(bucket_name, "badge_translation", influx_client)
-    rotations_data = fetch_and_process_data(bucket_name, "badge_rotation", influx_client)
-    translation_json_file = save_to_json_file(bucket_name, translations_data, "badge_translation", log_dir)
-    relations_json_file = save_to_json_file(bucket_name, relations_data, "badge_relation", log_dir)
-    save_to_json_file(bucket_name, rotations_data, "badge_rotation", log_dir)
+    relations_data = fetch_and_process_data(session_id, EVENT_TYPE_IPS_RELATION, influx_client)
+    translations_data = fetch_and_process_data(session_id, EVENT_TYPE_IPS_TRANSLATION, influx_client)
+    rotations_data = fetch_and_process_data(session_id, EVENT_TYPE_IPS_ROTATION, influx_client)
+    translation_json_file = save_to_json_file(session_id, translations_data, "badge_translation", log_dir)
+    relations_json_file = save_to_json_file(session_id, relations_data, "badge_relation", log_dir)
+    save_to_json_file(session_id, rotations_data, "badge_rotation", log_dir)
 
     # Visualize
     plot_badge_locations_and_trajectories(translation_json_file, visualization_dir)
@@ -73,7 +74,7 @@ def ips_session_analysis(project_dir, bucket_name, influx_client):
 
 def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plot_type='both'):
     """Visualizes the 2D and 3D locations and trajectories of badges from JSON data."""
-    bucket_name = f"session_{os.path.basename(json_file_path).split('_')[1]}"
+    session_id = f"session_{os.path.basename(json_file_path).split('_')[1]}"
 
     # Load the JSON file
     with open(json_file_path, 'r') as f:
@@ -112,8 +113,8 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
         plt.ylabel('X Coordinate')
         plt.title('2D Localisation of Badges (Z, X)')
         plt.legend()
-        plt.savefig(os.path.join(visualization_dir, f"{bucket_name}_2d_positions.png"), dpi=300)
-        print(f"Saved 2D positions to {bucket_name}_2d_positions.png")
+        plt.savefig(os.path.join(visualization_dir, f"{session_id}_2d_positions.png"), dpi=300)
+        print(f"Saved 2D positions to {session_id}_2d_positions.png")
 
     if plot_type in ['both', 'trajectory']:
         # 2D scatter plot with interpolated trajectory lines
@@ -175,8 +176,8 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
         plt.ylabel('X Coordinate')
         plt.title('2D Interpolated Trajectories of Badges (Z, X)')
         plt.legend()
-        plt.savefig(os.path.join(visualization_dir, f"{bucket_name}_2d_interpolated_trajectories.png"), dpi=300)
-        print(f"Saved 2D interpolated trajectories to {bucket_name}_2d_interpolated_trajectories.png")
+        plt.savefig(os.path.join(visualization_dir, f"{session_id}_2d_interpolated_trajectories.png"), dpi=300)
+        print(f"Saved 2D interpolated trajectories to {session_id}_2d_interpolated_trajectories.png")
 
     if plot_type in ['both', 'position']:
         # 3D scatter plot of positions
@@ -196,8 +197,8 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
         ax.set_zlabel('Y Coordinate')
         ax.set_title('3D Localisation of Badges')
         ax.legend()
-        plt.savefig(os.path.join(visualization_dir, f"{bucket_name}_3d_positions.png"), dpi=300)
-        print(f"Saved 3D positions to {bucket_name}_3d_positions.png")
+        plt.savefig(os.path.join(visualization_dir, f"{session_id}_3d_positions.png"), dpi=300)
+        print(f"Saved 3D positions to {session_id}_3d_positions.png")
 
     if plot_type in ['both', 'trajectory']:
         # 3D scatter plot with interpolated trajectory lines
@@ -264,13 +265,13 @@ def plot_badge_locations_and_trajectories(json_file_path, visualization_dir, plo
         ax.set_zlabel('Y Coordinate')
         ax.set_title('3D Interpolated Trajectories of Badges')
         ax.legend()
-        plt.savefig(os.path.join(visualization_dir, f"{bucket_name}_3d_interpolated_trajectories.png"), dpi=300)
-        print(f"Saved 3D interpolated trajectories to {bucket_name}_3d_interpolated_trajectories.png")
+        plt.savefig(os.path.join(visualization_dir, f"{session_id}_3d_interpolated_trajectories.png"), dpi=300)
+        print(f"Saved 3D interpolated trajectories to {session_id}_3d_interpolated_trajectories.png")
 
 
 def plot_2d_heatmap(json_file_path, visualization_dir):
     """Creates a 2D heatmap visualization of badge positions based on their Z and X coordinates."""
-    bucket_name = f"session_{os.path.basename(json_file_path).split('_')[1]}"
+    session_id = f"session_{os.path.basename(json_file_path).split('_')[1]}"
 
     # Load the JSON file to inspect its structure
     with open(json_file_path, 'r') as f:
@@ -306,8 +307,8 @@ def plot_2d_heatmap(json_file_path, visualization_dir):
     plt.xlabel('Z Coordinate')
     plt.ylabel('X Coordinate')
     plt.title('2D Heatmap of Badge Positions (Z, X)')
-    plt.savefig(os.path.join(visualization_dir, f"{bucket_name}_hm.png"), dpi=300)
-    print(f"Saved 2D heatmap to {bucket_name}_hm.png")
+    plt.savefig(os.path.join(visualization_dir, f"{session_id}_hm.png"), dpi=300)
+    print(f"Saved 2D heatmap to {session_id}_hm.png")
 
 
 def plot_physical_interaction_network(json_file_path, visualization_dir):
@@ -374,8 +375,8 @@ def plot_physical_interaction_network(json_file_path, visualization_dir):
     nx.draw_networkx_labels(G, pos, font_size=7)
 
     plt.title(f'Normalized Physical Interaction Network ({session_name})')
-    bucket_name = f"session_{os.path.basename(json_file_path).split('_')[1]}"
-    plt.savefig(os.path.join(visualization_dir, f"{bucket_name}_npin.png"), dpi=300)
+    session_id = f"session_{os.path.basename(json_file_path).split('_')[1]}"
+    plt.savefig(os.path.join(visualization_dir, f"{session_id}_npin.png"), dpi=300)
 
 
 def calculate_physical_interactions(json_file_path):

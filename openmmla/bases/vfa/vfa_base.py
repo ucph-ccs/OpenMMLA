@@ -12,8 +12,8 @@ import numpy as np
 
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
-from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket, get_id, flush_input
+from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import select_or_create_session, get_id, flush_input
 from openmmla.utils.logger import get_logger
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
@@ -47,7 +47,7 @@ class VFABase(Base):
         self.selected_source = None
         self.base_id = None
         self.camera_configured = False
-        self.bucket_name = None
+        self.session_id = None
         self.video_stream = None
 
         # Threading attributes
@@ -92,6 +92,7 @@ class VFABase(Base):
     def _setup_clients(self):
         """Initialize external service clients and internal processing objects."""
         self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.mongo_client = MongoDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
 
@@ -155,7 +156,7 @@ class VFABase(Base):
             self.logger.warning("Camera is not configured.")
             return self._set_camera()
 
-        self.bucket_name = select_or_create_bucket(self.influx_client)
+        self.session_id = select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
 
         if self.mode != 'analyze':
@@ -183,9 +184,9 @@ class VFABase(Base):
 
     def _create_bucket_logger(self):
         """Create logger for the bucket."""
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'vfa-{self.bucket_name}',
+        self.logger = get_logger(f'vfa-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'vfa_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
 
@@ -382,7 +383,7 @@ class VFABase(Base):
 
     def _process_frames(self):
         """Process video frames and handle frame analysis."""
-        self.save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/{self.chosen_camera}_{self.base_id}')
+        self.save_path = os.path.join(self.runtime_dir, f'{self.session_id}/{self.chosen_camera}_{self.base_id}')
         os.makedirs(self.save_path, exist_ok=True)
 
         if self.mode == 'analyze':  # processing existing frames
@@ -568,13 +569,13 @@ class VFABase(Base):
             "acquired_time": acquired_time
         }
 
-        self.mqtt_client.publish(f"{self.bucket_name}/vfa", json.dumps(frame_data))
+        self.mqtt_client.publish(f"{self.session_id}/vfa", json.dumps(frame_data))
         self.logger.info(f"Published frame path {image_path} with angle {self.camera_angle} at {acquired_time}")
 
     @property
-    def bucket_control(self) -> str | None:
-        """Dynamic property that returns the control channel name based on current bucket_name."""
-        if self.bucket_name:
-            return f'{self.bucket_name}/vfa/control'
+    def session_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current session_id."""
+        if self.session_id:
+            return f'{self.session_id}/vfa/control'
         return None
 

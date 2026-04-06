@@ -19,8 +19,8 @@ def run_session_analysis(args):
     print(f"\033]0; Session Analysis \007")
 
     from openmmla.utils.logger import get_logger
-    from openmmla.utils.input import select_bucket, interactive_menu
-    from openmmla.utils.client import InfluxDBClientWrapper
+    from openmmla.utils.input import select_session, interactive_menu
+    from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper
     from openmmla.analytics.asr.analyze import asr_session_analysis
     from openmmla.analytics.ips.analyze import ips_session_analysis
     from openmmla.analytics.vfa.analyze import vfa_session_analysis
@@ -36,32 +36,32 @@ def run_session_analysis(args):
     while True:
         try:
             influx_client = InfluxDBClientWrapper(config_path)
+            mongo_client = MongoDBClientWrapper(config_path)
             options = [
                 "🎤 ASR Diarization Analysis",
-                "📍 Indoor Positioning Analysis", 
+                "📍 Indoor Positioning Analysis",
                 "📹 Video Frame Analysis",
             ]
             descriptions = [
                 "Analyze speaker diarization and transcription data",
                 "Analyze indoor positioning and movement data",
                 "Analyze video frame and object detection data",
-                "Exit the session analysis tool"
             ]
-            
+
             operation = interactive_menu("Session Analysis", options, descriptions, exit_on_q=True, prompt_enter=True)
-            
+
             if operation == 0:
-                bucket_name = select_bucket(influx_client)
-                if bucket_name:
-                    asr_session_analysis(None, bucket_name, influx_client)
+                session_id = select_session(mongo_client)
+                if session_id:
+                    asr_session_analysis(None, session_id, influx_client)
             elif operation == 1:
-                bucket_name = select_bucket(influx_client)
-                if bucket_name:
-                    ips_session_analysis(None, bucket_name, influx_client)
+                session_id = select_session(mongo_client)
+                if session_id:
+                    ips_session_analysis(None, session_id, influx_client)
             elif operation == 2:
-                bucket_name = select_bucket(influx_client)
-                if bucket_name:
-                    vfa_session_analysis(None, bucket_name, influx_client)
+                session_id = select_session(mongo_client)
+                if session_id:
+                    vfa_session_analysis(None, session_id, influx_client)
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
                 print("\n👋 Goodbye!")

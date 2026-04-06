@@ -11,13 +11,14 @@ from pyecharts.charts import Page
 from pyecharts.charts import Pie, Bar
 from pyecharts.commons.utils import JsCode
 
+from openmmla.utils.constants import EVENT_TYPE_ASR_RECOGNITION, EVENT_TYPE_ASR_TRANSCRIPTION
 from openmmla.utils.querys import fetch_and_process_data, save_to_json_file, read_json_file, convert_json_to_dataframe
 from openmmla.utils.visualization import format_time, weight_to_width, draw_networkx_edge_labels, \
     format_list_for_pyecharts, get_pyecharts_js_functions
 from .transcription import convert_transcription_json_to_txt
 
 
-def asr_session_analysis(project_dir, bucket_name, influx_client):
+def asr_session_analysis(project_dir, session_id, influx_client):
     """Retrieves data from InfluxDB for speaker recognition, transcription, and then visualizes them."""
     if not project_dir or not os.path.exists(project_dir):
         print("Warning: project_dir is not set or does not exist. Please set it to a valid directory, set it to current"
@@ -25,17 +26,17 @@ def asr_session_analysis(project_dir, bucket_name, influx_client):
         project_dir = os.getcwd()
 
     logs_dir = os.path.join(project_dir, 'logs')
-    log_dir = os.path.join(logs_dir, f'{bucket_name}')
+    log_dir = os.path.join(logs_dir, f'{session_id}')
     visualizations_dir = os.path.join(project_dir, 'visualizations')
-    visualization_dir = os.path.join(visualizations_dir, bucket_name, 'post-time')
+    visualization_dir = os.path.join(visualizations_dir, session_id, 'post-time')
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(visualization_dir, exist_ok=True)
 
     # Log
-    recognition_data = fetch_and_process_data(bucket_name, "speaker_recognition", influx_client)
-    transcription_data = fetch_and_process_data(bucket_name, "speaker_transcription", influx_client)
-    recognition_json_file_path = save_to_json_file(bucket_name, recognition_data, "speaker_recognition", log_dir)
-    transcription_json_file_path = save_to_json_file(bucket_name, transcription_data, "speaker_transcription", log_dir)
+    recognition_data = fetch_and_process_data(session_id, EVENT_TYPE_ASR_RECOGNITION, influx_client)
+    transcription_data = fetch_and_process_data(session_id, EVENT_TYPE_ASR_TRANSCRIPTION, influx_client)
+    recognition_json_file_path = save_to_json_file(session_id, recognition_data, "speaker_recognition", log_dir)
+    transcription_json_file_path = save_to_json_file(session_id, transcription_data, "speaker_transcription", log_dir)
     convert_transcription_json_to_txt(transcription_json_file_path)
 
     # Visualize
@@ -231,9 +232,9 @@ def plot_speaker_diarization_interactive(json_file_path, save_dir):
     page.add(stacked_bar)
     page.add(pie1)
     page.add(pie2)
-    bucket_name = f"session_{os.path.basename(json_file_path).split('_')[1]}"
-    page.render(os.path.join(save_dir, f'{bucket_name}_speaker_diarization.html'))
-    print(f"Speaker diarization visualization saved to '{bucket_name}_speaker_diarization.html'")
+    session_id = f"session_{os.path.basename(json_file_path).split('_')[1]}"
+    page.render(os.path.join(save_dir, f'{session_id}_speaker_diarization.html'))
+    print(f"Speaker diarization visualization saved to '{session_id}_speaker_diarization.html'")
 
 
 def plot_speaking_interaction_network(json_file_path, save_dir):
@@ -299,9 +300,9 @@ def plot_speaking_interaction_network(json_file_path, save_dir):
     nx.draw_networkx_labels(G, pos, font_size=7)
 
     plt.title(f'Normalized Speaking Interaction Network ({session_name})')
-    bucket_name = f"session_{os.path.basename(json_file_path).split('_')[1]}"
-    plt.savefig(os.path.join(save_dir, f"{bucket_name}_nsin.png"), dpi=300)
-    print(f"Normalized speaking interaction network saved to '{bucket_name}_nsin.png'")
+    session_id = f"session_{os.path.basename(json_file_path).split('_')[1]}"
+    plt.savefig(os.path.join(save_dir, f"{session_id}_nsin.png"), dpi=300)
+    print(f"Normalized speaking interaction network saved to '{session_id}_nsin.png'")
 
 
 def calculate_speaker_interactions(json_file_path):

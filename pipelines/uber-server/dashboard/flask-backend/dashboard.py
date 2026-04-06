@@ -11,6 +11,7 @@ from flask_socketio import SocketIO
 
 from openmmla.analytics.asr.analyze import asr_session_analysis
 from openmmla.analytics.ips.analyze import ips_session_analysis
+from openmmla.utils.constants import EVENT_TYPE_ASR_RECOGNITION, EVENT_TYPE_ASR_TRANSCRIPTION, EVENT_TYPE_IPS_RELATION
 from openmmla.utils.querys import fetch_latest_entry, get_node_positions
 from openmmla.utils.client import InfluxDBClientWrapper
 
@@ -65,17 +66,16 @@ celery = make_celery(app)  # Initialize Celery
 
 @app.route('/api/get_buckets')
 def get_buckets():
-    bucket_list = influx_client.get_buckets()
-    bucket_names = [bucket.name for bucket in bucket_list.buckets if bucket.name not in ['_tasks', '_monitoring']]
-    return jsonify(bucket_names)
+    session_ids = influx_client.get_all_session_ids()
+    return jsonify(session_ids)
 
 
 @celery.task
-def generate_post_time_visualization(bucket_name):
+def generate_post_time_visualization(session_id):
     try:
         print("Generating post-time visualization...")
-        asr_session_analysis(static_dir, bucket_name, influx_client)
-        ips_session_analysis(static_dir, bucket_name, influx_client)
+        asr_session_analysis(static_dir, session_id, influx_client)
+        ips_session_analysis(static_dir, session_id, influx_client)
     except KeyError as e:
         print(f"Key not found, {e}")
 
@@ -84,20 +84,20 @@ def generate_post_time_visualization(bucket_name):
 def post_time_visualize():
     """Start the post-time visualization generation task"""
     data = request.json
-    bucket_name = data['bucket_name']
+    session_id = data['session_id']
     # Check if visualizations exist and were generated recently
-    last_visualized = post_time_visualization_timestamps.get(bucket_name)
+    last_visualized = post_time_visualization_timestamps.get(session_id)
     visualization_age = datetime.now() - last_visualized if last_visualized else timedelta.max
     if visualization_age > timedelta(minutes=2):  # At least 1 minute old data to regenerate
-        generate_post_time_visualization.delay(bucket_name)
+        generate_post_time_visualization.delay(session_id)
         print("Post-time visualization task started")
-        post_time_visualization_timestamps[bucket_name] = datetime.now()
+        post_time_visualization_timestamps[session_id] = datetime.now()
     return jsonify({'message': "Post-time visualization started"})
 
 
-@app.route('/api/get_post_time_visualizations/<bucket_name>')
-def get_post_time_visualizations(bucket_name):
-    post_time_visualization_path = os.path.join(visualizations_dir, bucket_name, 'post-time')
+@app.route('/api/get_post_time_visualizations/<session_id>')
+def get_post_time_visualizations(session_id):
+    post_time_visualization_path = os.path.join(visualizations_dir, session_id, 'post-time')
     valid_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.html']
     files = []
     try:
@@ -108,88 +108,88 @@ def get_post_time_visualizations(bucket_name):
         pass
     finally:
         # file_urls is the flask route to access the static folder files, not the actual file path
-        file_urls = [url_for('static', filename=f"visualizations/{bucket_name}/post-time/{file}") for file in files]
+        file_urls = [url_for('static', filename=f"visualizations/{session_id}/post-time/{file}") for file in files]
     return jsonify({'files': file_urls})
 
 
-@app.route('/api/get_logs/<bucket_name>')
-def get_logs(bucket_name):
-    log_path = os.path.join(logs_dir, bucket_name)
+@app.route('/api/get_logs/<session_id>')
+def get_logs(session_id):
+    log_path = os.path.join(logs_dir, session_id)
     try:
         log_files = [f for f in os.listdir(log_path) if os.path.isfile(os.path.join(log_path, f))]
         # log_urls is the flask route to call the download_log function, not the actual file path
-        log_urls = [{'name': file, 'url': f"/logs/{bucket_name}/{file}"} for file in log_files]
+        log_urls = [{'name': file, 'url': f"/logs/{session_id}/{file}"} for file in log_files]
         return jsonify({'logs': log_urls})
     except FileNotFoundError:
         return jsonify({'message': 'Log files not found', 'logs': []}), 404
 
 
-@app.route('/logs/<bucket_name>/<filename>')
-def download_log(bucket_name, filename):
-    log_path = os.path.join(logs_dir, bucket_name)
+@app.route('/logs/<session_id>/<filename>')
+def download_log(session_id, filename):
+    log_path = os.path.join(logs_dir, session_id)
     return send_from_directory(log_path, filename, as_attachment=True)
 
 
-@app.route('/api/real_time_visualize/<bucket_name>')
-def real_time_visualize(bucket_name):
+@app.route('/api/real_time_visualize/<session_id>')
+def real_time_visualize(session_id):
     """Start real-time visualization for the specified bucket"""
     # Check if we need to start a new thread for this bucket
-    if bucket_name not in real_time_visualization_threads:
+    if session_id not in real_time_visualization_threads:
         stop_event = Event()  # Create a new stop event for this thread
-        thread = threading.Thread(target=emit_realtime_data, args=(bucket_name, stop_event))
+        thread = threading.Thread(target=emit_realtime_data, args=(session_id, stop_event))
         thread.daemon = True
         thread.start()
-        real_time_visualization_threads[bucket_name] = (thread, stop_event)
-        print(f"Starting real-time visualization thread for bucket: {bucket_name}")
+        real_time_visualization_threads[session_id] = (thread, stop_event)
+        print(f"Starting real-time visualization thread for bucket: {session_id}")
     return jsonify({'message': "Real-time visualization started"})
 
 
-def emit_realtime_data(bucket_name, stop_event):
+def emit_realtime_data(session_id, stop_event):
     global last_sent_data
 
     while not stop_event.is_set():
         try:
-            recognition_data = fetch_latest_entry(bucket_name, "speaker_recognition", influx_client)
-            transcription_data = fetch_latest_entry(bucket_name, "speaker_transcription", influx_client)
-            relations = fetch_latest_entry(bucket_name, "badge_relation", influx_client)
+            recognition_data = fetch_latest_entry(session_id, EVENT_TYPE_ASR_RECOGNITION, influx_client)
+            transcription_data = fetch_latest_entry(session_id, EVENT_TYPE_ASR_TRANSCRIPTION, influx_client)
+            relations = fetch_latest_entry(session_id, EVENT_TYPE_IPS_RELATION, influx_client)
             graph_data = relations.get('graph', None) if relations else None
             timestamp = relations.get('window_start_time', None) if relations else None
             position_data = {}
             if timestamp:
-                position_data = get_node_positions(bucket_name, influx_client, timestamp)
+                position_data = get_node_positions(session_id, influx_client, timestamp)
 
             data = {'recognition': None, 'transcription': None, 'graph': None, 'positions': None}
             recognition_new = False
             transcription_new = False
             graph_new = False
 
-            if bucket_name not in last_sent_data:
-                last_sent_data[bucket_name] = {}
+            if session_id not in last_sent_data:
+                last_sent_data[session_id] = {}
 
             # Update recognition data
-            if recognition_data and (bucket_name not in last_sent_data or recognition_data['window_start_time']
-                                     != last_sent_data[bucket_name].get('recognition_last_timestamp')):
-                last_sent_data[bucket_name]['recognition_last_timestamp'] = recognition_data['window_start_time']
+            if recognition_data and (session_id not in last_sent_data or recognition_data['window_start_time']
+                                     != last_sent_data[session_id].get('recognition_last_timestamp')):
+                last_sent_data[session_id]['recognition_last_timestamp'] = recognition_data['window_start_time']
                 data['recognition'] = recognition_data
                 recognition_new = True
 
             # Update transcription data
-            if transcription_data and (bucket_name not in last_sent_data or transcription_data['window_start_time']
-                                       != last_sent_data[bucket_name].get('transcription_last_timestamp')):
-                last_sent_data[bucket_name]['transcription_last_timestamp'] = transcription_data['window_start_time']
+            if transcription_data and (session_id not in last_sent_data or transcription_data['window_start_time']
+                                       != last_sent_data[session_id].get('transcription_last_timestamp')):
+                last_sent_data[session_id]['transcription_last_timestamp'] = transcription_data['window_start_time']
                 data['transcription'] = transcription_data
                 transcription_new = True
 
             # Update graph and position data
-            if timestamp and (bucket_name not in last_sent_data or timestamp != last_sent_data[bucket_name].get(
+            if timestamp and (session_id not in last_sent_data or timestamp != last_sent_data[session_id].get(
                     'graph_last_timestamp')):
-                last_sent_data[bucket_name]['graph_last_timestamp'] = timestamp
+                last_sent_data[session_id]['graph_last_timestamp'] = timestamp
                 data['graph'] = graph_data
                 data['positions'] = position_data
                 graph_new = True
 
             if recognition_new or transcription_new or graph_new:
-                socketio.emit('realtime_data', {'bucket': bucket_name, 'data': data})
+                socketio.emit('realtime_data', {'bucket': session_id, 'data': data})
 
         except Exception as e:
             print(f"An unexpected error occurred during data fetching: {e}")
@@ -197,14 +197,14 @@ def emit_realtime_data(bucket_name, stop_event):
 
 @socketio.on('join_bucket')
 def handle_join_bucket(data):
-    bucket_name = data['bucket_name']
+    session_id = data['session_id']
     client_id = data['client_id']  # Assuming client sends this
-    print(f"Client {client_id} joined bucket: {bucket_name}")
+    print(f"Client {client_id} joined bucket: {session_id}")
     # Initialize the set for the bucket if it doesn't exist
-    if bucket_name not in active_buckets:
-        active_buckets[bucket_name] = set()
+    if session_id not in active_buckets:
+        active_buckets[session_id] = set()
     # Add the client ID to the set for the bucket
-    active_buckets[bucket_name].add(client_id)
+    active_buckets[session_id].add(client_id)
 
 
 @socketio.on('connect')

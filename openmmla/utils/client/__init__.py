@@ -2,6 +2,9 @@ def __getattr__(name):
     if name == "InfluxDBClientWrapper":
         from .influx_client import InfluxDBClientWrapper
         return InfluxDBClientWrapper
+    elif name == "MongoDBClientWrapper":
+        from .mongo_client import MongoDBClientWrapper
+        return MongoDBClientWrapper
     elif name == "MQTTClientWrapper":
         from .mqtt_client import MQTTClientWrapper
         return MQTTClientWrapper

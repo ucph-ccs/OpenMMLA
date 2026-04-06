@@ -10,8 +10,8 @@ from openmmla.analytics.vfa.analyze import vfa_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.clean import clear_directory
-from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket, get_number_of_bases
+from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import select_or_create_session, get_number_of_bases
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
@@ -34,7 +34,7 @@ class VFASynchronizer(Synchronizer):
         # Runtime attributes
         self.threads = []
         self.stop_event = threading.Event()
-        self.bucket_name = None
+        self.session_id = None
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<angle>, <path>, <base_result_time>}}}
@@ -73,9 +73,10 @@ class VFASynchronizer(Synchronizer):
 
     def _setup_objects(self):
         """Set up client objects."""
-        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
-        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
-        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
+        self.redis_client = RedisClientWrapper(self.config_path)
+        self.mqtt_client = MQTTClientWrapper(self.config_path)
+        self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.mongo_client = MongoDBClientWrapper(self.config_path)
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
@@ -83,7 +84,7 @@ class VFASynchronizer(Synchronizer):
             self._stop_threads()
         self._clear_threads()
         self.mqtt_client.loop_stop()
-        self.bucket_name = None
+        self.session_id = None
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}
@@ -119,7 +120,7 @@ class VFASynchronizer(Synchronizer):
         self.time_bucket_buffer = {}
 
         # bucket selection
-        self.bucket_name = select_or_create_bucket(self.influx_client)
+        self.session_id = select_or_create_session(self.mongo_client)
         self.number_of_bases = get_number_of_bases()
         
         # select participant descriptions
@@ -131,7 +132,7 @@ class VFASynchronizer(Synchronizer):
         self._listen_for_start_signal()
 
         # reinitialize mqtt client with a new topic and on_message callback
-        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/vfa')
+        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/vfa')
         self.mqtt_client.loop_start()
 
         # create threads
@@ -152,9 +153,9 @@ class VFASynchronizer(Synchronizer):
             self._synchronization_handler(exception_occurred)
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'vfa-synchronizer-{self.bucket_name}',
+        self.logger = get_logger(f'vfa-synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'vfa_synchronizer.log'))
 
     def _handle_base_result(self, client, userdata, message):
@@ -242,7 +243,7 @@ class VFASynchronizer(Synchronizer):
         else:
             self.logger.warning(f"VLLM queue still has {self.vllm_queue.qsize()} items")
         
-        vfa_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
+        vfa_session_analysis(self.project_dir, self.session_id, self.influx_client)
         clear_directory(self.temp_dir)
         self._clean_up()
 
@@ -286,7 +287,7 @@ class VFASynchronizer(Synchronizer):
                                 image_paths=image_paths,
                                 angles=angles,
                                 angle_descriptions=angle_descriptions,
-                                session_id=self.bucket_name,
+                                session_id=self.session_id,
                                 url=self.vllm_frame_analyzer_url,
                                 participant_descriptions=self.selected_participant_descriptions,
                             )
@@ -321,30 +322,25 @@ class VFASynchronizer(Synchronizer):
             self.logger.warning(f"No analysis results for time bucket {time_bucket_key}")
             return
 
-        # Check if bucket_name is available (might be None if cleanup has already occurred)
-        if self.bucket_name is None:
-            self.logger.warning(f"Cannot upload result for time bucket {time_bucket_key}: bucket_name is None (synchronizer may be shutting down)")
+        if self.session_id is None:
+            self.logger.warning(f"Cannot upload result for time bucket {time_bucket_key}: session_id is None (synchronizer may be shutting down)")
             return
 
-        analysis_data = {
-            "measurement": "action_recognition",
-            "fields": {
-                "window_start_time": time_bucket_key,
-                "window_end_time": time_bucket_key,
-                "action_recognition": json.dumps(result)
-            },
+        from openmmla.utils.constants import EVENT_TYPE_VFA_ACTION
+        fields = {
+            "window_start_time": time_bucket_key,
+            "window_end_time": time_bucket_key,
+            "action_recognition": json.dumps(result),
         }
-        print(f"{BLUE}[Action Recognition]{ENDC} {analysis_data['fields']['window_start_time']}: "
+        print(f"{BLUE}[Action Recognition]{ENDC} {time_bucket_key}: "
               f"{BLUE}Multi-angle analysis results: {result}{ENDC}")
-        
-        try:
-            self.influx_client.write(self.bucket_name, analysis_data)
-        except Exception as e:
-            self.logger.error(f"Failed to upload result for time bucket {time_bucket_key}: {e}")
+
+        if not self.influx_client.write_event(self.session_id, EVENT_TYPE_VFA_ACTION, fields):
+            self.logger.error(f"Failed to upload result for time bucket {time_bucket_key}")
 
     @property
-    def bucket_control(self) -> str | None:
-        """Dynamic property that returns the control channel name based on current bucket_name."""
-        if self.bucket_name:
-            return f'{self.bucket_name}/vfa/control'
+    def session_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current session_id."""
+        if self.session_id:
+            return f'{self.session_id}/vfa/control'
         return None

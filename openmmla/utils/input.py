@@ -479,136 +479,93 @@ def get_interactive_files(base_dir: str, file_extensions: tuple[str, ...] = None
             elif key == '\x03':  # Ctrl+C
                 raise KeyboardInterrupt
 
-_SYSTEM_BUCKETS = {'_tasks', '_monitoring'}
-
-def _is_user_bucket(name: str) -> bool:
-    """return True for any bucket that is not an InfluxDB system bucket."""
-    return name not in _SYSTEM_BUCKETS
-
-
-def parse_bucket_timestamp(bucket_name: str) -> datetime:
-    """parse the timestamp portion from a bucket name.
-
-    Supports both new format ``<exp>_<group>_YYMMDDTHHMMZ`` and
-    legacy format ``session_YYYY-MM-DDTHH:MM:SSZ``.
-    """
-    # new format: last segment is YYMMDDTHHMMZ
-    last_seg = bucket_name.rsplit('_', 1)[-1]
-    try:
-        return datetime.strptime(last_seg, '%y%m%dT%H%MZ')
-    except ValueError:
-        pass
-    # legacy: session_YYYY-MM-DDTHH:MM:SSZ
-    try:
-        timestamp_str = bucket_name.split('_', 1)[1]
-        return datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
-    except (IndexError, ValueError):
-        return datetime.min
-
-
-def _format_bucket_description(name: str) -> str:
-    """build a human-readable description for a bucket name."""
-    # new format: <exp_id>_<group_id>_YYMMDDTHHMMZ
-    parts = name.rsplit('_', 1)
-    if len(parts) == 2:
-        try:
-            dt = datetime.strptime(parts[1], '%y%m%dT%H%MZ')
-            prefix_parts = parts[0].rsplit('_', 1)
-            if len(prefix_parts) == 2:
-                return f"{prefix_parts[0]} / {prefix_parts[1]} — {dt.strftime('%Y-%m-%d %H:%M')} UTC"
-        except ValueError:
-            pass
-    # legacy: session_YYYY-MM-DDTHH:MM:SSZ
-    try:
-        timestamp_str = name.split('_', 1)[1]
-        dt = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ')
-        return f"Session from {dt.strftime('%Y-%m-%d %H:%M:%S')}"
-    except (IndexError, ValueError):
-        return "Bucket"
-
-def select_bucket(influx_client: InfluxDBClientWrapper) -> str:
-    """Get the bucket name from the user using interactive menu."""
-    while True:
-        bucket_list = influx_client.get_buckets()
-        bucket_names = [b.name for b in bucket_list.buckets if _is_user_bucket(b.name)]
-
-        try:
-            bucket_names = sorted(bucket_names, key=parse_bucket_timestamp)
-        except Exception as e:
-            print(f'{YELLOW}Warning: Some buckets have incompatible formats: {e}{ENDC}')
-
-        if not bucket_names:
-            input("No bucket sessions found.")
-            return None
-
-        options = [f"📁 {name}" for name in bucket_names]
-        descriptions = [_format_bucket_description(name) for name in bucket_names]
-
-        selected_index = interactive_menu("Select Session Bucket", options, descriptions, prompt_enter=False)
-
-        bucket_name = bucket_names[selected_index]
-        clear_screen()
-        print(f"{GREEN}✅ Bucket: {bucket_name} has been selected.{ENDC}")
-        return bucket_name
-
-
-def _make_bucket_name(exp_id: str, group_id: str, dt: datetime) -> str:
-    """build a bucket name in the ``<exp_id>_<group_id>_YYMMDDTHHMMZ`` format."""
+def _make_session_id(exp_id: str, group_id: str, dt: datetime) -> str:
+    """build a session id in the ``<exp_id>_<group_id>_YYMMDDTHHMMZ`` format."""
     return f"{exp_id}_{group_id}_{dt.strftime('%y%m%dT%H%MZ')}"
 
 
-def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
-    """Get the bucket name from user input using interactive menu, either select an existing bucket or create a new one."""
+def _format_session_description(session: dict) -> str:
+    """build a human-readable description for a MongoDB session document."""
+    parts = []
+    if session.get('experiment_id'):
+        parts.append(session['experiment_id'])
+    if session.get('group_id'):
+        parts.append(session['group_id'])
+    if session.get('start_time'):
+        parts.append(session['start_time'].strftime('%Y-%m-%d %H:%M UTC'))
+    status = session.get('status', 'unknown')
+    parts.append(f"[{status}]")
+    return " / ".join(parts)
+
+
+def select_session(mongo_client) -> str:
+    """Select an existing session from MongoDB using interactive menu."""
+    while True:
+        sessions = mongo_client.get_all_sessions()
+
+        if not sessions:
+            input("No sessions found.")
+            return None
+
+        session_ids = [s['session_id'] for s in sessions]
+        options = [f"📁 {sid}" for sid in session_ids]
+        descriptions = [_format_session_description(s) for s in sessions]
+
+        selected_index = interactive_menu("Select Session", options, descriptions, prompt_enter=False)
+
+        session_id = session_ids[selected_index]
+        clear_screen()
+        print(f"{GREEN}✅ Session: {session_id} has been selected.{ENDC}")
+        return session_id
+
+
+def select_or_create_session(mongo_client) -> str:
+    """Select an existing session or create a new one via MongoDB."""
     from .experiments import select_experiment_and_group
 
     while True:
-        bucket_list = influx_client.get_buckets()
-        bucket_names = [b.name for b in bucket_list.buckets if _is_user_bucket(b.name)]
+        sessions = mongo_client.get_all_sessions()
+        session_ids = [s['session_id'] for s in sessions]
 
-        try:
-            bucket_names = sorted(bucket_names, key=parse_bucket_timestamp)
-        except Exception as e:
-            print(f'{YELLOW}Warning: Some buckets have incompatible formats: {e}{ENDC}')
-
-        options = [f"📁 {name}" for name in bucket_names]
-        descriptions = [_format_bucket_description(name) for name in bucket_names]
+        options = [f"📁 {sid}" for sid in session_ids]
+        descriptions = [_format_session_description(s) for s in sessions]
 
         options.extend([
-            "➕ Create New Bucket (Auto)",
-            "⌨️  Create New Bucket (Manual)",
+            "➕ Create New Session (Auto)",
+            "⌨️  Create New Session (Manual)",
             "🔄 Refresh List"
         ])
         descriptions.extend([
             "Select experiment & group, use current timestamp",
             "Select experiment & group, provide custom Unix timestamp",
-            "Refresh the bucket list"
+            "Refresh the session list"
         ])
 
-        if not bucket_names:
+        if not session_ids:
             options = options[-3:]
             descriptions = descriptions[-3:]
 
-        selected_index = interactive_menu("Select Session Bucket", options, descriptions)
+        selected_index = interactive_menu("Select Session", options, descriptions)
 
-        if selected_index < len(bucket_names):
-            bucket_name = bucket_names[selected_index]
+        if selected_index < len(session_ids):
+            session_id = session_ids[selected_index]
             clear_screen()
-            print(f"{GREEN}✅ Bucket: {bucket_name} has been selected.{ENDC}")
-            return bucket_name
-        elif options[selected_index] == "➕ Create New Bucket (Auto)":
+            print(f"{GREEN}✅ Session: {session_id} has been selected.{ENDC}")
+            return session_id
+        elif options[selected_index] == "➕ Create New Session (Auto)":
             clear_screen()
             exp_id, group_id = select_experiment_and_group()
-            bucket_name = _make_bucket_name(exp_id, group_id, datetime.now(timezone.utc))
-            influx_client.create_bucket(bucket_name)
+            session_id = _make_session_id(exp_id, group_id, datetime.now(timezone.utc))
+            mongo_client.create_session(session_id, exp_id, group_id)
             clear_screen()
-            print(f"{GREEN}✅ Bucket: {bucket_name} has been created.{ENDC}")
-            return bucket_name
-        elif options[selected_index] == "⌨️  Create New Bucket (Manual)":
+            print(f"{GREEN}✅ Session: {session_id} has been created.{ENDC}")
+            return session_id
+        elif options[selected_index] == "⌨️  Create New Session (Manual)":
             clear_screen()
             exp_id, group_id = select_experiment_and_group()
             clear_screen()
             print("=" * 80)
-            print(f"{PURPLE}{BOLD}Create New Bucket with Custom Timestamp{ENDC}")
+            print(f"{PURPLE}{BOLD}Create New Session with Custom Timestamp{ENDC}")
             print("=" * 80)
             print(f"{PURPLE}Enter a Unix timestamp (e.g., 1759904435.95792 or 1759904435){ENDC}")
             print("-" * 80)
@@ -629,23 +586,23 @@ def select_or_create_bucket(influx_client: InfluxDBClientWrapper) -> str:
                         continue
 
                     dt = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
-                    bucket_name = _make_bucket_name(exp_id, group_id, dt)
+                    session_id = _make_session_id(exp_id, group_id, dt)
 
                     print("-" * 80)
                     print(f"{CYAN}Preview:{ENDC}")
                     print(f"  Unix timestamp: {unix_timestamp}")
                     print(f"  Human readable: {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-                    print(f"  Bucket name: {bucket_name}")
+                    print(f"  Session ID: {session_id}")
                     print("-" * 80)
 
-                    confirm = input(f"{PURPLE}Create this bucket? (y/n): {ENDC}").strip().lower()
+                    confirm = input(f"{PURPLE}Create this session? (y/n): {ENDC}").strip().lower()
                     if confirm == 'y':
-                        influx_client.create_bucket(bucket_name)
+                        mongo_client.create_session(session_id, exp_id, group_id)
                         clear_screen()
-                        print(f"{GREEN}✅ Bucket: {bucket_name} has been created.{ENDC}")
-                        return bucket_name
+                        print(f"{GREEN}✅ Session: {session_id} has been created.{ENDC}")
+                        return session_id
                     else:
-                        print(f"{YELLOW}Bucket creation cancelled.{ENDC}")
+                        print(f"{YELLOW}Session creation cancelled.{ENDC}")
                         input("Press Enter to return to menu...")
                         break
 

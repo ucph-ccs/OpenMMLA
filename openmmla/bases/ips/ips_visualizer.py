@@ -10,8 +10,8 @@ from matplotlib.animation import FuncAnimation
 from numpy.linalg import norm
 
 from openmmla.bases.base import Base
-from openmmla.utils.client import InfluxDBClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket
+from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, RedisClientWrapper
+from openmmla.utils.input import select_or_create_session
 from openmmla.utils.logger import get_logger
 from .input import get_function_visualizer
 
@@ -35,7 +35,7 @@ class IPSVisualizer(Base):
         self.use_3d = use_3d
 
         # Runtime attribute
-        self.bucket_name = None
+        self.session_id = None
 
         # Threading attribute
         self.stop_event = threading.Event()
@@ -55,6 +55,7 @@ class IPSVisualizer(Base):
         """Set up client objects."""
         self.redis_client = RedisClientWrapper(self.config_path)
         self.influx_client_main = InfluxDBClientWrapper(self.config_path)
+        self.mongo_client = MongoDBClientWrapper(self.config_path)
 
     def run(self):
         """Run the IPS visualizer."""
@@ -75,11 +76,11 @@ class IPSVisualizer(Base):
                     exc_info=True)
 
     def _start_visualization(self):
-        self.bucket_name = select_or_create_bucket(self.influx_client_main)
+        self.session_id = select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
 
         if self.store:
-            dir_path = os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time')
+            dir_path = os.path.join(self.visualizations_dir, f'{self.session_id}/real-time')
             os.makedirs(dir_path, exist_ok=True)
 
         self._listen_for_start_signal()
@@ -94,12 +95,12 @@ class IPSVisualizer(Base):
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("%s, returning to main menu.", e, exc_info=True)
         finally:
-            self.bucket_name = None
+            self.session_id = None
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'ips-visualizer-{self.bucket_name}',
+        self.logger = get_logger(f'ips-visualizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_visualizer.log'))
 
     def _start_2d_plot(self):
@@ -141,7 +142,7 @@ class IPSVisualizer(Base):
 
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{timestamp}_2d.png'))
+                os.path.join(self.visualizations_dir, f'{self.session_id}/real-time/image_{timestamp}_2d.png'))
 
     def _switch_dimension(self):
         self.use_3d = not self.use_3d
@@ -174,7 +175,7 @@ class IPSVisualizer(Base):
         ax.view_init(elev=20., azim=30)
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.bucket_name}/real-time/image_{timestamp}_3d.png'))
+                os.path.join(self.visualizations_dir, f'{self.session_id}/real-time/image_{timestamp}_3d.png'))
 
     def _build_graph(self, graph_dict: dict, pos: dict) -> nx.DiGraph:
         G = nx.DiGraph()
@@ -196,48 +197,21 @@ class IPSVisualizer(Base):
         return G
 
     def _get_node_relations(self, influx_client: InfluxDBClientWrapper) -> tuple[dict | None, float | None]:
-        start_time = int(time.time()) - 20
-        query = f"""from(bucket: "{self.bucket_name}")
-                    |> range(start: {start_time})
-                    |> last()
-                    |> filter(fn: (r) => r._measurement == "badge_relation")
-                    |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-                    """
-        tables = influx_client.query(query)
-        data = json.loads(tables.to_json(indent=5))
-        if not data:
-            print("No data found for the specified bucket.")
+        from openmmla.utils.constants import EVENT_TYPE_IPS_RELATION
+        from openmmla.utils.querys import deep_parse_json
+        event = influx_client.query_latest_event(self.session_id, EVENT_TYPE_IPS_RELATION)
+        if not event:
+            print("No data found for the specified session.")
             return None, None
-        graph_dict_str = data[0]["graph"]
-        graph_dict = json.loads(graph_dict_str)
-        timestamp = data[0]["window_start_time"]
+        event = deep_parse_json(event)
+        graph_dict = event["graph"]
+        timestamp = event["window_start_time"]
         return graph_dict, timestamp
 
     def _get_node_positions(self, influx_client: InfluxDBClientWrapper, timestamp: float,
                             dimension: str = '2d') -> dict:
-        start_time = int(timestamp) - 20
-        query = f"""from(bucket: "{self.bucket_name}")
-                   |> range(start: {start_time})
-                   |> filter(fn: (r) => r._measurement == "badge_translation")
-                   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-                   |> filter(fn: (r) => r.window_start_time == {timestamp})
-                  """
-        tables = influx_client.query(query)
-        data = json.loads(tables.to_json(indent=5))
-        translate_dict = json.loads(data[0]["translations"])
-
-        positions = {'B': (0, 0)} if dimension == '2d' else {'B': (0, 0, 0)}
-        for badge_id, translation in translate_dict.items():
-            if dimension == '2d':
-                x = translation[0][0]
-                z = translation[2][0]
-                positions[badge_id] = (z, -x)
-            else:
-                x = translation[0][0]
-                y = translation[1][0]
-                z = translation[2][0]
-                positions[badge_id] = (x, -y, z)
-        return positions
+        from openmmla.utils.querys import get_node_positions
+        return get_node_positions(self.session_id, influx_client, int(timestamp), dimension)
 
     def _stop_threads(self):
         super()._stop_threads()
@@ -257,8 +231,8 @@ class IPSVisualizer(Base):
                    c='red', s=10, marker='.', zorder=10)
 
     @property
-    def bucket_control(self) -> str | None:
-        """Dynamic property that returns the control channel name based on current bucket_name."""
-        if self.bucket_name:
-            return f'{self.bucket_name}/ips/control'
+    def session_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current session_id."""
+        if self.session_id:
+            return f'{self.session_id}/ips/control'
         return None

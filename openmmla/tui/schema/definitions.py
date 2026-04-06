@@ -23,6 +23,26 @@ SHARED_SECTIONS = {
                 "field_type": "str",
                 "default": "",
             },
+            "bucket": {
+                "description": "InfluxDB bucket name (default mmla-data)",
+                "field_type": "str",
+                "default": "mmla-data",
+            },
+        },
+    },
+    "MongoDB": {
+        "label": "MongoDB",
+        "fields": {
+            "url": {
+                "description": "MongoDB connection URL (e.g. mongodb://localhost:27017)",
+                "field_type": "url",
+                "default": "mongodb://localhost:27017",
+            },
+            "db": {
+                "description": "MongoDB database name (default openmmla)",
+                "field_type": "str",
+                "default": "openmmla",
+            },
         },
     },
     "MQTT": {

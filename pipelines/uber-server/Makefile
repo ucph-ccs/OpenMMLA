@@ -1,4 +1,4 @@
-.PHONY: all influxdb redis mosquitto nginx flask next celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-nginx stop-next stop-flask stop-celery
+.PHONY: all influxdb redis mosquitto mongodb nginx flask next celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-next stop-flask stop-celery
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
@@ -19,7 +19,7 @@ CONDA_PREFIX := $(shell conda info --base)
 CONDA_ACTIVATE := . $(CONDA_PREFIX)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)
 
 # ======= Service exclusion ========
-SERVICES := influxdb redis mosquitto nginx flask next celery
+SERVICES := influxdb redis mosquitto mongodb nginx flask next celery
 FILTERED_SERVICES = $(filter-out $(subst $(comma),$(space),$(without)),$(SERVICES))
 
 # Helper variables for parsing
@@ -69,6 +69,16 @@ else
 	@echo "🔁 Restarting Mosquitto (Linux)"
 	$(SUDO) systemctl enable mosquitto
 	$(SUDO) systemctl restart mosquitto
+endif
+
+mongodb:
+ifeq ($(IS_MAC), 1)
+	@echo "🔁 Restarting MongoDB (macOS)"
+	brew services restart mongodb-community
+else
+	@echo "🔁 Restarting MongoDB (Linux)"
+	$(SUDO) systemctl enable mongod
+	$(SUDO) systemctl restart mongod
 endif
 
 nginx:
@@ -128,6 +138,7 @@ clean-ports:
 		for p in $(filter 8086,$(if $(filter influxdb,$(FILTERED_SERVICES)),8086,)) \
 				 $(filter 6379,$(if $(filter redis,$(FILTERED_SERVICES)),6379,)) \
 				 $(filter 1883,$(if $(filter mosquitto,$(FILTERED_SERVICES)),1883,)) \
+				 $(filter 27017,$(if $(filter mongodb,$(FILTERED_SERVICES)),27017,)) \
 				 $(filter 8080,$(if $(filter nginx,$(FILTERED_SERVICES)),8080,)) \
 				 $(filter 3000,$(if $(filter next,$(FILTERED_SERVICES)),3000,)) \
 				 $(filter 5050,$(if $(filter flask,$(FILTERED_SERVICES)),5050,)); do \
@@ -168,12 +179,23 @@ else
 	@$(SUDO) systemctl disable mosquitto || echo "⚠️ Could not disable Mosquitto"
 endif
 
+stop-mongodb:
+ifeq ($(IS_MAC), 1)
+	@echo "🛑 Stopping MongoDB (macOS)"
+	@brew services stop mongodb-community 2>/dev/null || echo "⚠️ MongoDB not running"
+	@pkill -f mongod 2>/dev/null || true
+else
+	@echo "🛑 Stopping MongoDB (Linux)"
+	@$(SUDO) systemctl stop mongod || echo "⚠️ MongoDB not running"
+	@$(SUDO) systemctl disable mongod || echo "⚠️ Could not disable MongoDB"
+endif
+
 stop-nginx:
 ifeq ($(IS_MAC), 1)
 	@echo "🛑 Stopping NGINX (macOS)"
-	@$(SUDO) launchctl bootout system/homebrew.mxcl.nginx-full 2>/dev/null; \
-	 $(SUDO) nginx -s stop 2>/dev/null; \
-	 $(SUDO) pkill -f "nginx: master" 2>/dev/null; true
+	@$(SUDO) launchctl bootout system/homebrew.mxcl.nginx-full 2>/dev/null || true
+	@$(SUDO) nginx -s stop || true
+	@$(SUDO) pkill -f "nginx: master" || true
 else
 	@echo "🛑 Stopping NGINX (Linux)"
 	@$(SUDO) systemctl stop nginx || echo "⚠️ NGINX not running"

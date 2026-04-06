@@ -136,6 +136,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
     if os.path.isdir(uber_dir):
         for svc_name, desc in [
             ("InfluxDB", "Time series database"),
+            ("MongoDB", "Document database"),
             ("Redis", "In-memory data store and message broker"),
             ("Mosquitto", "MQTT message broker"),
             ("Nginx", "Reverse proxy and load balancer"),
@@ -192,6 +193,7 @@ def _get_system_service_log(service_name: str, lines: int = 80) -> str:
 
     log_paths: dict[str, list[str]] = {
         "influxdb": [f"{prefix}/var/log/influxdb2/influxd_output.log"],
+        "mongodb": [f"{prefix}/var/log/mongodb/mongo.log"],
         "redis": [f"{prefix}/var/log/redis.log"],
         "nginx": [
             f"{prefix}/var/log/nginx/error.log",
@@ -214,7 +216,7 @@ def _get_system_service_log(service_name: str, lines: int = 80) -> str:
                 continue
 
     try:
-        proc_name = "influxd" if service_name == "influxdb" else service_name
+        proc_name = "influxd" if service_name == "influxdb" else "mongod" if service_name == "mongodb" else service_name
         result = subprocess.run(
             ["log", "show", "--predicate", f'process == "{proc_name}"',
              "--last", "5m", "--style", "compact"],
@@ -234,6 +236,7 @@ def _check_config_exists(config_dir: str) -> bool:
 
 _SYSTEM_SVC_PORTS: dict[str, int] = {
     "influxdb": 8086,
+    "mongodb": 27017,
     "redis": 6379,
     "mosquitto": 1883,
     "nginx": 8080,
@@ -982,6 +985,7 @@ class ServicePanel(Widget):
             if target in _SYSTEM_SVC_PORTS:
                 log_cmds = {
                     "influxdb": "journalctl -u influxdb -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/influxdb/influxd.log 2>/dev/null || echo '(no influxdb logs found)'",
+                    "mongodb": "journalctl -u mongod -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/mongodb/mongod.log 2>/dev/null || echo '(no mongodb logs found)'",
                     "redis": "journalctl -u redis-server -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/redis/redis-server.log 2>/dev/null || echo '(no redis logs found)'",
                     "mosquitto": "journalctl -u mosquitto -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/mosquitto/mosquitto.log 2>/dev/null || echo '(no mosquitto logs found)'",
                     "nginx": "journalctl -u nginx -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/nginx/error.log 2>/dev/null || echo '(no nginx logs found)'",

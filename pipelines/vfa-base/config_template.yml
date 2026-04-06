@@ -87,6 +87,11 @@ InfluxDB:
   url: http://<influxdb-example-server>:<port>
   token: <influxdb-token>
   org: <org-name>
+  bucket: mmla-data
+
+MongoDB:
+  url: mongodb://<mongodb-example-server>:<port>
+  db: openmmla
 
 # MQTT settings
 MQTT:

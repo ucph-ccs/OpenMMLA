@@ -30,6 +30,9 @@ conda install -c conda-forge liblsl=1.16.2
 
 
 ### On Servers
+
+> **Tip**: You can use `mmla tui` to configure and launch all services from the TUI Launcher, instead of running commands manually.
+
 ```bash
 # 1. Run uber services on uber server with conda env `uber-server`
 # Go to /pipelines/uber-server/ to run with scripts or run manually with brew or systemctl

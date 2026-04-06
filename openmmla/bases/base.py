@@ -41,14 +41,14 @@ class Base(ABC):
 
         self.threads: list[RaisingThread] | None = None
         self.stop_event: threading.Event | None = None
-        self.bucket_name: str | None = None
+        self.session_id: str | None = None
         self.redis_client: RedisClientWrapper | None = None
 
     @property
-    def bucket_control(self):
-        """Dynamic property that returns the control channel name based on current bucket_name."""
-        if self.bucket_name:
-            return f"{self.bucket_name}/control"
+    def session_control(self):
+        """Dynamic property that returns the control channel name based on current session_id."""
+        if self.session_id:
+            return f"{self.session_id}/control"
         return None
 
     def _load_config(self):
@@ -133,8 +133,8 @@ class Base(ABC):
 
     def _listen_for_start_signal(self):
         """Listen on the redis bucket control channel for the START signal."""
-        p = self.redis_client.subscribe(f"{self.bucket_control}")
-        self.logger.info(f"Wait for START signal on {self.bucket_control}...")
+        p = self.redis_client.subscribe(f"{self.session_control}")
+        self.logger.info(f"Wait for START signal on {self.session_control}...")
 
         while True:
             message = p.get_message(timeout=5)
@@ -145,8 +145,8 @@ class Base(ABC):
 
     def _listen_for_stop_signal(self):
         """Listen on the redis bucket control channel for the STOP signal."""
-        p = self.redis_client.subscribe(f"{self.bucket_control}")
-        self.logger.info(f"Listening for STOP signal on {self.bucket_control}...")
+        p = self.redis_client.subscribe(f"{self.session_control}")
+        self.logger.info(f"Listening for STOP signal on {self.session_control}...")
 
         while not self.stop_event.is_set():
             message = p.get_message(timeout=5)

@@ -91,8 +91,9 @@ sudo apt install -y build-essential git ffmpeg portaudio19-dev python3-pyaudio l
 
 The following services are typically run on a dedicated **Uber Server** to provide centralized functionalities:
 
-- [InfluxDB](https://docs.influxdata.com/influxdb/v2/install/) (required): Time series database for storing group segment measurement results
-- [Redis](https://redis.io/downloads/) (required): Message broker for session bucket Start/Stop control (and cache for Celery workers' tasks)
+- [InfluxDB](https://docs.influxdata.com/influxdb/v2/install/) (required): Time series database for storing sensor event data
+- [MongoDB](https://www.mongodb.com/docs/manual/installation/) (required): Document database for storing session metadata
+- [Redis](https://redis.io/downloads/) (required): Message broker for session Start/Stop control (and cache for Celery workers' tasks)
 - [Mosquitto](https://mosquitto.org/download/) (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*
 - [Nginx](https://github.com/nginx/nginx?tab=readme-ov-file#downloading-and-installing) (optional): Load balancer for AI/Algorithm services and RTMP server for streams
 - [Dashboard](https://openmmla-dashboard-ri2dd2eh1-lizaibeims-projects.vercel.app/) (optional): Next.js frontend & Flask backend server for real/post-time visualizations
@@ -154,6 +155,21 @@ For detailed Nginx installation and configuration as both a load balancer and RT
 For detailed instructions on setting up the Next.js frontend and Flask backend for the dashboard, please refer to the [Dashboard Setup Guide](docs/dashboard.md).
 
 </details>
+
+### Management Console (TUI)
+
+OpenMMLA provides a terminal-based management console for configuring, launching, and monitoring all services:
+
+```bash
+mmla tui
+```
+
+The TUI offers three main screens:
+- **Environment**: View and manage Conda environments for each pipeline
+- **Launcher**: Configure pipeline settings (with shared defaults for InfluxDB, MongoDB, Redis, MQTT), and start/stop infrastructure services and pipeline components — locally or on remote hosts via SSH
+- **Status**: Monitor all running services, ports, and tmux sessions at a glance
+
+> This is the recommended way to manage services. The manual commands documented below remain available as alternatives.
 
 ### OpenMMLA Codebase Setup
 

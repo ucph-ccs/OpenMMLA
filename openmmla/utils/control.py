@@ -1,7 +1,7 @@
 """Control utility for managing ASR, IPS, and VFA services."""
 
 from .input import interactive_menu, multi_interactive_menu
-from .client import InfluxDBClientWrapper, RedisClientWrapper
+from .client import MongoDBClientWrapper, RedisClientWrapper
 from .logger import get_logger
 
 
@@ -50,40 +50,41 @@ def start_control(config_path: str):
 
     print(f"\033]0; Control Base \007")
     
-    # Restart loop - allows restarting the entire process
     while True:
         try:
-            influx_client = InfluxDBClientWrapper(config_path)
+            mongo_client = MongoDBClientWrapper(config_path)
             redis_client = RedisClientWrapper(config_path)
 
             operation = get_operation()
             
-            from .input import select_or_create_bucket
-            bucket_name = select_or_create_bucket(influx_client)
+            from .input import select_or_create_session
+            session_id = select_or_create_session(mongo_client)
                 
             command = 'START' if operation == 1 else 'STOP'
             selected_services = select_services()
             
             if not selected_services:
                 continue
+
+            if command == 'STOP':
+                mongo_client.end_session(session_id)
             
-            # Send control signal to each selected service
             for service in selected_services:
-                channel = f"{bucket_name}/{service}/control"
+                channel = f"{session_id}/{service}/control"
                 redis_client.publish(channel, command)
                 print(f"{'✅' if command == 'START' else '🛑'} {command} signal sent to {service}.")
 
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
                 print("\n👋 Goodbye!")
-                break  # Exit completely when 'q' is pressed
+                break
             elif "Operation Cancelled" in str(e):
                 print("\n🔄 Restarting Control Base...")
-                continue  # Restart on 'q' pressed in lower-level menu
+                continue
             else:
                 print("\n🔄 Restarting Control Base...")
-                continue  # Restart on Ctrl+C during runtime
+                continue
         except Exception as e:
             print(f"\n❌ Error: {e}")
             print("🔄 Restarting Control Base...")
-            continue  # Restart on error
+            continue

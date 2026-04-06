@@ -7,8 +7,8 @@ import time
 from openmmla.analytics.asr.analyze import asr_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
-from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket, get_number_of_bases
+from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import select_or_create_session, get_number_of_bases
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
@@ -66,7 +66,7 @@ class ASRSynchronizer(Synchronizer):
         # Runtime attributes
         self.threads = []
         self.stop_event = threading.Event()
-        self.bucket_name = None  # Session bucket name
+        self.session_id = None  # Session bucket name
         self.number_of_bases = None  # Number of group members
         self.latest_time = None  # Record start time of the most recent received frame
         self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<speakers>, <similarities>, <durations>, <segment_start_times>}}}
@@ -95,9 +95,10 @@ class ASRSynchronizer(Synchronizer):
 
     def _setup_objects(self):
         """Set up client objects."""
-        self.redis_client = RedisClientWrapper(self.config_path)  # Redis wrapped client
-        self.mqtt_client = MQTTClientWrapper(self.config_path)  # MQTT wrapped client
-        self.influx_client = InfluxDBClientWrapper(self.config_path)  # InfluxDB wrapped client
+        self.redis_client = RedisClientWrapper(self.config_path)
+        self.mqtt_client = MQTTClientWrapper(self.config_path)
+        self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.mongo_client = MongoDBClientWrapper(self.config_path)
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
@@ -105,7 +106,7 @@ class ASRSynchronizer(Synchronizer):
             self._stop_threads()
         self._clear_threads()
         self.mqtt_client.loop_stop()
-        self.bucket_name = None
+        self.session_id = None
         self.number_of_bases = None
         self.latest_time = None
         self.time_bucket_buffer = {}
@@ -135,7 +136,7 @@ class ASRSynchronizer(Synchronizer):
     def _start_synchronization(self):
         """Start the synchronization process."""
         # bucket selection
-        self.bucket_name = select_or_create_bucket(self.influx_client)
+        self.session_id = select_or_create_session(self.mongo_client)
         self.number_of_bases = get_number_of_bases()
         self._create_bucket_logger()
 
@@ -147,7 +148,7 @@ class ASRSynchronizer(Synchronizer):
         self._listen_for_start_signal()
 
         # reinitialize mqtt client with a new topic and on_message callback
-        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.bucket_name}/asr')
+        self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/asr')
         self.mqtt_client.loop_start()
 
         # create threads
@@ -189,9 +190,9 @@ class ASRSynchronizer(Synchronizer):
         gc.collect()
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'synchronizer-{self.bucket_name}',
+        self.logger = get_logger(f'synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir,
                                               f'asr_synchronizer_{self.base_type}.log'))
 
@@ -284,7 +285,7 @@ class ASRSynchronizer(Synchronizer):
         else:
             self.logger.info("All threads stopped.")
 
-        asr_session_analysis(self.project_dir, self.bucket_name, self.influx_client)
+        asr_session_analysis(self.project_dir, self.session_id, self.influx_client)
         clear_directory(self.temp_dir)
         self._clean_up()
 
@@ -298,7 +299,7 @@ class ASRSynchronizer(Synchronizer):
         The loop continues until the stop_event is set during shutdown.
         """
         while not self.stop_event.is_set():
-            self.redis_client.publish(f"{self.bucket_name}/asr/control", 'START')
+            self.redis_client.publish(f"{self.session_id}/asr/control", 'START')
             time.sleep(self.bucket_duration)
 
     def _update_time_bucket_buffer(self, time_bucket_key: float, latest_base_result: dict):
@@ -399,21 +400,20 @@ class ASRSynchronizer(Synchronizer):
                           - durations: List of corresponding audio durations
                           - segment_start_times: List of base recording start times
         """
-        recognition_data = {
-            "measurement": "speaker_recognition",
-            "fields": {
-                "window_start_time": float(merged_result['window_start_time']),
-                "window_end_time": float(merged_result['window_start_time']) + float(self.bucket_duration),
-                "speakers": json.dumps(merged_result['speakers']),
-                "similarities": json.dumps(merged_result['similarities']),
-                "durations": json.dumps(merged_result['durations']),
-                "segment_start_times": json.dumps(merged_result['segment_start_times']),
-            },
+        from openmmla.utils.constants import EVENT_TYPE_ASR_RECOGNITION
+        window_start = float(merged_result['window_start_time'])
+        fields = {
+            "window_start_time": window_start,
+            "window_end_time": window_start + float(self.bucket_duration),
+            "speakers": json.dumps(merged_result['speakers']),
+            "similarities": json.dumps(merged_result['similarities']),
+            "durations": json.dumps(merged_result['durations']),
+            "segment_start_times": json.dumps(merged_result['segment_start_times']),
         }
-        print(f"{BLUE}[Speaker Recognition]{ENDC}{recognition_data['fields']['window_start_time']}: "
-              f"{BLUE}{recognition_data['fields']['speakers']}{ENDC}, "
-              f"similarity: {recognition_data['fields']['similarities']}")
-        self.influx_client.write(self.bucket_name, recognition_data)
+        print(f"{BLUE}[Speaker Recognition]{ENDC}{window_start}: "
+              f"{BLUE}{fields['speakers']}{ENDC}, "
+              f"similarity: {fields['similarities']}")
+        self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_RECOGNITION, fields)
 
     @staticmethod
     def find_best_base_result(segment_results: dict) -> tuple:
@@ -450,16 +450,16 @@ class ASRSynchronizer(Synchronizer):
         return best_result, max_index
 
     @property
-    def bucket_control(self) -> str | None:
+    def session_control(self) -> str | None:
         """Get the Redis control channel name for the current bucket.
         
         This property dynamically constructs the communication channel name that
         should be used for sending control signals (START/STOP) to ASR bases.
         
         Returns:
-            A Redis channel string in format '{bucket_name}/asr/control' if bucket_name
+            A Redis channel string in format '{session_id}/asr/control' if session_id
             is set, or None if no bucket is currently active.
         """
-        if self.bucket_name:
-            return f'{self.bucket_name}/asr/control'
+        if self.session_id:
+            return f'{self.session_id}/asr/control'
         return None

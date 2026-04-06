@@ -13,8 +13,8 @@ from pupil_apriltags import Detector
 
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
-from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket
+from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import select_or_create_session
 from openmmla.utils.logger import get_logger
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
@@ -54,7 +54,7 @@ class IPSBase(Base):
         self.main_id = None  # the main camera id
         self.transform_matrices_dict = None
         self.camera_configured = False
-        self.bucket_name = None
+        self.session_id = None
         self.video_stream = None
 
         # Threading attributes
@@ -102,6 +102,7 @@ class IPSBase(Base):
     def _setup_objects(self):
         """Set up client objects."""
         self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.mongo_client = MongoDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.detector = Detector(families=self.families, nthreads=4)
@@ -149,7 +150,7 @@ class IPSBase(Base):
             return self._set_camera()
 
         # bucket selection
-        self.bucket_name = select_or_create_bucket(self.influx_client)
+        self.session_id = select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
 
         # configure video stream and start it
@@ -174,9 +175,9 @@ class IPSBase(Base):
             self._detection_handler(exception_occurred)
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'ips-base-{self.bucket_name}',
+        self.logger = get_logger(f'ips-base-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
 
@@ -382,7 +383,7 @@ class IPSBase(Base):
     def _process_keyframes(self):
         """Process video frames using keyframe synchronization for file mode."""
         print("Processing keyframes with timing synchronization...")
-        save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/ips_{self.base_id}')
+        save_path = os.path.join(self.runtime_dir, f'{self.session_id}/ips_{self.base_id}')
         os.makedirs(save_path, exist_ok=True)
         
         filename = os.path.basename(self.selected_source)
@@ -427,7 +428,7 @@ class IPSBase(Base):
             }
             self.logger.debug(message)
             message_str = json.dumps(message)
-            self.mqtt_client.publish(f'{self.bucket_name}/ips', message_str, qos=0, retain=False)
+            self.mqtt_client.publish(f'{self.session_id}/ips', message_str, qos=0, retain=False)
             
             # accumulative timing synchronization
             if self.enable_timing_sync:
@@ -452,7 +453,7 @@ class IPSBase(Base):
     def _process_continuous_frames(self):
         """Process real-time video streams continuously (opencv, rtmp, lsl)."""
         print("Processing real-time streams...")
-        save_path = os.path.join(self.runtime_dir, f'{self.bucket_name}/ips_{self.base_id}')
+        save_path = os.path.join(self.runtime_dir, f'{self.session_id}/ips_{self.base_id}')
         os.makedirs(save_path, exist_ok=True)
         frames_count = 0
 
@@ -480,7 +481,7 @@ class IPSBase(Base):
             }
             self.logger.debug(message)
             message_str = json.dumps(message)
-            self.mqtt_client.publish(f'{self.bucket_name}/ips', message_str, qos=0, retain=False)
+            self.mqtt_client.publish(f'{self.session_id}/ips', message_str, qos=0, retain=False)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -580,9 +581,9 @@ class IPSBase(Base):
             return json.load(file)
 
     @property
-    def bucket_control(self) -> str | None:
-        """Dynamic property that returns the control channel name based on current bucket_name."""
-        if self.bucket_name:
-            return f'{self.bucket_name}/ips/control'
+    def session_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current session_id."""
+        if self.session_id:
+            return f'{self.session_id}/ips/control'
         return None
     

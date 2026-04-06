@@ -23,8 +23,8 @@ from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.clean import clear_directory
-from openmmla.utils.client import InfluxDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_bucket, get_id, get_interactive_files, get_rtmp_url
+from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
@@ -99,7 +99,7 @@ class ASRBase(Base):
         self.hsr = hsr
 
         # runtime attributes
-        self.bucket_name = None
+        self.session_id = None
         self.last_speaker = None
         self.audio_dir = None
         self.audio_queue = None
@@ -253,6 +253,7 @@ class ASRBase(Base):
         AudioRecognizer and AudioStream.
         """
         self.influx_client = InfluxDBClientWrapper(self.config_path)
+        self.mongo_client = MongoDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.warm_up_resampler()
@@ -267,7 +268,7 @@ class ASRBase(Base):
         self.mqtt_client.loop_stop()
         if self.audio_stream:
             self.audio_stream.stop()
-        self.bucket_name = None
+        self.session_id = None
         self.last_speaker = None
         self.audio_dir = None
         self.audio_queue = None
@@ -472,7 +473,7 @@ class ASRBase(Base):
         except Exception as e:
             self.logger.error(f"Error in file-based registration: {e}")
 
-    def _start_recognition(self, bucket_name: str | None = None):
+    def _start_recognition(self, session_id: str | None = None):
         """Start the real-time voice recognition process.
 
         Set up directories, queues, and MQTT communication before creating threads for:
@@ -483,7 +484,7 @@ class ASRBase(Base):
           - Listening for stop signals.
 
         Args:
-            bucket_name: The bucket name for storing recognition results. If not provided, it is obtained interactively.
+            session_id: The bucket name for storing recognition results. If not provided, it is obtained interactively.
         """
         # check if any speakers are selected for recognition
         if not self.selected_speakers or len(self.selected_speakers) == 0:
@@ -513,7 +514,7 @@ class ASRBase(Base):
         print(f"\n{GREEN}Total speakers: {len(self.selected_speakers) if self.selected_speakers else 0}{ENDC}")
         
         # select or create bucket
-        self.bucket_name = select_or_create_bucket(self.influx_client) if not bucket_name else bucket_name
+        self.session_id = select_or_create_session(self.mongo_client) if not session_id else session_id
         self._create_bucket_logger()
         self._create_speaker_profile_snapshot()
 
@@ -557,9 +558,9 @@ class ASRBase(Base):
 
     def _create_bucket_logger(self):
         """Create a logger for a bucket."""
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.bucket_name}')
+        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
-        self.logger = get_logger(f'asr-base-{self.bucket_name}',
+        self.logger = get_logger(f'asr-base-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir,
                                               f'asr_{self.base_type}_{self.id}.log'))
 
@@ -570,16 +571,16 @@ class ASRBase(Base):
         folder to record exactly which speaker profiles were used in this session.
         The snapshot is stored in the runtime directory under the bucket folder.
         """
-        if not self.bucket_name:
+        if not self.session_id:
             return
 
-        snapshot_dir = os.path.join(self.runtime_dir, self.bucket_name, f'{self.base_type}_{self.id}', 'profiles')
+        snapshot_dir = os.path.join(self.runtime_dir, self.session_id, f'{self.base_type}_{self.id}', 'profiles')
         if os.path.exists(snapshot_dir):
             shutil.rmtree(snapshot_dir)  # Clear any existing snapshot
         else:
             os.makedirs(snapshot_dir)
 
-        self.logger.info(f"Creating snapshot of speaker profiles for bucket '{self.bucket_name}'")
+        self.logger.info(f"Creating snapshot of speaker profiles for bucket '{self.session_id}'")
         try:
             # copy only selected speaker profiles
             for speaker_name in self.selected_speakers:
@@ -607,7 +608,7 @@ class ASRBase(Base):
         # process any remaining audio chunks before cleanup
         self._process_final_chunks()
         
-        current_bucket = self.bucket_name  # assign bucket name before cleaning up
+        current_bucket = self.session_id  # assign bucket name before cleaning up
         self._clean_up()
         if isinstance(e, RecordingError):
             self.logger.info("Restarting recognizing service.")
@@ -1137,19 +1138,17 @@ class ASRBase(Base):
             chunk_start_time: start timestamp of the audio chunk.
             chunk_end_time: end timestamp of the audio chunk.
         """
-        transcription_record = {
-            "measurement": "speaker_transcription",
-            "fields": {
-                "window_start_time": chunk_start_time,
-                "window_end_time": chunk_end_time,
-                "text": transcribe_result.get("text", ""),
-                "words": json.dumps(transcribe_result.get("words", [])),
-                "speaker": speaker,
-            },
+        from openmmla.utils.constants import EVENT_TYPE_ASR_TRANSCRIPTION
+        fields = {
+            "window_start_time": chunk_start_time,
+            "window_end_time": chunk_end_time,
+            "text": transcribe_result.get("text", ""),
+            "words": json.dumps(transcribe_result.get("words", [])),
+            "speaker": speaker,
         }
-        print(f"{GREEN}[Speaker Transcription]{ENDC}{transcription_record['fields']['window_start_time']}: "
+        print(f"{GREEN}[Speaker Transcription]{ENDC}{chunk_start_time}: "
               f"{GREEN}{speaker} : {transcribe_result.get('text', 'N/A')}{ENDC}")
-        self.influx_client.write(self.bucket_name, record=transcription_record)
+        self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_TRANSCRIPTION, fields)
 
     def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],
                              similarities: list[float], durations: list[float]):
@@ -1176,7 +1175,7 @@ class ASRBase(Base):
               f"{BLUE}{base_recognition_result['speakers']}{ENDC}, similarity: {base_recognition_result['similarities']},"
               f"processed time: {time.time() - recognize_start_time} seconds")
         result_str = json.dumps(base_recognition_result)
-        self.mqtt_client.publish(f'{self.bucket_name}/asr', result_str)
+        self.mqtt_client.publish(f'{self.session_id}/asr', result_str)
 
     def _separate_speech(self, audio_path: str) -> list[bytes]:
         """Separate overlapping speech from an audio file using source separation.
@@ -1260,7 +1259,7 @@ class ASRBase(Base):
         Create subdirectories for segments, chunks, separations, temporary files, and records.
         Clear specific directories based on the current operating mode.
         """
-        self.audio_dir = os.path.join(self.runtime_dir, f'{self.bucket_name}', f'{self.base_type}_{self.id}')
+        self.audio_dir = os.path.join(self.runtime_dir, f'{self.session_id}', f'{self.base_type}_{self.id}')
         sub_dirs = ['segments', 'chunks', 'separations', 'temp', 'records']
         for subdir in sub_dirs:
             directory_path = os.path.join(self.audio_dir, subdir)
@@ -1314,18 +1313,18 @@ class ASRBase(Base):
         print("------------------------------------------------")
 
     @property
-    def bucket_control(self) -> str | None:
-        """Dynamic property that returns the control channel name based on current bucket_name.
+    def session_control(self) -> str | None:
+        """Dynamic property that returns the control channel name based on current session_id.
         
         This property provides the MQTT topic name used for start/stop control signals.
-        The channel name is constructed using the current bucket_name, which allows
+        The channel name is constructed using the current session_id, which allows
         for controlling specific sessions without affecting others.
         
         Returns:
-            The control channel string in format '{bucket_name}/asr/control' if bucket_name 
+            The control channel string in format '{session_id}/asr/control' if session_id 
             is set, otherwise None.
         """
-        if self.bucket_name:
-            return f'{self.bucket_name}/asr/control'
+        if self.session_id:
+            return f'{self.session_id}/asr/control'
         return None
     
