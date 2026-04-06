@@ -17,6 +17,7 @@ from openmmla.tui.schema.loader import (
     FieldDef as LoaderFieldDef,
     discover_pipelines, load_existing_config, get_nested_value,
     save_config, PipelineDef, _find_project_root, fields_from_config_section,
+    load_streams,
 )
 from openmmla.tui.schema.definitions import (
     SHARED_SECTIONS, get_shared_defaults, apply_shared_values,
@@ -30,6 +31,7 @@ from openmmla.tui.widgets.config_form import ConfigForm
 from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
 from openmmla.tui.widgets.ssh_form import SSHForm
+from openmmla.tui.widgets.stream_panel import StreamPanel
 from openmmla.tui.widgets.task_form import TaskForm
 
 
@@ -37,6 +39,33 @@ _SVC_PIPELINE_NAMES: dict[str, str] = {
     "Uber: Nginx": "Nginx",
     "Uber: Flask": "Flask Backend",
 }
+
+_STREAM_PIPELINES = {"ASR Base", "IPS Base", "VFA Base"}
+
+_STREAM_FIELDS_TEMPLATE = [
+    ("target", "str", "", "rtmp://<host>/<app>/<stream> or udp://<host>:<port>", False),
+    ("ssh_profile", "str", "", "SSH profile for remote stream management", True),
+    ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
+]
+
+
+def _make_stream_fields(stream_name: str) -> list[LoaderFieldDef]:
+    """create FieldDef list for a single stream entry."""
+    section = f"Streams.{stream_name}"
+    ssh_profile_names = ["local"] + [p.name for p in load_ssh_profiles()]
+    fields = []
+    for key, ftype, default, desc, is_choices in _STREAM_FIELDS_TEMPLATE:
+        choices = ssh_profile_names if is_choices else []
+        fields.append(LoaderFieldDef(
+            path=f"Streams.{stream_name}.{key}",
+            field_type=ftype,
+            default=default,
+            description=desc,
+            required=(key == "target"),
+            section=section,
+            choices=choices,
+        ))
+    return fields
 
 
 def _build_service_registry(root: str) -> list[ServiceDef]:
@@ -363,6 +392,18 @@ class ServicePanel(Widget):
         color: $warning;
         padding: 0 2;
     }
+    .add-base-bar, .add-stream-bar {
+        layout: horizontal;
+        height: auto;
+        padding: 1 0;
+    }
+    .add-base-bar Input, .add-stream-bar Input {
+        width: 1fr;
+    }
+    .add-base-bar Button, .add-stream-bar Button {
+        margin: 0 1;
+        min-width: 10;
+    }
     """
 
     def __init__(self) -> None:
@@ -559,6 +600,14 @@ class ServicePanel(Widget):
             await tabs.add_pane(config_pane)
             self._config_container = config_scroll
             self._show_pipeline_form(config_scroll, pipeline)
+
+            streams = load_streams(pipeline.config_path)
+            if streams or svc.name in ("ASR Base", "IPS Base", "VFA Base"):
+                stream_scroll = VerticalScroll(classes="svc-launch-scroll")
+                stream_pane = TabPane("Streams", stream_scroll, id="svc-tab-streams")
+                await tabs.add_pane(stream_pane)
+                panel = StreamPanel(streams, config_path=pipeline.config_path)
+                await stream_scroll.mount(panel)
         else:
             scroll = VerticalScroll(classes="svc-launch-scroll")
             await content_area.mount(scroll)
@@ -633,9 +682,28 @@ class ServicePanel(Widget):
                         if val is not None:
                             values[f.path] = val
 
+        if pipeline.name in _STREAM_PIPELINES:
+            streams_data = existing.get("Streams", {})
+            if isinstance(streams_data, dict):
+                for stream_name, stream_props in streams_data.items():
+                    if not isinstance(stream_props, dict):
+                        continue
+                    section_name = f"Streams.{stream_name}"
+                    s_fields = _make_stream_fields(stream_name)
+                    dynamic_sections[section_name] = s_fields
+                    for f in s_fields:
+                        val = get_nested_value(existing, f.path)
+                        if val is not None:
+                            values[f.path] = val
+            fields_to_remove = [f for f in pipeline.fields if f.path.startswith("Streams")]
+            for f in fields_to_remove:
+                pipeline.fields.remove(f)
+
         group_add_buttons = {}
         if pipeline.base_template and pipeline.base_section:
             group_add_buttons[pipeline.base_section] = ("+ Add Base", "btn-add-base")
+        if pipeline.name in _STREAM_PIPELINES:
+            group_add_buttons["Streams"] = ("+ Add Stream", "btn-add-stream")
 
         form = ConfigForm(pipeline.name, pipeline.fields, values, dynamic_sections,
                           group_add_buttons=group_add_buttons)
@@ -713,6 +781,12 @@ class ServicePanel(Widget):
             self._confirm_add_base()
         elif event.button.id == "btn-cancel-add-base":
             self._cancel_add_base()
+        elif event.button.id == "btn-add-stream":
+            self._show_add_stream_input()
+        elif event.button.id == "btn-confirm-add-stream":
+            self._confirm_add_stream()
+        elif event.button.id == "btn-cancel-add-stream":
+            self._cancel_add_stream()
 
     def _show_add_base_input(self) -> None:
         form = self._current_form
@@ -762,6 +836,60 @@ class ServicePanel(Widget):
         for old in form.query(".add-base-bar"):
             old.remove()
         btn = Button("+ Add Base", variant="success", id="btn-add-base")
+        try:
+            form.mount(btn, before=form.query_one(".form-actions"))
+        except Exception:
+            form.mount(btn)
+
+    # ── stream add/delete ─────────────────────────────────────────
+
+    def _show_add_stream_input(self) -> None:
+        form = self._current_form
+        if form is None:
+            return
+        try:
+            form.query_one("#btn-add-stream").remove()
+        except Exception:
+            pass
+        bar = Horizontal(
+            Input(placeholder="Stream name (e.g. cam-1)", id="add-stream-input"),
+            Button("Add", variant="success", id="btn-confirm-add-stream"),
+            Button("Cancel", id="btn-cancel-add-stream"),
+            classes="add-stream-bar",
+        )
+        try:
+            form.mount(bar, before=form.query_one(".form-actions"))
+        except Exception:
+            form.mount(bar)
+
+    def _confirm_add_stream(self) -> None:
+        try:
+            inp = self.query_one("#add-stream-input", Input)
+            name = inp.value.strip()
+        except Exception:
+            return
+        if not name:
+            return
+
+        form = self._current_form
+        if form is None:
+            return
+
+        section_name = f"Streams.{name}"
+        fields = _make_stream_fields(name)
+        form.add_section(section_name, fields, {})
+        self._restore_add_stream_button()
+
+    def _cancel_add_stream(self) -> None:
+        self._restore_add_stream_button()
+
+    def _restore_add_stream_button(self) -> None:
+        form = self._current_form
+        if form is None:
+            return
+        for old in form.query(".add-stream-bar"):
+            old.remove()
+        btn = Button("+ Add Stream", variant="success", id="btn-add-stream")
         try:
             form.mount(btn, before=form.query_one(".form-actions"))
         except Exception:
@@ -831,6 +959,9 @@ class ServicePanel(Widget):
             self._cmd.log(message)
         except Exception:
             pass
+
+    def on_stream_panel_stream_log(self, event: StreamPanel.StreamLog) -> None:
+        self._log(event.text)
 
     def _detect_running(self, svc: ServiceDef) -> bool:
         if svc.launch_type == "tmux":

@@ -29,6 +29,45 @@ conda install -c conda-forge liblsl=1.16.2
 ```
 
 
+### Data Input Setup
+
+IPS Base supports the following video input sources (configured via `Base.source` in `config.yml`):
+
+| Source | Description | Device Setup |
+|--------|-------------|-------------|
+| `opencv` | USB camera directly connected to the base station or Raspberry Pi | Plug in the camera; the base will detect available video devices (indices 0–3) and prompt you to select at startup |
+| `rtmp` | Video stream pulled from an NGINX RTMP server | Add RTMP entries in the `Streams` section of `config.yml` with `target: rtmp://...`. The streaming device pushes video to NGINX via ffmpeg |
+| `file` | Replay from previously recorded video files | Set `file_dir` and `initial_sync_time` in config |
+
+Additional input path:
+- **Nicla Vision on-device AprilTag detection**: The badge runs `onboard_apriltag_detect.py`, performs AprilTag detection locally, and publishes position results via **MQTT** to `<session>/ips` topic. This bypasses the camera-based `VideoStream` pipeline entirely. See `pipelines/wearables/nicla-vision/ips/`
+
+#### Stream Configuration
+
+All stream sources (RTMP and remote devices) are configured in the unified `Streams` section of `config.yml`:
+
+```yaml
+Streams:
+  # external RTMP stream (already running, Base only pulls from the URL)
+  cam-external:
+    target: rtmp://uber-server.local/ips/3
+
+  # managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  cam-1:
+    ssh_profile: rpi-living-room    # must match a TUI SSH profile name
+    device: /dev/video0             # camera device on the remote machine
+    target: rtmp://uber-server.local/ips/1
+    codec: libx264
+    resolution: 1920x1080
+    fps: 30
+```
+
+Streams with `ssh_profile` can be started/stopped from the TUI Launcher's **Streams** tab. Streams without `ssh_profile` are treated as external (already running).
+
+Camera calibration is required before running the IPS pipeline:
+1. Run `./calibrate.sh` (or `mmla ips-ccal`) to compute camera intrinsic parameters
+2. Run `./synchronize.sh` (or `mmla ips-ctag` + `mmla ips-csync`) to synchronize coordinate systems across multiple cameras
+
 ### On Servers
 
 > **Tip**: You can use `mmla tui` to configure and launch all services from the TUI Launcher, instead of running commands manually.

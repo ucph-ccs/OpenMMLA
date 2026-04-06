@@ -43,15 +43,22 @@ PostAnalyzer:
   custom_origin_dir: path/to/origin/directory     # Default to <project_dir>/post-time/origin if null
   filenames: ['file_name.wav', 'file_name2.m4a']  # List of filenames in origin directory to process
 
-# RTMP streams settings
-RTMP:
-  # Replace <example-rtmp-server> with your actual sever address that runs the RTMP server, and the <stream_id> with
-  # the actual stream application in your RTMP server.
-  # =================================================================================
-  # e.g., if your RTMP server is on uber-server.local machine and its IP address is 192.168.1.12, and it has two streams
-  # app named stream_01 and stream_02, then the following line should be:
-  # audio_streams: ['rtmp://uber-server.local/stream_01', 'rtmp://192.168.1.12/stream_02']
-  audio_streams: ['rtmp://<rtmp-example-server>/<stream_id>', ..]
+# streams settings
+# each entry defines an audio stream source. streams with ssh_profile can be started/stopped
+# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
+Streams:
+  # example 1: external RTMP stream (already running, Base pulls from URL)
+  # rtmp-mic-1:
+  #   target: rtmp://uber-server.local/stream_01
+  #
+  # example 2: managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  # rpi-mic-1:
+  #   ssh_profile: rpi-table-1        # must match a TUI SSH profile name
+  #   device: hw:1,0                  # ALSA audio device on the remote machine
+  #   target: udp://asr-base.local:5001  # target address (udp://<host>:<port> or tcp://<host>:<port>)
+  #   format: s16le                   # audio format (s16le, f32le, etc.)
+  #   rate: 16000                     # sample rate in Hz
+  #   channels: 1                     # number of audio channels
 
 # Database settings
 InfluxDB:

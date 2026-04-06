@@ -35,6 +35,56 @@ class PipelineDef:
     base_template_prefix: str = ""
 
 
+@dataclass
+class StreamDef:
+    name: str
+    ssh_profile: str
+    device: str
+    target: str
+    codec: str = ""
+    resolution: str = ""
+    fps: int = 30
+    format: str = ""
+    rate: int = 0
+    channels: int = 0
+
+
+def load_streams(config_path: str) -> list[StreamDef]:
+    """load stream definitions from a pipeline config.yml."""
+    data = load_existing_config(config_path)
+    streams_data = data.get("Streams", {})
+    if not isinstance(streams_data, dict):
+        return []
+    streams = []
+    for name, props in streams_data.items():
+        if not isinstance(props, dict):
+            continue
+        ssh_profile = props.get("ssh_profile", "")
+        device = props.get("device", "")
+        target = props.get("target", "")
+        if not target:
+            continue
+        streams.append(StreamDef(
+            name=name,
+            ssh_profile=ssh_profile,
+            device=device,
+            target=target,
+            codec=props.get("codec", ""),
+            resolution=props.get("resolution", ""),
+            fps=int(props.get("fps", 30)),
+            format=props.get("format", ""),
+            rate=int(props.get("rate", 0)),
+            channels=int(props.get("channels", 0)),
+        ))
+    return streams
+
+
+def get_stream_targets(config_path: str, protocol: str = "rtmp") -> list[str]:
+    """extract target URLs from Streams config, filtered by protocol prefix."""
+    streams = load_streams(config_path)
+    return [s.target for s in streams if s.target.startswith(f"{protocol}://")]
+
+
 def _infer_type(value):
     if isinstance(value, bool):
         return "bool"

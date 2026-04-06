@@ -18,3 +18,30 @@ EVENT_TYPES_ALL = EVENT_TYPES_ASR + EVENT_TYPES_IPS + EVENT_TYPES_VFA
 
 # mongodb defaults
 MONGODB_DEFAULT_DB = "openmmla"
+
+
+def get_stream_urls(config: dict, protocol: str = "rtmp") -> list[str]:
+    """extract target URLs from Streams config section, filtered by protocol.
+
+    Falls back to legacy RTMP section (audio_streams / video_streams) if Streams is empty.
+    """
+    streams = config.get("Streams", {})
+    if isinstance(streams, dict) and streams:
+        urls = []
+        for entry in streams.values():
+            if isinstance(entry, dict):
+                target = entry.get("target", "")
+                if target.startswith(f"{protocol}://"):
+                    urls.append(target)
+        if urls:
+            return urls
+
+    rtmp = config.get("RTMP", {})
+    if isinstance(rtmp, dict):
+        for key in ("audio_streams", "video_streams"):
+            val = rtmp.get(key)
+            if isinstance(val, list):
+                return [u for u in val if isinstance(u, str) and u.startswith(f"{protocol}://")]
+            if isinstance(val, str) and "," in val:
+                return [u.strip() for u in val.split(",") if u.strip().startswith(f"{protocol}://")]
+    return []

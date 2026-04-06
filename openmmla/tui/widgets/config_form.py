@@ -5,7 +5,7 @@ import re
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Static, Input, Switch, Button, Collapsible, TextArea
+from textual.widgets import Static, Input, Switch, Button, Collapsible, TextArea, Select
 from textual.widget import Widget
 
 from openmmla.tui.schema.loader import FieldDef
@@ -53,7 +53,25 @@ class FieldRow(Widget):
                 self.field_def.description,
                 classes="field-desc",
             )
-        if self.field_def.field_type == "bool":
+        if self.field_def.choices:
+            options = [(c, c) for c in self.field_def.choices]
+            initial = str(self._initial) if self._initial else ""
+            if initial and initial in self.field_def.choices:
+                yield Select(
+                    options,
+                    value=initial,
+                    prompt=self.field_def.description or short_name,
+                    allow_blank=True,
+                    id=widget_id,
+                )
+            else:
+                yield Select(
+                    options,
+                    prompt=self.field_def.description or short_name,
+                    allow_blank=True,
+                    id=widget_id,
+                )
+        elif self.field_def.field_type == "bool":
             val = self._initial if isinstance(self._initial, bool) else False
             yield Switch(value=val, id=widget_id)
         else:
@@ -92,6 +110,12 @@ class FieldRow(Widget):
 
         if isinstance(w, Switch):
             return w.value
+
+        if isinstance(w, Select):
+            val = w.value
+            if val is Select.BLANK or val is None:
+                return self.field_def.default
+            return str(val)
 
         raw = w.text.strip() if isinstance(w, TextArea) else w.value.strip()
         if not raw:
@@ -739,6 +763,8 @@ class ConfigForm(Widget):
                 continue
             if isinstance(w, Switch):
                 w.value = row.field_def.default if isinstance(row.field_def.default, bool) else False
+            elif isinstance(w, Select):
+                w.clear()
             elif isinstance(w, TextArea):
                 w.load_text(row._to_display(row.field_def.default))
             elif isinstance(w, Input):

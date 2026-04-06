@@ -62,15 +62,29 @@ Synchronizer:
       "1": "Male with dark blue/black shirt with orange-red trim details"
     # Add more participants as needed
 
-# RTMP streams settings
-RTMP:
-  # Replace <example-rtmp-server> with your actual sever address that runs the RTMP server, and the <stream_id> with
-  # the actual stream application in your RTMP server.
-  # =================================================================================
-  # e.g., if your RTMP server is on uber-server.local machine and its IP address is 192.168.1.12, and it has two streams
-  # app named stream_01 and stream_02, then the following line should be:
-  # video_streams: rtmp://uber-server.local/stream_01,rtmp://192.168.1.12/stream_02
-  video_streams: ['rtmp://<rtmp-example-server>/<stream_id>', ..]
+# streams settings
+# each entry defines a video stream source. streams with ssh_profile can be started/stopped
+# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
+Streams:
+  # example 1: external RTMP stream (already running, Base pulls from URL)
+  # cam-external:
+  #   target: rtmp://uber-server.local/vfa/side
+  #
+  # example 2: managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  # cam-front:
+  #   ssh_profile: rpi-front          # must match a TUI SSH profile name
+  #   device: /dev/video0             # camera device on the remote machine
+  #   target: rtmp://uber-server.local/vfa/front  # RTMP URL
+  #   codec: libx264                  # video codec
+  #   resolution: 1920x1080           # video resolution
+  #   fps: 30                         # frames per second
+  # cam-top:
+  #   ssh_profile: rpi-top
+  #   device: /dev/video0
+  #   target: rtmp://uber-server.local/vfa/top
+  #   codec: libx264
+  #   resolution: 1920x1080
+  #   fps: 30
 
 # Database settings
 InfluxDB:

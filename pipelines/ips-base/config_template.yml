@@ -34,15 +34,29 @@ Base:
 Synchronizer:
   bucket_duration: 1                                # time bucket duration (seconds) for synchronized result
 
-# RTMP streams settings
-RTMP:
-  # Replace <example-rtmp-server> with your actual sever address that runs the RTMP server, and the <stream_id> with
-  # the actual stream application in your RTMP server.
-  # =================================================================================
-  # e.g., if your RTMP server is on uber-server.local machine and its IP address is 192.168.1.12, and it has two streams
-  # app named ips and vfa, and with camera 1, 2, 3, 4 linked to ips, with camera 5, 6 linked to vfa:
-  # video_streams: ['rtmp://uber-server.local/ips/1', 'rtmp://uber-server.local/ips/2', 'rtmp://uber-server.local/ips/3', 'rtmp://uber-server.local/ips/4']
-  video_streams: ['rtmp://<rtmp-example-server>/<stream-app-name>/<stream-name>', ..]
+# streams settings
+# each entry defines a video stream source. streams with ssh_profile can be started/stopped
+# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
+Streams:
+  # example 1: external RTMP stream (already running, Base pulls from URL)
+  # cam-external:
+  #   target: rtmp://uber-server.local/ips/3
+  #
+  # example 2: managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  # cam-1:
+  #   ssh_profile: rpi-living-room    # must match a TUI SSH profile name
+  #   device: /dev/video0             # camera device on the remote machine
+  #   target: rtmp://uber-server.local/ips/1  # RTMP URL
+  #   codec: libx264                  # video codec
+  #   resolution: 1920x1080           # video resolution
+  #   fps: 30                         # frames per second
+  # cam-2:
+  #   ssh_profile: rpi-kitchen
+  #   device: /dev/video0
+  #   target: rtmp://uber-server.local/ips/2
+  #   codec: libx264
+  #   resolution: 1920x1080
+  #   fps: 30
 
 # Database settings
 InfluxDB:

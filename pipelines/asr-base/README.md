@@ -29,6 +29,45 @@ pip install pylsl==1.17.6
 conda install -c conda-forge liblsl=1.16.2
 ```
 
+### Data Input Setup
+
+ASR Base supports the following audio input sources (configured via `Base.<device>.source` in `config.yml`):
+
+| Source | Description | Device Setup |
+|--------|-------------|-------------|
+| `pyaudio` | USB microphone directly connected to the base station (e.g., Jabra Speak2 75, built-in mic) | Plug in the microphone; the base will prompt you to select the audio device and channel at startup |
+| `udp` / `tcp` | Nicla Vision or Portenta H7 wearable badge streaming audio over Wi-Fi | Flash the firmware (`.ino`) onto the badge with the correct Wi-Fi credentials and ASR Base host/port in `arduino_secrets.h`. See `pipelines/wearables/nicla-vision/asr/` or `pipelines/wearables/portenta-h7/asr/` |
+| `rtmp` | Audio stream pulled from an NGINX RTMP server | Add RTMP entries in the `Streams` section of `config.yml` with `target: rtmp://...`. The streaming device pushes audio to NGINX via ffmpeg |
+| `lsl` | Lab Streaming Layer input | Configure `lsl_name` in `stream_kwargs`. Requires `pylsl` installed |
+| `file` | Replay from previously recorded audio files | Set `file_dir` and `initial_sync_time` in config |
+
+For wearable badges, the key configuration is in the firmware:
+- **Wi-Fi**: SSID and password in `arduino_secrets.h`
+- **Target**: ASR Base's IP address and port (base listens on `port_offset + base_id`)
+- **Format**: Must match `stream_kwargs` in config (default: 16 kHz, mono, 16-bit PCM)
+
+#### Stream Configuration
+
+All stream sources (RTMP and remote devices) are configured in the unified `Streams` section of `config.yml`:
+
+```yaml
+Streams:
+  # external RTMP stream (already running, Base only pulls from the URL)
+  rtmp-mic-1:
+    target: rtmp://uber-server.local/stream_01
+
+  # managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  rpi-mic-1:
+    ssh_profile: rpi-table-1        # must match a TUI SSH profile name
+    device: hw:1,0                  # ALSA audio device on the remote machine
+    target: udp://asr-base.local:5001
+    format: s16le
+    rate: 16000
+    channels: 1
+```
+
+Streams with `ssh_profile` can be started/stopped from the TUI Launcher's **Streams** tab. Streams without `ssh_profile` are treated as external (already running).
+
 ### On Servers
 
 > **Tip**: You can use `mmla tui` to configure and launch all services from the TUI Launcher, instead of running commands manually.

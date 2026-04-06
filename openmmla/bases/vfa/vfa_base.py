@@ -308,12 +308,11 @@ class VFABase(Base):
                 cap.release()
 
         elif self.source == 'rtmp':
-            # Get RTMP URLs from configuration
-            if 'RTMP' not in self.config:
-                raise ValueError("RTMP configuration is missing in the YAML file.")
-            if 'video_streams' not in self.config['RTMP']:
-                raise ValueError("RTMP: video_streams configuration is missing in the YAML file.")
-            for url in self.config['RTMP']['video_streams']:
+            from openmmla.utils.constants import get_stream_urls
+            rtmp_urls = get_stream_urls(self.config, "rtmp")
+            if not rtmp_urls:
+                raise ValueError("No RTMP streams found in Streams (or legacy RTMP) config section.")
+            for url in rtmp_urls:
                 print(f"{available_source_idx} : RTMP stream {url} is available.")
                 available_sources.append(url)
                 available_source_idx += 1

@@ -194,11 +194,11 @@ class ASRBase(Base):
 
         # set url for 'rtmp'
         elif self.source == 'rtmp':
-            if 'RTMP' not in self.config:
-                raise ValueError("RTMP configuration is missing in the YAML file.")
-            if 'audio_streams' not in self.config['RTMP']:
-                raise ValueError("RTMP: audio_streams configuration is missing in the YAML file.")
-            self.url = get_rtmp_url(self.config['RTMP']['audio_streams'])
+            from openmmla.utils.constants import get_stream_urls
+            rtmp_urls = get_stream_urls(self.config, "rtmp")
+            if not rtmp_urls:
+                raise ValueError("No RTMP streams found in Streams (or legacy RTMP) config section.")
+            self.url = get_rtmp_url(rtmp_urls)
             self.stream_kwargs['url'] = self.url
             self.logger.info(f"Using RTMP URL: {self.url}")
 
