@@ -6,7 +6,6 @@ import threading
 
 from typing import Any
 
-from openmmla.analytics.vfa.analyze import vfa_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.clean import clear_directory
@@ -15,7 +14,7 @@ from openmmla.utils.input import select_or_create_session, get_number_of_bases
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
-from .input import get_function_synchronizer, select_participant_descriptions
+from .input import get_function_synchronizer
 
 
 class VFASynchronizer(Synchronizer):
@@ -57,11 +56,8 @@ class VFASynchronizer(Synchronizer):
         self.buffer_expiry_time = float(sync_config.get('result_expiry_time', 30))
         self.match_tolerance = float(sync_config.get('match_tolerance', 0.5))
         self.vllm_frame_analyzer_url = vfa_server_config['vllm_frame_analyzer']
-        
-        self.participant_config = sync_config.get('participant_config', {})
         self.angle_config = base_config.get('angle_config', {})
         
-        self.logger.info(f"Loaded participant configurations: {list(self.participant_config.keys()) if self.participant_config else 'None'}")
         self.logger.info(f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
 
     def _setup_directories(self):
@@ -123,8 +119,20 @@ class VFASynchronizer(Synchronizer):
         self.session_id = select_or_create_session(self.mongo_client)
         self.number_of_bases = get_number_of_bases()
         
-        # select participant descriptions
-        self.selected_participant_descriptions = select_participant_descriptions(self.participant_config)
+        # resolve participant descriptions from experiment assignments
+        from openmmla.utils.experiments import get_participant_descriptions
+        session_doc = self.mongo_client.get_session(self.session_id)
+        if session_doc:
+            exp_id = session_doc.get("experiment_id", "")
+            group_id = session_doc.get("group_id", "")
+            self.selected_participant_descriptions = get_participant_descriptions(exp_id, group_id)
+            if self.selected_participant_descriptions:
+                self.logger.info(f"Resolved participant descriptions for {exp_id}/{group_id}: {self.selected_participant_descriptions}")
+            else:
+                self.logger.warning(f"No participant descriptions found for {exp_id}/{group_id}")
+        else:
+            self.logger.warning(f"Could not retrieve session document for {self.session_id}")
+            self.selected_participant_descriptions = None
         
         self._create_bucket_logger()
 
@@ -243,7 +251,6 @@ class VFASynchronizer(Synchronizer):
         else:
             self.logger.warning(f"VLLM queue still has {self.vllm_queue.qsize()} items")
         
-        vfa_session_analysis(self.project_dir, self.session_id, self.influx_client)
         clear_directory(self.temp_dir)
         self._clean_up()
 

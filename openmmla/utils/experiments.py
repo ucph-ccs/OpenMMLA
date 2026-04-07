@@ -66,6 +66,25 @@ def get_groups_for_experiment(exp_id: str, data: dict | None = None) -> list[str
     return sorted(groups)
 
 
+def get_participant_descriptions(exp_id: str, group_id: str, data: dict | None = None) -> dict[str, str]:
+    """build a {tag_id: description} mapping for all learners in the given experiment and group.
+
+    Returns an empty dict when the experiment, group, or descriptions are not found.
+    """
+    if data is None:
+        data = load_experiments()
+    assignments = data.get("assignments", {}).get(exp_id, {})
+    descriptions: dict[str, str] = {}
+    for person_info in assignments.values():
+        if person_info.get("group_id") != group_id:
+            continue
+        tag_id = person_info.get("tag_id")
+        desc = person_info.get("description")
+        if tag_id is not None and desc:
+            descriptions[str(tag_id)] = desc
+    return descriptions
+
+
 # ── tasks ────────────────────────────────────────────────────────
 
 

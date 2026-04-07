@@ -47,20 +47,6 @@ Synchronizer:
   result_expiry_time: 30                            # cleanup timeout (seconds)
   match_tolerance: 0.5                              # matching tolerance (seconds) for incoming result to time buckets
 
-  # participant configuration for identification (key: session_key, value: {tag_id: description})
-  participant_config:
-    'osaka_case_0':
-      "6": "Male with black long-sleeve shirt/jacket and white mask."
-      "10": "Male with dark blue sweater"
-    'cph_case_0':
-      "0": "Male with yellow-brown patterned knit sweater"
-      "1": "Male with dark blue/black shirt with orange-red trim details"
-    'puzzle_case_0':
-      "0": "Male with dark green jacket"
-    'session_2025-08-15T11:14:50Z':
-      "0": "Male with yellow-brown patterned knit sweater"
-      "1": "Male with dark blue/black shirt with orange-red trim details"
-    # Add more participants as needed
 
 # streams settings
 # each entry defines a video stream source. streams with ssh_profile can be started/stopped

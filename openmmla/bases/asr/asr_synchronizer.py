@@ -4,7 +4,6 @@ import os
 import threading
 import time
 
-from openmmla.analytics.asr.analyze import asr_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
@@ -285,7 +284,6 @@ class ASRSynchronizer(Synchronizer):
         else:
             self.logger.info("All threads stopped.")
 
-        asr_session_analysis(self.project_dir, self.session_id, self.influx_client)
         clear_directory(self.temp_dir)
         self._clean_up()
 

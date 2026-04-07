@@ -4,7 +4,6 @@ import logging
 import os
 import threading
 
-from openmmla.analytics.ips.analyze import ips_session_analysis
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session
@@ -148,7 +147,6 @@ class IPSSynchronizer(Synchronizer):
             self._stop_threads()
         else:
             self.logger.info("All threads stopped properly.")
-        ips_session_analysis(self.project_dir, self.session_id, self.influx_client)
         self._clean_up()
 
     def _set_main_camera(self):

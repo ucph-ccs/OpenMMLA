@@ -85,6 +85,9 @@ class VideoStream(StreamReceiver):
         self.buffer = RingBuffer(buffer_frames)
         self._last_read_pos = -1
 
+        # PTS-to-wallclock calibration for RTMP sources
+        self._pts_offset: float | None = None
+
         # Threading control
         self._stop_event = threading.Event()
         self._receive_thread = None
@@ -133,6 +136,7 @@ class VideoStream(StreamReceiver):
 
     def _initialize_opencv(self, max_retries: int = 3) -> None:
         """Initialize OpenCV video capture with configured parameters."""
+        self._pts_offset = None
         video_seed = self.camera_index if self.source == 'opencv' else self.rtmp_url
         self.stream = cv2.VideoCapture(video_seed)
 
@@ -276,10 +280,20 @@ class VideoStream(StreamReceiver):
         try:
             if self.source in ['opencv', 'rtmp']:
                 grabbed, frame = self.stream.read()
-                timestamp = time.time()
                 if not grabbed:
                     logger.warning("Failed to grab frame")
                     return None
+                if self.source == 'rtmp':
+                    pts_ms = self.stream.get(cv2.CAP_PROP_POS_MSEC)
+                    if pts_ms > 0:
+                        if self._pts_offset is None:
+                            self._pts_offset = time.time() - pts_ms / 1000.0
+                            logger.info(f"RTMP PTS calibrated: offset={self._pts_offset:.3f}s")
+                        timestamp = pts_ms / 1000.0 + self._pts_offset
+                    else:
+                        timestamp = time.time()
+                else:
+                    timestamp = time.time()
             elif self.source == 'lsl':
                 sample, timestamp = self.lsl_inlet.pull_sample(timeout=1.0)
                 if not sample:

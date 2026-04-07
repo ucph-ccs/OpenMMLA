@@ -51,7 +51,8 @@ def _build_ffmpeg_cmd(stream: StreamDef) -> str:
     resolution = stream.resolution or "1920x1080"
     fps = stream.fps or 30
     return (
-        f"ffmpeg -f v4l2 -input_format mjpeg -framerate {fps} -video_size {resolution} -i {device} "
+        f"ffmpeg -use_wallclock_as_timestamps 1 "
+        f"-f v4l2 -input_format mjpeg -framerate {fps} -video_size {resolution} -i {device} "
         f"-c:v {codec} -preset ultrafast -tune zerolatency "
         f"-g {fps} -keyint_min {fps} -sc_threshold 0 "
         f'-x264-params "keyint={fps}:min-keyint={fps}:no-scenecut=1:repeat-headers=1" '

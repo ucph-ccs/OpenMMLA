@@ -503,6 +503,13 @@ class ServicePanel(Widget):
         for svc in self._services:
             categories.setdefault(svc.category, []).append(svc)
 
+        infra_svcs = categories.get("Infrastructure", [])
+        if infra_svcs:
+            infra_node = tree.root.add("Infrastructure", data="__cat_Infrastructure")
+            infra_node.expand()
+            for svc in infra_svcs:
+                infra_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
+
         _PIPELINE_CATS = ["ASR", "VFA", "IPS"]
 
         pipeline_node = tree.root.add("Pipelines", data="__cat_Pipelines")
@@ -515,13 +522,6 @@ class ServicePanel(Widget):
             cat_node.expand()
             for svc in svcs:
                 cat_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
-
-        infra_svcs = categories.get("Infrastructure", [])
-        if infra_svcs:
-            infra_node = tree.root.add("Infrastructure", data="__cat_Infrastructure")
-            infra_node.expand()
-            for svc in infra_svcs:
-                infra_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
 
     def _svc_markers(self, svc: ServiceDef) -> str:
         """build status marker string for a service tree leaf."""
