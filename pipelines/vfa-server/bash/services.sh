@@ -160,12 +160,21 @@ for i in "${!ports[@]}"; do
     service="${services[$i]}"
     echo "Checking for processes using port $port ($service)"
 
-    PIDs=$(sudo lsof -ti:"$port" 2>/dev/null | xargs)
+    PIDs=$(lsof -ti:"$port" 2>/dev/null | xargs)
+    if [ -z "$PIDs" ] && command -v sudo >/dev/null 2>&1; then
+        PIDs=$(sudo -n lsof -ti:"$port" 2>/dev/null | xargs)
+    fi
     if [ -n "$PIDs" ]; then
         echo "$PIDs" | tr " " "\n" | while read -r PID; do
             if [ -n "$PID" ]; then
                 echo "Killing process on port $port with PID $PID"
-                sudo kill -9 "$PID"
+                if kill -9 "$PID" 2>/dev/null; then
+                    :
+                elif command -v sudo >/dev/null 2>&1 && sudo -n kill -9 "$PID" 2>/dev/null; then
+                    :
+                else
+                    echo "Warning: could not kill PID $PID without interactive sudo"
+                fi
             fi
         done
     else
