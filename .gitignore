@@ -20,14 +20,7 @@ version_control/
 
 # Ignore directories at any level
 **/tests/
-!tests/
 tests/*
-!tests/test_environment_screen.py
-!tests/test_launcher_services.py
-!tests/test_asr_server_extras.py
-!tests/test_vfa_optional_imports.py
-!tests/test_vfa_vllm_command.py
-!tests/test_vfa_vllm_runtime_extra.py
 **/__pycache__/
 **/data/
 **/logs/
