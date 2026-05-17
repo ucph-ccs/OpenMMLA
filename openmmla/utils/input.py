@@ -3,11 +3,15 @@ import re
 import sys
 import tty
 import termios
+import traceback
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from .clean import flush_input
-from .client import InfluxDBClientWrapper
 from .validation import validate_unix_timestamp
+
+if TYPE_CHECKING:
+    from .client import InfluxDBClientWrapper
 
 # Color constants for interactive UI
 PINK = '\033[95m'
@@ -26,6 +30,22 @@ UNDERLINE = '\033[4m'
 REVERSE = '\033[7m'
 
 
+def _normalize_escape_sequence(sequence: str) -> str:
+    """Normalize common terminal escape sequences to logical key names."""
+    if not sequence.startswith('\x1b') or len(sequence) < 2:
+        return sequence
+
+    final_char = sequence[-1]
+    if sequence.startswith(('\x1b[', '\x1bO')):
+        return {
+            'A': 'UP',
+            'B': 'DOWN',
+            'C': 'RIGHT',
+            'D': 'LEFT',
+        }.get(final_char, sequence)
+    return sequence
+
+
 def get_key():
     """Get a single keypress from stdin."""
     fd = sys.stdin.fileno()
@@ -33,19 +53,15 @@ def get_key():
     try:
         tty.setraw(sys.stdin.fileno())
         ch = sys.stdin.read(1)
-        # Handle arrow keys (multi-character sequences)
+        # handle arrow keys and modified key sequences
         if ch == '\x1b':
-            ch = sys.stdin.read(1)
-            if ch == '[':
-                ch = sys.stdin.read(1)
-                if ch == 'A':
-                    return 'UP'
-                elif ch == 'B':
-                    return 'DOWN'
-                elif ch == 'C':
-                    return 'RIGHT'
-                elif ch == 'D':
-                    return 'LEFT'
+            sequence = [ch]
+            while len(sequence) < 8:
+                next_ch = sys.stdin.read(1)
+                sequence.append(next_ch)
+                if next_ch.isalpha() or next_ch == '~':
+                    break
+            return _normalize_escape_sequence(''.join(sequence))
         return ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -54,6 +70,21 @@ def get_key():
 def clear_screen():
     """Clear the terminal screen."""
     os.system('clear' if os.name == 'posix' else 'cls')
+
+
+def pause_after_error(action: str = "continue") -> None:
+    """Keep an error visible until the user acknowledges it."""
+    try:
+        input(f"\nPress Enter to {action}...")
+    except EOFError:
+        pass
+
+
+def show_error_and_pause(error: BaseException, action: str = "continue") -> None:
+    """Print an interactive error with traceback, then wait for acknowledgement."""
+    print(f"\n❌ Error: {error}")
+    traceback.print_exception(type(error), error, error.__traceback__)
+    pause_after_error(action)
 
 
 def interactive_menu(title: str, options: list[str], descriptions: list[str] = None, exit_on_q: bool = False, prompt_enter: bool = True) -> int:
@@ -82,28 +113,29 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
         print(f"{PURPLE}{BOLD}{title}{ENDC}")
         print("=" * 80)
         if exit_on_q:
-            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space/Enter to select, 'q' to quit{ENDC}")
+            print(f"{PURPLE}Use ↑/↓ or j/k to navigate, Space/Enter to select, 1-9 to jump, 'q' to quit{ENDC}")
         else:
-            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space/Enter to select, 'q' to go back{ENDC}")
+            print(f"{PURPLE}Use ↑/↓ or j/k to navigate, Space/Enter to select, 1-9 to jump, 'q' to go back{ENDC}")
         print("-" * 80)
         
         for i, (option, desc) in enumerate(zip(options, descriptions)):
+            label = f"{i + 1}. {option}"
             if i == selected_index:
                 # Highlighted selected option
-                print(f"{GREEN}{BOLD}▶ {option} ◀{ENDC}")
+                print(f"{GREEN}{BOLD}▶ {label} ◀{ENDC}")
                 if desc:
                     print(f"   {GREY}└─ {desc}{ENDC}")
             else:
                 # Normal option
-                print(f"  {option}")
+                print(f"  {label}")
                 if desc:
                     print(f"   {GREY}└─ {desc}{ENDC}")
         
         print("-" * 80)
         if exit_on_q:
-            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space/Enter = select, 'q' = quit{ENDC}")
+            print(f"{PURPLE}Commands: ↑/↓ or j/k = navigate, Space/Enter = select, 1-9 = jump/select, 'q' = quit{ENDC}")
         else:
-            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space/Enter = select, 'q' = go back{ENDC}")
+            print(f"{PURPLE}Commands: ↑/↓ or j/k = navigate, Space/Enter = select, 1-9 = jump/select, 'q' = go back{ENDC}")
         
         key = get_key()
         
@@ -113,6 +145,10 @@ def interactive_menu(title: str, options: list[str], descriptions: list[str] = N
             selected_index = (selected_index + 1) % len(options)
         elif key == '\r' or key == '\n' or key == ' ':  # Enter or Space key to confirm
             return selected_index
+        elif key.isdigit():
+            shortcut_index = int(key) - 1
+            if 0 <= shortcut_index < len(options):
+                return shortcut_index
         elif key == 'q':
             if exit_on_q:
                 confirm = input(f"{PURPLE}Are you sure you want to exit? (y/n): {ENDC}").strip().lower()
@@ -173,9 +209,9 @@ def multi_interactive_menu(title: str, options: list[str], descriptions: list[st
         print(f"{PURPLE}{BOLD}{title}{ENDC}")
         print("=" * 80)
         if exit_on_q:
-            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space to toggle, Enter to confirm, 'q' to quit{ENDC}")
+            print(f"{PURPLE}Use ↑/↓ or j/k to navigate, Space to toggle, Enter to confirm, 'q' to quit{ENDC}")
         else:
-            print(f"{PURPLE}Use ↑/↓ arrows to navigate, Space to toggle, Enter to confirm, 'q' to go back{ENDC}")
+            print(f"{PURPLE}Use ↑/↓ or j/k to navigate, Space to toggle, Enter to confirm, 'q' to go back{ENDC}")
         print("-" * 80)
         
         # Create menu items
@@ -204,9 +240,9 @@ def multi_interactive_menu(title: str, options: list[str], descriptions: list[st
         selected_count = sum(selected)
         print(f"{PURPLE}Selected: {selected_count}/{len(options)} options{ENDC}")
         if exit_on_q:
-            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space = toggle, Enter = confirm, 'q' = quit{ENDC}")
+            print(f"{PURPLE}Commands: ↑/↓ or j/k = navigate, Space = toggle, Enter = confirm, 'q' = quit{ENDC}")
         else:
-            print(f"{PURPLE}Commands: ↑/↓ = navigate, Space = toggle, Enter = confirm, 'q' = go back{ENDC}")
+            print(f"{PURPLE}Commands: ↑/↓ or j/k = navigate, Space = toggle, Enter = confirm, 'q' = go back{ENDC}")
         
         key = get_key()
         
@@ -521,7 +557,10 @@ def select_session(mongo_client) -> str:
 
 def select_or_create_session(mongo_client) -> str:
     """Select an existing session or create a new one via MongoDB."""
-    from .experiments import select_experiment_and_group
+    from .experiments import get_participant_aliases, select_experiment_and_group
+
+    def session_participants(exp_id: str, group_id: str) -> list[dict[str, str]]:
+        return list(get_participant_aliases(exp_id, group_id).values())
 
     while True:
         sessions = mongo_client.get_all_sessions()
@@ -556,7 +595,7 @@ def select_or_create_session(mongo_client) -> str:
             clear_screen()
             exp_id, group_id = select_experiment_and_group()
             session_id = _make_session_id(exp_id, group_id, datetime.now(timezone.utc))
-            mongo_client.create_session(session_id, exp_id, group_id)
+            mongo_client.create_session(session_id, exp_id, group_id, participants=session_participants(exp_id, group_id))
             clear_screen()
             print(f"{GREEN}✅ Session: {session_id} has been created.{ENDC}")
             return session_id
@@ -597,7 +636,7 @@ def select_or_create_session(mongo_client) -> str:
 
                     confirm = input(f"{PURPLE}Create this session? (y/n): {ENDC}").strip().lower()
                     if confirm == 'y':
-                        mongo_client.create_session(session_id, exp_id, group_id)
+                        mongo_client.create_session(session_id, exp_id, group_id, participants=session_participants(exp_id, group_id))
                         clear_screen()
                         print(f"{GREEN}✅ Session: {session_id} has been created.{ENDC}")
                         return session_id
@@ -677,4 +716,3 @@ def get_rtmp_url(available_urls: list[str]) -> str:
     
     selected_index = interactive_menu("Select RTMP URL", options, descriptions, prompt_enter=False)    
     return available_urls[selected_index]
-

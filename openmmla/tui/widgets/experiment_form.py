@@ -11,6 +11,26 @@ from openmmla.utils.experiments import (
 )
 
 
+def _normalize_participant_info(info: object) -> dict[str, str]:
+    """normalize participant info from experiments.yaml for the TUI."""
+    if not isinstance(info, dict):
+        return {"group_id": "", "tag_id": "", "description": ""}
+    normalized = {}
+    for key in ("group_id", "tag_id", "description"):
+        value = info.get(key, "")
+        normalized[key] = str(value).strip() if value is not None else ""
+    return normalized
+
+
+def _format_participant_summary(person: str, info: object) -> str:
+    """build a readable participant summary for the detail view."""
+    normalized = _normalize_participant_info(info)
+    group_id = normalized["group_id"] or "-"
+    tag_id = normalized["tag_id"] or "-"
+    description = normalized["description"] or "-"
+    return f"{person}  ->  {group_id}  / tag: {tag_id}  / desc: {description}"
+
+
 class ExperimentForm(Widget):
     """experiment management widget with list view and detail view."""
 
@@ -42,6 +62,7 @@ class ExperimentForm(Widget):
         super().__init__()
         self._data = load_experiments()
         self._editing_exp: str | None = None
+        self._editing_participant: str | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="ef-root"):
@@ -144,10 +165,10 @@ class ExperimentForm(Widget):
         assignments = self._data.get("assignments", {}).get(eid, {})
         participant_rows = []
         for person, info in sorted(assignments.items()):
-            gid = info.get("group_id", "?")
             participant_rows.append(
                 Horizontal(
-                    Static(f"{person}  →  {gid}", classes="ef-participant-name"),
+                    Static(_format_participant_summary(person, info), classes="ef-participant-name"),
+                    Button("Edit", id=f"ef-edp-{person}"),
                     Button("Remove", variant="error", id=f"ef-rmp-{person}"),
                     classes="ef-participant",
                 )
@@ -167,7 +188,22 @@ class ExperimentForm(Widget):
             classes="ef-field",
         )
         yield Horizontal(
+            Label("Tag ID:", classes="ef-field-label"),
+            Input(placeholder="e.g. 12", id="ef-p-tag", classes="ef-field-input"),
+            classes="ef-field",
+        )
+        yield Horizontal(
+            Label("Description:", classes="ef-field-label"),
+            Input(
+                placeholder="e.g. learner wearing a grey hoodie",
+                id="ef-p-description",
+                classes="ef-field-input",
+            ),
+            classes="ef-field",
+        )
+        yield Horizontal(
             Button("Add", variant="success", id="ef-p-add"),
+            Button("Cancel Edit", id="ef-p-cancel-edit", disabled=True),
             classes="ef-actions",
         )
 
@@ -182,12 +218,14 @@ class ExperimentForm(Widget):
 
     async def _show_list(self) -> None:
         self._editing_exp = None
+        self._editing_participant = None
         root = self.query_one("#ef-root")
         await root.remove_children()
         await root.mount(*list(self._compose_list_view()))
 
     async def _show_detail(self, eid: str) -> None:
         self._editing_exp = eid
+        self._editing_participant = None
         root = self.query_one("#ef-root")
         await root.remove_children()
         await root.mount(*list(self._compose_detail_view(eid)))
@@ -207,13 +245,51 @@ class ExperimentForm(Widget):
         await container.remove_children()
         assignments = self._data.get("assignments", {}).get(eid, {})
         for person, info in sorted(assignments.items()):
-            gid = info.get("group_id", "?")
             h = Horizontal(
-                Static(f"{person}  →  {gid}", classes="ef-participant-name"),
+                Static(_format_participant_summary(person, info), classes="ef-participant-name"),
+                Button("Edit", id=f"ef-edp-{person}"),
                 Button("Remove", variant="error", id=f"ef-rmp-{person}"),
                 classes="ef-participant",
             )
             await container.mount(h)
+
+    def _set_participant_form_mode(self, editing_person: str | None) -> None:
+        """update participant form buttons for add vs edit mode."""
+        self._editing_participant = editing_person
+        add_button = self.query_one("#ef-p-add", Button)
+        cancel_button = self.query_one("#ef-p-cancel-edit", Button)
+        if editing_person:
+            add_button.label = "Save Participant"
+            add_button.variant = "primary"
+            cancel_button.disabled = False
+        else:
+            add_button.label = "Add"
+            add_button.variant = "success"
+            cancel_button.disabled = True
+
+    def _clear_participant_form(self) -> None:
+        """reset participant form inputs and leave add mode active."""
+        self.query_one("#ef-p-name", Input).value = ""
+        self.query_one("#ef-p-group", Input).value = ""
+        self.query_one("#ef-p-tag", Input).value = ""
+        self.query_one("#ef-p-description", Input).value = ""
+        self._set_participant_form_mode(None)
+
+    def _load_participant_form(self, person: str) -> None:
+        """fill participant form with existing data for editing."""
+        eid = self._editing_exp
+        if not eid:
+            return
+        info = self._data.get("assignments", {}).get(eid, {}).get(person)
+        if info is None:
+            self._set_status(f"[red]Participant '{person}' was not found.[/red]")
+            return
+        normalized = _normalize_participant_info(info)
+        self.query_one("#ef-p-name", Input).value = person
+        self.query_one("#ef-p-group", Input).value = normalized["group_id"]
+        self.query_one("#ef-p-tag", Input).value = normalized["tag_id"]
+        self.query_one("#ef-p-description", Input).value = normalized["description"]
+        self._set_participant_form_mode(person)
 
     # ── event handling ───────────────────────────────────────────
 
@@ -265,6 +341,15 @@ class ExperimentForm(Widget):
         elif btn_id == "ef-p-add":
             await self._add_participant()
 
+        elif btn_id == "ef-p-cancel-edit":
+            self._clear_participant_form()
+            self._set_status("[yellow]Participant edit cancelled.[/yellow]")
+
+        elif btn_id.startswith("ef-edp-"):
+            person = btn_id[len("ef-edp-"):]
+            self._load_participant_form(person)
+            self._set_status(f"[yellow]Editing participant '{person}'.[/yellow]")
+
         elif btn_id.startswith("ef-rmp-"):
             person = btn_id[len("ef-rmp-"):]
             await self._remove_participant(person)
@@ -307,20 +392,51 @@ class ExperimentForm(Widget):
         eid = self._editing_exp
         if not eid:
             return
+        original_name = self._editing_participant
         name = self.query_one("#ef-p-name", Input).value.strip()
         group = self.query_one("#ef-p-group", Input).value.strip()
+        tag_id = self.query_one("#ef-p-tag", Input).value.strip()
+        description = self.query_one("#ef-p-description", Input).value.strip()
         if not name:
             self._set_status("[red]Participant name is required.[/red]")
             return
         if not group:
             self._set_status("[red]Group ID is required.[/red]")
             return
+        if not tag_id:
+            self._set_status("[red]Tag ID is required.[/red]")
+            return
+        if not description:
+            self._set_status("[red]Description is required.[/red]")
+            return
 
-        self._data.setdefault("assignments", {}).setdefault(eid, {})[name] = {"group_id": group}
+        assignments = self._data.setdefault("assignments", {}).setdefault(eid, {})
+        if name in assignments and name != original_name:
+            self._set_status(f"[red]Participant '{name}' already exists.[/red]")
+            return
+        for person, info in assignments.items():
+            if person == original_name:
+                continue
+            if _normalize_participant_info(info).get("tag_id") == tag_id:
+                self._set_status(
+                    f"[red]Tag ID '{tag_id}' is already assigned to '{person}'.[/red]"
+                )
+                return
+
+        participant_data = {
+            "group_id": group,
+            "tag_id": tag_id,
+            "description": description,
+        }
+        if original_name and original_name != name:
+            assignments.pop(original_name, None)
+        assignments[name] = participant_data
         save_experiments(self._data)
-        self.query_one("#ef-p-name", Input).value = ""
-        self.query_one("#ef-p-group", Input).value = ""
-        self._set_status(f"[green]{name} → {group}[/green]")
+        self._clear_participant_form()
+        if original_name:
+            self._set_status(f"[green]{name} updated.[/green]")
+        else:
+            self._set_status(f"[green]{name} -> {group} (tag {tag_id})[/green]")
         await self._refresh_participants()
         self.post_message(self.DataChanged())
 
@@ -330,6 +446,8 @@ class ExperimentForm(Widget):
             return
         self._data.get("assignments", {}).get(eid, {}).pop(person, None)
         save_experiments(self._data)
+        if self._editing_participant == person:
+            self._clear_participant_form()
         self._set_status(f"[red]{person} removed.[/red]")
         await self._refresh_participants()
         self.post_message(self.DataChanged())

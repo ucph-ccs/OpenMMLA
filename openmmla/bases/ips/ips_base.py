@@ -14,7 +14,7 @@ from pupil_apriltags import Detector
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session
+from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
@@ -140,6 +140,8 @@ class IPSBase(Base):
                 self.logger.warning(
                     f"During running the IPS base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+                if not isinstance(e, KeyboardInterrupt):
+                    show_error_and_pause(e, "return to the IPS Base menu")
             finally:
                 self._clean_up()
 
@@ -369,6 +371,7 @@ class IPSBase(Base):
 
     def _configure_video_stream(self):
         """Configure video stream."""
+        self.stream_kwargs['project_dir'] = self.project_dir
         self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
         self.video_stream.start()
 

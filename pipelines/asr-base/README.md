@@ -20,13 +20,20 @@ The post-time analyzer is as follows:
 ### Install Dependencies
 ```bash
 # Install the required dependencies for the ASR pipeline on specific machines 
-# (e.g., base station: asr-base, base server: asr-server, uber server: uber-server)
+# (e.g., base station: asr-base, base server: asr-server-nemo or asr-server-wespeaker, uber server: uber-server)
 conda create -n asr-base -c conda-forge -y python=3.10.12
 conda activate asr-base
 pip install -e .[asr-base] # or pip install openmmla[asr-base]
 # Optional: if you would like to use lab streaming layer as an input source
 pip install pylsl==1.17.6 
 conda install -c conda-forge liblsl=1.16.2
+```
+
+For ASR server environments, choose one backend-specific extra. `asr-server` is kept as the legacy/default name for the NeMo backend.
+
+```bash
+pip install -e ".[asr-server-nemo]"       # NeMo speaker embedding backend
+pip install -e ".[asr-server-wespeaker]"  # WeSpeaker backend, isolated to avoid dependency conflicts
 ```
 
 ### Data Input Setup

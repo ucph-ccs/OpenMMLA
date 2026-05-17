@@ -20,14 +20,16 @@ from openmmla.tui.widgets.command_session import CommandSession, _list_conda_env
 ENV_GROUPS = [
     {"group": "asr-base", "env": "asr-base", "python": "3.10",
      "description": "ASR base station"},
-    {"group": "asr-server", "env": "asr-server", "python": "3.10",
+    {"group": "asr-server-nemo", "env": "asr-server-nemo", "python": "3.10",
      "description": "ASR server (NeMo backend)"},
     {"group": "asr-server-wespeaker", "env": "asr-server-wespeaker", "python": "3.10",
      "description": "ASR server (WeSpeaker backend)"},
     {"group": "vfa-base", "env": "vfa-base", "python": "3.10",
      "description": "VFA base station"},
     {"group": "vfa-server", "env": "vfa-server", "python": "3.10",
-     "description": "VFA server"},
+     "description": "VFA server wrapper"},
+    {"group": "vfa-vllm-runtime", "env": "vfa-vllm", "python": "3.12",
+     "description": "VFA local vLLM runtime"},
     {"group": "ips-base", "env": "ips-base", "python": "3.10",
      "description": "IPS base station"},
     {"group": "uber-base", "env": "uber-base", "python": "3.10",
@@ -37,6 +39,19 @@ ENV_GROUPS = [
     {"group": "tui", "env": "tui", "python": "3.10",
      "description": "TUI management console"},
 ]
+
+
+def _target_options() -> list[tuple[str, str]]:
+    return [("Local", "local")] + [
+        (p.name, p.name) for p in load_ssh_profiles()
+    ]
+
+
+def _normalize_target(value) -> str:
+    if value is Select.BLANK or value is None:
+        return "local"
+    text = str(value)
+    return text if text else "local"
 
 
 class EnvironmentPanel(Widget):
@@ -83,12 +98,9 @@ class EnvironmentPanel(Widget):
         self._root = _find_project_root()
         self._conda_envs: set[str] = set()
         self._selected_group: str | None = None
+        self._target = "local"
 
     def compose(self) -> ComposeResult:
-        from openmmla.tui.ssh import load_ssh_profiles
-        target_options = [("Local", "local")] + [
-            (p.name, p.name) for p in load_ssh_profiles()
-        ]
         with Vertical():
             yield Static(
                 "Conda Environment Manager — select a target and a row, then use actions",
@@ -97,7 +109,7 @@ class EnvironmentPanel(Widget):
             yield DataTable(id="env-table")
             with Horizontal(id="env-target-bar"):
                 yield Label("Target:")
-                yield Select(target_options, value="local", id="env-target-select")
+                yield Select(_target_options(), value="local", id="env-target-select")
             with Horizontal(id="env-actions"):
                 yield Button("Connect", variant="primary", id="btn-connect")
                 yield Button("Refresh", variant="primary", id="btn-env-refresh")
@@ -113,10 +125,24 @@ class EnvironmentPanel(Widget):
 
     @property
     def _is_remote(self) -> bool:
-        return self._cmd.is_remote
+        return self._get_target() != "local"
 
     def _get_target(self) -> str:
-        return self._cmd.get_target()
+        return self._target
+
+    def _get_selected_target(self) -> str:
+        try:
+            sel = self.query_one("#env-target-select", Select)
+            return _normalize_target(sel.value)
+        except Exception:
+            return self._target
+
+    def _set_target(self, target: str) -> None:
+        self._target = _normalize_target(target)
+        try:
+            self._cmd.set_target(self._target)
+        except Exception:
+            pass
 
     def _log(self, msg: str) -> None:
         self._cmd.log(msg)
@@ -127,19 +153,36 @@ class EnvironmentPanel(Widget):
         table.cursor_type = "row"
         self._refresh_table()
 
+    def on_show(self) -> None:
+        self._refresh_target_options()
+
+    def _refresh_target_options(self) -> None:
+        options = _target_options()
+        try:
+            sel = self.query_one("#env-target-select", Select)
+            current = sel.value
+            sel.set_options(options)
+            if any(v == current for _, v in options):
+                sel.value = current
+                self._set_target(_normalize_target(current))
+            else:
+                sel.value = "local"
+                self._set_target("local")
+        except Exception:
+            pass
+
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "env-target-select":
-            val = event.value
-            if val is Select.BLANK or val is None:
-                val = "local"
-            self._cmd.set_target(str(val))
+            self._set_target(_normalize_target(event.value))
             self._refresh_table()
 
     # -- table -----------------------------------------------------------------
 
     def _refresh_table(self) -> None:
-        if self._is_remote:
-            self.run_worker(self._refresh_table_remote(), exclusive=True)
+        self._set_target(self._get_selected_target())
+        target = self._get_target()
+        if target != "local":
+            self.run_worker(self._refresh_table_remote(target), exclusive=True)
         else:
             self._conda_envs = _list_conda_envs_sync()
             self._populate_table()
@@ -154,18 +197,23 @@ class EnvironmentPanel(Widget):
                 eg["env"], eg["group"], eg["python"], status, eg["description"],
             )
 
-    async def _refresh_table_remote(self) -> None:
-        profile = get_profile_by_name(self._get_target())
-        if profile is None:
-            self._log("[red]SSH profile not found.[/red]")
+    async def _refresh_table_remote(self, profile_name: str) -> None:
+        if profile_name != self._get_target():
             return
-        self._log(f"[yellow]Checking conda envs on '{self._get_target()}'...[/yellow]")
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            if profile_name == self._get_target():
+                self._log("[red]SSH profile not found.[/red]")
+            return
+        self._log(f"[yellow]Checking conda envs on '{profile_name}'...[/yellow]")
         proc = await ssh_run_async(profile, wrap_remote("conda env list"))
         output = ""
         assert proc.stdout is not None
         async for line in proc.stdout:
             output += line.decode()
         await proc.wait()
+        if profile_name != self._get_target():
+            return
         self._conda_envs = _parse_conda_envs(output)
         self._populate_table()
         self._log("[green]Remote env list refreshed.[/green]")
@@ -183,9 +231,13 @@ class EnvironmentPanel(Widget):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn-connect":
+            self._refresh_target_options()
+            self._set_target(self._get_selected_target())
             self._cmd.connect()
             self._refresh_table()
         elif bid == "btn-env-refresh":
+            self._refresh_target_options()
+            self._set_target(self._get_selected_target())
             self._refresh_table()
             if not self._is_remote:
                 self._log("[green]Refreshed.[/green]")

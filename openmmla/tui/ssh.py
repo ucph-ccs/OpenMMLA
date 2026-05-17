@@ -186,9 +186,16 @@ async def scp_file_async(
 
 
 CONDA_INIT = (
-    'for _p in ~/miniforge3 ~/miniconda3 ~/anaconda3 ~/mambaforge /opt/conda; do '
+    'if command -v conda >/dev/null 2>&1; then '
+    '_base="$(conda info --base 2>/dev/null)" && '
+    '[ -f "$_base/etc/profile.d/conda.sh" ] && . "$_base/etc/profile.d/conda.sh"; '
+    'fi; '
+    'if ! command -v conda >/dev/null 2>&1; then '
+    'for _p in "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/anaconda3" '
+    '"$HOME/mambaforge" /home/*/miniforge3 /home/*/miniconda3 /opt/conda; do '
     '[ -f "$_p/etc/profile.d/conda.sh" ] && . "$_p/etc/profile.d/conda.sh" && break; '
-    'done'
+    'done; '
+    'fi'
 )
 
 REMOTE_SHELL_INIT = f'export LANG=en_US.UTF-8 PYTHONUNBUFFERED=1; {CONDA_INIT}'

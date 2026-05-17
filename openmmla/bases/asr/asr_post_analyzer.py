@@ -20,7 +20,7 @@ from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.files import format_wav, segment_wav, crop_and_concatenate_wav
 from openmmla.utils.audio.properties import get_audio_properties
-from openmmla.utils.input import get_interactive_files, PURPLE, GREEN, GREY, ENDC
+from openmmla.utils.input import get_interactive_files, PURPLE, GREEN, GREY, ENDC, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
 from .audio_recognizer import AudioRecognizer
@@ -137,6 +137,7 @@ class ASRPostAnalyzer(Base):
                     self.logger.warning(f"During running the ASR post analyzer, catch: {e}, Come back to main menu.", exc_info=True)
             except Exception as e:
                 self.logger.warning(f"During running the ASR post analyzer, catch: {e}, Come back to the main menu.", exc_info=True)
+                show_error_and_pause(e, "return to the ASR Post Analyzer menu")
             finally:
                 self._clean_up()
 
@@ -867,6 +868,6 @@ def start_asr_post_analyzer(project_dir: str, config_path: str, vad: bool = True
                 print("\n🔄 Restarting ASR Post Analyzer...")
                 continue  # Restart on Ctrl+C during runtime
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            show_error_and_pause(e, "restart ASR Post Analyzer")
             print("\n🔄 Restarting ASR Post Analyzer...")
             continue

@@ -13,12 +13,8 @@ VLLMFrameAnalyzer:
   image_detail: "auto"  # Image detail for vision models: "low" (faster, less detail), "high" (slower, more detail), "auto" (model decides)
   prompt_templates_dir: <path-to-prompt-templates-dir>  # either relative to the project directory or absolute path
   apriltag_examples_dir: <path-to-apriltag-examples-dir>  # either relative to the project directory or absolute path
-
-  # Define the actions that you want to classify
-  action_definitions:
-  
-  # Decision process for action classification (Rule-based if-else chain)
-  decision_process:
+  action_schema_path: config/vfa/action_schemas.yml  # centralized schema definitions under the repo root
+  # action_schema: collaboration_v1  # optional explicit override; otherwise use config/vfa/action_schemas.yml default_schema
 
   # Supported backends
   ollama:
@@ -95,4 +91,3 @@ VLLMFrameAnalyzer:
     llm_base_url: "https://chat.intern-ai.org.cn/api/v1/"
     vlm_model: "internvl3.5-241b-a28b"
     llm_model: "internvl3.5-241b-a28b"
-

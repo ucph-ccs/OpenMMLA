@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.message import Message
@@ -94,6 +96,13 @@ class SSHForm(Widget):
 
             yield Static("[b]Add / Edit Profile[/b]", classes="ssh-title")
 
+            with Horizontal(classes="ssh-actions"):
+                yield Button("Add Profile", variant="success", id="ssh-save")
+                yield Button("Test Connection", variant="warning", id="ssh-test")
+                yield Button("Clear Form", variant="default", id="ssh-clear")
+
+            yield Static("", id="ssh-status", classes="ssh-status")
+
             with Horizontal(classes="ssh-field"):
                 yield Label("Profile Name:", classes="ssh-field-label")
                 yield Input(placeholder="e.g. lab-server", id="ssh-name", classes="ssh-field-input")
@@ -121,13 +130,6 @@ class SSHForm(Widget):
                 yield Label("Remote Project Path:", classes="ssh-field-label")
                 yield Input(value="~/OpenMMLA", id="ssh-remote-path", classes="ssh-field-input")
 
-            with Horizontal(classes="ssh-actions"):
-                yield Button("Save Profile", variant="primary", id="ssh-save")
-                yield Button("Test Connection", variant="warning", id="ssh-test")
-                yield Button("Clear Form", variant="default", id="ssh-clear")
-
-            yield Static("", id="ssh-status", classes="ssh-status")
-
     def _get_form_values(self) -> dict:
         return {
             "name": self.query_one("#ssh-name", Input).value.strip(),
@@ -154,6 +156,7 @@ class SSHForm(Widget):
         self.query_one("#ssh-key", Input).value = profile.key_path
         self.query_one("#ssh-remote-path", Input).value = profile.remote_project_path
         self._editing = profile.name
+        self._set_save_mode(editing=True)
 
     def _clear_form(self) -> None:
         self.query_one("#ssh-name", Input).value = ""
@@ -164,7 +167,17 @@ class SSHForm(Widget):
         self.query_one("#ssh-key", Input).value = ""
         self.query_one("#ssh-remote-path", Input).value = "~/OpenMMLA"
         self._editing = None
+        self._set_save_mode(editing=False)
         self._set_status("")
+
+    def _set_save_mode(self, editing: bool) -> None:
+        """update the primary action label for add vs edit mode."""
+        try:
+            button = self.query_one("#ssh-save", Button)
+            button.label = "Save Profile" if editing else "Add Profile"
+            button.variant = "primary" if editing else "success"
+        except Exception:
+            pass
 
     def _build_profile_from_form(self) -> SSHProfile | None:
         vals = self._get_form_values()
@@ -197,7 +210,7 @@ class SSHForm(Widget):
         if btn_id == "ssh-save":
             await self._save_profile()
         elif btn_id == "ssh-test":
-            self._test_connection()
+            await self._test_connection(event.button)
         elif btn_id == "ssh-clear":
             self._clear_form()
         elif btn_id.startswith("ssh-edit-"):
@@ -218,6 +231,7 @@ class SSHForm(Widget):
         self._profiles.append(profile)
         save_ssh_profiles(self._profiles)
         self._editing = None
+        self._set_save_mode(editing=False)
         self._set_status(f"[green]Profile '{profile.name}' saved.[/green]")
         await self._rebuild_list()
         self.post_message(self.ProfilesChanged())
@@ -231,16 +245,25 @@ class SSHForm(Widget):
         await self._rebuild_list()
         self.post_message(self.ProfilesChanged())
 
-    def _test_connection(self) -> None:
+    async def _test_connection(self, button: Button | None = None) -> None:
         profile = self._build_profile_from_form()
         if profile is None:
             return
         self._set_status("[yellow]Testing connection...[/yellow]")
-        success, msg = ssh_test_connection(profile)
-        if success:
-            self._set_status(f"[green]{msg}[/green]")
-        else:
-            self._set_status(f"[red]{msg}[/red]")
+        if button is not None:
+            button.disabled = True
+            button.label = "Testing..."
+        try:
+            loop = asyncio.get_running_loop()
+            success, msg = await loop.run_in_executor(None, ssh_test_connection, profile)
+            if success:
+                self._set_status(f"[green]{msg}[/green]")
+            else:
+                self._set_status(f"[red]{msg}[/red]")
+        finally:
+            if button is not None:
+                button.disabled = False
+                button.label = "Test Connection"
 
     async def _rebuild_list(self) -> None:
         """reload the profile list display by re-mounting."""

@@ -21,20 +21,22 @@ def get_parser():
 def cleanup_session_events(influx_client, session_id) -> None:
     """Clean up selected event types for a session."""
     from openmmla.utils.input import multi_interactive_menu
-    from openmmla.utils.constants import EVENT_TYPES_ASR, EVENT_TYPES_IPS, EVENT_TYPES_VFA
+    from openmmla.utils.constants import EVENT_TYPES_ANALYTICS, EVENT_TYPES_ASR, EVENT_TYPES_IPS, EVENT_TYPES_VFA
 
     try:
         event_type_groups = {
             'asr': EVENT_TYPES_ASR,
             'ips': EVENT_TYPES_IPS,
             'vfa': EVENT_TYPES_VFA,
+            'analytics': EVENT_TYPES_ANALYTICS,
         }
 
-        pipeline_options = ['asr', 'ips', 'vfa']
+        pipeline_options = ['asr', 'ips', 'vfa', 'analytics']
         descriptions = [
             f'Automatic Speech Recognition ({", ".join(EVENT_TYPES_ASR)})',
             f'Indoor Positioning System ({", ".join(EVENT_TYPES_IPS)})',
             f'Video Frame Analysis ({", ".join(EVENT_TYPES_VFA)})',
+            f'Online analytics ({", ".join(EVENT_TYPES_ANALYTICS)})',
         ]
 
         selected_indices = multi_interactive_menu("Select Pipelines to Clean Up", pipeline_options, descriptions, exit_on_q=False, prompt_enter=False)
@@ -81,11 +83,12 @@ def delete_session(influx_client, mongo_client, session_id) -> None:
 def create_new_session(mongo_client) -> None:
     """Create a new session with experiment/group naming."""
     try:
-        from openmmla.utils.experiments import select_experiment_and_group
+        from openmmla.utils.experiments import get_participant_aliases, select_experiment_and_group
         from openmmla.utils.input import _make_session_id
         exp_id, group_id = select_experiment_and_group()
         session_id = _make_session_id(exp_id, group_id, datetime.now(timezone.utc))
-        mongo_client.create_session(session_id, exp_id, group_id)
+        participants = list(get_participant_aliases(exp_id, group_id).values())
+        mongo_client.create_session(session_id, exp_id, group_id, participants=participants)
         print(f"✅ Successfully created new session: {session_id}")
     except Exception as e:
         print(f"❌ Failed to create new session: {e}")

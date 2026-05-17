@@ -38,11 +38,11 @@ def get_app():
     if not config_path:
         raise RuntimeError("Environment variable CONFIG_PATH must be set, please set it via export or -c.")
 
-    from openmmla.services.vfa import VLLMFrameAnalyzer
+    from openmmla.services.vfa import MultiAngleVLLMFrameAnalyzer
     from openmmla.utils.apps import create_app
 
     return create_app(
-        class_type=VLLMFrameAnalyzer,
+        class_type=MultiAngleVLLMFrameAnalyzer,
         endpoint="vllm",
         method_name="process_request",
         class_args={"project_dir": project_dir, "config_path": config_path},

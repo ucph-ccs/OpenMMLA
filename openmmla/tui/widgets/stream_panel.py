@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shlex
 import subprocess
+import time
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
@@ -10,7 +13,16 @@ from textual.widget import Widget
 from textual.widgets import Static, Button, DataTable
 
 from openmmla.tui.schema.loader import StreamDef, load_streams
-from openmmla.tui.ssh import get_profile_by_name, ssh_run_sync, ssh_check_tmux
+from openmmla.tui.ssh import get_profile_by_name, ssh_run_sync
+from openmmla.utils.stream_registry import register_stream_start, mark_stream_stopped
+
+
+STREAM_REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _with_stream_path(command: str) -> str:
+    """run stream commands with a predictable PATH for non-interactive SSH shells."""
+    return f"export PATH={STREAM_REMOTE_PATH}:$PATH; {command}"
 
 
 def _check_local_tmux(session_name: str) -> bool:
@@ -26,6 +38,83 @@ def _check_local_tmux(session_name: str) -> bool:
 
 def _tmux_session_name(stream_name: str) -> str:
     return f"mmla-stream-{stream_name}"
+
+
+def _check_remote_tmux(profile, session_name: str) -> bool:
+    try:
+        cmd = _with_stream_path(
+            f"tmux has-session -t {shlex.quote(session_name)} 2>/dev/null && echo OK || echo FAIL"
+        )
+        result = ssh_run_sync(profile, cmd, timeout=8.0)
+        return "OK" in result.stdout
+    except Exception:
+        return False
+
+
+def _stream_start_file(session_name: str) -> str:
+    return f"$HOME/.openmmla/streams/{session_name}.start"
+
+
+def _project_root_from_config(config_path: str) -> str:
+    if not config_path:
+        return os.getcwd()
+    path = os.path.abspath(config_path)
+    marker = f"{os.sep}pipelines{os.sep}"
+    if marker in path:
+        return path.split(marker, 1)[0]
+    return os.path.dirname(path)
+
+
+def _build_tmux_stream_cmd(session: str, ffmpeg_cmd: str) -> str:
+    start_file = _stream_start_file(session)
+    inner_cmd = (
+        f"mkdir -p $HOME/.openmmla/streams; "
+        f"START_TIME=$(python3 -c \"import time; print('%.6f' % time.time())\" 2>/dev/null || date +%s); "
+        f"printf '%s\\n' \"$START_TIME\" > {start_file}; "
+        f"{ffmpeg_cmd}; exec bash"
+    )
+    return _with_stream_path(f"tmux new-session -d -s {shlex.quote(session)} {shlex.quote(inner_cmd)}")
+
+
+def _read_local_stream_start_time(session: str) -> float | None:
+    path = os.path.expanduser(f"~/.openmmla/streams/{session}.start")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return float(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _read_remote_stream_start_time(profile, session: str) -> float | None:
+    cmd = _with_stream_path(f"cat {_stream_start_file(session)} 2>/dev/null")
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=5.0)
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+    except (ValueError, Exception):
+        return None
+    return None
+
+
+def _read_stream_start_time_with_retry(
+    profile,
+    session: str,
+    is_local: bool,
+    attempts: int = 20,
+    delay: float = 0.1,
+) -> float | None:
+    """wait briefly for the tmux child shell to persist its start timestamp."""
+    for attempt in range(max(1, attempts)):
+        start_time = (
+            _read_local_stream_start_time(session)
+            if is_local
+            else _read_remote_stream_start_time(profile, session)
+        )
+        if start_time is not None:
+            return start_time
+        if attempt < attempts - 1:
+            time.sleep(delay)
+    return None
 
 
 def _build_ffmpeg_cmd(stream: StreamDef) -> str:
@@ -51,7 +140,7 @@ def _build_ffmpeg_cmd(stream: StreamDef) -> str:
     resolution = stream.resolution or "1920x1080"
     fps = stream.fps or 30
     return (
-        f"ffmpeg -use_wallclock_as_timestamps 1 "
+        f"ffmpeg -fflags +genpts -use_wallclock_as_timestamps 1 "
         f"-f v4l2 -input_format mjpeg -framerate {fps} -video_size {resolution} -i {device} "
         f"-c:v {codec} -preset ultrafast -tune zerolatency "
         f"-g {fps} -keyint_min {fps} -sc_threshold 0 "
@@ -59,6 +148,30 @@ def _build_ffmpeg_cmd(stream: StreamDef) -> str:
         f"-b:v 1M -maxrate 2M -bufsize 2M "
         f"-f flv {target}"
     )
+
+
+def _probe_rtmp_target(target: str, timeout: float = 10.0) -> tuple[bool, str]:
+    """probe an RTMP target by asking ffmpeg to decode a short sample."""
+    if not target.startswith("rtmp://"):
+        return False, "Probe currently supports RTMP targets only."
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", target, "-t", "2", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return False, "ffmpeg command not found on this machine."
+    except subprocess.TimeoutExpired:
+        return False, "Probe timed out while reading the RTMP target."
+
+    if result.returncode == 0:
+        return True, "RTMP target is readable."
+    output = (result.stderr or result.stdout or "").strip()
+    if not output:
+        output = f"ffmpeg exited with code {result.returncode}"
+    return False, output
 
 
 class StreamPanel(Widget):
@@ -90,6 +203,7 @@ class StreamPanel(Widget):
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
+        self._project_dir = _project_root_from_config(config_path)
         self._statuses: dict[str, bool] = {}
 
     def compose(self) -> ComposeResult:
@@ -98,6 +212,8 @@ class StreamPanel(Widget):
             with Horizontal(id="stream-actions"):
                 yield Button("Start", variant="success", id="stream-btn-start")
                 yield Button("Stop", variant="error", id="stream-btn-stop")
+                yield Button("Logs", variant="primary", id="stream-btn-logs")
+                yield Button("Probe", variant="warning", id="stream-btn-probe")
                 yield Button("Start All", variant="success", id="stream-btn-start-all")
                 yield Button("Stop All", variant="error", id="stream-btn-stop-all")
                 yield Button("Refresh", variant="primary", id="stream-btn-refresh")
@@ -133,7 +249,7 @@ class StreamPanel(Widget):
                     self._statuses[stream.name] = False
                     continue
                 is_running = await loop.run_in_executor(
-                    None, ssh_check_tmux, profile, session,
+                    None, _check_remote_tmux, profile, session,
                 )
             self._statuses[stream.name] = is_running
         self._rebuild_table()
@@ -189,6 +305,20 @@ class StreamPanel(Widget):
                 self._log(f"[yellow]{stream.name} is an external stream (no SSH profile).[/yellow]")
             else:
                 self._log("[yellow]Select a stream row first.[/yellow]")
+        elif btn == "stream-btn-logs":
+            stream = self._get_selected_stream()
+            if stream and stream.ssh_profile:
+                self._view_stream_logs(stream)
+            elif stream and not stream.ssh_profile:
+                self._log(f"[yellow]{stream.name} is external; no managed tmux logs.[/yellow]")
+            else:
+                self._log("[yellow]Select a stream row first.[/yellow]")
+        elif btn == "stream-btn-probe":
+            stream = self._get_selected_stream()
+            if stream:
+                self._probe_stream(stream)
+            else:
+                self._log("[yellow]Select a stream row first.[/yellow]")
         elif btn == "stream-btn-start-all":
             for s in self._streams:
                 if s.ssh_profile:
@@ -204,6 +334,7 @@ class StreamPanel(Widget):
         """re-read streams from config.yml and refresh status."""
         if self._config_path:
             self._streams = list(load_streams(self._config_path))
+            self._log(f"[cyan]Reloaded {len(self._streams)} stream(s) from {self._config_path}.[/cyan]")
         self._refresh_all()
 
     def _start_stream(self, stream: StreamDef) -> None:
@@ -212,9 +343,16 @@ class StreamPanel(Widget):
     def _stop_stream(self, stream: StreamDef) -> None:
         self.run_worker(self._async_stop(stream))
 
+    def _view_stream_logs(self, stream: StreamDef) -> None:
+        self.run_worker(self._async_view_logs(stream))
+
+    def _probe_stream(self, stream: StreamDef) -> None:
+        self.run_worker(self._async_probe_stream(stream))
+
     async def _async_start(self, stream: StreamDef) -> None:
         session = _tmux_session_name(stream.name)
         is_local = stream.ssh_profile == "local"
+        profile = None
         loop = asyncio.get_event_loop()
 
         if is_local:
@@ -224,7 +362,7 @@ class StreamPanel(Widget):
             if profile is None:
                 self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                 return
-            already_running = await loop.run_in_executor(None, ssh_check_tmux, profile, session)
+            already_running = await loop.run_in_executor(None, _check_remote_tmux, profile, session)
 
         if already_running:
             self._log(f"[yellow]{stream.name} is already running.[/yellow]")
@@ -233,7 +371,7 @@ class StreamPanel(Widget):
             return
 
         ffmpeg_cmd = _build_ffmpeg_cmd(stream)
-        tmux_cmd = f"tmux new-session -d -s {session} '{ffmpeg_cmd}; exec bash'"
+        tmux_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd)
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[green]Starting {stream.name} {target_label}...[/green]")
         self._log(f"  {ffmpeg_cmd}")
@@ -250,7 +388,26 @@ class StreamPanel(Widget):
                     None, ssh_run_sync, profile, tmux_cmd, 15.0,
                 )
             if result.returncode == 0:
+                start_time = await loop.run_in_executor(
+                    None,
+                    lambda: _read_stream_start_time_with_retry(profile, session, is_local),
+                )
+                if start_time is None:
+                    start_time = time.time()
+                    self._log(
+                        "[yellow]Could not read capture-side stream_start_time; "
+                        "using local registration time.[/yellow]"
+                    )
+                register_stream_start(
+                    stream.name,
+                    stream.target,
+                    start_time,
+                    project_dir=self._project_dir,
+                    ssh_profile=stream.ssh_profile,
+                    device=stream.device,
+                )
                 self._log(f"[green]{stream.name} started.[/green]")
+                self._log(f"  stream_start_time={start_time:.6f}")
                 self._statuses[stream.name] = True
             else:
                 output = result.stdout.strip() if result.stdout else result.stderr.strip()
@@ -271,10 +428,11 @@ class StreamPanel(Widget):
                 self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                 return
 
+        quoted_session = shlex.quote(session)
         stop_cmd = (
-            f"tmux send-keys -t {session} C-c 2>/dev/null; "
+            f"tmux send-keys -t {quoted_session} C-c 2>/dev/null; "
             f"sleep 1; "
-            f"tmux kill-session -t {session} 2>/dev/null; "
+            f"tmux kill-session -t {quoted_session} 2>/dev/null; "
             f"echo DONE"
         )
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
@@ -290,16 +448,61 @@ class StreamPanel(Widget):
                 )
             else:
                 result = await loop.run_in_executor(
-                    None, ssh_run_sync, profile, stop_cmd, 15.0,
+                    None, ssh_run_sync, profile, _with_stream_path(stop_cmd), 15.0,
                 )
             if "DONE" in (result.stdout or ""):
                 self._log(f"[red]{stream.name} stopped.[/red]")
+                mark_stream_stopped(stream.name, project_dir=self._project_dir)
                 self._statuses[stream.name] = False
             else:
                 self._log(f"[yellow]{stream.name} may still be running.[/yellow]")
         except Exception as e:
             self._log(f"[red]Error stopping {stream.name}: {e}[/red]")
         self._rebuild_table()
+
+    async def _async_view_logs(self, stream: StreamDef) -> None:
+        session = _tmux_session_name(stream.name)
+        is_local = stream.ssh_profile == "local"
+        loop = asyncio.get_event_loop()
+        self._log(f"[cyan]── Logs for {stream.name} ({session}) ──[/cyan]")
+        try:
+            if is_local:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(
+                        ["tmux", "capture-pane", "-t", session, "-p", "-S", "-120"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    ),
+                )
+            else:
+                profile = get_profile_by_name(stream.ssh_profile)
+                if profile is None:
+                    self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
+                    return
+                cmd = _with_stream_path(f"tmux capture-pane -t {shlex.quote(session)} -p -S -120")
+                result = await loop.run_in_executor(None, ssh_run_sync, profile, cmd, 10.0)
+            output = (result.stdout or result.stderr or "").strip()
+            if result.returncode != 0:
+                self._log(f"[red]Could not read tmux logs: {output or result.returncode}[/red]")
+                return
+            if not output:
+                self._log("[yellow]No tmux output captured yet.[/yellow]")
+                return
+            for line in output.splitlines()[-80:]:
+                self._log(line)
+        except Exception as e:
+            self._log(f"[red]Error reading logs for {stream.name}: {e}[/red]")
+
+    async def _async_probe_stream(self, stream: StreamDef) -> None:
+        self._log(f"[cyan]Probing {stream.target}...[/cyan]")
+        loop = asyncio.get_event_loop()
+        success, message = await loop.run_in_executor(None, _probe_rtmp_target, stream.target)
+        if success:
+            self._log(f"[green]{stream.name}: {message}[/green]")
+        else:
+            self._log(f"[red]{stream.name}: {message}[/red]")
 
     def update_streams(self, streams: list[StreamDef]) -> None:
         """replace the stream list and refresh."""

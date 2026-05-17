@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.widget import Widget
@@ -106,7 +107,7 @@ class SessionsPanel(Widget):
     def _update_summary(self, text: str) -> None:
         try:
             summary = self.query_one("#sessions-summary", Static)
-            summary.update(text)
+            summary.update(Text(str(text)))
         except Exception:
             pass
 

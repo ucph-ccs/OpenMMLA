@@ -7,7 +7,7 @@ import time
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session, get_number_of_bases
+from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
@@ -38,7 +38,7 @@ def start_asr_synchronizer(project_dir: str, config_path: str, mode: str = 'full
                 print("\n🔄 Restarting ASR Synchronizer...")
                 continue  # Restart on Ctrl+C during runtime
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            show_error_and_pause(e, "restart ASR Synchronizer")
             print("\n🔄 Restarting ASR Synchronizer...")
             continue
 
@@ -129,6 +129,7 @@ class ASRSynchronizer(Synchronizer):
                     self.logger.warning("Ctrl+C pressed during runtime, returning to main menu.", exc_info=True)
             except Exception as e:
                 self.logger.warning(f"During running synchronizer, catch: {e}, Come back to the main menu.", exc_info=True)
+                show_error_and_pause(e, "return to the ASR Synchronizer menu")
             finally:
                 self._clean_up()
 

@@ -6,7 +6,7 @@ import threading
 
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session
+from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .input import get_function_synchronizer
 from .transform import transform_point, transform_rotation
@@ -92,6 +92,8 @@ class IPSSynchronizer(Synchronizer):
                 self.logger.warning(
                     f"During running the synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+                if not isinstance(e, KeyboardInterrupt):
+                    show_error_and_pause(e, "return to the IPS Synchronizer menu")
             finally:
                 self._clean_up()
 

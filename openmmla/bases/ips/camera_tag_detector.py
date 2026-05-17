@@ -8,6 +8,7 @@ from pupil_apriltags import Detector
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import MQTTClientWrapper
+from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
 from .input import get_function_base
@@ -85,6 +86,8 @@ class CameraTagDetector(Base):
                 self.logger.warning(
                     f"During running the tag detector, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+                if not isinstance(e, KeyboardInterrupt):
+                    show_error_and_pause(e, "return to the Camera Tag Detector menu")
             finally:
                 self._clean_up()
 
@@ -230,6 +233,7 @@ class CameraTagDetector(Base):
 
     def _configure_video_stream(self):
         """Configure video stream."""
+        self.stream_kwargs['project_dir'] = self.project_dir
         self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
         self.video_stream.start()
 

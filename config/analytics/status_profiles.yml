@@ -1,0 +1,54 @@
+default_profile: imwut_v1
+
+profiles:
+  imwut_v1:
+    speaking:
+      silent_labels: ["silent", "unknown", ""]
+      facing_time_margin_seconds: 5.0
+      focused_code: 2
+      speaking_code: 1
+      inactive_code: 0
+
+    proximity:
+      zone_center: [0.0, 0.0, 0.0]
+      zone_radius: 4.0
+      close_distance: 1.0
+      time_margin_seconds: 2.0
+      close_code: 2
+      in_zone_code: 1
+      out_of_zone_code: 0
+
+    content:
+      invalid_code: 0
+      off_topic_code: 1
+      task_relevant_code: 2
+      min_meaningful_words: 3
+      filler_words:
+        - "um"
+        - "uh"
+        - "ah"
+        - "er"
+        - "like"
+        - "you know"
+        - "basically"
+        - "actually"
+      off_topic_keywords:
+        - "lunch"
+        - "coffee"
+        - "bathroom"
+        - "instagram"
+        - "facebook"
+        - "weekend"
+        - "vacation"
+      transcription_artifacts:
+        - "^[0-9]{1}$"
+        - "^[a-zA-Z]{1,2}$"
+        - "^\\.+$"
+        - "^,+$"
+        - "^-+$"
+        - "^(\\w+)\\s+\\1(\\s+\\1)*$"
+        - "^[a-zA-Z0-9]{8,}$"
+
+    action:
+      default_code: 0
+      action_map_ref: collaboration_v1

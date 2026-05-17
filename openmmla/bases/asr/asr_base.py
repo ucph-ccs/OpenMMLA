@@ -24,13 +24,29 @@ from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url
+from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url
+from openmmla.analytics.realtime.status_engine import normalize_asr_scope
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN, PURPLE, GREY
 from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion
+
+
+def _resolve_speaker_verification(value, asr_scope: str) -> bool:
+    """resolve the speaker verifier setting from config.
+
+    auto follows the ASR attribution scope: participant-level ASR verifies speakers,
+    group-level ASR skips speaker profile verification by default.
+    """
+    if value is None or str(value).strip().lower() in {"", "auto"}:
+        return asr_scope == "participant"
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
 
 
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'full', store: bool = True,
@@ -62,7 +78,7 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'full', store
                 print("\n🔄 Restarting ASR Base...")
                 continue  # Restart on Ctrl+C during runtime
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            show_error_and_pause(e, "restart ASR Base")
             print("\n🔄 Restarting ASR Base...")
             continue
 
@@ -108,6 +124,9 @@ class ASRBase(Base):
         self.stop_event = threading.Event()
         self.threads = []
         self.selected_speakers = None
+        self.asr_scope = "participant"
+        self.speaker_verification = True
+        self.group_speaker_id = "group"
 
         self.base_type = get_base_type(self.config)
         self.id = get_id()
@@ -124,6 +143,17 @@ class ASRBase(Base):
         """
         base_config = self.config['Base'][self.base_type]
         asr_server_config = self.config['Server']['asr']
+        analytics_config = self.config.get('Analytics', {})
+        self.asr_scope = normalize_asr_scope(analytics_config.get('asr_scope'))
+        self.speaker_verification = _resolve_speaker_verification(
+            analytics_config.get('speaker_verification', 'auto'),
+            self.asr_scope,
+        )
+        self.group_speaker_id = str(
+            analytics_config.get('group_id')
+            or analytics_config.get('group_speaker_id')
+            or 'group'
+        )
 
         self.register_duration = int(base_config['register_duration'])
         self.recognize_duration = int(base_config['recognize_sp_duration']) if self.sp else int(
@@ -295,6 +325,7 @@ class ASRBase(Base):
                     self.logger.warning(f"During running the ASR base, catch: {e}, Come back to main menu.", exc_info=True)
             except Exception as e:
                 self.logger.warning(f"During running the ASR base, catch: {e}, Come back to the main menu.", exc_info=True)
+                show_error_and_pause(e, "return to the ASR Base menu")
             finally:
                 self._clean_up()
 
@@ -486,35 +517,39 @@ class ASRBase(Base):
         Args:
             session_id: The bucket name for storing recognition results. If not provided, it is obtained interactively.
         """
-        # check if any speakers are selected for recognition
-        if not self.selected_speakers or len(self.selected_speakers) == 0:
+        # check if any speakers are selected for participant-level recognition
+        if self.speaker_verification and (not self.selected_speakers or len(self.selected_speakers) == 0):
             print("------------------------------------------------")
             if self.mode in ['full', 'recognize']:
                 self.logger.info("No speakers selected for recognition. Please register and select speaker profiles or switch to 'record' mode.")
                 return
             elif self.mode == 'record':
                 self.logger.warning("No speakers selected. Recording will continue without speaker recognition.")
-        elif self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
+        elif self.speaker_verification and self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.info("Audio database is empty, please register speaker profiles or either switch the mode to 'record'.")
             return
-        elif self.mode == 'record' and len(self.audio_recognizer.speaker_names) == 0:
+        elif self.speaker_verification and self.mode == 'record' and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.warning("Audio database is empty. Recording will continue without speaker recognition.")
         
         # show selected speakers and ask for confirmation
         print("------------------------------------------------")
-        print(f"{PURPLE}Selected speakers for recognition:{ENDC}")
-        if self.selected_speakers and len(self.selected_speakers) > 0:
-            for i, speaker in enumerate(self.selected_speakers, 1):
-                print(f"  {i}. {speaker}")
+        if self.speaker_verification:
+            print(f"{PURPLE}Selected speakers for recognition:{ENDC}")
+            if self.selected_speakers and len(self.selected_speakers) > 0:
+                for i, speaker in enumerate(self.selected_speakers, 1):
+                    print(f"  {i}. {speaker}")
+            else:
+                print(f"  {GREY}No speakers selected{ENDC}")
+            print(f"\n{GREEN}Total speakers: {len(self.selected_speakers) if self.selected_speakers else 0}{ENDC}")
         else:
-            print(f"  {GREY}No speakers selected{ENDC}")
-        
-        print(f"\n{GREEN}Total speakers: {len(self.selected_speakers) if self.selected_speakers else 0}{ENDC}")
+            print(f"{PURPLE}Speaker verification disabled.{ENDC}")
+            print(f"{GREEN}ASR chunks will be attributed at group scope.{ENDC}")
         
         # select or create bucket
         self.session_id = select_or_create_session(self.mongo_client) if not session_id else session_id
+        self._resolve_group_speaker_id()
         self._create_bucket_logger()
         self._create_speaker_profile_snapshot()
 
@@ -537,7 +572,10 @@ class ASRBase(Base):
         if self.mode == 'recognize':
             self._create_thread(self._enqueue_recorded_files)
         if self.mode in ['recognize', 'full']:
-            recognition_task = self._continuous_recognizing_sp if self.sp else self._continuous_recognizing
+            if self.speaker_verification:
+                recognition_task = self._continuous_recognizing_sp if self.sp else self._continuous_recognizing
+            else:
+                recognition_task = self._continuous_recognizing
             self._create_thread(recognition_task)
             if self.tr:
                 self._create_thread(self._continuous_transcribing)
@@ -556,6 +594,19 @@ class ASRBase(Base):
         finally:
             self._recognition_handler(exception_occurred)
 
+    def _resolve_group_speaker_id(self):
+        """Prefer the selected session group id for group-level ASR attribution."""
+        if self.asr_scope != "group" or not self.session_id:
+            return
+        try:
+            session = self.mongo_client.get_session(self.session_id) or {}
+            group_id = str(session.get("group_id") or "").strip()
+            if group_id:
+                self.group_speaker_id = group_id
+        except Exception as e:
+            self.logger.warning(f"Could not resolve group id for ASR attribution: {e}")
+        self.logger.info(f"Group-level ASR speaker id: {self.group_speaker_id}")
+
     def _create_bucket_logger(self):
         """Create a logger for a bucket."""
         self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
@@ -572,6 +623,9 @@ class ASRBase(Base):
         The snapshot is stored in the runtime directory under the bucket folder.
         """
         if not self.session_id:
+            return
+        if not self.speaker_verification or not self.selected_speakers:
+            self.logger.info("Skipping speaker profile snapshot because speaker verification is disabled.")
             return
 
         snapshot_dir = os.path.join(self.runtime_dir, self.session_id, f'{self.base_type}_{self.id}', 'profiles')
@@ -759,7 +813,11 @@ class ASRBase(Base):
                 duration = self.recognize_duration
                 similarity = 0
 
-                if speaker == 'unknown':  # voice detected
+                if speaker == 'unknown' and not self.speaker_verification:
+                    speaker = self.group_speaker_id
+                    similarity = 1.0
+                    duration = calculate_audio_duration(segment_audio_path)
+                elif speaker == 'unknown':  # voice detected
                     normalize_decibel(segment_audio_path, rms_level=-20)
                     name, similarity = self.audio_recognizer.recognize(segment_audio_path,
                                                                        update_threshold=self.update_threshold)
@@ -922,7 +980,7 @@ class ASRBase(Base):
         Raises:
             TranscribingError: If an error occurs during the transcription process.
         """
-        frame_rate = 8000 if self.sp else 16000
+        frame_rate = 8000 if self.sp and self.speaker_verification else 16000
         while not self.stop_event.is_set():
             try:
                 frames, speaker, chunk_start_time, chunk_end_time = self.transcription_queue.get(timeout=2)
@@ -949,7 +1007,7 @@ class ASRBase(Base):
             separate_frames (Optional): Speech separated frames from the current segment.
         """
         frames = separate_frames if separate_frames else origin_frames
-        fr = 8000 if self.sp else 16000
+        fr = 8000 if self.sp and self.speaker_verification else 16000
 
         if not self.last_speaker:
             self.speaker_frames_dict[speaker] = (segment_start_time, frames)
@@ -963,7 +1021,7 @@ class ASRBase(Base):
                 chunk_end_time = segment_start_time
 
                 # perform half-scaled recognition on speaker turn border if hsr is enabled
-                if chunk_frames and self.hsr:
+                if chunk_frames and self.hsr and self.speaker_verification:
                     self.logger.info(
                         f"Performing half-scaled recognition on speaker turn border for {self.last_speaker} and {speaker}")
                     left_temp_path = os.path.join(self.audio_dir, 'temp', f'{self.base_type}_{self.id}_left_temp.wav')
@@ -1077,7 +1135,7 @@ class ASRBase(Base):
         if not self.speaker_frames_dict or not self.last_speaker:
             return
             
-        fr = 8000 if self.sp else 16000
+        fr = 8000 if self.sp and self.speaker_verification else 16000
         
         # process each remaining speaker's audio
         for speaker, (chunk_start_time, chunk_frames) in self.speaker_frames_dict.items():

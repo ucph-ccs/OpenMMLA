@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -25,6 +26,7 @@ from openmmla.tui.schema.definitions import (
 from openmmla.tui.ssh import (
     load_ssh_profiles, get_profile_by_name, ssh_run_sync,
     scp_file_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
+    wrap_local, wrap_remote,
 )
 from openmmla.tui.widgets.command_session import CommandSession
 from openmmla.tui.widgets.config_form import ConfigForm
@@ -42,11 +44,138 @@ _SVC_PIPELINE_NAMES: dict[str, str] = {
 
 _STREAM_PIPELINES = {"ASR Base", "IPS Base", "VFA Base"}
 
+_MLLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+_MLLM_PORT = 8010
+_MLLM_MAX_MODEL_LEN = 8192
+_MLLM_IMAGE_LIMIT = '{"image":4}'
+_MLLM_GPU_MEMORY_UTILIZATION = "0.80"
+_MLLM_API_KEY = "EMPTY"
+_MLLM_CONFIG_REL_PATH = os.path.join("config", "mllm_server.yml")
+
+_MLLM_FIELDS = [
+    LoaderFieldDef(
+        path="server.model",
+        field_type="str",
+        default=_MLLM_MODEL,
+        description="Hugging Face model id for vLLM serve",
+        required=True,
+        section="server",
+    ),
+    LoaderFieldDef(
+        path="server.port",
+        field_type="int",
+        default=_MLLM_PORT,
+        description="OpenAI-compatible API port",
+        required=True,
+        section="server",
+    ),
+    LoaderFieldDef(
+        path="server.host",
+        field_type="str",
+        default="0.0.0.0",
+        description="Bind host for vLLM",
+        required=True,
+        section="server",
+    ),
+    LoaderFieldDef(
+        path="server.dtype",
+        field_type="str",
+        default="auto",
+        description="vLLM dtype argument",
+        required=True,
+        section="server",
+    ),
+    LoaderFieldDef(
+        path="server.max_model_len",
+        field_type="int",
+        default=_MLLM_MAX_MODEL_LEN,
+        description="Maximum model context length",
+        required=True,
+        section="server",
+    ),
+    LoaderFieldDef(
+        path="server.limit_mm_per_prompt",
+        field_type="str",
+        default=_MLLM_IMAGE_LIMIT,
+        description='vLLM multimodal limit JSON, e.g. {"image":4}',
+        required=True,
+        section="server",
+    ),
+    LoaderFieldDef(
+        path="server.gpu_memory_utilization",
+        field_type="float",
+        default=float(_MLLM_GPU_MEMORY_UTILIZATION),
+        description="GPU memory utilization fraction",
+        required=True,
+        section="server",
+    ),
+    LoaderFieldDef(
+        path="server.api_key",
+        field_type="str",
+        default=_MLLM_API_KEY,
+        description="OpenAI-compatible API key",
+        required=True,
+        section="server",
+    ),
+]
+
 _STREAM_FIELDS_TEMPLATE = [
     ("target", "str", "", "rtmp://<host>/<app>/<stream> or udp://<host>:<port>", False),
     ("ssh_profile", "str", "", "SSH profile for remote stream management", True),
     ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
 ]
+
+
+def _mllm_config_path(root: str) -> str:
+    return os.path.join(root, _MLLM_CONFIG_REL_PATH)
+
+
+def _mllm_form_values(root: str) -> dict:
+    existing = load_existing_config(_mllm_config_path(root))
+    values = {}
+    for field in _MLLM_FIELDS:
+        existing_value = get_nested_value(existing, field.path)
+        values[field.path] = field.default if existing_value is None else existing_value
+    return values
+
+
+def _coerce_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value, default: float) -> float:
+    try:
+        parsed = float(value)
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _quote_remote_path(path: str) -> str:
+    if path.startswith("~"):
+        return path
+    return shlex.quote(path)
+
+
+def _mllm_config(root: str, values: dict | None = None) -> dict:
+    raw = values or _mllm_form_values(root)
+    return {
+        "model": str(raw.get("server.model") or _MLLM_MODEL),
+        "port": _coerce_int(raw.get("server.port"), _MLLM_PORT),
+        "host": str(raw.get("server.host") or "0.0.0.0"),
+        "dtype": str(raw.get("server.dtype") or "auto"),
+        "max_model_len": _coerce_int(raw.get("server.max_model_len"), _MLLM_MAX_MODEL_LEN),
+        "limit_mm_per_prompt": str(raw.get("server.limit_mm_per_prompt") or _MLLM_IMAGE_LIMIT),
+        "gpu_memory_utilization": _coerce_float(
+            raw.get("server.gpu_memory_utilization"),
+            float(_MLLM_GPU_MEMORY_UTILIZATION),
+        ),
+        "api_key": str(raw.get("server.api_key") or _MLLM_API_KEY),
+    }
 
 
 def _make_stream_fields(stream_name: str) -> list[LoaderFieldDef]:
@@ -80,7 +209,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         launch_type="bash",
         description="Real-time audio analysis base stations and synchronizer",
         params=[
-            ParamDef("-nb", "Num Bases", "int", 3),
+            ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
             ParamDef("-s", "Store Audio", "bool", True),
             ParamDef("-vad", "VAD", "bool", True),
@@ -146,7 +275,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
     services.append(ServiceDef(
         name="ASR Server",
         category="ASR",
-        conda_env="asr-server",
+        conda_env="asr-server-nemo",
         config_dir=os.path.join(root, "pipelines", "asr-server"),
         launch_type="tmux",
         description="ASR inference services (inferer, resampler, enhancer, transcriber, ...)",
@@ -159,6 +288,19 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         config_dir=os.path.join(root, "pipelines", "vfa-server"),
         launch_type="tmux",
         description="VFA inference services (VLLM frame analyzer, ...)",
+    ))
+
+    mllm_config = _mllm_config(root)
+    services.append(ServiceDef(
+        name="MLLM Server",
+        category="VFA",
+        conda_env="vfa-vllm",
+        config_dir=root,
+        launch_type="vllm",
+        description=(
+            "OpenAI-compatible vLLM server "
+            f"({mllm_config['model']} on :{mllm_config['port']})"
+        ),
     ))
 
     uber_dir = os.path.join(root, "pipelines", "uber-server")
@@ -316,6 +458,33 @@ def _check_conda_env(env_name: str) -> bool:
         return False
 
 
+def _service_session_name(svc: ServiceDef) -> str:
+    return svc.name.lower().replace(" ", "-")
+
+
+def _service_requires_config(svc: ServiceDef) -> bool:
+    return svc.launch_type not in ("make", "vllm")
+
+
+def _service_python_hint(svc: ServiceDef) -> str:
+    return "3.12" if svc.conda_env == "vfa-vllm" else "3.10"
+
+
+def _vllm_serve_command(config: dict | None = None) -> str:
+    cfg = config or _mllm_config(_find_project_root())
+    args = [
+        "vllm", "serve", cfg["model"],
+        "--host", cfg["host"],
+        "--port", str(cfg["port"]),
+        "--dtype", cfg["dtype"],
+        "--max-model-len", str(cfg["max_model_len"]),
+        "--limit-mm-per-prompt", cfg["limit_mm_per_prompt"],
+        "--gpu-memory-utilization", str(cfg["gpu_memory_utilization"]),
+        "--api-key", cfg["api_key"],
+    ]
+    return " ".join(shlex.quote(arg) for arg in args)
+
+
 class ServicePanel(Widget):
 
     DEFAULT_CSS = """
@@ -448,6 +617,13 @@ class ServicePanel(Widget):
         self._build_tree()
 
     def on_show(self) -> None:
+        self._refresh_target_options()
+
+    def on_ssh_form_profiles_changed(self, event: SSHForm.ProfilesChanged) -> None:
+        event.stop()
+        self._refresh_target_options()
+
+    def _refresh_target_options(self) -> None:
         self._ssh_profile_names = [p.name for p in load_ssh_profiles()]
         try:
             sel = self.query_one("#svc-target-select", Select)
@@ -458,6 +634,9 @@ class ServicePanel(Widget):
             sel.set_options(options)
             if any(v == current for _, v in options):
                 sel.value = current
+            else:
+                sel.value = "local"
+                self.query_one("#svc-cmd-session", CommandSession).set_target("local")
         except Exception:
             pass
 
@@ -479,6 +658,17 @@ class ServicePanel(Widget):
                 val = "local"
             cmd = self.query_one("#svc-cmd-session", CommandSession)
             cmd.set_target(str(val))
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if event.tabbed_content.id != "svc-sub-tabs":
+            return
+        self._set_command_session_visible(event.pane.id != "svc-tab-config")
+
+    def _set_command_session_visible(self, visible: bool) -> None:
+        try:
+            self.query_one("#svc-cmd-session", CommandSession).display = visible
+        except Exception:
+            pass
 
     def _pipeline_for_service(self, svc_name: str) -> PipelineDef | None:
         """find the PipelineDef associated with a service, if any."""
@@ -553,6 +743,7 @@ class ServicePanel(Widget):
         self._config_container = None
 
         if node_str.startswith("__shared__"):
+            self._set_command_session_visible(False)
             section_name = node_str.replace("__shared__", "")
             scroll = VerticalScroll(classes="svc-config-scroll")
             await content_area.mount(scroll)
@@ -561,14 +752,17 @@ class ServicePanel(Widget):
             return
 
         if node_str == "__experiments__":
+            self._set_command_session_visible(False)
             await content_area.mount(ExperimentForm())
             return
 
         if node_str == "__tasks__":
+            self._set_command_session_visible(False)
             await content_area.mount(TaskForm())
             return
 
         if node_str == "__ssh_profiles__":
+            self._set_command_session_visible(False)
             scroll = VerticalScroll(classes="svc-config-scroll")
             await content_area.mount(scroll)
             await scroll.mount(SSHForm())
@@ -577,6 +771,7 @@ class ServicePanel(Widget):
         svc = self._svc_map.get(node_str)
         if svc is None:
             return
+        self._set_command_session_visible(True)
 
         pipeline = self._pipeline_for_service(svc.name)
         is_running = self._svc_states.get(svc.name, False)
@@ -608,6 +803,24 @@ class ServicePanel(Widget):
                 await tabs.add_pane(stream_pane)
                 panel = StreamPanel(streams, config_path=pipeline.config_path)
                 await stream_scroll.mount(panel)
+        elif svc.launch_type == "vllm":
+            tabs = TabbedContent(id="svc-sub-tabs")
+            await content_area.mount(tabs)
+
+            launch_scroll = VerticalScroll(classes="svc-launch-scroll")
+            card = ServiceCard(
+                svc,
+                is_running=is_running,
+            )
+            launch_pane = TabPane("Launch", launch_scroll, id="svc-tab-launch")
+            await tabs.add_pane(launch_pane)
+            await launch_scroll.mount(card)
+
+            config_scroll = VerticalScroll(classes="svc-config-scroll")
+            config_pane = TabPane("Config", config_scroll, id="svc-tab-config")
+            await tabs.add_pane(config_pane)
+            self._config_container = config_scroll
+            self._show_mllm_form(config_scroll)
         else:
             scroll = VerticalScroll(classes="svc-launch-scroll")
             await content_area.mount(scroll)
@@ -710,11 +923,25 @@ class ServicePanel(Widget):
         container.mount(form)
         self._current_form = form
 
+    def _show_mllm_form(self, container: VerticalScroll) -> None:
+        values = _mllm_form_values(self._root)
+        form = ConfigForm("MLLM Server", _MLLM_FIELDS, values)
+        container.mount(form)
+        self._current_form = form
+
     def on_config_form_saved(self, event: ConfigForm.Saved) -> None:
         if event.pipeline_name.startswith("shared:"):
             for path, val in event.values.items():
                 self._shared_values[path] = val
             self._show_status("Shared defaults updated")
+            return
+
+        if event.pipeline_name == "MLLM Server":
+            save_config(_mllm_config_path(self._root), _MLLM_FIELDS, event.values)
+            self._services = _build_service_registry(self._root)
+            self._svc_map = {s.name: s for s in self._services}
+            self._show_status(f"Saved to {_mllm_config_path(self._root)}")
+            self._build_tree()
             return
 
         pipeline = self._pipeline_map.get(event.pipeline_name)
@@ -726,8 +953,17 @@ class ServicePanel(Widget):
         save_config(pipeline.config_path, all_fields, event.values)
 
         self._show_status(f"Saved to {pipeline.config_path}")
+        self._refresh_stream_panels(pipeline)
         self._show_sync_bar(pipeline)
         self._build_tree()
+
+    def _refresh_stream_panels(self, pipeline: PipelineDef) -> None:
+        """refresh stream tabs after a pipeline config save."""
+        if pipeline.name not in _STREAM_PIPELINES:
+            return
+        streams = load_streams(pipeline.config_path)
+        for panel in self.query(StreamPanel):
+            panel.update_streams(streams)
 
     def _show_status(self, message: str) -> None:
         container = self._config_container
@@ -964,13 +1200,15 @@ class ServicePanel(Widget):
         self._log(event.text)
 
     def _detect_running(self, svc: ServiceDef) -> bool:
+        if svc.launch_type == "vllm":
+            return _check_port_in_use(_mllm_config(self._root)["port"])
         if svc.launch_type == "tmux":
-            session_name = svc.name.lower().replace(" ", "-")
+            session_name = _service_session_name(svc)
             if _check_tmux_session(session_name):
                 return True
             if "ASR" in svc.name:
                 return _check_tmux_session("asr-services")
-            if "VFA" in svc.name:
+            if svc.name == "VFA Server":
                 return _check_tmux_session("vfa-services")
         elif svc.launch_type == "make":
             target = _make_target_for(svc.name)
@@ -988,7 +1226,7 @@ class ServicePanel(Widget):
         target = self._get_panel_target()
         is_remote = target != "local"
 
-        if not is_remote and svc.launch_type != "make" and not _check_config_exists(svc.config_dir):
+        if not is_remote and _service_requires_config(svc) and not _check_config_exists(svc.config_dir):
             self._log(f"[yellow]WARNING: config.yml not found in {svc.config_dir}[/yellow]")
             self._log("[yellow]Please configure this pipeline first.[/yellow]")
             return
@@ -997,7 +1235,10 @@ class ServicePanel(Widget):
             has_conda = shutil.which("conda") is not None
             if has_conda and not _check_conda_env(svc.conda_env):
                 self._log(f"[red]conda env '{svc.conda_env}' not found. Aborting launch.[/red]")
-                self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
+                self._log(
+                    f"[yellow]Create it with: conda create -n {svc.conda_env} "
+                    f"python={_service_python_hint(svc)}[/yellow]"
+                )
                 return
         elif not is_remote and svc.launch_type == "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None
@@ -1061,8 +1302,10 @@ class ServicePanel(Widget):
                 return ssh_check_port(profile, port)
             return ssh_check_tmux(profile, target)
         elif svc.launch_type == "tmux":
-            session_name = svc.name.lower().replace(" ", "-")
+            session_name = _service_session_name(svc)
             return ssh_check_tmux(profile, session_name)
+        elif svc.launch_type == "vllm":
+            return ssh_check_port(profile, _mllm_config(self._root)["port"])
         return False
 
     def on_service_card_view_logs_requested(self, event: ServiceCard.ViewLogsRequested) -> None:
@@ -1078,7 +1321,7 @@ class ServicePanel(Widget):
         else:
             is_running = self._detect_running(svc)
 
-        if not is_running:
+        if not is_running and not self._logs_available(svc, target):
             self._log(f"[yellow]{svc.name} is not running ({target}). Start the service first.[/yellow]")
             return
 
@@ -1086,6 +1329,17 @@ class ServicePanel(Widget):
             self._view_logs_remote(svc)
         else:
             self._view_logs_local(svc)
+
+    def _logs_available(self, svc: ServiceDef, target: str) -> bool:
+        if svc.launch_type not in ("tmux", "vllm"):
+            return False
+        session_name = _service_session_name(svc)
+        if target == "local":
+            return _check_tmux_session(session_name)
+        profile = get_profile_by_name(target)
+        if profile is None:
+            return False
+        return ssh_check_tmux(profile, session_name)
 
     def _view_logs_local(self, svc: ServiceDef) -> None:
         if svc.launch_type == "make":
@@ -1098,8 +1352,8 @@ class ServicePanel(Widget):
                 self._log(f"[cyan]── End of logs ──[/cyan]")
                 return
             session_name = target
-        elif svc.launch_type == "tmux":
-            session_name = svc.name.lower().replace(" ", "-")
+        elif svc.launch_type in ("tmux", "vllm"):
+            session_name = _service_session_name(svc)
         else:
             self._log(f"[yellow]No logs available for {svc.name}[/yellow]")
             return
@@ -1125,8 +1379,8 @@ class ServicePanel(Widget):
                 self._cmd.run(cmd)
                 return
             session_name = target
-        elif svc.launch_type == "tmux":
-            session_name = svc.name.lower().replace(" ", "-")
+        elif svc.launch_type in ("tmux", "vllm"):
+            session_name = _service_session_name(svc)
         else:
             self._log(f"[yellow]No logs available for {svc.name}[/yellow]")
             return
@@ -1139,6 +1393,8 @@ class ServicePanel(Widget):
                 self._launch_bash(svc, params)
             elif svc.launch_type == "tmux":
                 self._launch_tmux_server(svc)
+            elif svc.launch_type == "vllm":
+                self._launch_vllm_server(svc)
             elif svc.launch_type == "make":
                 self._launch_make(svc)
         except Exception as e:
@@ -1151,10 +1407,13 @@ class ServicePanel(Widget):
 
         python_path = self._root
         conda_env = svc.conda_env
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        project_arg = f"-p {shlex.quote(self._root)}"
+        config_arg = f"-c {shlex.quote(config_path)}"
         preamble = (
-            f"export PYTHONPATH={python_path}/:$PYTHONPATH && "
+            f"export PYTHONPATH={shlex.quote(python_path)}/:$PYTHONPATH && "
             f"source $(conda info --base)/etc/profile.d/conda.sh && "
-            f"conda activate {conda_env}"
+            f"conda activate {shlex.quote(conda_env)}"
         )
 
         tab_cmds: list[tuple[str, str]] = []
@@ -1184,6 +1443,7 @@ class ServicePanel(Widget):
                 py_cmd = f"python3 {script_path}"
             else:
                 py_cmd = comp.script
+            py_cmd += f" {project_arg} {config_arg}"
             if flag_str:
                 py_cmd += f" {flag_str}"
 
@@ -1278,7 +1538,7 @@ class ServicePanel(Widget):
             self._log(f"[red]services.sh not found: {services_script}[/red]")
             return
 
-        session_name = svc.name.lower().replace(" ", "-")
+        session_name = _service_session_name(svc)
         subprocess.run(
             ["tmux", "kill-session", "-t", session_name],
             capture_output=True,
@@ -1289,6 +1549,23 @@ class ServicePanel(Widget):
             cwd=bash_dir,
         )
         self._log(f"[green]{svc.name} tmux session '{session_name}' started.[/green]")
+
+    def _launch_vllm_server(self, svc: ServiceDef) -> None:
+        session_name = _service_session_name(svc)
+        config = _mllm_config(self._root)
+        vllm_cmd = _vllm_serve_command(config)
+        run_cmd = f"cd {shlex.quote(self._root)} && {vllm_cmd}; exec bash"
+        wrapped_cmd = wrap_local(run_cmd, svc.conda_env)
+        subprocess.run(
+            ["tmux", "kill-session", "-t", session_name],
+            capture_output=True,
+        )
+        subprocess.Popen(
+            ["tmux", "new-session", "-d", "-s", session_name, wrapped_cmd],
+            cwd=self._root,
+        )
+        self._log(f"  Command: {vllm_cmd}")
+        self._log(f"[green]{svc.name} tmux session '{session_name}' started on port {config['port']}.[/green]")
 
     def _launch_make(self, svc: ServiceDef) -> None:
         target = _make_target_for(svc.name)
@@ -1313,8 +1590,8 @@ class ServicePanel(Widget):
 
     def _stop_service(self, svc: ServiceDef) -> None:
         try:
-            if svc.launch_type == "tmux":
-                session_name = svc.name.lower().replace(" ", "-")
+            if svc.launch_type in ("tmux", "vllm"):
+                session_name = _service_session_name(svc)
                 subprocess.run(["tmux", "send-keys", "-t", session_name, "C-c"], capture_output=True)
                 subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
                 self._log(f"[red]{svc.name} stopped.[/red]")
@@ -1397,7 +1674,7 @@ class ServicePanel(Widget):
             elif svc.launch_type == "tmux":
                 rel_dir = os.path.relpath(svc.config_dir, self._root)
                 remote_bash = f"{remote_root}/{rel_dir}/bash"
-                session_name = svc.name.lower().replace(" ", "-")
+                session_name = _service_session_name(svc)
                 cmd = (
                     f"tmux kill-session -t {session_name} 2>/dev/null; "
                     f"tmux new-session -d -s {session_name} "
@@ -1409,6 +1686,24 @@ class ServicePanel(Widget):
                     self._log(f"[green]{svc.name} tmux session started remotely.[/green]")
                 else:
                     self._log(f"[red]Remote tmux launch failed: {result.stderr.strip()}[/red]")
+
+            elif svc.launch_type == "vllm":
+                session_name = _service_session_name(svc)
+                config = _mllm_config(self._root)
+                vllm_cmd = _vllm_serve_command(config)
+                run_cmd = f"cd {_quote_remote_path(remote_root)} && {vllm_cmd}; exec bash"
+                wrapped_cmd = wrap_remote(run_cmd, svc.conda_env)
+                cmd = (
+                    f"tmux kill-session -t {session_name} 2>/dev/null; "
+                    f"tmux new-session -d -s {session_name} {shlex.quote(wrapped_cmd)}"
+                )
+                self._log(f"  Remote: {cmd}")
+                result = ssh_run_sync(profile, cmd, timeout=15.0)
+                if result.returncode == 0:
+                    self._log(f"  Command: {vllm_cmd}")
+                    self._log(f"[green]{svc.name} tmux session started remotely on port {config['port']}.[/green]")
+                else:
+                    self._log(f"[red]Remote MLLM launch failed: {result.stderr.strip()}[/red]")
 
             elif svc.launch_type == "make":
                 target = _make_target_for(svc.name)
@@ -1424,8 +1719,8 @@ class ServicePanel(Widget):
             return
         remote_root = profile.remote_project_path
         try:
-            if svc.launch_type == "tmux":
-                session_name = svc.name.lower().replace(" ", "-")
+            if svc.launch_type in ("tmux", "vllm"):
+                session_name = _service_session_name(svc)
                 cmd = (
                     f"tmux send-keys -t {session_name} C-c; "
                     f"tmux kill-session -t {session_name}"

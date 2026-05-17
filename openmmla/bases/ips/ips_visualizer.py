@@ -11,7 +11,7 @@ from numpy.linalg import norm
 
 from openmmla.bases.base import Base
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session
+from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .input import get_function_visualizer
 
@@ -74,6 +74,8 @@ class IPSVisualizer(Base):
                 self.logger.warning(
                     f"During running the visualizer, caught: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, returning to main menu.",
                     exc_info=True)
+                if not isinstance(e, KeyboardInterrupt):
+                    show_error_and_pause(e, "return to the IPS Visualizer menu")
 
     def _start_visualization(self):
         self.session_id = select_or_create_session(self.mongo_client)

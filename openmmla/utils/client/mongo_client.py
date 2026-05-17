@@ -3,8 +3,18 @@ import yaml
 from datetime import datetime, timezone
 from typing import Any
 
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import ConnectionFailure, DuplicateKeyError
+try:
+    from pymongo import MongoClient, ASCENDING
+    from pymongo.errors import ConnectionFailure, DuplicateKeyError
+except ModuleNotFoundError:
+    MongoClient = None
+    ASCENDING = 1
+
+    class ConnectionFailure(Exception):
+        """fallback when pymongo is unavailable during lightweight tests."""
+
+    class DuplicateKeyError(Exception):
+        """fallback when pymongo is unavailable during lightweight tests."""
 
 from openmmla.utils.constants import MONGODB_DEFAULT_DB
 
@@ -20,6 +30,8 @@ class MongoDBClientWrapper:
 
         self.url = mongo_config['url']
         self.db_name = mongo_config.get('db', MONGODB_DEFAULT_DB)
+        if MongoClient is None:
+            raise ModuleNotFoundError("pymongo is required to use MongoDBClientWrapper")
 
         try:
             self.client = MongoClient(self.url)
@@ -38,7 +50,7 @@ class MongoDBClientWrapper:
     # ---- session CRUD ----
 
     def create_session(self, session_id: str, experiment_id: str, group_id: str,
-                       participants: list[str] | None = None,
+                       participants: list[dict[str, str]] | None = None,
                        metadata: dict[str, Any] | None = None) -> bool:
         try:
             session_doc = {

@@ -41,4 +41,3 @@ semantic_mapping_rules:
     - status: "standing"
     - status: "static"
     - status: "moving"
-

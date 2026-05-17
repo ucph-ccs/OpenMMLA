@@ -10,7 +10,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session, get_number_of_bases
+from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
@@ -106,6 +106,8 @@ class VFASynchronizer(Synchronizer):
                 self.logger.warning(
                     f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
                     exc_info=True)
+                if not isinstance(e, KeyboardInterrupt):
+                    show_error_and_pause(e, "return to the VFA Synchronizer menu")
             finally:
                 self._clean_up()
 
@@ -125,7 +127,14 @@ class VFASynchronizer(Synchronizer):
         if session_doc:
             exp_id = session_doc.get("experiment_id", "")
             group_id = session_doc.get("group_id", "")
-            self.selected_participant_descriptions = get_participant_descriptions(exp_id, group_id)
+            session_participants = session_doc.get("participants", []) or []
+            self.selected_participant_descriptions = {
+                str(participant.get("tag_id")): participant.get("description")
+                for participant in session_participants
+                if isinstance(participant, dict) and participant.get("tag_id") is not None and participant.get("description")
+            }
+            if not self.selected_participant_descriptions:
+                self.selected_participant_descriptions = get_participant_descriptions(exp_id, group_id)
             if self.selected_participant_descriptions:
                 self.logger.info(f"Resolved participant descriptions for {exp_id}/{group_id}: {self.selected_participant_descriptions}")
             else:

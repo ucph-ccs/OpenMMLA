@@ -12,10 +12,10 @@ from pupil_apriltags import Detector
 from retinaface import RetinaFace
 
 from openmmla.services.server import Server
+from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze
 from openmmla.utils.video.image import encode_image_base64
-from zai import ZhipuAiClient
 
 class MultiAngleVLLMFrameAnalyzer(Server):
     """Multi-angle VLLM frame analyzer that processes multiple images captured simultaneously from different angles.
@@ -76,13 +76,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.vlm_base_url = backend_config.get('vlm_base_url', None)
         self.llm_base_url = backend_config.get('llm_base_url', None)
 
-        # Load action definitions from config
-        self.action_definitions_dict = analyzer_config['action_definitions']
+        schema = load_vfa_action_schema(analyzer_config, self.project_dir)
+        self.action_schema_name = schema.schema_name
+        self.action_schema_path = schema.schema_path
+        self.action_definitions_dict = schema.action_definitions
         self.action_definitions = '\n'.join(
             [f"'{key}': {value}" for key, value in self.action_definitions_dict.items()])
-        
-        # Load decision process from config
-        self.decision_process = analyzer_config.get('decision_process', '')
+        self.decision_process = schema.decision_process
 
         # Load VLM extra body from config
         self.vlm_extra_body = backend_config.get('VLMExtraBody', {})
@@ -101,6 +101,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"VLM Base URL: {self.vlm_base_url}")
         self.logger.info(f"LLM Base URL: {self.llm_base_url}")
         self.logger.info(f"End-to-End: {self.end_to_end}")
+        self.logger.info(f"Action Schema: {self.action_schema_name} ({self.action_schema_path})")
         self.logger.info(f"AprilTag Detection: {self.april_tag_enabled}")
         self.logger.info(f"Gaze Detection: {self.gaze_detect_enabled}")
 
@@ -178,6 +179,14 @@ class MultiAngleVLLMFrameAnalyzer(Server):
 
         # Setup VLM/LLM clients (required for analysis)
         if self.backend == 'zhipuai':
+            try:
+                from zai import ZhipuAiClient
+            except ImportError as e:
+                raise ImportError(
+                    "ZhipuAI backend requires the optional 'zai' package. "
+                    "Install it before using backend: zhipuai."
+                ) from e
+
             self.vlm_client = ZhipuAiClient(
                 api_key=self.api_key
             )

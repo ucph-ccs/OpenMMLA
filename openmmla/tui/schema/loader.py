@@ -49,6 +49,15 @@ class StreamDef:
     channels: int = 0
 
 
+def _clean_stream_optional(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text in ("", "Select.NULL", "None", "null"):
+        return ""
+    return text
+
+
 def load_streams(config_path: str) -> list[StreamDef]:
     """load stream definitions from a pipeline config.yml."""
     data = load_existing_config(config_path)
@@ -59,8 +68,8 @@ def load_streams(config_path: str) -> list[StreamDef]:
     for name, props in streams_data.items():
         if not isinstance(props, dict):
             continue
-        ssh_profile = props.get("ssh_profile", "")
-        device = props.get("device", "")
+        ssh_profile = _clean_stream_optional(props.get("ssh_profile", ""))
+        device = _clean_stream_optional(props.get("device", ""))
         target = props.get("target", "")
         if not target:
             continue

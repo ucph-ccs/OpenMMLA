@@ -113,7 +113,7 @@ class FieldRow(Widget):
 
         if isinstance(w, Select):
             val = w.value
-            if val is Select.BLANK or val is None:
+            if val is Select.BLANK or val is getattr(Select, "NULL", None) or val is None:
                 return self.field_def.default
             return str(val)
 

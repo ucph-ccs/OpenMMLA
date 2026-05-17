@@ -13,6 +13,7 @@ except ImportError:
 
 from openmmla.streams.resampling import resample_video, ResampleMethod
 from openmmla.utils.logger import get_logger
+from openmmla.utils.stream_registry import resolve_stream_by_target, resolve_rtmp_timestamp
 from openmmla.utils.threads import RaisingThread
 from .frame import VideoFrame
 from .stream_buffer import RingBuffer
@@ -49,6 +50,8 @@ class VideoStream(StreamReceiver):
         self.resolution = kwargs.get('resolution', (1920, 1080))
         self.fps = kwargs.get('fps', 30)
         self.resample_method = kwargs.get('resample_method', ResampleMethod.VIDEO_AVERAGE)
+        self.project_dir = kwargs.get('project_dir')
+        self.stream_registry_path = kwargs.get('stream_registry_path')
 
         # Source-specific configuration
         if self.source == 'opencv':
@@ -59,6 +62,16 @@ class VideoStream(StreamReceiver):
             self.format = kwargs.get('format', 'H264')
             self.rtmp_url = self.require_kwarg(kwargs, 'rtmp_url', "RTMP source requires a 'rtmp_url' parameter")
             self.stream = None
+            self._rtmp_registry_entry = resolve_stream_by_target(
+                self.rtmp_url,
+                project_dir=self.project_dir,
+                registry_path=self.stream_registry_path,
+            )
+            self._rtmp_stream_start_time = (
+                float(self._rtmp_registry_entry["stream_start_time"])
+                if self._rtmp_registry_entry
+                else None
+            )
         elif self.source == 'lsl':
             self.format = kwargs.get('format', 'raw')
             self.lsl_name = self.require_kwarg(kwargs, 'lsl_name', "LSL source requires a 'lsl_name'")
@@ -137,6 +150,17 @@ class VideoStream(StreamReceiver):
     def _initialize_opencv(self, max_retries: int = 3) -> None:
         """Initialize OpenCV video capture with configured parameters."""
         self._pts_offset = None
+        if self.source == 'rtmp':
+            self._rtmp_registry_entry = resolve_stream_by_target(
+                self.rtmp_url,
+                project_dir=self.project_dir,
+                registry_path=self.stream_registry_path,
+            )
+            self._rtmp_stream_start_time = (
+                float(self._rtmp_registry_entry["stream_start_time"])
+                if self._rtmp_registry_entry
+                else None
+            )
         video_seed = self.camera_index if self.source == 'opencv' else self.rtmp_url
         self.stream = cv2.VideoCapture(video_seed)
 
@@ -285,15 +309,11 @@ class VideoStream(StreamReceiver):
                     return None
                 if self.source == 'rtmp':
                     pts_ms = self.stream.get(cv2.CAP_PROP_POS_MSEC)
-                    if pts_ms > 0:
-                        if self._pts_offset is None:
-                            self._pts_offset = time.time() - pts_ms / 1000.0
-                            logger.info(f"RTMP PTS calibrated: offset={self._pts_offset:.3f}s")
-                        timestamp = pts_ms / 1000.0 + self._pts_offset
-                    else:
-                        timestamp = time.time()
+                    received_time = time.time()
+                    timestamp, timestamp_metadata = self._resolve_rtmp_timestamp(pts_ms, received_time)
                 else:
                     timestamp = time.time()
+                    timestamp_metadata = {"timestamp_source": "receiver_wallclock"}
             elif self.source == 'lsl':
                 sample, timestamp = self.lsl_inlet.pull_sample(timeout=1.0)
                 if not sample:
@@ -321,18 +341,35 @@ class VideoStream(StreamReceiver):
                     raise ValueError(f"Unsupported format for LSL source: {self.format}")
 
                 timestamp = (timestamp + self.lsl_offset) if timestamp else time.time()
+                timestamp_metadata = {"timestamp_source": "lsl"}
             else:
                 raise ValueError(f"Unsupported source type: {self.source}")
 
+            metadata = dict(self._frame_metadata)
+            metadata.update(timestamp_metadata)
             return VideoFrame(
                 data=frame,
                 timestamp=timestamp,
-                metadata=self._frame_metadata
+                metadata=metadata
             )
 
         except Exception as e:
             logger.error(f"Error reading frame: {e}", exc_info=True)
             return None
+
+    def _resolve_rtmp_timestamp(self, pts_ms: float, received_time: float) -> tuple[float, dict]:
+        """resolve RTMP frame timestamp from stream-start metadata and media PTS."""
+        previous_offset = self._pts_offset
+        timestamp, metadata, self._pts_offset = resolve_rtmp_timestamp(
+            pts_ms,
+            received_time,
+            stream_start_time=self._rtmp_stream_start_time,
+            receiver_pts_offset=self._pts_offset,
+            stream_name=(self._rtmp_registry_entry or {}).get("name", ""),
+        )
+        if previous_offset is None and self._pts_offset is not None and metadata.get("timestamp_source") == "rtmp_receiver_calibrated_pts":
+            logger.info(f"RTMP PTS calibrated: offset={self._pts_offset:.3f}s")
+        return timestamp, metadata
 
     def read(self, duration: float = None, target_fps: float = None, timeout: float = 10.0,
              latest: bool = False, start_time: float = 0.0) -> VideoFrame | list[VideoFrame] | None:
@@ -428,11 +465,12 @@ class VideoStream(StreamReceiver):
         base_timestamp = frames[0].timestamp
 
         for i, frame_data in enumerate(resampled_arrays):
-            metadata = {
+            metadata = dict(frames[0].metadata)
+            metadata.update({
                 'resolution': self.resolution,
                 'fps': target_fps,
                 'format': self.format
-            }
+            })
             resampled_frames.append(VideoFrame(
                 data=frame_data,
                 timestamp=base_timestamp + (i * time_step),

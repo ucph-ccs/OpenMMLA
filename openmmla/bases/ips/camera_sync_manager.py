@@ -12,6 +12,7 @@ from matplotlib.animation import FuncAnimation
 
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import MQTTClientWrapper
+from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .input import get_function_sync_manager
 from .transform import (
@@ -99,6 +100,8 @@ class CameraSyncManager(Synchronizer):
                 func_map.get(select_fun, lambda: print("Invalid option."))()
             except (Exception, KeyboardInterrupt) as e:
                 self.logger.warning("%s, Come back to the main menu.", e, exc_info=True)
+                if not isinstance(e, KeyboardInterrupt):
+                    show_error_and_pause(e, "return to the Camera Sync Manager menu")
 
     def _set_camera_id(self):
         """Set camera IDs through user input."""

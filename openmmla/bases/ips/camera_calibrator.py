@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from openmmla.bases.base import Base
+from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from .input import flush_input, get_function_calibrator
@@ -59,6 +60,8 @@ class CameraCalibrator(Base):
                 func_map.get(select_fun, lambda: print("Invalid option."))()
             except (Exception, KeyboardInterrupt) as e:
                 self.logger.warning("%s, Come back to the main menu.", e, exc_info=True)
+                if not isinstance(e, KeyboardInterrupt):
+                    show_error_and_pause(e, "return to the Camera Calibrator menu")
 
     def _capture_images(self):
         """Capture calibration images."""

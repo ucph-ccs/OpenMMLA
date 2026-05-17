@@ -1,0 +1,31 @@
+default_schema: collaboration_v1
+
+schemas:
+  collaboration_v1:
+    labels:
+      Communicating: |
+        (1) GAZE is directed toward a work-related element (software, hardware, documents) AND hands are clearly pointing at that element.
+        OR
+        (2) GAZE is directed toward another person AND hands are visibly gesturing OR pointing.
+      Observing: |
+        (1) GAZE is directed at a work-related element OR at another person.
+        AND
+        (2) HANDS are either inactive OR hovering OR actively contacting something other than the GAZE target.
+      Manipulating: |
+        (1) GAZE is directed at a work-related element.
+        AND
+        (2) At least one HAND is clearly contacting the same GAZE target.
+      Idle-OffTask: |
+        (1) GAZE is directed toward non-task items (personal phone, snack, etc.) OR outside the frame.
+        AND
+        (2) HANDS may be in any state.
+      Unclear: |
+        (1) GAZE OR HANDS activity cannot be confidently determined
+            due to occlusion, blurriness, cropped, OR insufficient visibility.
+    decision_process: |
+      Follow this hierarchical decision process in order:
+      1. If GAZE is directed at non-task items OR outside the frame: -> Idle-OffTask
+      2. Else if GAZE OR HANDS activity cannot be confidently determined: -> Unclear
+      3. Else if (GAZE is at another person AND HANDS are gesturing OR pointing) OR (GAZE is at work element AND HANDS are pointing at that element): -> Communicating
+      4. Else if GAZE is at a work-related element AND >=1 hand contacting that same element: -> Manipulating
+      5. Else (GAZE is at work-related elements OR people but HANDS are inactive OR hovering OR actively contacting something other than the GAZE target): -> Observing

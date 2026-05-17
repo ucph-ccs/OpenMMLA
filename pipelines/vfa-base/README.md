@@ -37,7 +37,9 @@ VFA requires backend services to run large language models (LLMs) and vision-lan
 #### Local Backend Options
 - **vLLM**: Efficient inference for LLMs with optimized attention algorithms
   - Installation and setup guide: [vLLM Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
-  - Example: `pip install vllm` and run `vllm serve Qwen/Qwen2.5-1.5B-Instruct`
+  - For local VFA inference, install the OpenMMLA wrapper and local vLLM runtime extras: `pip install -e ".[vfa-server,vfa-vllm-runtime]"`
+  - Example: `vllm serve Qwen/Qwen3-VL-8B-Instruct --limit-mm-per-prompt '{"image":4}'`
+  - From the TUI Launcher, use **VFA → MLLM Server** to run the local vLLM model service and **VFA → VFA Server** to run the OpenMMLA wrapper.
   
 - **Ollama**: Simplified local deployment of open-source models
   - Installation: [Ollama Download](https://ollama.com/download)

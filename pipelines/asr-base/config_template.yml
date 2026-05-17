@@ -1,6 +1,12 @@
 # ASR-BASE config_template.yml
 # Template for configuring audio, stream, database and server endpoints for the system
 
+# realtime analytics and ASR attribution settings
+Analytics:
+  asr_scope: participant             # participant = use speaker ids; group = attribute ASR transcript to the current session group
+  speaker_verification: auto         # auto = participant:true, group:false; set true/false to override
+  group_id: ""                       # optional fallback speaker id for group ASR when no session group_id is available
+
 # base settings for your device
 Base:
   <Your_Device_Name>:

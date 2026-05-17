@@ -8,5 +8,13 @@ active_experiments:
   status: active
   task_type: lego_building
 assignments:
-  exp_01: {}
+  exp_01:
+    alice:
+      group_id: group_01
+      tag_id: '1'
+      description: brown hair and white shirt
+    eric:
+      group_id: group_01
+      tag_id: '2'
+      description: black hair, wear glasses, black sweater, male
   exp_02: {}

@@ -5,3 +5,17 @@
   password: '12341234'
   key_path: ''
   remote_project_path: ~/OpenMMLA
+- name: mac-01
+  host: mac-01
+  user: admin
+  port: 22
+  password: '12341234'
+  key_path: ''
+  remote_project_path: ~/OpenMMLA
+- name: server-01
+  host: server-01
+  user: admin
+  port: 22
+  password: '12341234'
+  key_path: ''
+  remote_project_path: ~/OpenMMLA

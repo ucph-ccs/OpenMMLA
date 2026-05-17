@@ -85,6 +85,32 @@ def get_participant_descriptions(exp_id: str, group_id: str, data: dict | None =
     return descriptions
 
 
+def get_participant_aliases(exp_id: str, group_id: str, data: dict | None = None) -> dict[str, dict[str, str]]:
+    """build canonical participant-to-tag mappings for a session group.
+
+    The participant name is the display/canonical id. The tag_id is the shared runtime id for ASR, IPS, and VFA.
+    """
+    if data is None:
+        data = load_experiments()
+    assignments = data.get("assignments", {}).get(exp_id, {})
+    aliases: dict[str, dict[str, str]] = {}
+    for participant_id, person_info in assignments.items():
+        if person_info.get("group_id") != group_id:
+            continue
+        tag_id = person_info.get("tag_id")
+        normalized_tag = str(tag_id).strip() if tag_id is not None else ""
+        participant_name = str(participant_id).strip()
+        if not participant_name:
+            continue
+        description = person_info.get("description", "")
+        aliases[participant_name] = {
+            "participant_id": participant_name,
+            "tag_id": normalized_tag or participant_name,
+            "description": str(description).strip() if description is not None else "",
+        }
+    return aliases
+
+
 # ── tasks ────────────────────────────────────────────────────────
 
 

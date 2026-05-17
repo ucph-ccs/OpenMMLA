@@ -1,13 +1,14 @@
 import json
 import os
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-import pandas as pd
-from openmmla.utils.client import InfluxDBClientWrapper
 from openmmla.utils.constants import INFLUXDB_MEASUREMENT, EVENT_TYPE_IPS_TRANSLATION
 
+if TYPE_CHECKING:
+    from openmmla.utils.client import InfluxDBClientWrapper
 
-def fetch_and_process_data(session_id: str, event_type: str, influx_client: InfluxDBClientWrapper) -> list[dict]:
+
+def fetch_and_process_data(session_id: str, event_type: str, influx_client: "InfluxDBClientWrapper") -> list[dict]:
     """Query InfluxDB for specified data and sort by window_start_time."""
     events = influx_client.query_events(session_id, event_type)
     data = [deep_parse_json(e) for e in events]
@@ -15,13 +16,13 @@ def fetch_and_process_data(session_id: str, event_type: str, influx_client: Infl
     return data
 
 
-def fetch_latest_entry(session_id: str, event_type: str, influx_client: InfluxDBClientWrapper) -> dict | None:
+def fetch_latest_entry(session_id: str, event_type: str, influx_client: "InfluxDBClientWrapper") -> dict | None:
     """Retrieve the most recent entry from InfluxDB."""
     event = influx_client.query_latest_event(session_id, event_type)
     return deep_parse_json(event) if event else None
 
 
-def get_node_positions(session_id: str, influx_client: InfluxDBClientWrapper, timestamp: int, dimension: str = '2d') -> dict:
+def get_node_positions(session_id: str, influx_client: "InfluxDBClientWrapper", timestamp: int, dimension: str = '2d') -> dict:
     """Retrieve badge positions from InfluxDB filtered by window_start_time."""
     from openmmla.utils.client.influx_client import _to_flux_time
     from datetime import datetime, timedelta, timezone
@@ -73,9 +74,11 @@ def save_to_json_file(session_id: str, data: Any, suffix: str, log_dir: str) -> 
     return json_path
 
 
-def convert_json_to_dataframe(json_data: Any, json_columns: list) -> pd.DataFrame:
+def convert_json_to_dataframe(json_data: Any, json_columns: list):
     """Converts JSON data into a pandas DataFrame and transforms JSON-formatted string columns into Python
     dictionaries."""
+    import pandas as pd
+
     df = pd.DataFrame(json_data)[json_columns]
 
     def try_json_loads(x: Any) -> Any:
