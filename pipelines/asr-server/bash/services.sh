@@ -3,9 +3,12 @@
 BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PYHON_PATH="$BASH_DIR/../../.."
 CONFIG_FILE="$BASH_DIR/../config.yml"
+PROJECT_DIR="$BASH_DIR/.."
 
 CONDA_ENV="${OPENMMLA_CONDA_ENV:-asr-server-nemo}"
+export CONDA_ENV
 CONDA_INIT='if command -v conda >/dev/null 2>&1; then _base="$(conda info --base 2>/dev/null)" && [ -f "$_base/etc/profile.d/conda.sh" ] && source "$_base/etc/profile.d/conda.sh"; fi; if ! command -v conda >/dev/null 2>&1; then for _p in "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/mambaforge" /home/*/miniforge3 /home/*/miniconda3 /opt/conda; do [ -f "$_p/etc/profile.d/conda.sh" ] && source "$_p/etc/profile.d/conda.sh" && break; done; fi; conda activate "$CONDA_ENV"'
+SERVICE_ENV="OPENMMLA_PROJECT_DIR=$(printf '%q' "$PROJECT_DIR") OPENMMLA_CONFIG_PATH=$(printf '%q' "$CONFIG_FILE")"
 
 # First ensure conda environment is activated
 echo "Activating conda environment '$CONDA_ENV'..."
@@ -198,9 +201,9 @@ for i in "${!services[@]}"; do
 
     # If we have a directory, cd to it first
     if [ -n "$app_dir" ]; then
-        cmd="$CONDA_INIT && cd \"$app_dir\" && gunicorn -k gevent -w $worker -b 0.0.0.0:$port $app:app"
+        cmd="$CONDA_INIT && cd \"$app_dir\" && $SERVICE_ENV gunicorn -k gevent -w $worker -b 0.0.0.0:$port $app:app"
     else
-        cmd="$CONDA_INIT && gunicorn -k gevent -w $worker -b 0.0.0.0:$port $app:app"
+        cmd="$CONDA_INIT && $SERVICE_ENV gunicorn -k gevent -w $worker -b 0.0.0.0:$port $app:app"
     fi
     
     commands+=("$cmd")

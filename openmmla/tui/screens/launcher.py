@@ -426,6 +426,55 @@ def _check_config_exists(config_dir: str) -> bool:
     return os.path.isfile(os.path.join(config_dir, "config.yml"))
 
 
+def _tmux_component_session_name(service_name: str) -> str:
+    raw = service_name.lower().replace(" ", "_")
+    return "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
+
+
+def _stack_service_specs(config_dir: str) -> list[dict[str, object]]:
+    config = load_existing_config(os.path.join(config_dir, "config.yml"))
+    specs: list[dict[str, object]] = []
+    if not isinstance(config, dict):
+        return specs
+    for service_name, service_config in config.items():
+        if not isinstance(service_config, dict) or "port" not in service_config:
+            continue
+        port = _coerce_int(service_config.get("port"), 0)
+        if port <= 0:
+            continue
+        specs.append({
+            "name": str(service_name),
+            "session": _tmux_component_session_name(str(service_name)),
+            "port": port,
+        })
+    return specs
+
+
+def _is_stack_tmux_service(svc: ServiceDef) -> bool:
+    return svc.launch_type == "tmux" and svc.name in ("ASR Server", "VFA Server")
+
+
+def _stack_legacy_session(svc: ServiceDef) -> str | None:
+    if svc.name == "ASR Server":
+        return "asr-services"
+    if svc.name == "VFA Server":
+        return "vfa-services"
+    return None
+
+
+def _stack_sessions(svc: ServiceDef) -> list[str]:
+    sessions = [_service_session_name(svc)]
+    legacy = _stack_legacy_session(svc)
+    if legacy:
+        sessions.append(legacy)
+    sessions.extend(str(spec["session"]) for spec in _stack_service_specs(svc.config_dir))
+    return list(dict.fromkeys(sessions))
+
+
+def _stack_ports(svc: ServiceDef) -> list[int]:
+    return [int(spec["port"]) for spec in _stack_service_specs(svc.config_dir)]
+
+
 _SYSTEM_SVC_PORTS: dict[str, int] = {
     "influxdb": 8086,
     "mongodb": 27017,
@@ -736,7 +785,11 @@ class ServicePanel(Widget):
 
     def _svc_markers(self, svc: ServiceDef) -> str:
         """build status marker string for a service tree leaf."""
-        is_running = self._detect_running(svc)
+        target = self._get_panel_target()
+        if target == "local":
+            is_running = self._detect_running(svc)
+        else:
+            is_running = self._detect_running_remote(svc, target)
         self._svc_states[svc.name] = is_running
         pipeline = self._pipeline_for_service(svc.name)
         markers = ""
@@ -1236,6 +1289,11 @@ class ServicePanel(Widget):
         if svc.launch_type == "vllm":
             return _check_port_in_use(_mllm_config(self._root)["port"])
         if svc.launch_type == "tmux":
+            if _is_stack_tmux_service(svc):
+                ports = _stack_ports(svc)
+                if ports:
+                    return all(_check_port_in_use(port) for port in ports)
+                return any(_check_tmux_session(session) for session in _stack_sessions(svc))
             session_name = _service_session_name(svc)
             if _check_tmux_session(session_name):
                 return True
@@ -1288,7 +1346,7 @@ class ServicePanel(Widget):
             self._launch_remote(svc, event.params, target)
         else:
             self._launch_service(svc, event.params)
-        self.set_timer(2.0, self._build_tree)
+        self.set_timer(3.0, self._refresh_visible_statuses)
 
     def on_service_card_stop_requested(self, event: ServiceCard.StopRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
@@ -1304,7 +1362,7 @@ class ServicePanel(Widget):
             self._stop_remote(svc, target)
         else:
             self._stop_service(svc)
-        self.set_timer(2.0, self._build_tree)
+        self.set_timer(2.0, self._refresh_visible_statuses)
 
     def on_service_card_refresh_requested(self, event: ServiceCard.RefreshRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
@@ -1323,6 +1381,19 @@ class ServicePanel(Widget):
         status = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
         self._log(f"{svc.name} ({target}): {status}")
 
+    def _refresh_visible_statuses(self) -> None:
+        target = self._get_panel_target()
+        for svc in self._services:
+            if target == "local":
+                is_running = self._detect_running(svc)
+            else:
+                is_running = self._detect_running_remote(svc, target)
+            self._svc_states[svc.name] = is_running
+            for card in self.query(ServiceCard):
+                if card.service_def.name == svc.name:
+                    card.update_status(is_running)
+        self._build_tree()
+
     def _detect_running_remote(self, svc: ServiceDef, profile_name: str) -> bool:
         """check if a service is running on a remote host via SSH."""
         profile = get_profile_by_name(profile_name)
@@ -1335,6 +1406,11 @@ class ServicePanel(Widget):
                 return ssh_check_port(profile, port)
             return ssh_check_tmux(profile, target)
         elif svc.launch_type == "tmux":
+            if _is_stack_tmux_service(svc):
+                ports = _stack_ports(svc)
+                if ports:
+                    return all(ssh_check_port(profile, port) for port in ports)
+                return any(ssh_check_tmux(profile, session) for session in _stack_sessions(svc))
             session_name = _service_session_name(svc)
             return ssh_check_tmux(profile, session_name)
         elif svc.launch_type == "vllm":
@@ -1366,13 +1442,16 @@ class ServicePanel(Widget):
     def _logs_available(self, svc: ServiceDef, target: str) -> bool:
         if svc.launch_type not in ("tmux", "vllm"):
             return False
-        session_name = _service_session_name(svc)
         if target == "local":
-            return _check_tmux_session(session_name)
+            if _is_stack_tmux_service(svc):
+                return any(_check_tmux_session(session) for session in _stack_sessions(svc))
+            return _check_tmux_session(_service_session_name(svc))
         profile = get_profile_by_name(target)
         if profile is None:
             return False
-        return ssh_check_tmux(profile, session_name)
+        if _is_stack_tmux_service(svc):
+            return any(ssh_check_tmux(profile, session) for session in _stack_sessions(svc))
+        return ssh_check_tmux(profile, _service_session_name(svc))
 
     def _view_logs_local(self, svc: ServiceDef) -> None:
         if svc.launch_type == "make":
@@ -1385,6 +1464,21 @@ class ServicePanel(Widget):
                 self._log(f"[cyan]── End of logs ──[/cyan]")
                 return
             session_name = target
+        elif _is_stack_tmux_service(svc):
+            self._log(f"[cyan]── Logs for {svc.name} ──[/cyan]")
+            captured = False
+            for session_name in _stack_sessions(svc):
+                if not _check_tmux_session(session_name):
+                    continue
+                captured = True
+                self._log(f"[cyan]── session: {session_name} ──[/cyan]")
+                output = _capture_tmux_pane(session_name)
+                for line in output.splitlines():
+                    self._log(line)
+            if not captured:
+                self._log("(no tmux sessions found)")
+            self._log(f"[cyan]── End of logs ──[/cyan]")
+            return
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
         else:
@@ -1412,6 +1506,18 @@ class ServicePanel(Widget):
                 self._cmd.run(cmd)
                 return
             session_name = target
+        elif _is_stack_tmux_service(svc):
+            cmd_parts = []
+            for session_name in _stack_sessions(svc):
+                quoted_session = shlex.quote(session_name)
+                heading = shlex.quote(f"── session: {session_name} ──")
+                cmd_parts.append(
+                    "if tmux has-session -t "
+                    f"{quoted_session} 2>/dev/null; then echo {heading}; "
+                    f"tmux capture-pane -t {quoted_session} -p -S -80; fi"
+                )
+            self._cmd.run(" ; ".join(cmd_parts) or "echo '(no tmux sessions configured)'")
+            return
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
         else:
@@ -1628,9 +1734,10 @@ class ServicePanel(Widget):
     def _stop_service(self, svc: ServiceDef) -> None:
         try:
             if svc.launch_type in ("tmux", "vllm"):
-                session_name = _service_session_name(svc)
-                subprocess.run(["tmux", "send-keys", "-t", session_name, "C-c"], capture_output=True)
-                subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
+                sessions = _stack_sessions(svc) if _is_stack_tmux_service(svc) else [_service_session_name(svc)]
+                for session_name in sessions:
+                    subprocess.run(["tmux", "send-keys", "-t", session_name, "C-c"], capture_output=True)
+                    subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
                 self._log(f"[red]{svc.name} stopped.[/red]")
             elif svc.launch_type == "make":
                 make_name = _make_target_for(svc.name)
@@ -1761,10 +1868,11 @@ class ServicePanel(Widget):
         remote_root = profile.remote_project_path
         try:
             if svc.launch_type in ("tmux", "vllm"):
-                session_name = _service_session_name(svc)
-                cmd = (
-                    f"tmux send-keys -t {session_name} C-c; "
-                    f"tmux kill-session -t {session_name}"
+                sessions = _stack_sessions(svc) if _is_stack_tmux_service(svc) else [_service_session_name(svc)]
+                cmd = " ; ".join(
+                    f"tmux send-keys -t {shlex.quote(session)} C-c 2>/dev/null; "
+                    f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null"
+                    for session in sessions
                 )
                 result = ssh_run_sync(profile, cmd, timeout=10.0)
                 self._log(f"[red]{svc.name} stopped remotely.[/red]")

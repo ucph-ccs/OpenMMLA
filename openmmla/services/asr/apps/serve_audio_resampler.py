@@ -4,7 +4,8 @@ import os
 from openmmla.services.asr.audio_resampler import AudioResampler
 from openmmla.utils.apps import create_app
 
-project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+default_project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+project_dir = os.environ.get('OPENMMLA_PROJECT_DIR', default_project_dir)
 app = create_app(
     class_type=AudioResampler,
     endpoint='resample',

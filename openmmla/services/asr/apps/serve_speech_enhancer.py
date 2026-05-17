@@ -4,8 +4,9 @@ import os
 from openmmla.services.asr.speech_enhancer import SpeechEnhancer
 from openmmla.utils.apps import create_app
 
-project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-config_path = os.path.join(project_dir, 'config.yml')
+default_project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+project_dir = os.environ.get('OPENMMLA_PROJECT_DIR', default_project_dir)
+config_path = os.environ.get('OPENMMLA_CONFIG_PATH', os.path.join(project_dir, 'config.yml'))
 app = create_app(
     class_type=SpeechEnhancer,
     endpoint='enhance',
