@@ -307,6 +307,20 @@ class ServiceCard(Widget):
         except Exception:
             pass
 
+    def update_service_def(self, service_def: ServiceDef) -> None:
+        """update service metadata displayed by an already-mounted card."""
+        self.service_def = service_def
+        try:
+            metas = list(self.query(".card-meta"))
+            if metas:
+                metas[0].update(
+                    f"  env: {service_def.conda_env}  |  type: {service_def.launch_type}"
+                )
+            if len(metas) > 1:
+                metas[1].update(f"  {service_def.description}")
+        except Exception:
+            pass
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
         if btn_id.startswith("start__"):

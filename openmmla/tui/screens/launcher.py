@@ -178,6 +178,24 @@ def _mllm_config(root: str, values: dict | None = None) -> dict:
     }
 
 
+def _asr_server_config_path(root: str) -> str:
+    return os.path.join(root, "pipelines", "asr-server", "config.yml")
+
+
+def _asr_audio_inferer_backend(root: str) -> str:
+    config = load_existing_config(_asr_server_config_path(root))
+    backend = get_nested_value(config, "AudioInferer.backend")
+    if backend is None:
+        return "nemo"
+    return str(backend).strip().lower() or "nemo"
+
+
+def _asr_server_conda_env(root: str) -> str:
+    if _asr_audio_inferer_backend(root) == "wespeaker":
+        return "asr-server-wespeaker"
+    return "asr-server-nemo"
+
+
 def _make_stream_fields(stream_name: str) -> list[LoaderFieldDef]:
     """create FieldDef list for a single stream entry."""
     section = f"Streams.{stream_name}"
@@ -275,10 +293,13 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
     services.append(ServiceDef(
         name="ASR Server",
         category="ASR",
-        conda_env="asr-server-nemo",
+        conda_env=_asr_server_conda_env(root),
         config_dir=os.path.join(root, "pipelines", "asr-server"),
         launch_type="tmux",
-        description="ASR inference services (inferer, resampler, enhancer, transcriber, ...)",
+        description=(
+            "ASR inference services "
+            f"(AudioInferer: {_asr_audio_inferer_backend(root)})"
+        ),
     ))
 
     services.append(ServiceDef(
@@ -952,6 +973,11 @@ class ServicePanel(Widget):
         all_fields = form.all_fields if form else pipeline.fields
         save_config(pipeline.config_path, all_fields, event.values)
 
+        if pipeline.name == "ASR Server":
+            self._services = _build_service_registry(self._root)
+            self._svc_map = {s.name: s for s in self._services}
+            self._refresh_service_cards()
+
         self._show_status(f"Saved to {pipeline.config_path}")
         self._refresh_stream_panels(pipeline)
         self._show_sync_bar(pipeline)
@@ -964,6 +990,13 @@ class ServicePanel(Widget):
         streams = load_streams(pipeline.config_path)
         for panel in self.query(StreamPanel):
             panel.update_streams(streams)
+
+    def _refresh_service_cards(self) -> None:
+        """refresh metadata on any mounted service card after registry changes."""
+        for card in self.query(ServiceCard):
+            service = self._svc_map.get(card.service_def.name)
+            if service is not None:
+                card.update_service_def(service)
 
     def _show_status(self, message: str) -> None:
         container = self._config_container
@@ -1543,9 +1576,13 @@ class ServicePanel(Widget):
             ["tmux", "kill-session", "-t", session_name],
             capture_output=True,
         )
+        run_cmd = (
+            f"cd {shlex.quote(bash_dir)} && "
+            f"OPENMMLA_CONDA_ENV={shlex.quote(svc.conda_env)} "
+            "bash services.sh; exec bash"
+        )
         subprocess.Popen(
-            ["tmux", "new-session", "-d", "-s", session_name,
-             f"bash -c 'cd {bash_dir} && bash services.sh; exec bash'"],
+            ["tmux", "new-session", "-d", "-s", session_name, "bash", "-lc", run_cmd],
             cwd=bash_dir,
         )
         self._log(f"[green]{svc.name} tmux session '{session_name}' started.[/green]")
@@ -1675,10 +1712,14 @@ class ServicePanel(Widget):
                 rel_dir = os.path.relpath(svc.config_dir, self._root)
                 remote_bash = f"{remote_root}/{rel_dir}/bash"
                 session_name = _service_session_name(svc)
+                run_cmd = (
+                    f"cd {remote_bash} && "
+                    f"OPENMMLA_CONDA_ENV={shlex.quote(svc.conda_env)} "
+                    "bash services.sh; exec bash"
+                )
                 cmd = (
                     f"tmux kill-session -t {session_name} 2>/dev/null; "
-                    f"tmux new-session -d -s {session_name} "
-                    f"'cd {remote_bash} && bash services.sh; exec bash'"
+                    f"tmux new-session -d -s {session_name} bash -lc {shlex.quote(run_cmd)}"
                 )
                 self._log(f"  Remote: {cmd}")
                 result = ssh_run_sync(profile, cmd, timeout=15.0)

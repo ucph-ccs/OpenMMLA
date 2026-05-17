@@ -4,8 +4,8 @@ BASH_DIR="$(dirname "$(readlink -f "$0")")"
 PYHON_PATH="$BASH_DIR/../../.."
 CONFIG_FILE="$BASH_DIR/../config.yml"
 
-CONDA_ENV="asr-server"
-CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+CONDA_ENV="${OPENMMLA_CONDA_ENV:-asr-server-nemo}"
+CONDA_INIT='if command -v conda >/dev/null 2>&1; then _base="$(conda info --base 2>/dev/null)" && [ -f "$_base/etc/profile.d/conda.sh" ] && source "$_base/etc/profile.d/conda.sh"; fi; if ! command -v conda >/dev/null 2>&1; then for _p in "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/mambaforge" /home/*/miniforge3 /home/*/miniconda3 /opt/conda; do [ -f "$_p/etc/profile.d/conda.sh" ] && source "$_p/etc/profile.d/conda.sh" && break; done; fi; conda activate "$CONDA_ENV"'
 
 # First ensure conda environment is activated
 echo "Activating conda environment '$CONDA_ENV'..."
