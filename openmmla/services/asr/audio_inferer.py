@@ -28,8 +28,10 @@ except ImportError:
 try:
     import wespeaker as _wespeaker
     _WESPEAKER_AVAILABLE = True
-except ImportError:
+    _WESPEAKER_IMPORT_ERROR = None
+except ImportError as exc:
     _WESPEAKER_AVAILABLE = False
+    _WESPEAKER_IMPORT_ERROR = exc
 
 
 if _NEMO_AVAILABLE:
@@ -140,7 +142,10 @@ class AudioInferer(Server):
 
     def _setup_wespeaker(self):
         if not _WESPEAKER_AVAILABLE:
-            raise ImportError("WeSpeaker is not installed. Install it with 'pip install wespeaker'")
+            raise ImportError(
+                "WeSpeaker backend is unavailable. Install the asr-server-wespeaker "
+                f"extra dependencies. Original import error: {_WESPEAKER_IMPORT_ERROR}"
+            )
 
         device = "cuda:0" if self.cuda else "cpu"
         self.logger.info(f"Loading WeSpeaker model: {self.model_name}...")
