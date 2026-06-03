@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field, asdict
 
@@ -11,6 +12,32 @@ from openmmla.tui.schema.loader import _find_project_root
 
 PROFILES_DIR = "config"
 PROFILES_FILE = "ssh_profiles.yml"
+_LOCAL_COMMAND_DIRS = (
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+)
+
+
+def _resolve_local_command(command: str) -> str:
+    path = shutil.which(command)
+    if path:
+        return path
+    for directory in _LOCAL_COMMAND_DIRS:
+        candidate = os.path.join(directory, command)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return command
+
+
+def _missing_local_command(args: list[str]) -> str | None:
+    for command in ("sshpass", "ssh", "scp"):
+        if any(os.path.basename(arg) == command for arg in args) and _resolve_local_command(command) == command:
+            return command
+    return None
 
 
 @dataclass
@@ -29,7 +56,7 @@ class SSHProfile:
     def _sshpass_prefix(self) -> list[str]:
         """return sshpass prefix if password auth is configured."""
         if self.password:
-            return ["sshpass", "-p", self.password]
+            return [_resolve_local_command("sshpass"), "-p", self.password]
         return []
 
     def _control_path(self) -> str:
@@ -47,7 +74,7 @@ class SSHProfile:
     def base_ssh_args(self) -> list[str]:
         """return the common ssh argument list (without the remote command)."""
         args = self._sshpass_prefix()
-        args.extend(["ssh"] + self._common_ssh_opts())
+        args.extend([_resolve_local_command("ssh")] + self._common_ssh_opts())
         if self.key_path:
             args.extend(["-i", os.path.expanduser(self.key_path)])
         if self.port != 22:
@@ -58,7 +85,7 @@ class SSHProfile:
     def base_scp_args(self) -> list[str]:
         """return the common scp argument list (without src/dest)."""
         args = self._sshpass_prefix()
-        args.extend(["scp"] + self._common_ssh_opts())
+        args.extend([_resolve_local_command("scp")] + self._common_ssh_opts())
         if self.key_path:
             args.extend(["-i", os.path.expanduser(self.key_path)])
         if self.port != 22:
@@ -157,8 +184,17 @@ def ssh_check_tmux(profile: SSHProfile, session_name: str) -> bool:
 
 def ssh_test_connection(profile: SSHProfile) -> tuple[bool, str]:
     """test ssh connectivity. returns (success, message)."""
+    args = profile.base_ssh_args()
+    missing_command = _missing_local_command(args)
+    if missing_command:
+        return False, f"{missing_command} command not found"
     try:
-        result = ssh_run_sync(profile, "echo CONNECTION_OK", timeout=10.0)
+        result = subprocess.run(
+            args + ["echo CONNECTION_OK"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
         if result.returncode == 0 and "CONNECTION_OK" in result.stdout:
             return True, "Connection successful"
         return False, result.stderr.strip() or f"exit code {result.returncode}"
