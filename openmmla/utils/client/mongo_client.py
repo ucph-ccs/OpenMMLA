@@ -1,5 +1,4 @@
 import logging
-import yaml
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +16,7 @@ except ModuleNotFoundError:
         """fallback when pymongo is unavailable during lightweight tests."""
 
 from openmmla.utils.constants import MONGODB_DEFAULT_DB
+from openmmla.utils.config import load_config_with_system_services
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class MongoDBClientWrapper:
     """MongoDB client that loads configuration from a YAML file and provides session management."""
 
     def __init__(self, config_path: str):
-        config = yaml.safe_load(open(config_path, 'r'))
+        config = load_config_with_system_services(config_path)
         mongo_config = config['MongoDB']
 
         self.url = mongo_config['url']

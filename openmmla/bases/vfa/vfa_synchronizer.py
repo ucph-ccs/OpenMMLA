@@ -8,6 +8,7 @@ from typing import Any
 
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
@@ -21,7 +22,7 @@ class VFASynchronizer(Synchronizer):
     """VFASynchronizer class for synchronizing video frames from multiple angles."""
     logger = get_logger('vfa-synchronizer')
 
-    def __init__(self, project_dir: str | None, config_path: str):
+    def __init__(self, project_dir: str | None, config_path: str, session_id: str | None = None):
         """Initialize the VFASynchronizer class.
         
         Args:
@@ -29,6 +30,7 @@ class VFASynchronizer(Synchronizer):
             config_path: path to the configuration file
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
+        self.launch_session_id = session_id
 
         # Runtime attributes
         self.threads = []
@@ -62,8 +64,8 @@ class VFASynchronizer(Synchronizer):
 
     def _setup_directories(self):
         """Set up required directories."""
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'logger'))
+        self.temp_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'real-time', 'temp'))
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
 
@@ -118,8 +120,11 @@ class VFASynchronizer(Synchronizer):
         self.time_bucket_buffer = {}
 
         # bucket selection
-        self.session_id = select_or_create_session(self.mongo_client)
+        self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self.number_of_bases = get_number_of_bases()
+        real_time_dir = pipeline_section_dir(self.project_dir, self.session_id, 'vfa-base', 'real-time')
+        self.temp_dir = os.fspath(real_time_dir / 'temp')
+        os.makedirs(self.temp_dir, exist_ok=True)
         
         # resolve participant descriptions from experiment assignments
         from openmmla.utils.experiments import get_participant_descriptions
@@ -170,8 +175,11 @@ class VFASynchronizer(Synchronizer):
             self._synchronization_handler(exception_occurred)
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
+        self.bucket_logger_dir = os.fspath(
+            pipeline_section_dir(self.project_dir, self.session_id, 'vfa-base', 'logger')
+        )
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'vfa-base')
         self.logger = get_logger(f'vfa-synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'vfa_synchronizer.log'))
 
@@ -183,6 +191,7 @@ class VFASynchronizer(Synchronizer):
             base_id = base_result['base_id']
             angle = base_result['angle']
             image_path = base_result['image_path']
+            store_frames = bool(base_result.get('store_frames', True))
 
             if not os.path.exists(image_path):
                 self.logger.warning(f"Image path does not exist: {image_path}")
@@ -207,6 +216,7 @@ class VFASynchronizer(Synchronizer):
                     })
                 else:
                     self.logger.warning(f"Dropping expired frame set at {t} with only {len(frame_set)} frame(s)")
+                    self._cleanup_unstored_frames(frame_set)
                 del self.time_bucket_buffer[t]
 
             # Find the closest time bucket using the utility class
@@ -225,11 +235,15 @@ class VFASynchronizer(Synchronizer):
             # Store frame info
             if base_id in self.time_bucket_buffer[closest_time]:
                 self.logger.debug(f"Overwriting frame for base {base_id} at time bucket {closest_time}")
+                self._cleanup_unstored_frames({
+                    base_id: self.time_bucket_buffer[closest_time][base_id]
+                })
 
             self.time_bucket_buffer[closest_time][base_id] = {
                 'angle': angle,
                 'path': image_path,
-                'base_result_time': base_result_time
+                'base_result_time': base_result_time,
+                'store_frames': store_frames
             }
 
             # Check if we've received frames from all cameras for this time bucket
@@ -269,6 +283,7 @@ class VFASynchronizer(Synchronizer):
             try:
                 # get a frame set from the queue with a timeout
                 frame_set = self.vllm_queue.get(timeout=1.0)
+                frames = {}
                 
                 try:
                     time_bucket_key = frame_set['time_bucket_key']  # the start time of this time bucket
@@ -318,6 +333,8 @@ class VFASynchronizer(Synchronizer):
                             self.logger.error(f"Error processing frame set: {e}", exc_info=True)
                 
                 finally:
+                    if frames:
+                        self._cleanup_unstored_frames(frames)
                     # if not stopped, mark the task as done since vllm_queue is still existing
                     if not self.stop_event.is_set():
                         self.vllm_queue.task_done()
@@ -326,6 +343,32 @@ class VFASynchronizer(Synchronizer):
                 continue
             except Exception as e:
                 self.logger.error(f"Error in VLLM processing thread: {e}", exc_info=True)
+
+    def _cleanup_unstored_frames(self, frames: dict[str, dict[str, Any]]) -> None:
+        """Remove temporary frames when bases did not request persistent frame storage."""
+        temp_dir = os.path.abspath(self.temp_dir)
+        for frame_info in frames.values():
+            if frame_info.get('store_frames', True):
+                continue
+
+            image_path = frame_info.get('path')
+            if not image_path:
+                continue
+
+            image_path = os.path.abspath(image_path)
+            try:
+                if os.path.commonpath([temp_dir, image_path]) != temp_dir:
+                    self.logger.warning(f"Refusing to delete non-temp VFA frame path: {image_path}")
+                    continue
+            except ValueError:
+                self.logger.warning(f"Refusing to delete invalid VFA frame path: {image_path}")
+                continue
+
+            try:
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+            except OSError as e:
+                self.logger.warning(f"Failed to delete temporary VFA frame {image_path}: {e}")
 
     def _upload_result(self, time_bucket_key: float, result: dict[str, Any] | None):
         """Upload analysis results to InfluxDB.

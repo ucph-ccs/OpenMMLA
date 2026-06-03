@@ -19,25 +19,38 @@ from openmmla.tui.widgets.command_session import CommandSession, _list_conda_env
 
 ENV_GROUPS = [
     {"group": "asr-base", "env": "asr-base", "python": "3.10",
-     "description": "ASR base station"},
+     "description": "ASR base station",
+     "packages": ["openmmla", "influxdb-client", "paho-mqtt", "pymongo", "pyyaml", "redis"]},
     {"group": "asr-server-nemo", "env": "asr-server-nemo", "python": "3.10",
-     "description": "ASR server (NeMo backend)"},
+     "description": "ASR server (NeMo backend)",
+     "packages": ["openmmla", "flask", "gunicorn", "nemo-toolkit", "onnxruntime", "whisperx"]},
     {"group": "asr-server-wespeaker", "env": "asr-server-wespeaker", "python": "3.10",
-     "description": "ASR server (WeSpeaker backend)"},
+     "description": "ASR server (WeSpeaker backend)",
+     "packages": [
+         "openmmla", "flask", "gunicorn", "wespeaker", "s3prl", "peft",
+         "accelerate", "openai-whisper", "hdbscan", "umap-learn", "librosa",
+     ]},
     {"group": "vfa-base", "env": "vfa-base", "python": "3.10",
-     "description": "VFA base station"},
+     "description": "VFA base station",
+     "packages": ["openmmla", "cv2", "influxdb-client", "paho-mqtt", "pymongo", "pyyaml", "redis"]},
     {"group": "vfa-server", "env": "vfa-server", "python": "3.10",
-     "description": "VFA server wrapper"},
+     "description": "VFA server wrapper",
+     "packages": ["openmmla", "flask", "gunicorn", "openai", "opencv-python", "pupil-apriltags"]},
     {"group": "vfa-vllm-runtime", "env": "vfa-vllm", "python": "3.12",
-     "description": "VFA local vLLM runtime"},
+     "description": "VFA local vLLM runtime",
+     "packages": ["openmmla", "qwen-vl-utils", "transformers", "vllm"]},
     {"group": "ips-base", "env": "ips-base", "python": "3.10",
-     "description": "IPS base station"},
+     "description": "IPS base station",
+     "packages": ["openmmla", "influxdb-client", "opencv-python", "paho-mqtt", "pupil-apriltags"]},
     {"group": "uber-base", "env": "uber-base", "python": "3.10",
-     "description": "Analysis framework"},
+     "description": "Analysis framework",
+     "packages": ["openmmla", "influxdb-client", "pandas", "pyecharts", "pymongo", "redis"]},
     {"group": "uber-server", "env": "uber-server", "python": "3.10",
-     "description": "Dashboard & infrastructure services"},
+     "description": "Dashboard & infrastructure services",
+     "packages": ["openmmla", "celery", "flask", "flask-socketio", "influxdb-client", "redis"]},
     {"group": "tui", "env": "tui", "python": "3.10",
-     "description": "TUI management console"},
+     "description": "TUI management console",
+     "packages": ["openmmla", "cryptography", "pyyaml", "textual"]},
 ]
 
 
@@ -52,6 +65,58 @@ def _normalize_target(value) -> str:
         return "local"
     text = str(value)
     return text if text else "local"
+
+
+def _normalize_package_name(name: str) -> str:
+    return name.strip().lower().replace("_", "-")
+
+
+def _parse_conda_packages(output: str) -> set[str]:
+    packages: set[str] = set()
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if parts:
+            packages.add(_normalize_package_name(parts[0]))
+    return packages
+
+
+def _list_conda_packages_sync(env_name: str) -> set[str]:
+    try:
+        result = subprocess.run(
+            ["conda", "list", "-n", env_name],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode == 0:
+            return _parse_conda_packages(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return set()
+
+
+def _missing_packages(entry: dict, installed_packages: set[str]) -> list[str]:
+    required = [_normalize_package_name(pkg) for pkg in entry.get("packages", [])]
+    missing = [pkg for pkg in required if pkg not in installed_packages]
+    if "opencv-python" in missing and "cv2" in installed_packages:
+        missing.remove("opencv-python")
+    if "cv2" in missing and "opencv-python" in installed_packages:
+        missing.remove("cv2")
+    return missing
+
+
+def _format_env_status(entry: dict, conda_envs: set[str], env_packages: dict[str, set[str]]) -> str:
+    env_name = entry["env"]
+    if env_name not in conda_envs:
+        return "Missing"
+    missing = _missing_packages(entry, env_packages.get(env_name, set()))
+    if missing:
+        suffix = ", ".join(missing[:2])
+        if len(missing) > 2:
+            suffix += f" +{len(missing) - 2}"
+        return f"Partial: {suffix}"
+    return "Ready"
 
 
 class EnvironmentPanel(Widget):
@@ -97,7 +162,9 @@ class EnvironmentPanel(Widget):
         super().__init__()
         self._root = _find_project_root()
         self._conda_envs: set[str] = set()
+        self._env_packages: dict[str, set[str]] = {}
         self._selected_group: str | None = None
+        self._pending_delete: tuple[str, str] | None = None
         self._target = "local"
 
     def compose(self) -> ComposeResult:
@@ -117,6 +184,7 @@ class EnvironmentPanel(Widget):
                 yield Button("Git Pull", variant="warning", id="btn-git-pull")
                 yield Button("Create Env", variant="success", id="btn-create-env")
                 yield Button("Install Deps", variant="success", id="btn-install-deps")
+                yield Button("Delete Env", variant="error", id="btn-delete-env")
             yield CommandSession(show_target=False, id="env-cmd-session")
 
     @property
@@ -138,7 +206,10 @@ class EnvironmentPanel(Widget):
             return self._target
 
     def _set_target(self, target: str) -> None:
-        self._target = _normalize_target(target)
+        normalized = _normalize_target(target)
+        if normalized != self._target:
+            self._pending_delete = None
+        self._target = normalized
         try:
             self._cmd.set_target(self._target)
         except Exception:
@@ -184,15 +255,32 @@ class EnvironmentPanel(Widget):
         if target != "local":
             self.run_worker(self._refresh_table_remote(target), exclusive=True)
         else:
-            self._conda_envs = _list_conda_envs_sync()
-            self._populate_table()
+            self.run_worker(self._refresh_table_local(target), exclusive=True)
+
+    async def _refresh_table_local(self, target: str) -> None:
+        if target != self._get_target():
+            return
+        conda_envs = await asyncio.to_thread(_list_conda_envs_sync)
+        env_packages = await asyncio.to_thread(self._list_selected_conda_packages, conda_envs)
+        if target != self._get_target():
+            return
+        self._conda_envs = conda_envs
+        self._env_packages = env_packages
+        self._populate_table()
+
+    def _list_selected_conda_packages(self, conda_envs: set[str]) -> dict[str, set[str]]:
+        packages: dict[str, set[str]] = {}
+        for entry in ENV_GROUPS:
+            env_name = entry["env"]
+            if env_name in conda_envs:
+                packages[env_name] = _list_conda_packages_sync(env_name)
+        return packages
 
     def _populate_table(self) -> None:
         table = self.query_one("#env-table", DataTable)
         table.clear()
         for eg in ENV_GROUPS:
-            exists = eg["env"] in self._conda_envs
-            status = "Exists" if exists else "Missing"
+            status = _format_env_status(eg, self._conda_envs, self._env_packages)
             table.add_row(
                 eg["env"], eg["group"], eg["python"], status, eg["description"],
             )
@@ -215,14 +303,60 @@ class EnvironmentPanel(Widget):
         if profile_name != self._get_target():
             return
         self._conda_envs = _parse_conda_envs(output)
+        env_packages = await self._list_remote_conda_packages(profile_name, self._conda_envs)
+        if profile_name != self._get_target():
+            return
+        self._env_packages = env_packages
         self._populate_table()
         self._log("[green]Remote env list refreshed.[/green]")
+
+    async def _list_remote_conda_packages(
+        self,
+        profile_name: str,
+        conda_envs: set[str],
+    ) -> dict[str, set[str]]:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            return {}
+        env_names = [
+            entry["env"] for entry in ENV_GROUPS
+            if entry["env"] in conda_envs
+        ]
+        if not env_names:
+            return {}
+        cmd_parts = []
+        for env_name in env_names:
+            cmd_parts.append(
+                f"echo __OPENMMLA_ENV__{env_name}; "
+                f"conda list -n {env_name} 2>/dev/null || true"
+            )
+        proc = await ssh_run_async(profile, wrap_remote("; ".join(cmd_parts)))
+        output = ""
+        assert proc.stdout is not None
+        async for line in proc.stdout:
+            output += line.decode()
+        await proc.wait()
+        packages: dict[str, set[str]] = {}
+        current_env: str | None = None
+        current_lines: list[str] = []
+        for line in output.splitlines():
+            if line.startswith("__OPENMMLA_ENV__"):
+                if current_env is not None:
+                    packages[current_env] = _parse_conda_packages("\n".join(current_lines))
+                current_env = line.replace("__OPENMMLA_ENV__", "", 1).strip()
+                current_lines = []
+            else:
+                current_lines.append(line)
+        if current_env is not None:
+            packages[current_env] = _parse_conda_packages("\n".join(current_lines))
+        return packages
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         table = self.query_one("#env-table", DataTable)
         try:
             row = table.get_row(event.row_key)
             self._selected_group = str(row[1])
+            self._pending_delete = None
         except Exception:
             pass
 
@@ -239,12 +373,12 @@ class EnvironmentPanel(Widget):
             self._refresh_target_options()
             self._set_target(self._get_selected_target())
             self._refresh_table()
-            if not self._is_remote:
-                self._log("[green]Refreshed.[/green]")
         elif bid == "btn-create-env":
             self._create_selected_env()
         elif bid == "btn-install-deps":
             self._install_selected_deps()
+        elif bid == "btn-delete-env":
+            self._delete_selected_env()
         elif bid == "btn-git-clone":
             self._git_clone()
         elif bid == "btn-git-pull":
@@ -402,6 +536,79 @@ class EnvironmentPanel(Widget):
             self._log(f"[red]Remote env creation failed (exit {rc}).[/red]")
         self._refresh_table()
 
+    def _delete_selected_env(self) -> None:
+        entry = self._get_selected_entry()
+        if entry is None:
+            return
+        env_name = entry["env"]
+        if env_name not in self._conda_envs:
+            self._log(f"[yellow]Env '{env_name}' does not exist.[/yellow]")
+            return
+        delete_key = (self._get_target(), env_name)
+        if self._pending_delete != delete_key:
+            self._pending_delete = delete_key
+            target_label = "local" if delete_key[0] == "local" else f"remote target '{delete_key[0]}'"
+            self._log(
+                f"[yellow]Press Delete Env again to permanently delete '{env_name}' on {target_label}.[/yellow]"
+            )
+            return
+        self._pending_delete = None
+        self._log(f"[red]Deleting conda env '{env_name}'...[/red]")
+        if self._is_remote:
+            self.run_worker(
+                self._run_remote_delete(self._get_target(), env_name),
+                exclusive=True,
+            )
+        else:
+            self.run_worker(self._run_delete(env_name), exclusive=True)
+
+    async def _run_delete(self, env_name: str) -> None:
+        cmd = ["conda", "env", "remove", "-n", env_name, "-y"]
+        self._log(f"  $ {' '.join(cmd)}")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        assert proc.stdout is not None
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+            text = chunk.decode(errors="replace").rstrip()
+            if text:
+                for line in text.splitlines():
+                    self._log(rich_escape(line))
+        rc = await proc.wait()
+        if rc == 0:
+            self._log(f"[green]Env '{env_name}' deleted.[/green]")
+        else:
+            self._log(f"[red]Failed to delete env '{env_name}' (exit {rc}).[/red]")
+        self._refresh_table()
+
+    async def _run_remote_delete(self, profile_name: str, env_name: str) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            return
+        cmd = f"conda env remove -n {env_name} -y"
+        self._log(f"  remote$ {rich_escape(cmd)}")
+        proc = await ssh_run_async(profile, wrap_remote(cmd))
+        assert proc.stdout is not None
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+            text = chunk.decode(errors="replace").rstrip()
+            if text:
+                for line in text.splitlines():
+                    self._log(rich_escape(line))
+        rc = await proc.wait()
+        if rc == 0:
+            self._log(f"[green]Env '{env_name}' deleted remotely.[/green]")
+        else:
+            self._log(f"[red]Remote env deletion failed (exit {rc}).[/red]")
+        self._refresh_table()
+
     def _install_selected_deps(self) -> None:
         entry = self._get_selected_entry()
         if entry is None:
@@ -446,6 +653,7 @@ class EnvironmentPanel(Widget):
             self._log(f"[green]Dependencies '{rich_escape(f'[{group}]')}' installed successfully.[/green]")
         else:
             self._log(f"[red]Installation failed (exit {rc}).[/red]")
+        self._refresh_table()
 
     async def _run_remote_install(self, profile_name: str, env_name: str, group: str) -> None:
         profile = get_profile_by_name(profile_name)
@@ -469,3 +677,4 @@ class EnvironmentPanel(Widget):
             self._log(f"[green]Remote install of '{rich_escape(f'[{group}]')}' completed.[/green]")
         else:
             self._log(f"[red]Remote install failed (exit {rc}).[/red]")
+        self._refresh_table()

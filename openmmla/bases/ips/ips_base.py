@@ -13,6 +13,7 @@ from pupil_apriltags import Detector
 
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -28,7 +29,7 @@ class IPSBase(Base):
     logger = get_logger('ips-base')
 
     def __init__(self, project_dir: str | None, config_path: str, graphics: bool = True,
-                 store: bool = True, verbose: bool = False):
+                 store: bool = True, verbose: bool = False, session_id: str | None = None):
         """Initialize the IPSBase class.
 
         Args:
@@ -44,6 +45,7 @@ class IPSBase(Base):
         self.graphics = graphics
         self.store = store
         self.verbose = verbose
+        self.launch_session_id = session_id
         self.max_badge_id = 12
 
         # Runtime attributes
@@ -90,8 +92,8 @@ class IPSBase(Base):
 
     def _setup_directories(self):
         """Set up directories."""
-        self.runtime_dir = os.path.join(self.project_dir, 'real-time/runtime')
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
+        self.runtime_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'real-time', 'runtime'))
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'logger'))
         self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
         self.camera_calib_dir = os.path.join(self.project_dir, 'camera_calib')
         os.makedirs(self.runtime_dir, exist_ok=True)
@@ -152,7 +154,7 @@ class IPSBase(Base):
             return self._set_camera()
 
         # bucket selection
-        self.session_id = select_or_create_session(self.mongo_client)
+        self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
 
         # configure video stream and start it
@@ -177,8 +179,11 @@ class IPSBase(Base):
             self._detection_handler(exception_occurred)
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
+        self.bucket_logger_dir = os.fspath(
+            pipeline_section_dir(self.project_dir, self.session_id, 'ips-base', 'logger')
+        )
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'ips-base')
         self.logger = get_logger(f'ips-base-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
@@ -385,7 +390,10 @@ class IPSBase(Base):
     def _process_keyframes(self):
         """Process video frames using keyframe synchronization for file mode."""
         print("Processing keyframes with timing synchronization...")
-        save_path = os.path.join(self.runtime_dir, f'{self.session_id}/ips_{self.base_id}')
+        runtime_root = pipeline_section_dir(self.project_dir, self.session_id, 'ips-base', 'real-time') / 'runtime'
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        self.runtime_dir = os.fspath(runtime_root)
+        save_path = os.path.join(self.runtime_dir, f'ips_{self.base_id}')
         os.makedirs(save_path, exist_ok=True)
         
         filename = os.path.basename(self.selected_source)
@@ -455,7 +463,10 @@ class IPSBase(Base):
     def _process_continuous_frames(self):
         """Process real-time video streams continuously (opencv, rtmp, lsl)."""
         print("Processing real-time streams...")
-        save_path = os.path.join(self.runtime_dir, f'{self.session_id}/ips_{self.base_id}')
+        runtime_root = pipeline_section_dir(self.project_dir, self.session_id, 'ips-base', 'real-time') / 'runtime'
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        self.runtime_dir = os.fspath(runtime_root)
+        save_path = os.path.join(self.runtime_dir, f'ips_{self.base_id}')
         os.makedirs(save_path, exist_ok=True)
         frames_count = 0
 

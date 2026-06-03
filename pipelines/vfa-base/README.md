@@ -104,6 +104,7 @@ VFA Base supports the following video input sources (configured via `Base.source
 | `opencv` | USB camera directly connected to the base station or Raspberry Pi | Plug in the camera; the base will detect available video devices and prompt you to select at startup |
 | `rtmp` | Video stream pulled from an NGINX RTMP server | Add RTMP entries in the `Streams` section of `config.yml` with `target: rtmp://...`. The streaming device pushes video to NGINX via ffmpeg |
 | `file` | Replay from previously recorded video files | Set `file_dir` and `initial_sync_time` in config |
+| `frames` | Replay previously extracted VFA frames for post-time analysis | Set `frame_dir` and start `vfa-base` with `-m analyze`; frame filenames may be `timestamp.jpg` or `prefix_timestamp.jpg` |
 
 VFA captures frames at a configurable interval (`keyframe_interval`, default 30s) for VLM/LLM analysis, rather than processing every frame. Configure `angle_config` in `config.yml` to describe camera perspectives for multi-angle analysis.
 
@@ -177,12 +178,14 @@ gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> openmmla.services.vfa.a
 # ===================BASH========================
 # Go to /pipelines/vfa-base/bash
 # Run real-time video frame analyzer
-Usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]
+Usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-m MODE] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]
 
 options:
   -nb NUM_BASE         : Number of VFA bases to run (default: 1)
   -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)
+  -m MODE              : VFA base mode: record, analyze, or full (default: full)
   -g GRAPHICS          : Enable graphics (default: true)
+  -s STORE             : Store frames locally (default: true)
   -v VERBOSE           : Enable verbose mode (default: false)
   -h                   : Display this help message
   

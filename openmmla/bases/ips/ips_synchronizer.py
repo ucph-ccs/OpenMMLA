@@ -5,6 +5,7 @@ import os
 import threading
 
 from openmmla.bases.synchronizer import Synchronizer
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -18,7 +19,8 @@ class IPSSynchronizer(Synchronizer):
     coordinate and uploading them to InfluxDB"""
     logger = get_logger('ips-synchronizer')
 
-    def __init__(self, project_dir: str | None, config_path: str, verbose: bool = False):
+    def __init__(self, project_dir: str | None, config_path: str, verbose: bool = False,
+                 session_id: str | None = None):
         """Initialize the IPSSynchronizer class.
 
         Args:
@@ -28,6 +30,7 @@ class IPSSynchronizer(Synchronizer):
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.verbose = verbose
+        self.launch_session_id = session_id
 
         # Runtime attributes
         self.main_id = None
@@ -35,6 +38,7 @@ class IPSSynchronizer(Synchronizer):
         self.merged_tags = None
         self.merged_relations = None
         self.session_id = None
+        self.allowed_tag_ids = None
         self.time_bucket_key = None  # start timestamp of time bucket
         self.time_bucket_end = None
         self.alive = False
@@ -53,7 +57,7 @@ class IPSSynchronizer(Synchronizer):
 
     def _setup_directories(self):
         """Set up directories."""
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'logger'))
         self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.camera_sync_dir, exist_ok=True)
@@ -72,6 +76,7 @@ class IPSSynchronizer(Synchronizer):
         self._clear_threads()
         self.mqtt_client.loop_stop()
         self.session_id = None
+        self.allowed_tag_ids = None
         self.merged_relations = None
         self.merged_tags = None
         gc.collect()
@@ -107,8 +112,9 @@ class IPSSynchronizer(Synchronizer):
         self.merged_tags = {}
 
         # select or create bucket
-        self.session_id = select_or_create_session(self.mongo_client)
+        self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
+        self._resolve_session_tag_filter()
         self._listen_for_start_signal()
 
         # reinitialize mqtt client with new topics and on_message callback
@@ -133,11 +139,68 @@ class IPSSynchronizer(Synchronizer):
 
     def _create_bucket_logger(self):
         """Create logger for the bucket."""
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
+        self.bucket_logger_dir = os.fspath(
+            pipeline_section_dir(self.project_dir, self.session_id, 'ips-base', 'logger')
+        )
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'ips-base')
         self.logger = get_logger(f'ips-synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_synchronizer.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
+
+    def _resolve_session_tag_filter(self):
+        """Limit IPS aggregation to tag ids assigned to the selected session group."""
+        self.allowed_tag_ids = None
+        try:
+            session_doc = self.mongo_client.get_session(self.session_id)
+        except Exception as e:
+            self.logger.warning(f"Could not load session document for IPS tag filtering: {e}")
+            return
+        if not session_doc:
+            self.logger.warning(f"No MongoDB session document found for {self.session_id}; IPS will not filter tags by group.")
+            return
+
+        tag_ids = set()
+        for participant in session_doc.get("participants", []) or []:
+            if not isinstance(participant, dict):
+                continue
+            tag_id = participant.get("tag_id")
+            if tag_id is None:
+                continue
+            text = str(tag_id).strip()
+            if text:
+                tag_ids.add(text)
+
+        if tag_ids:
+            self.allowed_tag_ids = tag_ids
+            self.logger.info(f"IPS tag filter for {self.session_id}: {sorted(tag_ids)}")
+        else:
+            self.logger.warning(f"No participant tag ids found for {self.session_id}; IPS will not filter tags by group.")
+
+    def _tag_allowed(self, tag_id) -> bool:
+        return self.allowed_tag_ids is None or str(tag_id) in self.allowed_tag_ids
+
+    def _filter_tags(self, tags: dict) -> dict:
+        if self.allowed_tag_ids is None:
+            return tags
+        return {
+            tag_id: tag_data
+            for tag_id, tag_data in tags.items()
+            if self._tag_allowed(tag_id)
+        }
+
+    def _filter_relations(self, relations: dict) -> dict:
+        if self.allowed_tag_ids is None:
+            return relations
+        filtered = {}
+        for tag_id, look_at_tags in relations.items():
+            if not self._tag_allowed(tag_id):
+                continue
+            filtered[tag_id] = [
+                target_id for target_id in look_at_tags
+                if self._tag_allowed(target_id)
+            ]
+        return filtered
 
     def _synchronization_handler(self, e: Exception | KeyboardInterrupt | None):
         """Handle exceptions and stop all threads.
@@ -191,12 +254,18 @@ class IPSSynchronizer(Synchronizer):
             valid = self.time_bucket_key <= base_result_time < self.time_bucket_end
             if valid:
                 if base_id.isnumeric() and int(base_id) > 50000:  # msg from nicla vision's onboard apriltag detection (if used)
+                    if not self._tag_allowed(base_id):
+                        return
+                    detected_tags = [
+                        tag_id for tag_id in base_result['detected_tags']
+                        if self._tag_allowed(tag_id)
+                    ]
                     if base_id not in self.merged_relations:
                         self.merged_relations[base_id] = set()
-                    self.merged_relations[base_id].update(base_result['detected_tags'])
+                    self.merged_relations[base_id].update(detected_tags)
                 else:  # msg from environmental camera
-                    tags = base_result["tags"]
-                    tag_relations = base_result["tag_relations"]
+                    tags = self._filter_tags(base_result["tags"])
+                    tag_relations = self._filter_relations(base_result["tag_relations"])
 
                     if base_id != self.main_id:  # convert to main coordinates
                         R = self.transform_matrices_dict[base_id]['R']

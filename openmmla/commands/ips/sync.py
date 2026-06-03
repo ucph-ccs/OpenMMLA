@@ -14,6 +14,8 @@ def get_parser():
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
     add_arg('verbose', bool, False, 'whether to print debug information', shortname='-v')
+    add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
+            shortname='-sid')
     return parser
 
 
@@ -29,7 +31,8 @@ def main():
     ips_synchronizer = IPSSynchronizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
-        verbose=args.verbose
+        verbose=args.verbose,
+        session_id=args.session_id
     )
     ips_synchronizer.run()
 

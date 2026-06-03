@@ -7,7 +7,6 @@ PROJECT_DIR="$BASH_DIR/.."
 paths=(
     "$PROJECT_DIR/visualizations"
     "$PROJECT_DIR/real-time"
-    "$PROJECT_DIR/logger"
     "$PROJECT_DIR/logs"
 )
 

@@ -1,5 +1,6 @@
 import paho.mqtt.client as mqtt
-import yaml
+
+from openmmla.utils.config import load_config_with_system_services
 
 
 class MQTTClientWrapper(mqtt.Client):
@@ -11,7 +12,7 @@ class MQTTClientWrapper(mqtt.Client):
         super().__init__(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
         self.config_path = config_path
         self.current_topics = []
-        config = yaml.safe_load(open(config_path, 'r'))
+        config = load_config_with_system_services(config_path)
 
         self.connect(config['MQTT']['host'], int(config['MQTT']['port']), 60)
 

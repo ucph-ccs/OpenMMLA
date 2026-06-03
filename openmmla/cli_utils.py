@@ -26,6 +26,7 @@ def print_main_help():
         ("ASR (Automatic Speech Recognition)", "asr-"),
         ("IPS (Indoor Positioning System)", "ips-"),
         ("VFA (Video Frame Analyzer)", "vfa-"),
+        ("Raw Data Collection", "collect-"),
         ("Session-level Tools", "ses-"),
         ("Management Console", "tui"),
         ("Security & Encryption", "crypto"),

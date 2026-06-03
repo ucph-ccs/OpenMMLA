@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static, Button
+from textual.widgets import Static, Button, Input, Select, TabbedContent, TabPane
 
 
 def _safe_id(raw: str) -> str:
@@ -34,6 +34,7 @@ class ServiceDef:
     description: str = ""
     params: list = field(default_factory=list)
     components: list = field(default_factory=list)
+    artifact_pipeline: str = ""
 
 
 @dataclass
@@ -42,6 +43,7 @@ class ParamDef:
     label: str
     param_type: str
     default: Any
+    choices: list[str] = field(default_factory=list)
 
 
 class ServiceCard(Widget):
@@ -54,9 +56,10 @@ class ServiceCard(Widget):
             self.params = params
 
     class StopRequested(Message):
-        def __init__(self, service_name: str) -> None:
+        def __init__(self, service_name: str, params: dict | None = None) -> None:
             super().__init__()
             self.service_name = service_name
+            self.params = params or {}
 
     class ViewLogsRequested(Message):
         def __init__(self, service_name: str) -> None:
@@ -68,31 +71,43 @@ class ServiceCard(Widget):
             super().__init__()
             self.service_name = service_name
 
+    class DownloadRequested(Message):
+        def __init__(self, service_name: str, params: dict) -> None:
+            super().__init__()
+            self.service_name = service_name
+            self.params = params
+
+    class DeleteFilesRequested(Message):
+        def __init__(self, service_name: str, params: dict) -> None:
+            super().__init__()
+            self.service_name = service_name
+            self.params = params
+
     DEFAULT_CSS = """
     ServiceCard {
         height: auto;
         border: solid $primary;
-        padding: 1;
-        margin: 1;
+        padding: 0 1;
+        margin: 0 1 1 1;
     }
     ServiceCard .card-title {
         text-style: bold;
         color: $text;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
     ServiceCard .card-meta {
         color: $text-muted;
     }
     ServiceCard .card-status {
-        margin: 1 0;
+        margin: 0 0 1 0;
     }
     ServiceCard .card-params {
-        margin: 1 0;
+        margin: 0;
     }
     ServiceCard .card-counts {
         layout: horizontal;
         height: auto;
-        margin: 1 0;
+        margin: 0 0 1 0;
     }
     ServiceCard .param-cell {
         layout: horizontal;
@@ -105,7 +120,7 @@ class ServiceCard(Widget):
         layout: horizontal;
         height: auto;
         min-height: 3;
-        margin-bottom: 1;
+        margin-bottom: 0;
         padding: 0;
     }
     ServiceCard .param-label {
@@ -132,13 +147,23 @@ class ServiceCard(Widget):
         min-width: 9;
         height: 3;
     }
+    ServiceCard .param-input {
+        width: 44;
+        min-width: 22;
+        height: 3;
+    }
+    ServiceCard .param-select {
+        width: 44;
+        min-width: 22;
+        height: 3;
+    }
     ServiceCard .card-actions {
         height: auto;
-        margin-top: 1;
+        margin: 0 0 1 0;
     }
     ServiceCard .card-actions Button {
         margin-right: 1;
-        width: 12;
+        width: 16;
         min-width: 12;
         height: 3;
     }
@@ -158,6 +183,10 @@ class ServiceCard(Widget):
         }
 
     def compose(self) -> ComposeResult:
+        if self.service_def.launch_type == "collection":
+            yield from self._compose_collection()
+            return
+
         status_text = "[green]Running[/green]" if self._is_running else "[red]Stopped[/red]"
 
         with Vertical():
@@ -206,6 +235,20 @@ class ServiceCard(Widget):
                     compact=True,
                     id=_safe_id(f"refresh__{self.service_def.name}"),
                 )
+                if self.service_def.launch_type == "collection" or self.service_def.artifact_pipeline:
+                    yield Button(
+                        "Download" if self.service_def.launch_type == "collection" else "Artifacts",
+                        variant="warning",
+                        compact=True,
+                        id=_safe_id(f"download__{self.service_def.name}"),
+                    )
+                if self.service_def.launch_type == "collection":
+                    yield Button(
+                        "Delete Remote",
+                        variant="error",
+                        compact=True,
+                        id=_safe_id(f"delete_files__{self.service_def.name}"),
+                    )
 
             if self.service_def.params:
                 option_params = [p for p in self.service_def.params if p.param_type != "int"]
@@ -216,8 +259,85 @@ class ServiceCard(Widget):
                                 for widget in self._param_widgets(p):
                                     yield widget
 
-    def _param_widgets(self, param: ParamDef) -> list:
+    def _compose_collection(self) -> ComposeResult:
+        status_text = "[green]Running[/green]" if self._is_running else "[red]Stopped[/red]"
+        with Vertical():
+            yield Static(f"[b]{self.service_def.name}[/b]", classes="card-title")
+            yield Static(
+                f"  env: {self.service_def.conda_env}  |  type: {self.service_def.launch_type}",
+                classes="card-meta",
+            )
+            if self.service_def.description:
+                yield Static(f"  {self.service_def.description}", classes="card-meta")
+            yield Static(f"  Status: {status_text}", classes="card-status")
+
+            with TabbedContent(id=_safe_id(f"collection_tabs__{self.service_def.name}")):
+                for label, role in (("Audio", "audio"), ("Video", "video")):
+                    with TabPane(label, id=_safe_id(f"collection_tab__{self.service_def.name}__{role}")):
+                        yield from self._compose_collection_role(role)
+
+    def _compose_collection_role(self, role: str) -> ComposeResult:
+        count_param = self._collection_count_param(role)
+        if count_param is not None:
+            with Horizontal(classes="card-counts"):
+                with Horizontal(classes="param-cell"):
+                    for widget in self._param_widgets(
+                        count_param,
+                        param_id=lambda kind, flag: self._collection_param_id(role, kind, flag),
+                    ):
+                        yield widget
+
+        with Horizontal(classes="card-actions"):
+            title_role = role.title()
+            yield Button(
+                f"Start {title_role}",
+                variant="success",
+                compact=True,
+                id=_safe_id(f"start_collection__{self.service_def.name}__{role}"),
+            )
+            yield Button(
+                "Stop",
+                variant="error",
+                compact=True,
+                id=_safe_id(f"stop_collection__{self.service_def.name}__{role}"),
+            )
+            yield Button(
+                "Logs",
+                variant="primary",
+                compact=True,
+                id=_safe_id(f"logs_collection__{self.service_def.name}__{role}"),
+            )
+            yield Button(
+                "Refresh",
+                variant="primary",
+                compact=True,
+                id=_safe_id(f"refresh_collection__{self.service_def.name}__{role}"),
+            )
+            yield Button(
+                "Download",
+                variant="warning",
+                compact=True,
+                id=_safe_id(f"download_collection__{self.service_def.name}__{role}"),
+            )
+            yield Button(
+                "Delete Remote",
+                variant="error",
+                compact=True,
+                id=_safe_id(f"delete_collection__{self.service_def.name}__{role}"),
+            )
+
+        with Vertical(classes="card-params"):
+            for param in self._collection_params_for_role(role):
+                with Horizontal(classes="param-row"):
+                    for widget in self._param_widgets(
+                        param,
+                        param_id=lambda kind, flag, role=role: self._collection_param_id(role, kind, flag),
+                    ):
+                        yield widget
+
+    def _param_widgets(self, param: ParamDef, param_id=None) -> list:
         """build the widgets for one launch parameter control."""
+        param_id = param_id or self._param_id
         widgets = [Static(f"{param.label}:", classes="param-label")]
         if param.param_type == "bool":
             value = bool(self._param_values[param.flag])
@@ -226,7 +346,7 @@ class ServiceCard(Widget):
                     self._bool_label(value),
                     variant=self._bool_variant(value),
                     compact=True,
-                    id=self._param_id("toggle", param.flag),
+                    id=param_id("toggle", param.flag),
                     classes="param-toggle",
                 )
             )
@@ -236,28 +356,60 @@ class ServiceCard(Widget):
                     Button(
                         "-",
                         compact=True,
-                        id=self._param_id("dec", param.flag),
+                        id=param_id("dec", param.flag),
                         classes="param-step",
                     ),
                     Static(
                         str(self._param_values[param.flag]),
-                        id=self._param_id("value", param.flag),
+                        id=param_id("value", param.flag),
                         classes="param-value",
                     ),
                     Button(
                         "+",
                         compact=True,
-                        id=self._param_id("inc", param.flag),
+                        id=param_id("inc", param.flag),
                         classes="param-step",
                     ),
                 ]
             )
+        elif param.choices:
+            options = [(str(choice), str(choice)) for choice in param.choices]
+            value = self._param_values[param.flag]
+            if not any(option_value == value for _, option_value in options):
+                value = Select.NULL
+            widgets.append(
+                Select(
+                    options,
+                    value=value,
+                    prompt=f"Select {param.label.lower()}...",
+                    id=param_id("select", param.flag),
+                    classes="param-select",
+                )
+            )
         else:
-            widgets.append(Static(str(self._param_values[param.flag]), classes="param-value"))
+            widgets.append(
+                Input(
+                    value=str(self._param_values[param.flag] or ""),
+                    id=param_id("input", param.flag),
+                    classes="param-input",
+                )
+            )
         return widgets
 
     def collect_params(self) -> dict:
         """gather current launch parameter values."""
+        for param in self.service_def.params:
+            if param.param_type in ("bool", "int"):
+                continue
+            try:
+                if param.choices:
+                    sel = self.query_one(f"#{self._param_id('select', param.flag)}", Select)
+                    self._param_values[param.flag] = "" if sel.value is Select.NULL else str(sel.value)
+                else:
+                    inp = self.query_one(f"#{self._param_id('input', param.flag)}", Input)
+                    self._param_values[param.flag] = inp.value
+            except Exception:
+                pass
         return dict(self._param_values)
 
     def _initial_param_value(self, param: ParamDef) -> Any:
@@ -272,6 +424,33 @@ class ServiceCard(Widget):
 
     def _param_id(self, kind: str, flag: str) -> str:
         return _safe_id(f"param_{kind}__{self.service_def.name}__{flag}")
+
+    def _collection_param_id(self, role: str, kind: str, flag: str) -> str:
+        return _safe_id(f"param_{kind}__{self.service_def.name}__{role}__{flag}")
+
+    def _collection_count_param(self, role: str) -> ParamDef | None:
+        count_flag = next(
+            (component.count_flag for component in self.service_def.components if component.role == role),
+            "",
+        )
+        return next((param for param in self.service_def.params if param.flag == count_flag), None)
+
+    def _collection_params_for_role(self, role: str) -> list[ParamDef]:
+        component = next((component for component in self.service_def.components if component.role == role), None)
+        if component is None:
+            return []
+        flags = [
+            "--session-id",
+            "--experiment-group",
+            "--output-root",
+            "--host-label",
+            *[
+                flag for flag in component.flags
+                if flag not in {"--session-id", "--experiment-group", "--output-root", "--host-label"}
+            ],
+        ]
+        params = {param.flag: param for param in self.service_def.params}
+        return [params[flag] for flag in flags if flag in params]
 
     @staticmethod
     def _bool_label(value: bool) -> str:
@@ -288,6 +467,15 @@ class ServiceCard(Widget):
         except Exception:
             pass
 
+    def _change_collection_int_param(self, role: str, flag: str, delta: int) -> None:
+        self._param_values[flag] = max(0, int(self._param_values.get(flag, 0)) + delta)
+        try:
+            self.query_one(f"#{self._collection_param_id(role, 'value', flag)}", Static).update(
+                str(self._param_values[flag])
+            )
+        except Exception:
+            pass
+
     def _toggle_bool_param(self, flag: str) -> None:
         self._param_values[flag] = not bool(self._param_values.get(flag, False))
         try:
@@ -297,6 +485,49 @@ class ServiceCard(Widget):
             button.variant = self._bool_variant(value)
         except Exception:
             pass
+
+    def _toggle_collection_bool_param(self, role: str, flag: str) -> None:
+        self._param_values[flag] = not bool(self._param_values.get(flag, False))
+        try:
+            button = self.query_one(f"#{self._collection_param_id(role, 'toggle', flag)}", Button)
+            value = bool(self._param_values[flag])
+            button.label = self._bool_label(value)
+            button.variant = self._bool_variant(value)
+        except Exception:
+            pass
+
+    def _collect_param_values(self, params: list[ParamDef], param_id) -> dict:
+        values: dict[str, Any] = {}
+        for param in params:
+            if param.param_type in ("bool", "int"):
+                values[param.flag] = self._param_values[param.flag]
+                continue
+            try:
+                if param.choices:
+                    sel = self.query_one(f"#{param_id('select', param.flag)}", Select)
+                    values[param.flag] = "" if sel.value is Select.NULL else str(sel.value)
+                else:
+                    inp = self.query_one(f"#{param_id('input', param.flag)}", Input)
+                    values[param.flag] = inp.value
+            except Exception:
+                values[param.flag] = self._param_values.get(param.flag, param.default)
+        return values
+
+    def _collect_collection_params(self, role: str, *, start: bool = False) -> dict:
+        params = self._collection_params_for_role(role)
+        values = self._collect_param_values(
+            params,
+            lambda kind, flag: self._collection_param_id(role, kind, flag),
+        )
+        count_param = self._collection_count_param(role)
+        if count_param is not None:
+            count = int(self._param_values.get(count_param.flag, 0))
+            values[count_param.flag] = max(0, count)
+        if start:
+            for component in self.service_def.components:
+                if component.role != role:
+                    values[component.count_flag] = 0
+        return values
 
     def update_status(self, is_running: bool) -> None:
         """update the displayed status."""
@@ -309,7 +540,15 @@ class ServiceCard(Widget):
 
     def update_service_def(self, service_def: ServiceDef) -> None:
         """update service metadata displayed by an already-mounted card."""
-        self.service_def = service_def
+        existing_params = {param.flag: param for param in self.service_def.params}
+        params = []
+        for param in service_def.params:
+            existing = existing_params.get(param.flag)
+            if existing and existing.choices and not param.choices:
+                params.append(replace(param, choices=existing.choices, default=existing.default))
+            else:
+                params.append(param)
+        self.service_def = replace(service_def, params=params)
         try:
             metas = list(self.query(".card-meta"))
             if metas:
@@ -323,15 +562,57 @@ class ServiceCard(Widget):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
+        if self.service_def.launch_type == "collection":
+            for role in ("audio", "video"):
+                if btn_id == _safe_id(f"start_collection__{self.service_def.name}__{role}"):
+                    params = self._collect_collection_params(role, start=True)
+                    self.post_message(self.StartRequested(self.service_def.name, params))
+                    return
+                if btn_id == _safe_id(f"stop_collection__{self.service_def.name}__{role}"):
+                    params = self._collect_collection_params(role)
+                    self.post_message(self.StopRequested(self.service_def.name, params))
+                    return
+                if btn_id == _safe_id(f"logs_collection__{self.service_def.name}__{role}"):
+                    self.post_message(self.ViewLogsRequested(self.service_def.name))
+                    return
+                if btn_id == _safe_id(f"refresh_collection__{self.service_def.name}__{role}"):
+                    self.post_message(self.RefreshRequested(self.service_def.name))
+                    return
+                if btn_id == _safe_id(f"download_collection__{self.service_def.name}__{role}"):
+                    params = self._collect_collection_params(role)
+                    self.post_message(self.DownloadRequested(self.service_def.name, params))
+                    return
+                if btn_id == _safe_id(f"delete_collection__{self.service_def.name}__{role}"):
+                    params = self._collect_collection_params(role)
+                    self.post_message(self.DeleteFilesRequested(self.service_def.name, params))
+                    return
+                for param in self.service_def.params:
+                    if btn_id == self._collection_param_id(role, "inc", param.flag):
+                        self._change_collection_int_param(role, param.flag, 1)
+                        return
+                    if btn_id == self._collection_param_id(role, "dec", param.flag):
+                        self._change_collection_int_param(role, param.flag, -1)
+                        return
+                    if btn_id == self._collection_param_id(role, "toggle", param.flag):
+                        self._toggle_collection_bool_param(role, param.flag)
+                        return
+
         if btn_id.startswith("start__"):
             params = self.collect_params()
             self.post_message(self.StartRequested(self.service_def.name, params))
         elif btn_id.startswith("stop__"):
-            self.post_message(self.StopRequested(self.service_def.name))
+            params = self.collect_params()
+            self.post_message(self.StopRequested(self.service_def.name, params))
         elif btn_id.startswith("logs__"):
             self.post_message(self.ViewLogsRequested(self.service_def.name))
         elif btn_id.startswith("refresh__"):
             self.post_message(self.RefreshRequested(self.service_def.name))
+        elif btn_id.startswith("download__"):
+            params = self.collect_params()
+            self.post_message(self.DownloadRequested(self.service_def.name, params))
+        elif btn_id.startswith("delete_files__"):
+            params = self.collect_params()
+            self.post_message(self.DeleteFilesRequested(self.service_def.name, params))
         else:
             for param in self.service_def.params:
                 if btn_id == self._param_id("inc", param.flag):

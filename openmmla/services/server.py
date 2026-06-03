@@ -4,6 +4,7 @@ from abc import abstractmethod, ABC
 
 import yaml
 
+from openmmla.utils.artifact_paths import artifact_root, safe_segment
 from openmmla.utils.logger import get_logger
 
 
@@ -36,7 +37,13 @@ class Server(ABC):
         self.config = self._load_config() if self.config_path else None
 
         # setup server directories
-        self.server_logger_dir = os.path.join(self.project_dir, 'logger')
+        self.server_logger_dir = os.fspath(
+            artifact_root(self.project_dir)
+            / 'shared'
+            / 'services'
+            / safe_segment(self.__class__.__name__, 'server')
+            / 'logger'
+        )
         self.server_temp_folder = os.path.join(self.project_dir, 'temp')
         os.makedirs(self.server_logger_dir, exist_ok=True)
         os.makedirs(self.server_temp_folder, exist_ok=True)

@@ -25,12 +25,16 @@ tests/*
 **/data/
 **/logs/
 **/real-time/
+**/post-time/
 **/visualizations/
 **/camera_sync/
 **/fine_tune/
+/artifacts/
+/collection/
 
 # Ignore generated files
 *.generated.conf
+**/.manifest.lock
 **/.next/
 
 # Ignore specific files

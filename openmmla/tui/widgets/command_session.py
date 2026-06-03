@@ -63,7 +63,7 @@ class CommandSession(Widget):
     DEFAULT_CSS = """
     CommandSession {
         height: auto;
-        min-height: 18;
+        min-height: 8;
     }
     .cmd-target-bar {
         layout: horizontal;
@@ -78,7 +78,7 @@ class CommandSession(Widget):
         width: 1fr;
     }
     .cmd-log {
-        height: 14;
+        height: 4;
         border-top: solid $primary;
         padding: 0 1;
     }

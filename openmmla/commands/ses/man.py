@@ -102,7 +102,6 @@ def cleanup_local_data(project_dir, session_id) -> None:
             print("Cleanup cancelled.")
             return
         directories = [
-            os.path.join(project_dir, 'logger', f'*{session_id}*'),
             os.path.join(project_dir, 'logs', f'*{session_id}*'),
             os.path.join(project_dir, 'visualizations', f'*{session_id}*'),
             os.path.join(project_dir, 'real-time', 'runtime', session_id)

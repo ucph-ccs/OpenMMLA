@@ -1,7 +1,7 @@
-"""shared infrastructure sections that appear across multiple pipeline configs.
+"""system service sections shared by OpenMMLA pipeline configs.
 
-When users fill these once in the "Global Defaults" panel, the values propagate
-to every pipeline config that contains the matching section name.
+These values describe where the common deployment services live. The TUI uses
+them to prefill and synchronize matching sections across pipeline configs.
 """
 
 SHARED_SECTIONS = {

@@ -199,11 +199,11 @@ class StreamPanel(Widget):
     }
     """
 
-    def __init__(self, streams: list[StreamDef], config_path: str = "") -> None:
+    def __init__(self, streams: list[StreamDef], config_path: str = "", project_dir: str | None = None) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
-        self._project_dir = _project_root_from_config(config_path)
+        self._project_dir = project_dir or _project_root_from_config(config_path)
         self._statuses: dict[str, bool] = {}
 
     def compose(self) -> ComposeResult:
@@ -335,6 +335,8 @@ class StreamPanel(Widget):
         if self._config_path:
             self._streams = list(load_streams(self._config_path))
             self._log(f"[cyan]Reloaded {len(self._streams)} stream(s) from {self._config_path}.[/cyan]")
+        else:
+            self._log("[cyan]Refreshing stream status from the current target config.[/cyan]")
         self._refresh_all()
 
     def _start_stream(self, stream: StreamDef) -> None:

@@ -10,6 +10,7 @@ from matplotlib.animation import FuncAnimation
 from numpy.linalg import norm
 
 from openmmla.bases.base import Base
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -21,7 +22,7 @@ class IPSVisualizer(Base):
     logger = get_logger('ips-visualizer')
 
     def __init__(self, config_path: str, project_dir: str | None = None,
-                 store: bool = True, use_3d: bool = False):
+                 store: bool = True, use_3d: bool = False, session_id: str | None = None):
         """Initialize the IPSVisualizer class.
 
         Args:
@@ -33,6 +34,7 @@ class IPSVisualizer(Base):
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.store = store
         self.use_3d = use_3d
+        self.launch_session_id = session_id
 
         # Runtime attribute
         self.session_id = None
@@ -46,8 +48,10 @@ class IPSVisualizer(Base):
 
     def _setup_directories(self):
         """Set up directories."""
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'logger'))
+        self.visualizations_dir = os.fspath(
+            shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'visualizations')
+        )
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.visualizations_dir, exist_ok=True)
 
@@ -78,11 +82,14 @@ class IPSVisualizer(Base):
                     show_error_and_pause(e, "return to the IPS Visualizer menu")
 
     def _start_visualization(self):
-        self.session_id = select_or_create_session(self.mongo_client)
+        self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
 
         if self.store:
-            dir_path = os.path.join(self.visualizations_dir, f'{self.session_id}/real-time')
+            self.visualizations_dir = os.fspath(
+                pipeline_section_dir(self.project_dir, self.session_id, 'ips-base', 'visualizations')
+            )
+            dir_path = os.path.join(self.visualizations_dir, 'real-time')
             os.makedirs(dir_path, exist_ok=True)
 
         self._listen_for_start_signal()
@@ -100,8 +107,11 @@ class IPSVisualizer(Base):
             self.session_id = None
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
+        self.bucket_logger_dir = os.fspath(
+            pipeline_section_dir(self.project_dir, self.session_id, 'ips-base', 'logger')
+        )
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'ips-base')
         self.logger = get_logger(f'ips-visualizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_visualizer.log'))
 
@@ -144,7 +154,7 @@ class IPSVisualizer(Base):
 
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.session_id}/real-time/image_{timestamp}_2d.png'))
+                os.path.join(self.visualizations_dir, f'real-time/image_{timestamp}_2d.png'))
 
     def _switch_dimension(self):
         self.use_3d = not self.use_3d
@@ -177,7 +187,7 @@ class IPSVisualizer(Base):
         ax.view_init(elev=20., azim=30)
         if self.store:
             plt.savefig(
-                os.path.join(self.visualizations_dir, f'{self.session_id}/real-time/image_{timestamp}_3d.png'))
+                os.path.join(self.visualizations_dir, f'real-time/image_{timestamp}_3d.png'))
 
     def _build_graph(self, graph_dict: dict, pos: dict) -> nx.DiGraph:
         G = nx.DiGraph()

@@ -1,5 +1,6 @@
 import redis
-import yaml
+
+from openmmla.utils.config import load_config_with_system_services
 
 
 class RedisClientWrapper(redis.Redis):
@@ -7,7 +8,7 @@ class RedisClientWrapper(redis.Redis):
 
     def __init__(self, config_path):
         """Initialize a Redis client with configurations"""
-        config = yaml.safe_load(open(config_path, 'r'))
+        config = load_config_with_system_services(config_path)
         super().__init__(
             host=config['Redis']['host'],
             port=int(config['Redis']['port']),

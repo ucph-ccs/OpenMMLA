@@ -16,6 +16,8 @@ def get_parser():
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
     add_arg('dominant', bool, False, 'whether to select the dominant speaker or not', shortname='-d')
     add_arg('sp', bool, False, 'whether the audio bases do speech separation or not', shortname='-sp')
+    add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
+            shortname='-sid')
     return parser
 
 
@@ -36,7 +38,8 @@ def main():
         config_path=args.config_path,
         mode='full',  # Default mode for synchronizer
         dominant=args.dominant,
-        sp=args.sp
+        sp=args.sp,
+        session_id=args.session_id
     )
 
 

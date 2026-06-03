@@ -5,12 +5,12 @@ OPTIONAL_DEP_MAP = {
     "asr-base": "asr-base",
     "asr-sync": "asr-base",
     "asr-post": "asr-base",
-    "asr-infer": "asr-server",
-    "asr-resample": "asr-server",
-    "asr-enhance": "asr-server",
-    "asr-separate": "asr-server",
-    "asr-transcribe": "asr-server",
-    "asr-vad": "asr-server",
+    "asr-infer": "asr-server-nemo",
+    "asr-resample": "asr-server-nemo",
+    "asr-enhance": "asr-server-nemo",
+    "asr-separate": "asr-server-nemo",
+    "asr-transcribe": "asr-server-nemo",
+    "asr-vad": "asr-server-nemo",
     "ips-ccal": "ips-base",
     "ips-csync": "ips-base",
     "ips-ctag": "ips-base",
@@ -20,8 +20,10 @@ OPTIONAL_DEP_MAP = {
     "vfa-base": "vfa-base",
     "vfa-sync": "vfa-base",
     "vfa-vllm": "vfa-server",
+    "collect-audio": "tui",
+    "collect-video": "tui",
     "ses-ctl": "uber-base",
-    "ses-enc": "uber-base",
+    "ses-gd-export": "uber-base",
     "ses-ana": "uber-base",
     "ses-man": "uber-base",
     "tui": "tui",
@@ -102,13 +104,21 @@ COMMANDS = {
         "openmmla.commands.vfa.vllm:main",
         "Start multimodal large language model server."
     ),
+    "collect-audio": (
+        "openmmla.commands.collect.audio:main",
+        "Record raw audio files for post-time processing."
+    ),
+    "collect-video": (
+        "openmmla.commands.collect.video:main",
+        "Record raw video files for post-time processing."
+    ),
     "ses-ctl": (
         "openmmla.commands.ses.ctl:main",
         "Control bucket session."
     ),
-    "ses-enc": (
-        "openmmla.commands.ses.enc:main",
-        "Encode real-time hybrid indicators and summaries."
+    "ses-gd-export": (
+        "openmmla.commands.ses.gd_export:main",
+        "Export OpenMMLA-GD windowed group dynamics datasets."
     ),
     "ses-ana": (
         "openmmla.commands.ses.ana:main",

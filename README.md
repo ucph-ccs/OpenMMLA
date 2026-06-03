@@ -166,10 +166,27 @@ mmla tui
 
 The TUI offers three main screens:
 - **Environment**: View and manage Conda environments for each pipeline
-- **Launcher**: Configure pipeline settings (with shared defaults for InfluxDB, MongoDB, Redis, MQTT), and start/stop infrastructure services and pipeline components — locally or on remote hosts via SSH
+- **Launcher**: Configure pipeline settings (with shared defaults for InfluxDB, MongoDB, Redis, MQTT), start/stop infrastructure services and pipeline components, and run raw audio/video collection into `artifacts/<session_id>/collection/<host>` — locally or on remote hosts via SSH
 - **Status**: Monitor all running services, ports, and tmux sessions at a glance
 
 > This is the recommended way to manage services. The manual commands documented below remain available as alternatives.
+
+### Raw Audio/Video Collection
+
+Use the collection commands when you want to record raw media first and process it later with ASR, IPS, or VFA configured as `source: file`. VFA frames downloaded from `real-time/runtime/<session_id>` can also be replayed with VFA configured as `source: frames` and launched in `analyze` mode.
+
+```bash
+mmla collect-audio --session-id demo --audio-device 0 --audio-channel mix
+mmla collect-video --session-id demo --video-device /dev/video0 --camera-label cam0
+```
+
+Use `mmla collect-audio --list-devices` to inspect FFmpeg audio device ids before recording. `--audio-channel mix` records a mono average of all detected channels; pass a 0-based channel number such as `0` or `1` when you need one specific channel.
+
+The same commands are available from the TUI Launcher under **Collection → Collection Session**. Audio collection is interactive by default there: the launcher opens a terminal, lists FFmpeg audio devices, and lets you choose the device/channel before recording. Selecting **Create MongoDB Session** uses the configured experiment/group assignments to create the same `<experiment_id>_<group_id>_<YYMMDDTHHMMZ>` session id used by ASR, IPS, and VFA. For remote targets, the launcher uploads a lightweight collection runtime to `~/.openmmla/collection-runtime`, then opens an SSH terminal and records under `~/artifacts/<session_id>/collection/<host>`. After the recording finishes, use **Download** to copy that remote collection into the local `artifacts/<session_id>/collection/<host>/`, then **Delete Remote** if the remote copy should be removed.
+
+The files are written under `artifacts/<session_id>/collection/<host>/audio` and `artifacts/<session_id>/collection/<host>/video` with filenames ending in the capture start timestamp, for example `audio_host_mix_1750000000.123.wav` and `video_host_cam0_1750000000.123.mp4`. Each session also gets `manifest.json` and `manifest.yml` containing the shared `initial_sync_time`, recording metadata, and ready-to-use ASR/IPS/VFA `file_dir` values.
+
+Real-time ASR/VFA/IPS components also write session artifacts at the repository root: `artifacts/<session_id>/pipelines/<pipeline>/<host>/`. Pipeline-local `real-time/`, `post-time/`, `logger/`, and `visualizations/` directories should be treated as legacy scratch locations rather than the default archive. InfluxDB exports live in `artifacts/<session_id>/measurements/`; post-time derived outputs live under `artifacts/<session_id>/analysis/`, with charts in `analysis/visualizations/` and future computed features in `analysis/features/`.
 
 ### OpenMMLA Codebase Setup
 

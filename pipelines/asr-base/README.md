@@ -29,7 +29,7 @@ pip install pylsl==1.17.6
 conda install -c conda-forge liblsl=1.16.2
 ```
 
-For ASR server environments, choose one backend-specific extra. `asr-server` is kept as the legacy/default name for the NeMo backend.
+For ASR server environments, choose one backend-specific extra.
 
 ```bash
 pip install -e ".[asr-server-nemo]"       # NeMo speaker embedding backend
@@ -85,7 +85,7 @@ Streams with `ssh_profile` can be started/stopped from the TUI Launcher's **Stre
 make all # if start all services 
 make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
 
-# 2. Run asr services on base server with conda env `asr-server` 
+# 2. Run asr services on base server with conda env `asr-server-nemo` or `asr-server-wespeaker`
 # Edit your own config.yml file, see pipelines/asr-server/config_template.yml for more details
 # You can either run it via bash or python
 
@@ -97,8 +97,8 @@ make all -without=nginx,celery,flask,next # if start without nginx(load balancer
 # =================PYTHON========================
 # Start asr services one-by-one (asr-infer, asr-enhance, asr-vad, asr-transcribe, asr-separate, etc.)
 # Flask app entrypoints live under openmmla/services/asr/apps/ (serve_*.py); use mmla or gunicorn against :app.
-# Activate conda env `asr-server`
-conda activate asr-server
+# Activate conda env `asr-server-nemo`
+conda activate asr-server-nemo
 
 ## Option 1: run with single worker via mmla command
 ## e.g., 

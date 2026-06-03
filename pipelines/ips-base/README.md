@@ -105,7 +105,7 @@ options:
   -nb NUM_BASE         : Number of IPS bases to run (default: 3)
   -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)
   -g GRAPHICS          : Enable graphics (default: true)
-  -s STORE             : Enable store (default: false)
+  -s STORE             : Store frames locally (default: true)
   -v VERBOSE           : Enable verbose mode (default: false)
   -h                   : Display this help message
 

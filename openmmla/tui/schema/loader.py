@@ -58,9 +58,8 @@ def _clean_stream_optional(value) -> str:
     return text
 
 
-def load_streams(config_path: str) -> list[StreamDef]:
-    """load stream definitions from a pipeline config.yml."""
-    data = load_existing_config(config_path)
+def streams_from_config(data: dict) -> list[StreamDef]:
+    """load stream definitions from a parsed pipeline config."""
     streams_data = data.get("Streams", {})
     if not isinstance(streams_data, dict):
         return []
@@ -86,6 +85,11 @@ def load_streams(config_path: str) -> list[StreamDef]:
             channels=int(props.get("channels", 0)),
         ))
     return streams
+
+
+def load_streams(config_path: str) -> list[StreamDef]:
+    """load stream definitions from a pipeline config.yml."""
+    return streams_from_config(load_existing_config(config_path))
 
 
 def get_stream_targets(config_path: str, protocol: str = "rtmp") -> list[str]:

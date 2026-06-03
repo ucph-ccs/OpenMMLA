@@ -1,20 +1,62 @@
 active_experiments:
-- experiment_id: exp_01
-  title: pair programming
+- experiment_id: exp_20260520_microbit
+  title: Microbit
+  status: inactive
+  task_type: microbit_circuit
+- experiment_id: exp_20260520_wegrow
+  title: Wegrow
+  status: inactive
+  task_type: wegrow
+- experiment_id: exp_test
+  title: Test experiment
+  status: inactive
+  task_type: microbit_circuit
+- experiment_id: exp_20260603_microbit
+  title: microbit
   status: active
-  task_type: programming
-- experiment_id: exp_02
-  title: lego
-  status: active
-  task_type: lego_building
+  task_type: microbit_circuit
 assignments:
-  exp_01:
-    alice:
+  exp_20260520_microbit:
+    Anthon:
+      group_id: group_01
+      tag_id: '0'
+      description: male, balck sweather, blonde hair
+    Diana:
       group_id: group_01
       tag_id: '1'
-      description: brown hair and white shirt
-    eric:
+      description: female, brown t-shirt, blonde long hair
+  exp_20260520_wegrow:
+    Anthon:
+      group_id: group_01
+      tag_id: '0'
+      description: male, black sweather, blonde hair
+    Diana:
+      group_id: group_01
+      tag_id: '1'
+      description: female, brown shirt, black pants, brown hair
+  exp_test:
+    zaibei:
+      group_id: group_01
+      tag_id: '0'
+      description: male, black hair, grep sweather
+    danping:
+      group_id: group_01
+      tag_id: '1'
+      description: female, black long hair, yellow shirt
+    jimmy:
+      group_id: group_02
+      tag_id: '2'
+      description: male, brown hair, long white shirt
+  exp_20260603_microbit:
+    Mikkel:
+      group_id: group_01
+      tag_id: '0'
+      description: male, blonde, checkered shirt, black jeans
+    Alex:
+      group_id: group_01
+      tag_id: '1'
+      description: male, blonde, blue jeans, black tee
+    Haaken:
       group_id: group_01
       tag_id: '2'
-      description: black hair, wear glasses, black sweater, male
-  exp_02: {}
+      description: male, blonde, black tee, beige pants

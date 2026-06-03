@@ -1,5 +1,4 @@
 import logging
-import yaml
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -7,6 +6,7 @@ from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 from openmmla.utils.constants import INFLUXDB_MEASUREMENT, INFLUXDB_DEFAULT_BUCKET
+from openmmla.utils.config import load_config_with_system_services
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class InfluxDBClientWrapper:
     """InfluxDB client for single-bucket, single-measurement schema with event_type tags."""
 
     def __init__(self, config_path: str):
-        config = yaml.safe_load(open(config_path, 'r'))
+        config = load_config_with_system_services(config_path)
         influx_config = config['InfluxDB']
 
         self.url = influx_config['url']

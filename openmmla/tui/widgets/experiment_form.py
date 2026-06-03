@@ -139,7 +139,7 @@ class ExperimentForm(Widget):
             Label("Task Type:", classes="ef-field-label"),
             Select(
                 options,
-                value=task_val if task_val else Select.BLANK,
+                value=task_val if task_val else Select.NULL,
                 allow_blank=True,
                 prompt="select task type",
                 id="ef-task-type",
@@ -152,7 +152,7 @@ class ExperimentForm(Widget):
             Label("Status:", classes="ef-field-label"),
             Select(
                 [("active", "active"), ("inactive", "inactive")],
-                value=status_val if status_val else Select.BLANK,
+                value=status_val if status_val else Select.NULL,
                 allow_blank=True,
                 id="ef-status-select",
                 classes="ef-field-input",
@@ -362,9 +362,9 @@ class ExperimentForm(Widget):
         new_id = self.query_one("#ef-id", Input).value.strip()
         title = self.query_one("#ef-title", Input).value.strip()
         task_sel = self.query_one("#ef-task-type", Select).value
-        task_type = str(task_sel) if task_sel is not Select.BLANK else ""
+        task_type = str(task_sel) if task_sel is not Select.NULL else ""
         status_sel = self.query_one("#ef-status-select", Select).value
-        status = str(status_sel) if status_sel is not Select.BLANK else "active"
+        status = str(status_sel) if status_sel is not Select.NULL else "active"
 
         if not new_id:
             self._set_status("[red]Experiment ID is required.[/red]")

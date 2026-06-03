@@ -4,7 +4,6 @@ PROJECT_DIR="$BASH_DIR/.."
 
 # Folders to clean and recreate
 paths=(
-    "$PROJECT_DIR/logger/"
     "$PROJECT_DIR/temp/"
 )
 

@@ -13,8 +13,12 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
+    add_arg('mode', str, 'full', 'operating mode', choices=['record', 'analyze', 'full'], shortname='-m')
     add_arg('graphics', bool, True, 'whether to display video frames', shortname='-g')
+    add_arg('store', bool, True, 'whether to store frames locally', shortname='-s')
     add_arg('verbose', bool, False, 'whether to print debug information', shortname='-v')
+    add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
+            shortname='-sid')
     return parser
 
 
@@ -30,8 +34,11 @@ def main():
     vfa_base = VFABase(
         project_dir=args.project_dir,
         config_path=args.config_path,
+        mode=args.mode,
         graphics=args.graphics,
-        verbose=args.verbose
+        store=args.store,
+        verbose=args.verbose,
+        session_id=args.session_id
     )
     vfa_base.run()
 

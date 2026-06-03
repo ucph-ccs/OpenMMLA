@@ -14,8 +14,10 @@ def get_parser():
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
     add_arg('graphics', bool, True, 'whether to display video frames', shortname='-g')
-    add_arg('store', bool, False, 'whether to store video frames', shortname='-s')
+    add_arg('store', bool, False, 'whether to store frames locally', shortname='-s')
     add_arg('verbose', bool, False, 'whether to print debug information', shortname='-v')
+    add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
+            shortname='-sid')
     return parser
 
 
@@ -33,7 +35,8 @@ def main():
         config_path=args.config_path,
         graphics=args.graphics,
         store=args.store,
-        verbose=args.verbose
+        verbose=args.verbose,
+        session_id=args.session_id
     )
     ips_base.run()
 

@@ -1,0 +1,15 @@
+InfluxDB:
+  url: http://ericli.local:8086
+  token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  org: admin
+  bucket: mmla-data
+MongoDB:
+  url: mongodb://ericli.local:27017
+  db: openmmla
+MQTT:
+  host: ericli.local
+  port: 1883
+Redis:
+  host: ericli.local
+  port: 6379
+  db: 1

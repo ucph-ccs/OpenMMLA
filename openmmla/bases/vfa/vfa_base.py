@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 
@@ -12,6 +13,7 @@ import numpy as np
 
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, flush_input, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -25,7 +27,7 @@ class VFABase(Base):
     logger = get_logger('vfa-base')
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'full', graphics: bool = True,
-                 verbose: bool = False):
+                 store: bool = True, verbose: bool = False, session_id: str | None = None):
         """Initializes the VFABase class.
 
         Args:
@@ -33,6 +35,7 @@ class VFABase(Base):
             config_path: path to the configuration file
             mode: operating mode, 'record', 'analyze', or 'full'. (default: 'full')
             graphics: whether to display graphics (default: True)
+            store: whether to store frames locally (default: True)
             verbose: whether to enable verbose logging (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
@@ -40,7 +43,9 @@ class VFABase(Base):
         # VFABase specific parameters
         self.mode = mode
         self.graphics = graphics
+        self.store = store
         self.verbose = verbose
+        self.launch_session_id = session_id
 
         # Runtime attributes
         self.chosen_camera = None
@@ -49,6 +54,9 @@ class VFABase(Base):
         self.camera_configured = False
         self.session_id = None
         self.video_stream = None
+        self.save_path = None
+        self.temp_save_path = None
+        self.frame_output_path = None
 
         # Threading attributes
         self.stop_event = threading.Event()
@@ -78,16 +86,21 @@ class VFABase(Base):
         self.source = base_config['source']
         self.stream_kwargs = base_config['stream_kwargs']
 
-        source_list = ['opencv', 'rtmp', 'lsl', 'file']
+        source_list = ['opencv', 'rtmp', 'lsl', 'file', 'frames']
         if self.source not in source_list:
             raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
 
+        if self.source == 'frames' and self.mode != 'analyze':
+            raise ValueError("VFA source 'frames' requires analyze mode. Start vfa-base with -m analyze.")
+
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations."""
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        self.runtime_dir = os.path.join(self.project_dir, 'real-time', 'runtime')
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'logger'))
+        self.runtime_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'real-time', 'runtime'))
+        self.temp_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'real-time', 'temp'))
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.runtime_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
 
     def _setup_clients(self):
         """Initialize external service clients and internal processing objects."""
@@ -110,6 +123,28 @@ class VFABase(Base):
             cv2.waitKey(1)
         gc.collect()
 
+    def _clean_stale_temp_frames(self):
+        """Clean stale temporary frames before starting a new non-persistent run."""
+        if getattr(self, 'store', True):
+            return
+
+        temp_save_path = getattr(self, 'temp_save_path', None)
+        if not temp_save_path:
+            return
+
+        temp_root = os.path.abspath(self.temp_dir)
+        temp_save_path = os.path.abspath(temp_save_path)
+        try:
+            if os.path.commonpath([temp_root, temp_save_path]) != temp_root:
+                self.logger.warning(f"Refusing to delete non-temp VFA frame path: {temp_save_path}")
+                return
+        except ValueError:
+            self.logger.warning(f"Refusing to delete invalid VFA frame path: {temp_save_path}")
+            return
+
+        if os.path.isdir(temp_save_path):
+            shutil.rmtree(temp_save_path, ignore_errors=True)
+
     def _reinit(self):
         """Reinitialize VFABase by calling __init__ again with stored parameters."""
         self.logger.info("Starting VFA base reinitialization...")
@@ -119,14 +154,17 @@ class VFABase(Base):
         config_path = getattr(self, 'config_path', None)
         mode = getattr(self, 'mode', 'full')
         graphics = getattr(self, 'graphics', True)
+        store = getattr(self, 'store', True)
         verbose = getattr(self, 'verbose', False)
+        session_id = getattr(self, 'launch_session_id', None)
         
         # Clean up current state
         self._clean_up()
         
         # Call __init__ again with the original parameters
         self.__init__(project_dir=project_dir, config_path=config_path, 
-                     mode=mode, graphics=graphics, verbose=verbose)
+                     mode=mode, graphics=graphics, store=store, verbose=verbose,
+                     session_id=session_id)
         
         self.logger.info("VFA base reinitialization completed successfully")
 
@@ -158,7 +196,7 @@ class VFABase(Base):
             self.logger.warning("Camera is not configured.")
             return self._set_camera()
 
-        self.session_id = select_or_create_session(self.mongo_client)
+        self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
 
         if self.mode != 'analyze':
@@ -187,8 +225,11 @@ class VFABase(Base):
 
     def _create_bucket_logger(self):
         """Create logger for the bucket."""
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
+        self.bucket_logger_dir = os.fspath(
+            pipeline_section_dir(self.project_dir, self.session_id, 'vfa-base', 'logger')
+        )
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'vfa-base')
         self.logger = get_logger(f'vfa-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'vfa_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
@@ -356,6 +397,21 @@ class VFABase(Base):
                         available_sources.append(file_path)
                         available_source_idx += 1
 
+        elif self.source == 'frames':
+            base_config = self.config.get('Base', {})
+            frame_dir = base_config.get('frame_dir') or base_config.get('file_dir')
+            if not frame_dir:
+                raise ValueError("frame_dir configuration is missing in the YAML file.")
+            if not os.path.isabs(frame_dir):
+                frame_dir = os.path.join(self.project_dir, frame_dir)
+            if not os.path.isdir(frame_dir):
+                raise ValueError(f"Frame directory does not exist: {frame_dir}")
+
+            for source_dir in self._find_frame_source_dirs(frame_dir):
+                print(f"{available_source_idx} : Frame directory {source_dir} is available.")
+                available_sources.append(source_dir)
+                available_source_idx += 1
+
         if not available_sources:
             self.logger.warning(f"No video sources found for {self.source}.")
 
@@ -385,13 +441,32 @@ class VFABase(Base):
 
     def _process_frames(self):
         """Process video frames and handle frame analysis."""
-        self.save_path = os.path.join(self.runtime_dir, f'{self.session_id}/{self.chosen_camera}_{self.base_id}')
-        os.makedirs(self.save_path, exist_ok=True)
+        real_time_dir = pipeline_section_dir(self.project_dir, self.session_id, 'vfa-base', 'real-time')
+        self.runtime_dir = os.fspath(real_time_dir / 'runtime')
+        self.temp_dir = os.fspath(real_time_dir / 'temp')
+        os.makedirs(self.runtime_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
+        self.save_path = os.path.join(self.runtime_dir, f'{self.chosen_camera}_{self.base_id}')
+        self.temp_save_path = os.path.join(self.temp_dir, f'{self.chosen_camera}_{self.base_id}')
 
         if self.mode == 'analyze':  # processing existing frames
+            frame_source_path = self.selected_source if self.source == 'frames' else self.save_path
+            if not frame_source_path:
+                self.logger.warning("No frame source is configured for analysis.")
+                return
+            if self.source != 'frames':
+                os.makedirs(frame_source_path, exist_ok=True)
             time.sleep(2) # wait for the synchronizer to start
-            self._analyze_existing_frames(self.save_path)
+            self._analyze_existing_frames(str(frame_source_path))
             return
+
+        self.frame_output_path = self.save_path if self.store else self.temp_save_path
+        if self.store or self.mode == 'full':
+            if not self.store:
+                self._clean_stale_temp_frames()
+            os.makedirs(self.frame_output_path, exist_ok=True)
+        elif self.mode == 'record':
+            self.logger.warning("VFA record mode is running with store frames disabled; frames will not be written.")
 
         if self.source == 'file':
             self._process_keyframes()
@@ -431,15 +506,15 @@ class VFABase(Base):
             # process the frame
             processed_frame = self._process_single_frame(frame, acquired_time)
             
-            # save and publish frame
-            image_path = os.path.join(self.save_path, f'{acquired_time}.jpg')
-            cv2.imwrite(image_path, processed_frame)
-            
-            if self.mode == 'full':
-                try:
-                    self._publish_frame(image_path, acquired_time)
-                except Exception as e:
-                    self.logger.warning(f"VFA publish failed: {e}")
+            if self.store or self.mode == 'full':
+                image_path = os.path.join(self.frame_output_path, f'{acquired_time}.jpg')
+                cv2.imwrite(image_path, processed_frame)
+
+                if self.mode == 'full':
+                    try:
+                        self._publish_frame(image_path, acquired_time)
+                    except Exception as e:
+                        self.logger.warning(f"VFA publish failed: {e}")
             
             # accumulative timing synchronization
             if self.enable_timing_sync:
@@ -478,8 +553,9 @@ class VFABase(Base):
             processed_frame = self._process_single_frame(frame, acquired_time)
 
             if acquired_time - last_saved_time >= self.keyframe_interval:
-                image_path = os.path.join(self.save_path, f'{acquired_time}.jpg')
-                cv2.imwrite(image_path, processed_frame)
+                if self.store or self.mode == 'full':
+                    image_path = os.path.join(self.frame_output_path, f'{acquired_time}.jpg')
+                    cv2.imwrite(image_path, processed_frame)
                 last_saved_time = acquired_time
 
                 if self.mode == 'full':
@@ -509,15 +585,63 @@ class VFABase(Base):
 
         return frame
 
+    @staticmethod
+    def _frame_timestamp(filename: str) -> float:
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        candidates = [stem]
+        if '_' in stem:
+            candidates.append(stem.rsplit('_', 1)[1])
+        candidates.extend(re.findall(r'\d+(?:\.\d+)?', stem))
+
+        for candidate in reversed(candidates):
+            try:
+                timestamp = float(candidate)
+            except ValueError:
+                continue
+            if validate_unix_timestamp(timestamp):
+                return timestamp
+        raise ValueError(f"no unix timestamp found in frame filename: {filename}")
+
+    @staticmethod
+    def _frame_files(path: str) -> list[str]:
+        if not os.path.isdir(path):
+            return []
+        return [
+            f for f in os.listdir(path)
+            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+        ]
+
+    @classmethod
+    def _find_frame_source_dirs(cls, frame_dir: str) -> list[str]:
+        if cls._frame_files(frame_dir):
+            return [frame_dir]
+
+        source_dirs = []
+        for root, dirs, files in os.walk(frame_dir):
+            dirs[:] = [name for name in dirs if name not in {'__pycache__', 'temp'}]
+            frame_files = [
+                f for f in files
+                if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+            ]
+            if frame_files:
+                source_dirs.append(root)
+        return sorted(source_dirs)
+
     def _analyze_existing_frames(self, save_path: str):
         """Analyze existing frames in the save path with timing synchronization."""
         print("Analyzing VFA existing frames with timing synchronization...")
 
         # Get all image files and sort by timestamp
-        frame_files = [f for f in os.listdir(save_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        frame_files.sort(key=lambda x: float(x.split('.')[0].split('_')[1]))  # Sort by timestamp (assuming filename format: _timestamp.jpg)
+        frame_files = self._frame_files(save_path)
+        valid_frame_files = []
+        for frame_file in frame_files:
+            try:
+                valid_frame_files.append((self._frame_timestamp(frame_file), frame_file))
+            except ValueError as e:
+                self.logger.warning(f"Skipping frame {frame_file}: {e}")
+        valid_frame_files.sort(key=lambda item: item[0])
 
-        if not frame_files:
+        if not valid_frame_files:
             self.logger.warning("No image files found in save path for analysis")
             return
 
@@ -527,15 +651,13 @@ class VFABase(Base):
         frame_count = 0
         
         self.logger.info(f"VFA analyze mode: interval={self.keyframe_interval}s, rate={self.processing_rate}x, "
-                        f"target_interval={target_interval:.3f}s, total frames: {len(frame_files)}")
+                        f"target_interval={target_interval:.3f}s, total frames: {len(valid_frame_files)}")
 
-        for frame_file in frame_files:
+        for acquired_time, frame_file in valid_frame_files:
             if self.stop_event.is_set():
                 break
 
             try:
-                # Extract timestamp from filename (assuming format: timestamp.jpg)
-                acquired_time = float(frame_file.split('.')[0].split('_')[1])
                 image_path = os.path.join(save_path, frame_file)
                 
                 # Publish frame
@@ -564,15 +686,20 @@ class VFABase(Base):
 
     def _publish_frame(self, image_path: str, acquired_time: float):
         """Publish frame to MQTT for synchronization."""
+        store_frames = bool(self.store) or self.mode == 'analyze'
         frame_data = {
             "base_id": str(self.base_id),
             "angle": self.camera_angle,
             "image_path": image_path,
-            "acquired_time": acquired_time
+            "acquired_time": acquired_time,
+            "store_frames": store_frames
         }
 
         self.mqtt_client.publish(f"{self.session_id}/vfa", json.dumps(frame_data))
-        self.logger.info(f"Published frame path {image_path} with angle {self.camera_angle} at {acquired_time}")
+        self.logger.info(
+            f"Published frame path {image_path} with angle {self.camera_angle} at {acquired_time} "
+            f"(store_frames={store_frames})"
+        )
 
     @property
     def session_control(self) -> str | None:

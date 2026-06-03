@@ -22,6 +22,7 @@ from openmmla.utils.audio.auga import normalize_decibel, apply_gain
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url, show_error_and_pause
@@ -50,7 +51,8 @@ def _resolve_speaker_verification(value, asr_scope: str) -> bool:
 
 
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'full', store: bool = True,
-                   vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
+                   vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
+                   hsr: bool = True, session_id: str | None = None):
     """Start ASR Base with restart capability.
     
     Args:
@@ -68,7 +70,8 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'full', store
     while True:
         try:
             asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode, 
-                              vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr)
+                              vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr,
+                              session_id=session_id)
             asr_base.run()
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
@@ -89,7 +92,8 @@ class ASRBase(Base):
     logger = get_logger(f'asr-base')
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'record', store: bool = True,
-                 vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False, hsr: bool = True):
+                 vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
+                 hsr: bool = True, session_id: str | None = None):
         """Initialize the ASRBase class.
 
         Args:
@@ -113,6 +117,7 @@ class ASRBase(Base):
         self.tr = tr
         self.sp = sp
         self.hsr = hsr
+        self.launch_session_id = session_id
 
         # runtime attributes
         self.session_id = None
@@ -266,10 +271,10 @@ class ASRBase(Base):
         Create directories for runtime files, temporary files, speaker profiles, and audio databases.
         Ensures that the required folder structure exists.
         """
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        self.runtime_dir = os.path.join(self.project_dir, 'real-time', 'runtime')
-        self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
-        self.profiles_dir = os.path.join(self.project_dir, 'real-time', 'profiles')
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'logger'))
+        self.runtime_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'real-time', 'runtime'))
+        self.temp_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'temp'))
+        self.profiles_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'profiles'))
 
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.runtime_dir, exist_ok=True)
@@ -548,7 +553,8 @@ class ASRBase(Base):
             print(f"{GREEN}ASR chunks will be attributed at group scope.{ENDC}")
         
         # select or create bucket
-        self.session_id = select_or_create_session(self.mongo_client) if not session_id else session_id
+        launch_session_id = session_id or self.launch_session_id
+        self.session_id = select_or_create_session(self.mongo_client) if not launch_session_id else launch_session_id
         self._resolve_group_speaker_id()
         self._create_bucket_logger()
         self._create_speaker_profile_snapshot()
@@ -609,8 +615,11 @@ class ASRBase(Base):
 
     def _create_bucket_logger(self):
         """Create a logger for a bucket."""
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
+        self.bucket_logger_dir = os.fspath(
+            pipeline_section_dir(self.project_dir, self.session_id, 'asr-base', 'logger')
+        )
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'asr-base')
         self.logger = get_logger(f'asr-base-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir,
                                               f'asr_{self.base_type}_{self.id}.log'))
@@ -628,7 +637,10 @@ class ASRBase(Base):
             self.logger.info("Skipping speaker profile snapshot because speaker verification is disabled.")
             return
 
-        snapshot_dir = os.path.join(self.runtime_dir, self.session_id, f'{self.base_type}_{self.id}', 'profiles')
+        runtime_root = pipeline_section_dir(self.project_dir, self.session_id, 'asr-base', 'real-time') / 'runtime'
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        self.runtime_dir = os.fspath(runtime_root)
+        snapshot_dir = os.path.join(self.runtime_dir, f'{self.base_type}_{self.id}', 'profiles')
         if os.path.exists(snapshot_dir):
             shutil.rmtree(snapshot_dir)  # Clear any existing snapshot
         else:
@@ -1317,7 +1329,10 @@ class ASRBase(Base):
         Create subdirectories for segments, chunks, separations, temporary files, and records.
         Clear specific directories based on the current operating mode.
         """
-        self.audio_dir = os.path.join(self.runtime_dir, f'{self.session_id}', f'{self.base_type}_{self.id}')
+        runtime_root = pipeline_section_dir(self.project_dir, self.session_id, 'asr-base', 'real-time') / 'runtime'
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        self.runtime_dir = os.fspath(runtime_root)
+        self.audio_dir = os.path.join(self.runtime_dir, f'{self.base_type}_{self.id}')
         sub_dirs = ['segments', 'chunks', 'separations', 'temp', 'records']
         for subdir in sub_dirs:
             directory_path = os.path.join(self.audio_dir, subdir)

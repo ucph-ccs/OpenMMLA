@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, Button, Input, Label
@@ -24,8 +24,11 @@ class SSHForm(Widget):
 
     DEFAULT_CSS = """
     SSHForm {
-        height: auto;
+        height: 1fr;
         padding: 1 2;
+    }
+    SSHForm .ssh-root {
+        height: 1fr;
     }
     SSHForm .ssh-title {
         text-style: bold;
@@ -57,7 +60,15 @@ class SSHForm(Widget):
     }
     SSHForm .ssh-profile-list {
         margin-top: 1;
+        height: 1fr;
+        min-height: 5;
+        border-bottom: solid $surface-lighten-1;
+        padding-bottom: 1;
+        scrollbar-size: 1 1;
+    }
+    SSHForm .ssh-form-section {
         height: auto;
+        padding-top: 1;
     }
     SSHForm .profile-entry {
         layout: horizontal;
@@ -80,10 +91,10 @@ class SSHForm(Widget):
         self._editing: str | None = None
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with Vertical(classes="ssh-root"):
             yield Static("[b]SSH Profiles[/b]", classes="ssh-title")
 
-            with Vertical(classes="ssh-profile-list", id="ssh-profile-list"):
+            with VerticalScroll(classes="ssh-profile-list", id="ssh-profile-list"):
                 for p in self._profiles:
                     auth = "password" if p.password else ("key" if p.key_path else "default")
                     with Horizontal(classes="profile-entry"):
@@ -94,41 +105,42 @@ class SSHForm(Widget):
                         yield Button("Edit", id=f"ssh-edit-{p.name}")
                         yield Button("Delete", variant="error", id=f"ssh-del-{p.name}")
 
-            yield Static("[b]Add / Edit Profile[/b]", classes="ssh-title")
+            with Vertical(classes="ssh-form-section"):
+                yield Static("[b]Add / Edit Profile[/b]", classes="ssh-title")
 
-            with Horizontal(classes="ssh-actions"):
-                yield Button("Add Profile", variant="success", id="ssh-save")
-                yield Button("Test Connection", variant="warning", id="ssh-test")
-                yield Button("Clear Form", variant="default", id="ssh-clear")
+                with Horizontal(classes="ssh-actions"):
+                    yield Button("Add Profile", variant="success", id="ssh-save")
+                    yield Button("Test Connection", variant="warning", id="ssh-test")
+                    yield Button("Clear Form", variant="default", id="ssh-clear")
 
-            yield Static("", id="ssh-status", classes="ssh-status")
+                yield Static("", id="ssh-status", classes="ssh-status")
 
-            with Horizontal(classes="ssh-field"):
-                yield Label("Profile Name:", classes="ssh-field-label")
-                yield Input(placeholder="e.g. lab-server", id="ssh-name", classes="ssh-field-input")
-            with Horizontal(classes="ssh-field"):
-                yield Label("Host:", classes="ssh-field-label")
-                yield Input(placeholder="e.g. 192.168.1.100", id="ssh-host", classes="ssh-field-input")
-            with Horizontal(classes="ssh-field"):
-                yield Label("User:", classes="ssh-field-label")
-                yield Input(placeholder="e.g. ubuntu", id="ssh-user", classes="ssh-field-input")
-            with Horizontal(classes="ssh-field"):
-                yield Label("Port:", classes="ssh-field-label")
-                yield Input(value="22", id="ssh-port", classes="ssh-field-input")
-            with Horizontal(classes="ssh-field"):
-                yield Label("Password:", classes="ssh-field-label")
-                yield Input(
-                    placeholder="leave empty for key-based auth",
-                    id="ssh-password",
-                    password=True,
-                    classes="ssh-field-input",
-                )
-            with Horizontal(classes="ssh-field"):
-                yield Label("Key Path:", classes="ssh-field-label")
-                yield Input(placeholder="e.g. ~/.ssh/id_rsa (leave empty for default)", id="ssh-key", classes="ssh-field-input")
-            with Horizontal(classes="ssh-field"):
-                yield Label("Remote Project Path:", classes="ssh-field-label")
-                yield Input(value="~/OpenMMLA", id="ssh-remote-path", classes="ssh-field-input")
+                with Horizontal(classes="ssh-field"):
+                    yield Label("Profile Name:", classes="ssh-field-label")
+                    yield Input(placeholder="e.g. lab-server", id="ssh-name", classes="ssh-field-input")
+                with Horizontal(classes="ssh-field"):
+                    yield Label("Host:", classes="ssh-field-label")
+                    yield Input(placeholder="e.g. 192.168.1.100", id="ssh-host", classes="ssh-field-input")
+                with Horizontal(classes="ssh-field"):
+                    yield Label("User:", classes="ssh-field-label")
+                    yield Input(placeholder="e.g. ubuntu", id="ssh-user", classes="ssh-field-input")
+                with Horizontal(classes="ssh-field"):
+                    yield Label("Port:", classes="ssh-field-label")
+                    yield Input(value="22", id="ssh-port", classes="ssh-field-input")
+                with Horizontal(classes="ssh-field"):
+                    yield Label("Password:", classes="ssh-field-label")
+                    yield Input(
+                        placeholder="leave empty for key-based auth",
+                        id="ssh-password",
+                        password=True,
+                        classes="ssh-field-input",
+                    )
+                with Horizontal(classes="ssh-field"):
+                    yield Label("Key Path:", classes="ssh-field-label")
+                    yield Input(placeholder="e.g. ~/.ssh/id_rsa (leave empty for default)", id="ssh-key", classes="ssh-field-input")
+                with Horizontal(classes="ssh-field"):
+                    yield Label("Remote Project Path:", classes="ssh-field-label")
+                    yield Input(value="~/OpenMMLA", id="ssh-remote-path", classes="ssh-field-input")
 
     def _get_form_values(self) -> dict:
         return {

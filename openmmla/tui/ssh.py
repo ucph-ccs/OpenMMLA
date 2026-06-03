@@ -185,6 +185,21 @@ async def scp_file_async(
     )
 
 
+async def scp_from_remote_async(
+    profile: SSHProfile,
+    remote_path: str,
+    local_path: str,
+) -> asyncio.subprocess.Process:
+    """copy a remote file or directory to the local host via scp."""
+    args = profile.base_scp_args()
+    args.extend(["-r", f"{profile.ssh_destination()}:{remote_path}", local_path])
+    return await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+
 CONDA_INIT = (
     'if command -v conda >/dev/null 2>&1; then '
     '_base="$(conda info --base 2>/dev/null)" && '

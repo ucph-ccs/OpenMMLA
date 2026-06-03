@@ -20,6 +20,8 @@ def get_parser():
     add_arg('tr', bool, True, 'whether to transcribe speech to text', shortname='-tr')
     add_arg('sp', bool, False, 'whether to do speech separation', shortname='-sp')
     add_arg('hsr', bool, True, 'whether to apply Half-Scaled Recognition at speaker boundaries', shortname='-hsr')
+    add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
+            shortname='-sid')
     return parser
 
 
@@ -44,7 +46,8 @@ def main():
         nr=args.nr,
         tr=args.tr,
         sp=args.sp,
-        hsr=args.hsr
+        hsr=args.hsr,
+        session_id=args.session_id
     )
 
 

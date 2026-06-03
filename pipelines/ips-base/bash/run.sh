@@ -23,7 +23,7 @@ print_usage() {
     echo "  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)"
     echo "  -nv NUM_VISUALIZER   : Number of visualizers to run (default: 1)"
     echo "  -g GRAPHICS          : Enable graphics (default: true)"
-    echo "  -s STORE             : Enable store (default: false)"
+    echo "  -s STORE             : Store frames locally (default: true)"
     echo "  -v VERBOSE           : Enable verbose mode (default: false)"
     echo "  -h                   : Display this help message"
     exit 1
@@ -156,7 +156,7 @@ echo "NUM_BASE: $NUM_BASE"
 echo "NUM_SYNCHRONIZER: $NUM_SYNCHRONIZER"
 echo "NUM_VISUALIZER: $NUM_VISUALIZER"
 echo "GRAPHICS: $GRAPHICS"
-echo "STORE: $STORE"
+echo "STORE_FRAMES: $STORE"
 echo "VERBOSE: $VERBOSE"
 echo "--------------------------------"
 

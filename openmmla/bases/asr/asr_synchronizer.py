@@ -5,6 +5,7 @@ import threading
 import time
 
 from openmmla.bases.synchronizer import Synchronizer
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
@@ -14,7 +15,14 @@ from .enums import BLUE, ENDC
 from .input import get_function_synchronizer, get_base_type, get_synchronizer_mode
 
 
-def start_asr_synchronizer(project_dir: str, config_path: str, mode: str = 'full', dominant: bool = False, sp: bool = False):
+def start_asr_synchronizer(
+    project_dir: str,
+    config_path: str,
+    mode: str = 'full',
+    dominant: bool = False,
+    sp: bool = False,
+    session_id: str | None = None,
+):
     """Start ASR Synchronizer with restart capability.
     
     Args:
@@ -27,8 +35,14 @@ def start_asr_synchronizer(project_dir: str, config_path: str, mode: str = 'full
     # Restart loop - allows restarting the entire process
     while True:
         try:
-            synchronizer = ASRSynchronizer(project_dir=project_dir, config_path=config_path, 
-                                          mode=mode, dominant=dominant, sp=sp)
+            synchronizer = ASRSynchronizer(
+                project_dir=project_dir,
+                config_path=config_path,
+                mode=mode,
+                dominant=dominant,
+                sp=sp,
+                session_id=session_id,
+            )
             synchronizer.run()
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
@@ -48,7 +62,15 @@ class ASRSynchronizer(Synchronizer):
     uploading the segment result to InfluxDB."""
     logger = get_logger('asr-synchronizer')
 
-    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'full', dominant: bool = False, sp: bool = False):
+    def __init__(
+        self,
+        project_dir: str | None,
+        config_path: str,
+        mode: str = 'full',
+        dominant: bool = False,
+        sp: bool = False,
+        session_id: str | None = None,
+    ):
         """Initialize the ASRSynchronizer class.
 
         Args:
@@ -61,6 +83,7 @@ class ASRSynchronizer(Synchronizer):
         self.mode = mode
         self.dominant = dominant
         self.sp = sp
+        self.launch_session_id = session_id
 
         # Runtime attributes
         self.threads = []
@@ -87,8 +110,8 @@ class ASRSynchronizer(Synchronizer):
 
     def _setup_directories(self):
         """Set up required directories."""
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
-        self.temp_dir = os.path.join(self.project_dir, 'real-time', 'temp')
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'logger'))
+        self.temp_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'temp'))
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
 
@@ -136,7 +159,7 @@ class ASRSynchronizer(Synchronizer):
     def _start_synchronization(self):
         """Start the synchronization process."""
         # bucket selection
-        self.session_id = select_or_create_session(self.mongo_client)
+        self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self.number_of_bases = get_number_of_bases()
         self._create_bucket_logger()
 
@@ -190,8 +213,11 @@ class ASRSynchronizer(Synchronizer):
         gc.collect()
 
     def _create_bucket_logger(self):
-        self.bucket_logger_dir = os.path.join(self.logger_dir, f'{self.session_id}')
+        self.bucket_logger_dir = os.fspath(
+            pipeline_section_dir(self.project_dir, self.session_id, 'asr-base', 'logger')
+        )
         os.makedirs(self.bucket_logger_dir, exist_ok=True)
+        copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'asr-base')
         self.logger = get_logger(f'synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir,
                                               f'asr_synchronizer_{self.base_type}.log'))

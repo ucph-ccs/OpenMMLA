@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 import os
+import re
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+import yaml
+from rich.markup import escape as rich_escape
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll, Vertical, Horizontal
 from textual.widget import Widget
@@ -18,15 +28,53 @@ from openmmla.tui.schema.loader import (
     FieldDef as LoaderFieldDef,
     discover_pipelines, load_existing_config, get_nested_value,
     save_config, PipelineDef, _find_project_root, fields_from_config_section,
-    load_streams,
+    load_streams, streams_from_config,
 )
 from openmmla.tui.schema.definitions import (
-    SHARED_SECTIONS, get_shared_defaults, apply_shared_values,
+    SHARED_SECTIONS, apply_shared_values,
+)
+from openmmla.tui.system_services import (
+    SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
+    load_system_service_values,
+    save_system_service_section,
 )
 from openmmla.tui.ssh import (
     load_ssh_profiles, get_profile_by_name, ssh_run_sync,
-    scp_file_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
+    scp_file_async, scp_from_remote_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
+    ssh_test_connection,
     wrap_local, wrap_remote,
+)
+from openmmla.tui.artifacts import (
+    collection_artifact_dir, merge_tree, pipeline_artifact_dir,
+    safe_segment, update_collection_manifest, update_pipeline_manifest,
+)
+from openmmla.collection.recording import (
+    DEFAULT_AUDIO_CHANNEL,
+    DEFAULT_AUDIO_DEVICE_LINUX,
+    DEFAULT_AUDIO_DEVICE_MACOS,
+    DEFAULT_AUDIO_FORMAT,
+    DEFAULT_AUDIO_INPUT_FORMAT_LINUX,
+    DEFAULT_AUDIO_INPUT_FORMAT_MACOS,
+    DEFAULT_AUDIO_SAMPLE_RATE,
+    DEFAULT_VIDEO_BITRATE_LINUX,
+    DEFAULT_VIDEO_BITRATE_MACOS,
+    DEFAULT_VIDEO_BUFSIZE_LINUX,
+    DEFAULT_VIDEO_BUFSIZE_MACOS,
+    DEFAULT_VIDEO_DEVICE_LINUX,
+    DEFAULT_VIDEO_DEVICE_MACOS,
+    DEFAULT_VIDEO_FRAMERATE,
+    DEFAULT_VIDEO_INPUT_FORMAT_LINUX,
+    DEFAULT_VIDEO_INPUT_FORMAT_MACOS,
+    DEFAULT_VIDEO_MAXRATE_LINUX,
+    DEFAULT_VIDEO_MAXRATE_MACOS,
+    DEFAULT_VIDEO_PRESET,
+    DEFAULT_VIDEO_SIZE,
+    DEFAULT_VIDEO_SOURCE_FORMAT_LINUX,
+    DEFAULT_VIDEO_SOURCE_FORMAT_MACOS,
+)
+from openmmla.utils.experiments import (
+    get_active_experiments, get_groups_for_experiment, get_participant_aliases,
+    load_experiments,
 )
 from openmmla.tui.widgets.command_session import CommandSession
 from openmmla.tui.widgets.config_form import ConfigForm
@@ -44,6 +92,17 @@ _SVC_PIPELINE_NAMES: dict[str, str] = {
 
 _STREAM_PIPELINES = {"ASR Base", "IPS Base", "VFA Base"}
 
+_GLOBAL_DEFAULT_NAV_ORDER = (
+    "SSH Profiles",
+    "Experiments",
+    "Tasks",
+    "MongoDB",
+    "InfluxDB",
+    "MQTT",
+    "Redis",
+)
+_SYSTEM_SERVICES_LABEL = "System Services"
+
 _MLLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 _MLLM_PORT = 8010
 _MLLM_MAX_MODEL_LEN = 8192
@@ -51,6 +110,49 @@ _MLLM_IMAGE_LIMIT = '{"image":4}'
 _MLLM_GPU_MEMORY_UTILIZATION = "0.80"
 _MLLM_API_KEY = "EMPTY"
 _MLLM_CONFIG_REL_PATH = os.path.join("config", "mllm_server.yml")
+_REMOTE_COLLECTION_RUNTIME = "~/.openmmla/collection-runtime"
+_REMOTE_COLLECTION_RUNTIME_ENV = "$HOME/.openmmla/collection-runtime"
+
+_ARTIFACT_CONFIG_RELS = SYSTEM_SERVICE_SOURCE_CONFIG_RELS
+
+_REMOTE_COLLECTION_FILES = (
+    "openmmla/__init__.py",
+    "openmmla/collection/__init__.py",
+    "openmmla/collection/recording.py",
+    "openmmla/commands/__init__.py",
+    "openmmla/commands/collect/__init__.py",
+    "openmmla/commands/collect/audio.py",
+    "openmmla/commands/collect/video.py",
+    "openmmla/utils/__init__.py",
+    "openmmla/utils/artifact_paths.py",
+)
+_NEW_COLLECTION_SESSION_CHOICE = "Create MongoDB Session"
+_COLLECTION_HIDDEN_PRESET_FLAGS = {
+    "--audio-interactive",
+    "--audio-input-format",
+    "--audio-device",
+    "--audio-channels",
+    "--audio-channel",
+    "--sample-rate",
+    "--audio-format",
+    "--video-interactive",
+    "--video-input-format",
+    "--video-device",
+    "--video-source-format",
+    "--framerate",
+    "--size",
+    "--bitrate",
+    "--maxrate",
+    "--bufsize",
+    "--preset",
+    "--camera-label",
+}
+_LAUNCHER_UI_WORKER_GROUP = "launcher-ui"
+_LAUNCHER_STATUS_WORKER_GROUP = "launcher-status"
+_LAUNCHER_DOWNLOAD_WORKER_GROUP = "launcher-downloads"
+_LAUNCHER_REMOTE_DELETE_WORKER_GROUP = "launcher-remote-delete"
+_LAUNCHER_REMOTE_STOP_WORKER_GROUP = "launcher-remote-stop"
+_LAUNCHER_COLLECTION_STOP_WORKER_GROUP = "launcher-collection-stop"
 
 _MLLM_FIELDS = [
     LoaderFieldDef(
@@ -156,9 +258,118 @@ def _coerce_float(value, default: float) -> float:
 
 
 def _quote_remote_path(path: str) -> str:
-    if path.startswith("~"):
-        return path
-    return shlex.quote(path)
+    text = str(path).strip()
+    if text == "~" or text == "$HOME":
+        return "$HOME"
+    if text.startswith("~/"):
+        return _remote_path_join("$HOME", *(shlex.quote(part) for part in text[2:].split("/") if part))
+    if text.startswith("$HOME/"):
+        return _remote_path_join("$HOME", *(shlex.quote(part) for part in text[6:].split("/") if part))
+    return shlex.quote(text)
+
+
+def _remote_path_join(root: str, *parts: str) -> str:
+    return "/".join([root.rstrip("/"), *[part.strip("/") for part in parts if part]])
+
+
+def _replace_loopback_url(url: object, host: str) -> object:
+    text = str(url or "").strip()
+    if not text:
+        return url
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return url
+    if parts.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return url
+
+    userinfo = ""
+    if parts.username:
+        userinfo = quote(unquote(parts.username), safe="")
+        if parts.password is not None:
+            userinfo += f":{quote(unquote(parts.password), safe='')}"
+        userinfo += "@"
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    port = f":{parts.port}" if parts.port else ""
+    return urlunsplit((parts.scheme, f"{userinfo}{host_part}{port}", parts.path, parts.query, parts.fragment))
+
+
+def _config_for_local_db_access(config: dict, profile=None) -> dict:
+    local_config = copy.deepcopy(config)
+    if profile is None:
+        return local_config
+    for section in ("MongoDB", "InfluxDB"):
+        section_config = local_config.get(section)
+        if isinstance(section_config, dict) and "url" in section_config:
+            section_config["url"] = _replace_loopback_url(section_config["url"], profile.host)
+    return local_config
+
+
+def _remote_home(profile) -> str | None:
+    try:
+        result = ssh_run_sync(profile, 'printf "%s" "$HOME"', timeout=10.0)
+    except Exception:
+        return None
+    home = (result.stdout or "").strip()
+    if result.returncode == 0 and home.startswith("/"):
+        return home.rstrip("/") or "/"
+    return None
+
+
+def _expand_remote_home_path(path: str, remote_home: str | None) -> str:
+    text = str(path).strip()
+    if not remote_home:
+        return text
+    home = remote_home.rstrip("/") or "/"
+    if text == "~" or text == "$HOME":
+        return home
+    if text.startswith("~/"):
+        return _remote_path_join(home, text[2:])
+    if text.startswith("$HOME/"):
+        return _remote_path_join(home, text[6:])
+    return text
+
+
+def _safe_session_id(value: str | None, default: str = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    if raw in {".", ".."} or "/" in raw or "\\" in raw:
+        return ""
+    segment = safe_segment(raw, "")
+    if segment:
+        return segment
+    return default
+
+
+def _is_new_collection_session_choice(value: object) -> bool:
+    return str(value or "").strip() in {_NEW_COLLECTION_SESSION_CHOICE, "New Session"}
+
+
+def _non_self_matching_regex(pattern: str) -> str:
+    """escape a process pattern while preventing pkill -f from matching itself."""
+    parts = []
+    replaced = False
+    for char in str(pattern):
+        if not replaced and char.isalnum():
+            parts.append(f"[{re.escape(char)}]")
+            replaced = True
+        else:
+            parts.append(re.escape(char))
+    return "".join(parts) if parts else pattern
+
+
+def _non_self_matching_process_pattern(pattern: str) -> str:
+    """prevent pgrep/pkill patterns from matching their own shell command."""
+    parts = []
+    replaced = False
+    for char in str(pattern):
+        if not replaced and char.isalnum():
+            parts.append(f"[{char}]")
+            replaced = True
+        else:
+            parts.append(char)
+    return "".join(parts) if parts else pattern
 
 
 def _mllm_config(root: str, values: dict | None = None) -> dict:
@@ -182,18 +393,307 @@ def _asr_server_config_path(root: str) -> str:
     return os.path.join(root, "pipelines", "asr-server", "config.yml")
 
 
-def _asr_audio_inferer_backend(root: str) -> str:
-    config = load_existing_config(_asr_server_config_path(root))
+def _asr_audio_inferer_backend_from_config(config: dict) -> str:
     backend = get_nested_value(config, "AudioInferer.backend")
     if backend is None:
         return "nemo"
     return str(backend).strip().lower() or "nemo"
 
 
-def _asr_server_conda_env(root: str) -> str:
-    if _asr_audio_inferer_backend(root) == "wespeaker":
+def _asr_audio_inferer_backend(root: str) -> str:
+    return _asr_audio_inferer_backend_from_config(
+        load_existing_config(_asr_server_config_path(root))
+    )
+
+
+def _asr_server_conda_env_from_config(config: dict) -> str:
+    if _asr_audio_inferer_backend_from_config(config) == "wespeaker":
         return "asr-server-wespeaker"
     return "asr-server-nemo"
+
+
+def _asr_server_conda_env(root: str) -> str:
+    return _asr_server_conda_env_from_config(
+        load_existing_config(_asr_server_config_path(root))
+    )
+
+
+def _artifact_session_choices(root: str) -> list[str]:
+    configs = []
+    for rel_path in _ARTIFACT_CONFIG_RELS:
+        config_path = os.path.join(root, rel_path)
+        if os.path.isfile(config_path):
+            configs.append(load_existing_config(config_path))
+    local_sessions = _local_artifact_session_ids(root) + _local_collection_session_ids(root)
+    return _artifact_session_choices_from_configs(configs, local_sessions)
+
+
+def _artifact_session_choices_from_configs(configs: list[dict], local_sessions: list[str] | None = None) -> list[str]:
+    choices: list[str] = []
+    seen: set[str] = set()
+
+    def add_many(values: list[str]) -> None:
+        for value in values:
+            session_id = str(value or "").strip()
+            if not session_id or session_id in seen:
+                continue
+            seen.add(session_id)
+            choices.append(session_id)
+
+    for config in configs:
+        add_many(_mongodb_session_ids_from_config(config))
+        add_many(_influxdb_session_ids_from_config(config))
+
+    add_many(local_sessions or [])
+    return choices[:100]
+
+
+def _mongodb_session_ids(config_path: str) -> list[str]:
+    return _mongodb_session_ids_from_config(load_existing_config(config_path))
+
+
+def _mongodb_session_ids_from_config(config: dict) -> list[str]:
+    try:
+        from pymongo import MongoClient
+        from openmmla.utils.constants import MONGODB_DEFAULT_DB
+
+        mongo_config = config.get("MongoDB", {})
+        if not isinstance(mongo_config, dict):
+            return []
+        url = str(mongo_config.get("url") or "").strip()
+        if not url or "<" in url:
+            return []
+        db_name = str(mongo_config.get("db") or MONGODB_DEFAULT_DB)
+        client = MongoClient(
+            url,
+            serverSelectionTimeoutMS=800,
+            connectTimeoutMS=800,
+        )
+        try:
+            client.admin.command("ping")
+            sessions = client[db_name]["sessions"]
+            return [
+                str(session.get("session_id"))
+                for session in sessions.find({}, {"_id": 0, "session_id": 1}).sort("start_time", -1)
+                if isinstance(session, dict) and session.get("session_id")
+            ]
+        finally:
+            client.close()
+    except Exception:
+        return []
+
+
+def _influxdb_session_ids(config_path: str) -> list[str]:
+    return _influxdb_session_ids_from_config(load_existing_config(config_path))
+
+
+def _influxdb_session_ids_from_config(config: dict) -> list[str]:
+    try:
+        from influxdb_client import InfluxDBClient
+        from openmmla.utils.constants import INFLUXDB_DEFAULT_BUCKET, INFLUXDB_MEASUREMENT
+
+        influx_config = config.get("InfluxDB", {})
+        if not isinstance(influx_config, dict):
+            return []
+        url = str(influx_config.get("url") or "").strip()
+        token = str(influx_config.get("token") or "").strip()
+        org = str(influx_config.get("org") or "").strip()
+        if not url or not token or not org or "<" in url or "<" in token or "<" in org:
+            return []
+        bucket = str(influx_config.get("bucket") or INFLUXDB_DEFAULT_BUCKET)
+        client = InfluxDBClient(url=url, token=token, org=org, timeout=1000)
+        try:
+            query = f'''
+                from(bucket: "{bucket}")
+                |> range(start: -365d)
+                |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}")
+                |> keep(columns: ["session_id"])
+                |> distinct(column: "session_id")
+            '''
+            result = client.query_api().query(org=org, query=query)
+            session_ids = set()
+            for table in result:
+                for record in table.records:
+                    session_id = record.values.get("session_id")
+                    if session_id:
+                        session_ids.add(str(session_id))
+            return sorted(session_ids, reverse=True)
+        finally:
+            client.close()
+    except Exception:
+        return []
+
+
+def _local_artifact_session_ids(root: str) -> list[str]:
+    artifacts_dir = os.path.join(root, "artifacts")
+    if not os.path.isdir(artifacts_dir):
+        return []
+    return sorted(
+        [
+            name for name in os.listdir(artifacts_dir)
+            if name not in {"shared", ".DS_Store"}
+            and os.path.isdir(os.path.join(artifacts_dir, name))
+        ],
+        reverse=True,
+    )
+
+
+def _local_collection_session_ids(root: str) -> list[str]:
+    collection_dir = os.path.join(root, "collection")
+    if not os.path.isdir(collection_dir):
+        return []
+    return sorted(
+        [
+            name for name in os.listdir(collection_dir)
+            if os.path.isdir(os.path.join(collection_dir, name))
+        ],
+        reverse=True,
+    )
+
+
+def _remote_artifact_session_ids(profile) -> list[str]:
+    artifacts_dir = _remote_path_join(profile.remote_project_path, "artifacts")
+    quoted_dir = _quote_remote_path(artifacts_dir)
+    cmd = (
+        f"if [ -d {quoted_dir} ]; then "
+        f"find {quoted_dir} -mindepth 1 -maxdepth 1 -type d -exec basename {{}} \\; 2>/dev/null; "
+        "fi"
+    )
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=8.0)
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return sorted(
+        [
+            line.strip()
+            for line in (result.stdout or "").splitlines()
+            if line.strip() and line.strip() not in {"shared", ".DS_Store"}
+        ],
+        reverse=True,
+    )
+
+
+def _ips_transform_local_dir(root: str) -> str:
+    return os.path.join(root, "pipelines", "ips-base", "camera_sync")
+
+
+def _is_transform_matrix_file(name: str) -> bool:
+    return name.startswith("transformation_matrices") and name.endswith(".json")
+
+
+def _local_transform_matrix_files(local_dir: str) -> list[str]:
+    if not os.path.isdir(local_dir):
+        return []
+    return sorted(
+        name for name in os.listdir(local_dir)
+        if _is_transform_matrix_file(name)
+        and os.path.isfile(os.path.join(local_dir, name))
+    )
+
+
+def _remote_transform_matrix_files(profile, remote_dir: str) -> list[str]:
+    quoted_dir = _quote_remote_path(remote_dir)
+    cmd = (
+        f"if [ -d {quoted_dir} ]; then "
+        f"find {quoted_dir} -maxdepth 1 -type f -name 'transformation_matrices*.json' -exec basename {{}} \\; "
+        "2>/dev/null; fi"
+    )
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=8.0)
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return sorted(
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if line.strip()
+    )
+
+
+class TransformMatrixPanel(Widget):
+    """IPS transform matrix file overview and sync controls."""
+
+    DEFAULT_CSS = """
+    TransformMatrixPanel {
+        height: auto;
+        padding: 1 2;
+    }
+    TransformMatrixPanel .tm-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    TransformMatrixPanel .tm-muted {
+        color: $text-muted;
+    }
+    TransformMatrixPanel .tm-file {
+        padding-left: 2;
+    }
+    TransformMatrixPanel .tm-actions {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    TransformMatrixPanel .tm-actions Select {
+        width: 1fr;
+    }
+    TransformMatrixPanel .tm-actions Button {
+        min-width: 20;
+        margin-left: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        local_dir: str,
+        target: str,
+        remote_dir: str | None,
+        local_files: list[str],
+        remote_files: list[str],
+        ssh_profiles: list[str],
+    ) -> None:
+        super().__init__()
+        self.local_dir = local_dir
+        self.target = target
+        self.remote_dir = remote_dir
+        self.local_files = local_files
+        self.remote_files = remote_files
+        self.ssh_profiles = ssh_profiles
+
+    def compose(self) -> ComposeResult:
+        files = self.remote_files if self.target != "local" else self.local_files
+        yield Static("[b]Transform Matrix[/b]", classes="tm-title")
+        yield Static(f"Local: {self.local_dir}", classes="tm-muted")
+        if self.remote_dir:
+            yield Static(f"Remote: {self.target}:{self.remote_dir}", classes="tm-muted")
+        yield Static("Files:", classes="tm-title")
+        if files:
+            for name in files:
+                yield Static(name, classes="tm-file")
+        else:
+            yield Static("No transformation_matrices*.json files found.", classes="tm-muted")
+
+        if self.target == "local":
+            if self.ssh_profiles:
+                with Horizontal(classes="tm-actions"):
+                    yield Select(
+                        [(name, name) for name in self.ssh_profiles],
+                        prompt="Select SSH profile...",
+                        id="transform-sync-profile-select",
+                    )
+                    yield Button("Sync to Remote", variant="warning", id="btn-sync-transform-remote")
+            else:
+                yield Static("No SSH profiles configured for sync.", classes="tm-muted")
+        else:
+            with Horizontal(classes="tm-actions"):
+                yield Button(
+                    f"Sync Local to {self.target}",
+                    variant="warning",
+                    id="btn-sync-transform-local-target",
+                )
 
 
 def _make_stream_fields(stream_name: str) -> list[LoaderFieldDef]:
@@ -229,6 +729,9 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         params=[
             ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
+            ParamDef("-sid", "Session", "str", ""),
+            ParamDef("--experiment-group", "Experiment Group", "str", ""),
+            ParamDef("-m", "Mode", "str", "full", ["full", "record", "recognize"]),
             ParamDef("-s", "Store Audio", "bool", True),
             ParamDef("-vad", "VAD", "bool", True),
             ParamDef("-nr", "Noise Reduce", "bool", True),
@@ -239,10 +742,11 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         ],
         components=[
             ComponentDef("base", "mmla asr-base", "-nb",
-                         ["-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
+                         ["-sid", "-m", "-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
             ComponentDef("synchronizer", "mmla asr-sync", "-ns",
-                         ["-d", "-sp"]),
+                         ["-sid", "-d", "-sp"]),
         ],
+        artifact_pipeline="asr-base",
     ))
 
     services.append(ServiceDef(
@@ -255,14 +759,19 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         params=[
             ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
+            ParamDef("-sid", "Session", "str", ""),
+            ParamDef("--experiment-group", "Experiment Group", "str", ""),
+            ParamDef("-m", "Mode", "str", "full", ["full", "record", "analyze"]),
             ParamDef("-g", "Graphics", "bool", True),
+            ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
         ],
         components=[
             ComponentDef("base", "mmla vfa-base", "-nb",
-                         ["-g", "-v"]),
-            ComponentDef("synchronizer", "mmla vfa-sync", "-ns"),
+                         ["-sid", "-m", "-g", "-s", "-v"]),
+            ComponentDef("synchronizer", "mmla vfa-sync", "-ns", ["-sid"]),
         ],
+        artifact_pipeline="vfa-base",
     ))
 
     services.append(ServiceDef(
@@ -276,17 +785,58 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
             ParamDef("-nv", "Num Visualizers", "int", 1),
+            ParamDef("-sid", "Session", "str", ""),
+            ParamDef("--experiment-group", "Experiment Group", "str", ""),
             ParamDef("-g", "Graphics", "bool", True),
-            ParamDef("-s", "Store", "bool", True),
+            ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
         ],
         components=[
             ComponentDef("base", "mmla ips-base", "-nb",
-                         ["-g", "-s", "-v"]),
+                         ["-sid", "-g", "-s", "-v"]),
             ComponentDef("synchronizer", "mmla ips-sync", "-ns",
-                         ["-v"]),
+                         ["-sid", "-v"]),
             ComponentDef("visualizer", "mmla ips-vis", "-nv",
-                         ["-s"]),
+                         ["-sid", "-s"]),
+        ],
+        artifact_pipeline="ips-base",
+    ))
+
+    services.append(ServiceDef(
+        name="Collection Session",
+        category="Collection",
+        conda_env="",
+        config_dir=root,
+        launch_type="collection",
+        description="Record raw audio/video files for post-time processing",
+        params=[
+            ParamDef("-na", "Num Audio", "int", 0),
+            ParamDef("-nv", "Num Video", "int", 0),
+            ParamDef("--session-id", "Session ID", "str", ""),
+            ParamDef("--experiment-group", "Experiment Group", "str", ""),
+            ParamDef("--output-root", "Output Root", "str", "artifacts"),
+        ],
+        components=[
+            ComponentDef(
+                "audio",
+                "scripts/collection/audio_recording.sh",
+                "-na",
+                [
+                    "--session-id", "--output-root", "--host-label",
+                    "--audio-interactive", "--sample-rate", "--audio-format",
+                ],
+            ),
+            ComponentDef(
+                "video",
+                "scripts/collection/video_recording.sh",
+                "-nv",
+                [
+                    "--session-id", "--output-root", "--host-label",
+                    "--video-interactive",
+                    "--framerate", "--size", "--bitrate", "--maxrate", "--bufsize",
+                    "--preset", "--camera-label",
+                ],
+            ),
         ],
     ))
 
@@ -431,8 +981,7 @@ def _tmux_component_session_name(service_name: str) -> str:
     return "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
 
 
-def _stack_service_specs(config_dir: str) -> list[dict[str, object]]:
-    config = load_existing_config(os.path.join(config_dir, "config.yml"))
+def _stack_service_specs_from_config(config: dict) -> list[dict[str, object]]:
     specs: list[dict[str, object]] = []
     if not isinstance(config, dict):
         return specs
@@ -450,6 +999,11 @@ def _stack_service_specs(config_dir: str) -> list[dict[str, object]]:
     return specs
 
 
+def _stack_service_specs(config_dir: str) -> list[dict[str, object]]:
+    config = load_existing_config(os.path.join(config_dir, "config.yml"))
+    return _stack_service_specs_from_config(config)
+
+
 def _is_stack_tmux_service(svc: ServiceDef) -> bool:
     return svc.launch_type == "tmux" and svc.name in ("ASR Server", "VFA Server")
 
@@ -463,16 +1017,24 @@ def _stack_legacy_session(svc: ServiceDef) -> str | None:
 
 
 def _stack_sessions(svc: ServiceDef) -> list[str]:
+    return _stack_sessions_from_specs(svc, _stack_service_specs(svc.config_dir))
+
+
+def _stack_sessions_from_specs(svc: ServiceDef, specs: list[dict[str, object]]) -> list[str]:
     sessions = [_service_session_name(svc)]
     legacy = _stack_legacy_session(svc)
     if legacy:
         sessions.append(legacy)
-    sessions.extend(str(spec["session"]) for spec in _stack_service_specs(svc.config_dir))
+    sessions.extend(str(spec["session"]) for spec in specs)
     return list(dict.fromkeys(sessions))
 
 
 def _stack_ports(svc: ServiceDef) -> list[int]:
-    return [int(spec["port"]) for spec in _stack_service_specs(svc.config_dir)]
+    return _stack_ports_from_specs(_stack_service_specs(svc.config_dir))
+
+
+def _stack_ports_from_specs(specs: list[dict[str, object]]) -> list[int]:
+    return [int(spec["port"]) for spec in specs]
 
 
 _SYSTEM_SVC_PORTS: dict[str, int] = {
@@ -532,8 +1094,30 @@ def _service_session_name(svc: ServiceDef) -> str:
     return svc.name.lower().replace(" ", "-")
 
 
+def _collection_session_prefix(svc: ServiceDef) -> str:
+    return _service_session_name(svc) + "-"
+
+
+def _collection_sessions_local(svc: ServiceDef) -> list[str]:
+    prefix = _collection_session_prefix(svc)
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        return [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip().startswith(prefix)
+        ]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+
+
 def _service_requires_config(svc: ServiceDef) -> bool:
-    return svc.launch_type not in ("make", "vllm")
+    return svc.launch_type not in ("make", "vllm", "collection")
 
 
 def _service_python_hint(svc: ServiceDef) -> str:
@@ -653,13 +1237,20 @@ class ServicePanel(Widget):
         self._svc_states: dict[str, bool] = {}
         self._pipelines: list[PipelineDef] = []
         self._pipeline_map: dict[str, PipelineDef] = {}
-        self._shared_values: dict[str, object] = get_shared_defaults()
+        self._shared_values: dict[str, object] = load_system_service_values(self._root)
         self._current_pipeline: PipelineDef | None = None
         self._current_form: ConfigForm | None = None
+        self._current_shared_section: str | None = None
+        self._current_config_local_path: str | None = None
         self._config_container: VerticalScroll | None = None
         self._ssh_profile_names: list[str] = [
             p.name for p in load_ssh_profiles()
         ]
+        self._collection_last_params: dict[tuple[str, str], dict] = {}
+        self._pending_collection_delete: tuple[str, str] | None = None
+        self._target_config_cache: dict[tuple[str, str], dict] = {}
+        self._target_platform_cache: dict[str, str] = {}
+        self._current_service_name: str | None = None
 
     def compose(self) -> ComposeResult:
         target_options = [("Local", "local")] + [
@@ -688,6 +1279,12 @@ class ServicePanel(Widget):
 
     def on_show(self) -> None:
         self._refresh_target_options()
+        if self._current_service_name == "Collection Session":
+            self.run_worker(
+                self._reload_current_service_view(),
+                group=_LAUNCHER_UI_WORKER_GROUP,
+                exclusive=True,
+            )
 
     def on_ssh_form_profiles_changed(self, event: SSHForm.ProfilesChanged) -> None:
         event.stop()
@@ -728,6 +1325,11 @@ class ServicePanel(Widget):
                 val = "local"
             cmd = self.query_one("#svc-cmd-session", CommandSession)
             cmd.set_target(str(val))
+            self.run_worker(
+                self._reload_current_service_view(),
+                group=_LAUNCHER_UI_WORKER_GROUP,
+                exclusive=True,
+            )
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.tabbed_content.id != "svc-sub-tabs":
@@ -751,13 +1353,22 @@ class ServicePanel(Widget):
         tree = self.query_one("#svc-tree", Tree)
         tree.clear()
 
-        shared_node = tree.root.add("Global Defaults", data="__shared__")
+        shared_node = tree.root.add(_SYSTEM_SERVICES_LABEL, data="__shared__")
         shared_node.expand()
+        added_shared_sections: set[str] = set()
+        for item in _GLOBAL_DEFAULT_NAV_ORDER:
+            if item == "SSH Profiles":
+                shared_node.add_leaf("SSH Profiles", data="__ssh_profiles__")
+            elif item == "Experiments":
+                shared_node.add_leaf("Experiments", data="__experiments__")
+            elif item == "Tasks":
+                shared_node.add_leaf("Tasks", data="__tasks__")
+            elif item in SHARED_SECTIONS:
+                shared_node.add_leaf(item, data=f"__shared__{item}")
+                added_shared_sections.add(item)
         for sec in SHARED_SECTIONS:
-            shared_node.add_leaf(sec, data=f"__shared__{sec}")
-        shared_node.add_leaf("Experiments", data="__experiments__")
-        shared_node.add_leaf("Tasks", data="__tasks__")
-        shared_node.add_leaf("SSH Profiles", data="__ssh_profiles__")
+            if sec not in added_shared_sections:
+                shared_node.add_leaf(sec, data=f"__shared__{sec}")
 
         categories: dict[str, list[ServiceDef]] = {}
         for svc in self._services:
@@ -769,6 +1380,13 @@ class ServicePanel(Widget):
             infra_node.expand()
             for svc in infra_svcs:
                 infra_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
+
+        collection_svcs = categories.get("Collection", [])
+        if collection_svcs:
+            collection_node = tree.root.add("Collection", data="__cat_Collection")
+            collection_node.expand()
+            for svc in collection_svcs:
+                collection_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
 
         _PIPELINE_CATS = ["ASR", "VFA", "IPS"]
 
@@ -814,7 +1432,10 @@ class ServicePanel(Widget):
         await content_area.remove_children()
         self._current_pipeline = None
         self._current_form = None
+        self._current_shared_section = None
+        self._current_config_local_path = None
         self._config_container = None
+        self._current_service_name = None
 
         if node_str.startswith("__shared__"):
             self._set_command_session_visible(False)
@@ -822,6 +1443,7 @@ class ServicePanel(Widget):
             scroll = VerticalScroll(classes="svc-config-scroll")
             await content_area.mount(scroll)
             self._config_container = scroll
+            self._current_shared_section = section_name
             self._show_shared_form(scroll, section_name)
             return
 
@@ -837,18 +1459,69 @@ class ServicePanel(Widget):
 
         if node_str == "__ssh_profiles__":
             self._set_command_session_visible(False)
-            scroll = VerticalScroll(classes="svc-config-scroll")
-            await content_area.mount(scroll)
-            await scroll.mount(SSHForm())
+            await content_area.mount(SSHForm())
             return
 
         svc = self._svc_map.get(node_str)
         if svc is None:
             return
+        self._current_service_name = node_str
+        base_svc = svc
         self._set_command_session_visible(True)
 
+        target = self._get_panel_target()
+        svc, is_running = await self._service_view_state(base_svc, target)
+        self._svc_states[base_svc.name] = is_running
+
+        await self._mount_service_content(content_area, svc, is_running)
+
+    async def _reload_current_service_view(self) -> None:
+        """rebuild the selected service panel after target-dependent state changes."""
+        if not self._current_service_name:
+            self._build_tree()
+            return
+        svc = self._svc_map.get(self._current_service_name)
+        if svc is None:
+            self._build_tree()
+            return
+        target = self._get_panel_target()
+        display_svc, is_running = await self._service_view_state(svc, target)
+        self._svc_states[svc.name] = is_running
+
+        content_area = self.query_one("#svc-content-area", Vertical)
+        await content_area.remove_children()
+        self._current_pipeline = None
+        self._current_form = None
+        self._current_shared_section = None
+        self._current_config_local_path = None
+        self._config_container = None
+        self._set_command_session_visible(True)
+        await self._mount_service_content(
+            content_area,
+            display_svc,
+            is_running,
+        )
+        self._build_tree()
+
+    async def _service_view_state(self, svc: ServiceDef, target: str) -> tuple[ServiceDef, bool]:
+        """resolve target-dependent service metadata without blocking the UI loop."""
+        return await asyncio.to_thread(self._service_view_state_sync, svc, target)
+
+    def _service_view_state_sync(self, svc: ServiceDef, target: str) -> tuple[ServiceDef, bool]:
+        if target == "local":
+            is_running = self._detect_running(svc)
+        else:
+            is_running = self._detect_running_remote(svc, target)
+        self._svc_states[svc.name] = is_running
+        return self._service_for_target(svc, target), is_running
+
+    async def _mount_service_content(
+        self,
+        content_area: Vertical,
+        svc: ServiceDef,
+        is_running: bool,
+    ) -> None:
         pipeline = self._pipeline_for_service(svc.name)
-        is_running = self._svc_states.get(svc.name, False)
 
         if pipeline:
             self._current_pipeline = pipeline
@@ -868,15 +1541,23 @@ class ServicePanel(Widget):
             config_pane = TabPane("Config", config_scroll, id="svc-tab-config")
             await tabs.add_pane(config_pane)
             self._config_container = config_scroll
+            self._current_config_local_path = pipeline.config_path
             self._show_pipeline_form(config_scroll, pipeline)
 
-            streams = load_streams(pipeline.config_path)
+            streams = self._streams_for_pipeline_target(pipeline)
             if streams or svc.name in ("ASR Base", "IPS Base", "VFA Base"):
                 stream_scroll = VerticalScroll(classes="svc-launch-scroll")
                 stream_pane = TabPane("Streams", stream_scroll, id="svc-tab-streams")
                 await tabs.add_pane(stream_pane)
-                panel = StreamPanel(streams, config_path=pipeline.config_path)
+                stream_config_path = pipeline.config_path if self._get_panel_target() == "local" else ""
+                panel = StreamPanel(streams, config_path=stream_config_path, project_dir=self._root)
                 await stream_scroll.mount(panel)
+
+            if svc.name == "IPS Base":
+                transform_scroll = VerticalScroll(classes="svc-launch-scroll")
+                transform_pane = TabPane("Transform Matrix", transform_scroll, id="svc-tab-transform")
+                await tabs.add_pane(transform_pane)
+                await transform_scroll.mount(self._transform_matrix_panel())
         elif svc.launch_type == "vllm":
             tabs = TabbedContent(id="svc-sub-tabs")
             await content_area.mount(tabs)
@@ -894,6 +1575,7 @@ class ServicePanel(Widget):
             config_pane = TabPane("Config", config_scroll, id="svc-tab-config")
             await tabs.add_pane(config_pane)
             self._config_container = config_scroll
+            self._current_config_local_path = _mllm_config_path(self._root)
             self._show_mllm_form(config_scroll)
         else:
             scroll = VerticalScroll(classes="svc-launch-scroll")
@@ -902,6 +1584,201 @@ class ServicePanel(Widget):
                 svc,
                 is_running=is_running,
             ))
+
+    def _service_with_session_choices(self, svc: ServiceDef, target: str | None = None) -> ServiceDef:
+        if not svc.artifact_pipeline:
+            return svc
+        target = target or self._get_panel_target()
+        session_choices = self._artifact_session_choices_for_target(target)
+        choices = [_NEW_COLLECTION_SESSION_CHOICE]
+        for session_id in session_choices:
+            if session_id and session_id not in choices:
+                choices.append(session_id)
+        experiment_group_choices = self._collection_experiment_group_choices()
+        params = []
+        for param in svc.params:
+            if param.flag in ("-sid", "--session-id", "--artifact-session-id"):
+                params.append(ParamDef(param.flag, "Session", param.param_type, _NEW_COLLECTION_SESSION_CHOICE, choices))
+            elif param.flag == "--experiment-group" and experiment_group_choices:
+                params.append(replace(param, default=experiment_group_choices[0], choices=experiment_group_choices))
+            else:
+                params.append(param)
+        return replace(svc, params=params)
+
+    def _service_with_artifact_choices(self, svc: ServiceDef) -> ServiceDef:
+        return self._service_with_session_choices(svc)
+
+    def _artifact_session_choices_for_target(self, target: str, conda_env: str = "") -> list[str]:
+        if target == "local":
+            return _artifact_session_choices(self._root)
+
+        profile = get_profile_by_name(target)
+        if profile is None:
+            return _artifact_session_choices(self._root)
+
+        configs = []
+        for rel_path in _ARTIFACT_CONFIG_RELS:
+            config_path = os.path.join(self._root, rel_path)
+            config, _ = self._load_config_for_target(
+                config_path,
+                show_status=False,
+                target=target,
+            )
+            if config:
+                configs.append(_config_for_local_db_access(config, profile))
+
+        local_sessions = _remote_artifact_session_ids(profile) + _artifact_session_choices(self._root)
+        choices = _artifact_session_choices_from_configs(configs, local_sessions)
+        return choices or _artifact_session_choices(self._root)
+
+    def _collection_experiment_group_choices(self) -> list[str]:
+        data = load_experiments(self._root)
+        choices: list[str] = []
+        seen: set[str] = set()
+        for experiment in get_active_experiments(data):
+            exp_id = str(experiment.get("experiment_id") or "").strip()
+            if not exp_id:
+                continue
+            for group_id in get_groups_for_experiment(exp_id, data):
+                choice = f"{exp_id}/{group_id}"
+                if choice in seen:
+                    continue
+                seen.add(choice)
+                choices.append(choice)
+        return choices
+
+    def _service_with_collection_defaults(self, svc: ServiceDef, target: str | None = None) -> ServiceDef:
+        if svc.launch_type != "collection":
+            return svc
+
+        target = target or self._get_panel_target()
+        defaults = self._collection_defaults_for_current_target(target)
+        session_choices = self._artifact_session_choices_for_target(target)
+        experiment_group_choices = self._collection_experiment_group_choices()
+        last_session = self._collection_session_id(
+            self._collection_last_params.get((target, svc.name), {})
+        )
+        if last_session and last_session not in session_choices and not self._svc_states.get(svc.name, False):
+            last_session = ""
+        last_experiment_group = str(
+            self._collection_last_params.get((target, svc.name), {}).get("--experiment-group") or ""
+        ).strip()
+        params = []
+        for param in self._collection_param_defs(svc, defaults):
+            default = defaults.get(param.flag, param.default)
+            choices = list(param.choices)
+            if param.flag == "--session-id":
+                choices = [_NEW_COLLECTION_SESSION_CHOICE]
+                for session_id in [last_session, *session_choices]:
+                    if session_id and session_id not in choices:
+                        choices.append(session_id)
+                default = last_session or _NEW_COLLECTION_SESSION_CHOICE
+            elif param.flag == "--experiment-group" and experiment_group_choices:
+                choices = experiment_group_choices
+                default = (
+                    last_experiment_group
+                    if last_experiment_group in experiment_group_choices
+                    else experiment_group_choices[0]
+                )
+            params.append(replace(param, default=default, choices=choices))
+        return replace(svc, params=params)
+
+    @staticmethod
+    def _collection_param_defs(svc: ServiceDef, defaults: dict[str, object]) -> list[ParamDef]:
+        params = list(svc.params)
+        existing = {param.flag for param in params}
+        labels = {
+            "--host-label": "Host Label",
+            "--audio-interactive": "Terminal Setup",
+            "--audio-input-format": "Input Format",
+            "--audio-device": "Device",
+            "--audio-channels": "Channel Count",
+            "--audio-channel": "Channel",
+            "--sample-rate": "Sample Rate",
+            "--audio-format": "Audio Format",
+            "--video-interactive": "Terminal Setup",
+            "--video-input-format": "Input Format",
+            "--video-device": "Device",
+            "--video-source-format": "Video Format",
+            "--framerate": "Framerate",
+            "--size": "Frame Size",
+            "--bitrate": "Bitrate",
+            "--maxrate": "Maxrate",
+            "--bufsize": "Bufsize",
+            "--preset": "Preset",
+            "--camera-label": "Camera Label",
+        }
+        video_source_choices = (
+            [""]
+            if str(defaults.get("--video-input-format") or "").strip() == "avfoundation"
+            else ["mjpeg", "yuyv422", ""]
+        )
+        choices = {
+            "--audio-input-format": ["alsa", "avfoundation"],
+            "--audio-channel": ["mix", "0", "1", "2", "3"],
+            "--sample-rate": ["8000", "16000", "22050", "24000", "44100", "48000"],
+            "--audio-format": ["wav", "flac", "aac"],
+            "--video-input-format": ["v4l2", "avfoundation"],
+            "--video-source-format": video_source_choices,
+            "--preset": ["ultrafast", "veryfast", "faster", "fast", "medium"],
+        }
+        bool_flags = {"--audio-interactive", "--video-interactive"}
+        for component in svc.components:
+            for flag in component.flags:
+                if (
+                    flag in existing
+                    or flag in {"--session-id", "--experiment-group", "--output-root"}
+                    or flag in _COLLECTION_HIDDEN_PRESET_FLAGS
+                ):
+                    continue
+                default = defaults.get(flag, "")
+                param_type = "bool" if flag in bool_flags else "str"
+                params.append(ParamDef(flag, labels.get(flag, flag.lstrip("-")), param_type, default, choices.get(flag, [])))
+                existing.add(flag)
+        return params
+
+    def _service_for_current_target(self, svc: ServiceDef) -> ServiceDef:
+        return self._service_for_target(svc, self._get_panel_target())
+
+    def _service_for_target(self, svc: ServiceDef, target: str) -> ServiceDef:
+        svc = self._service_with_collection_defaults(svc, target)
+        svc = self._service_with_session_choices(svc, target)
+        if svc.name != "ASR Server":
+            return svc
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+        backend = _asr_audio_inferer_backend_from_config(config)
+        return replace(
+            svc,
+            conda_env=_asr_server_conda_env_from_config(config),
+            description=f"ASR inference services (AudioInferer: {backend})",
+        )
+
+    def _streams_for_pipeline_target(self, pipeline: PipelineDef) -> list:
+        target = self._get_panel_target()
+        if target == "local":
+            return load_streams(pipeline.config_path)
+        config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
+        return streams_from_config(config)
+
+    def _transform_matrix_panel(self) -> TransformMatrixPanel:
+        target = self._get_panel_target()
+        local_dir = _ips_transform_local_dir(self._root)
+        remote_dir = None
+        remote_files: list[str] = []
+        if target != "local":
+            profile = get_profile_by_name(target)
+            if profile is not None:
+                remote_dir = self._ips_transform_remote_dir(profile)
+                remote_files = _remote_transform_matrix_files(profile, remote_dir)
+        return TransformMatrixPanel(
+            local_dir=local_dir,
+            target=target,
+            remote_dir=remote_dir,
+            local_files=_local_transform_matrix_files(local_dir),
+            remote_files=remote_files,
+            ssh_profiles=self._ssh_profile_names,
+        )
 
     # ── config logic ─────────────────────────────────────────────
 
@@ -920,9 +1797,11 @@ class ServicePanel(Widget):
         values = {f.path: self._shared_values.get(f.path, f.default) for f in fields}
         form = ConfigForm(f"shared:{section_name}", fields, values)
         container.mount(form)
+        self._current_form = form
+        self._show_sync_bar(shared_section=section_name)
 
     def _show_pipeline_form(self, container: VerticalScroll, pipeline: PipelineDef) -> None:
-        existing = load_existing_config(pipeline.config_path)
+        existing, source_message = self._load_config_for_target(pipeline.config_path)
         apply_shared_values(pipeline.fields, self._shared_values)
 
         values = {}
@@ -996,25 +1875,39 @@ class ServicePanel(Widget):
                           group_add_buttons=group_add_buttons)
         container.mount(form)
         self._current_form = form
+        if source_message:
+            self._show_status(source_message)
+        self._show_sync_bar(pipeline)
 
     def _show_mllm_form(self, container: VerticalScroll) -> None:
         values = _mllm_form_values(self._root)
         form = ConfigForm("MLLM Server", _MLLM_FIELDS, values)
         container.mount(form)
         self._current_form = form
+        self._show_sync_bar(local_path=_mllm_config_path(self._root))
 
     def on_config_form_saved(self, event: ConfigForm.Saved) -> None:
         if event.pipeline_name.startswith("shared:"):
             for path, val in event.values.items():
                 self._shared_values[path] = val
-            self._show_status("Shared defaults updated")
+            section_name = event.pipeline_name.replace("shared:", "", 1)
+            config_path = save_system_service_section(
+                self._root,
+                section_name,
+                self._shared_section_data(section_name),
+            )
+            updated = self._apply_shared_section_to_local_configs(section_name)
+            self._show_status(
+                f"{section_name} system service saved to {config_path} and {updated} local pipeline config(s)"
+            )
             return
 
         if event.pipeline_name == "MLLM Server":
-            save_config(_mllm_config_path(self._root), _MLLM_FIELDS, event.values)
+            config_path = _mllm_config_path(self._root)
+            save_config(config_path, _MLLM_FIELDS, event.values)
             self._services = _build_service_registry(self._root)
             self._svc_map = {s.name: s for s in self._services}
-            self._show_status(f"Saved to {_mllm_config_path(self._root)}")
+            self._show_status(f"Saved launch config locally to {config_path}")
             self._build_tree()
             return
 
@@ -1024,15 +1917,15 @@ class ServicePanel(Widget):
 
         form = self._current_form
         all_fields = form.all_fields if form else pipeline.fields
-        save_config(pipeline.config_path, all_fields, event.values)
+        self._save_pipeline_config_for_target(pipeline, all_fields, event.values)
 
         if pipeline.name == "ASR Server":
             self._services = _build_service_registry(self._root)
             self._svc_map = {s.name: s for s in self._services}
             self._refresh_service_cards()
 
-        self._show_status(f"Saved to {pipeline.config_path}")
-        self._refresh_stream_panels(pipeline)
+        if self._get_panel_target() == "local":
+            self._refresh_stream_panels(pipeline)
         self._show_sync_bar(pipeline)
         self._build_tree()
 
@@ -1049,7 +1942,34 @@ class ServicePanel(Widget):
         for card in self.query(ServiceCard):
             service = self._svc_map.get(card.service_def.name)
             if service is not None:
-                card.update_service_def(service)
+                card.update_service_def(self._service_for_current_target(service))
+
+    def _apply_shared_section_to_local_configs(self, section_name: str) -> int:
+        section_data = self._shared_section_data(section_name)
+        if not section_data:
+            return 0
+        if not self._pipelines:
+            self._pipelines = discover_pipelines()
+            self._pipeline_map = {pipeline.name: pipeline for pipeline in self._pipelines}
+        updated = 0
+        for pipeline in self._pipelines:
+            if not self._pipeline_has_section(pipeline, section_name):
+                continue
+            config = load_existing_config(pipeline.config_path)
+            if not isinstance(config, dict):
+                config = {}
+            if config.get(section_name) == section_data:
+                continue
+            config[section_name] = dict(section_data)
+            os.makedirs(os.path.dirname(pipeline.config_path), exist_ok=True)
+            with open(pipeline.config_path, "w", encoding="utf-8") as file:
+                yaml.safe_dump(config, file, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            updated += 1
+        self._target_config_cache.clear()
+        self._shared_values.update(
+            {f"{section_name}.{key}": value for key, value in section_data.items()}
+        )
+        return updated
 
     def _show_status(self, message: str) -> None:
         container = self._config_container
@@ -1059,18 +1979,45 @@ class ServicePanel(Widget):
             old.remove()
         container.mount(Static(f" {message}", classes="status-saved"))
 
-    def _show_sync_bar(self, pipeline: PipelineDef) -> None:
-        profiles = load_ssh_profiles()
-        if not profiles:
-            return
+    def _show_sync_bar(
+        self,
+        pipeline: PipelineDef | None = None,
+        shared_section: str | None = None,
+        local_path: str | None = None,
+    ) -> None:
         container = self._config_container
         if container is None:
             return
         for old in container.query(".sync-bar"):
             old.remove()
+        target = self._get_panel_target()
+        if target != "local":
+            if pipeline is None and shared_section is None and local_path is None:
+                return
+            bar = Horizontal(
+                Button(f"Sync Local to {target}", variant="warning", id="btn-sync-local-target"),
+                classes="sync-bar",
+            )
+            container.mount(bar)
+            return
+
+        if pipeline is None and local_path is None:
+            return
+        profiles = load_ssh_profiles()
+        if not profiles:
+            return
         options = [(p.name, p.name) for p in profiles]
+        selected_profile = target if any(p.name == target for p in profiles) else None
+        select_kwargs = {}
+        if selected_profile is not None:
+            select_kwargs["value"] = selected_profile
         bar = Horizontal(
-            Select(options, prompt="Select SSH profile...", id="sync-profile-select"),
+            Select(
+                options,
+                prompt="Select SSH profile...",
+                id="sync-profile-select",
+                **select_kwargs,
+            ),
             Button("Sync to Remote", variant="warning", id="btn-sync-remote"),
             classes="sync-bar",
         )
@@ -1097,6 +2044,12 @@ class ServicePanel(Widget):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-sync-remote":
             self._sync_to_remote()
+        elif event.button.id == "btn-sync-local-target":
+            self._sync_local_to_selected_target()
+        elif event.button.id == "btn-sync-transform-remote":
+            self._sync_transform_to_remote()
+        elif event.button.id == "btn-sync-transform-local-target":
+            self._sync_transform_local_to_selected_target()
         elif event.button.id == "btn-add-base":
             self._show_add_base_input()
         elif event.button.id == "btn-confirm-add-base":
@@ -1217,8 +2170,112 @@ class ServicePanel(Widget):
         except Exception:
             form.mount(btn)
 
+    def _config_cache_key(self, local_path: str, target: str | None = None) -> tuple[str, str]:
+        return (target or self._get_panel_target(), os.path.abspath(local_path))
+
+    def _load_config_for_target(
+        self,
+        local_path: str,
+        show_status: bool = True,
+        target: str | None = None,
+    ) -> tuple[dict, str]:
+        target = target or self._get_panel_target()
+        key = self._config_cache_key(local_path, target)
+        if key in self._target_config_cache:
+            return self._target_config_cache[key], ""
+
+        if target == "local":
+            config = load_existing_config(local_path)
+            self._target_config_cache[key] = config
+            return config, ""
+
+        profile = get_profile_by_name(target)
+        if profile is None:
+            return {}, f"SSH profile '{target}' not found; using defaults."
+
+        remote_path = self._remote_config_path(local_path, profile)
+        quoted_path = _quote_remote_path(remote_path)
+        cmd = (
+            f"if [ -f {quoted_path} ]; then "
+            f"cat {quoted_path}; "
+            "else printf '__OPENMMLA_CONFIG_MISSING__\\n'; fi"
+        )
+        try:
+            result = ssh_run_sync(profile, cmd, timeout=10.0)
+        except Exception as e:
+            return {}, f"Could not read {target}:{remote_path}: {e}. Using defaults."
+
+        if result.returncode != 0:
+            error = (result.stderr or "").strip() or f"exit code {result.returncode}"
+            return {}, f"Could not read {target}:{remote_path}: {error}. Using defaults."
+
+        raw = result.stdout or ""
+        if raw.strip() == "__OPENMMLA_CONFIG_MISSING__":
+            config = {}
+            self._target_config_cache[key] = config
+            return config, f"No remote config at {target}:{remote_path}; using defaults."
+
+        try:
+            config = yaml.safe_load(raw) or {}
+        except yaml.YAMLError as e:
+            return {}, f"Invalid remote config at {target}:{remote_path}: {e}. Using defaults."
+        if not isinstance(config, dict):
+            config = {}
+        self._target_config_cache[key] = config
+        return (
+            config,
+            f"Loaded config from {target}:{remote_path}" if show_status else "",
+        )
+
+    def _save_pipeline_config_for_target(
+        self,
+        pipeline: PipelineDef,
+        fields: list[LoaderFieldDef],
+        values: dict,
+    ) -> None:
+        target = self._get_panel_target()
+        if target == "local":
+            save_config(pipeline.config_path, fields, values)
+            self._target_config_cache[self._config_cache_key(pipeline.config_path, "local")] = (
+                load_existing_config(pipeline.config_path)
+            )
+            self._show_status(f"Saved locally to {pipeline.config_path}")
+            return
+
+        profile = get_profile_by_name(target)
+        if profile is None:
+            self._show_status(f"SSH profile '{target}' not found; config was not saved.")
+            return
+
+        tmp = tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".yml",
+            prefix="openmmla-config-",
+            delete=False,
+        )
+        tmp_path = tmp.name
+        tmp.close()
+        save_config(tmp_path, fields, values)
+        cache_key = self._config_cache_key(pipeline.config_path, target)
+        cache_config = load_existing_config(tmp_path)
+
+        remote_path = self._remote_config_path(pipeline.config_path, profile)
+        self._show_status(f"Saving to {target}:{remote_path} ...")
+        self.run_worker(
+            self._run_scp(
+                target,
+                tmp_path,
+                remote_path,
+                cleanup_local=True,
+                cache_key=cache_key,
+                cache_config=cache_config,
+            ),
+            exclusive=True,
+        )
+
     def _sync_to_remote(self) -> None:
-        if self._current_pipeline is None:
+        local_path = self._current_pipeline.config_path if self._current_pipeline is not None else self._current_config_local_path
+        if not local_path:
             return
         try:
             sel = self.query_one("#sync-profile-select", Select)
@@ -1235,40 +2292,293 @@ class ServicePanel(Widget):
             self._show_status(f"SSH profile '{profile_name}' not found.")
             return
 
-        local_path = self._current_pipeline.config_path
-        if not os.path.isfile(local_path):
-            self._show_status("Local config.yml not found. Save first.")
+        self._sync_local_config_path_to_profile(local_path, profile_name)
+
+    def _sync_local_to_selected_target(self) -> None:
+        target = self._get_panel_target()
+        if target == "local":
             return
+        if self._current_shared_section:
+            self._sync_shared_section_to_target(self._current_shared_section, target)
+            return
+        local_path = self._current_pipeline.config_path if self._current_pipeline is not None else self._current_config_local_path
+        if not local_path:
+            self._show_status("No local config is selected for syncing.")
+            return
+        self._sync_local_config_path_to_profile(local_path, target)
 
-        rel_dir = os.path.relpath(
-            os.path.dirname(local_path), self._root,
-        )
-        remote_path = f"{profile.remote_project_path}/{rel_dir}/config.yml"
-
+    def _sync_local_config_path_to_profile(self, local_path: str, profile_name: str) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._show_status(f"SSH profile '{profile_name}' not found.")
+            return
+        if not os.path.isfile(local_path):
+            self._show_status(f"Local config not found: {local_path}. Save first.")
+            return
+        remote_path = self._remote_config_path(local_path, profile)
+        cache_key = self._config_cache_key(local_path, profile_name)
+        cache_config = load_existing_config(local_path)
         self._show_status(f"Syncing to {profile_name}:{remote_path} ...")
         self.run_worker(
-            self._run_scp(profile_name, local_path, remote_path),
+            self._run_scp(
+                profile_name,
+                local_path,
+                remote_path,
+                cache_key=cache_key,
+                cache_config=cache_config,
+            ),
             exclusive=True,
         )
 
-    async def _run_scp(self, profile_name: str, local_path: str, remote_path: str) -> None:
+    def _sync_transform_to_remote(self) -> None:
+        try:
+            sel = self.query_one("#transform-sync-profile-select", Select)
+            val = sel.value
+            if val is Select.BLANK or val is None:
+                self._show_status("Select an SSH profile first.")
+                return
+            profile_name = str(val)
+        except Exception:
+            return
+        self._sync_transform_dir_to_profile(profile_name)
+
+    def _sync_transform_local_to_selected_target(self) -> None:
+        target = self._get_panel_target()
+        if target == "local":
+            return
+        self._sync_transform_dir_to_profile(target)
+
+    def _sync_transform_dir_to_profile(self, profile_name: str) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._show_status(f"SSH profile '{profile_name}' not found.")
+            return
+        local_dir = _ips_transform_local_dir(self._root)
+        files = _local_transform_matrix_files(local_dir)
+        if not files:
+            self._show_status(f"No transformation_matrices*.json files found in {local_dir}.")
+            return
+        remote_dir = self._ips_transform_remote_dir(profile)
+        self._show_status(f"Syncing IPS transform matrices to {profile_name}:{remote_dir} ...")
+        self.run_worker(
+            self._run_transform_matrix_sync(profile_name, local_dir, remote_dir, files),
+            exclusive=True,
+        )
+
+    def _sync_shared_section_to_target(self, section_name: str, target: str) -> None:
+        profile = get_profile_by_name(target)
+        if profile is None:
+            self._show_status(f"SSH profile '{target}' not found.")
+            return
+        section_data = self._shared_section_data(section_name)
+        if not section_data:
+            self._show_status(f"No shared defaults found for {section_name}.")
+            return
+
+        entries: list[tuple[str, str, tuple[str, str], dict]] = []
+        temp_paths: list[str] = []
+        for pipeline in self._pipelines:
+            if not self._pipeline_has_section(pipeline, section_name):
+                continue
+            remote_config, _ = self._load_config_for_target(
+                pipeline.config_path,
+                show_status=False,
+                target=target,
+            )
+            if not isinstance(remote_config, dict):
+                remote_config = {}
+            remote_config[section_name] = dict(section_data)
+
+            tmp = tempfile.NamedTemporaryFile(
+                "w",
+                suffix=".yml",
+                prefix="openmmla-shared-config-",
+                delete=False,
+                encoding="utf-8",
+            )
+            with tmp:
+                yaml.safe_dump(remote_config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            temp_paths.append(tmp.name)
+            remote_path = self._remote_config_path(pipeline.config_path, profile)
+            cache_key = self._config_cache_key(pipeline.config_path, target)
+            entries.append((tmp.name, remote_path, cache_key, remote_config))
+
+        if not entries:
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            self._show_status(f"No pipeline configs contain {section_name}.")
+            return
+
+        for key, value in section_data.items():
+            self._shared_values[f"{section_name}.{key}"] = value
+
+        self._show_status(f"Syncing {section_name} system service to {target} ...")
+        self.run_worker(
+            self._run_scp_batch(target, entries, cleanup_local=True, success_message=f"Synced {section_name} system service"),
+            exclusive=True,
+        )
+
+    def _shared_section_data(self, section_name: str) -> dict[str, object]:
+        info = SHARED_SECTIONS.get(section_name, {})
+        values = self._current_form.collect_values() if self._current_form is not None else {}
+        section_data: dict[str, object] = {}
+        for key, fdef in info.get("fields", {}).items():
+            path = f"{section_name}.{key}"
+            section_data[key] = values.get(path, self._shared_values.get(path, fdef.get("default", "")))
+        return section_data
+
+    @staticmethod
+    def _pipeline_has_section(pipeline: PipelineDef, section_name: str) -> bool:
+        prefix = f"{section_name}."
+        return any(
+            field.path.startswith(prefix)
+            or field.section == section_name
+            or field.section.startswith(prefix)
+            for field in pipeline.fields
+        )
+
+    def _remote_config_path(self, local_path: str, profile) -> str:
+        rel_path = os.path.relpath(local_path, self._root)
+        return _remote_path_join(profile.remote_project_path, rel_path)
+
+    def _ips_transform_remote_dir(self, profile) -> str:
+        rel_path = os.path.relpath(_ips_transform_local_dir(self._root), self._root)
+        return _remote_path_join(profile.remote_project_path, rel_path)
+
+    def _stack_service_specs_for_target(self, svc: ServiceDef, target: str) -> list[dict[str, object]]:
+        if target == "local":
+            return _stack_service_specs(svc.config_dir)
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+        return _stack_service_specs_from_config(config)
+
+    def _stack_sessions_for_target(self, svc: ServiceDef, target: str) -> list[str]:
+        specs = self._stack_service_specs_for_target(svc, target)
+        return _stack_sessions_from_specs(svc, specs)
+
+    def _stack_ports_for_target(self, svc: ServiceDef, target: str) -> list[int]:
+        specs = self._stack_service_specs_for_target(svc, target)
+        return _stack_ports_from_specs(specs)
+
+    async def _run_scp(
+        self,
+        profile_name: str,
+        local_path: str,
+        remote_path: str,
+        cleanup_local: bool = False,
+        cache_key: tuple[str, str] | None = None,
+        cache_config: dict | None = None,
+    ) -> None:
         profile = get_profile_by_name(profile_name)
         if profile is None:
             return
-        remote_dir = remote_path.rsplit("/", 1)[0]
-        mkdir_proc = await ssh_run_async(profile, f"mkdir -p {remote_dir}")
+        try:
+            remote_dir = remote_path.rsplit("/", 1)[0]
+            mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
+            await mkdir_proc.wait()
+
+            proc = await scp_file_async(profile, local_path, remote_path)
+            assert proc.stdout is not None
+            output = ""
+            async for line in proc.stdout:
+                output += line.decode(errors="replace")
+            rc = await proc.wait()
+            if rc == 0:
+                if cache_key is not None and cache_config is not None:
+                    self._target_config_cache[cache_key] = cache_config
+                    self._refresh_service_cards()
+                self._show_status(f"Saved to {profile_name}:{remote_path}")
+            else:
+                self._show_status(f"Save failed: {output.strip()}")
+        finally:
+            if cleanup_local:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+
+    async def _run_transform_matrix_sync(
+        self,
+        profile_name: str,
+        local_dir: str,
+        remote_dir: str,
+        files: list[str],
+    ) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            return
+
+        mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
         await mkdir_proc.wait()
 
-        proc = await scp_file_async(profile, local_path, remote_path)
-        assert proc.stdout is not None
-        output = ""
-        async for line in proc.stdout:
-            output += line.decode()
-        rc = await proc.wait()
-        if rc == 0:
-            self._show_status(f"Synced to {profile_name}:{remote_path}")
-        else:
-            self._show_status(f"Sync failed: {output.strip()}")
+        copied = 0
+        failures: list[str] = []
+        for name in files:
+            local_path = os.path.join(local_dir, name)
+            remote_path = _remote_path_join(remote_dir, name)
+            proc = await scp_file_async(profile, local_path, remote_path)
+            assert proc.stdout is not None
+            output = ""
+            async for line in proc.stdout:
+                output += line.decode(errors="replace")
+            rc = await proc.wait()
+            if rc == 0:
+                copied += 1
+            else:
+                detail = output.strip() or f"exit code {rc}"
+                failures.append(f"{name}: {detail}")
+
+        if failures:
+            self._show_status(f"Transform matrix sync failed: {'; '.join(failures[:2])}")
+            return
+        self._show_status(f"Synced {copied} transform matrix file(s) to {profile_name}:{remote_dir}")
+
+    async def _run_scp_batch(
+        self,
+        profile_name: str,
+        entries: list[tuple[str, str, tuple[str, str], dict]],
+        cleanup_local: bool = False,
+        success_message: str = "Synced config",
+    ) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            return
+        saved = 0
+        failures: list[str] = []
+        try:
+            for local_path, remote_path, cache_key, cache_config in entries:
+                remote_dir = remote_path.rsplit("/", 1)[0]
+                mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
+                await mkdir_proc.wait()
+
+                proc = await scp_file_async(profile, local_path, remote_path)
+                assert proc.stdout is not None
+                output = ""
+                async for line in proc.stdout:
+                    output += line.decode(errors="replace")
+                rc = await proc.wait()
+                if rc == 0:
+                    self._target_config_cache[cache_key] = cache_config
+                    saved += 1
+                else:
+                    failures.append(f"{remote_path}: {output.strip() or f'exit code {rc}'}")
+
+            if failures:
+                self._show_status(f"{success_message} partially failed: {'; '.join(failures[:2])}")
+            else:
+                self._show_status(f"{success_message} to {profile_name} ({saved} file(s))")
+            if saved:
+                self._refresh_service_cards()
+        finally:
+            if cleanup_local:
+                for local_path, _, _, _ in entries:
+                    try:
+                        os.unlink(local_path)
+                    except OSError:
+                        pass
 
     # ── launch logic ─────────────────────────────────────────────
 
@@ -1307,12 +2617,15 @@ class ServicePanel(Widget):
             if port is not None:
                 return _check_port_in_use(port)
             return _check_tmux_session(target)
+        elif svc.launch_type == "collection":
+            return False
         return False
 
     def on_service_card_start_requested(self, event: ServiceCard.StartRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
             return
+        svc = self._service_for_current_target(svc)
 
         target = self._get_panel_target()
         is_remote = target != "local"
@@ -1322,7 +2635,7 @@ class ServicePanel(Widget):
             self._log("[yellow]Please configure this pipeline first.[/yellow]")
             return
 
-        if not is_remote and svc.launch_type != "make":
+        if not is_remote and svc.launch_type != "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None
             if has_conda and not _check_conda_env(svc.conda_env):
                 self._log(f"[red]conda env '{svc.conda_env}' not found. Aborting launch.[/red]")
@@ -1339,13 +2652,18 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
                 return
 
+        launch_params = dict(event.params)
+        if not self._ensure_pipeline_session_for_launch(svc, launch_params, target=target):
+            self._log("[red]Could not resolve a launch session id.[/red]")
+            return
+
         target_label = f"on '{target}'" if is_remote else "locally"
         self._log(f"[green]Starting {svc.name} {target_label}...[/green]")
 
         if is_remote:
-            self._launch_remote(svc, event.params, target)
+            self._launch_remote(svc, launch_params, target)
         else:
-            self._launch_service(svc, event.params)
+            self._launch_service(svc, launch_params)
         self.set_timer(3.0, self._refresh_visible_statuses)
 
     def on_service_card_stop_requested(self, event: ServiceCard.StopRequested) -> None:
@@ -1359,14 +2677,22 @@ class ServicePanel(Widget):
         self._log(f"[red]Stopping {svc.name} {target_label}...[/red]")
 
         if is_remote:
-            self._stop_remote(svc, target)
+            self._stop_remote(svc, target, event.params)
         else:
-            self._stop_service(svc)
+            self._stop_service(svc, event.params)
         self.set_timer(2.0, self._refresh_visible_statuses)
 
     def on_service_card_refresh_requested(self, event: ServiceCard.RefreshRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
+            return
+        if svc.launch_type == "collection":
+            self.run_worker(
+                self._reload_current_service_view(),
+                group=_LAUNCHER_UI_WORKER_GROUP,
+                exclusive=True,
+            )
+            self._log("Refreshing Collection Session choices.")
             return
         target = self._get_panel_target()
         if target == "local":
@@ -1381,7 +2707,444 @@ class ServicePanel(Widget):
         status = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
         self._log(f"{svc.name} ({target}): {status}")
 
+    def on_service_card_download_requested(self, event: ServiceCard.DownloadRequested) -> None:
+        svc = next((s for s in self._services if s.name == event.service_name), None)
+        if svc is None:
+            return
+        target = self._get_panel_target()
+        if svc.launch_type == "collection":
+            if target == "local":
+                self._log("[yellow]Download is only needed for remote collection targets.[/yellow]")
+                return
+            params = self._collection_params_for_action(svc, event.params, target)
+            session_id = self._collection_session_id(params)
+            if not session_id:
+                self._log("[yellow]No valid collection session id. Enter one or start a collection first.[/yellow]")
+                return
+            self.run_worker(
+                self._run_collection_download(target, params),
+                name=f"collection-download:{target}:{session_id}",
+                group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
+                exclusive=False,
+            )
+            return
+
+        if not svc.artifact_pipeline:
+            return
+        if target == "local":
+            self._log("[yellow]Artifact download is only available for remote base targets.[/yellow]")
+            return
+        session_id = self._artifact_session_id(event.params)
+        if not session_id:
+            self._log("[yellow]Enter a valid Artifact Session before downloading base artifacts.[/yellow]")
+            return
+        self.run_worker(
+            self._run_pipeline_artifacts_download(target, svc, session_id),
+            name=f"pipeline-download:{target}:{svc.name}:{session_id}",
+            group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    def on_service_card_delete_files_requested(self, event: ServiceCard.DeleteFilesRequested) -> None:
+        svc = next((s for s in self._services if s.name == event.service_name), None)
+        if svc is None or svc.launch_type != "collection":
+            return
+        target = self._get_panel_target()
+        if target == "local":
+            self._log("[yellow]Delete Remote is only available for remote collection targets.[/yellow]")
+            return
+        params = self._collection_params_for_action(svc, event.params, target)
+        session_id = self._collection_session_id(params)
+        if not session_id:
+            self._log("[yellow]No valid collection session id. Enter one or start a collection first.[/yellow]")
+            return
+        delete_key = (target, session_id)
+        if self._pending_collection_delete != delete_key:
+            self._pending_collection_delete = delete_key
+            self._log(
+                f"[yellow]Press Delete Remote again to permanently delete remote collection '{session_id}' on '{target}'.[/yellow]"
+            )
+            return
+        self._pending_collection_delete = None
+        self.run_worker(
+            self._run_collection_remote_delete(target, params),
+            name=f"collection-remote-delete:{target}:{session_id}",
+            group=_LAUNCHER_REMOTE_DELETE_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    async def _run_collection_download(self, profile_name: str, params: dict) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
+            return
+        session_id = self._collection_session_id(params)
+        remote_path = self._collection_remote_path(profile, params)
+        remote_transfer_path = await asyncio.to_thread(
+            lambda: _expand_remote_home_path(remote_path, _remote_home(profile))
+        )
+        local_path = self._collection_local_path(params, profile_name)
+        self._log(f"[cyan]Downloading {profile_name}:{remote_transfer_path} -> {local_path}[/cyan]")
+        with tempfile.TemporaryDirectory(prefix="openmmla-collection-") as tmp_dir:
+            proc = await scp_from_remote_async(profile, remote_transfer_path, tmp_dir)
+            assert proc.stdout is not None
+            output = ""
+            async for line in proc.stdout:
+                output += line.decode(errors="replace")
+            rc = await proc.wait()
+            if rc != 0:
+                self._log(f"[red]Download failed (exit {rc}).[/red]")
+                for line in output.strip().splitlines():
+                    self._log(rich_escape(line))
+                return
+
+            downloaded = Path(tmp_dir) / os.path.basename(remote_transfer_path.rstrip("/"))
+            if not downloaded.exists():
+                children = [path for path in Path(tmp_dir).iterdir() if path.name != ".DS_Store"]
+                downloaded = children[0] if len(children) == 1 else downloaded
+            if not downloaded.exists():
+                self._log("[red]Download completed, but no collection directory was found in the transfer.[/red]")
+                return
+
+            stats = await asyncio.to_thread(
+                merge_tree,
+                downloaded,
+                Path(local_path),
+                conflict_label=profile_name,
+            )
+        manifest = await asyncio.to_thread(
+            update_collection_manifest,
+            self._root,
+            session_id=session_id,
+            host_name=safe_segment(params.get("--host-label") or profile_name, "host"),
+            remote_path=remote_transfer_path,
+            local_path=Path(local_path),
+        )
+        self._log(
+            f"[green]Downloaded collection to {local_path} "
+            f"(copied {stats['copied']}, skipped {stats['skipped']}, conflicts {stats['conflicted']}).[/green]"
+        )
+        self._log(f"[green]Updated session manifest: {manifest}[/green]")
+
+    async def _run_collection_remote_delete(self, profile_name: str, params: dict) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
+            return
+        session_id = self._collection_session_id(params)
+        if not session_id or session_id in (".", "..", "/"):
+            self._log("[red]Refusing to delete invalid collection session path.[/red]")
+            return
+        remote_path = self._collection_remote_path(profile, params)
+        remote_delete_path = _expand_remote_home_path(remote_path, _remote_home(profile))
+        quoted_path = _quote_remote_path(remote_delete_path)
+        cmd = (
+            f"if [ -d {quoted_path} ]; then "
+            f"rm -rf -- {quoted_path} && echo DELETED; "
+            "else echo MISSING; fi"
+        )
+        self._log(f"[red]Deleting remote collection: {profile_name}:{remote_delete_path}[/red]")
+        proc = await ssh_run_async(profile, wrap_remote(cmd))
+        assert proc.stdout is not None
+        output = ""
+        async for line in proc.stdout:
+            output += line.decode(errors="replace")
+        rc = await proc.wait()
+        for line in output.strip().splitlines():
+            self._log(rich_escape(line))
+        if rc == 0:
+            self._log("[green]Remote collection delete command completed.[/green]")
+        else:
+            self._log(f"[red]Remote collection delete failed (exit {rc}).[/red]")
+
+    async def _run_collection_remote_stop(self, profile_name: str, session_id: str) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
+            return
+
+        command = self._collection_stop_command(session_id)
+        remote_command = f"bash -lc {shlex.quote(f'cd $HOME && {command}')}"
+        self._log(
+            f"[red]Stopping collection session '{session_id}' on '{profile_name}' ...[/red]"
+        )
+        proc = await ssh_run_async(profile, remote_command)
+        output = ""
+        if proc.stdout is not None:
+            async for line in proc.stdout:
+                output += line.decode(errors="replace")
+        rc = await proc.wait()
+        for line in output.strip().splitlines():
+            self._log(rich_escape(line))
+        if rc == 0:
+            self._log(
+                f"[green]Stop command completed for collection session '{session_id}' on '{profile_name}'.[/green]"
+            )
+        else:
+            self._log(f"[red]Remote collection stop failed (exit {rc}).[/red]")
+        await self._reload_current_service_view()
+
+    async def _run_collection_local_stop(self, session_id: str) -> None:
+        command = self._collection_stop_command(session_id)
+        self._log(f"[red]Stopping collection session '{session_id}' locally ...[/red]")
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=self._root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output = ""
+        if proc.stdout is not None:
+            async for line in proc.stdout:
+                output += line.decode(errors="replace")
+        rc = await proc.wait()
+        for line in output.strip().splitlines():
+            self._log(rich_escape(line))
+        if rc == 0:
+            self._log(f"[green]Stop command completed for collection session '{session_id}'.[/green]")
+        else:
+            self._log(f"[yellow]Collection stop command finished with warnings (exit {rc}).[/yellow]")
+        await self._reload_current_service_view()
+
+    @staticmethod
+    def _artifact_session_id(params: dict) -> str:
+        raw = params.get("--artifact-session-id") or params.get("--session-id") or params.get("-sid")
+        if _is_new_collection_session_choice(raw):
+            return ""
+        return _safe_session_id(raw)
+
+    async def _run_pipeline_artifacts_download(
+        self,
+        profile_name: str,
+        svc: ServiceDef,
+        session_id: str,
+    ) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
+            return
+        pipeline_name = svc.artifact_pipeline or svc.name
+        artifact_host = await self._resolve_remote_pipeline_artifact_host(
+            profile,
+            session_id,
+            pipeline_name,
+            fallback=profile_name,
+        )
+        local_root = pipeline_artifact_dir(
+            self._root,
+            session_id,
+            pipeline_name,
+            artifact_host,
+        )
+        downloaded_paths: list[str] = []
+        total = {"copied": 0, "skipped": 0, "conflicted": 0}
+        remote_root = self._remote_pipeline_artifact_root(profile, session_id, pipeline_name, artifact_host)
+        self._log(f"[cyan]Downloading {svc.name} artifacts from {profile_name}:{remote_root}[/cyan]")
+
+        for remote_rel, local_rel in self._pipeline_artifact_sources():
+            remote_path = f"{remote_root.rstrip('/')}/{remote_rel}"
+            exists = await self._remote_path_exists(profile, remote_path)
+            if not exists:
+                self._log(f"  [yellow]Missing remote path: {remote_rel}[/yellow]")
+                continue
+            destination = local_root / local_rel
+            stats = await self._download_remote_item(
+                profile,
+                remote_path,
+                destination,
+                conflict_label=profile_name,
+            )
+            if stats is None:
+                continue
+            downloaded_paths.append(remote_rel)
+            for key, value in stats.items():
+                total[key] += value
+
+        if not downloaded_paths:
+            self._log(f"[yellow]No artifacts found for session '{session_id}' on {profile_name}.[/yellow]")
+            return
+
+        manifest = update_pipeline_manifest(
+            self._root,
+            session_id=session_id,
+            pipeline_name=pipeline_name,
+            host_name=artifact_host,
+            remote_root=remote_root,
+            local_path=local_root,
+            downloaded_paths=downloaded_paths,
+        )
+        self._log(
+            f"[green]Downloaded {svc.name} artifacts to {local_root} "
+            f"(copied {total['copied']}, skipped {total['skipped']}, conflicts {total['conflicted']}).[/green]"
+        )
+        self._log(f"[green]Updated session manifest: {manifest}[/green]")
+
+    def _remote_pipeline_root(self, profile, svc: ServiceDef) -> str:
+        rel_dir = os.path.relpath(svc.config_dir, self._root)
+        return f"{profile.remote_project_path.rstrip('/')}/{rel_dir}"
+
+    @staticmethod
+    def _remote_pipeline_artifact_base(profile, session_id: str, pipeline_name: str) -> str:
+        return (
+            f"{profile.remote_project_path.rstrip('/')}/artifacts/"
+            f"{safe_segment(session_id, 'session')}/pipelines/"
+            f"{safe_segment(pipeline_name, 'pipeline')}"
+        )
+
+    @classmethod
+    def _remote_pipeline_artifact_root(cls, profile, session_id: str, pipeline_name: str, host_name: str) -> str:
+        return f"{cls._remote_pipeline_artifact_base(profile, session_id, pipeline_name)}/{safe_segment(host_name, 'host')}"
+
+    @staticmethod
+    def _pipeline_artifact_sources() -> list[tuple[str, Path]]:
+        return [
+            ("real-time/runtime", Path("real-time") / "runtime"),
+            ("real-time/profiles", Path("real-time") / "profiles"),
+            ("post-time", Path("post-time")),
+            ("logger", Path("logger")),
+            ("config", Path("config")),
+            ("visualizations", Path("visualizations")),
+        ]
+
+    async def _resolve_remote_pipeline_artifact_host(
+        self,
+        profile,
+        session_id: str,
+        pipeline_name: str,
+        *,
+        fallback: str,
+    ) -> str:
+        base_root = self._remote_pipeline_artifact_base(profile, session_id, pipeline_name)
+        candidates: list[str] = []
+        for candidate in (fallback, await self._remote_short_hostname(profile)):
+            safe = safe_segment(candidate, "")
+            if safe and safe not in candidates:
+                candidates.append(safe)
+
+        for candidate in candidates:
+            if await self._remote_path_exists(profile, f"{base_root.rstrip('/')}/{candidate}"):
+                return candidate
+
+        child_dirs = await self._remote_child_dirs(profile, base_root)
+        if len(child_dirs) == 1:
+            return child_dirs[0]
+        if child_dirs:
+            self._log(
+                f"[yellow]Multiple remote artifact host dirs found under {base_root}; "
+                f"using {child_dirs[0]}.[/yellow]"
+            )
+            return child_dirs[0]
+        return safe_segment(fallback, "host")
+
+    async def _remote_short_hostname(self, profile) -> str:
+        proc = await ssh_run_async(profile, "hostname -s 2>/dev/null || hostname")
+        assert proc.stdout is not None
+        output = ""
+        async for line in proc.stdout:
+            output += line.decode(errors="replace")
+        rc = await proc.wait()
+        if rc != 0:
+            return ""
+        return safe_segment(output.strip().splitlines()[0] if output.strip() else "", "")
+
+    async def _remote_child_dirs(self, profile, remote_path: str) -> list[str]:
+        quoted_path = _quote_remote_path(remote_path)
+        cmd = (
+            f"if [ -d {quoted_path} ]; then "
+            f"find {quoted_path} -mindepth 1 -maxdepth 1 -type d -exec basename {{}} \\; 2>/dev/null; "
+            "fi"
+        )
+        proc = await ssh_run_async(profile, wrap_remote(cmd))
+        assert proc.stdout is not None
+        output = ""
+        async for line in proc.stdout:
+            output += line.decode(errors="replace")
+        rc = await proc.wait()
+        if rc != 0:
+            return []
+        dirs = []
+        for line in output.splitlines():
+            name = safe_segment(line.strip(), "")
+            if name and name not in {"shared", ".DS_Store"} and name not in dirs:
+                dirs.append(name)
+        return sorted(dirs)
+
+    async def _remote_path_exists(self, profile, remote_path: str) -> bool:
+        cmd = f"if [ -e {_quote_remote_path(remote_path)} ]; then echo EXISTS; else echo MISSING; fi"
+        proc = await ssh_run_async(profile, wrap_remote(cmd))
+        assert proc.stdout is not None
+        output = ""
+        async for line in proc.stdout:
+            output += line.decode(errors="replace")
+        rc = await proc.wait()
+        return rc == 0 and "EXISTS" in output
+
+    async def _download_remote_item(
+        self,
+        profile,
+        remote_path: str,
+        destination: Path,
+        *,
+        conflict_label: str,
+    ) -> dict[str, int] | None:
+        remote_transfer_path = await asyncio.to_thread(
+            lambda: _expand_remote_home_path(remote_path, _remote_home(profile))
+        )
+        with tempfile.TemporaryDirectory(prefix="openmmla-artifact-") as tmp_dir:
+            proc = await scp_from_remote_async(profile, remote_transfer_path, tmp_dir)
+            assert proc.stdout is not None
+            output = ""
+            async for line in proc.stdout:
+                output += line.decode(errors="replace")
+            rc = await proc.wait()
+            if rc != 0:
+                self._log(f"[red]Download failed for {remote_path} (exit {rc}).[/red]")
+                for line in output.strip().splitlines():
+                    self._log(rich_escape(line))
+                return None
+
+            downloaded = Path(tmp_dir) / os.path.basename(remote_transfer_path.rstrip("/"))
+            if not downloaded.exists():
+                children = [path for path in Path(tmp_dir).iterdir() if path.name != ".DS_Store"]
+                downloaded = children[0] if len(children) == 1 else downloaded
+            if not downloaded.exists():
+                self._log(f"[red]Download completed, but no artifact was found for {remote_path}.[/red]")
+                return None
+            return await asyncio.to_thread(
+                merge_tree,
+                downloaded,
+                destination,
+                conflict_label=conflict_label,
+            )
+
     def _refresh_visible_statuses(self) -> None:
+        self.run_worker(
+            self._async_refresh_visible_statuses(self._get_panel_target()),
+            group=_LAUNCHER_STATUS_WORKER_GROUP,
+            exclusive=True,
+        )
+
+    async def _async_refresh_visible_statuses(self, target: str) -> None:
+        states = await asyncio.to_thread(self._detect_visible_statuses, target)
+        if target != self._get_panel_target():
+            return
+        for svc_name, is_running in states.items():
+            self._svc_states[svc_name] = is_running
+            for card in self.query(ServiceCard):
+                if card.service_def.name == svc_name:
+                    card.update_status(is_running)
+        self._build_tree()
+
+    def _detect_visible_statuses(self, target: str) -> dict[str, bool]:
+        states: dict[str, bool] = {}
+        for svc in self._services:
+            if target == "local":
+                states[svc.name] = self._detect_running(svc)
+            else:
+                states[svc.name] = self._detect_running_remote(svc, target)
+        return states
+
+    def _refresh_visible_statuses_sync(self) -> None:
         target = self._get_panel_target()
         for svc in self._services:
             if target == "local":
@@ -1407,14 +3170,19 @@ class ServicePanel(Widget):
             return ssh_check_tmux(profile, target)
         elif svc.launch_type == "tmux":
             if _is_stack_tmux_service(svc):
-                ports = _stack_ports(svc)
+                ports = self._stack_ports_for_target(svc, profile_name)
                 if ports:
                     return all(ssh_check_port(profile, port) for port in ports)
-                return any(ssh_check_tmux(profile, session) for session in _stack_sessions(svc))
+                return any(
+                    ssh_check_tmux(profile, session)
+                    for session in self._stack_sessions_for_target(svc, profile_name)
+                )
             session_name = _service_session_name(svc)
             return ssh_check_tmux(profile, session_name)
         elif svc.launch_type == "vllm":
             return ssh_check_port(profile, _mllm_config(self._root)["port"])
+        elif svc.launch_type == "collection":
+            return False
         return False
 
     def on_service_card_view_logs_requested(self, event: ServiceCard.ViewLogsRequested) -> None:
@@ -1440,17 +3208,24 @@ class ServicePanel(Widget):
             self._view_logs_local(svc)
 
     def _logs_available(self, svc: ServiceDef, target: str) -> bool:
-        if svc.launch_type not in ("tmux", "vllm"):
+        if svc.launch_type not in ("tmux", "vllm", "collection"):
             return False
         if target == "local":
+            if svc.launch_type == "collection":
+                return False
             if _is_stack_tmux_service(svc):
                 return any(_check_tmux_session(session) for session in _stack_sessions(svc))
             return _check_tmux_session(_service_session_name(svc))
         profile = get_profile_by_name(target)
         if profile is None:
             return False
+        if svc.launch_type == "collection":
+            return False
         if _is_stack_tmux_service(svc):
-            return any(ssh_check_tmux(profile, session) for session in _stack_sessions(svc))
+            return any(
+                ssh_check_tmux(profile, session)
+                for session in self._stack_sessions_for_target(svc, target)
+            )
         return ssh_check_tmux(profile, _service_session_name(svc))
 
     def _view_logs_local(self, svc: ServiceDef) -> None:
@@ -1477,6 +3252,18 @@ class ServicePanel(Widget):
                     self._log(line)
             if not captured:
                 self._log("(no tmux sessions found)")
+            self._log(f"[cyan]── End of logs ──[/cyan]")
+            return
+        elif svc.launch_type == "collection":
+            self._log(f"[cyan]── Logs for {svc.name} ──[/cyan]")
+            sessions = _collection_sessions_local(svc)
+            if not sessions:
+                self._log("(no collection sessions found)")
+            for session_name in sessions:
+                self._log(f"[cyan]── session: {session_name} ──[/cyan]")
+                output = _capture_tmux_pane(session_name)
+                for line in output.splitlines():
+                    self._log(line)
             self._log(f"[cyan]── End of logs ──[/cyan]")
             return
         elif svc.launch_type in ("tmux", "vllm"):
@@ -1507,8 +3294,9 @@ class ServicePanel(Widget):
                 return
             session_name = target
         elif _is_stack_tmux_service(svc):
+            target = self._get_panel_target()
             cmd_parts = []
-            for session_name in _stack_sessions(svc):
+            for session_name in self._stack_sessions_for_target(svc, target):
                 quoted_session = shlex.quote(session_name)
                 heading = shlex.quote(f"── session: {session_name} ──")
                 cmd_parts.append(
@@ -1517,6 +3305,15 @@ class ServicePanel(Widget):
                     f"tmux capture-pane -t {quoted_session} -p -S -80; fi"
                 )
             self._cmd.run(" ; ".join(cmd_parts) or "echo '(no tmux sessions configured)'")
+            return
+        elif svc.launch_type == "collection":
+            prefix = shlex.quote(_collection_session_prefix(svc))
+            cmd = (
+                f"for s in $(tmux list-sessions -F '#{{session_name}}' 2>/dev/null | grep '^{prefix}'); do "
+                "echo \"── session: $s ──\"; tmux capture-pane -t \"$s\" -p -S -80; "
+                "done"
+            )
+            self._cmd.run(cmd)
             return
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
@@ -1536,8 +3333,627 @@ class ServicePanel(Widget):
                 self._launch_vllm_server(svc)
             elif svc.launch_type == "make":
                 self._launch_make(svc)
+            elif svc.launch_type == "collection":
+                self._launch_collection(svc, params)
         except Exception as e:
             self._log(f"[red]Error launching {svc.name}: {e}[/red]")
+
+    def _collection_defaults_for_current_target(self, target: str) -> dict[str, object]:
+        return self._collection_defaults_for_target(
+            target,
+            platform_name=self._collection_platform_for_target(target),
+        )
+
+    def _collection_platform_for_target(self, target: str) -> str:
+        if target == "local":
+            return sys.platform
+
+        cache = getattr(self, "_target_platform_cache", None)
+        if cache is None:
+            cache = {}
+            self._target_platform_cache = cache
+        if target in cache:
+            return cache[target]
+
+        lower_target = str(target or "").lower()
+        if lower_target.startswith(("raspi", "rpi", "pi")):
+            cache[target] = "linux"
+            return cache[target]
+
+        profile = get_profile_by_name(target)
+        if profile is None:
+            cache[target] = "linux"
+            return cache[target]
+        try:
+            result = ssh_run_sync(profile, "uname -s", timeout=2.0)
+            raw = (result.stdout or "").strip().lower()
+        except Exception:
+            raw = ""
+        if "darwin" in raw:
+            platform_name = "darwin"
+        elif "linux" in raw:
+            platform_name = "linux"
+        else:
+            platform_name = "linux"
+        cache[target] = platform_name
+        return platform_name
+
+    @staticmethod
+    def _collection_defaults_for_target(
+        target: str,
+        platform_name: str | None = None,
+    ) -> dict[str, object]:
+        platform_text = (platform_name or (sys.platform if target == "local" else "linux")).lower()
+        is_macos = platform_text.startswith("darwin")
+        defaults: dict[str, object] = {
+            "--output-root": ServicePanel._collection_default_output_root(target),
+            "--host-label": ServicePanel._collection_default_host_label(target),
+            "--audio-interactive": True,
+            "--audio-input-format": (
+                DEFAULT_AUDIO_INPUT_FORMAT_MACOS if is_macos else DEFAULT_AUDIO_INPUT_FORMAT_LINUX
+            ),
+            "--audio-device": DEFAULT_AUDIO_DEVICE_MACOS if is_macos else DEFAULT_AUDIO_DEVICE_LINUX,
+            "--audio-channels": "",
+            "--audio-channel": DEFAULT_AUDIO_CHANNEL,
+            "--sample-rate": str(DEFAULT_AUDIO_SAMPLE_RATE),
+            "--audio-format": DEFAULT_AUDIO_FORMAT,
+            "--video-interactive": True,
+            "--video-input-format": (
+                DEFAULT_VIDEO_INPUT_FORMAT_MACOS if is_macos else DEFAULT_VIDEO_INPUT_FORMAT_LINUX
+            ),
+            "--video-device": DEFAULT_VIDEO_DEVICE_MACOS if is_macos else DEFAULT_VIDEO_DEVICE_LINUX,
+            "--video-source-format": (
+                DEFAULT_VIDEO_SOURCE_FORMAT_MACOS if is_macos else DEFAULT_VIDEO_SOURCE_FORMAT_LINUX
+            ),
+            "--framerate": DEFAULT_VIDEO_FRAMERATE,
+            "--size": DEFAULT_VIDEO_SIZE,
+            "--bitrate": DEFAULT_VIDEO_BITRATE_MACOS if is_macos else DEFAULT_VIDEO_BITRATE_LINUX,
+            "--maxrate": DEFAULT_VIDEO_MAXRATE_MACOS if is_macos else DEFAULT_VIDEO_MAXRATE_LINUX,
+            "--bufsize": DEFAULT_VIDEO_BUFSIZE_MACOS if is_macos else DEFAULT_VIDEO_BUFSIZE_LINUX,
+            "--preset": DEFAULT_VIDEO_PRESET,
+            "--camera-label": "",
+        }
+        return defaults
+
+    @staticmethod
+    def _is_default_collection_output_root(output_root: str) -> bool:
+        return output_root in {
+            "",
+            "collection",
+            "~/collection",
+            "artifacts",
+            "~/artifacts",
+            "post-time/recordings",
+            "~/post-time/recordings",
+        }
+
+    def _collection_launch_params(
+        self,
+        params: dict,
+        target: str = "local",
+        service_name: str = "Collection Session",
+    ) -> dict:
+        last = self._collection_last_params.get((target, service_name), {})
+        prepared = dict(last)
+        for key, value in params.items():
+            if key == "--session-id" and not str(value or "").strip() and prepared.get(key):
+                continue
+            if key == "--session-id" and _is_new_collection_session_choice(value):
+                prepared[key] = ""
+                continue
+            if isinstance(value, (bool, int)):
+                prepared[key] = value
+            elif str(value or "").strip() or key not in prepared:
+                prepared[key] = value
+        defaults = self._collection_defaults_for_current_target(target)
+        for flag, value in defaults.items():
+            if prepared.get(flag) in (None, ""):
+                prepared[flag] = value
+        for flag in _COLLECTION_HIDDEN_PRESET_FLAGS:
+            if flag in defaults:
+                prepared[flag] = defaults[flag]
+        raw_session_id = str(prepared.get("--session-id") or "").strip()
+        if raw_session_id:
+            prepared["--session-id"] = _safe_session_id(raw_session_id)
+        else:
+            prepared["--session-id"] = ""
+        output_root = str(prepared.get("--output-root") or "").strip()
+        if self._is_default_collection_output_root(output_root):
+            prepared["--output-root"] = self._collection_default_output_root(target)
+        prepared.pop("--initial-sync-time", None)
+        return prepared
+
+    def _collection_params_for_action(self, svc: ServiceDef, params: dict, target: str) -> dict:
+        last = self._collection_last_params.get((target, svc.name), {})
+        merged = dict(last)
+        for key, value in params.items():
+            if key == "--session-id" and _is_new_collection_session_choice(value):
+                continue
+            if isinstance(value, (bool, int)):
+                merged[key] = value
+            elif str(value or "").strip():
+                merged[key] = value
+        defaults = self._collection_defaults_for_current_target(target)
+        for flag, value in defaults.items():
+            if merged.get(flag) in (None, ""):
+                merged[flag] = value
+        output_root = str(merged.get("--output-root") or "").strip()
+        if self._is_default_collection_output_root(output_root):
+            merged["--output-root"] = self._collection_default_output_root(target)
+        merged["--session-id"] = _safe_session_id(merged.get("--session-id"))
+        merged.pop("--initial-sync-time", None)
+        return merged
+
+    @staticmethod
+    def _collection_default_output_root(target: str) -> str:
+        return "~/artifacts" if target != "local" else "artifacts"
+
+    @staticmethod
+    def _collection_default_host_label(target: str) -> str:
+        if target != "local":
+            return safe_segment(target, "host")
+        return safe_segment(socket.gethostname().split(".", 1)[0], "host")
+
+    @staticmethod
+    def _collection_session_id(params: dict) -> str:
+        return _safe_session_id(params.get("--session-id"))
+
+    def _collection_local_path(self, params: dict, host_name: str) -> str:
+        session_id = self._collection_session_id(params)
+        artifact_host = safe_segment(params.get("--host-label") or host_name, "host")
+        return str(collection_artifact_dir(self._root, session_id, artifact_host))
+
+    def _collection_remote_path(self, profile, params: dict) -> str:
+        output_root = str(params.get("--output-root") or "artifacts").strip()
+        session_id = _safe_session_id(params.get("--session-id"))
+        host_name = safe_segment(
+            params.get("--host-label") or getattr(profile, "name", None),
+            "host",
+        )
+        if output_root.rstrip("/") in {"artifacts", "~/artifacts"}:
+            root = output_root.rstrip("/")
+            if root.startswith("/") or root.startswith("~"):
+                return f"{root}/{session_id}/collection/{host_name}"
+            return f"~/{root}/{session_id}/collection/{host_name}"
+        if output_root.startswith("/") or output_root.startswith("~"):
+            return f"{output_root.rstrip('/')}/{session_id}"
+        return f"~/{output_root.rstrip('/')}/{session_id}"
+
+    @staticmethod
+    def _collection_count(params: dict, flag: str) -> int:
+        try:
+            return max(0, int(params.get(flag, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _collection_requested_component_count(self, svc: ServiceDef, params: dict) -> int:
+        return sum(self._collection_count(params, comp.count_flag) for comp in svc.components)
+
+    @staticmethod
+    def _usable_collection_mongodb_config(config: dict) -> dict | None:
+        mongo_config = config.get("MongoDB", {})
+        if not isinstance(mongo_config, dict):
+            return None
+        url = str(mongo_config.get("url") or "").strip()
+        if url and "<" not in url:
+            return dict(mongo_config)
+        return None
+
+    def _collection_mongodb_config(self, target: str = "local") -> tuple[dict, str] | tuple[None, None]:
+        if target != "local":
+            profile = get_profile_by_name(target)
+            if profile is not None:
+                for rel_path in _ARTIFACT_CONFIG_RELS:
+                    config_path = os.path.join(self._root, rel_path)
+                    remote_config, _ = self._load_config_for_target(
+                        config_path,
+                        show_status=False,
+                        target=target,
+                    )
+                    if not remote_config:
+                        continue
+                    local_access_config = _config_for_local_db_access(remote_config, profile)
+                    mongo_config = self._usable_collection_mongodb_config(local_access_config)
+                    if mongo_config:
+                        return mongo_config, f"{target}:{self._remote_config_path(config_path, profile)}"
+
+        for rel_path in _ARTIFACT_CONFIG_RELS:
+            config_path = os.path.join(self._root, rel_path)
+            if not os.path.isfile(config_path):
+                continue
+            config = load_existing_config(config_path)
+            mongo_config = self._usable_collection_mongodb_config(config)
+            if mongo_config:
+                return mongo_config, config_path
+        shared_url = str(self._shared_values.get("MongoDB.url") or "").strip()
+        if shared_url and "<" not in shared_url:
+            return {
+                "url": shared_url,
+                "db": str(self._shared_values.get("MongoDB.db") or "openmmla").strip(),
+            }, f"{_SYSTEM_SERVICES_LABEL} / MongoDB"
+        return None, None
+
+    @staticmethod
+    def _parse_collection_experiment_group(value: object) -> tuple[str, str]:
+        text = str(value or "").strip()
+        if "/" in text:
+            exp_id, group_id = text.split("/", 1)
+        elif ":" in text:
+            exp_id, group_id = text.split(":", 1)
+        else:
+            return "", ""
+        return exp_id.strip(), group_id.strip()
+
+    def _create_mongodb_session(
+        self,
+        experiment_group: object,
+        target: str = "local",
+        *,
+        created_by: str = "tui_launcher",
+    ) -> str:
+        exp_id, group_id = self._parse_collection_experiment_group(experiment_group)
+        if not exp_id or not group_id:
+            self._log("[yellow]Select an Experiment Group before creating a MongoDB session.[/yellow]")
+            return ""
+
+        mongo_config, config_path = self._collection_mongodb_config(target)
+        if not mongo_config:
+            self._log("[red]No usable MongoDB config found for collection session creation.[/red]")
+            return ""
+
+        try:
+            from pymongo import ASCENDING, MongoClient
+            from pymongo.errors import DuplicateKeyError
+            from openmmla.utils.constants import MONGODB_DEFAULT_DB
+            from openmmla.utils.input import _make_session_id
+        except ModuleNotFoundError as e:
+            self._log(f"[red]Cannot create MongoDB session: {e}[/red]")
+            return ""
+
+        session_id = _make_session_id(exp_id, group_id, datetime.now(timezone.utc))
+        data = load_experiments(self._root)
+        participants = list(get_participant_aliases(exp_id, group_id, data).values())
+        db_name = str(mongo_config.get("db") or MONGODB_DEFAULT_DB)
+        url = str(mongo_config.get("url") or "").strip()
+        try:
+            client = MongoClient(
+                url,
+                serverSelectionTimeoutMS=1500,
+                connectTimeoutMS=1500,
+            )
+            try:
+                client.admin.command("ping")
+                sessions = client[db_name]["sessions"]
+                sessions.create_index([("session_id", ASCENDING)], unique=True)
+                sessions.insert_one({
+                    "session_id": session_id,
+                    "experiment_id": exp_id,
+                    "group_id": group_id,
+                    "participants": participants,
+                    "start_time": datetime.now(timezone.utc),
+                    "end_time": None,
+                    "status": "active",
+                    "metadata": {"created_by": created_by},
+                })
+            except DuplicateKeyError:
+                self._log(f"[yellow]MongoDB session already exists; using {session_id}.[/yellow]")
+            finally:
+                client.close()
+        except Exception as e:
+            self._log(f"[red]Failed to create MongoDB session from {config_path}: {e}[/red]")
+            return ""
+
+        self._log(f"[green]MongoDB session ready: {session_id} ({exp_id}/{group_id})[/green]")
+        return session_id
+
+    def _create_collection_mongodb_session(self, experiment_group: object, target: str = "local") -> str:
+        return self._create_mongodb_session(experiment_group, target=target, created_by="tui_collection")
+
+    def _ensure_collection_session_for_launch(self, params: dict, target: str = "local") -> bool:
+        session_id = self._collection_session_id(params)
+        if session_id:
+            params["--session-id"] = session_id
+            return True
+        session_id = self._create_collection_mongodb_session(params.get("--experiment-group"), target=target)
+        if not session_id:
+            return False
+        params["--session-id"] = session_id
+        return True
+
+    def _ensure_pipeline_session_for_launch(self, svc: ServiceDef, params: dict, target: str = "local") -> bool:
+        if not svc.artifact_pipeline:
+            return True
+        raw_session = params.get("-sid") or params.get("--session-id") or params.get("--artifact-session-id")
+        session_id = "" if _is_new_collection_session_choice(raw_session) else _safe_session_id(raw_session)
+        if session_id:
+            params["-sid"] = session_id
+            return True
+
+        session_id = self._create_mongodb_session(
+            params.get("--experiment-group"),
+            target=target,
+            created_by=f"tui_{safe_segment(svc.artifact_pipeline, 'pipeline')}",
+        )
+        if not session_id:
+            return False
+        params["-sid"] = session_id
+        return True
+
+    def _collection_component_command(
+        self,
+        comp: ComponentDef,
+        params: dict,
+        root: str,
+    ) -> str:
+        script_path = comp.script if os.path.isabs(comp.script) else os.path.join(root, comp.script)
+        args = ["bash", script_path]
+        for flag in comp.flags:
+            value = params.get(flag)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                args.extend([flag, "true" if value else "false"])
+                continue
+            text = str(value).strip()
+            if text == "":
+                continue
+            args.extend([flag, text])
+        return " ".join(shlex.quote(arg) for arg in args)
+
+    def _collection_remote_component_command(self, comp: ComponentDef, params: dict) -> str:
+        module = {
+            "audio": "openmmla.commands.collect.audio",
+            "video": "openmmla.commands.collect.video",
+        }.get(comp.role)
+        if not module:
+            raise ValueError(f"Unsupported collection component: {comp.role}")
+
+        args = ["python3", "-m", module]
+        for flag in comp.flags:
+            value = params.get(flag)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                args.extend([flag, "true" if value else "false"])
+                continue
+            text = str(value).strip()
+            if text == "":
+                continue
+            args.extend([flag, text])
+        command = " ".join(shlex.quote(arg) for arg in args)
+        return f"PYTHONPATH={_REMOTE_COLLECTION_RUNTIME_ENV}:$PYTHONPATH {command}"
+
+    @staticmethod
+    def _interactive_ssh_args(profile) -> list[str]:
+        args = profile.base_ssh_args()
+        try:
+            ssh_index = args.index("ssh")
+        except ValueError:
+            return args
+        if "-tt" not in args:
+            args.insert(ssh_index + 1, "-tt")
+        return args
+
+    def _collection_remote_terminal_command(self, profile, command: str) -> str:
+        return self._remote_terminal_command(profile, command)
+
+    def _remote_terminal_command(self, profile, command: str, cwd: str = "~") -> str:
+        quoted_cwd = _quote_remote_path(cwd)
+        remote_script = (
+            f"cd {quoted_cwd} && {command}; "
+            "rc=$?; "
+            "printf '\\n[OpenMMLA] remote command exited with code %s\\n' \"$rc\"; "
+            "exec \"${SHELL:-bash}\" -l"
+        )
+        args = self._interactive_ssh_args(profile) + ["bash", "-lc", remote_script]
+        return " ".join(shlex.quote(arg) for arg in args)
+
+    def _remote_bash_terminal_commands(self, svc: ServiceDef, params: dict, profile) -> list[tuple[str, str]]:
+        rel_dir = os.path.relpath(svc.config_dir, self._root)
+        remote_root = profile.remote_project_path
+        remote_config_dir = _remote_path_join(remote_root, rel_dir)
+        remote_config_path = _remote_path_join(remote_config_dir, "config.yml")
+        tab_cmds: list[tuple[str, str]] = []
+
+        for comp in svc.components:
+            count = params.get(comp.count_flag, 0)
+            if isinstance(count, str):
+                try:
+                    count = int(count)
+                except ValueError:
+                    count = 0
+            if count <= 0:
+                continue
+
+            flag_parts = []
+            for flag in comp.flags:
+                value = params.get(flag)
+                if value is None:
+                    continue
+                if isinstance(value, bool):
+                    flag_parts.extend([flag, "true" if value else "false"])
+                    continue
+                text = str(value).strip()
+                if text:
+                    flag_parts.extend([flag, text])
+
+            command = (
+                f"{comp.script} "
+                f"-p {_quote_remote_path(remote_config_dir)} "
+                f"-c {_quote_remote_path(remote_config_path)}"
+            )
+            if flag_parts:
+                command += " " + " ".join(shlex.quote(part) for part in flag_parts)
+            run_cmd = (
+                f"cd {_quote_remote_path(remote_config_dir)} && "
+                f"export PYTHONPATH={_quote_remote_path(remote_root)}:$PYTHONPATH && "
+                f"{command}"
+            )
+            wrapped_cmd = wrap_remote(run_cmd, svc.conda_env)
+
+            for index in range(count):
+                label = f"{comp.role} {index + 1}" if count > 1 else comp.role
+                tab_cmds.append((label, self._remote_terminal_command(profile, wrapped_cmd)))
+
+        return tab_cmds
+
+    @staticmethod
+    def _remote_bash_stop_command(svc: ServiceDef) -> str:
+        patterns = []
+        for comp in svc.components:
+            if comp.script:
+                patterns.append(comp.script)
+        if not patterns:
+            patterns = [svc.name]
+        quoted_patterns = " ".join(
+            shlex.quote(_non_self_matching_regex(pattern))
+            for pattern in patterns
+        )
+        return (
+            f"for pattern in {quoted_patterns}; do "
+            "echo \"Stopping remote process matching: $pattern\"; "
+            "pkill -INT -f \"$pattern\" 2>/dev/null || true; "
+            "done; "
+            "sleep 2; "
+            f"for pattern in {quoted_patterns}; do "
+            "pkill -TERM -f \"$pattern\" 2>/dev/null || true; "
+            "done; "
+            "echo \"Stop signal sent for remote bash service.\""
+        )
+
+    @staticmethod
+    def _collection_stop_command(session_id: str) -> str:
+        quoted_session = shlex.quote(session_id)
+        recorder_patterns = " ".join(
+            shlex.quote(_non_self_matching_process_pattern(pattern))
+            for pattern in (
+                f"openmmla.commands.collect.audio.*--session-id {session_id}",
+                f"openmmla.commands.collect.video.*--session-id {session_id}",
+                f"scripts/collection/audio_recording.sh.*--session-id {session_id}",
+                f"scripts/collection/video_recording.sh.*--session-id {session_id}",
+                f"audio_recording.sh.*--session-id {session_id}",
+                f"video_recording.sh.*--session-id {session_id}",
+            )
+        )
+        ffmpeg_pattern = shlex.quote(_non_self_matching_process_pattern(f"ffmpeg.*{session_id}"))
+        return (
+            f"SESSION_ID={quoted_session}; "
+            "echo \"Stopping OpenMMLA collection session: $SESSION_ID\"; "
+            f"for pattern in {recorder_patterns}; do "
+            "pkill -INT -f \"$pattern\" 2>/dev/null || true; "
+            "done; "
+            "grace=20; "
+            "while [ \"$grace\" -gt 0 ]; do "
+            "alive=0; "
+            f"for pattern in {recorder_patterns}; do "
+            "if pgrep -f \"$pattern\" >/dev/null 2>&1; then alive=1; fi; "
+            "done; "
+            "[ \"$alive\" -eq 0 ] && break; "
+            "sleep 1; grace=$((grace - 1)); "
+            "done; "
+            "alive=0; "
+            f"for pattern in {recorder_patterns}; do "
+            "if pgrep -f \"$pattern\" >/dev/null 2>&1; then alive=1; fi; "
+            "done; "
+            "if [ \"$alive\" -ne 0 ]; then "
+            "echo \"Recorders did not stop after grace period; not force-killing to avoid corrupting files.\"; "
+            "exit 1; "
+            "fi; "
+            f"if pgrep -f {ffmpeg_pattern} >/dev/null 2>&1; then "
+            "echo \"Recorder wrapper stopped but ffmpeg is still running; sending Ctrl+C-equivalent SIGINT.\"; "
+            f"pkill -INT -f {ffmpeg_pattern} 2>/dev/null || true; "
+            "ffmpeg_grace=10; "
+            "while [ \"$ffmpeg_grace\" -gt 0 ]; do "
+            f"if ! pgrep -f {ffmpeg_pattern} >/dev/null 2>&1; then break; fi; "
+            "sleep 1; ffmpeg_grace=$((ffmpeg_grace - 1)); "
+            "done; "
+            f"if pgrep -f {ffmpeg_pattern} >/dev/null 2>&1; then "
+            "echo \"ffmpeg is still running; leaving it alive to avoid corrupting files.\"; "
+            "exit 1; "
+            "fi; "
+            "fi; "
+            "echo \"Stop signal sent for collection session: $SESSION_ID\""
+        )
+
+    def _ensure_remote_collection_runtime(self, profile) -> bool:
+        remote_home = _remote_home(profile)
+        remote_runtime = _expand_remote_home_path(_REMOTE_COLLECTION_RUNTIME, remote_home)
+        dirs = sorted({os.path.dirname(path) for path in _REMOTE_COLLECTION_FILES})
+        mkdir_parts = [
+            _remote_path_join(remote_runtime, directory)
+            for directory in dirs
+        ]
+        mkdir_cmd = "mkdir -p " + " ".join(_quote_remote_path(path) for path in mkdir_parts)
+        try:
+            result = ssh_run_sync(profile, mkdir_cmd, timeout=15.0)
+        except Exception as e:
+            self._log(f"[red]Failed to prepare remote collection runtime: {e}[/red]")
+            return False
+        if result.returncode != 0:
+            self._log(f"[red]Failed to prepare remote collection runtime: {result.stderr.strip()}[/red]")
+            return False
+
+        for rel_path in _REMOTE_COLLECTION_FILES:
+            local_path = os.path.join(self._root, rel_path)
+            remote_path = _remote_path_join(remote_runtime, rel_path)
+            try:
+                result = subprocess.run(
+                    profile.base_scp_args() + [local_path, f"{profile.ssh_destination()}:{remote_path}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+            except Exception as e:
+                self._log(f"[red]Failed to upload collection runtime file {rel_path}: {e}[/red]")
+                return False
+            if result.returncode != 0:
+                self._log(f"[red]Failed to upload collection runtime file {rel_path}: {result.stderr.strip()}[/red]")
+                return False
+        return True
+
+    def _collection_session_name(self, svc: ServiceDef, role: str, index: int, count: int) -> str:
+        suffix = role if count <= 1 else f"{role}-{index + 1}"
+        return _collection_session_prefix(svc) + suffix
+
+    def _launch_collection(self, svc: ServiceDef, params: dict) -> None:
+        if not svc.components:
+            self._log(f"[red]No collection components defined for {svc.name}[/red]")
+            return
+
+        prepared = self._collection_launch_params(params, service_name=svc.name)
+        if self._collection_requested_component_count(svc, prepared) <= 0:
+            self._log("[yellow]No collection components launched.[/yellow]")
+            return
+        if not self._ensure_collection_session_for_launch(prepared, target="local"):
+            self._log("[red]Could not resolve a collection session id.[/red]")
+            return
+        self._collection_last_params[(self._get_panel_target(), svc.name)] = dict(prepared)
+        launched = 0
+        self._log(f"  Session ID: {prepared['--session-id']}")
+        self._log("  Sync time: auto; manifest will use the earliest common replay time")
+
+        tab_cmds: list[tuple[str, str]] = []
+        for comp in svc.components:
+            count = self._collection_count(prepared, comp.count_flag)
+            for index in range(count):
+                label = self._collection_session_name(svc, comp.role, index, count)
+                command = self._collection_component_command(comp, prepared, self._root)
+                run_cmd = f"cd {shlex.quote(self._root)} && {command}"
+                tab_cmds.append((label, run_cmd))
+                self._log(f"    [{label}] {command}")
+        if tab_cmds and self._open_collection_terminal(tab_cmds):
+            launched = len(tab_cmds)
+
+        if launched:
+            output_root = str(prepared.get("--output-root") or "collection")
+            self._log(f"[green]Collection recording started; files will be written under {output_root}.[/green]")
+            self.run_worker(
+                self._reload_current_service_view(),
+                group=_LAUNCHER_UI_WORKER_GROUP,
+                exclusive=True,
+            )
+        else:
+            self._log("[yellow]No collection components launched.[/yellow]")
 
     def _launch_bash(self, svc: ServiceDef, params: dict) -> None:
         if not svc.components:
@@ -1547,7 +3963,7 @@ class ServicePanel(Widget):
         python_path = self._root
         conda_env = svc.conda_env
         config_path = os.path.join(svc.config_dir, "config.yml")
-        project_arg = f"-p {shlex.quote(self._root)}"
+        project_arg = f"-p {shlex.quote(svc.config_dir)}"
         config_arg = f"-c {shlex.quote(config_path)}"
         preamble = (
             f"export PYTHONPATH={shlex.quote(python_path)}/:$PYTHONPATH && "
@@ -1574,7 +3990,9 @@ class ServicePanel(Widget):
                 if isinstance(val, bool):
                     flag_parts.append(f"{f} {'true' if val else 'false'}")
                 else:
-                    flag_parts.append(f"{f} {val}")
+                    text = str(val).strip()
+                    if text:
+                        flag_parts.append(f"{f} {shlex.quote(text)}")
             flag_str = " ".join(flag_parts)
 
             if os.path.sep in comp.script or comp.script.endswith(".py"):
@@ -1612,6 +4030,19 @@ class ServicePanel(Widget):
 
         self._log(f"[green]{svc.name} launched in new terminal window.[/green]")
 
+    def _open_collection_terminal(self, tab_cmds: list[tuple[str, str]]) -> bool:
+        if sys.platform == "darwin":
+            self._open_tabs_mac(tab_cmds)
+            return True
+        if self._is_ubuntu():
+            self._open_tabs_gnome(tab_cmds)
+            return True
+        if self._is_raspberry_pi():
+            self._open_tabs_lxterminal(tab_cmds)
+            return True
+        self._log("[yellow]Unsupported OS for terminal tab launch.[/yellow]")
+        return False
+
     def _open_tabs_mac(self, tab_cmds: list[tuple[str, str]]) -> None:
         """open one Terminal.app window with N tabs on macOS."""
         script_lines = []
@@ -1646,9 +4077,10 @@ class ServicePanel(Widget):
     def _open_tabs_lxterminal(self, tab_cmds: list[tuple[str, str]]) -> None:
         """open one lxterminal window per component (no multi-tab support)."""
         for _, cmd in tab_cmds:
+            shell_cmd = "bash -lc " + shlex.quote(f"{cmd}; exec bash")
             subprocess.Popen([
                 "lxterminal",
-                f'--command=bash -c "{cmd}; exec bash"',
+                f"--command={shell_cmd}",
             ])
 
     @staticmethod
@@ -1731,9 +4163,42 @@ class ServicePanel(Widget):
             )
             self._log(f"[green]Uber {target} started.[/green]")
 
-    def _stop_service(self, svc: ServiceDef) -> None:
+    @staticmethod
+    def _bash_run_flag_str(svc: ServiceDef, params: dict) -> str:
+        launch_flags: set[str] = set()
+        for comp in svc.components:
+            launch_flags.add(comp.count_flag)
+            launch_flags.update(comp.flags)
+
+        ordered_flags = [param.flag for param in svc.params if param.flag in launch_flags]
+        parts = []
+        for flag in ordered_flags:
+            value = params.get(flag)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                parts.extend([flag, "true" if value else "false"])
+                continue
+            text = str(value).strip()
+            if text:
+                parts.extend([flag, text])
+        return "".join(f" {shlex.quote(part)}" for part in parts)
+
+    def _stop_service(self, svc: ServiceDef, params: dict | None = None) -> None:
         try:
-            if svc.launch_type in ("tmux", "vllm"):
+            if svc.launch_type == "collection":
+                stop_params = self._collection_params_for_action(svc, params or {}, "local")
+                session_id = self._collection_session_id(stop_params)
+                if not session_id:
+                    self._log("[yellow]No collection session has been started from this target yet.[/yellow]")
+                    return
+                self.run_worker(
+                    self._run_collection_local_stop(session_id),
+                    name=f"collection-local-stop:{session_id}",
+                    group=_LAUNCHER_COLLECTION_STOP_WORKER_GROUP,
+                    exclusive=False,
+                )
+            elif svc.launch_type in ("tmux", "vllm"):
                 sessions = _stack_sessions(svc) if _is_stack_tmux_service(svc) else [_service_session_name(svc)]
                 for session_name in sessions:
                     subprocess.run(["tmux", "send-keys", "-t", session_name, "C-c"], capture_output=True)
@@ -1799,41 +4264,30 @@ class ServicePanel(Widget):
         remote_root = profile.remote_project_path
         try:
             if svc.launch_type == "bash":
-                rel_dir = os.path.relpath(svc.config_dir, self._root)
-                remote_bash = f"{remote_root}/{rel_dir}/bash"
-                flag_str = ""
-                for flag, value in params.items():
-                    if isinstance(value, bool):
-                        flag_str += f" {flag} {'true' if value else 'false'}"
-                    else:
-                        flag_str += f" {flag} {value}"
-                cmd = f"cd {remote_bash} && bash run.sh{flag_str}"
-                self._log(f"  Remote: {cmd}")
-                result = ssh_run_sync(profile, f"nohup bash -c '{cmd}' >/dev/null 2>&1 &", timeout=15.0)
-                if result.returncode == 0:
-                    self._log(f"[green]{svc.name} launched remotely.[/green]")
+                tab_cmds = self._remote_bash_terminal_commands(svc, params, profile)
+                for label, command in tab_cmds:
+                    self._log(f"    [{label}] ssh {profile.ssh_destination()} {command.split(' bash -lc ', 1)[-1]}")
+                if tab_cmds and self._open_collection_terminal(tab_cmds):
+                    self._log(f"[green]{svc.name} launched in SSH terminal(s).[/green]")
                 else:
-                    self._log(f"[red]Remote launch failed: {result.stderr.strip()}[/red]")
+                    self._log("[yellow]No remote components launched.[/yellow]")
 
             elif svc.launch_type == "tmux":
                 rel_dir = os.path.relpath(svc.config_dir, self._root)
-                remote_bash = f"{remote_root}/{rel_dir}/bash"
-                session_name = _service_session_name(svc)
+                remote_bash = _remote_path_join(remote_root, rel_dir, "bash")
                 run_cmd = (
-                    f"cd {remote_bash} && "
+                    f"cd {_quote_remote_path(remote_bash)} && "
                     f"OPENMMLA_CONDA_ENV={shlex.quote(svc.conda_env)} "
-                    "bash services.sh; exec bash"
+                    "bash services.sh; "
+                    "echo; echo 'Available tmux sessions:'; "
+                    "tmux list-sessions 2>/dev/null || true"
                 )
-                cmd = (
-                    f"tmux kill-session -t {session_name} 2>/dev/null; "
-                    f"tmux new-session -d -s {session_name} bash -lc {shlex.quote(run_cmd)}"
-                )
-                self._log(f"  Remote: {cmd}")
-                result = ssh_run_sync(profile, cmd, timeout=15.0)
-                if result.returncode == 0:
-                    self._log(f"[green]{svc.name} tmux session started remotely.[/green]")
+                ssh_cmd = self._remote_terminal_command(profile, run_cmd)
+                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {run_cmd}")
+                if self._open_collection_terminal([(svc.name, ssh_cmd)]):
+                    self._log(f"[green]{svc.name} start opened in SSH terminal.[/green]")
                 else:
-                    self._log(f"[red]Remote tmux launch failed: {result.stderr.strip()}[/red]")
+                    self._log("[yellow]Could not open remote server terminal.[/yellow]")
 
             elif svc.launch_type == "vllm":
                 session_name = _service_session_name(svc)
@@ -1843,49 +4297,121 @@ class ServicePanel(Widget):
                 wrapped_cmd = wrap_remote(run_cmd, svc.conda_env)
                 cmd = (
                     f"tmux kill-session -t {session_name} 2>/dev/null; "
-                    f"tmux new-session -d -s {session_name} {shlex.quote(wrapped_cmd)}"
+                    f"tmux new-session -d -s {session_name} {shlex.quote(wrapped_cmd)}; "
+                    f"tmux attach -t {session_name}"
                 )
-                self._log(f"  Remote: {cmd}")
-                result = ssh_run_sync(profile, cmd, timeout=15.0)
-                if result.returncode == 0:
+                ssh_cmd = self._remote_terminal_command(profile, cmd)
+                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {vllm_cmd}")
+                if self._open_collection_terminal([(svc.name, ssh_cmd)]):
                     self._log(f"  Command: {vllm_cmd}")
-                    self._log(f"[green]{svc.name} tmux session started remotely on port {config['port']}.[/green]")
+                    self._log(f"[green]{svc.name} tmux session opened remotely on port {config['port']}.[/green]")
                 else:
-                    self._log(f"[red]Remote MLLM launch failed: {result.stderr.strip()}[/red]")
+                    self._log("[yellow]Could not open remote MLLM terminal.[/yellow]")
+
+            elif svc.launch_type == "collection":
+                prepared = self._collection_launch_params(params, target=profile_name, service_name=svc.name)
+                if self._collection_requested_component_count(svc, prepared) <= 0:
+                    self._log("[yellow]No remote collection components launched.[/yellow]")
+                    return
+                if not self._ensure_collection_session_for_launch(prepared, target=profile_name):
+                    self._log("[red]Could not resolve a collection session id.[/red]")
+                    return
+                self._collection_last_params[(profile_name, svc.name)] = dict(prepared)
+                self._log(f"  Session ID: {prepared['--session-id']}")
+                self._log("  Sync time: auto; manifest will use the earliest common replay time")
+                success, msg = ssh_test_connection(profile)
+                if not success:
+                    self._log(f"[red]SSH connection failed: {msg}[/red]")
+                    return
+                if not self._ensure_remote_collection_runtime(profile):
+                    return
+                launched = 0
+                tab_cmds: list[tuple[str, str]] = []
+                for comp in svc.components:
+                    count = self._collection_count(prepared, comp.count_flag)
+                    for index in range(count):
+                        label = self._collection_session_name(svc, comp.role, index, count)
+                        command = self._collection_remote_component_command(comp, prepared)
+                        ssh_cmd = self._collection_remote_terminal_command(profile, command)
+                        tab_cmds.append((label, ssh_cmd))
+                        self._log(f"    [{label}] ssh {profile.ssh_destination()} {command}")
+                if tab_cmds and self._open_collection_terminal(tab_cmds):
+                    launched = len(tab_cmds)
+                    self._log(f"[green]{svc.name} launched in SSH terminal(s).[/green]")
+                    self.run_worker(
+                        self._reload_current_service_view(),
+                        group=_LAUNCHER_UI_WORKER_GROUP,
+                        exclusive=True,
+                    )
+                else:
+                    self._log("[yellow]No remote collection components launched.[/yellow]")
 
             elif svc.launch_type == "make":
                 target = _make_target_for(svc.name)
                 remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
-                self._cmd.run(f"cd {remote_dir} && make {target}")
+                run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
+                ssh_cmd = self._remote_terminal_command(profile, run_cmd)
+                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {run_cmd}")
+                if self._open_collection_terminal([(svc.name, ssh_cmd)]):
+                    self._log(f"[green]{svc.name} start opened in SSH terminal.[/green]")
+                else:
+                    self._log("[yellow]Could not open remote make terminal.[/yellow]")
         except Exception as e:
             self._log(f"[red]Remote launch error: {e}[/red]")
 
-    def _stop_remote(self, svc: ServiceDef, profile_name: str) -> None:
+    def _stop_remote(self, svc: ServiceDef, profile_name: str, params: dict | None = None) -> None:
         profile = get_profile_by_name(profile_name)
         if profile is None:
             self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
             return
         remote_root = profile.remote_project_path
         try:
-            if svc.launch_type in ("tmux", "vllm"):
-                sessions = _stack_sessions(svc) if _is_stack_tmux_service(svc) else [_service_session_name(svc)]
+            if svc.launch_type == "collection":
+                stop_params = self._collection_params_for_action(svc, params or {}, profile_name)
+                session_id = self._collection_session_id(stop_params)
+                if not session_id:
+                    self._log("[yellow]No collection session has been started from this remote target yet.[/yellow]")
+                    return
+                self.run_worker(
+                    self._run_collection_remote_stop(profile_name, session_id),
+                    name=f"collection-remote-stop:{profile_name}:{session_id}",
+                    group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
+                    exclusive=False,
+                )
+
+            elif svc.launch_type in ("tmux", "vllm"):
+                sessions = (
+                    self._stack_sessions_for_target(svc, profile_name)
+                    if _is_stack_tmux_service(svc)
+                    else [_service_session_name(svc)]
+                )
                 cmd = " ; ".join(
                     f"tmux send-keys -t {shlex.quote(session)} C-c 2>/dev/null; "
                     f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null"
                     for session in sessions
                 )
-                result = ssh_run_sync(profile, cmd, timeout=10.0)
-                self._log(f"[red]{svc.name} stopped remotely.[/red]")
+                ssh_cmd = self._remote_terminal_command(profile, cmd)
+                if self._open_collection_terminal([(f"stop {svc.name}", ssh_cmd)]):
+                    self._log(f"[red]Opened SSH stop terminal for {svc.name} on '{profile_name}'.[/red]")
+                else:
+                    self._log("[yellow]Could not open remote stop terminal.[/yellow]")
 
             elif svc.launch_type == "make":
                 target = "stop-" + _make_target_for(svc.name)
                 remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
-                self._cmd.run(f"cd {remote_dir} && make {target}")
+                run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
+                ssh_cmd = self._remote_terminal_command(profile, run_cmd)
+                if self._open_collection_terminal([(f"stop {svc.name}", ssh_cmd)]):
+                    self._log(f"[red]Opened SSH stop terminal for {svc.name} on '{profile_name}'.[/red]")
+                else:
+                    self._log("[yellow]Could not open remote stop terminal.[/yellow]")
 
             elif svc.launch_type == "bash":
-                self._log(
-                    f"[yellow]Remote bash services must be stopped "
-                    f"from the remote terminal.[/yellow]"
-                )
+                command = self._remote_bash_stop_command(svc)
+                ssh_cmd = self._remote_terminal_command(profile, command)
+                if self._open_collection_terminal([(f"stop {svc.name}", ssh_cmd)]):
+                    self._log(f"[red]Opened SSH stop terminal for {svc.name} on '{profile_name}'.[/red]")
+                else:
+                    self._log("[yellow]Could not open remote stop terminal.[/yellow]")
         except Exception as e:
             self._log(f"[red]Remote stop error: {e}[/red]")

@@ -11,15 +11,19 @@ CONDA_INIT="source \$(conda info --base)/etc/profile.d/conda.sh && conda activat
 NUM_BASE=1
 NUM_SYNCHRONIZER=1
 GRAPHICS=true
+STORE=true
 VERBOSE=true
+MODE=full
 
 print_usage() {
-    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-v VERBOSE] [-h]"
+    echo "Usage: $0 [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-m MODE] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]"
     echo ""
     echo "options:"
     echo "  -nb NUM_BASE         : Number of VFA bases to run (default: 1)"
     echo "  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)"
+    echo "  -m MODE              : VFA base mode: record, analyze, or full (default: full)"
     echo "  -g GRAPHICS          : Enable graphics (default: true)"
+    echo "  -s STORE             : Store frames locally (default: true)"
     echo "  -v VERBOSE           : Enable verbose mode (default: false)"
     echo "  -h                   : Display this help message"
     exit 1
@@ -81,12 +85,30 @@ while [ $i -le $# ]; do
                 print_usage
             fi
             ;;
+        -m)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                MODE="${!i}"
+            else
+                echo "Error: -m requires a value"
+                print_usage
+            fi
+            ;;
         -g)
             i=$((i+1))
             if [ $i -le $# ]; then
                 GRAPHICS="${!i}"
             else
                 echo "Error: -g requires a value"
+                print_usage
+            fi
+            ;;
+        -s)
+            i=$((i+1))
+            if [ $i -le $# ]; then
+                STORE="${!i}"
+            else
+                echo "Error: -s requires a value"
                 print_usage
             fi
             ;;
@@ -119,7 +141,7 @@ for arg_name in "NUM_BASE" "NUM_SYNCHRONIZER"; do
     fi
 done
 
-for arg_name in "GRAPHICS" "VERBOSE"; do
+for arg_name in "GRAPHICS" "STORE" "VERBOSE"; do
     arg_value="${!arg_name}"
     if ! is_boolean "$arg_value"; then
         echo "Error: $arg_name must be either 'true' or 'false'."
@@ -127,17 +149,24 @@ for arg_name in "GRAPHICS" "VERBOSE"; do
     fi
 done
 
+if [[ ! "$MODE" =~ ^(record|analyze|full)$ ]]; then
+    echo "Error: MODE must be record, analyze, or full."
+    print_usage
+fi
+
 # Display config
 echo "Video Frame Analyzer Configuration:"
 echo "--------------------------------"
 echo "NUM_BASE: $NUM_BASE"
 echo "NUM_SYNCHRONIZER: $NUM_SYNCHRONIZER"
+echo "MODE: $MODE"
 echo "GRAPHICS: $GRAPHICS"
+echo "STORE_FRAMES: $STORE"
 echo "VERBOSE: $VERBOSE"
 echo "--------------------------------"
 
 # Run bases
-CMD="python3 $PROJECT_DIR/examples/run_vfa_base.py -g $GRAPHICS -v $VERBOSE"
+CMD="mmla vfa-base -p $PROJECT_DIR -c $PROJECT_DIR/config.yml -m $MODE -g $GRAPHICS -s $STORE -v $VERBOSE"
 if [ "$NUM_BASE" -gt 0 ]; then
     echo "Starting bases..."
     for i in $(seq 1 "$NUM_BASE"); do
@@ -157,7 +186,7 @@ if [ "$NUM_BASE" -gt 0 ]; then
 fi
 
 # Run synchronizer
-CMD="python3 $PROJECT_DIR/examples/run_vfa_synchronizer.py"
+CMD="mmla vfa-sync -p $PROJECT_DIR -c $PROJECT_DIR/config.yml"
 if [ "$NUM_SYNCHRONIZER" -gt 0 ]; then
     echo "Starting synchronizer..."
     if [[ $OSTYPE == 'darwin'* ]]; then

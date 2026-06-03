@@ -20,6 +20,7 @@ from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.files import format_wav, segment_wav, crop_and_concatenate_wav
 from openmmla.utils.audio.properties import get_audio_properties
+from openmmla.utils.artifact_paths import shared_pipeline_artifact_dir
 from openmmla.utils.input import get_interactive_files, PURPLE, GREEN, GREY, ENDC, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import resolve_url
@@ -101,7 +102,7 @@ class ASRPostAnalyzer(Base):
         self.origin_dir = os.path.join(self.project_dir, 'post-time', 'origin')
         self.temp_dir = os.path.join(self.project_dir, 'post-time', 'temp')
         self.logs_dir = os.path.join(self.project_dir, 'logs')
-        self.logger_dir = os.path.join(self.project_dir, 'logger')
+        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-post', 'logger'))
         self.visualizations_dir = os.path.join(self.project_dir, 'visualizations')
 
         os.makedirs(self.runtime_dir, exist_ok=True)
