@@ -13,7 +13,7 @@ from pupil_apriltags import Detector
 
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
-from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -92,8 +92,8 @@ class IPSBase(Base):
 
     def _setup_directories(self):
         """Set up directories."""
-        self.runtime_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'real-time', 'runtime'))
-        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'logger'))
+        self.runtime_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'ips-base', 'real-time', 'runtime'))
+        self.logger_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'ips-base', 'logger'))
         self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
         self.camera_calib_dir = os.path.join(self.project_dir, 'camera_calib')
         os.makedirs(self.runtime_dir, exist_ok=True)

@@ -13,7 +13,7 @@ import numpy as np
 
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
-from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, flush_input, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -95,9 +95,9 @@ class VFABase(Base):
 
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations."""
-        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'logger'))
-        self.runtime_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'real-time', 'runtime'))
-        self.temp_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'real-time', 'temp'))
+        self.logger_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'logger'))
+        self.runtime_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'real-time', 'runtime'))
+        self.temp_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'vfa-base', 'real-time', 'temp'))
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.runtime_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)

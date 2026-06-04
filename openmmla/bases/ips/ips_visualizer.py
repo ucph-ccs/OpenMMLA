@@ -10,7 +10,7 @@ from matplotlib.animation import FuncAnimation
 from numpy.linalg import norm
 
 from openmmla.bases.base import Base
-from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -48,9 +48,9 @@ class IPSVisualizer(Base):
 
     def _setup_directories(self):
         """Set up directories."""
-        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'logger'))
+        self.logger_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'ips-base', 'logger'))
         self.visualizations_dir = os.fspath(
-            shared_pipeline_artifact_dir(self.project_dir, 'ips-base', 'visualizations')
+            runtime_pipeline_artifact_dir(self.project_dir, 'ips-base', 'visualizations')
         )
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.visualizations_dir, exist_ok=True)

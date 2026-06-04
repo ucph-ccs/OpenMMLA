@@ -48,6 +48,7 @@ from openmmla.tui.artifacts import (
     collection_artifact_dir, merge_tree, pipeline_artifact_dir,
     safe_segment, update_collection_manifest, update_pipeline_manifest,
 )
+from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -531,7 +532,7 @@ def _local_artifact_session_ids(root: str) -> list[str]:
     return sorted(
         [
             name for name in os.listdir(artifacts_dir)
-            if name not in {"shared", ".DS_Store"}
+            if name not in _NON_SESSION_ARTIFACT_NAMES
             and os.path.isdir(os.path.join(artifacts_dir, name))
         ],
         reverse=True,
@@ -569,7 +570,7 @@ def _remote_artifact_session_ids(profile) -> list[str]:
         [
             line.strip()
             for line in (result.stdout or "").splitlines()
-            if line.strip() and line.strip() not in {"shared", ".DS_Store"}
+            if line.strip() and line.strip() not in _NON_SESSION_ARTIFACT_NAMES
         ],
         reverse=True,
     )
@@ -1044,6 +1045,7 @@ _SYSTEM_SVC_PORTS: dict[str, int] = {
     "mosquitto": 1883,
     "nginx": 8080,
 }
+_NON_SESSION_ARTIFACT_NAMES = {*NON_SESSION_ARTIFACT_DIRS, ".DS_Store"}
 
 _MAKE_TARGET_OVERRIDES: dict[str, str] = {
     "Uber: Next.js": "next",
@@ -3065,7 +3067,7 @@ class ServicePanel(Widget):
         dirs = []
         for line in output.splitlines():
             name = safe_segment(line.strip(), "")
-            if name and name not in {"shared", ".DS_Store"} and name not in dirs:
+            if name and name not in _NON_SESSION_ARTIFACT_NAMES and name not in dirs:
                 dirs.append(name)
         return sorted(dirs)
 

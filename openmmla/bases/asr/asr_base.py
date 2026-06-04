@@ -22,7 +22,7 @@ from openmmla.utils.audio.auga import normalize_decibel, apply_gain
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
-from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url, show_error_and_pause
@@ -271,10 +271,10 @@ class ASRBase(Base):
         Create directories for runtime files, temporary files, speaker profiles, and audio databases.
         Ensures that the required folder structure exists.
         """
-        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'logger'))
-        self.runtime_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'real-time', 'runtime'))
-        self.temp_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'temp'))
-        self.profiles_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'profiles'))
+        self.logger_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'logger'))
+        self.runtime_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'real-time', 'runtime'))
+        self.temp_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'temp'))
+        self.profiles_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'profiles'))
 
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.runtime_dir, exist_ok=True)

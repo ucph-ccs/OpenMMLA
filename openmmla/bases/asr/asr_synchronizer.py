@@ -5,7 +5,7 @@ import threading
 import time
 
 from openmmla.bases.synchronizer import Synchronizer
-from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, shared_pipeline_artifact_dir
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
@@ -110,8 +110,8 @@ class ASRSynchronizer(Synchronizer):
 
     def _setup_directories(self):
         """Set up required directories."""
-        self.logger_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'logger'))
-        self.temp_dir = os.fspath(shared_pipeline_artifact_dir(self.project_dir, 'asr-base', 'temp'))
+        self.logger_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'logger'))
+        self.temp_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'temp'))
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
 

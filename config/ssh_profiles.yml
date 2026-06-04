@@ -47,17 +47,17 @@
   password: '12341234'
   key_path: ~/.ssh/id_ed25519.pub
   remote_project_path: ~/OpenMMLA
-- name: raspi4-02
-  host: raspi4-02.local
-  user: admin
-  port: 22
-  password: '12341234'
-  key_path: ~/.ssh/id_ed25519.pub
-  remote_project_path: ~/OpenMMLA
 - name: raspi5-01
   host: raspi5-01.local
   user: admin
   port: 22
-  password: '12341234'
-  key_path: ~/.ssh/id_ed25519.pub
+  password: ''
+  key_path: ~/.ssh/id_ed25519
+  remote_project_path: ~/OpenMMLA
+- name: raspi4-02
+  host: raspi4-02.local
+  user: admin
+  port: 22
+  password: ''
+  key_path: ~/.ssh/id_ed25519
   remote_project_path: ~/OpenMMLA

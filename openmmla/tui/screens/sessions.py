@@ -18,6 +18,8 @@ from textual.containers import Vertical, Horizontal
 from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button, Select, Label
 
+from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
+
 
 @dataclass
 class SessionConfigSource:
@@ -217,7 +219,7 @@ def _local_artifact_sessions(root: str | os.PathLike[str]) -> list[dict]:
         return []
     sessions = []
     for session_dir in sorted(artifacts_dir.iterdir(), key=lambda p: p.name, reverse=True):
-        if not session_dir.is_dir() or session_dir.name in {"shared", ".DS_Store"}:
+        if not session_dir.is_dir() or session_dir.name in {*NON_SESSION_ARTIFACT_DIRS, ".DS_Store"}:
             continue
         manifest = _read_manifest(session_dir / "manifest.yml") or _read_manifest(session_dir / "manifest.json")
         sessions.append({

@@ -156,23 +156,6 @@ def update_manifest(
         data["initial_sync_time"] = sync_time
         data.setdefault("created_at", format_epoch_ms(sync_time))
         data["updated_at"] = format_epoch_ms()
-        data["file_sources"] = {
-            "asr": {
-                "source": "file",
-                "file_dir": str(session_dir / "audio"),
-                "initial_sync_time": sync_time,
-            },
-            "ips": {
-                "source": "file",
-                "file_dir": str(session_dir / "video"),
-                "initial_sync_time": sync_time,
-            },
-            "vfa": {
-                "source": "file",
-                "file_dir": str(session_dir / "video"),
-                "initial_sync_time": sync_time,
-            },
-        }
         recordings = data.setdefault("recordings", [])
         if not isinstance(recordings, list):
             recordings = []

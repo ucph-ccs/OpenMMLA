@@ -8,13 +8,17 @@ active_experiments:
   status: inactive
   task_type: wegrow
 - experiment_id: exp_test
-  title: Test experiment
+  title: test
   status: inactive
   task_type: microbit_circuit
 - experiment_id: exp_20260603_microbit
   title: microbit
   status: active
   task_type: microbit_circuit
+- experiment_id: exp_20260603_wegrow
+  title: wegrow
+  status: active
+  task_type: wegrow
 assignments:
   exp_20260520_microbit:
     Anthon:
@@ -48,6 +52,19 @@ assignments:
       tag_id: '2'
       description: male, brown hair, long white shirt
   exp_20260603_microbit:
+    Mikkel:
+      group_id: group_01
+      tag_id: '0'
+      description: male, blonde, checkered shirt, black jeans
+    Alex:
+      group_id: group_01
+      tag_id: '1'
+      description: male, blonde, blue jeans, black tee
+    Haaken:
+      group_id: group_01
+      tag_id: '2'
+      description: male, blonde, black tee, beige pants
+  exp_20260603_wegrow:
     Mikkel:
       group_id: group_01
       tag_id: '0'

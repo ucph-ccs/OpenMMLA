@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 ARTIFACTS_DIR = "artifacts"
+RUNTIME_ARTIFACTS_DIR = "runtime"
+NON_SESSION_ARTIFACT_DIRS = {RUNTIME_ARTIFACTS_DIR}
 
 
 def safe_segment(value: str | None, default: str = "item") -> str:
@@ -89,15 +91,16 @@ def pipeline_section_dir(
     return path
 
 
-def shared_pipeline_artifact_dir(
+def runtime_pipeline_artifact_dir(
     project_dir: str | os.PathLike[str] | None,
     pipeline_name: str,
     *parts: str,
     host_name: str | None = None,
 ) -> Path:
+    """Return the cross-session runtime artifact directory for one pipeline."""
     path = (
         artifact_root(project_dir)
-        / "shared"
+        / RUNTIME_ARTIFACTS_DIR
         / "pipelines"
         / safe_segment(pipeline_name, "pipeline")
         / safe_segment(host_name, short_hostname())

@@ -235,7 +235,8 @@ def update_collection_manifest(
     file_sources = {}
     audio_dir = local_path / "audio"
     video_dir = local_path / "video"
-    initial_sync_time = _manifest_initial_sync_time(local_path)
+    collection_manifest = _read_manifest_pair(local_path / "manifest.yml", local_path / "manifest.json")
+    initial_sync_time = _coerce_sync_time(collection_manifest.get("initial_sync_time"))
     if audio_dir.exists():
         file_sources["asr"] = _file_source_entry(
             host_name,
@@ -261,6 +262,7 @@ def update_collection_manifest(
         session_id=session_id,
         collection_entry=entry,
         file_sources=file_sources,
+        recordings=_collection_recordings(local_path, collection_manifest),
     )
 
 
@@ -384,6 +386,7 @@ def update_session_manifest(
     pipeline_name: str | None = None,
     pipeline_entry: dict[str, Any] | None = None,
     file_sources: dict[str, dict[str, Any]] | None = None,
+    recordings: list[dict[str, Any]] | None = None,
 ) -> Path:
     ensure_session_layout(project_root, session_id)
     path = manifest_path(project_root, session_id)
@@ -419,6 +422,14 @@ def update_session_manifest(
             data["initial_sync_time"] = max(sync_times)
             _normalize_file_source_sync_times(data_sources, data["initial_sync_time"])
 
+    if recordings:
+        existing_recordings = data.setdefault("recordings", [])
+        if not isinstance(existing_recordings, list):
+            existing_recordings = []
+            data["recordings"] = existing_recordings
+        for recording in recordings:
+            _upsert_entry(existing_recordings, recording, keys=("id",))
+
     with path.open("w", encoding="utf-8") as file:
         yaml.safe_dump(data, file, sort_keys=False, allow_unicode=True)
     with json_path.open("w", encoding="utf-8") as file:
@@ -432,6 +443,33 @@ def _read_manifest_pair(yml_path: Path, json_path: Path) -> dict[str, Any]:
     if data:
         return data
     return _read_json(json_path)
+
+
+def _collection_recordings(local_path: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    recordings = manifest.get("recordings")
+    if not isinstance(recordings, list):
+        return []
+    normalized = []
+    for recording in recordings:
+        if not isinstance(recording, dict):
+            continue
+        item = dict(recording)
+        path = str(item.get("path") or "").strip()
+        if path:
+            item["path"] = _local_collection_recording_path(local_path, path)
+        normalized.append(item)
+    return normalized
+
+
+def _local_collection_recording_path(local_path: Path, original_path: str) -> str:
+    original = Path(original_path)
+    if not original.is_absolute():
+        return str((local_path / original).resolve())
+    for marker in ("audio", "video"):
+        if marker in original.parts:
+            index = original.parts.index(marker)
+            return str(local_path.joinpath(*original.parts[index:]))
+    return str(original)
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

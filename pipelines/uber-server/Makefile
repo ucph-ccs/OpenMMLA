@@ -1,10 +1,22 @@
-.PHONY: all influxdb redis mosquitto mongodb nginx flask next celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-next stop-flask stop-celery
+.PHONY: all configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx flask next celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-next stop-flask stop-celery
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
 SUDO ?= sudo
 CONDA_BASE := $(shell conda info --base)
 IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
+OPENMMLA_BIND_ADDRESS ?= 0.0.0.0
+OPENMMLA_MQTT_ALLOW_ANONYMOUS ?= true
+
+MONGO_CONFIG_MAC ?= $(BREW_PREFIX)/etc/mongod.conf
+MONGO_CONFIG_LINUX ?= /etc/mongod.conf
+REDIS_CONFIG_MAC ?= $(BREW_PREFIX)/etc/redis.conf
+REDIS_CONFIG_LINUX ?= /etc/redis/redis.conf
+MOSQUITTO_CONFIG_MAC ?= $(BREW_PREFIX)/etc/mosquitto/mosquitto.conf
+MOSQUITTO_CONFIG_LINUX ?= /etc/mosquitto/mosquitto.conf
+INFLUX_CONFIG_MAC ?= $(BREW_PREFIX)/etc/influxdb/config.toml
+INFLUX_CONFIG_LINUX ?= /etc/influxdb/config.toml
 
 # extract command and arguments
 CMD := $(firstword $(MAKECMDGOALS))
@@ -40,8 +52,134 @@ sudo-keepalive:
 	@$(SUDO) -v
 	@while true; do $(SUDO) -n true; sleep 60; done 2>/dev/null &
 
+# ======= External listener configuration =======
+configure-mongodb-external:
+ifeq ($(IS_MAC), 1)
+	@config="$(MONGO_CONFIG_MAC)"; \
+	if [ -f "$$config" ]; then \
+		echo "Configuring MongoDB to listen on $(OPENMMLA_BIND_ADDRESS)"; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		if grep -qE '^[[:space:]]*bindIp:' "$$config"; then \
+			$(SUDO) sed -i '' -E 's/^[[:space:]]*bindIp:.*/  bindIp: $(OPENMMLA_BIND_ADDRESS)/' "$$config"; \
+		elif grep -qE '^net:[[:space:]]*$$' "$$config"; then \
+			$(SUDO) perl -0pi -e 's/(^net:\n)/$${1}  bindIp: $(OPENMMLA_BIND_ADDRESS)\n/m' "$$config"; \
+		else \
+			printf '\nnet:\n  bindIp: $(OPENMMLA_BIND_ADDRESS)\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+	else \
+		echo "MongoDB config not found at $$config; skipping listener config"; \
+	fi
+else
+	@config="$(MONGO_CONFIG_LINUX)"; \
+	if [ -f "$$config" ]; then \
+		echo "Configuring MongoDB to listen on $(OPENMMLA_BIND_ADDRESS)"; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		if grep -qE '^[[:space:]]*bindIp:' "$$config"; then \
+			$(SUDO) sed -i -E 's/^[[:space:]]*bindIp:.*/  bindIp: $(OPENMMLA_BIND_ADDRESS)/' "$$config"; \
+		elif grep -qE '^net:[[:space:]]*$$' "$$config"; then \
+			$(SUDO) perl -0pi -e 's/(^net:\n)/$${1}  bindIp: $(OPENMMLA_BIND_ADDRESS)\n/m' "$$config"; \
+		else \
+			printf '\nnet:\n  bindIp: $(OPENMMLA_BIND_ADDRESS)\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+	else \
+		echo "MongoDB config not found at $$config; skipping listener config"; \
+	fi
+endif
+
+configure-redis-external:
+ifeq ($(IS_MAC), 1)
+	@config="$(REDIS_CONFIG_MAC)"; \
+	if [ -f "$$config" ]; then \
+		echo "Configuring Redis to listen on $(OPENMMLA_BIND_ADDRESS)"; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		if grep -qE '^bind ' "$$config"; then \
+			$(SUDO) sed -i '' -E 's/^bind .*/bind $(OPENMMLA_BIND_ADDRESS) ::/' "$$config"; \
+		else \
+			printf '\nbind $(OPENMMLA_BIND_ADDRESS) ::\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+		if grep -qE '^protected-mode ' "$$config"; then \
+			$(SUDO) sed -i '' -E 's/^protected-mode .*/protected-mode no/' "$$config"; \
+		else \
+			printf 'protected-mode no\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+	else \
+		echo "Redis config not found at $$config; skipping listener config"; \
+	fi
+else
+	@config="$(REDIS_CONFIG_LINUX)"; \
+	if [ -f "$$config" ]; then \
+		echo "Configuring Redis to listen on $(OPENMMLA_BIND_ADDRESS)"; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		if grep -qE '^bind ' "$$config"; then \
+			$(SUDO) sed -i -E 's/^bind .*/bind $(OPENMMLA_BIND_ADDRESS) ::/' "$$config"; \
+		else \
+			printf '\nbind $(OPENMMLA_BIND_ADDRESS) ::\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+		if grep -qE '^protected-mode ' "$$config"; then \
+			$(SUDO) sed -i -E 's/^protected-mode .*/protected-mode no/' "$$config"; \
+		else \
+			printf 'protected-mode no\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+	else \
+		echo "Redis config not found at $$config; skipping listener config"; \
+	fi
+endif
+
+configure-mosquitto-external:
+ifeq ($(IS_MAC), 1)
+	@config="$(MOSQUITTO_CONFIG_MAC)"; conf_dir="$$(dirname "$$config")/conf.d"; listener_conf="$$conf_dir/openmmla-listener.conf"; \
+	if [ -f "$$config" ]; then \
+		echo "Configuring Mosquitto to listen on $(OPENMMLA_BIND_ADDRESS)"; \
+		$(SUDO) mkdir -p "$$conf_dir"; \
+		printf 'listener 1883 $(OPENMMLA_BIND_ADDRESS)\nallow_anonymous $(OPENMMLA_MQTT_ALLOW_ANONYMOUS)\n' | $(SUDO) tee "$$listener_conf" >/dev/null; \
+		if ! grep -qE "^[[:space:]]*include_dir[[:space:]]+$$conf_dir" "$$config"; then \
+			printf '\ninclude_dir %s\n' "$$conf_dir" | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+	else \
+		echo "Mosquitto config not found at $$config; skipping listener config"; \
+	fi
+else
+	@config="$(MOSQUITTO_CONFIG_LINUX)"; conf_dir="/etc/mosquitto/conf.d"; listener_conf="$$conf_dir/openmmla-listener.conf"; \
+	if [ -f "$$config" ] || [ -d "$$conf_dir" ]; then \
+		echo "Configuring Mosquitto to listen on $(OPENMMLA_BIND_ADDRESS)"; \
+		$(SUDO) mkdir -p "$$conf_dir"; \
+		printf 'listener 1883 $(OPENMMLA_BIND_ADDRESS)\nallow_anonymous $(OPENMMLA_MQTT_ALLOW_ANONYMOUS)\n' | $(SUDO) tee "$$listener_conf" >/dev/null; \
+	else \
+		echo "Mosquitto config not found; skipping listener config"; \
+	fi
+endif
+
+configure-influxdb-external:
+ifeq ($(IS_MAC), 1)
+	@config="$(INFLUX_CONFIG_MAC)"; \
+	if [ -f "$$config" ]; then \
+		echo "Configuring InfluxDB to listen on all interfaces"; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		if grep -qE '^[#[:space:]]*http-bind-address[[:space:]]*=' "$$config"; then \
+			$(SUDO) sed -i '' -E 's|^[#[:space:]]*http-bind-address[[:space:]]*=.*|http-bind-address = ":8086"|' "$$config"; \
+		else \
+			printf '\nhttp-bind-address = ":8086"\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+	else \
+		echo "InfluxDB config not found at $$config; default InfluxDB bind is usually :8086"; \
+	fi
+else
+	@config="$(INFLUX_CONFIG_LINUX)"; \
+	if [ -f "$$config" ]; then \
+		echo "Configuring InfluxDB to listen on all interfaces"; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		if grep -qE '^[#[:space:]]*http-bind-address[[:space:]]*=' "$$config"; then \
+			$(SUDO) sed -i -E 's|^[#[:space:]]*http-bind-address[[:space:]]*=.*|http-bind-address = ":8086"|' "$$config"; \
+		else \
+			printf '\nhttp-bind-address = ":8086"\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+		fi; \
+	else \
+		echo "InfluxDB config not found at $$config; default InfluxDB bind is usually :8086"; \
+	fi
+endif
+
 # ======= Individual services =======
-influxdb:
+influxdb: configure-influxdb-external
 ifeq ($(IS_MAC), 1)
 	@echo "🔁 Restarting InfluxDB (macOS)"
 	brew services restart influxdb
@@ -51,7 +189,7 @@ else
 	$(SUDO) systemctl restart influxdb
 endif
 
-redis:
+redis: configure-redis-external
 ifeq ($(IS_MAC), 1)
 	@echo "🔁 Restarting Redis (macOS)"
 	brew services restart redis
@@ -61,7 +199,7 @@ else
 	$(SUDO) systemctl restart redis-server
 endif
 
-mosquitto:
+mosquitto: configure-mosquitto-external
 ifeq ($(IS_MAC), 1)
 	@echo "🔁 Restarting Mosquitto (macOS)"
 	brew services restart mosquitto
@@ -71,7 +209,7 @@ else
 	$(SUDO) systemctl restart mosquitto
 endif
 
-mongodb:
+mongodb: configure-mongodb-external
 ifeq ($(IS_MAC), 1)
 	@echo "🔁 Restarting MongoDB (macOS)"
 	brew services restart mongodb-community
