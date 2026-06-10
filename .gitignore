@@ -13,6 +13,7 @@ logger/
 analysis/
 openmmla/analytics/framework/
 omini/
+group_state/
 
 # Ignore deprecated repositories
 deprecated/
@@ -34,6 +35,9 @@ tests/*
 
 # Ignore generated files
 *.generated.conf
+*.pt
+*.pth
+*.onnx
 **/.manifest.lock
 **/.next/
 

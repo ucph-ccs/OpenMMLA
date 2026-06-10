@@ -23,7 +23,6 @@ OPTIONAL_DEP_MAP = {
     "collect-audio": "tui",
     "collect-video": "tui",
     "ses-ctl": "uber-base",
-    "ses-enc": "uber-base",
     "ses-ana": "uber-base",
     "ses-man": "uber-base",
     "tui": "tui",
@@ -115,10 +114,6 @@ COMMANDS = {
     "ses-ctl": (
         "openmmla.commands.ses.ctl:main",
         "Control bucket session."
-    ),
-    "ses-enc": (
-        "openmmla.commands.ses.enc:main",
-        "Encode real-time hybrid indicators and summaries."
     ),
     "ses-ana": (
         "openmmla.commands.ses.ana:main",
