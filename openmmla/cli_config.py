@@ -1,10 +1,30 @@
 # openmmla/cli_config.py
 
+# Commands hidden from the main `mmla --help` listing. They remain fully
+# functional (the TUI and power users still invoke them); they are just not
+# part of the user-facing surface. Show them with `mmla --help --all`.
+#
+# - asr-infer/resample/enhance/separate/vad/transcribe: single-worker dev
+#   runners for ASR services; production stacks are launched from the TUI
+#   (one gunicorn tmux session per service from pipelines/asr-server/config.yml)
+# - vfa-vllm: single-worker dev runner for the VFA frame analyzer
+# - crypto: secrets are now encrypted automatically (TUI config save and
+#   Base/Server config load); only needed for manual key init/rotation
+HIDDEN_COMMANDS = {
+    "asr-infer",
+    "asr-resample",
+    "asr-enhance",
+    "asr-separate",
+    "asr-transcribe",
+    "asr-vad",
+    "vfa-vllm",
+    "crypto",
+}
+
 # Optional dependency group for each command
 OPTIONAL_DEP_MAP = {
     "asr-base": "asr-base",
     "asr-sync": "asr-base",
-    "asr-post": "asr-base",
     "asr-infer": "asr-server-nemo",
     "asr-resample": "asr-server-nemo",
     "asr-enhance": "asr-server-nemo",
@@ -38,10 +58,6 @@ COMMANDS = {
     "asr-sync": (
         "openmmla.commands.asr.sync:main",
         "Run ASR synchronizer of real-time audio analyzer."
-    ),
-    "asr-post": (
-        "openmmla.commands.asr.post:main",
-        "Run ASR post-time audio analyser."
     ),
     "asr-infer": (
         "openmmla.commands.asr.infer:main",

@@ -64,27 +64,28 @@ Configure your chosen backend in the `config.yml` file under the appropriate VLM
 
 ### Customizing Prompt Templates
 
-VFA now supports loading custom prompt templates from external files, allowing you to modify the prompts without changing the code:
+Prompt templates live in external files (default: `pipelines/vfa-server/prompts/`), so you can
+modify prompts without touching code. The easiest way is the TUI: **Launcher → VFA Server →
+Prompts** tab lists all templates, marks which are active, and lets you edit and save them.
 
-1. Add the `prompt_templates_dir` parameter to your `config.yml` file:
+1. Configure the templates directory and profile in `config.yml`:
    ```yaml
    VLLMFrameAnalyzer:
-     prompt_templates_dir: "prompts"  # Path to your prompt templates directory
+     prompt_templates_dir: "prompts"  # path to your prompt templates directory
+     prompt_profile: cot              # end-to-end variant: cot | baseline | baseline_no_pre
+     end_to_end: true                 # end-to-end VLM vs two-step VLM+LLM
      # Other configuration options...
    ```
 
-2. Create the templates directory and add template files:
-   ```bash
-   mkdir -p /path/to/your/prompts
-   ```
+2. The `prompt_profile` selects which end-to-end templates are loaded (these correspond to the
+   ICALT26 paper conditions):
+   - `cot`: `multi_angle_end_{system,user}_prompt.txt` — zero-shot Chain-of-Thought (main pipeline)
+   - `baseline`: `multi_angle_end_{system,user}_prompt_baseline.txt` — direct classification
+   - `baseline_no_pre`: `..._baseline_no_pre.txt` — baseline without the pre-context block
 
-3. Create the following template files:
-   - `multi_angle_end_system_prompt.txt`: System prompt for end-to-end analysis (both observation and classification)
-   - `multi_angle_end_user_prompt.txt`: User prompt for end-to-end analysis
-   - `multi_angle_vlm_system_prompt.txt`: System prompt for vision-only observations
-   - `multi_angle_vlm_user_prompt.txt`: User prompt for vision-only observations
-   - `multi_angle_llm_system_prompt.txt`: System prompt for classification-only
-   - `multi_angle_llm_user_prompt.txt`: User prompt for classification-only
+3. The two-step (`end_to_end: false`) templates are fixed:
+   - `multi_angle_vlm_system_prompt.txt` / `multi_angle_vlm_user_prompt.txt`: vision-only observations
+   - `multi_angle_llm_system_prompt.txt` / `multi_angle_llm_user_prompt.txt`: classification from observations
 
    All templates can use variable substitution with the syntax `{{variable_name}}`. Supported variables:
    - `{{num_perspectives}}`: Number of camera angles being analyzed
@@ -130,70 +131,39 @@ Streams:
 
 Streams with `ssh_profile` can be started/stopped from the TUI Launcher's **Streams** tab. Streams without `ssh_profile` are treated as external (already running).
 
-### On Servers
+### Run with the TUI (recommended)
 
-> **Tip**: You can use `mmla tui` to configure and launch all services from the TUI Launcher, instead of running commands manually.
+Start the management console and use the Launcher:
 
 ```bash
-# 1. Run uber services on uber server with conda env `uber-server`
-# Go to /pipelines/uber-server/ to run with scripts or run manually with brew or systemctl
-make all # if start all services 
-make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
-
-# 2. Run vfa services on base server with conda env `vfa-server`
-# Edit your own config.yml file, see pipelines/vfa-server/config_template.yml for more details
-# You can either run it via bash or python
-
-# ==================BASH========================
-# Start vfa services at once
-# Go to /pipelines/vfa-server/bash
-./run.sh
-
-
-# =================PYTHON========================
-# Start vfa services one by one; Flask apps live under openmmla/services/vfa/apps/.
-# Activate conda env `vfa-server`
-conda activate vfa-server
-
-## Option 1: run with single worker via mmla command
-## e.g., 
-## mmla vfa-vllm -c config.yml
-mmla <vfa-server-commands> -c <config_file_path>
- 
-## Option 2: run with multiple workers via gunicorn
-## e.g., 
-## export CONFIG_FILE=config.yml
-## gunicorn -k gevent -w 3 -b 0.0.0.0:5007 openmmla.services.vfa.apps.serve_multi_angle_vllm_frame_analyzer:app
-export CONFIG_FILE=<config_file_path>
-gunicorn -k gevent -w <number-workers> -b 0.0.0.0:<port> openmmla.services.vfa.apps.<serve_module>:app
+mmla tui
 ```
 
-### On Base Stations
+1. **VFA Server** (on the AI server): edit the Config tab (`pipelines/vfa-server/config.yml` — backend, models, `prompt_profile`), then Start — the TUI launches one gunicorn tmux session per service, locally or over SSH
+2. **Prompts tab** (on the VFA Server card): browse and edit the prompt templates; active ones are marked according to `prompt_profile` and `end_to_end`
+3. **MLLM Server**: run a local vLLM model if you don't use a cloud backend
+4. **Pipelines → VFA → VFA Base** (on base stations): set session, mode, and options on the card, then Start
+5. **Streams tab**: start/stop remote ffmpeg streams defined in the `Streams` config section
+
+### Manual CLI (alternative)
+
 ```bash
-# Run vfa pipelines on base station with conda env `vfa-base`
-# Edit your own config.yml file, see pipelines/vfa-base/config_template.yml for more details
-# Prefer the mmla commands below; examples/run_*.py launchers were removed.
-# You can either run it via bash or python
+# Base station (conda env: vfa-base)
+mmla vfa-base -c <config_path>  # start a vfa base
+mmla vfa-sync -c <config_path>  # start a vfa synchronizer
 
-# ===================BASH========================
-# Go to /pipelines/vfa-base/bash
-# Run real-time video frame analyzer
-Usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-m MODE] [-g GRAPHICS] [-s STORE] [-v VERBOSE] [-h]
+# AI server (conda env: vfa-server)
+# one gunicorn process per service from openmmla/services/vfa/apps/
+export CONFIG_FILE=<config_path>
+gunicorn -k gevent -w <workers> -b 0.0.0.0:<port> openmmla.services.vfa.apps.<serve_module>:app
+```
 
-options:
-  -nb NUM_BASE         : Number of VFA bases to run (default: 1)
-  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)
-  -m MODE              : VFA base mode: record, analyze, or full (default: full)
-  -g GRAPHICS          : Enable graphics (default: true)
-  -s STORE             : Store frames locally (default: true)
-  -v VERBOSE           : Enable verbose mode (default: false)
-  -h                   : Display this help message
-  
-# ==================PYTHON========================
-# Activate conda env `vfa-base`
-conda activate vfa-base
+### Smoke Test
 
-# Run real-time video frame analyzer
-mmla vfa-base -c <config_file_path> # start a vfa base
-mmla vfa-sync -c <config_file_path> # start a vfa base synchronizer
+With the VFA Server running, you can verify the analyzer end-to-end without starting any base:
+
+```bash
+python pipelines/vfa-base/examples/analyze_video_frame.py front.jpg side.jpg \
+  --angles front,side \
+  --participant-descriptions '{"1": "person with red shirt"}'
 ```

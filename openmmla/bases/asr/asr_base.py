@@ -148,16 +148,15 @@ class ASRBase(Base):
         """
         base_config = self.config['Base'][self.base_type]
         asr_server_config = self.config['Server']['asr']
-        analytics_config = self.config.get('Analytics', {})
-        self.asr_scope = normalize_asr_scope(analytics_config.get('asr_scope'))
+
+        # recognition scope is a per-device setting: a room microphone profile
+        # is typically group-scope (transcription only), a personal badge
+        # profile participant-scope (speaker verification + transcription).
+        # the actual group id is resolved from the session at runtime.
+        self.asr_scope = normalize_asr_scope(base_config.get('asr_scope'))
         self.speaker_verification = _resolve_speaker_verification(
-            analytics_config.get('speaker_verification', 'auto'),
+            base_config.get('speaker_verification', 'auto'),
             self.asr_scope,
-        )
-        self.group_speaker_id = str(
-            analytics_config.get('group_id')
-            or analytics_config.get('group_speaker_id')
-            or 'group'
         )
 
         self.register_duration = int(base_config['register_duration'])

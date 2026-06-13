@@ -184,6 +184,10 @@ def ssh_check_tmux(profile: SSHProfile, session_name: str) -> bool:
 
 def ssh_test_connection(profile: SSHProfile) -> tuple[bool, str]:
     """test ssh connectivity. returns (success, message)."""
+    # fast-fail on unreachable hosts before paying the full SSH handshake
+    # timeout (ConnectTimeout=5 / subprocess cap 10s)
+    if not probe_ssh_endpoint(profile.host, profile.port, timeout=1.5):
+        return False, f"host unreachable ({profile.host}:{profile.port})"
     args = profile.base_ssh_args()
     missing_command = _missing_local_command(args)
     if missing_command:
@@ -250,6 +254,145 @@ CONDA_INIT = (
 )
 
 REMOTE_SHELL_INIT = f'export LANG=en_US.UTF-8 PYTHONUNBUFFERED=1; {CONDA_INIT}'
+
+
+_RESOLVED_SSH_ENDPOINTS: dict[tuple[str, int], tuple[str, int]] = {}
+
+
+def resolve_ssh_endpoint(host: str, port: int) -> tuple[str, int]:
+    """resolve the effective hostname/port via `ssh -G`, honoring ~/.ssh/config
+    aliases (Host server-01 -> HostName 192.168.x.x) that a plain socket
+    lookup cannot see. Results are cached."""
+    key = (host, port)
+    cached = _RESOLVED_SSH_ENDPOINTS.get(key)
+    if cached:
+        return cached
+    resolved_host, resolved_port = host, port
+    try:
+        result = subprocess.run(
+            [_resolve_local_command("ssh"), "-G", "-p", str(port), host],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                k, v = parts[0].lower(), parts[1].strip()
+                if k == "hostname" and v:
+                    resolved_host = v
+                elif k == "port":
+                    try:
+                        resolved_port = int(v)
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    _RESOLVED_SSH_ENDPOINTS[key] = (resolved_host, resolved_port)
+    return resolved_host, resolved_port
+
+
+# profile name -> "online" / "offline"; written by the launcher's background
+# probe loop, read by every screen's target dropdown
+TARGET_STATES: dict[str, str] = {}
+
+
+def is_select_sentinel(value) -> bool:
+    """True for the placeholder values a Select emits while (re)building its
+    options (Select.BLANK / Select.NULL depending on textual version)."""
+    if value is None:
+        return True
+    return str(value) in ("Select.BLANK", "Select.NULL")
+
+
+def target_state_label(name: str) -> str:
+    """render a profile name with its cached reachability state."""
+    state = TARGET_STATES.get(name)
+    if state == "online":
+        return f"{name}  (online)"
+    if state == "offline":
+        return f"{name}  (offline ✗)"
+    return name
+
+
+# sentinel value: selecting this dropdown entry triggers a connectivity test
+REFRESH_TARGETS_OPTION = "__refresh_targets__"
+
+
+def target_options() -> list[tuple[str, str]]:
+    """unified (label, value) options for all Host selectors."""
+    return (
+        [("⟳  Test connections", REFRESH_TARGETS_OPTION), ("Local", "local")]
+        + [(target_state_label(p.name), p.name) for p in load_ssh_profiles()]
+    )
+
+
+def probe_all_profiles(timeout: float = 1.0, deadline: float = 15.0) -> dict[str, str]:
+    """probe every SSH profile concurrently and update TARGET_STATES.
+
+    The connect timeout does not bound DNS/mDNS resolution (a dead .local
+    name can take ~5s to fail), so an overall deadline caps the wall time:
+    anything unresolved by then is reported offline."""
+    from concurrent.futures import ThreadPoolExecutor, wait
+    profiles = load_ssh_profiles()
+    if not profiles:
+        TARGET_STATES.clear()
+        return {}
+
+    pool = ThreadPoolExecutor(max_workers=min(16, len(profiles)))
+    futures = {
+        pool.submit(probe_ssh_endpoint, profile.host, profile.port, timeout): profile.name
+        for profile in profiles
+    }
+    done, _pending = wait(futures, timeout=deadline)
+    states: dict[str, str] = {}
+    for future, name in futures.items():
+        if future in done:
+            try:
+                ok = bool(future.result())
+            except Exception:
+                ok = False
+            states[name] = "online" if ok else "offline"
+        else:
+            # still resolving when the deadline hit (e.g. slow mDNS): we don't
+            # know either way — never mislabel a reachable host as offline
+            states[name] = "unknown"
+    # do not wait for stragglers stuck in mDNS resolution
+    pool.shutdown(wait=False, cancel_futures=True)
+    TARGET_STATES.clear()
+    TARGET_STATES.update(states)
+    return states
+
+
+def test_profile_by_name(name: str) -> tuple[bool, str]:
+    """run a full SSH connectivity test for one saved profile and record the
+    definitive result in TARGET_STATES."""
+    profile = get_profile_by_name(name)
+    if profile is None:
+        return False, f"profile '{name}' not found"
+    success, msg = ssh_test_connection(profile)
+    TARGET_STATES[name] = "online" if success else "offline"
+    return success, msg
+
+
+def summarize_states(states: dict[str, str]) -> str:
+    """human-readable summary like '2 online, 5 offline, 1 unknown'."""
+    counts = {"online": 0, "offline": 0, "unknown": 0}
+    for state in states.values():
+        counts[state] = counts.get(state, 0) + 1
+    parts = [f"{count} {state}" for state, count in counts.items() if count]
+    return ", ".join(parts) if parts else "no hosts configured"
+
+
+def probe_ssh_endpoint(host: str, port: int, timeout: float = 1.0) -> bool:
+    """cheap reachability check: TCP connect to the (ssh-config resolved) SSH port."""
+    import socket
+    host, port = resolve_ssh_endpoint(host, port)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def wrap_local(cmd: str, conda_env: str = "") -> str:

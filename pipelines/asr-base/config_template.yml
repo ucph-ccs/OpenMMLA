@@ -1,15 +1,11 @@
 # ASR-BASE config_template.yml
 # Template for configuring audio, stream, database and server endpoints for the system
 
-# realtime analytics and ASR attribution settings
-Analytics:
-  asr_scope: participant             # participant = use speaker ids; group = attribute ASR transcript to the current session group
-  speaker_verification: auto         # auto = participant:true, group:false; set true/false to override
-  group_id: ""                       # optional fallback speaker id for group ASR when no session group_id is available
-
 # base settings for your device
 Base:
   <Your_Device_Name>:
+    asr_scope: participant        # participant = speaker verification + transcription; group = attribute transcript to the session group (no verification)
+    speaker_verification: auto    # auto = participant:true, group:false; set true/false to override
     register_duration:            # Seconds to record for registration
     recognize_duration:           # Seconds to record for recognition
     recognize_sp_duration:        # Seconds to record for recognition (with speech separation)
@@ -42,13 +38,6 @@ Synchronizer:
   match_tolerance: 1.5          # matching tolerance (seconds) for incoming result to time buckets (default: ~bucket_duration/2)
 
 # post analyzer settings
-PostAnalyzer:
-  threshold: 0.2                                  # Similarity threshold for recognition
-  keep_threshold: 0.1                             # Special threshold for keeping identity for speaker border cases
-  segment_duration: 3                             # Duration of each audio segment for analysis
-  custom_origin_dir: path/to/origin/directory     # Default to <project_dir>/post-time/origin if null
-  filenames: ['file_name.wav', 'file_name2.m4a']  # List of filenames in origin directory to process
-
 # streams settings
 # each entry defines an audio stream source. streams with ssh_profile can be started/stopped
 # from the TUI Launcher; streams without ssh_profile are treated as external (already running).

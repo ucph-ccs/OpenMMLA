@@ -5,11 +5,12 @@ import os
 import subprocess
 
 from rich.markup import escape as rich_escape
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import RichLog, Label, Input, Select
+from textual.widgets import RichLog, Label, Input, Select, Static
 
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.ssh import (
@@ -51,8 +52,61 @@ def _parse_conda_envs(output: str) -> set[str]:
     return envs
 
 
+class LogResizeHandle(Static):
+    """thin grab bar above the command log; drag or scroll to resize the log."""
+
+    DEFAULT_CSS = """
+    LogResizeHandle {
+        height: 1;
+        color: $text-muted;
+        text-align: center;
+        border-top: solid $primary;
+    }
+    LogResizeHandle:hover {
+        background: $primary 20%;
+        color: $text;
+    }
+    """
+
+    def __init__(self, session: "CommandSession") -> None:
+        super().__init__("· · ·  ⇕ drag or scroll to resize log  · · ·")
+        self._session = session
+        self._drag_start_y: int | None = None
+        self._drag_start_height: int = 0
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self.capture_mouse()
+        self._drag_start_y = event.screen_y
+        self._drag_start_height = self._session.log_height
+        event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._drag_start_y is None:
+            return
+        # dragging the handle up grows the log, down shrinks it
+        delta = self._drag_start_y - event.screen_y
+        self._session.set_log_height(self._drag_start_height + delta)
+        event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        self.release_mouse()
+        self._drag_start_y = None
+        event.stop()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._session.set_log_height(self._session.log_height + 1)
+        event.stop()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._session.set_log_height(self._session.log_height - 1)
+        event.stop()
+
+
 class CommandSession(Widget):
     """reusable interactive command session with target selector, log, and input."""
+
+    MIN_LOG_HEIGHT = 2
+    MAX_LOG_HEIGHT = 40
 
     class TargetChanged(Message):
         """emitted when the user changes the target selector."""
@@ -79,7 +133,6 @@ class CommandSession(Widget):
     }
     .cmd-log {
         height: 4;
-        border-top: solid $primary;
         padding: 0 1;
     }
     .cmd-bar {
@@ -108,6 +161,24 @@ class CommandSession(Widget):
         self._active_conda_env: str = ""
         self._running_proc: asyncio.subprocess.Process | None = None
         self._connected: bool = False
+        self._log_height: int = 4
+
+    @property
+    def log_height(self) -> int:
+        return self._log_height
+
+    def set_log_height(self, height: int) -> None:
+        """resize the log area, clamped to sane bounds."""
+        height = max(self.MIN_LOG_HEIGHT, min(self.MAX_LOG_HEIGHT, height))
+        if height == self._log_height:
+            return
+        self._log_height = height
+        try:
+            log = self.query_one(".cmd-log", RichLog)
+            log.styles.height = height
+            log.scroll_end(animate=False)
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         target_options = [("Local", "local")] + [
@@ -115,8 +186,9 @@ class CommandSession(Widget):
         ]
         if self._show_target:
             with Horizontal(classes="cmd-target-bar"):
-                yield Label("Target:")
+                yield Label("Host:")
                 yield Select(target_options, value="local", id="cmd-target-select")
+        yield LogResizeHandle(self)
         yield RichLog(classes="cmd-log", highlight=True, markup=True)
         with Horizontal(classes="cmd-bar"):
             yield Label("$", classes="cmd-prompt")
@@ -149,7 +221,8 @@ class CommandSession(Widget):
             try:
                 sel = self.query_one("#cmd-target-select", Select)
                 val = sel.value
-                if val is Select.BLANK or val is None:
+                from openmmla.tui.ssh import is_select_sentinel
+                if is_select_sentinel(val):
                     return "local"
                 return str(val)
             except Exception:
@@ -243,11 +316,15 @@ class CommandSession(Widget):
             self.log("[red]SSH profile not found.[/red]")
             return
         self.log(f"[yellow]Testing connection to '{profile.name}'...[/yellow]")
-        success, msg = ssh_test_connection(profile)
+        self.run_worker(self._async_connect(profile), exclusive=True)
+
+    async def _async_connect(self, profile) -> None:
+        """run the SSH connectivity test off the UI thread."""
+        success, msg = await asyncio.to_thread(ssh_test_connection, profile)
         if success:
             self._connected = True
             self.log(f"[green]Connected to {profile.name} ({profile.ssh_destination()}) — {msg}[/green]")
-            self.run_worker(self._resolve_remote_cwd(profile), exclusive=True)
+            await self._resolve_remote_cwd(profile)
         else:
             self._connected = False
             self.log(f"[red]Connection failed: {msg}[/red]")

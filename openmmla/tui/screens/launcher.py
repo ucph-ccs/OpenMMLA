@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ from textual.app import ComposeResult
 from textual.containers import VerticalScroll, Vertical, Horizontal
 from textual.widget import Widget
 from textual.widgets import (
-    Static, Tree, Button, Select, Input, Label, TabbedContent, TabPane,
+    Static, Tree, Button, Select, Input, Label, TabbedContent, TabPane, TextArea,
 )
 
 from openmmla.tui.schema.loader import (
@@ -39,6 +40,7 @@ from openmmla.tui.system_services import (
     save_system_service_section,
 )
 from openmmla.tui.ssh import (
+    REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel, probe_all_profiles, probe_ssh_endpoint, summarize_states, target_options, target_state_label,
     load_ssh_profiles, get_profile_by_name, ssh_run_sync,
     scp_file_async, scp_from_remote_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
     ssh_test_connection,
@@ -83,6 +85,7 @@ from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
 from openmmla.tui.widgets.ssh_form import SSHForm
 from openmmla.tui.widgets.stream_panel import StreamPanel
+from openmmla.tui.widgets.session_control import SessionControlPanel
 from openmmla.tui.widgets.task_form import TaskForm
 
 
@@ -441,9 +444,30 @@ def _artifact_session_choices_from_configs(configs: list[dict], local_sessions: 
             seen.add(session_id)
             choices.append(session_id)
 
+    # most pipeline configs point at the same databases; query each unique
+    # endpoint only once instead of once per config
+    seen_mongo: set[tuple[str, str]] = set()
+    seen_influx: set[tuple[str, str, str, str]] = set()
     for config in configs:
-        add_many(_mongodb_session_ids_from_config(config))
-        add_many(_influxdb_session_ids_from_config(config))
+        if not isinstance(config, dict):
+            continue
+        mongo_cfg = config.get("MongoDB")
+        if isinstance(mongo_cfg, dict):
+            mongo_sig = (str(mongo_cfg.get("url") or ""), str(mongo_cfg.get("db") or ""))
+            if mongo_sig not in seen_mongo:
+                seen_mongo.add(mongo_sig)
+                add_many(_mongodb_session_ids_from_config(config))
+        influx_cfg = config.get("InfluxDB")
+        if isinstance(influx_cfg, dict):
+            influx_sig = (
+                str(influx_cfg.get("url") or ""),
+                str(influx_cfg.get("token") or ""),
+                str(influx_cfg.get("org") or ""),
+                str(influx_cfg.get("bucket") or ""),
+            )
+            if influx_sig not in seen_influx:
+                seen_influx.add(influx_sig)
+                add_many(_influxdb_session_ids_from_config(config))
 
     add_many(local_sessions or [])
     return choices[:100]
@@ -697,6 +721,141 @@ class TransformMatrixPanel(Widget):
                 )
 
 
+class PromptsPanel(Widget):
+    """VFA prompt template browser and editor."""
+
+    DEFAULT_CSS = """
+    PromptsPanel {
+        height: auto;
+        padding: 1 2;
+    }
+    PromptsPanel .pp-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    PromptsPanel .pp-muted {
+        color: $text-muted;
+    }
+    PromptsPanel #prompt-editor {
+        height: 24;
+        margin-top: 1;
+    }
+    PromptsPanel .pp-actions {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    PromptsPanel .pp-actions Button {
+        min-width: 16;
+        margin-right: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        prompts_dir: str,
+        active_files: list[str],
+        profile: str,
+        end_to_end: bool,
+        target: str = "local",
+    ) -> None:
+        super().__init__()
+        self.prompts_dir = prompts_dir
+        self.active_files = set(active_files)
+        self.profile = profile
+        self.end_to_end = end_to_end
+        self.target = target
+        self._current_file: str | None = None
+
+    def _prompt_files(self) -> list[str]:
+        try:
+            return sorted(
+                name for name in os.listdir(self.prompts_dir)
+                if name.endswith(".txt") and not name.startswith(".")
+            )
+        except OSError:
+            return []
+
+    def compose(self) -> ComposeResult:
+        yield Static("[b]Prompt Templates[/b]", classes="pp-title")
+        yield Static(f"Directory: {self.prompts_dir}", classes="pp-muted")
+        mode = "end-to-end" if self.end_to_end else "two-step (VLM + LLM)"
+        yield Static(
+            f"Active profile: [b]{self.profile}[/b] ({mode}) — "
+            "change via Config > prompt_profile / end_to_end",
+            classes="pp-muted",
+        )
+        if self.target != "local":
+            yield Static(
+                f"Editing local files; copy changes to '{self.target}' yourself "
+                "(prompts are not synced automatically).",
+                classes="pp-muted",
+            )
+        files = self._prompt_files()
+        if not files:
+            yield Static("No .txt prompt templates found.", classes="pp-muted")
+            return
+        options = [
+            (f"{name}  (active)" if name in self.active_files else name, name)
+            for name in files
+        ]
+        yield Select(options, prompt="Select a prompt template...", id="prompt-file-select")
+        yield TextArea("", id="prompt-editor", read_only=True)
+        with Horizontal(classes="pp-actions"):
+            yield Button("Save", variant="primary", id="btn-prompt-save", disabled=True)
+            yield Button("Reload", id="btn-prompt-reload", disabled=True)
+        yield Static("", id="prompt-status", classes="pp-muted")
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#prompt-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _load_current(self) -> None:
+        editor = self.query_one("#prompt-editor", TextArea)
+        if not self._current_file:
+            editor.load_text("")
+            editor.read_only = True
+            return
+        path = os.path.join(self.prompts_dir, self._current_file)
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                editor.load_text(file.read())
+            editor.read_only = False
+            self._set_status(f"Loaded {self._current_file}")
+        except OSError as exc:
+            editor.load_text("")
+            editor.read_only = True
+            self._set_status(f"Could not read {self._current_file}: {exc}")
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "prompt-file-select":
+            return
+        value = event.value
+        self._current_file = None if value in (None, Select.BLANK) else str(value)
+        has_file = self._current_file is not None
+        self.query_one("#btn-prompt-save", Button).disabled = not has_file
+        self.query_one("#btn-prompt-reload", Button).disabled = not has_file
+        self._load_current()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-prompt-reload":
+            self._load_current()
+        elif event.button.id == "btn-prompt-save":
+            if not self._current_file:
+                return
+            path = os.path.join(self.prompts_dir, self._current_file)
+            editor = self.query_one("#prompt-editor", TextArea)
+            try:
+                with open(path, "w", encoding="utf-8") as file:
+                    file.write(editor.text)
+                self._set_status(f"Saved {self._current_file} (restart VFA Server to apply)")
+            except OSError as exc:
+                self._set_status(f"Save failed: {exc}")
+
+
 def _make_stream_fields(stream_name: str) -> list[LoaderFieldDef]:
     """create FieldDef list for a single stream entry."""
     section = f"Streams.{stream_name}"
@@ -801,6 +960,38 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                          ["-sid", "-s"]),
         ],
         artifact_pipeline="ips-base",
+    ))
+
+    services.append(ServiceDef(
+        name="IPS Camera Calibration",
+        category="IPS",
+        conda_env="ips-base",
+        config_dir=os.path.join(root, "pipelines", "ips-base"),
+        launch_type="bash",
+        description="Calibrate camera intrinsic parameters (interactive, run before IPS sessions)",
+        params=[
+            ParamDef("-n", "Num Calibrators", "int", 1),
+        ],
+        components=[
+            ComponentDef("calibrator", "mmla ips-ccal", "-n", []),
+        ],
+    ))
+
+    services.append(ServiceDef(
+        name="IPS Camera Sync",
+        category="IPS",
+        conda_env="ips-base",
+        config_dir=os.path.join(root, "pipelines", "ips-base"),
+        launch_type="bash",
+        description="Synchronize multi-camera coordinates (tag detectors + sync manager)",
+        params=[
+            ParamDef("-nc", "Num Tag Detectors", "int", 2),
+            ParamDef("-ns", "Num Sync Managers", "int", 1),
+        ],
+        components=[
+            ComponentDef("tag detector", "mmla ips-ctag", "-nc", []),
+            ComponentDef("sync manager", "mmla ips-csync", "-ns", []),
+        ],
     ))
 
     services.append(ServiceDef(
@@ -1005,6 +1196,93 @@ def _stack_service_specs(config_dir: str) -> list[dict[str, object]]:
     return _stack_service_specs_from_config(config)
 
 
+def _stack_launch_specs_from_config(config: dict) -> list[dict[str, object]]:
+    """Like _stack_service_specs_from_config, but include the workers/app fields
+    needed to build gunicorn launch commands (ported from bash/services.sh)."""
+    specs: list[dict[str, object]] = []
+    if not isinstance(config, dict):
+        return specs
+    for service_name, service_config in config.items():
+        if not isinstance(service_config, dict) or "port" not in service_config:
+            continue
+        port = _coerce_int(service_config.get("port"), 0)
+        if port <= 0:
+            continue
+        app = str(service_config.get("app") or "").strip()
+        if not app:
+            continue
+        specs.append({
+            "name": str(service_name),
+            "session": _tmux_component_session_name(str(service_name)),
+            "port": port,
+            "workers": max(1, _coerce_int(service_config.get("workers"), 1)),
+            "app": app,
+        })
+    return specs
+
+
+def _split_app_target(app: str, check_filesystem: bool) -> tuple[str, str]:
+    """Resolve a config 'app' value into (working_dir, gunicorn module).
+
+    Module paths like openmmla.services.asr.apps.serve_audio_inferer pass
+    through unchanged. File paths (absolute, ~, or containing a separator)
+    are split into a cd directory and a bare module name."""
+    looks_like_path = "/" in app or app.startswith("~")
+    if check_filesystem:
+        expanded = os.path.expanduser(app)
+        looks_like_path = looks_like_path and (
+            os.path.exists(expanded) or os.path.exists(expanded + ".py")
+        )
+        app = expanded if looks_like_path else app
+    if not looks_like_path:
+        return "", app
+    module = os.path.basename(app)
+    if module.endswith(".py"):
+        module = module[:-3]
+    return os.path.dirname(app), module
+
+
+def _stack_service_shell_command(
+    spec: dict[str, object],
+    project_dir: str,
+    config_path: str,
+    *,
+    remote: bool = False,
+) -> str:
+    """Build the gunicorn command for one server-stack service."""
+    workdir, module = _split_app_target(str(spec["app"]), check_filesystem=not remote)
+    quote = _quote_remote_path if remote else shlex.quote
+    cd_part = f"cd {quote(workdir)} && " if workdir else ""
+    return (
+        f"{cd_part}"
+        f"OPENMMLA_PROJECT_DIR={quote(project_dir)} "
+        f"OPENMMLA_CONFIG_PATH={quote(config_path)} "
+        f"gunicorn -k gevent -w {spec['workers']} -b 0.0.0.0:{spec['port']} {module}:app"
+    )
+
+
+def _kill_port_processes(port: int) -> None:
+    """Force-kill any local processes listening on the given port."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    for pid in result.stdout.split():
+        pid = pid.strip()
+        if pid:
+            subprocess.run(["kill", "-9", pid], capture_output=True)
+
+
+def _remote_kill_port_snippet(port: int) -> str:
+    """POSIX shell snippet that kills processes on a port (remote side)."""
+    return (
+        f'for _p in $(lsof -ti:{port} 2>/dev/null); do kill -9 "$_p" 2>/dev/null; done'
+    )
+
+
 def _is_stack_tmux_service(svc: ServiceDef) -> bool:
     return svc.launch_type == "tmux" and svc.name in ("ASR Server", "VFA Server")
 
@@ -1037,6 +1315,11 @@ def _stack_ports(svc: ServiceDef) -> list[int]:
 def _stack_ports_from_specs(specs: list[dict[str, object]]) -> list[int]:
     return [int(spec["port"]) for spec in specs]
 
+
+_SESSION_CHOICE_TTL_SEC = 20.0
+_TARGET_PROBE_INTERVAL_SEC = 30.0
+
+_probe_ssh_endpoint = probe_ssh_endpoint
 
 _SYSTEM_SVC_PORTS: dict[str, int] = {
     "influxdb": 8086,
@@ -1075,21 +1358,32 @@ def _check_port_in_use(port: int) -> bool:
         return False
 
 
+_KNOWN_CONDA_ENVS: set[str] = set()
+
+
 def _check_conda_env(env_name: str) -> bool:
+    """check that a conda env exists.
+
+    Positive results are cached for the lifetime of the TUI (envs are rarely
+    deleted mid-session); on a cache miss the list is re-queried, so freshly
+    created envs are always picked up."""
+    if env_name in _KNOWN_CONDA_ENVS:
+        return True
     try:
         result = subprocess.run(
             ["conda", "env", "list"],
             capture_output=True, text=True, timeout=10,
         )
-        for line in result.stdout.splitlines():
-            if line.strip().startswith(env_name + " ") or line.strip().startswith(env_name + "\t"):
-                return True
-            parts = line.strip().split()
-            if parts and parts[0] == env_name:
-                return True
-        return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if parts:
+            _KNOWN_CONDA_ENVS.add(parts[0])
+    return env_name in _KNOWN_CONDA_ENVS
 
 
 def _service_session_name(svc: ServiceDef) -> str:
@@ -1200,6 +1494,16 @@ class ServicePanel(Widget):
         width: 1fr;
         height: 1fr;
     }
+    /* TabPane defaults to height:auto, which lets pane content escape the
+       viewport: inner VerticalScrolls then never scroll and the overflow is
+       clipped (e.g. when the command log is resized taller). Pin the pane
+       and switcher to the tab body height so scrolling works. */
+    #svc-sub-tabs ContentSwitcher {
+        height: 1fr;
+    }
+    #svc-sub-tabs TabPane {
+        height: 1fr;
+    }
     .sync-bar {
         layout: horizontal;
         height: auto;
@@ -1253,6 +1557,14 @@ class ServicePanel(Widget):
         self._target_config_cache: dict[tuple[str, str], dict] = {}
         self._target_platform_cache: dict[str, str] = {}
         self._current_service_name: str | None = None
+        self._target_states: dict[str, str] = {}
+        self._target_probe_timer = None
+        self._last_target: str = "local"
+        self._suppress_target_change: bool = False
+        self._target_states: dict[str, str] = {}  # profile name -> online/offline
+        self._target_probe_timer = None
+        self._last_target: str = "local"
+        self._suppress_target_change: bool = False
 
     def compose(self) -> ComposeResult:
         target_options = [("Local", "local")] + [
@@ -1265,7 +1577,7 @@ class ServicePanel(Widget):
             yield tree
         with Vertical(id="svc-main"):
             with Horizontal(id="svc-target-bar"):
-                yield Label("Target:")
+                yield Label("Host:")
                 yield Select(target_options, value="local", id="svc-target-select")
             with Vertical(id="svc-content-area"):
                 yield Static(
@@ -1278,6 +1590,50 @@ class ServicePanel(Widget):
         self._pipelines = discover_pipelines()
         self._pipeline_map = {p.name: p for p in self._pipelines}
         self._build_tree()
+        # populate running markers asynchronously; the tree itself renders
+        # instantly from cached states
+        self._refresh_visible_statuses()
+        self._probe_targets()
+
+    # ── target reachability ──────────────────────────────────────
+
+    def _probe_targets(self) -> None:
+        self.run_worker(
+            self._async_probe_targets(),
+            group="launcher-target-probe",
+            exclusive=True,
+        )
+
+    async def _async_test_single_host(self, name: str) -> None:
+        from openmmla.tui.ssh import test_profile_by_name
+        success, msg = await asyncio.to_thread(test_profile_by_name, name)
+        self._target_states = dict(TARGET_STATES)
+        self._refresh_target_options()
+        color = "green" if success else "red"
+        self._log(f"[{color}]'{name}': {msg}[/{color}]")
+
+    async def _async_manual_probe(self) -> None:
+        states = await asyncio.to_thread(probe_all_profiles)
+        self._target_states = states
+        self._refresh_target_options()
+        self._log(f"[green]Connection test finished: {summarize_states(states)}.[/green]")
+
+    async def _async_probe_targets(self) -> None:
+        try:
+            states = await asyncio.to_thread(probe_all_profiles)
+            if states != self._target_states:
+                for name, state in states.items():
+                    previous = self._target_states.get(name)
+                    if previous is not None and previous != state and state in ("online", "offline"):
+                        color = "green" if state == "online" else "red"
+                        self._log(f"[{color}]Host '{name}' is now {state}.[/{color}]")
+                self._target_states = states
+                self._refresh_target_options()
+        finally:
+            # the re-probe loop must survive any failure above
+            if self._target_probe_timer is not None:
+                self._target_probe_timer.stop()
+            self._target_probe_timer = self.set_timer(_TARGET_PROBE_INTERVAL_SEC, self._probe_targets)
 
     def on_show(self) -> None:
         self._refresh_target_options()
@@ -1291,30 +1647,46 @@ class ServicePanel(Widget):
     def on_ssh_form_profiles_changed(self, event: SSHForm.ProfilesChanged) -> None:
         event.stop()
         self._refresh_target_options()
+        self._probe_targets()
+
+    def on_ssh_form_connection_tested(self, event: SSHForm.ConnectionTested) -> None:
+        """a single-host test updated TARGET_STATES; mirror it in the dropdown."""
+        event.stop()
+        self._target_states = dict(TARGET_STATES)
+        self._refresh_target_options()
+
+    def _target_option_label(self, name: str) -> str:
+        return target_state_label(name)
 
     def _refresh_target_options(self) -> None:
         self._ssh_profile_names = [p.name for p in load_ssh_profiles()]
         try:
             sel = self.query_one("#svc-target-select", Select)
-            options = [("Local", "local")] + [
-                (name, name) for name in self._ssh_profile_names
-            ]
+            options = target_options()
             current = sel.value
-            sel.set_options(options)
-            if any(v == current for _, v in options):
-                sel.value = current
-            else:
-                sel.value = "local"
-                self.query_one("#svc-cmd-session", CommandSession).set_target("local")
+            self._suppress_target_change = True
+            try:
+                sel.set_options(options)
+                if any(v == current for _, v in options):
+                    sel.value = current
+                else:
+                    sel.value = "local"
+                    self._last_target = "local"
+                    self.query_one("#svc-cmd-session", CommandSession).set_target("local")
+            finally:
+                self.call_after_refresh(self._clear_target_suppression)
         except Exception:
-            pass
+            self._suppress_target_change = False
+
+    def _clear_target_suppression(self) -> None:
+        self._suppress_target_change = False
 
     def _get_panel_target(self) -> str:
         """get the current target from the unified selector."""
         try:
             sel = self.query_one("#svc-target-select", Select)
             val = sel.value
-            if val is Select.BLANK or val is None:
+            if is_select_sentinel(val):
                 return "local"
             return str(val)
         except Exception:
@@ -1322,16 +1694,51 @@ class ServicePanel(Widget):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "svc-target-select":
-            val = event.value
-            if val is Select.BLANK or val is None:
-                val = "local"
+            if self._suppress_target_change:
+                return
+            if is_select_sentinel(event.value):
+                return  # transient placeholder while options are rebuilt
+            val = str(event.value)
+            if val == REFRESH_TARGETS_OPTION:
+                self._log("[yellow]Testing connections to all hosts...[/yellow]")
+                self._suppress_target_change = True
+                event.select.value = self._last_target
+                self.call_after_refresh(self._clear_target_suppression)
+                self.run_worker(
+                    self._async_manual_probe(),
+                    group="launcher-target-probe",
+                    exclusive=True,
+                )
+                return
+            if val == self._last_target:
+                return
+            if val != "local" and self._target_states.get(val) == "offline":
+                self._log(
+                    f"[red]Host '{val}' is offline; staying on '{self._last_target}'. "
+                    f"Re-testing it now...[/red]"
+                )
+                self._suppress_target_change = True
+                event.select.value = self._last_target
+                self.call_after_refresh(self._clear_target_suppression)
+                self.run_worker(
+                    self._async_test_single_host(val),
+                    group="launcher-target-probe",
+                    exclusive=False,
+                )
+                return
+            self._last_target = val
+            if val != "local":
+                self._log(f"[yellow]Switching host to '{val}' — loading remote state...[/yellow]")
             cmd = self.query_one("#svc-cmd-session", CommandSession)
-            cmd.set_target(str(val))
+            cmd.set_target(val)
+            # stale states from the previous target should not linger
+            self._svc_states.clear()
             self.run_worker(
                 self._reload_current_service_view(),
                 group=_LAUNCHER_UI_WORKER_GROUP,
                 exclusive=True,
             )
+            self._refresh_visible_statuses()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.tabbed_content.id != "svc-sub-tabs":
@@ -1402,15 +1809,15 @@ class ServicePanel(Widget):
             cat_node.expand()
             for svc in svcs:
                 cat_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
+        pipeline_node.add_leaf("Session Control", data="__session_control__")
 
     def _svc_markers(self, svc: ServiceDef) -> str:
-        """build status marker string for a service tree leaf."""
-        target = self._get_panel_target()
-        if target == "local":
-            is_running = self._detect_running(svc)
-        else:
-            is_running = self._detect_running_remote(svc, target)
-        self._svc_states[svc.name] = is_running
+        """build status marker string for a service tree leaf.
+
+        Reads the cached running state only — live detection (subprocess/
+        socket/SSH probes) happens in the _refresh_visible_statuses worker,
+        never on the UI thread while rendering the tree."""
+        is_running = self._svc_states.get(svc.name, False)
         pipeline = self._pipeline_for_service(svc.name)
         markers = ""
         if pipeline and os.path.isfile(pipeline.config_path):
@@ -1462,6 +1869,17 @@ class ServicePanel(Widget):
         if node_str == "__ssh_profiles__":
             self._set_command_session_visible(False)
             await content_area.mount(SSHForm())
+            return
+
+        if node_str == "__session_control__":
+            self._set_command_session_visible(False)
+            target = self._get_panel_target()
+            choices = await asyncio.to_thread(self._artifact_session_choices_for_target, target)
+            choices = [c for c in choices if c and c != _NEW_COLLECTION_SESSION_CHOICE]
+            from openmmla.tui.system_services import system_services_config_path
+            scroll = VerticalScroll(classes="svc-launch-scroll")
+            await content_area.mount(scroll)
+            await scroll.mount(SessionControlPanel(choices, system_services_config_path(self._root)))
             return
 
         svc = self._svc_map.get(node_str)
@@ -1517,6 +1935,47 @@ class ServicePanel(Widget):
         self._svc_states[svc.name] = is_running
         return self._service_for_target(svc, target), is_running
 
+    async def _populate_deferred_panes(
+        self,
+        tabs: TabbedContent,
+        svc: ServiceDef,
+        pipeline: PipelineDef,
+        config_scroll: VerticalScroll,
+    ) -> None:
+        """fill the Config/Streams/Transform/Prompts panes after the first paint.
+
+        The user may have already navigated to another tree node; in that case
+        the containers are detached and this becomes a no-op."""
+        if not tabs.is_attached or not config_scroll.is_attached:
+            return
+        try:
+            self._show_pipeline_form(config_scroll, pipeline)
+
+            streams = self._streams_for_pipeline_target(pipeline)
+            if streams or svc.name in ("ASR Base", "IPS Base", "VFA Base"):
+                stream_scroll = VerticalScroll(classes="svc-launch-scroll")
+                stream_pane = TabPane("Streams", stream_scroll, id="svc-tab-streams")
+                await tabs.add_pane(stream_pane)
+                stream_config_path = pipeline.config_path if self._get_panel_target() == "local" else ""
+                panel = StreamPanel(streams, config_path=stream_config_path, project_dir=self._root)
+                await stream_scroll.mount(panel)
+
+            if svc.name == "IPS Base":
+                transform_scroll = VerticalScroll(classes="svc-launch-scroll")
+                transform_pane = TabPane("Transform Matrix", transform_scroll, id="svc-tab-transform")
+                await tabs.add_pane(transform_pane)
+                await transform_scroll.mount(self._transform_matrix_panel())
+
+            if svc.name == "VFA Server":
+                prompts_scroll = VerticalScroll(classes="svc-launch-scroll")
+                prompts_pane = TabPane("Prompts", prompts_scroll, id="svc-tab-prompts")
+                await tabs.add_pane(prompts_pane)
+                await prompts_scroll.mount(self._vfa_prompts_panel(svc))
+        except Exception:
+            # containers can disappear mid-population when the user switches
+            # nodes quickly; never let that take down the screen
+            pass
+
     async def _mount_service_content(
         self,
         content_area: Vertical,
@@ -1544,22 +2003,10 @@ class ServicePanel(Widget):
             await tabs.add_pane(config_pane)
             self._config_container = config_scroll
             self._current_config_local_path = pipeline.config_path
-            self._show_pipeline_form(config_scroll, pipeline)
-
-            streams = self._streams_for_pipeline_target(pipeline)
-            if streams or svc.name in ("ASR Base", "IPS Base", "VFA Base"):
-                stream_scroll = VerticalScroll(classes="svc-launch-scroll")
-                stream_pane = TabPane("Streams", stream_scroll, id="svc-tab-streams")
-                await tabs.add_pane(stream_pane)
-                stream_config_path = pipeline.config_path if self._get_panel_target() == "local" else ""
-                panel = StreamPanel(streams, config_path=stream_config_path, project_dir=self._root)
-                await stream_scroll.mount(panel)
-
-            if svc.name == "IPS Base":
-                transform_scroll = VerticalScroll(classes="svc-launch-scroll")
-                transform_pane = TabPane("Transform Matrix", transform_scroll, id="svc-tab-transform")
-                await tabs.add_pane(transform_pane)
-                await transform_scroll.mount(self._transform_matrix_panel())
+            # defer the heavy widget building (config form has dozens of field
+            # rows; streams/transform/prompts may hit disk or SSH) so the Launch
+            # card paints immediately when navigating the tree
+            self.call_after_refresh(self._populate_deferred_panes, tabs, svc, pipeline, config_scroll)
         elif svc.launch_type == "vllm":
             tabs = TabbedContent(id="svc-sub-tabs")
             await content_area.mount(tabs)
@@ -1611,6 +2058,28 @@ class ServicePanel(Widget):
         return self._service_with_session_choices(svc)
 
     def _artifact_session_choices_for_target(self, target: str, conda_env: str = "") -> list[str]:
+        # session discovery hits MongoDB/InfluxDB and is by far the slowest part
+        # of building a service card; cache per target so tree navigation stays
+        # snappy. Refresh on a card invalidates the cache.
+        cache: dict[str, tuple[float, list[str]]] = getattr(self, "_session_choice_cache", None) or {}
+        self._session_choice_cache = cache
+        cached = cache.get(target)
+        if cached and time.monotonic() - cached[0] < _SESSION_CHOICE_TTL_SEC:
+            return cached[1]
+        choices = self._fetch_artifact_session_choices(target)
+        cache[target] = (time.monotonic(), choices)
+        return choices
+
+    def _invalidate_session_choice_cache(self, target: str | None = None) -> None:
+        cache = getattr(self, "_session_choice_cache", None)
+        if not cache:
+            return
+        if target is None:
+            cache.clear()
+        else:
+            cache.pop(target, None)
+
+    def _fetch_artifact_session_choices(self, target: str) -> list[str]:
         if target == "local":
             return _artifact_session_choices(self._root)
 
@@ -1762,6 +2231,25 @@ class ServicePanel(Widget):
             return load_streams(pipeline.config_path)
         config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
         return streams_from_config(config)
+
+    def _vfa_prompts_panel(self, svc: ServiceDef) -> PromptsPanel:
+        from openmmla.services.vfa.prompt_profiles import (
+            DEFAULT_PROMPT_PROFILE, active_prompt_files,
+        )
+        config = load_existing_config(os.path.join(svc.config_dir, "config.yml")) or {}
+        analyzer_config = config.get("VLLMFrameAnalyzer") or {}
+        prompts_dir = str(analyzer_config.get("prompt_templates_dir") or "prompts")
+        if not os.path.isabs(prompts_dir):
+            prompts_dir = os.path.join(svc.config_dir, prompts_dir)
+        profile = str(analyzer_config.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
+        end_to_end = bool(analyzer_config.get("end_to_end", False))
+        return PromptsPanel(
+            prompts_dir=prompts_dir,
+            active_files=active_prompt_files(profile, end_to_end),
+            profile=profile,
+            end_to_end=end_to_end,
+            target=self._get_panel_target(),
+        )
 
     def _transform_matrix_panel(self) -> TransformMatrixPanel:
         target = self._get_panel_target()
@@ -2493,6 +2981,7 @@ class ServicePanel(Widget):
                     self._target_config_cache[cache_key] = cache_config
                     self._refresh_service_cards()
                 self._show_status(f"Saved to {profile_name}:{remote_path}")
+                await self._maybe_push_master_key(profile, local_path)
             else:
                 self._show_status(f"Save failed: {output.strip()}")
         finally:
@@ -2501,6 +2990,38 @@ class ServicePanel(Widget):
                     os.unlink(local_path)
                 except OSError:
                     pass
+
+    async def _maybe_push_master_key(self, profile, local_config_path: str) -> None:
+        """sync ~/.openmmla/master.key to the remote host when an uploaded
+        config contains ENC(...) values, so remote services can decrypt them."""
+        try:
+            with open(local_config_path, "r", encoding="utf-8") as fh:
+                if "ENC(" not in fh.read():
+                    return
+        except OSError:
+            return
+        try:
+            from openmmla.utils.crypto import MASTER_KEY_PATH
+        except ImportError:
+            return
+        if not os.path.exists(MASTER_KEY_PATH):
+            return
+        try:
+            mkdir_proc = await ssh_run_async(profile, "mkdir -p ~/.openmmla && chmod 700 ~/.openmmla")
+            await mkdir_proc.wait()
+            scp_proc = await scp_file_async(profile, MASTER_KEY_PATH, ".openmmla/master.key")
+            rc = await scp_proc.wait()
+            if rc == 0:
+                chmod_proc = await ssh_run_async(profile, "chmod 600 ~/.openmmla/master.key")
+                await chmod_proc.wait()
+                self._show_status(
+                    f"Saved to {profile.name} (encrypted values; master key synced to remote ~/.openmmla/)"
+                )
+        except Exception:
+            self._show_status(
+                "Config has encrypted values but master key sync failed; "
+                "copy ~/.openmmla/master.key to the remote manually."
+            )
 
     async def _run_transform_matrix_sync(
         self,
@@ -2688,6 +3209,7 @@ class ServicePanel(Widget):
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
             return
+        self._invalidate_session_choice_cache(self._get_panel_target())
         if svc.launch_type == "collection":
             self.run_worker(
                 self._reload_current_service_view(),
@@ -2697,10 +3219,20 @@ class ServicePanel(Widget):
             self._log("Refreshing Collection Session choices.")
             return
         target = self._get_panel_target()
+        self.run_worker(
+            self._async_refresh_single_status(svc, target),
+            group=_LAUNCHER_STATUS_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    async def _async_refresh_single_status(self, svc: ServiceDef, target: str) -> None:
+        """probe one service's running state off the UI thread."""
         if target == "local":
-            is_running = self._detect_running(svc)
+            is_running = await asyncio.to_thread(self._detect_running, svc)
         else:
-            is_running = self._detect_running_remote(svc, target)
+            is_running = await asyncio.to_thread(self._detect_running_remote, svc, target)
+        if target != self._get_panel_target():
+            return
         self._svc_states[svc.name] = is_running
         for card in self.query(ServiceCard):
             if card.service_def.name == svc.name:
@@ -3145,19 +3677,6 @@ class ServicePanel(Widget):
             else:
                 states[svc.name] = self._detect_running_remote(svc, target)
         return states
-
-    def _refresh_visible_statuses_sync(self) -> None:
-        target = self._get_panel_target()
-        for svc in self._services:
-            if target == "local":
-                is_running = self._detect_running(svc)
-            else:
-                is_running = self._detect_running_remote(svc, target)
-            self._svc_states[svc.name] = is_running
-            for card in self.query(ServiceCard):
-                if card.service_def.name == svc.name:
-                    card.update_status(is_running)
-        self._build_tree()
 
     def _detect_running_remote(self, svc: ServiceDef, profile_name: str) -> bool:
         """check if a service is running on a remote host via SSH."""
@@ -3642,10 +4161,14 @@ class ServicePanel(Widget):
             finally:
                 client.close()
         except Exception as e:
-            self._log(f"[red]Failed to create MongoDB session from {config_path}: {e}[/red]")
-            return ""
+            # MongoDB being down should not block a launch: the session id is
+            # generated locally; only the registration record is skipped.
+            self._log(f"[yellow]MongoDB unreachable ({e}); using locally generated session id.[/yellow]")
+            self._log(f"[yellow]Session {session_id} is NOT registered in MongoDB — start Uber: MongoDB and re-create it if you need it in the session list.[/yellow]")
+            return session_id
 
         self._log(f"[green]MongoDB session ready: {session_id} ({exp_id}/{group_id})[/green]")
+        self._invalidate_session_choice_cache()
         return session_id
 
     def _create_collection_mongodb_session(self, experiment_group: object, target: str = "local") -> str:
@@ -4105,27 +4628,30 @@ class ServicePanel(Widget):
             return False
 
     def _launch_tmux_server(self, svc: ServiceDef) -> None:
-        bash_dir = os.path.join(svc.config_dir, "bash")
-        services_script = os.path.join(bash_dir, "services.sh")
-        if not os.path.isfile(services_script):
-            self._log(f"[red]services.sh not found: {services_script}[/red]")
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        config = load_existing_config(config_path)
+        specs = _stack_launch_specs_from_config(config)
+        if not specs:
+            self._log(f"[red]No launchable services (sections with port/app) found in {config_path}[/red]")
             return
 
-        session_name = _service_session_name(svc)
-        subprocess.run(
-            ["tmux", "kill-session", "-t", session_name],
-            capture_output=True,
-        )
-        run_cmd = (
-            f"cd {shlex.quote(bash_dir)} && "
-            f"OPENMMLA_CONDA_ENV={shlex.quote(svc.conda_env)} "
-            "bash services.sh; exec bash"
-        )
-        subprocess.Popen(
-            ["tmux", "new-session", "-d", "-s", session_name, "bash", "-lc", run_cmd],
-            cwd=bash_dir,
-        )
-        self._log(f"[green]{svc.name} tmux session '{session_name}' started.[/green]")
+        for spec in specs:
+            _kill_port_processes(int(spec["port"]))
+            session = str(spec["session"])
+            subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+            service_cmd = _stack_service_shell_command(spec, svc.config_dir, config_path)
+            wrapped = wrap_local(f"{service_cmd}; exec bash", svc.conda_env)
+            subprocess.Popen(
+                ["tmux", "new-session", "-d", "-s", session, wrapped],
+                cwd=svc.config_dir,
+            )
+            self._log(f"  {spec['name']}: tmux '{session}' on port {spec['port']} ({spec['workers']} worker(s))")
+
+        # clean up legacy aggregate sessions from the old services.sh flow
+        for legacy in filter(None, (_service_session_name(svc), _stack_legacy_session(svc))):
+            subprocess.run(["tmux", "kill-session", "-t", legacy], capture_output=True)
+
+        self._log(f"[green]{svc.name}: {len(specs)} service(s) started in tmux.[/green]")
 
     def _launch_vllm_server(self, svc: ServiceDef) -> None:
         session_name = _service_session_name(svc)
@@ -4153,7 +4679,8 @@ class ServicePanel(Widget):
             return
 
         if target in _SYSTEM_SVC_PORTS:
-            self._log(f"  Running: make {target} (may ask for sudo password)")
+            self._log(f"  Running: make {target}")
+            self._log("  [yellow]If it pauses at a Password: prompt, type your sudo password in the command box below and press Enter.[/yellow]")
             self._cmd.run(f'make -C {make_dir} {target} SUDO="sudo -S"')
         else:
             self._log(f"  Running: make {target}")
@@ -4276,16 +4803,37 @@ class ServicePanel(Widget):
 
             elif svc.launch_type == "tmux":
                 rel_dir = os.path.relpath(svc.config_dir, self._root)
-                remote_bash = _remote_path_join(remote_root, rel_dir, "bash")
+                remote_config_dir = _remote_path_join(remote_root, rel_dir)
+                remote_config_path = _remote_path_join(remote_config_dir, "config.yml")
+                config, _ = self._load_config_for_target(
+                    os.path.join(svc.config_dir, "config.yml"),
+                    show_status=False,
+                    target=profile_name,
+                )
+                specs = _stack_launch_specs_from_config(config)
+                if not specs:
+                    self._log(f"[red]No launchable services found in remote {remote_config_path}[/red]")
+                    return
+                parts = []
+                for spec in specs:
+                    session = str(spec["session"])
+                    service_cmd = _stack_service_shell_command(
+                        spec, remote_config_dir, remote_config_path, remote=True,
+                    )
+                    wrapped = wrap_remote(f"{service_cmd}; exec bash", svc.conda_env)
+                    parts.append(
+                        f"{_remote_kill_port_snippet(int(spec['port']))}; "
+                        f"tmux kill-session -t {session} 2>/dev/null; "
+                        f"tmux new-session -d -s {session} {shlex.quote(wrapped)}"
+                    )
+                    self._log(f"  {spec['name']}: remote tmux '{session}' on port {spec['port']}")
                 run_cmd = (
-                    f"cd {_quote_remote_path(remote_bash)} && "
-                    f"OPENMMLA_CONDA_ENV={shlex.quote(svc.conda_env)} "
-                    "bash services.sh; "
-                    "echo; echo 'Available tmux sessions:'; "
+                    "; ".join(parts)
+                    + "; echo; echo 'Available tmux sessions:'; "
                     "tmux list-sessions 2>/dev/null || true"
                 )
                 ssh_cmd = self._remote_terminal_command(profile, run_cmd)
-                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {run_cmd}")
+                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} ({len(specs)} service(s))")
                 if self._open_collection_terminal([(svc.name, ssh_cmd)]):
                     self._log(f"[green]{svc.name} start opened in SSH terminal.[/green]")
                 else:

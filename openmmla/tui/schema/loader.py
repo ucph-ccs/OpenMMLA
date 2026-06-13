@@ -359,12 +359,24 @@ def set_nested_value(data, dot_path, value):
 
 
 def save_config(config_path, fields, values):
-    """build a yaml dict from field values and write to config_path."""
+    """build a yaml dict from field values and write to config_path.
+
+    Sensitive values (api_key, token, password, ...) entered as plaintext are
+    encrypted to ENC(...) with the master key before hitting disk; a master
+    key is generated automatically on first use.
+    """
     data = {}
     for f in fields:
         val = values.get(f.path, f.default)
         if val is not None:
             set_nested_value(data, f.path, val)
+    try:
+        from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key
+        encrypt_sensitive_values(data, ensure_master_key())
+    except Exception:
+        # never block a config save on crypto problems; runtime loaders
+        # (Base/Server._load_config) retry encryption on next start
+        pass
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, 'w', encoding='utf-8') as fh:
         yaml.dump(data, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)

@@ -22,6 +22,9 @@ class SSHForm(Widget):
     class ProfilesChanged(Message):
         """posted when the profile list is modified."""
 
+    class ConnectionTested(Message):
+        """posted after a successful Test Connection (lets the launcher re-probe targets)."""
+
     DEFAULT_CSS = """
     SSHForm {
         height: 1fr;
@@ -102,6 +105,7 @@ class SSHForm(Widget):
                             f"{p.name}  ({p.user}@{p.host}:{p.port})  [{auth}]",
                             classes="profile-entry-name",
                         )
+                        yield Button("Test", variant="warning", id=f"ssh-testrow-{p.name}")
                         yield Button("Edit", id=f"ssh-edit-{p.name}")
                         yield Button("Delete", variant="error", id=f"ssh-del-{p.name}")
 
@@ -225,6 +229,9 @@ class SSHForm(Widget):
             await self._test_connection(event.button)
         elif btn_id == "ssh-clear":
             self._clear_form()
+        elif btn_id.startswith("ssh-testrow-"):
+            name = btn_id[len("ssh-testrow-"):]
+            await self._test_profile_row(name, event.button)
         elif btn_id.startswith("ssh-edit-"):
             name = btn_id[len("ssh-edit-"):]
             profile = next((p for p in self._profiles if p.name == name), None)
@@ -270,12 +277,34 @@ class SSHForm(Widget):
             success, msg = await loop.run_in_executor(None, ssh_test_connection, profile)
             if success:
                 self._set_status(f"[green]{msg}[/green]")
+                self.post_message(self.ConnectionTested())
             else:
                 self._set_status(f"[red]{msg}[/red]")
         finally:
             if button is not None:
                 button.disabled = False
                 button.label = "Test Connection"
+
+    async def _test_profile_row(self, name: str, button: Button) -> None:
+        """test one saved profile and update its shared host state."""
+        profile = next((p for p in self._profiles if p.name == name), None)
+        if profile is None:
+            return
+        self._set_status(f"[yellow]Testing connection to '{name}'...[/yellow]")
+        button.disabled = True
+        button.label = "..."
+        try:
+            success, msg = await asyncio.to_thread(ssh_test_connection, profile)
+            from openmmla.tui.ssh import TARGET_STATES
+            TARGET_STATES[name] = "online" if success else "offline"
+            if success:
+                self._set_status(f"[green]'{name}': {msg}[/green]")
+            else:
+                self._set_status(f"[red]'{name}': {msg}[/red]")
+            self.post_message(self.ConnectionTested())
+        finally:
+            button.disabled = False
+            button.label = "Test"
 
     async def _rebuild_list(self) -> None:
         """reload the profile list display by re-mounting."""
@@ -289,6 +318,7 @@ class SSHForm(Widget):
                         f"{p.name}  ({p.user}@{p.host}:{p.port})  [{auth}]",
                         classes="profile-entry-name",
                     ),
+                    Button("Test", variant="warning", id=f"ssh-testrow-{p.name}"),
                     Button("Edit", id=f"ssh-edit-{p.name}"),
                     Button("Delete", variant="error", id=f"ssh-del-{p.name}"),
                     classes="profile-entry",

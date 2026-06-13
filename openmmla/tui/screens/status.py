@@ -12,7 +12,7 @@ from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button
 
 from openmmla.tui.schema.loader import _find_project_root
-from openmmla.tui.ssh import load_ssh_profiles, ssh_check_port, ssh_check_tmux, ssh_run_sync, get_profile_by_name, SSHProfile
+from openmmla.tui.ssh import load_ssh_profiles, probe_ssh_endpoint, ssh_check_port, ssh_check_tmux, ssh_run_sync, get_profile_by_name, SSHProfile
 
 
 KNOWN_SERVICES = [
@@ -132,23 +132,61 @@ class StatusPanel(Widget):
         table = self.query_one("#status-table", DataTable)
         table.add_columns("Service", "Host", "Status", "Port", "Session", "Started")
         table.cursor_type = "row"
-        self._refresh_status()
+        self._is_visible = False
         self._schedule_refresh()
+
+    def on_show(self) -> None:
+        self._is_visible = True
+        self._refresh_status()
+
+    def on_hide(self) -> None:
+        self._is_visible = False
 
     def _schedule_refresh(self) -> None:
         self.set_timer(5.0, self._auto_refresh)
 
     def _auto_refresh(self) -> None:
-        self._refresh_status(include_remote=False)
+        # don't probe ports/tmux while the Status tab is hidden
+        if getattr(self, "_is_visible", False):
+            self._refresh_status(include_remote=False)
         self._schedule_refresh()
 
     def _refresh_status(self, include_remote: bool = False) -> None:
-        """refresh service status. remote checks only when explicitly requested."""
-        self._tmux_sessions = _list_tmux_sessions()
-        self._ssh_profiles = load_ssh_profiles()
+        """refresh service status off the UI thread; remote checks only when requested."""
+        self.run_worker(
+            self._async_refresh_status(include_remote),
+            group="status-refresh",
+            exclusive=True,
+        )
+
+    async def _async_refresh_status(self, include_remote: bool) -> None:
+        tmux_sessions, profiles, rows, running_count, port_count = await asyncio.to_thread(
+            self._gather_local_status
+        )
+        self._tmux_sessions = tmux_sessions
+        self._ssh_profiles = profiles
+
         table = self.query_one("#status-table", DataTable)
         table.clear()
+        for row in rows:
+            table.add_row(*row)
 
+        self._summary_text = (
+            f"Services: {running_count} running | Ports: {port_count} active | "
+            f"tmux: {len(tmux_sessions)} | SSH profiles: {len(profiles)}"
+        )
+        summary = self.query_one("#status-summary", Static)
+        summary.update(self._summary_text)
+
+        if include_remote and profiles:
+            self.run_worker(self._refresh_remote_status(), exclusive=True)
+
+    @staticmethod
+    def _gather_local_status() -> tuple[dict[str, str], list, list[tuple], int, int]:
+        """collect all local probe results (runs in a worker thread)."""
+        tmux_sessions = _list_tmux_sessions()
+        profiles = load_ssh_profiles()
+        rows: list[tuple] = []
         running_count = 0
         port_count = 0
 
@@ -158,58 +196,56 @@ class StatusPanel(Widget):
             session = svc.get("session", "")
 
             port_ok = _check_port(port) if port else False
-            session_ok = session in self._tmux_sessions if session else False
-
-            if svc["type"] == "system":
-                is_up = port_ok
-            else:
-                is_up = session_ok
-
-            status_str = "Running" if is_up else "Stopped"
-            port_str = str(port) if port else "-"
-            session_str = session if session else "-"
-            started_str = self._tmux_sessions.get(session, "-") if session else "-"
+            session_ok = session in tmux_sessions if session else False
+            is_up = port_ok if svc["type"] == "system" else session_ok
 
             if is_up:
                 running_count += 1
             if port_ok:
                 port_count += 1
 
-            table.add_row(name, "local", status_str, port_str, session_str, started_str)
+            rows.append((
+                name,
+                "local",
+                "Running" if is_up else "Stopped",
+                str(port) if port else "-",
+                session if session else "-",
+                tmux_sessions.get(session, "-") if session else "-",
+            ))
 
-        extra_sessions = set(self._tmux_sessions.keys()) - {
+        extra_sessions = set(tmux_sessions.keys()) - {
             s.get("session", "") for s in KNOWN_SERVICES if s.get("session")
         }
         for session_name in sorted(extra_sessions):
             if session_name in ("asr-services", "vfa-services"):
                 continue
-            table.add_row(
-                f"[tmux] {session_name}",
-                "local",
-                "Running",
-                "-",
-                session_name,
-                self._tmux_sessions[session_name],
-            )
+            rows.append((
+                f"[tmux] {session_name}", "local", "Running", "-",
+                session_name, tmux_sessions[session_name],
+            ))
             running_count += 1
 
-        remote_count = len(self._ssh_profiles)
-        self._summary_text = (
-            f"Services: {running_count} running | Ports: {port_count} active | "
-            f"tmux: {len(self._tmux_sessions)} | SSH profiles: {remote_count}"
-        )
-        summary = self.query_one("#status-summary", Static)
-        summary.update(self._summary_text)
-
-        if include_remote and self._ssh_profiles:
-            self.run_worker(self._refresh_remote_status(), exclusive=True)
+        return tmux_sessions, profiles, rows, running_count, port_count
 
     async def _refresh_remote_status(self) -> None:
-        """check remote services in background (slow SSH calls)."""
+        """check remote services in background (slow SSH calls).
+
+        Hosts whose SSH port is unreachable are skipped after a 1s TCP probe
+        instead of paying a full SSH timeout per service check."""
         table = self.query_one("#status-table", DataTable)
+        log = self.query_one("#log-panel", RichLog)
         added = 0
 
+        reachable = []
         for profile in self._ssh_profiles:
+            ok = await asyncio.to_thread(probe_ssh_endpoint, profile.host, profile.port)
+            if ok:
+                reachable.append(profile)
+            else:
+                log.write(f"[yellow]Skipping '{profile.name}' ({profile.host}): SSH port unreachable.[/yellow]")
+
+        for profile in reachable:
+            log.write(f"Checking services on '{profile.name}'...")
             for svc in KNOWN_SERVICES:
                 port = svc.get("port")
                 session = svc.get("session", "")

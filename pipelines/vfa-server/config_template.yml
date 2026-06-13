@@ -12,7 +12,7 @@ VLLMFrameAnalyzer:
   end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
   image_detail: "auto"  # Image detail for vision models: "low" (faster, less detail), "high" (slower, more detail), "auto" (model decides)
   prompt_templates_dir: <path-to-prompt-templates-dir>  # either relative to the project directory or absolute path
-  apriltag_examples_dir: <path-to-apriltag-examples-dir>  # either relative to the project directory or absolute path
+  prompt_profile: cot  # end-to-end prompt variant: cot (zero-shot CoT, paper default), baseline, baseline_no_pre
   action_schema_path: config/vfa/action_schemas.yml  # centralized schema definitions under the repo root
   # action_schema: collaboration_v1  # optional explicit override; otherwise use config/vfa/action_schemas.yml default_schema
 

@@ -12,6 +12,7 @@ from pupil_apriltags import Detector
 from retinaface import RetinaFace
 
 from openmmla.services.server import Server
+from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze
@@ -64,6 +65,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             raise FileNotFoundError(f"Prompt templates directory not found: {self.prompt_templates_dir}")
         self.logger.info(f"Prompt templates directory: {self.prompt_templates_dir}")
 
+        # Prompt profile selects which end-to-end template variant is loaded
+        # (cot | baseline | baseline_no_pre); see openmmla/services/vfa/prompt_profiles.py
+        self.prompt_profile = str(analyzer_config.get('prompt_profile', DEFAULT_PROMPT_PROFILE))
+        self.logger.info(f"Prompt profile: {self.prompt_profile}")
+
 
         if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok', 'zhipuai', 'intern']:
             backend_config = analyzer_config[self.backend]
@@ -115,19 +121,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.multi_angle_llm_system_prompt_template = ""
         self.multi_angle_llm_user_prompt_template = ""
 
-        # Define template files to load 
-        template_files = {
-            # 'multi_angle_end_system_prompt.txt': 'multi_angle_end_system_prompt_template',
-            # 'multi_angle_end_user_prompt.txt': 'multi_angle_end_user_prompt_template',
-            'multi_angle_end_system_prompt_baseline.txt': 'multi_angle_end_system_prompt_template',
-            'multi_angle_end_user_prompt_baseline.txt': 'multi_angle_end_user_prompt_template',
-            # 'multi_angle_end_system_prompt_baseline_no_pre.txt': 'multi_angle_end_system_prompt_template',
-            # 'multi_angle_end_user_prompt_baseline_no_pre.txt': 'multi_angle_end_user_prompt_template',
-            'multi_angle_vlm_system_prompt.txt': 'multi_angle_vlm_system_prompt_template',
-            'multi_angle_vlm_user_prompt.txt': 'multi_angle_vlm_user_prompt_template',
-            'multi_angle_llm_system_prompt.txt': 'multi_angle_llm_system_prompt_template',
-            'multi_angle_llm_user_prompt.txt': 'multi_angle_llm_user_prompt_template',
-        }
+        # Template files are selected by the configured prompt profile
+        # (cot | baseline | baseline_no_pre) plus the fixed two-step templates.
+        template_files = profile_template_files(self.prompt_profile)
 
         try:
             if os.path.exists(self.prompt_templates_dir):

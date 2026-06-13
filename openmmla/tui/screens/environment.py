@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import subprocess
 
 from rich.markup import escape as rich_escape
@@ -17,47 +19,36 @@ from openmmla.tui.ssh import (
 from openmmla.tui.widgets.command_session import CommandSession, _list_conda_envs_sync, _parse_conda_envs
 
 
+# Env/group metadata only. Required packages are read dynamically from the
+# project's pyproject.toml ([project.optional-dependencies].<group>), so this
+# table no longer carries a hardcoded package list.
 ENV_GROUPS = [
     {"group": "asr-base", "env": "asr-base", "python": "3.10",
-     "description": "ASR base station",
-     "packages": ["openmmla", "influxdb-client", "paho-mqtt", "pymongo", "pyyaml", "redis"]},
+     "description": "ASR base station"},
     {"group": "asr-server-nemo", "env": "asr-server-nemo", "python": "3.10",
-     "description": "ASR server (NeMo backend)",
-     "packages": ["openmmla", "flask", "gunicorn", "nemo-toolkit", "onnxruntime", "whisperx"]},
+     "description": "ASR server (NeMo backend)"},
     {"group": "asr-server-wespeaker", "env": "asr-server-wespeaker", "python": "3.10",
-     "description": "ASR server (WeSpeaker backend)",
-     "packages": [
-         "openmmla", "flask", "gunicorn", "wespeaker", "s3prl", "peft",
-         "accelerate", "openai-whisper", "hdbscan", "umap-learn", "librosa",
-     ]},
+     "description": "ASR server (WeSpeaker backend)"},
     {"group": "vfa-base", "env": "vfa-base", "python": "3.10",
-     "description": "VFA base station",
-     "packages": ["openmmla", "cv2", "influxdb-client", "paho-mqtt", "pymongo", "pyyaml", "redis"]},
+     "description": "VFA base station"},
     {"group": "vfa-server", "env": "vfa-server", "python": "3.10",
-     "description": "VFA server wrapper",
-     "packages": ["openmmla", "flask", "gunicorn", "openai", "opencv-python", "pupil-apriltags"]},
+     "description": "VFA server wrapper"},
     {"group": "vfa-vllm-runtime", "env": "vfa-vllm", "python": "3.12",
-     "description": "VFA local vLLM runtime",
-     "packages": ["openmmla", "qwen-vl-utils", "transformers", "vllm"]},
+     "description": "VFA local vLLM runtime"},
     {"group": "ips-base", "env": "ips-base", "python": "3.10",
-     "description": "IPS base station",
-     "packages": ["openmmla", "influxdb-client", "opencv-python", "paho-mqtt", "pupil-apriltags"]},
+     "description": "IPS base station"},
     {"group": "uber-base", "env": "uber-base", "python": "3.10",
-     "description": "Analysis framework",
-     "packages": ["openmmla", "influxdb-client", "pandas", "pyecharts", "pymongo", "redis"]},
+     "description": "Analysis framework"},
     {"group": "uber-server", "env": "uber-server", "python": "3.10",
-     "description": "Dashboard & infrastructure services",
-     "packages": ["openmmla", "celery", "flask", "flask-socketio", "influxdb-client", "redis"]},
+     "description": "Dashboard & infrastructure services"},
     {"group": "tui", "env": "tui", "python": "3.10",
-     "description": "TUI management console",
-     "packages": ["openmmla", "cryptography", "pyyaml", "textual"]},
+     "description": "TUI management console"},
 ]
 
 
 def _target_options() -> list[tuple[str, str]]:
-    return [("Local", "local")] + [
-        (p.name, p.name) for p in load_ssh_profiles()
-    ]
+    from openmmla.tui.ssh import target_options
+    return target_options()
 
 
 def _normalize_target(value) -> str:
@@ -96,9 +87,91 @@ def _list_conda_packages_sync(env_name: str) -> set[str]:
     return set()
 
 
-def _missing_packages(entry: dict, installed_packages: set[str]) -> list[str]:
-    required = [_normalize_package_name(pkg) for pkg in entry.get("packages", [])]
-    missing = [pkg for pkg in required if pkg not in installed_packages]
+def _requirement_to_name(req: str) -> str:
+    """Reduce a PEP 508 requirement string to its normalized distribution name.
+
+    Handles version specifiers, extras, environment markers and direct
+    references, e.g. ``modelscope[framework]==1.16.1`` -> ``modelscope`` and
+    ``wespeaker @ git+https://...`` -> ``wespeaker``.
+    """
+    req = req.split(";", 1)[0]   # drop environment markers
+    req = req.split("@", 1)[0]   # drop direct URL references (name @ url)
+    req = req.split("[", 1)[0]   # drop extras
+    req = re.split(r"[<>=!~\s]", req, 1)[0]  # drop version specifiers / whitespace
+    return _normalize_package_name(req)
+
+
+def _extract_array_items(text: str, section: str, key: str) -> list[str] | None:
+    """Fallback TOML array extractor used when no toml parser is available.
+
+    Scans the given ``section`` header for ``key = [ ... ]`` and returns the
+    quoted string items, correctly ignoring brackets that appear *inside*
+    quoted strings (e.g. ``modelscope[framework]``).
+    """
+    sec = text.find(section)
+    if sec == -1:
+        return None
+    rest = text[sec + len(section):]
+    nxt = re.search(r"\n\[", rest)  # stop at the next table header
+    if nxt:
+        rest = rest[:nxt.start()]
+    km = re.search(r'(?m)^\s*"?' + re.escape(key) + r'"?\s*=\s*', rest)
+    if not km:
+        return None
+    i = km.end()
+    while i < len(rest) and rest[i] in " \t\r\n":
+        i += 1
+    if i >= len(rest) or rest[i] != "[":
+        return None
+    i += 1
+    items: list[str] = []
+    buf: list[str] = []
+    in_str = False
+    quote = ""
+    while i < len(rest):
+        c = rest[i]
+        if in_str:
+            if c == quote:
+                items.append("".join(buf))
+                buf = []
+                in_str = False
+            else:
+                buf.append(c)
+        elif c in ("\"", "'"):
+            in_str = True
+            quote = c
+            buf = []
+        elif c == "]":
+            break
+        i += 1
+    return items
+
+
+def _parse_optional_deps_from_text(text: str, group: str) -> set[str] | None:
+    """Return normalized package names for ``[project.optional-dependencies].<group>``.
+
+    Returns ``None`` if the group can't be found so callers can fall back to a
+    hardcoded sentinel list.
+    """
+    deps: list[str] | None = None
+    try:
+        try:
+            import tomllib  # Python 3.11+
+        except ModuleNotFoundError:  # pragma: no cover
+            import tomli as tomllib  # type: ignore
+        data = tomllib.loads(text)
+        deps = list(data["project"]["optional-dependencies"][group])
+    except Exception:
+        deps = _extract_array_items(text, "[project.optional-dependencies]", group)
+    if deps is None:
+        return None
+    names = {_requirement_to_name(d) for d in deps}
+    names.discard("")
+    return names
+
+
+def _missing_packages(installed_packages: set[str], required: set[str]) -> list[str]:
+    missing = sorted(pkg for pkg in required if pkg not in installed_packages)
     if "opencv-python" in missing and "cv2" in installed_packages:
         missing.remove("opencv-python")
     if "cv2" in missing and "opencv-python" in installed_packages:
@@ -106,11 +179,21 @@ def _missing_packages(entry: dict, installed_packages: set[str]) -> list[str]:
     return missing
 
 
-def _format_env_status(entry: dict, conda_envs: set[str], env_packages: dict[str, set[str]]) -> str:
+def _format_env_status(
+    entry: dict,
+    conda_envs: set[str],
+    env_packages: dict[str, set[str]],
+    required_by_group: dict[str, set[str]],
+) -> str:
     env_name = entry["env"]
     if env_name not in conda_envs:
         return "Missing"
-    missing = _missing_packages(entry, env_packages.get(env_name, set()))
+    required = required_by_group.get(entry["group"])
+    if not required:
+        # No pyproject deps resolved for this group (file unreadable or group
+        # absent) -> we have nothing to check against.
+        return "Unknown"
+    missing = _missing_packages(env_packages.get(env_name, set()), required)
     if missing:
         suffix = ", ".join(missing[:2])
         if len(missing) > 2:
@@ -163,20 +246,21 @@ class EnvironmentPanel(Widget):
         self._root = _find_project_root()
         self._conda_envs: set[str] = set()
         self._env_packages: dict[str, set[str]] = {}
+        self._required_packages: dict[str, set[str]] = {}
         self._selected_group: str | None = None
         self._pending_delete: tuple[str, str] | None = None
         self._target = "local"
 
     def compose(self) -> ComposeResult:
         with Vertical():
+            with Horizontal(id="env-target-bar"):
+                yield Label("Host:")
+                yield Select(_target_options(), value="local", id="env-target-select")
             yield Static(
-                "Conda Environment Manager — select a target and a row, then use actions",
+                "Conda Environment Manager — select a row, then use actions",
                 id="env-header",
             )
             yield DataTable(id="env-table")
-            with Horizontal(id="env-target-bar"):
-                yield Label("Target:")
-                yield Select(_target_options(), value="local", id="env-target-select")
             with Horizontal(id="env-actions"):
                 yield Button("Connect", variant="primary", id="btn-connect")
                 yield Button("Refresh", variant="primary", id="btn-env-refresh")
@@ -244,8 +328,48 @@ class EnvironmentPanel(Widget):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "env-target-select":
-            self._set_target(_normalize_target(event.value))
+            if getattr(self, "_suppress_select", False):
+                return
+            from openmmla.tui.ssh import REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel
+            if is_select_sentinel(event.value):
+                return
+            if str(event.value) == REFRESH_TARGETS_OPTION:
+                self._cmd.log("[yellow]Testing connections to all hosts...[/yellow]")
+                self._revert_select(event.select)
+                self.run_worker(self._async_probe_hosts(), group="env-host-probe", exclusive=True)
+                return
+            target = _normalize_target(event.value)
+            if target != "local" and TARGET_STATES.get(target) == "offline":
+                self._cmd.log(
+                    f"[red]Host '{target}' is offline; staying on '{self._target}'. "
+                    f"Re-testing it now...[/red]"
+                )
+                self._revert_select(event.select)
+                self.run_worker(self._async_test_single_host(target), group="env-host-probe", exclusive=False)
+                return
+            self._set_target(target)
             self._refresh_table()
+
+    def _revert_select(self, select: Select) -> None:
+        self._suppress_select = True
+        select.value = self._target
+        self.call_after_refresh(self._clear_select_suppression)
+
+    def _clear_select_suppression(self) -> None:
+        self._suppress_select = False
+
+    async def _async_test_single_host(self, name: str) -> None:
+        from openmmla.tui.ssh import test_profile_by_name
+        success, msg = await asyncio.to_thread(test_profile_by_name, name)
+        self._refresh_target_options()
+        color = "green" if success else "red"
+        self._cmd.log(f"[{color}]'{name}': {msg}[/{color}]")
+
+    async def _async_probe_hosts(self) -> None:
+        from openmmla.tui.ssh import probe_all_profiles, summarize_states
+        states = await asyncio.to_thread(probe_all_profiles)
+        self._refresh_target_options()
+        self._cmd.log(f"[green]Connection test finished: {summarize_states(states)}.[/green]")
 
     # -- table -----------------------------------------------------------------
 
@@ -266,7 +390,33 @@ class EnvironmentPanel(Widget):
             return
         self._conda_envs = conda_envs
         self._env_packages = env_packages
+        self._required_packages = self._build_required_map(self._read_local_pyproject())
         self._populate_table()
+
+    def _read_local_pyproject(self) -> str | None:
+        path = os.path.join(self._root, "pyproject.toml")
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def _build_required_map(self, pyproject_text: str | None) -> dict[str, set[str]]:
+        """Build {group: required package names} from pyproject text.
+
+        Falls back to an empty map (callers then use the hardcoded sentinel
+        list) when the text is missing or a group can't be parsed.
+        """
+        result: dict[str, set[str]] = {}
+        if not pyproject_text:
+            return result
+        for entry in ENV_GROUPS:
+            deps = _parse_optional_deps_from_text(pyproject_text, entry["group"])
+            if deps is not None:
+                deps = set(deps)
+                deps.add("openmmla")  # the editable project itself is always installed
+                result[entry["group"]] = deps
+        return result
 
     def _list_selected_conda_packages(self, conda_envs: set[str]) -> dict[str, set[str]]:
         packages: dict[str, set[str]] = {}
@@ -280,7 +430,9 @@ class EnvironmentPanel(Widget):
         table = self.query_one("#env-table", DataTable)
         table.clear()
         for eg in ENV_GROUPS:
-            status = _format_env_status(eg, self._conda_envs, self._env_packages)
+            status = _format_env_status(
+                eg, self._conda_envs, self._env_packages, self._required_packages
+            )
             table.add_row(
                 eg["env"], eg["group"], eg["python"], status, eg["description"],
             )
@@ -304,11 +456,27 @@ class EnvironmentPanel(Widget):
             return
         self._conda_envs = _parse_conda_envs(output)
         env_packages = await self._list_remote_conda_packages(profile_name, self._conda_envs)
+        pyproject_text = await self._read_remote_pyproject(profile)
         if profile_name != self._get_target():
             return
         self._env_packages = env_packages
+        self._required_packages = self._build_required_map(pyproject_text)
         self._populate_table()
         self._log("[green]Remote env list refreshed.[/green]")
+
+    async def _read_remote_pyproject(self, profile) -> str | None:
+        remote_path = profile.remote_project_path
+        proc = await ssh_run_async(
+            profile, wrap_remote(f"cat {remote_path}/pyproject.toml")
+        )
+        assert proc.stdout is not None
+        output = ""
+        async for line in proc.stdout:
+            output += line.decode(errors="replace")
+        rc = await proc.wait()
+        if rc != 0 or not output.strip():
+            return None
+        return output
 
     async def _list_remote_conda_packages(
         self,

@@ -58,7 +58,7 @@ ifeq ($(IS_MAC), 1)
 	@config="$(MONGO_CONFIG_MAC)"; \
 	if [ -f "$$config" ]; then \
 		echo "Configuring MongoDB to listen on $(OPENMMLA_BIND_ADDRESS)"; \
-		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
 		if grep -qE '^[[:space:]]*bindIp:' "$$config"; then \
 			$(SUDO) sed -i '' -E 's/^[[:space:]]*bindIp:.*/  bindIp: $(OPENMMLA_BIND_ADDRESS)/' "$$config"; \
 		elif grep -qE '^net:[[:space:]]*$$' "$$config"; then \
@@ -73,7 +73,7 @@ else
 	@config="$(MONGO_CONFIG_LINUX)"; \
 	if [ -f "$$config" ]; then \
 		echo "Configuring MongoDB to listen on $(OPENMMLA_BIND_ADDRESS)"; \
-		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
 		if grep -qE '^[[:space:]]*bindIp:' "$$config"; then \
 			$(SUDO) sed -i -E 's/^[[:space:]]*bindIp:.*/  bindIp: $(OPENMMLA_BIND_ADDRESS)/' "$$config"; \
 		elif grep -qE '^net:[[:space:]]*$$' "$$config"; then \
@@ -91,7 +91,7 @@ ifeq ($(IS_MAC), 1)
 	@config="$(REDIS_CONFIG_MAC)"; \
 	if [ -f "$$config" ]; then \
 		echo "Configuring Redis to listen on $(OPENMMLA_BIND_ADDRESS)"; \
-		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
 		if grep -qE '^bind ' "$$config"; then \
 			$(SUDO) sed -i '' -E 's/^bind .*/bind $(OPENMMLA_BIND_ADDRESS) ::/' "$$config"; \
 		else \
@@ -109,7 +109,7 @@ else
 	@config="$(REDIS_CONFIG_LINUX)"; \
 	if [ -f "$$config" ]; then \
 		echo "Configuring Redis to listen on $(OPENMMLA_BIND_ADDRESS)"; \
-		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
 		if grep -qE '^bind ' "$$config"; then \
 			$(SUDO) sed -i -E 's/^bind .*/bind $(OPENMMLA_BIND_ADDRESS) ::/' "$$config"; \
 		else \
@@ -154,7 +154,7 @@ ifeq ($(IS_MAC), 1)
 	@config="$(INFLUX_CONFIG_MAC)"; \
 	if [ -f "$$config" ]; then \
 		echo "Configuring InfluxDB to listen on all interfaces"; \
-		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
 		if grep -qE '^[#[:space:]]*http-bind-address[[:space:]]*=' "$$config"; then \
 			$(SUDO) sed -i '' -E 's|^[#[:space:]]*http-bind-address[[:space:]]*=.*|http-bind-address = ":8086"|' "$$config"; \
 		else \
@@ -167,7 +167,7 @@ else
 	@config="$(INFLUX_CONFIG_LINUX)"; \
 	if [ -f "$$config" ]; then \
 		echo "Configuring InfluxDB to listen on all interfaces"; \
-		$(SUDO) cp "$$config" "$$config.openmmla.bak" 2>/dev/null || true; \
+		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
 		if grep -qE '^[#[:space:]]*http-bind-address[[:space:]]*=' "$$config"; then \
 			$(SUDO) sed -i -E 's|^[#[:space:]]*http-bind-address[[:space:]]*=.*|http-bind-address = ":8086"|' "$$config"; \
 		else \

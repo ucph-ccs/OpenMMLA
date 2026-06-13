@@ -44,33 +44,6 @@ def get_function_synchronizer(mode: str):
     return function_map[selected_index]
 
 
-def get_function_post(selected_speaker_files: list[str] = None, selected_files: list[str] = None) -> int:
-    """Get the function selection for ASR Post Analyzer using interactive menu."""
-    # Default to empty lists if None
-    if selected_speaker_files is None:
-        selected_speaker_files = []
-    if selected_files is None:
-        selected_files = []
-    
-    # Create options with current selection status in parentheses
-    speaker_count = len(selected_speaker_files)
-    files_count = len(selected_files)
-    
-    options = [
-        f"Select Speaker Profiles ({LIGHT_BLUE}{speaker_count} selected{ENDC})",
-        f"Select Audio Files ({LIGHT_BLUE}{files_count} selected{ENDC})", 
-        "Start Processing"
-    ]
-    
-    descriptions = [
-        "Choose speaker audio files for recognition",
-        "Select audio files to analyze",
-        "Begin processing selected files with current settings"
-    ]
-    
-    selected_index = interactive_menu("🎯 Select Post Analyzer Function", options, descriptions, exit_on_q=True)
-    return selected_index + 1  # Return 1, 2, or 3
-
 
 def get_base_mode():
     """Get the operating mode from user input."""

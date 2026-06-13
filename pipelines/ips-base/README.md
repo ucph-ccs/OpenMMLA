@@ -64,64 +64,36 @@ Streams:
 
 Streams with `ssh_profile` can be started/stopped from the TUI Launcher's **Streams** tab. Streams without `ssh_profile` are treated as external (already running).
 
-Camera calibration is required before running the IPS pipeline:
-1. Run `./calibrate.sh` (or `mmla ips-ccal`) to compute camera intrinsic parameters
-2. Run `./synchronize.sh` (or `mmla ips-ctag` + `mmla ips-csync`) to synchronize coordinate systems across multiple cameras
+### Run with the TUI (recommended)
 
-### On Servers
-
-> **Tip**: You can use `mmla tui` to configure and launch all services from the TUI Launcher, instead of running commands manually.
+Start the management console and go to **Launcher → Pipelines → IPS**:
 
 ```bash
-# 1. Run uber services on uber server with conda env `uber-server`
-# Go to /pipelines/uber-server/ to run with scripts or run manually with brew or systemctl
-make all # if start all services 
-make all -without=nginx,celery,flask,next # if start without nginx(load balancer, RTMP) and dashboard
+mmla tui
 ```
 
-### On Base Stations
+1. **Config tab**: edit `config.yml` (see `config_template.yml` for all options)
+2. **IPS Camera Calibration**: compute camera intrinsic parameters (required once per camera)
+3. **IPS Camera Sync**: run tag detectors + sync manager to align coordinate systems across cameras
+4. **IPS Base**: launch bases, synchronizer, and visualizer for the session
+5. **Transform Matrix tab**: review and sync the calibration matrices to remote hosts
+
+Infrastructure services (InfluxDB, Redis, MQTT, ...) are launched from the same Launcher under **Infrastructure**.
+
+### Manual CLI (alternative)
+
 ```bash
-# Run ips pipelines on base station with conda env `ips-base`
-# Edit your own config.yml file, see pipelines/ips-base/config_template.yml for more details
-# Prefer the mmla commands below; examples/run_*.py launchers were removed.
-# You can either run it via bash or python
-
-# ===================BASH========================
-# Run camera intrinsic calibration
-usage: ./calibrate.sh
-
-# Run multiple cameras coordinate synchronization
-usage: ./synchronize.sh [-nc] 2 [-ns] 1 [-h]
-
-options:
-  -nc  NUM_CAMERA             : Number of camera detectors to run (default: 3)
-  -ns  NUM_SYNCMANAGER       : Number of sync managers to run (default: 1)
-  -h                          : Display this help message
-
-# Run real-time indoor position system
-Usage: ./run.sh [-nb NUM_BASE] [-ns NUM_SYNCHRONIZER] [-g GRAPHICS] [-s STORE] [-h]
-
-options:
-  -nb NUM_BASE         : Number of IPS bases to run (default: 3)
-  -ns NUM_SYNCHRONIZER : Number of synchronizers to run (default: 1)
-  -g GRAPHICS          : Enable graphics (default: true)
-  -s STORE             : Store frames locally (default: true)
-  -v VERBOSE           : Enable verbose mode (default: false)
-  -h                   : Display this help message
-
-# ==================PYTHON========================
-# Activate conda env `ips-base`
 conda activate ips-base
 
-# Run camera intrinsic calibration
+# Camera intrinsic calibration
 mmla ips-ccal -c <config_path>
 
-# Run multiple cameras coordinate synchronization
-mmla ips-ctag -c <config_path> # start a camera detector
-mmla ips-csync -c <config_path> # start a camera sync manager
+# Multi-camera coordinate synchronization
+mmla ips-ctag -c <config_path>   # start a camera detector
+mmla ips-csync -c <config_path>  # start a camera sync manager
 
-# Run real-time indoor position system
-mmla ips-base -c <config_path> # start an ips base
-mmla ips-sync -c <config_path> # start an ips base synchronizer
-mmla ips-vis -c <config_path> # start an ips base visualizer
+# Real-time indoor positioning system
+mmla ips-base -c <config_path>   # start an ips base
+mmla ips-sync -c <config_path>   # start an ips synchronizer
+mmla ips-vis -c <config_path>    # start an ips visualizer
 ```

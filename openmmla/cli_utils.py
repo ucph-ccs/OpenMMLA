@@ -2,7 +2,7 @@ import importlib
 import importlib.metadata
 import sys
 
-from openmmla.cli_config import COMMANDS, OPTIONAL_DEP_MAP
+from openmmla.cli_config import COMMANDS, HIDDEN_COMMANDS, OPTIONAL_DEP_MAP
 
 
 def load_func(entry: str):
@@ -12,43 +12,54 @@ def load_func(entry: str):
     return getattr(module, func_name)
 
 
-def print_main_help():
+def print_main_help(show_all=False):
     print("\n📦 OpenMMLA CLI\n")
     print("OpenMMLA is a toolkit for multimodal learning analytics, providing various built-in pipelines for "
           "different tasks.\n")
     print(f"usage: mmla [-h] [-V] or mmla COMMAND [options]\n")
     print(f'options: \n'
-          f'    -h, --help       show this help message and exit\n'
+          f'    -h, --help       show this help message and exit (add --all for internal commands)\n'
           f'    -V --version     show version number and exit\n'
           f'    COMMAND          subcommand to run (e.g. asr-base)\n')
 
     sections = [
+        ("Management Console", "tui"),
         ("ASR (Automatic Speech Recognition)", "asr-"),
         ("IPS (Indoor Positioning System)", "ips-"),
         ("VFA (Video Frame Analyzer)", "vfa-"),
         ("Raw Data Collection", "collect-"),
         ("Session-level Tools", "ses-"),
-        ("Management Console", "tui"),
         ("Security & Encryption", "crypto"),
     ]
 
     print("🛠️  Available Commands:\n")
     for title, prefix in sections:
+        rows = [
+            (name, desc)
+            for name, (_, desc) in COMMANDS.items()
+            if name.startswith(prefix) and (show_all or name not in HIDDEN_COMMANDS)
+        ]
+        if not rows:
+            continue
         print(f"🔸 {title}")
         print("     COMMAND                  DESCRIPTION")
-        for name, (_, desc) in COMMANDS.items():
-            if name.startswith(prefix):
-                print(f"  🔹 {name:<24} {desc}")
+        for name, desc in rows:
+            print(f"  🔹 {name:<24} {desc}")
         print("")
 
-    print("📘 Tip: run `mmla <command> -h` for detailed usage of a command.\n")
+    if not show_all:
+        hidden_count = len([name for name in COMMANDS if name in HIDDEN_COMMANDS])
+        if hidden_count:
+            print(f"ℹ️  {hidden_count} internal/dev commands hidden; run `mmla --help --all` to list them.\n")
+    print("📘 Tip: run `mmla <command> -h` for detailed usage of a command. "
+          "The TUI (`mmla tui`) is the recommended way to configure and launch everything.\n")
 
 
 def run_cli():
     argv = sys.argv[1:]
 
     if not argv or argv[0] in ("-h", "--help"):
-        print_main_help()
+        print_main_help(show_all="--all" in argv)
         return
 
     if argv[0] in ("-V", "--version"):

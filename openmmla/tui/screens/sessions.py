@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import copy
 import json
 import os
@@ -37,8 +39,8 @@ def _normalize_target(value) -> str:
 
 
 def _target_options() -> list[tuple[str, str]]:
-    from openmmla.tui.ssh import load_ssh_profiles
-    return [("Local", "local")] + [(profile.name, profile.name) for profile in load_ssh_profiles()]
+    from openmmla.tui.ssh import target_options
+    return target_options()
 
 
 def _remote_path_join(root: str, *parts: str) -> str:
@@ -255,11 +257,36 @@ def _local_collection_sessions(root: str | os.PathLike[str]) -> list[dict]:
     return sessions
 
 
-def _source_label(kinds: set[str]) -> str:
-    return " + ".join(kind for kind in ("MongoDB", "Artifacts", "Collection Files") if kind in kinds) or "-"
+def _source_label(kinds: set[str], db_host: str = "") -> str:
+    parts = []
+    for kind in ("MongoDB", "Artifacts", "Collection Files"):
+        if kind in kinds:
+            if kind == "MongoDB" and db_host:
+                parts.append(f"MongoDB@{db_host}")
+            else:
+                parts.append(kind)
+    return " + ".join(parts) or "-"
 
 
-def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict]) -> list[dict]:
+def _db_host_from_config(config: dict) -> str:
+    """hostname of the MongoDB endpoint actually used for the session list."""
+    url = str((config.get("MongoDB") or {}).get("url") or "")
+    netloc = urlsplit(url).netloc if url else ""
+    return netloc.split("@")[-1].split(":")[0] if netloc else ""
+
+
+def _db_endpoint_summary(config: dict) -> str:
+    """e.g. 'MongoDB@ericli.local:27017 · InfluxDB@server-01:8086'."""
+    parts = []
+    for section, name in (("MongoDB", "MongoDB"), ("InfluxDB", "InfluxDB")):
+        url = str((config.get(section) or {}).get("url") or "")
+        if url:
+            netloc = urlsplit(url).netloc or url
+            parts.append(f"{name}@{netloc.split('@')[-1]}")
+    return " · ".join(parts)
+
+
+def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict], db_host: str = "") -> list[dict]:
     merged: dict[str, dict] = {}
     for session in mongo_sessions:
         session_id = str(session.get("session_id") or "").strip()
@@ -287,7 +314,7 @@ def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict
 
     rows = list(merged.values())
     for row in rows:
-        row["_source"] = _source_label(set(row.get("_source_kinds") or []))
+        row["_source"] = _source_label(set(row.get("_source_kinds") or []), db_host)
     return sorted(rows, key=lambda row: _coerce_start_timestamp(row.get("start_time")), reverse=True)
 
 
@@ -305,17 +332,19 @@ class SessionsPanel(Widget):
         content-align: center middle;
         text-style: bold;
     }
+    /* unified target bar: identical placement/style across Launcher,
+       Environment, and Sessions (top of the panel, full-width select) */
     #sessions-target-bar {
-        height: 3;
+        layout: horizontal;
+        height: auto;
         padding: 0 1;
-        background: $panel;
-        align: center middle;
     }
     #sessions-target-bar Label {
         width: 10;
+        padding-top: 1;
     }
     #sessions-target-select {
-        width: 40;
+        width: 1fr;
     }
     #sessions-table {
         height: 1fr;
@@ -349,7 +378,7 @@ class SessionsPanel(Widget):
     def compose(self) -> ComposeResult:
         with Vertical():
             with Horizontal(id="sessions-target-bar"):
-                yield Label("Target:")
+                yield Label("Host:")
                 yield Select(_target_options(), value="local", id="sessions-target-select")
             yield Static("Discovering database configuration...", id="sessions-summary")
             yield DataTable(id="sessions-table")
@@ -494,6 +523,21 @@ class SessionsPanel(Widget):
         except Exception:
             pass
 
+    async def _async_test_single_host(self, name: str) -> None:
+        from openmmla.tui.ssh import test_profile_by_name
+        success, msg = await asyncio.to_thread(test_profile_by_name, name)
+        self._refresh_target_options()
+        color = "green" if success else "red"
+        self.query_one("#sessions-log", RichLog).write(f"[{color}]'{name}': {msg}[/{color}]")
+
+    async def _async_probe_hosts(self) -> None:
+        from openmmla.tui.ssh import probe_all_profiles, summarize_states
+        states = await asyncio.to_thread(probe_all_profiles)
+        self._refresh_target_options()
+        self.query_one("#sessions-log", RichLog).write(
+            f"[green]Connection test finished: {summarize_states(states)}.[/green]"
+        )
+
     # ---- session listing ----
 
     def _refresh_sessions(self) -> None:
@@ -504,7 +548,8 @@ class SessionsPanel(Widget):
         if self._target == "local":
             root = _find_project_root()
             artifact_sessions = _local_artifact_sessions(root) + _local_collection_sessions(root)
-        self._sessions = _merge_session_rows(mongo_sessions, artifact_sessions)
+        db_host = _db_host_from_config(self._config_source.config) if self._config_source else ""
+        self._sessions = _merge_session_rows(mongo_sessions, artifact_sessions, db_host)
         table = self.query_one("#sessions-table", DataTable)
         table.clear()
 
@@ -518,7 +563,11 @@ class SessionsPanel(Widget):
             table.add_row(sid, exp, grp, status, start_str, ses.get("_source", "-"))
 
         source = self._config_source.label if self._config_source else self._target
-        detail = f"Source: {source}"
+        detail = f"Config: {source}"
+        if self._config_source:
+            endpoints = _db_endpoint_summary(self._config_source.config)
+            if endpoints:
+                detail += f" | {endpoints}"
         if self._target == "local":
             detail += " + local artifacts"
         self._update_summary(f"Sessions: {len(self._sessions)} found | {detail}")
@@ -538,13 +587,39 @@ class SessionsPanel(Widget):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "sessions-target-select":
             return
+        if getattr(self, "_suppress_select", False):
+            return
+        from openmmla.tui.ssh import REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel
+        if is_select_sentinel(event.value):
+            return
+        if str(event.value) == REFRESH_TARGETS_OPTION:
+            self.query_one("#sessions-log", RichLog).write("[yellow]Testing connections to all hosts...[/yellow]")
+            self._revert_select(event.select)
+            self.run_worker(self._async_probe_hosts(), group="sessions-host-probe", exclusive=True)
+            return
         target = _normalize_target(event.value)
+        if target != "local" and TARGET_STATES.get(target) == "offline":
+            self.query_one("#sessions-log", RichLog).write(
+                f"[red]Host '{target}' is offline; staying on '{self._target}'. "
+                f"Re-testing it now...[/red]"
+            )
+            self._revert_select(event.select)
+            self.run_worker(self._async_test_single_host(target), group="sessions-host-probe", exclusive=False)
+            return
         if target == self._target and self._mongo_client is not None:
             return
         self._target = target
         self._config_path = None
         self._config_source = None
         self.run_worker(self._async_init(target), exclusive=True)
+
+    def _revert_select(self, select: Select) -> None:
+        self._suppress_select = True
+        select.value = self._target
+        self.call_after_refresh(self._clear_select_suppression)
+
+    def _clear_select_suppression(self) -> None:
+        self._suppress_select = False
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id

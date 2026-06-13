@@ -90,6 +90,12 @@ class ServiceCard(Widget):
         padding: 0 1;
         margin: 0 1 1 1;
     }
+    /* the card's content wrapper must size to its rows: Vertical defaults to
+       height:1fr, which would clamp the card to the scroll viewport and clip
+       the lower param rows inside the border */
+    ServiceCard Vertical {
+        height: auto;
+    }
     ServiceCard .card-title {
         text-style: bold;
         color: $text;

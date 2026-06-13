@@ -84,6 +84,39 @@ def is_sensitive_key(key_name: str) -> bool:
     return key_name.lower() in SENSITIVE_KEYS
 
 
+def ensure_master_key() -> bytes:
+    """load the master key, generating one automatically on first use."""
+    try:
+        return load_master_key()
+    except FileNotFoundError:
+        generate_master_key()
+        logger.info("No master key found; generated a new one.")
+        return load_master_key()
+
+
+def encrypt_sensitive_values(data: dict, key: bytes | None = None) -> int:
+    """recursively encrypt plaintext sensitive values in-place.
+
+    Existing ENC(...) values and template placeholders (<...>) are left
+    untouched. Returns the number of values encrypted."""
+    if key is None:
+        key = load_master_key()
+    count = 0
+    for k, v in data.items():
+        if isinstance(v, dict):
+            count += encrypt_sensitive_values(v, key)
+        elif (
+            isinstance(v, str)
+            and v
+            and is_sensitive_key(k)
+            and not is_encrypted(v)
+            and not v.startswith("<")
+        ):
+            data[k] = encrypt_value(v, key)
+            count += 1
+    return count
+
+
 def process_config_dict(data: dict, key: bytes | None = None) -> tuple[dict, bool]:
     """recursively walk a config dict, decrypt ENC() values in-place, and detect
     plaintext sensitive values that need encryption.
@@ -103,7 +136,15 @@ def process_config_dict(data: dict, key: bytes | None = None) -> tuple[dict, boo
             if sub_rewrite:
                 needs_rewrite = True
         elif isinstance(v, str) and is_encrypted(v):
-            runtime_data[k] = decrypt_value(v, key)
+            try:
+                runtime_data[k] = decrypt_value(v, key)
+            except Exception:
+                logger.warning(
+                    f"Could not decrypt config value '{k}' — wrong or missing master key? "
+                    f"Keeping the encrypted form; sync ~/.openmmla/master.key from the "
+                    f"machine that encrypted it."
+                )
+                runtime_data[k] = v
         elif isinstance(v, str) and is_sensitive_key(k) and v and not v.startswith("<"):
             data[k] = encrypt_value(v, key)
             runtime_data[k] = v

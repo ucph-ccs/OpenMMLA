@@ -9,15 +9,15 @@ active_experiments:
   task_type: wegrow
 - experiment_id: exp_test
   title: test
-  status: inactive
+  status: active
   task_type: microbit_circuit
 - experiment_id: exp_20260603_microbit
   title: microbit
-  status: active
+  status: inactive
   task_type: microbit_circuit
 - experiment_id: exp_20260603_wegrow
   title: wegrow
-  status: active
+  status: inactive
   task_type: wegrow
 assignments:
   exp_20260520_microbit:

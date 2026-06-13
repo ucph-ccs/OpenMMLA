@@ -80,10 +80,17 @@ class ExperimentForm(Widget):
             task = exp.get("task_type", "")
             status = exp.get("status", "")
             groups = self._groups_summary(eid)
+            is_active = status == "active"
+            status_markup = "[green]active[/green]" if is_active else "[dim]inactive[/dim]"
             yield Horizontal(
                 Static(
-                    f"{eid}  —  {title}  [{task}]  ({status})  {groups}",
+                    f"{eid}  —  {title}  [{task}]  ({status_markup})  {groups}",
                     classes="ef-entry-name",
+                ),
+                Button(
+                    "Deactivate" if is_active else "Activate",
+                    variant="default" if is_active else "success",
+                    id=f"ef-toggle-{eid}",
                 ),
                 Button("Edit", id=f"ef-open-{eid}"),
                 Button("Delete", variant="error", id=f"ef-del-{eid}"),
@@ -297,7 +304,25 @@ class ExperimentForm(Widget):
         btn_id = event.button.id or ""
 
         # list view actions
-        if btn_id.startswith("ef-open-"):
+        if btn_id.startswith("ef-toggle-"):
+            eid = btn_id[len("ef-toggle-"):]
+            exp = next(
+                (e for e in self._data.get("active_experiments", []) if e.get("experiment_id") == eid),
+                None,
+            )
+            if exp is None:
+                return
+            new_status = "inactive" if exp.get("status", "active") == "active" else "active"
+            exp["status"] = new_status
+            save_experiments(self._data)
+            await self._show_list()
+            color = "green" if new_status == "active" else "yellow"
+            self.call_after_refresh(
+                lambda: self._set_status(f"[{color}]Experiment '{eid}' is now {new_status}.[/{color}]")
+            )
+            self.post_message(self.DataChanged())
+
+        elif btn_id.startswith("ef-open-"):
             eid = btn_id[len("ef-open-"):]
             await self._show_detail(eid)
 
