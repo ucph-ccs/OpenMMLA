@@ -1253,10 +1253,12 @@ def _stack_service_shell_command(
     workdir, module = _split_app_target(str(spec["app"]), check_filesystem=not remote)
     quote = _quote_remote_path if remote else shlex.quote
     cd_part = f"cd {quote(workdir)} && " if workdir else ""
+    # The WSGI app factories read the un-prefixed PROJECT_DIR / CONFIG_PATH
+    # (see openmmla/commands/asr/*.py and openmmla/services/**/apps/serve_*.py).
     return (
         f"{cd_part}"
-        f"OPENMMLA_PROJECT_DIR={quote(project_dir)} "
-        f"OPENMMLA_CONFIG_PATH={quote(config_path)} "
+        f"PROJECT_DIR={quote(project_dir)} "
+        f"CONFIG_PATH={quote(config_path)} "
         f"gunicorn -k gevent -w {spec['workers']} -b 0.0.0.0:{spec['port']} {module}:app"
     )
 

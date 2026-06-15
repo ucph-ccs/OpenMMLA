@@ -828,7 +828,12 @@ class EnvironmentPanel(Widget):
         if profile is None:
             return
         remote_path = profile.remote_project_path
-        cmd = f"cd {remote_path} && conda run -n {env_name} pip install -e '.[{group}]'"
+        # --no-capture-output: conda run buffers child stdout/stderr by default
+        # and only flushes on exit; this streams pip output line-by-line instead.
+        cmd = (
+            f"cd {remote_path} && "
+            f"conda run --no-capture-output -n {env_name} pip install -e '.[{group}]'"
+        )
         self._log(f"  remote$ {rich_escape(cmd)}")
         proc = await ssh_run_async(profile, wrap_remote(cmd))
         assert proc.stdout is not None

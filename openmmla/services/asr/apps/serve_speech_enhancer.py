@@ -4,9 +4,12 @@ import os
 from openmmla.services.asr.speech_enhancer import SpeechEnhancer
 from openmmla.utils.apps import create_app
 
-default_project_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-project_dir = os.environ.get('OPENMMLA_PROJECT_DIR', default_project_dir)
-config_path = os.environ.get('OPENMMLA_CONFIG_PATH', os.path.join(project_dir, 'config.yml'))
+project_dir = os.environ.get('PROJECT_DIR')
+config_path = os.environ.get('CONFIG_PATH')
+if not project_dir:
+    raise RuntimeError("Environment variable PROJECT_DIR must be set, please set it via export or -c.")
+if not config_path:
+    raise RuntimeError("Environment variable CONFIG_PATH must be set, please set it via export or -c.")
 app = create_app(
     class_type=SpeechEnhancer,
     endpoint='enhance',
