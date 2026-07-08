@@ -11,9 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# CPU torch wheel keeps this image small
+# CPU torch wheel keeps this image small; pinned 2.4.1 because silero-vad
+# 5.1.2 uses torchaudio.list_audio_backends, removed in newer torchaudio
 RUN pip install --index-url https://download.pytorch.org/whl/cpu \
-        "torch" "torchaudio" && \
+        "torch==2.4.1" "torchaudio==2.4.1" && \
     pip install \
         "silero-vad==5.1.2" \
         "soundfile" \
