@@ -17,6 +17,7 @@ RUN pip install \
         "modelscope[framework]==1.16.1" \
         "rotary-embedding-torch==0.6.4" \
         "speechbrain==1.0.0" \
+        "Pillow" \
         "librosa" "soundfile" \
         "flask==3.0.3" "gunicorn==23.0.0" "gevent==24.2.1" \
         "pyyaml" "cryptography>=42.0.0"

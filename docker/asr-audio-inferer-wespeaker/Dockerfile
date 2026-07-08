@@ -19,6 +19,7 @@ RUN pip install \
         "librosa" "soundfile" "tqdm" \
         "silero-vad" \
         "transformers>=4.43,<5" \
+        "onnxruntime" "kaldiio" "scipy" "scikit-learn" "requests" \
         "wespeaker @ git+https://github.com/wenet-e2e/wespeaker.git@9ce7995648a281ba6ce6f4e7a33941672ef22779" \
         "flask==3.0.3" "gunicorn==23.0.0" "gevent==24.2.1" \
         "pyyaml" "cryptography>=42.0.0"
