@@ -204,7 +204,8 @@ class AudioInferer(Server):
             raise RuntimeError("WeSpeaker failed to extract embedding")
         if embedding.is_cuda:
             embedding = embedding.cpu()
-        return embedding.detach().numpy().squeeze()
+        # Keep batch dimension (1, D) to match other backends
+        return embedding.detach().numpy().reshape(1, -1)
 
     def _infer_signal_onnx(self, signal):
         self.data_layer.set_signal(signal)

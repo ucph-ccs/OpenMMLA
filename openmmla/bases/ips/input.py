@@ -127,3 +127,10 @@ def get_function_visualizer(dimension: str):
 
         except ValueError:
             print('Please enter a valid integer')
+
+
+# base-list helpers are shared across pipelines; re-exported here for IPS callers
+from openmmla.utils.config import (  # noqa: E402,F401
+    get_bases, get_base_by_id, coerce_source_index, select_source_by_index_or_name,
+    compute_initial_sync_time,
+)

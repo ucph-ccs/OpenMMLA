@@ -13,12 +13,15 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('mode', str, 'full', 'operating mode', choices=['record', 'analyze', 'full'], shortname='-m')
+    add_arg('mode', str, 'live', 'operating mode (capture/analyze/live)', choices=['capture', 'analyze', 'live'], shortname='-m')
     add_arg('graphics', bool, True, 'whether to display video frames', shortname='-g')
     add_arg('store', bool, True, 'whether to store frames locally', shortname='-s')
     add_arg('verbose', bool, False, 'whether to print debug information', shortname='-v')
     add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
             shortname='-sid')
+    add_arg('base', str, None,
+            "base id from config 'Bases' (pulls camera/source/source_index/camera_angle from that entry); "
+            "if omitted, choose interactively", shortname='-b')
     return parser
 
 
@@ -38,7 +41,8 @@ def main():
         graphics=args.graphics,
         store=args.store,
         verbose=args.verbose,
-        session_id=args.session_id
+        session_id=args.session_id,
+        base=args.base
     )
     vfa_base.run()
 

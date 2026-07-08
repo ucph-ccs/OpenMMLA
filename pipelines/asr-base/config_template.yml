@@ -18,9 +18,10 @@ Base:
     update_threshold:             # Similarity threshold for incrementally updating speaker profile
     gain:                         # Volume gain multiplier in decibels for audio preprocessing
     score_amplified:              # Whether to amplify the similarity score of the audio signal based on the energy level
-    source:                       # AudioStream source type (udp/tcp/pyaudio/rtmp/lsl/file)
-    file_dir:                     # Directory path containing audio files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
-    initial_sync_time:            # Unix timestamp to start synchronizing from when source type is 'file'
+    # NOTE: per-base 'source' and 'source_index' live in Bases (below). 'file_dir'
+    # is optional (defaults to the project dir); initial_sync_time is auto-computed
+    # from the audio file name at runtime.
+    file_dir:                     # (optional) directory of audio files for source 'file'; filename format: <prefix>_<timestamp>.<extension>
     port_offset:                  # Port offset for udp/tcp streams
     stream_kwargs:                # Additional stream settings
       channels:                   # Number of audio channels of the input device (if channels >1, channel selection is required)
@@ -30,18 +31,6 @@ Base:
       buffer_duration:            # Buffer duration in seconds for audio stream
       resample_method:            # Resampling method for audio processing
       host:                       # listening address for udp/tcp streams (0.0.0 for all interfaces)
- 
-# synchronizer settings
-Synchronizer:
-  result_expiry_time: 10        # cleanup timeout (seconds)
-  bucket_duration: 3            # time bucket duration (seconds) for synchronized result (default: recognize_duration)
-  match_tolerance: 1.5          # matching tolerance (seconds) for incoming result to time buckets (default: ~bucket_duration/2)
-
-# post analyzer settings
-# streams settings
-# each entry defines an audio stream source. streams with ssh_profile can be started/stopped
-# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
-Streams:
   # example 1: external RTMP stream (already running, Base pulls from URL)
   # rtmp-mic-1:
   #   target: rtmp://uber-server.local/stream_01
@@ -54,6 +43,33 @@ Streams:
   #   format: s16le                   # audio format (s16le, f32le, etc.)
   #   rate: 16000                     # sample rate in Hz
   #   channels: 1                     # number of audio channels
+
+# bases settings
+# Each entry defines one ASR base node (a microphone). A base references a base
+# type (from Base) and carries its per-device binding. This is the single source
+# of truth for base id, type and device — used by interactive and headless/remote
+# runs, so you no longer type the id or pick the base type at startup.
+Bases:
+  # one template entry (edit it / use "+ Add Entry" in the TUI). Entries whose
+  # id is left as a <...> placeholder are ignored at runtime.
+  - id: <base-id>               # base id / identity (string or number; part of base_id {base_type}_{id})
+    base_type: <Your_Device_Name>   # which entry under Base
+    source: pyaudio             # source type (udp/tcp/pyaudio/rtmp/lsl/file)
+    source_index: 0             # pyaudio: input device index; file: file name in file_dir; lsl: stream name (udp/tcp use 'port')
+    channel: 0                  # channel selection (optional, multi-channel devices)
+    port: 5001                  # listening port (required only for source udp/tcp; decoupled from id)
+ 
+# synchronizer settings
+Synchronizer:
+  result_expiry_time: 10        # cleanup timeout (seconds)
+  bucket_duration: 3            # time bucket duration (seconds) for synchronized result (default: recognize_duration)
+  match_tolerance: 1.5          # matching tolerance (seconds) for incoming result to time buckets (default: ~bucket_duration/2)
+
+# post analyzer settings
+# streams settings
+# each entry defines an audio stream source. streams with ssh_profile can be started/stopped
+# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
+Streams:
 
 # Database settings
 InfluxDB:
@@ -102,6 +118,17 @@ Redis:
   host: <redis-example-server>
   port: <port-number>
   db: <database-number>
+
+# Gateway (Nginx) settings
+# Shared reverse-proxy/load-balancer endpoint that bases connect to. In the
+# Server section below, a service may be given either as a bare endpoint name
+# (composed against this gateway, e.g. 'infer' -> {scheme}://{host}:{http_port}/infer)
+# or as a full URL (used as-is, bypassing the gateway for a direct connection).
+Gateway:
+  host: <gateway-host>      # nginx host, e.g. uber-server.local
+  http_port: 8080           # nginx HTTP reverse-proxy port
+  rtmp_port: 1935           # nginx RTMP port for video/audio streams
+  scheme: http              # http or https
 
 # Server settings
 Server:

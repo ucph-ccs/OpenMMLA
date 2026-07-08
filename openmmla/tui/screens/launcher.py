@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import re
 import shlex
@@ -18,6 +19,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import yaml
 from rich.markup import escape as rich_escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll, Vertical, Horizontal
 from textual.widget import Widget
@@ -32,12 +34,15 @@ from openmmla.tui.schema.loader import (
     load_streams, streams_from_config,
 )
 from openmmla.tui.schema.definitions import (
-    SHARED_SECTIONS, apply_shared_values,
+    SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
 )
 from openmmla.tui.system_services import (
     SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
     load_system_service_values,
+    load_system_services_config,
     save_system_service_section,
+    pipeline_section_overrides,
+    shared_section_drift,
 )
 from openmmla.tui.ssh import (
     REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel, probe_all_profiles, probe_ssh_endpoint, summarize_states, target_options, target_state_label,
@@ -104,6 +109,7 @@ _GLOBAL_DEFAULT_NAV_ORDER = (
     "InfluxDB",
     "MQTT",
     "Redis",
+    "Gateway",
 )
 _SYSTEM_SERVICES_LABEL = "System Services"
 
@@ -604,6 +610,11 @@ def _ips_transform_local_dir(root: str) -> str:
     return os.path.join(root, "pipelines", "ips-base", "camera_sync")
 
 
+def _ips_cameras_local_dir(root: str) -> str:
+    """directory where camera calibration captures per-camera image folders."""
+    return os.path.join(root, "pipelines", "ips-base", "camera_calib", "cameras")
+
+
 def _is_transform_matrix_file(name: str) -> bool:
     return name.startswith("transformation_matrices") and name.endswith(".json")
 
@@ -638,6 +649,63 @@ def _remote_transform_matrix_files(profile, remote_dir: str) -> list[str]:
     )
 
 
+_FILE_MISSING_SENTINEL = "__OPENMMLA_FILE_MISSING__"
+
+
+def _remote_list_files(profile, remote_dir: str, suffix: str) -> list[str]:
+    """list files in a remote directory matching *suffix (basename only)."""
+    quoted = _quote_remote_path(remote_dir)
+    cmd = (
+        f"if [ -d {quoted} ]; then "
+        f"find {quoted} -maxdepth 1 -type f -name '*{suffix}' -exec basename {{}} \\; "
+        "2>/dev/null; fi"
+    )
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=8.0)
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return sorted(
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if line.strip() and not line.strip().startswith(".")
+    )
+
+
+def _remote_read_file(profile, remote_path: str) -> str | None:
+    """read a remote file's contents, or None if missing/unreadable."""
+    quoted = _quote_remote_path(remote_path)
+    cmd = f"if [ -f {quoted} ]; then cat {quoted}; else printf '{_FILE_MISSING_SENTINEL}'; fi"
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=10.0)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    out = result.stdout or ""
+    if out.strip() == _FILE_MISSING_SENTINEL:
+        return None
+    return out
+
+
+def _remote_write_file(profile, remote_path: str, content: str) -> tuple[bool, str]:
+    """write content to a remote file (creating parent dirs). Returns (ok, error)."""
+    quoted = _quote_remote_path(remote_path)
+    remote_dir = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
+    cmd = f"mkdir -p {_quote_remote_path(remote_dir)} && cat > {quoted}"
+    args = profile.base_ssh_args() + [cmd]
+    try:
+        proc = subprocess.run(
+            args, input=content, capture_output=True, text=True, timeout=20.0
+        )
+    except Exception as exc:
+        return False, str(exc)
+    if proc.returncode != 0:
+        return False, (proc.stderr or "").strip() or f"exit code {proc.returncode}"
+    return True, ""
+
+
 class TransformMatrixPanel(Widget):
     """IPS transform matrix file overview and sync controls."""
 
@@ -668,6 +736,10 @@ class TransformMatrixPanel(Widget):
         min-width: 20;
         margin-left: 1;
     }
+    TransformMatrixPanel #tm-editor {
+        height: 22;
+        margin-top: 1;
+    }
     """
 
     def __init__(
@@ -679,6 +751,7 @@ class TransformMatrixPanel(Widget):
         local_files: list[str],
         remote_files: list[str],
         ssh_profiles: list[str],
+        ssh_profile=None,
     ) -> None:
         super().__init__()
         self.local_dir = local_dir
@@ -687,20 +760,65 @@ class TransformMatrixPanel(Widget):
         self.local_files = local_files
         self.remote_files = remote_files
         self.ssh_profiles = ssh_profiles
+        # when set (host is remote), the panel lists/reads/writes the matrix
+        # files on the selected remote host instead of the local disk
+        self._ssh_profile = ssh_profile
+        self._current_file: str | None = None
+
+    @property
+    def _is_remote(self) -> bool:
+        return (
+            self.target != "local"
+            and self._ssh_profile is not None
+            and self.remote_dir is not None
+        )
+
+    @property
+    def _dir(self) -> str:
+        return self.remote_dir if self._is_remote else self.local_dir
+
+    def _file_path(self, name: str) -> str:
+        if self._is_remote:
+            return _remote_path_join(self.remote_dir, name)
+        return os.path.join(self.local_dir, name)
+
+    def _tm_files(self) -> list[str]:
+        return self.remote_files if self._is_remote else self.local_files
 
     def compose(self) -> ComposeResult:
-        files = self.remote_files if self.target != "local" else self.local_files
+        # make the active source unambiguous: when the host is remote, the list
+        # and editor operate on that host's files (read/written over SSH); when
+        # local, on the local disk.
+        host_label = self.target if self._is_remote else "Local"
+        files = self._tm_files()
         yield Static("[b]Transform Matrix[/b]", classes="tm-title")
-        yield Static(f"Local: {self.local_dir}", classes="tm-muted")
-        if self.remote_dir:
-            yield Static(f"Remote: {self.target}:{self.remote_dir}", classes="tm-muted")
-        yield Static("Files:", classes="tm-title")
-        if files:
-            for name in files:
-                yield Static(name, classes="tm-file")
-        else:
-            yield Static("No transformation_matrices*.json files found.", classes="tm-muted")
+        yield Static(f"Editing on {host_label}: {self._dir}", classes="tm-muted")
+        if self._is_remote:
+            yield Static(f"(Local copy: {self.local_dir})", classes="tm-muted")
+        yield Static(
+            "Generated by camera sync; edit here only to inspect/correct.",
+            classes="tm-muted",
+        )
 
+        if files:
+            yield Select(
+                [(name, name) for name in files],
+                prompt="Select a transform matrix file...",
+                id="tm-file-select",
+            )
+            yield TextArea("", id="tm-editor", read_only=True)
+            with Horizontal(classes="tm-actions"):
+                yield Button("Save", variant="primary", id="btn-tm-save", disabled=True)
+                yield Button("Reload", id="btn-tm-reload", disabled=True)
+            yield Static("", id="tm-status", classes="tm-muted")
+        else:
+            where = host_label
+            yield Static(
+                f"No transformation_matrices*.json files found on {where}.",
+                classes="tm-muted",
+            )
+
+        # Sync is only offered from the local host (push local -> remote).
         if self.target == "local":
             if self.ssh_profiles:
                 with Horizontal(classes="tm-actions"):
@@ -712,13 +830,285 @@ class TransformMatrixPanel(Widget):
                     yield Button("Sync to Remote", variant="warning", id="btn-sync-transform-remote")
             else:
                 yield Static("No SSH profiles configured for sync.", classes="tm-muted")
-        else:
-            with Horizontal(classes="tm-actions"):
-                yield Button(
-                    f"Sync Local to {self.target}",
-                    variant="warning",
-                    id="btn-sync-transform-local-target",
-                )
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#tm-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _load_current(self) -> None:
+        editor = self.query_one("#tm-editor", TextArea)
+        if not self._current_file:
+            editor.load_text("")
+            editor.read_only = True
+            return
+        path = self._file_path(self._current_file)
+        host_label = self.target if self._is_remote else "local"
+        if self._is_remote:
+            content = _remote_read_file(self._ssh_profile, path)
+            if content is None:
+                editor.load_text("")
+                editor.read_only = True
+                self._set_status(f"Could not read {self._current_file} on {host_label}")
+                return
+            editor.load_text(content)
+            editor.read_only = False
+            self._set_status(f"Loaded {self._current_file} from {host_label}")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                editor.load_text(fh.read())
+            editor.read_only = False
+            self._set_status(f"Loaded {self._current_file} from {host_label}")
+        except OSError as exc:
+            editor.load_text("")
+            editor.read_only = True
+            self._set_status(f"Could not read {self._current_file}: {exc}")
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "tm-file-select":
+            return
+        value = event.value
+        self._current_file = None if value in (None, Select.BLANK) else str(value)
+        has_file = self._current_file is not None
+        self.query_one("#btn-tm-save", Button).disabled = not has_file
+        self.query_one("#btn-tm-reload", Button).disabled = not has_file
+        self._load_current()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-tm-reload":
+            self._load_current()
+        elif event.button.id == "btn-tm-save":
+            if not self._current_file:
+                return
+            editor = self.query_one("#tm-editor", TextArea)
+            text = editor.text
+            try:
+                json.loads(text)  # reject invalid JSON before writing
+            except Exception as exc:
+                self._set_status(f"Not saved — invalid JSON: {exc}")
+                return
+            path = self._file_path(self._current_file)
+            host_label = self.target if self._is_remote else "local"
+            if self._is_remote:
+                ok, err = _remote_write_file(self._ssh_profile, path, text)
+                if ok:
+                    self._set_status(f"Saved {self._current_file} to {host_label}")
+                else:
+                    self._set_status(f"Save failed on {host_label}: {err}")
+                return
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                self._set_status(f"Saved {self._current_file} to {host_label}")
+            except OSError as exc:
+                self._set_status(f"Save failed: {exc}")
+
+
+class CameraManagerPanel(Widget):
+    """Browse and delete camera calibration image folders (local host only).
+
+    Calibration writes captured checkerboard images to
+    camera_calib/cameras/<camera_name>/. This panel lists those folders, shows
+    the images in a chosen camera, and lets the user delete a single image or a
+    whole camera folder without leaving the TUI.
+    """
+
+    DEFAULT_CSS = """
+    CameraManagerPanel {
+        height: auto;
+        padding: 1 2;
+    }
+    CameraManagerPanel .cm-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    CameraManagerPanel .cm-muted {
+        color: $text-muted;
+    }
+    CameraManagerPanel .cm-actions {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    CameraManagerPanel .cm-actions Button {
+        min-width: 18;
+        margin-right: 1;
+    }
+    CameraManagerPanel #cm-images {
+        height: 12;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, *, cameras_dir: str, target: str) -> None:
+        super().__init__()
+        self.cameras_dir = cameras_dir
+        self.target = target
+        self._current_camera: str | None = None
+
+    # ── filesystem helpers ───────────────────────────────────────
+    def _cameras(self) -> list[str]:
+        try:
+            return sorted(
+                name for name in os.listdir(self.cameras_dir)
+                if os.path.isdir(os.path.join(self.cameras_dir, name)) and not name.startswith(".")
+            )
+        except OSError:
+            return []
+
+    def _images(self, camera: str | None) -> list[str]:
+        if not camera:
+            return []
+        cam_dir = os.path.join(self.cameras_dir, camera)
+        try:
+            return sorted(
+                name for name in os.listdir(cam_dir)
+                if name.lower().endswith((".jpg", ".jpeg", ".png"))
+            )
+        except OSError:
+            return []
+
+    # ── compose ──────────────────────────────────────────────────
+    def compose(self) -> ComposeResult:
+        yield Static("[b]Calibration Cameras[/b]", classes="cm-title")
+        if self.target != "local":
+            yield Static(
+                "Camera image management is available on the Local host only.",
+                classes="cm-muted",
+            )
+            return
+        yield Static(f"Folder: {self.cameras_dir}", classes="cm-muted")
+        cameras = self._cameras()
+        if not cameras:
+            yield Static("No captured cameras yet (run a Capture from calibration).", classes="cm-muted")
+            return
+        yield Select(
+            [(c, c) for c in cameras],
+            prompt="Select a camera...",
+            id="cm-camera-select",
+        )
+        yield Static("", id="cm-info", classes="cm-muted")
+        yield Select([], prompt="Select an image...", id="cm-image-select")
+        with Horizontal(classes="cm-actions"):
+            yield Button("Delete Image", variant="error", id="btn-cm-del-image", disabled=True)
+            yield Button("Delete Camera", variant="error", id="btn-cm-del-camera", disabled=True)
+            yield Button("Refresh", id="btn-cm-refresh")
+        yield Static("", id="cm-status", classes="cm-muted")
+
+    # ── helpers ──────────────────────────────────────────────────
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#cm-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _refresh_cameras(self) -> None:
+        """re-list cameras after a deletion (rebuild the camera dropdown)."""
+        try:
+            sel = self.query_one("#cm-camera-select", Select)
+            sel.set_options([(c, c) for c in self._cameras()])
+            sel.value = Select.BLANK
+        except Exception:
+            pass
+        self._current_camera = None
+        self._refresh_images()
+        try:
+            self.query_one("#btn-cm-del-camera", Button).disabled = True
+        except Exception:
+            pass
+
+    def _refresh_images(self) -> None:
+        images = self._images(self._current_camera)
+        try:
+            img_sel = self.query_one("#cm-image-select", Select)
+            img_sel.set_options([(n, n) for n in images])
+            img_sel.value = Select.BLANK
+        except Exception:
+            pass
+        try:
+            self.query_one("#cm-info", Static).update(
+                f"{self._current_camera}: {len(images)} image(s)" if self._current_camera else ""
+            )
+        except Exception:
+            pass
+        try:
+            self.query_one("#btn-cm-del-image", Button).disabled = True
+        except Exception:
+            pass
+
+    # ── events ───────────────────────────────────────────────────
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "cm-camera-select":
+            self._current_camera = None if event.value is Select.BLANK else str(event.value)
+            self._refresh_images()
+            try:
+                self.query_one("#btn-cm-del-camera", Button).disabled = self._current_camera is None
+            except Exception:
+                pass
+        elif event.select.id == "cm-image-select":
+            has = event.value not in (None, Select.BLANK)
+            try:
+                self.query_one("#btn-cm-del-image", Button).disabled = not has
+            except Exception:
+                pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid == "btn-cm-refresh":
+            event.stop()
+            self._refresh_cameras()
+            self._set_status("Refreshed.")
+        elif bid == "btn-cm-del-image":
+            event.stop()
+            self._delete_image()
+        elif bid == "btn-cm-del-camera":
+            event.stop()
+            self._delete_camera()
+
+    def _safe_under_cameras(self, path: str) -> bool:
+        root = os.path.abspath(self.cameras_dir)
+        target = os.path.abspath(path)
+        try:
+            return os.path.commonpath([root, target]) == root and target != root
+        except ValueError:
+            return False
+
+    def _delete_image(self) -> None:
+        if not self._current_camera:
+            return
+        try:
+            img = self.query_one("#cm-image-select", Select).value
+        except Exception:
+            return
+        if img in (None, Select.BLANK):
+            return
+        path = os.path.join(self.cameras_dir, self._current_camera, str(img))
+        if not self._safe_under_cameras(path):
+            self._set_status("Refusing to delete a path outside the cameras folder.")
+            return
+        try:
+            os.remove(path)
+            self._set_status(f"Deleted image {img}")
+        except OSError as exc:
+            self._set_status(f"Delete failed: {exc}")
+        self._refresh_images()
+
+    def _delete_camera(self) -> None:
+        if not self._current_camera:
+            return
+        path = os.path.join(self.cameras_dir, self._current_camera)
+        if not self._safe_under_cameras(path):
+            self._set_status("Refusing to delete a path outside the cameras folder.")
+            return
+        name = self._current_camera
+        try:
+            shutil.rmtree(path)
+            self._set_status(f"Deleted camera folder '{name}'. Note: its entry under config 'Cameras' (if any) is left untouched.")
+        except OSError as exc:
+            self._set_status(f"Delete failed: {exc}")
+        self._refresh_cameras()
 
 
 class PromptsPanel(Widget):
@@ -759,6 +1149,9 @@ class PromptsPanel(Widget):
         profile: str,
         end_to_end: bool,
         target: str = "local",
+        ssh_profiles: list[str] | None = None,
+        ssh_profile=None,
+        remote_dir: str | None = None,
     ) -> None:
         super().__init__()
         self.prompts_dir = prompts_dir
@@ -766,9 +1159,29 @@ class PromptsPanel(Widget):
         self.profile = profile
         self.end_to_end = end_to_end
         self.target = target
+        self.ssh_profiles = ssh_profiles or []
+        # When ssh_profile is set, the panel reads/writes prompt files on the
+        # selected remote host instead of the local disk.
+        self._ssh_profile = ssh_profile
+        self._remote_dir = remote_dir
         self._current_file: str | None = None
 
+    @property
+    def _is_remote(self) -> bool:
+        return self._ssh_profile is not None and self._remote_dir is not None
+
+    @property
+    def _dir(self) -> str:
+        return self._remote_dir if self._is_remote else self.prompts_dir
+
+    def _file_path(self, name: str) -> str:
+        if self._is_remote:
+            return _remote_path_join(self._remote_dir, name)
+        return os.path.join(self.prompts_dir, name)
+
     def _prompt_files(self) -> list[str]:
+        if self._is_remote:
+            return _remote_list_files(self._ssh_profile, self._remote_dir, ".txt")
         try:
             return sorted(
                 name for name in os.listdir(self.prompts_dir)
@@ -778,34 +1191,65 @@ class PromptsPanel(Widget):
             return []
 
     def compose(self) -> ComposeResult:
+        host_label = self.target if self._is_remote else "Local"
         yield Static("[b]Prompt Templates[/b]", classes="pp-title")
-        yield Static(f"Directory: {self.prompts_dir}", classes="pp-muted")
-        mode = "end-to-end" if self.end_to_end else "two-step (VLM + LLM)"
-        yield Static(
-            f"Active profile: [b]{self.profile}[/b] ({mode}) — "
-            "change via Config > prompt_profile / end_to_end",
-            classes="pp-muted",
-        )
-        if self.target != "local":
-            yield Static(
-                f"Editing local files; copy changes to '{self.target}' yourself "
-                "(prompts are not synced automatically).",
-                classes="pp-muted",
-            )
+        yield Static(f"{host_label}: {self._dir}", classes="pp-muted")
+        yield Static(self._profile_line(), id="pp-profile-line", classes="pp-muted")
         files = self._prompt_files()
         if not files:
             yield Static("No .txt prompt templates found.", classes="pp-muted")
             return
-        options = [
-            (f"{name}  (active)" if name in self.active_files else name, name)
-            for name in files
-        ]
-        yield Select(options, prompt="Select a prompt template...", id="prompt-file-select")
+        yield Select(
+            self._build_options(),
+            prompt="Select a prompt template...",
+            id="prompt-file-select",
+        )
         yield TextArea("", id="prompt-editor", read_only=True)
         with Horizontal(classes="pp-actions"):
             yield Button("Save", variant="primary", id="btn-prompt-save", disabled=True)
             yield Button("Reload", id="btn-prompt-reload", disabled=True)
         yield Static("", id="prompt-status", classes="pp-muted")
+        # Sync is only offered from the local host (push local prompt files ->
+        # remote). On a remote host no sync button is shown.
+        if self.target == "local" and self.ssh_profiles:
+            with Horizontal(classes="pp-actions"):
+                yield Select(
+                    [(name, name) for name in self.ssh_profiles],
+                    prompt="Select SSH profile...",
+                    id="prompts-sync-profile-select",
+                )
+                yield Button("Sync to Remote", variant="warning", id="btn-sync-prompts-remote")
+
+    def _profile_line(self) -> str:
+        mode = "end-to-end" if self.end_to_end else "two-step (VLM + LLM)"
+        return (
+            f"Active profile: [b]{self.profile}[/b] ({mode}) — "
+            "change via Config > prompt_profile / end_to_end"
+        )
+
+    def _build_options(self) -> list[tuple[Text, str]]:
+        """build Select options, highlighting the currently-active prompt files."""
+        opts: list[tuple[Text, str]] = []
+        for name in self._prompt_files():
+            if name in self.active_files:
+                opts.append((Text(f"● {name}  (active)", style="bold green"), name))
+            else:
+                opts.append((Text(name), name))
+        return opts
+
+    def refresh_active(self, active_files: list[str], profile: str, end_to_end: bool) -> None:
+        """recompute the active prompt set after a config change and re-render."""
+        self.active_files = set(active_files)
+        self.profile = profile
+        self.end_to_end = end_to_end
+        try:
+            self.query_one("#pp-profile-line", Static).update(self._profile_line())
+        except Exception:
+            pass
+        try:
+            self.query_one("#prompt-file-select", Select).set_options(self._build_options())
+        except Exception:
+            pass
 
     def _set_status(self, text: str) -> None:
         try:
@@ -819,7 +1263,18 @@ class PromptsPanel(Widget):
             editor.load_text("")
             editor.read_only = True
             return
-        path = os.path.join(self.prompts_dir, self._current_file)
+        path = self._file_path(self._current_file)
+        if self._is_remote:
+            content = _remote_read_file(self._ssh_profile, path)
+            if content is None:
+                editor.load_text("")
+                editor.read_only = True
+                self._set_status(f"Could not read {self.target}:{path}")
+                return
+            editor.load_text(content)
+            editor.read_only = False
+            self._set_status(f"Loaded {self._current_file} from {self.target}")
+            return
         try:
             with open(path, "r", encoding="utf-8") as file:
                 editor.load_text(file.read())
@@ -846,12 +1301,162 @@ class PromptsPanel(Widget):
         elif event.button.id == "btn-prompt-save":
             if not self._current_file:
                 return
-            path = os.path.join(self.prompts_dir, self._current_file)
+            path = self._file_path(self._current_file)
             editor = self.query_one("#prompt-editor", TextArea)
+            if self._is_remote:
+                ok, err = _remote_write_file(self._ssh_profile, path, editor.text)
+                if ok:
+                    self._set_status(
+                        f"Saved {self._current_file} to {self.target} (restart VFA Server to apply)"
+                    )
+                else:
+                    self._set_status(f"Save to {self.target} failed: {err}")
+                return
             try:
                 with open(path, "w", encoding="utf-8") as file:
                     file.write(editor.text)
                 self._set_status(f"Saved {self._current_file} (restart VFA Server to apply)")
+            except OSError as exc:
+                self._set_status(f"Save failed: {exc}")
+
+
+class ActionSchemaPanel(Widget):
+    """VFA action-schema editor (single centralized YAML file)."""
+
+    DEFAULT_CSS = """
+    ActionSchemaPanel {
+        height: auto;
+        padding: 1 2;
+    }
+    ActionSchemaPanel .as-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ActionSchemaPanel .as-muted {
+        color: $text-muted;
+    }
+    ActionSchemaPanel #action-schema-editor {
+        height: 28;
+        margin-top: 1;
+    }
+    ActionSchemaPanel .as-actions {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    ActionSchemaPanel .as-actions Button {
+        min-width: 16;
+        margin-right: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        schema_path: str,
+        target: str = "local",
+        ssh_profiles: list[str] | None = None,
+        ssh_profile=None,
+        remote_path: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.schema_path = schema_path
+        self.target = target
+        self.ssh_profiles = ssh_profiles or []
+        # When ssh_profile is set, the panel reads/writes the schema on the
+        # selected remote host instead of the local disk.
+        self._ssh_profile = ssh_profile
+        self._remote_path = remote_path
+
+    @property
+    def _is_remote(self) -> bool:
+        return self._ssh_profile is not None and self._remote_path is not None
+
+    @property
+    def _path(self) -> str:
+        return self._remote_path if self._is_remote else self.schema_path
+
+    def compose(self) -> ComposeResult:
+        host_label = self.target if self._is_remote else "Local"
+        yield Static("[b]Action Schema[/b]", classes="as-title")
+        yield Static(f"{host_label}: {self._path}", classes="as-muted")
+        yield Static(
+            "This file can define multiple named schemas under 'schemas:'; the one "
+            "named by 'default_schema' (top of file) is the active one. Override "
+            "per-pipeline with VLLMFrameAnalyzer.action_schema.",
+            classes="as-muted",
+        )
+        yield TextArea("", id="action-schema-editor", read_only=True)
+        with Horizontal(classes="as-actions"):
+            yield Button("Save", variant="primary", id="btn-aschema-save")
+            yield Button("Reload", id="btn-aschema-reload")
+        yield Static("", id="aschema-status", classes="as-muted")
+        # Sync is only offered from the local host (push local schema file ->
+        # remote). On a remote host no sync button is shown.
+        if self.target == "local" and self.ssh_profiles:
+            with Horizontal(classes="as-actions"):
+                yield Select(
+                    [(name, name) for name in self.ssh_profiles],
+                    prompt="Select SSH profile...",
+                    id="aschema-sync-profile-select",
+                )
+                yield Button("Sync to Remote", variant="warning", id="btn-sync-aschema-remote")
+
+    def on_mount(self) -> None:
+        self._load()
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#aschema-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _load(self) -> None:
+        editor = self.query_one("#action-schema-editor", TextArea)
+        if self._is_remote:
+            content = _remote_read_file(self._ssh_profile, self._remote_path)
+            if content is None:
+                editor.load_text("")
+                editor.read_only = True
+                self._set_status(f"Could not read {self.target}:{self._remote_path}")
+                return
+            editor.load_text(content)
+            editor.read_only = False
+            self._set_status(f"Loaded from {self.target}")
+            return
+        try:
+            with open(self.schema_path, "r", encoding="utf-8") as fh:
+                editor.load_text(fh.read())
+            editor.read_only = False
+            self._set_status(f"Loaded {os.path.basename(self.schema_path)}")
+        except OSError as exc:
+            editor.load_text("")
+            editor.read_only = True
+            self._set_status(f"Could not read {self.schema_path}: {exc}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-aschema-reload":
+            self._load()
+        elif event.button.id == "btn-aschema-save":
+            editor = self.query_one("#action-schema-editor", TextArea)
+            text = editor.text
+            try:
+                yaml.safe_load(text)  # reject invalid YAML before writing
+            except yaml.YAMLError as exc:
+                self._set_status(f"Not saved — invalid YAML: {exc}")
+                return
+            if self._is_remote:
+                ok, err = _remote_write_file(self._ssh_profile, self._remote_path, text)
+                if ok:
+                    self._set_status(f"Saved to {self.target} (restart VFA Server to apply)")
+                else:
+                    self._set_status(f"Save to {self.target} failed: {err}")
+                return
+            try:
+                os.makedirs(os.path.dirname(self.schema_path), exist_ok=True)
+                with open(self.schema_path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                self._set_status("Saved (restart VFA Server to apply)")
             except OSError as exc:
                 self._set_status(f"Save failed: {exc}")
 
@@ -891,7 +1496,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-ns", "Num Synchronizers", "int", 1),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
-            ParamDef("-m", "Mode", "str", "full", ["full", "record", "recognize"]),
+            ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-s", "Store Audio", "bool", True),
             ParamDef("-vad", "VAD", "bool", True),
             ParamDef("-nr", "Noise Reduce", "bool", True),
@@ -921,7 +1526,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-ns", "Num Synchronizers", "int", 1),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
-            ParamDef("-m", "Mode", "str", "full", ["full", "record", "analyze"]),
+            ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-g", "Graphics", "bool", True),
             ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
@@ -1196,6 +1801,26 @@ def _stack_service_specs(config_dir: str) -> list[dict[str, object]]:
     return _stack_service_specs_from_config(config)
 
 
+# Built-in WSGI app module for each stack component. These are shipped with the
+# toolkit and fixed per component, so users no longer fill an `app` path in the
+# config; the launcher resolves it here. A user may still override by setting an
+# explicit `app:` in config.yml.
+_DEFAULT_STACK_APPS = {
+    "AudioInferer": "openmmla.services.asr.apps.serve_audio_inferer",
+    "AudioResampler": "openmmla.services.asr.apps.serve_audio_resampler",
+    "SpeechEnhancer": "openmmla.services.asr.apps.serve_speech_enhancer",
+    "SpeechSeparator": "openmmla.services.asr.apps.serve_speech_separator",
+    "SpeechTranscriber": "openmmla.services.asr.apps.serve_speech_transcriber",
+    "VoiceActivityDetector": "openmmla.services.asr.apps.serve_voice_activity_detector",
+    "VLLMFrameAnalyzer": "openmmla.services.vfa.apps.serve_multi_angle_vllm_frame_analyzer",
+}
+
+
+def _is_placeholder_value(value: str) -> bool:
+    """True for unfilled template placeholders like <path-to-...>."""
+    return bool(re.fullmatch(r"<[^>]*>", str(value).strip()))
+
+
 def _stack_launch_specs_from_config(config: dict) -> list[dict[str, object]]:
     """Like _stack_service_specs_from_config, but include the workers/app fields
     needed to build gunicorn launch commands (ported from bash/services.sh)."""
@@ -1209,6 +1834,9 @@ def _stack_launch_specs_from_config(config: dict) -> list[dict[str, object]]:
         if port <= 0:
             continue
         app = str(service_config.get("app") or "").strip()
+        if not app or _is_placeholder_value(app):
+            # fall back to the built-in toolkit module for this component
+            app = _DEFAULT_STACK_APPS.get(str(service_name), "")
         if not app:
             continue
         specs.append({
@@ -1255,11 +1883,15 @@ def _stack_service_shell_command(
     cd_part = f"cd {quote(workdir)} && " if workdir else ""
     # The WSGI app factories read the un-prefixed PROJECT_DIR / CONFIG_PATH
     # (see openmmla/commands/asr/*.py and openmmla/services/**/apps/serve_*.py).
+    # --timeout 0 disables gunicorn's worker timeout: these inference services
+    # load multi-GB models at boot (first run also downloads them), which can far
+    # exceed the 30s default and would otherwise get the worker killed mid-load.
     return (
         f"{cd_part}"
         f"PROJECT_DIR={quote(project_dir)} "
         f"CONFIG_PATH={quote(config_path)} "
-        f"gunicorn -k gevent -w {spec['workers']} -b 0.0.0.0:{spec['port']} {module}:app"
+        f"gunicorn -k gevent --timeout 0 -w {spec['workers']} "
+        f"-b 0.0.0.0:{spec['port']} {module}:app"
     )
 
 
@@ -1799,7 +2431,7 @@ class ServicePanel(Widget):
             for svc in collection_svcs:
                 collection_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
 
-        _PIPELINE_CATS = ["ASR", "VFA", "IPS"]
+        _PIPELINE_CATS = ["ASR", "IPS", "VFA"]
 
         pipeline_node = tree.root.add("Pipelines", data="__cat_Pipelines")
         pipeline_node.expand()
@@ -1973,6 +2605,11 @@ class ServicePanel(Widget):
                 prompts_pane = TabPane("Prompts", prompts_scroll, id="svc-tab-prompts")
                 await tabs.add_pane(prompts_pane)
                 await prompts_scroll.mount(self._vfa_prompts_panel(svc))
+
+                aschema_scroll = VerticalScroll(classes="svc-launch-scroll")
+                aschema_pane = TabPane("Action Schema", aschema_scroll, id="svc-tab-action-schema")
+                await tabs.add_pane(aschema_pane)
+                await aschema_scroll.mount(self._vfa_action_schema_panel(svc))
         except Exception:
             # containers can disappear mid-population when the user switches
             # nodes quickly; never let that take down the screen
@@ -1995,6 +2632,7 @@ class ServicePanel(Widget):
             card = ServiceCard(
                 svc,
                 is_running=is_running,
+                stack_components=self._stack_component_names(svc, self._get_panel_target()),
             )
             launch_pane = TabPane("Launch", launch_scroll, id="svc-tab-launch")
             await tabs.add_pane(launch_pane)
@@ -2035,6 +2673,13 @@ class ServicePanel(Widget):
                 svc,
                 is_running=is_running,
             ))
+            # calibration captures per-camera image folders; offer a manager to
+            # browse/delete them without digging into the project on disk
+            if svc.name == "IPS Camera Calibration":
+                await scroll.mount(CameraManagerPanel(
+                    cameras_dir=_ips_cameras_local_dir(self._root),
+                    target=self._get_panel_target(),
+                ))
 
     def _service_with_session_choices(self, svc: ServiceDef, target: str | None = None) -> ServiceDef:
         if not svc.artifact_pipeline:
@@ -2238,19 +2883,57 @@ class ServicePanel(Widget):
         from openmmla.services.vfa.prompt_profiles import (
             DEFAULT_PROMPT_PROFILE, active_prompt_files,
         )
-        config = load_existing_config(os.path.join(svc.config_dir, "config.yml")) or {}
-        analyzer_config = config.get("VLLMFrameAnalyzer") or {}
+        target = self._get_panel_target()
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        # read the config of the selected host so active set / profile reflect it
+        config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+        analyzer_config = (config or {}).get("VLLMFrameAnalyzer") or {}
         prompts_dir = str(analyzer_config.get("prompt_templates_dir") or "prompts")
+        if isinstance(prompts_dir, str) and prompts_dir.strip().startswith("<") and prompts_dir.strip().endswith(">"):
+            prompts_dir = "prompts"
         if not os.path.isabs(prompts_dir):
             prompts_dir = os.path.join(svc.config_dir, prompts_dir)
         profile = str(analyzer_config.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
         end_to_end = bool(analyzer_config.get("end_to_end", False))
+        ssh_profile = None
+        remote_dir = None
+        if target != "local":
+            ssh_profile = get_profile_by_name(target)
+            if ssh_profile is not None:
+                remote_dir = self._remote_dir_for_local(prompts_dir, ssh_profile)
         return PromptsPanel(
             prompts_dir=prompts_dir,
             active_files=active_prompt_files(profile, end_to_end),
             profile=profile,
             end_to_end=end_to_end,
-            target=self._get_panel_target(),
+            target=target,
+            ssh_profiles=[p.name for p in load_ssh_profiles()] if target == "local" else [],
+            ssh_profile=ssh_profile,
+            remote_dir=remote_dir,
+        )
+
+    def _vfa_action_schema_panel(self, svc: ServiceDef) -> ActionSchemaPanel:
+        target = self._get_panel_target()
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+        analyzer_config = (config or {}).get("VLLMFrameAnalyzer") or {}
+        schema_rel = str(analyzer_config.get("action_schema_path") or "config/vfa/action_schemas.yml")
+        if schema_rel.strip().startswith("<") and schema_rel.strip().endswith(">"):
+            schema_rel = "config/vfa/action_schemas.yml"
+        # action schemas live under the repo root (centralized definitions)
+        schema_path = schema_rel if os.path.isabs(schema_rel) else os.path.join(self._root, schema_rel)
+        ssh_profile = None
+        remote_path = None
+        if target != "local":
+            ssh_profile = get_profile_by_name(target)
+            if ssh_profile is not None:
+                remote_path = self._remote_config_path(schema_path, ssh_profile)
+        return ActionSchemaPanel(
+            schema_path=schema_path,
+            target=target,
+            ssh_profiles=[p.name for p in load_ssh_profiles()] if target == "local" else [],
+            ssh_profile=ssh_profile,
+            remote_path=remote_path,
         )
 
     def _transform_matrix_panel(self) -> TransformMatrixPanel:
@@ -2258,6 +2941,7 @@ class ServicePanel(Widget):
         local_dir = _ips_transform_local_dir(self._root)
         remote_dir = None
         remote_files: list[str] = []
+        profile = None
         if target != "local":
             profile = get_profile_by_name(target)
             if profile is not None:
@@ -2270,6 +2954,7 @@ class ServicePanel(Widget):
             local_files=_local_transform_matrix_files(local_dir),
             remote_files=remote_files,
             ssh_profiles=self._ssh_profile_names,
+            ssh_profile=profile,
         )
 
     # ── config logic ─────────────────────────────────────────────
@@ -2292,17 +2977,122 @@ class ServicePanel(Widget):
         self._current_form = form
         self._show_sync_bar(shared_section=section_name)
 
+    # media file extensions used to populate the per-base file dropdown
+    _SOURCE_FILE_EXTS = (
+        ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm",
+        ".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac",
+    )
+
+    def _list_source_files(self, existing: dict, target: str) -> list[str]:
+        """list media filenames in the configured Base.file_dir(s) so the Config
+        form can offer them as a dropdown when a base's source is 'file'. Only
+        resolves local, absolute directories; remote/unknown dirs fall back to a
+        free-text field in the form."""
+        if target != "local" or not isinstance(existing, dict):
+            return []
+        base = existing.get("Base")
+        dirs: list[str] = []
+        if isinstance(base, dict):
+            fd = base.get("file_dir")
+            if isinstance(fd, str):
+                dirs.append(fd)
+            # ASR keeps Base as a map of device -> settings (with file_dir each)
+            for v in base.values():
+                if isinstance(v, dict) and isinstance(v.get("file_dir"), str):
+                    dirs.append(v["file_dir"])
+        files: list[str] = []
+        seen: set[str] = set()
+        for d in dirs:
+            if not d or not os.path.isabs(d) or not os.path.isdir(d):
+                continue
+            try:
+                names = sorted(os.listdir(d))
+            except OSError:
+                continue
+            for fn in names:
+                low = fn.lower()
+                if fn not in seen and any(low.endswith(e) for e in self._SOURCE_FILE_EXTS):
+                    seen.add(fn)
+                    files.append(fn)
+        return files
+
     def _show_pipeline_form(self, container: VerticalScroll, pipeline: PipelineDef) -> None:
         existing, source_message = self._load_config_for_target(pipeline.config_path)
         apply_shared_values(pipeline.fields, self._shared_values)
 
+        # populate Bases entry dropdowns from the config (camera <- Cameras,
+        # base_type <- Base) so users pick existing values instead of typing
+        if isinstance(existing, dict):
+            cameras = sorted((existing.get("Cameras") or {}).keys())
+            base_types = sorted((existing.get("Base") or {}).keys())
+            source_types = {
+                "ASR Base": ["udp", "tcp", "pyaudio", "rtmp", "lsl", "file"],
+                "IPS Base": ["opencv", "rtmp", "lsl", "file"],
+                "VFA Base": ["opencv", "rtmp", "lsl", "file"],
+            }.get(pipeline.name, [])
+            source_files = self._list_source_files(existing, self._get_panel_target())
+            for f in pipeline.fields:
+                if f.field_type == "list_of_dicts" and f.path == "Bases":
+                    choices = {}
+                    if "camera" in (f.entry_schema or {}):
+                        choices["camera"] = cameras
+                    if "base_type" in (f.entry_schema or {}):
+                        choices["base_type"] = base_types
+                    if "source" in (f.entry_schema or {}) and source_types:
+                        choices["source"] = source_types
+                    # files for the per-base file dropdown (consumed by
+                    # _source_index_widget only when that base's source is 'file')
+                    if "source_index" in (f.entry_schema or {}):
+                        choices["source_index"] = source_files
+                    f.entry_field_choices = choices
+
+        _src_target = self._get_panel_target()
+        is_local_host = _src_target == "local"
+        overrides = pipeline_section_overrides(existing)
+        readonly_paths: set[str] = set()
         values = {}
+        sources: dict[str, str] = {}
         for f in pipeline.fields:
+            top_section = f.path.split(".")[0]
+            is_shared = top_section in SHARED_SECTION_NAMES
             existing_val = get_nested_value(existing, f.path)
+            # origin of the displayed value: the target's own config ("target"),
+            # the local System Services store used as a gap-filler ("shared"),
+            # or the template default ("default").
             if existing_val is not None:
                 values[f.path] = existing_val
+                origin = "target"
+            elif self._shared_values.get(f.path) is not None:
+                values[f.path] = self._shared_values[f.path]
+                origin = "shared"
             else:
-                values[f.path] = self._shared_values.get(f.path, f.default)
+                values[f.path] = f.default
+                origin = "default"
+
+            if is_shared and top_section not in overrides:
+                # managed centrally; read-only. The tag reflects where the shown
+                # value actually comes from so a remote view distinguishes a real
+                # remote value from a local fallback stand-in.
+                readonly_paths.add(f.path)
+                if is_local_host:
+                    sources[f.path] = "[yellow]· managed in System Services[/yellow]"
+                elif origin == "target":
+                    sources[f.path] = f"[cyan]· from {_src_target}[/cyan]"
+                elif origin == "shared":
+                    sources[f.path] = "[yellow]· local shared (fallback)[/yellow]"
+                else:
+                    sources[f.path] = "[dim]· default[/dim]"
+            elif is_shared and top_section in overrides:
+                sources[f.path] = "[magenta]· override (pinned here)[/magenta]"
+            elif origin == "target":
+                sources[f.path] = (
+                    "[cyan]· config.yml[/cyan]" if is_local_host
+                    else f"[cyan]· from {_src_target}[/cyan]"
+                )
+            elif origin == "shared":
+                sources[f.path] = "[yellow]· local shared[/yellow]"
+            else:
+                sources[f.path] = "[dim]· default[/dim]"
 
         dynamic_sections: dict[str, list[LoaderFieldDef]] = {}
         if pipeline.base_template and pipeline.base_section:
@@ -2364,7 +3154,13 @@ class ServicePanel(Widget):
             group_add_buttons["Streams"] = ("+ Add Stream", "btn-add-stream")
 
         form = ConfigForm(pipeline.name, pipeline.fields, values, dynamic_sections,
-                          group_add_buttons=group_add_buttons)
+                          group_add_buttons=group_add_buttons,
+                          base_section=pipeline.base_section or None,
+                          sources=sources,
+                          readonly_paths=readonly_paths,
+                          shared_sections=set(SHARED_SECTION_NAMES),
+                          overridden_sections=overrides,
+                          allow_override_toggle=True)
         container.mount(form)
         self._current_form = form
         if source_message:
@@ -2377,6 +3173,64 @@ class ServicePanel(Widget):
         container.mount(form)
         self._current_form = form
         self._show_sync_bar(local_path=_mllm_config_path(self._root))
+
+    def on_config_form_override_toggled(self, event: ConfigForm.OverrideToggled) -> None:
+        """toggle SystemServicesOverride for a shared section on the current
+        target's pipeline config, then reload so the fields flip
+        read-only/editable. Works on the local host and on a remote host."""
+        pipeline = self._current_pipeline
+        if pipeline is None:
+            return
+        section = event.section_name
+        target = self._get_panel_target()
+        config, _ = self._load_config_for_target(
+            pipeline.config_path, show_status=False, target=target)
+        if not isinstance(config, dict):
+            config = {}
+        else:
+            config = dict(config)
+        overrides = set(pipeline_section_overrides(config))
+        if section in overrides:
+            overrides.discard(section)
+            action = f"{section} is now managed centrally (System Services)"
+        else:
+            overrides.add(section)
+            action = f"{section} is now overridden on {pipeline.name} (edit it here)"
+        if overrides:
+            config["SystemServicesOverride"] = sorted(overrides)
+        else:
+            config.pop("SystemServicesOverride", None)
+
+        cache_key = self._config_cache_key(pipeline.config_path, target)
+        if target == "local":
+            os.makedirs(os.path.dirname(pipeline.config_path), exist_ok=True)
+            with open(pipeline.config_path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(config, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            self._target_config_cache.pop(cache_key, None)
+            self._show_status(action)
+            self.run_worker(self._reload_current_service_view(), exclusive=True)
+            return
+
+        # remote host: write the toggled config back over scp
+        profile = get_profile_by_name(target)
+        if profile is None:
+            self._show_status(f"SSH profile '{target}' not found; override not changed.")
+            return
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".yml", prefix="openmmla-override-", delete=False, encoding="utf-8")
+        with tmp:
+            yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        remote_path = self._remote_config_path(pipeline.config_path, profile)
+        # optimistically reflect the new state so the reloaded form is correct;
+        # _run_scp confirms/keeps it on success.
+        self._target_config_cache[cache_key] = config
+        self._show_status(f"{action}; saving to {target} ...")
+        self.run_worker(
+            self._run_scp(target, tmp.name, remote_path, cleanup_local=True,
+                          cache_key=cache_key, cache_config=config),
+            group="override-scp", exclusive=True,
+        )
+        self.run_worker(self._reload_current_service_view(), exclusive=True)
 
     def on_config_form_saved(self, event: ConfigForm.Saved) -> None:
         if event.pipeline_name.startswith("shared:"):
@@ -2418,8 +3272,29 @@ class ServicePanel(Widget):
 
         if self._get_panel_target() == "local":
             self._refresh_stream_panels(pipeline)
+        self._refresh_vfa_prompts(pipeline)
         self._show_sync_bar(pipeline)
         self._build_tree()
+
+    def _refresh_vfa_prompts(self, pipeline: PipelineDef) -> None:
+        """recompute Prompts-tab active set after a VFA Server config save."""
+        if pipeline.name != "VFA Server":
+            return
+        try:
+            from openmmla.services.vfa.prompt_profiles import (
+                DEFAULT_PROMPT_PROFILE, active_prompt_files,
+            )
+            config, _ = self._load_config_for_target(
+                pipeline.config_path, show_status=False, target=self._get_panel_target()
+            )
+            analyzer = (config or {}).get("VLLMFrameAnalyzer") or {}
+            profile = str(analyzer.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
+            end_to_end = bool(analyzer.get("end_to_end", False))
+            active = active_prompt_files(profile, end_to_end)
+        except Exception:
+            return
+        for panel in self.query(PromptsPanel):
+            panel.refresh_active(active, profile, end_to_end)
 
     def _refresh_stream_panels(self, pipeline: PipelineDef) -> None:
         """refresh stream tabs after a pipeline config save."""
@@ -2450,6 +3325,10 @@ class ServicePanel(Widget):
             config = load_existing_config(pipeline.config_path)
             if not isinstance(config, dict):
                 config = {}
+            # a pipeline that pins this section (override) manages it itself and
+            # must not be overwritten from the central store.
+            if section_name in pipeline_section_overrides(config):
+                continue
             if config.get(section_name) == section_data:
                 continue
             config[section_name] = dict(section_data)
@@ -2484,16 +3363,13 @@ class ServicePanel(Widget):
             old.remove()
         target = self._get_panel_target()
         if target != "local":
-            if pipeline is None and shared_section is None and local_path is None:
-                return
-            bar = Horizontal(
-                Button(f"Sync Local to {target}", variant="warning", id="btn-sync-local-target"),
-                classes="sync-bar",
-            )
-            container.mount(bar)
+            # On a remote host, Save already writes directly to that host, so we
+            # don't show a separate sync button here. To push a locally-edited
+            # config to a remote, switch Host to local and use the SSH-profile
+            # picker + "Sync to Remote" below.
             return
 
-        if pipeline is None and local_path is None:
+        if pipeline is None and local_path is None and shared_section is None:
             return
         profiles = load_ssh_profiles()
         if not profiles:
@@ -2542,6 +3418,10 @@ class ServicePanel(Widget):
             self._sync_transform_to_remote()
         elif event.button.id == "btn-sync-transform-local-target":
             self._sync_transform_local_to_selected_target()
+        elif event.button.id == "btn-sync-prompts-remote":
+            self._sync_prompts_to_remote()
+        elif event.button.id == "btn-sync-aschema-remote":
+            self._sync_action_schema_to_remote()
         elif event.button.id == "btn-add-base":
             self._show_add_base_input()
         elif event.button.id == "btn-confirm-add-base":
@@ -2766,9 +3646,6 @@ class ServicePanel(Widget):
         )
 
     def _sync_to_remote(self) -> None:
-        local_path = self._current_pipeline.config_path if self._current_pipeline is not None else self._current_config_local_path
-        if not local_path:
-            return
         try:
             sel = self.query_one("#sync-profile-select", Select)
             val = sel.value
@@ -2784,6 +3661,15 @@ class ServicePanel(Widget):
             self._show_status(f"SSH profile '{profile_name}' not found.")
             return
 
+        # System Services shared-section view: push just this section to the
+        # selected host (respecting any per-pipeline overrides on that host).
+        if self._current_shared_section:
+            self._sync_shared_section_to_target(self._current_shared_section, profile_name)
+            return
+
+        local_path = self._current_pipeline.config_path if self._current_pipeline is not None else self._current_config_local_path
+        if not local_path:
+            return
         self._sync_local_config_path_to_profile(local_path, profile_name)
 
     def _sync_local_to_selected_target(self) -> None:
@@ -2857,6 +3743,135 @@ class ServicePanel(Widget):
             exclusive=True,
         )
 
+    def _remote_dir_for_local(self, local_dir: str, profile) -> str:
+        rel = os.path.relpath(local_dir, self._root)
+        return _remote_path_join(profile.remote_project_path, rel)
+
+    def _sync_prompts_to_remote(self) -> None:
+        try:
+            sel = self.query_one("#prompts-sync-profile-select", Select)
+            val = sel.value
+            if val is Select.BLANK or val is None:
+                self._show_status("Select an SSH profile first.")
+                return
+            profile_name = str(val)
+        except Exception:
+            return
+        try:
+            panel = self.query_one(PromptsPanel)
+        except Exception:
+            return
+        local_dir = panel.prompts_dir
+        if not os.path.isdir(local_dir):
+            self._show_status(f"No prompts directory: {local_dir}")
+            return
+        files = [
+            f for f in os.listdir(local_dir)
+            if f.endswith(".txt") and not f.startswith(".")
+        ]
+        if not files:
+            self._show_status("No prompt files to sync.")
+            return
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._show_status(f"SSH profile '{profile_name}' not found.")
+            return
+        remote_dir = self._remote_dir_for_local(local_dir, profile)
+        self._show_status(f"Syncing prompts to {profile_name}:{remote_dir} ...")
+        self.run_worker(
+            self._run_files_sync(profile_name, local_dir, remote_dir, files, "prompt"),
+            exclusive=True,
+        )
+
+    def _sync_action_schema_to_remote(self) -> None:
+        try:
+            sel = self.query_one("#aschema-sync-profile-select", Select)
+            val = sel.value
+            if val is Select.BLANK or val is None:
+                self._show_status("Select an SSH profile first.")
+                return
+            profile_name = str(val)
+        except Exception:
+            return
+        try:
+            panel = self.query_one(ActionSchemaPanel)
+        except Exception:
+            return
+        local_path = panel.schema_path
+        if not os.path.isfile(local_path):
+            self._show_status(f"No action schema file: {local_path}")
+            return
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            self._show_status(f"SSH profile '{profile_name}' not found.")
+            return
+        remote_path = self._remote_config_path(local_path, profile)
+        self._show_status(f"Syncing action schema to {profile_name}:{remote_path} ...")
+        self.run_worker(
+            self._run_scp(profile_name, local_path, remote_path),
+            exclusive=True,
+        )
+
+    async def _run_files_sync(
+        self,
+        profile_name: str,
+        local_dir: str,
+        remote_dir: str,
+        files: list[str],
+        label: str,
+    ) -> None:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            return
+        mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
+        await mkdir_proc.wait()
+        copied = 0
+        failures: list[str] = []
+        for name in files:
+            local_path = os.path.join(local_dir, name)
+            remote_path = _remote_path_join(remote_dir, name)
+            proc = await scp_file_async(profile, local_path, remote_path)
+            assert proc.stdout is not None
+            output = ""
+            async for line in proc.stdout:
+                output += line.decode(errors="replace")
+            rc = await proc.wait()
+            if rc == 0:
+                copied += 1
+            else:
+                detail = output.strip() or f"exit code {rc}"
+                failures.append(f"{name}: {detail}")
+        if failures:
+            self._show_status(f"{label} sync failed: {'; '.join(failures[:2])}")
+            return
+        self._show_status(f"Synced {copied} {label} file(s) to {profile_name}:{remote_dir}")
+
+    async def _run_remote_streamed(
+        self, profile_name: str, cmd: str, ok_msg: str, fail_msg: str
+    ) -> None:
+        """Run a remote command directly over SSH, streaming output to the log.
+
+        Used for tmux start/stop and other remote control actions. Sending the
+        command straight through ssh args (rather than an interactive Terminal +
+        AppleScript) avoids the nested-quote truncation that previously broke
+        remote launches."""
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            return
+        proc = await ssh_run_async(profile, wrap_remote(cmd))
+        assert proc.stdout is not None
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+            text = chunk.decode(errors="replace").rstrip()
+            if text:
+                for line in text.splitlines():
+                    self._log(rich_escape(line))
+        rc = await proc.wait()
+        self._log(ok_msg if rc == 0 else f"[red]{fail_msg} (exit {rc}).[/red]")
+        self._refresh_service_cards()
+
     def _sync_shared_section_to_target(self, section_name: str, target: str) -> None:
         profile = get_profile_by_name(target)
         if profile is None:
@@ -2879,6 +3894,9 @@ class ServicePanel(Widget):
             )
             if not isinstance(remote_config, dict):
                 remote_config = {}
+            # respect a pipeline that pins this section locally.
+            if section_name in pipeline_section_overrides(remote_config):
+                continue
             remote_config[section_name] = dict(section_data)
 
             tmp = tempfile.NamedTemporaryFile(
@@ -2922,6 +3940,137 @@ class ServicePanel(Widget):
             section_data[key] = values.get(path, self._shared_values.get(path, fdef.get("default", "")))
         return section_data
 
+    def _central_shared_sections(self) -> dict[str, dict]:
+        """Return shared sections the user has explicitly saved to the central
+        System Services store (``config/system_services.yml``).
+
+        Only sections actually present in that file are returned, so a section
+        that has never been saved centrally is left untouched at launch (its
+        pipeline value is never clobbered by an unset default).
+        """
+        stored = load_system_services_config(self._root)
+        result: dict[str, dict] = {}
+        if isinstance(stored, dict):
+            for name in SHARED_SECTION_NAMES:
+                if name == "Sudo":
+                    continue  # local credential; never synced into pipeline configs
+                data = stored.get(name)
+                if isinstance(data, dict) and data:
+                    result[name] = data
+        return result
+
+    def _apply_central_sections_to_config_file(self, config_path: str, central: dict[str, dict],
+                                               sections: list[str]) -> None:
+        """Rewrite the named shared sections in a local pipeline config from the
+        central store, in place."""
+        config = load_existing_config(config_path)
+        if not isinstance(config, dict):
+            config = {}
+        for section_name in sections:
+            if section_name in central:
+                config[section_name] = dict(central[section_name])
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(config, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        self._target_config_cache.pop(self._config_cache_key(config_path, "local"), None)
+
+    def _sync_shared_sections_to_target(self, section_names: list[str], target: str,
+                                        central: dict[str, dict]) -> None:
+        """Push the named central shared sections into every remote pipeline
+        config on ``target`` (respecting per-pipeline overrides), in one scp
+        batch."""
+        profile = get_profile_by_name(target)
+        if profile is None:
+            self._show_status(f"SSH profile '{target}' not found.")
+            return
+        section_names = [s for s in section_names if s in central]
+        if not section_names:
+            return
+        if not self._pipelines:
+            self._pipelines = discover_pipelines()
+            self._pipeline_map = {p.name: p for p in self._pipelines}
+        entries: list[tuple[str, str, tuple[str, str], dict]] = []
+        temp_paths: list[str] = []
+        for pipeline in self._pipelines:
+            relevant = [s for s in section_names if self._pipeline_has_section(pipeline, s)]
+            if not relevant:
+                continue
+            remote_config, _ = self._load_config_for_target(
+                pipeline.config_path, show_status=False, target=target)
+            if not isinstance(remote_config, dict):
+                remote_config = {}
+            overrides = pipeline_section_overrides(remote_config)
+            wrote = False
+            for s in relevant:
+                if s in overrides:
+                    continue
+                remote_config[s] = dict(central[s])
+                wrote = True
+            if not wrote:
+                continue
+            tmp = tempfile.NamedTemporaryFile(
+                "w", suffix=".yml", prefix="openmmla-shared-config-", delete=False, encoding="utf-8")
+            with tmp:
+                yaml.safe_dump(remote_config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            temp_paths.append(tmp.name)
+            remote_path = self._remote_config_path(pipeline.config_path, profile)
+            cache_key = self._config_cache_key(pipeline.config_path, target)
+            entries.append((tmp.name, remote_path, cache_key, remote_config))
+        if not entries:
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            return
+        self._show_status(f"Syncing {', '.join(section_names)} to {target} ...")
+        self.run_worker(
+            self._run_scp_batch(target, entries, cleanup_local=True,
+                                success_message=f"Synced system services to {target}"),
+            exclusive=True,
+        )
+
+    def _reconcile_shared_sections_before_launch(self, svc: ServiceDef, target: str,
+                                                is_remote: bool) -> bool:
+        """Reconcile a pipeline's shared system-service sections with the central
+        store just before launch. Returns True to proceed, False to abort.
+
+        Local: drifted sections are rewritten from the central store in place,
+        then launch proceeds. Remote: on drift the latest values are pushed and
+        this launch is aborted so the operator relaunches against the now
+        up-to-date remote config (avoids racing the async push).
+        """
+        central = self._central_shared_sections()
+        if not central:
+            return True  # nothing saved centrally; leave pipeline configs as-is
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        if not is_remote:
+            config = load_existing_config(config_path)
+            overrides = pipeline_section_overrides(config)
+            drifted = shared_section_drift(central, config, overrides=overrides)
+            if drifted:
+                self._apply_central_sections_to_config_file(config_path, central, drifted)
+                self._log(
+                    f"[yellow]Updated {', '.join(drifted)} from System Services before "
+                    f"launch (local config was out of date).[/yellow]"
+                )
+            return True
+        # remote
+        if get_profile_by_name(target) is None:
+            return True  # cannot verify; existing checks already warned
+        remote_config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+        overrides = pipeline_section_overrides(remote_config)
+        drifted = shared_section_drift(central, remote_config, overrides=overrides)
+        if not drifted:
+            return True
+        self._log(
+            f"[yellow]System-services config on '{target}' is out of date "
+            f"({', '.join(drifted)}); pushing latest from System Services...[/yellow]"
+        )
+        self._sync_shared_sections_to_target(drifted, target, central)
+        self._log(f"[yellow]Relaunch {svc.name} once the sync above completes.[/yellow]")
+        return False
+
     @staticmethod
     def _pipeline_has_section(pipeline: PipelineDef, section_name: str) -> bool:
         prefix = f"{section_name}."
@@ -2936,9 +4085,67 @@ class ServicePanel(Widget):
         rel_path = os.path.relpath(local_path, self._root)
         return _remote_path_join(profile.remote_project_path, rel_path)
 
+    def _remote_config_exists(self, svc: ServiceDef, target: str) -> tuple[bool | None, str]:
+        """Check over SSH whether the remote config.yml for a service exists.
+
+        Returns a (exists, remote_path) tuple. ``exists`` is True/False when it
+        could be determined, or None when the check could not run (missing SSH
+        profile or SSH error) so the caller does not block the launch.
+        """
+        profile = get_profile_by_name(target)
+        if profile is None:
+            return None, "config.yml"
+        local_path = os.path.join(svc.config_dir, "config.yml")
+        remote_path = self._remote_config_path(local_path, profile)
+        quoted = _quote_remote_path(remote_path)
+        cmd = f"if [ -f {quoted} ]; then printf FOUND; else printf MISSING; fi"
+        try:
+            result = ssh_run_sync(profile, cmd, timeout=8.0)
+        except Exception:
+            return None, remote_path
+        if result.returncode != 0:
+            return None, remote_path
+        out = (result.stdout or "").strip()
+        if "MISSING" in out:
+            return False, remote_path
+        if "FOUND" in out:
+            return True, remote_path
+        return None, remote_path
+
     def _ips_transform_remote_dir(self, profile) -> str:
         rel_path = os.path.relpath(_ips_transform_local_dir(self._root), self._root)
         return _remote_path_join(profile.remote_project_path, rel_path)
+
+    def _stack_component_names(self, svc: ServiceDef, target: str) -> list[str]:
+        """names of the sub-services of a stack service, read from its config."""
+        if not _is_stack_tmux_service(svc):
+            return []
+        try:
+            cfg, _ = self._load_config_for_target(
+                os.path.join(svc.config_dir, "config.yml"),
+                show_status=False,
+                target=target,
+            )
+            return [str(s["name"]) for s in _stack_launch_specs_from_config(cfg or {})]
+        except Exception:
+            return []
+
+    def _stack_running_counts(self, svc: ServiceDef, target: str) -> tuple[int, int] | None:
+        """(up, total) listening ports for a stack service, or None if not one."""
+        if not _is_stack_tmux_service(svc):
+            return None
+        if target == "local":
+            ports = _stack_ports(svc)
+            if not ports:
+                return None
+            return (sum(1 for p in ports if _check_port_in_use(p)), len(ports))
+        profile = get_profile_by_name(target)
+        if profile is None:
+            return None
+        ports = self._stack_ports_for_target(svc, target)
+        if not ports:
+            return None
+        return (sum(1 for p in ports if ssh_check_port(profile, p)), len(ports))
 
     def _stack_service_specs_for_target(self, svc: ServiceDef, target: str) -> list[dict[str, object]]:
         if target == "local":
@@ -3155,10 +4362,33 @@ class ServicePanel(Widget):
         target = self._get_panel_target()
         is_remote = target != "local"
 
-        if not is_remote and _service_requires_config(svc) and not _check_config_exists(svc.config_dir):
-            self._log(f"[yellow]WARNING: config.yml not found in {svc.config_dir}[/yellow]")
-            self._log("[yellow]Please configure this pipeline first.[/yellow]")
-            return
+        if _service_requires_config(svc):
+            if not is_remote:
+                if not _check_config_exists(svc.config_dir):
+                    self._log(f"[yellow]WARNING: config.yml not found in {svc.config_dir}[/yellow]")
+                    self._log("[yellow]Please configure this pipeline first.[/yellow]")
+                    return
+            else:
+                exists, remote_path = self._remote_config_exists(svc, target)
+                if exists is False:
+                    self._log(
+                        f"[red]WARNING: config.yml not found on '{target}' at {remote_path}[/red]"
+                    )
+                    self._log(
+                        f"[yellow]Open the Config tab, set your values, and click Save "
+                        f"to push config.yml to '{target}' before launching.[/yellow]"
+                    )
+                    return
+                if exists is None:
+                    self._log(
+                        f"[yellow]NOTE: could not verify config.yml on '{target}' "
+                        f"({remote_path}); launching anyway.[/yellow]"
+                    )
+
+            # keep shared system-service sections consistent with the central
+            # System Services store before launching (single source of truth).
+            if not self._reconcile_shared_sections_before_launch(svc, target, is_remote):
+                return
 
         if not is_remote and svc.launch_type != "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None
@@ -3229,7 +4459,11 @@ class ServicePanel(Widget):
 
     async def _async_refresh_single_status(self, svc: ServiceDef, target: str) -> None:
         """probe one service's running state off the UI thread."""
-        if target == "local":
+        counts = None
+        if _is_stack_tmux_service(svc):
+            counts = await asyncio.to_thread(self._stack_running_counts, svc, target)
+            is_running = bool(counts) and counts[1] > 0 and counts[0] == counts[1]
+        elif target == "local":
             is_running = await asyncio.to_thread(self._detect_running, svc)
         else:
             is_running = await asyncio.to_thread(self._detect_running_remote, svc, target)
@@ -3238,10 +4472,16 @@ class ServicePanel(Widget):
         self._svc_states[svc.name] = is_running
         for card in self.query(ServiceCard):
             if card.service_def.name == svc.name:
-                card.update_status(is_running)
+                if counts is not None:
+                    card.update_stack_status(counts[0], counts[1])
+                else:
+                    card.update_status(is_running)
         self._build_tree()
-        status = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
-        self._log(f"{svc.name} ({target}): {status}")
+        if counts is not None:
+            self._log(f"{svc.name} ({target}): {counts[0]}/{counts[1]} running")
+        else:
+            status = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
+            self._log(f"{svc.name} ({target}): {status}")
 
     def on_service_card_download_requested(self, event: ServiceCard.DownloadRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
@@ -3664,20 +4904,27 @@ class ServicePanel(Widget):
         states = await asyncio.to_thread(self._detect_visible_statuses, target)
         if target != self._get_panel_target():
             return
-        for svc_name, is_running in states.items():
+        for svc_name, (is_running, counts) in states.items():
             self._svc_states[svc_name] = is_running
             for card in self.query(ServiceCard):
                 if card.service_def.name == svc_name:
-                    card.update_status(is_running)
+                    if counts is not None:
+                        card.update_stack_status(counts[0], counts[1])
+                    else:
+                        card.update_status(is_running)
         self._build_tree()
 
-    def _detect_visible_statuses(self, target: str) -> dict[str, bool]:
-        states: dict[str, bool] = {}
+    def _detect_visible_statuses(self, target: str) -> dict[str, tuple[bool, tuple[int, int] | None]]:
+        states: dict[str, tuple[bool, tuple[int, int] | None]] = {}
         for svc in self._services:
-            if target == "local":
-                states[svc.name] = self._detect_running(svc)
+            counts = self._stack_running_counts(svc, target)
+            if counts is not None:
+                up, total = counts
+                states[svc.name] = (total > 0 and up == total, counts)
+            elif target == "local":
+                states[svc.name] = (self._detect_running(svc), None)
             else:
-                states[svc.name] = self._detect_running_remote(svc, target)
+                states[svc.name] = (self._detect_running_remote(svc, target), None)
         return states
 
     def _detect_running_remote(self, svc: ServiceDef, profile_name: str) -> bool:
@@ -3851,7 +5098,7 @@ class ServicePanel(Widget):
             if svc.launch_type == "bash":
                 self._launch_bash(svc, params)
             elif svc.launch_type == "tmux":
-                self._launch_tmux_server(svc)
+                self._launch_tmux_server(svc, params)
             elif svc.launch_type == "vllm":
                 self._launch_vllm_server(svc)
             elif svc.launch_type == "make":
@@ -4629,12 +5876,28 @@ class ServicePanel(Widget):
         except FileNotFoundError:
             return False
 
-    def _launch_tmux_server(self, svc: ServiceDef) -> None:
+    @staticmethod
+    def _filter_specs_by_selection(specs: list, params: dict | None):
+        """keep only specs whose component name is in params['__components__'].
+
+        When no selection is provided (non-stack service or older card), all
+        specs are kept."""
+        selection = (params or {}).get("__components__")
+        if selection is None:
+            return specs
+        selset = set(selection)
+        return [s for s in specs if str(s["name"]) in selset]
+
+    def _launch_tmux_server(self, svc: ServiceDef, params: dict | None = None) -> None:
         config_path = os.path.join(svc.config_dir, "config.yml")
         config = load_existing_config(config_path)
         specs = _stack_launch_specs_from_config(config)
         if not specs:
             self._log(f"[red]No launchable services (sections with port/app) found in {config_path}[/red]")
+            return
+        specs = self._filter_specs_by_selection(specs, params)
+        if not specs:
+            self._log("[yellow]No sub-services selected to start.[/yellow]")
             return
 
         for spec in specs:
@@ -4682,7 +5945,7 @@ class ServicePanel(Widget):
 
         if target in _SYSTEM_SVC_PORTS:
             self._log(f"  Running: make {target}")
-            self._log("  [yellow]If it pauses at a Password: prompt, type your sudo password in the command box below and press Enter.[/yellow]")
+            self._log("  [yellow]If it pauses at a Password: prompt, it is auto-filled from System Services → Sudo (or type it in the command box below and press Enter).[/yellow]")
             self._cmd.run(f'make -C {make_dir} {target} SUDO="sudo -S"')
         else:
             self._log(f"  Running: make {target}")
@@ -4816,6 +6079,10 @@ class ServicePanel(Widget):
                 if not specs:
                     self._log(f"[red]No launchable services found in remote {remote_config_path}[/red]")
                     return
+                specs = self._filter_specs_by_selection(specs, params)
+                if not specs:
+                    self._log("[yellow]No sub-services selected to start.[/yellow]")
+                    return
                 parts = []
                 for spec in specs:
                     session = str(spec["session"])
@@ -4834,12 +6101,19 @@ class ServicePanel(Widget):
                     + "; echo; echo 'Available tmux sessions:'; "
                     "tmux list-sessions 2>/dev/null || true"
                 )
-                ssh_cmd = self._remote_terminal_command(profile, run_cmd)
-                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} ({len(specs)} service(s))")
-                if self._open_collection_terminal([(svc.name, ssh_cmd)]):
-                    self._log(f"[green]{svc.name} start opened in SSH terminal.[/green]")
-                else:
-                    self._log("[yellow]Could not open remote server terminal.[/yellow]")
+                # Run directly over SSH instead of through an interactive Terminal:
+                # tmux -d detaches, so no window is needed, and this avoids the
+                # AppleScript/Terminal nested-quote truncation that left no sessions.
+                self._log(f"  Launching {len(specs)} service(s) on {profile_name} via tmux...")
+                self.run_worker(
+                    self._run_remote_streamed(
+                        profile_name,
+                        run_cmd,
+                        f"[green]{svc.name}: tmux sessions created on {profile_name} "
+                        "(services are loading; click Refresh in a moment).[/green]",
+                        f"{svc.name} remote launch failed",
+                    )
+                )
 
             elif svc.launch_type == "vllm":
                 session_name = _service_session_name(svc)
@@ -4942,28 +6216,43 @@ class ServicePanel(Widget):
                     f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null"
                     for session in sessions
                 )
-                ssh_cmd = self._remote_terminal_command(profile, cmd)
-                if self._open_collection_terminal([(f"stop {svc.name}", ssh_cmd)]):
-                    self._log(f"[red]Opened SSH stop terminal for {svc.name} on '{profile_name}'.[/red]")
-                else:
-                    self._log("[yellow]Could not open remote stop terminal.[/yellow]")
+                self._log(f"  Stopping {svc.name} on {profile_name}...")
+                self.run_worker(
+                    self._run_remote_streamed(
+                        profile_name, cmd,
+                        f"[green]{svc.name} stopped on {profile_name}.[/green]",
+                        f"{svc.name} remote stop failed",
+                    ),
+                    group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
+                    exclusive=False,
+                )
 
             elif svc.launch_type == "make":
                 target = "stop-" + _make_target_for(svc.name)
                 remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
                 run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
-                ssh_cmd = self._remote_terminal_command(profile, run_cmd)
-                if self._open_collection_terminal([(f"stop {svc.name}", ssh_cmd)]):
-                    self._log(f"[red]Opened SSH stop terminal for {svc.name} on '{profile_name}'.[/red]")
-                else:
-                    self._log("[yellow]Could not open remote stop terminal.[/yellow]")
+                self._log(f"  Stopping {svc.name} on {profile_name}...")
+                self.run_worker(
+                    self._run_remote_streamed(
+                        profile_name, run_cmd,
+                        f"[green]{svc.name} stopped on {profile_name}.[/green]",
+                        f"{svc.name} remote stop failed",
+                    ),
+                    group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
+                    exclusive=False,
+                )
 
             elif svc.launch_type == "bash":
                 command = self._remote_bash_stop_command(svc)
-                ssh_cmd = self._remote_terminal_command(profile, command)
-                if self._open_collection_terminal([(f"stop {svc.name}", ssh_cmd)]):
-                    self._log(f"[red]Opened SSH stop terminal for {svc.name} on '{profile_name}'.[/red]")
-                else:
-                    self._log("[yellow]Could not open remote stop terminal.[/yellow]")
+                self._log(f"  Stopping {svc.name} on {profile_name}...")
+                self.run_worker(
+                    self._run_remote_streamed(
+                        profile_name, command,
+                        f"[green]{svc.name} stopped on {profile_name}.[/green]",
+                        f"{svc.name} remote stop failed",
+                    ),
+                    group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
+                    exclusive=False,
+                )
         except Exception as e:
             self._log(f"[red]Remote stop error: {e}[/red]")

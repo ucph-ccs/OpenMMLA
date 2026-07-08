@@ -80,6 +80,41 @@ SHARED_SECTIONS = {
             },
         },
     },
+    "Sudo": {
+        "label": "Sudo (local admin)",
+        "fields": {
+            "password": {
+                "description": "Local sudo password, auto-filled when privileged Start/Stop commands prompt for it (stored encrypted; leave empty to type manually)",
+                "field_type": "str",
+                "default": "",
+            },
+        },
+    },
+    "Gateway": {
+        "label": "Gateway (Nginx)",
+        "fields": {
+            "host": {
+                "description": "Nginx gateway host that bases connect to (e.g. localhost)",
+                "field_type": "str",
+                "default": "localhost",
+            },
+            "http_port": {
+                "description": "Nginx HTTP reverse-proxy port (default 8080)",
+                "field_type": "int",
+                "default": 8080,
+            },
+            "rtmp_port": {
+                "description": "Nginx RTMP port for video/audio streams (default 1935)",
+                "field_type": "int",
+                "default": 1935,
+            },
+            "scheme": {
+                "description": "URL scheme for HTTP services (http or https)",
+                "field_type": "str",
+                "default": "http",
+            },
+        },
+    },
 }
 
 

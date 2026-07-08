@@ -57,8 +57,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         # Image detail setting for vision models (low/high/auto)
         self.image_detail = analyzer_config.get('image_detail', 'auto')
 
-        # Get prompt templates directory
-        self.prompt_templates_dir = analyzer_config.get('prompt_templates_dir', 'prompts')
+        # Get prompt templates directory (treat an unfilled <...> placeholder as unset)
+        self.prompt_templates_dir = analyzer_config.get('prompt_templates_dir') or 'prompts'
+        if str(self.prompt_templates_dir).strip().startswith('<') and \
+                str(self.prompt_templates_dir).strip().endswith('>'):
+            self.prompt_templates_dir = 'prompts'
         if not os.path.isabs(self.prompt_templates_dir):
             self.prompt_templates_dir = os.path.join(self.project_dir, self.prompt_templates_dir)
         if not os.path.exists(self.prompt_templates_dir):

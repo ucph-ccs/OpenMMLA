@@ -68,8 +68,12 @@ def load_vfa_action_schema(
         )
 
     repo_root = _find_repo_root(project_dir or os.getcwd())
+    # treat an unfilled <...> placeholder as unset and fall back to the default
+    _schema_cfg = analyzer_config.get("action_schema_path") or "config/vfa/action_schemas.yml"
+    if str(_schema_cfg).strip().startswith("<") and str(_schema_cfg).strip().endswith(">"):
+        _schema_cfg = "config/vfa/action_schemas.yml"
     schema_path = _resolve_path(
-        analyzer_config.get("action_schema_path", "config/vfa/action_schemas.yml"),
+        _schema_cfg,
         repo_root=repo_root,
         project_dir=project_dir,
     )

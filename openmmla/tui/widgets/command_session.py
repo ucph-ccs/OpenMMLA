@@ -425,6 +425,39 @@ class CommandSession(Widget):
         else:
             self.log(f"[red]Env '{env_name}' not found.[/red]")
 
+    # -- sudo password auto-fill -------------------------------------------------
+
+    MAX_AUTO_PASSWORD_SENDS = 3
+
+    @staticmethod
+    def _looks_like_password_prompt(text: str) -> bool:
+        """detect a sudo/ssh password prompt at the end of an output chunk."""
+        tail = text.rstrip().lower()
+        return tail.endswith("password:") or "password for" in tail
+
+    def _stored_sudo_password(self) -> str | None:
+        """local sudo password from the System Services store (None if unset)."""
+        try:
+            from openmmla.tui.system_services import get_sudo_password
+            return get_sudo_password(self._root)
+        except Exception:
+            return None
+
+    async def _maybe_send_password(self, proc, chunk_text: str, password: str | None,
+                                   sends: int) -> int:
+        """auto-fill a password prompt; returns the updated send count."""
+        if (
+            password
+            and sends < self.MAX_AUTO_PASSWORD_SENDS
+            and proc.stdin is not None
+            and self._looks_like_password_prompt(chunk_text)
+        ):
+            proc.stdin.write((password + "\n").encode())
+            await proc.stdin.drain()
+            self.log("[dim]> (password auto-filled from System Services)[/dim]")
+            return sends + 1
+        return sends
+
     # -- local commands --------------------------------------------------------
 
     async def _run_local_cd(self, cmd: str) -> None:
@@ -453,14 +486,18 @@ class CommandSession(Widget):
         )
         self._running_proc = proc
         assert proc.stdout is not None
+        sudo_password = self._stored_sudo_password() if "sudo" in cmd else None
+        pw_sends = 0
         while True:
             chunk = await proc.stdout.read(4096)
             if not chunk:
                 break
-            text = chunk.decode(errors="replace").rstrip()
+            raw = chunk.decode(errors="replace")
+            text = raw.rstrip()
             if text:
                 for line in text.splitlines():
                     self.log(rich_escape(line))
+            pw_sends = await self._maybe_send_password(proc, raw, sudo_password, pw_sends)
         rc = await proc.wait()
         self._running_proc = None
         if rc != 0:
@@ -500,14 +537,19 @@ class CommandSession(Widget):
         proc = await ssh_run_async(profile, wrapped, pipe_stdin=True)
         self._running_proc = proc
         assert proc.stdout is not None
+        # remote sudo prompts are answered with the SSH profile's password
+        remote_password = (getattr(profile, "password", "") or None) if "sudo" in cmd else None
+        pw_sends = 0
         while True:
             chunk = await proc.stdout.read(4096)
             if not chunk:
                 break
-            text = chunk.decode(errors="replace").rstrip()
+            raw = chunk.decode(errors="replace")
+            text = raw.rstrip()
             if text:
                 for line in text.splitlines():
                     self.log(rich_escape(line))
+            pw_sends = await self._maybe_send_password(proc, raw, remote_password, pw_sends)
         rc = await proc.wait()
         self._running_proc = None
         if rc != 0:

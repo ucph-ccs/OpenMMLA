@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ class FieldDef:
     section: str
     choices: list = field(default_factory=list)
     entry_schema: dict = field(default_factory=dict)
+    # per-entry-field dropdown choices for list_of_dicts, e.g. {"camera": [...]}
+    entry_field_choices: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -263,6 +266,17 @@ def load_template(filepath):
                 fields,
                 indent_level=0,
             )
+        elif isinstance(section_value, list) and section_value and isinstance(section_value[0], dict):
+            # top-level list-of-dicts (e.g. Bases) -> editable add/remove entries
+            fields.append(FieldDef(
+                path=section_key,
+                field_type="list_of_dicts",
+                default=section_value,
+                description=comments.get(section_key, ""),
+                required=False,
+                section=section_key,
+                entry_schema=_infer_entry_schema(section_value),
+            ))
         else:
             ft = _infer_type(section_value)
             req = _is_placeholder(section_value)
@@ -358,18 +372,39 @@ def set_nested_value(data, dot_path, value):
     current[keys[-1]] = value
 
 
+_PLACEHOLDER_RE = re.compile(r"^<[^>]*>$")
+
+
+def _strip_placeholders(data):
+    """recursively drop dict leaves whose value is an unfilled <...> placeholder."""
+    if not isinstance(data, dict):
+        return
+    for key in list(data.keys()):
+        val = data[key]
+        if isinstance(val, dict):
+            _strip_placeholders(val)
+        elif isinstance(val, str) and _PLACEHOLDER_RE.match(val.strip()):
+            del data[key]
+
+
 def save_config(config_path, fields, values):
     """build a yaml dict from field values and write to config_path.
+
+    The existing config is used as the base so keys not managed by the form
+    (e.g. optional advanced overrides) are preserved; unfilled <...> placeholder
+    values are stripped so they never reach disk.
 
     Sensitive values (api_key, token, password, ...) entered as plaintext are
     encrypted to ENC(...) with the master key before hitting disk; a master
     key is generated automatically on first use.
     """
-    data = {}
+    existing = load_existing_config(config_path)
+    data = copy.deepcopy(existing) if isinstance(existing, dict) else {}
     for f in fields:
         val = values.get(f.path, f.default)
         if val is not None:
             set_nested_value(data, f.path, val)
+    _strip_placeholders(data)
     try:
         from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key
         encrypt_sensitive_values(data, ensure_master_key())

@@ -15,28 +15,34 @@ from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session, get_id, flush_input, show_error_and_pause
+from openmmla.utils.config import (
+    get_bases, get_base_by_id, select_source_by_index_or_name, compute_initial_sync_time,
+)
+from openmmla.utils.input import select_or_create_session
 from openmmla.utils.logger import get_logger
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
-from .input import get_function_base, get_mode
+from .input import get_mode
 
 
 class VFABase(Base):
     """VFABase class for video frame analysis."""
     logger = get_logger('vfa-base')
 
-    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'full', graphics: bool = True,
-                 store: bool = True, verbose: bool = False, session_id: str | None = None):
+    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'live', graphics: bool = True,
+                 store: bool = True, verbose: bool = False, session_id: str | None = None,
+                 base: str | None = None):
         """Initializes the VFABase class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
-            mode: operating mode, 'record', 'analyze', or 'full'. (default: 'full')
+            mode: operating mode, 'capture', 'analyze', or 'live'. (default: 'live')
             graphics: whether to display graphics (default: True)
             store: whether to store frames locally (default: True)
             verbose: whether to enable verbose logging (default: False)
+            base: which base id from the config 'Bases' list to run; if omitted,
+                pick one interactively (the only interaction).
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -46,6 +52,20 @@ class VFABase(Base):
         self.store = store
         self.verbose = verbose
         self.launch_session_id = session_id
+        self.launch_base = base
+
+        # profile-driven: every run loads a base from the config 'Bases' list
+        # (single source of truth) — by id if given, else picked interactively.
+        entry = get_base_by_id(self.config, base) if base else self._pick_base_interactively()
+        if entry is None:
+            raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+        self._camera_name = entry.get('camera')
+        # source_index is overloaded by source type (index / file name / stream
+        # name); keep it raw and interpret it once the source is known.
+        self._source_index = entry.get('source_index')
+        self._base_id_override = str(entry.get('id', base))
+        self._base_source = entry.get('source')  # per-base override of Base.source
+        self._camera_angle = entry.get('camera_angle')  # per-base viewing angle label
 
         # Runtime attributes
         self.chosen_camera = None
@@ -83,15 +103,17 @@ class VFABase(Base):
         self.processing_rate = float(base_config.get('processing_rate', 1.0))
         self.enable_timing_sync = base_config.get('enable_timing_sync', True)
 
-        self.source = base_config['source']
+        # source comes from the per-base Bases entry (single source of truth);
+        # Base.source has been removed, so a base must define its own source
+        self.source = self._base_source or base_config.get('source')
+        if not self.source:
+            raise ValueError(
+                f"Base '{self._base_id_override}' has no 'source'. Set 'source' in its Bases entry.")
         self.stream_kwargs = base_config['stream_kwargs']
 
-        source_list = ['opencv', 'rtmp', 'lsl', 'file', 'frames']
+        source_list = ['opencv', 'rtmp', 'lsl', 'file']
         if self.source not in source_list:
             raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
-
-        if self.source == 'frames' and self.mode != 'analyze':
-            raise ValueError("VFA source 'frames' requires analyze mode. Start vfa-base with -m analyze.")
 
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations."""
@@ -152,43 +174,60 @@ class VFABase(Base):
         # Store the original initialization parameters
         project_dir = getattr(self, 'project_dir', None)
         config_path = getattr(self, 'config_path', None)
-        mode = getattr(self, 'mode', 'full')
+        mode = getattr(self, 'mode', 'live')
         graphics = getattr(self, 'graphics', True)
         store = getattr(self, 'store', True)
         verbose = getattr(self, 'verbose', False)
         session_id = getattr(self, 'launch_session_id', None)
-        
+        base = getattr(self, 'launch_base', None)
+
         # Clean up current state
         self._clean_up()
-        
+
         # Call __init__ again with the original parameters
-        self.__init__(project_dir=project_dir, config_path=config_path, 
+        self.__init__(project_dir=project_dir, config_path=config_path,
                      mode=mode, graphics=graphics, store=store, verbose=verbose,
-                     session_id=session_id)
+                     session_id=session_id, base=base)
         
         self.logger.info("VFA base reinitialization completed successfully")
 
-    def run(self):
-        """Run the VFA base."""
-        print('\033]0;VFA Base\007')
-
-        func_map = {1: self._start, 2: self._set_camera, 3: self._switch_mode, 4: self._reinit}
+    def _pick_base_interactively(self):
+        """Pick a base from the config 'Bases' list (the only interaction)."""
+        bases = get_bases(self.config)
+        if not bases:
+            raise ValueError(
+                "No bases defined. Add entries under 'Bases' in config.yml "
+                "(each with id, camera, source and source_index).")
+        print("Select a base:")
+        for idx, b in enumerate(bases):
+            print(f"  {idx}: id={b.get('id')} (camera: {b.get('camera')}, source: {b.get('source')}, "
+                  f"source_index: {b.get('source_index')}, angle: {b.get('camera_angle')})")
         while True:
+            sel = input("Base number [0]: ").strip()
             try:
-                select_fun = get_function_base(self.chosen_camera, self.selected_source, self.camera_angle,
-                                               self.base_id, self.mode)
-                if select_fun == 0:
-                    self.logger.info("Exiting VFA base...")
-                    break
-                func_map.get(select_fun, lambda: print("Invalid option."))()
-            except (Exception, KeyboardInterrupt) as e:
-                self.logger.warning(
-                    f"During running the VFA base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
-                    exc_info=True)
-                if not isinstance(e, KeyboardInterrupt):
-                    show_error_and_pause(e, "return to the VFA Base menu")
-            finally:
-                self._clean_up()
+                index = int(sel) if sel else 0
+            except ValueError:
+                index = -1
+            if 0 <= index < len(bases):
+                return bases[index]
+            print("Invalid selection. Please enter a valid base number.")
+
+    def run(self):
+        """Run the VFA base — fully profile-driven (no menus)."""
+        print('\033]0;VFA Base\007')
+        try:
+            self._set_camera()
+            if self.camera_configured:
+                self._start()
+            else:
+                self.logger.error("Camera setup failed (no camera/source resolved from config).")
+        except (Exception, KeyboardInterrupt) as e:
+            self.logger.warning(
+                f"VFA base stopped: "
+                f"{'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
+                exc_info=not isinstance(e, KeyboardInterrupt))
+        finally:
+            self._clean_up()
 
     def _start(self):
         """Start the video streaming and MQTT client for the VFA base."""
@@ -235,7 +274,7 @@ class VFABase(Base):
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
 
     def _switch_mode(self):
-        """Switch the operating mode between 'record', 'analyze' and 'full'."""
+        """Switch the operating mode between 'capture', 'analyze' and 'live'."""
         self.mode = get_mode()
         self.logger.info(f"Switched to {self.mode} mode.")
 
@@ -263,8 +302,11 @@ class VFABase(Base):
             self.stream_kwargs['rtmp_url'] = self.selected_source
         elif self.source == 'file':
             self.stream_kwargs['file_path'] = self.selected_source
+        elif self.source == 'lsl':
+            self.stream_kwargs['lsl_name'] = self.selected_source
 
-        self.base_id = get_id()
+        # base id comes from the selected base entry
+        self.base_id = str(self._base_id_override) if self._base_id_override else '1'
         self.camera_configured = True
         print(f'\033]0;VFA Base {self.base_id}, Camera {self.selected_source}\007')
 
@@ -274,24 +316,14 @@ class VFABase(Base):
         camera_choices = sorted(list(cameras.keys()))
         if not camera_choices:
             return None
-        for idx, choice in enumerate(camera_choices):
-            print(f"{idx}: {choice}")
 
-        default_selection = 0  # Default to the first camera
-        while True:
-            try:
-                selection_input = input(f"Choose your camera name with number [{default_selection}]: ")
-                if selection_input == '':
-                    selection = default_selection
-                else:
-                    selection = int(selection_input)
-                if not 0 <= selection < len(camera_choices):
-                    self.logger.warning("Invalid selection. Please choose a valid number.")
-                else:
-                    self.chosen_camera = camera_choices[selection]
-                    break
-            except ValueError:
-                self.logger.warning("Please enter a valid number or press Enter for default.")
+        # camera comes from the selected base entry (Bases[].camera); fall back
+        # to the first calibrated camera if unspecified
+        if self._camera_name and self._camera_name in cameras:
+            self.chosen_camera = self._camera_name
+        else:
+            self.chosen_camera = camera_choices[0]
+        self.logger.info(f"Using camera '{self.chosen_camera}'")
 
         camera_config = cameras[self.chosen_camera]
         fisheye = camera_config['fisheye']
@@ -308,33 +340,14 @@ class VFABase(Base):
         return camera_info
 
     def _set_camera_angle(self) -> str | None:
-        """Set the camera angle."""
-        # Configure camera angle
-        if self.angle_config:
-            angles = list(self.angle_config.keys())
-            print("Available camera angles:")
-            for idx, angle in enumerate(angles):
-                print(f"{idx}: {angle} - {self.angle_config[angle]}")
-            print(f"{len(angles)}: unspecified - No specific angle")
-
-            while True:
-                try:
-                    flush_input()
-                    angle_input = input("Choose camera angle (press Enter for unspecified): ")
-                    if angle_input == '':
-                        return 'unspecified'
-
-                    angle_idx = int(angle_input)
-                    if 0 <= angle_idx < len(angles):
-                        return angles[angle_idx]
-                    elif angle_idx == len(angles):
-                        return 'unspecified'
-                    else:
-                        print("Invalid selection. Please choose a valid option.")
-                except ValueError:
-                    print("Please enter a valid number or press Enter for unspecified.")
-        else:
-            return 'unspecified'
+        """Resolve the camera angle from the selected base entry (Bases[].camera_angle)."""
+        angle = self._camera_angle
+        if angle and not str(angle).startswith('<'):
+            if self.angle_config and angle not in self.angle_config:
+                self.logger.warning(
+                    f"camera_angle '{angle}' is not in Base.angle_config; using it as-is.")
+            return str(angle)
+        return 'unspecified'
 
     def _detect_video_sources(self) -> list[str | int]:
         """Detect available video sources based on the source type."""
@@ -364,19 +377,20 @@ class VFABase(Base):
         elif self.source == 'file':
             base_config = self.config.get('Base', {})
 
-            if 'initial_sync_time' not in base_config:
-                raise ValueError("initial_sync_time configuration is missing in the YAML file.")
-            self.initial_sync_time = float(base_config['initial_sync_time'])
-            if not validate_unix_timestamp(self.initial_sync_time):
-                raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
-
-            if 'file_dir' not in base_config:
-                raise ValueError("File directory configuration is missing in the YAML file.")
-            file_dir = base_config['file_dir']
+            # file_dir is optional and defaults to the project directory
+            file_dir = base_config.get('file_dir') or self.project_dir
             if not os.path.isabs(file_dir):
                 file_dir = os.path.join(self.project_dir, file_dir)
-            if not os.path.exists(file_dir):
+            if not os.path.isdir(file_dir):
                 raise ValueError(f"File directory does not exist: {file_dir}")
+
+            # initial_sync_time is auto-computed as the latest file start time
+            # (the common point where every file has begun), unless explicitly set
+            video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm')
+            self.initial_sync_time = compute_initial_sync_time(
+                file_dir, base_config.get('initial_sync_time'), exts=video_exts)
+            if not validate_unix_timestamp(self.initial_sync_time):
+                raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
 
             # find all video files in directory (opencv-supported formats)
             video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
@@ -397,20 +411,13 @@ class VFABase(Base):
                         available_sources.append(file_path)
                         available_source_idx += 1
 
-        elif self.source == 'frames':
-            base_config = self.config.get('Base', {})
-            frame_dir = base_config.get('frame_dir') or base_config.get('file_dir')
-            if not frame_dir:
-                raise ValueError("frame_dir configuration is missing in the YAML file.")
-            if not os.path.isabs(frame_dir):
-                frame_dir = os.path.join(self.project_dir, frame_dir)
-            if not os.path.isdir(frame_dir):
-                raise ValueError(f"Frame directory does not exist: {frame_dir}")
-
-            for source_dir in self._find_frame_source_dirs(frame_dir):
-                print(f"{available_source_idx} : Frame directory {source_dir} is available.")
-                available_sources.append(source_dir)
-                available_source_idx += 1
+        elif self.source == 'lsl':
+            # the LSL stream is selected by name (source_index holds the name)
+            if self._source_index:
+                print(f"0 : LSL stream '{self._source_index}' is available.")
+                available_sources.append(self._source_index)
+            else:
+                raise ValueError("LSL source requires a stream name in the base's source_index.")
 
         if not available_sources:
             self.logger.warning(f"No video sources found for {self.source}.")
@@ -418,26 +425,13 @@ class VFABase(Base):
         return available_sources
 
     def _choose_video_source(self, available_sources: list[str | int]) -> str | int | None:
-        """Choose a video source (camera index or RTMP URL)."""
+        """Pick the video source for the selected base (source_index is an index
+        for opencv/rtmp, or a file/stream name for file/lsl)."""
         if not available_sources:
             return None
-        default_source_idx = 0  # Default to the first available source
-        while True:
-            try:
-                flush_input()
-                source_idx_input = input(f"Choose your video source index [{default_source_idx}]: ")
-                if source_idx_input == '':
-                    source_idx = default_source_idx
-                else:
-                    source_idx = int(source_idx_input)
-                if 0 <= source_idx < len(available_sources):
-                    selected_source = available_sources[source_idx]
-                    self.logger.info(f"Selected video source: {selected_source}")
-                    return selected_source
-                else:
-                    self.logger.warning("Invalid selection. Please choose a valid source index.")
-            except ValueError:
-                self.logger.warning("Please enter a valid number or press Enter for default.")
+        selected_source = select_source_by_index_or_name(self._source_index, available_sources)
+        self.logger.info(f"Using video source {selected_source}")
+        return selected_source
 
     def _process_frames(self):
         """Process video frames and handle frame analysis."""
@@ -449,24 +443,23 @@ class VFABase(Base):
         self.save_path = os.path.join(self.runtime_dir, f'{self.chosen_camera}_{self.base_id}')
         self.temp_save_path = os.path.join(self.temp_dir, f'{self.chosen_camera}_{self.base_id}')
 
-        if self.mode == 'analyze':  # processing existing frames
-            frame_source_path = self.selected_source if self.source == 'frames' else self.save_path
+        if self.mode == 'analyze':  # analyze this session's previously recorded frames
+            frame_source_path = self.save_path
             if not frame_source_path:
                 self.logger.warning("No frame source is configured for analysis.")
                 return
-            if self.source != 'frames':
-                os.makedirs(frame_source_path, exist_ok=True)
-            time.sleep(2) # wait for the synchronizer to start
+            os.makedirs(frame_source_path, exist_ok=True)
+            time.sleep(2)  # wait for the synchronizer to start
             self._analyze_existing_frames(str(frame_source_path))
             return
 
         self.frame_output_path = self.save_path if self.store else self.temp_save_path
-        if self.store or self.mode == 'full':
+        if self.store or self.mode == 'live':
             if not self.store:
                 self._clean_stale_temp_frames()
             os.makedirs(self.frame_output_path, exist_ok=True)
-        elif self.mode == 'record':
-            self.logger.warning("VFA record mode is running with store frames disabled; frames will not be written.")
+        elif self.mode == 'capture':
+            self.logger.warning("VFA capture mode is running with store frames disabled; frames will not be written.")
 
         if self.source == 'file':
             self._process_keyframes()
@@ -506,11 +499,11 @@ class VFABase(Base):
             # process the frame
             processed_frame = self._process_single_frame(frame, acquired_time)
             
-            if self.store or self.mode == 'full':
+            if self.store or self.mode == 'live':
                 image_path = os.path.join(self.frame_output_path, f'{acquired_time}.jpg')
                 cv2.imwrite(image_path, processed_frame)
 
-                if self.mode == 'full':
+                if self.mode == 'live':
                     try:
                         self._publish_frame(image_path, acquired_time)
                     except Exception as e:
@@ -553,12 +546,12 @@ class VFABase(Base):
             processed_frame = self._process_single_frame(frame, acquired_time)
 
             if acquired_time - last_saved_time >= self.keyframe_interval:
-                if self.store or self.mode == 'full':
+                if self.store or self.mode == 'live':
                     image_path = os.path.join(self.frame_output_path, f'{acquired_time}.jpg')
                     cv2.imwrite(image_path, processed_frame)
                 last_saved_time = acquired_time
 
-                if self.mode == 'full':
+                if self.mode == 'live':
                     try:
                         self._publish_frame(image_path, acquired_time)
                     except Exception as e:
@@ -610,22 +603,6 @@ class VFABase(Base):
             f for f in os.listdir(path)
             if f.lower().endswith(('.jpg', '.jpeg', '.png'))
         ]
-
-    @classmethod
-    def _find_frame_source_dirs(cls, frame_dir: str) -> list[str]:
-        if cls._frame_files(frame_dir):
-            return [frame_dir]
-
-        source_dirs = []
-        for root, dirs, files in os.walk(frame_dir):
-            dirs[:] = [name for name in dirs if name not in {'__pycache__', 'temp'}]
-            frame_files = [
-                f for f in files
-                if f.lower().endswith(('.jpg', '.jpeg', '.png'))
-            ]
-            if frame_files:
-                source_dirs.append(root)
-        return sorted(source_dirs)
 
     def _analyze_existing_frames(self, save_path: str):
         """Analyze existing frames in the save path with timing synchronization."""

@@ -18,7 +18,7 @@ from .input import get_function_synchronizer, get_base_type, get_synchronizer_mo
 def start_asr_synchronizer(
     project_dir: str,
     config_path: str,
-    mode: str = 'full',
+    mode: str = 'live',
     dominant: bool = False,
     sp: bool = False,
     session_id: str | None = None,
@@ -28,7 +28,7 @@ def start_asr_synchronizer(
     Args:
         project_dir: Path to the project directory
         config_path: Path to the configuration file
-        mode: Operating mode ('recognize' or 'full')
+        mode: Operating mode ('analyze' or 'live')
         dominant: Whether to select the dominant speaker
         sp: Whether the audio bases do speech separation
     """
@@ -66,7 +66,7 @@ class ASRSynchronizer(Synchronizer):
         self,
         project_dir: str | None,
         config_path: str,
-        mode: str = 'full',
+        mode: str = 'live',
         dominant: bool = False,
         sp: bool = False,
         session_id: str | None = None,
@@ -192,9 +192,9 @@ class ASRSynchronizer(Synchronizer):
             self._synchronization_handler(exception_occurred)
 
     def _switch_mode(self):
-        """Switch the operating mode between 'record', 'recognize' and 'full'."""
+        """Switch the operating mode between 'analyze' and 'live'."""
         self.mode = get_synchronizer_mode()
-        if self.mode == 'recognize': # post-time analysis
+        if self.mode == 'analyze': # post-time analysis
             self.buffer_expiry_time = 1000000000
         else:
             self.buffer_expiry_time = int(self.config['Synchronizer']['result_expiry_time'])

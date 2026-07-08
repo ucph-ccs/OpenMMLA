@@ -27,7 +27,7 @@ def resolve_hostname(hostname):
         return None
 
 
-def is_host_alive(ip_or_hostname, timeout=1.5):
+def is_host_alive(ip_or_hostname, timeout=5):
     try:
         for port in [22]:  # check SSH port
             with socket.create_connection((ip_or_hostname, port), timeout=timeout):
@@ -36,7 +36,7 @@ def is_host_alive(ip_or_hostname, timeout=1.5):
         return False
 
 
-def is_ip_port_open(ip, port, timeout=1.5):
+def is_ip_port_open(ip, port, timeout=5):
     try:
         with socket.create_connection((ip, port), timeout=timeout):
             return True

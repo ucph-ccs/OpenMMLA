@@ -19,7 +19,7 @@ from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
-from .input import get_function_base
+from .input import get_bases, get_base_by_id, select_source_by_index_or_name, compute_initial_sync_time
 from .track_utils import PoseStabilizer, NormalVectorStabilizer, TagRelationTracker
 from .vector import is_tag_looking_at_another_2d, get_2d_outward_normal_vector
 
@@ -29,7 +29,8 @@ class IPSBase(Base):
     logger = get_logger('ips-base')
 
     def __init__(self, project_dir: str | None, config_path: str, graphics: bool = True,
-                 store: bool = True, verbose: bool = False, session_id: str | None = None):
+                 store: bool = True, verbose: bool = False, session_id: str | None = None,
+                 base: str | None = None):
         """Initialize the IPSBase class.
 
         Args:
@@ -38,6 +39,8 @@ class IPSBase(Base):
             graphics: whether to show graphics (default: True)
             store: whether to store the video frames (default: True)
             verbose: whether to enable verbose logging (default: False)
+            base: which base id from the config 'Bases' list to run; if omitted,
+                pick one interactively.
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -47,6 +50,17 @@ class IPSBase(Base):
         self.verbose = verbose
         self.launch_session_id = session_id
         self.max_badge_id = 12
+
+        # profile-driven: load this base from the config 'Bases' list
+        entry = get_base_by_id(self.config, base) if base else self._pick_base_interactively()
+        if entry is None:
+            raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+        self._camera_name = entry.get('camera')
+        # source_index is overloaded by source type (index / file name / stream
+        # name); keep it raw and interpret it once the source is known.
+        self._source_index = entry.get('source_index')
+        self._base_id_override = str(entry.get('id', base))
+        self._base_source = entry.get('source')  # per-base override of Base.source
 
         # Runtime attributes
         self.chosen_camera = None
@@ -81,7 +95,12 @@ class IPSBase(Base):
         self.processing_rate = float(base_config.get('processing_rate', 1.0))
         self.enable_timing_sync = base_config.get('enable_timing_sync', True)
 
-        self.source = base_config['source']
+        # source comes from the per-base Bases entry (single source of truth);
+        # Base.source has been removed, so a base must define its own source
+        self.source = self._base_source or base_config.get('source')
+        if not self.source:
+            raise ValueError(
+                f"Base '{self._base_id_override}' has no 'source'. Set 'source' in its Bases entry.")
         self.stream_kwargs = base_config['stream_kwargs']
         self.stream_kwargs['resolution'] = self.res
         self.stream_kwargs['fps'] = self.fps
@@ -127,25 +146,20 @@ class IPSBase(Base):
         gc.collect()
 
     def run(self):
-        """Run the IPS base."""
+        """Run the IPS base — fully profile-driven (no menus)."""
         print('\033]0;IPS Base\007')
-        func_map = {1: self._start_detection, 2: self._set_camera}
-
-        while True:
-            try:
-                select_fun = get_function_base(self.chosen_camera, self.selected_source, self.base_id, self.main_id)
-                if select_fun == 0:
-                    self.logger.info("Exiting IPS base...")
-                    break
-                func_map.get(select_fun, lambda: print("Invalid option."))()
-            except (Exception, KeyboardInterrupt) as e:
-                self.logger.warning(
-                    f"During running the IPS base, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
-                    exc_info=True)
-                if not isinstance(e, KeyboardInterrupt):
-                    show_error_and_pause(e, "return to the IPS Base menu")
-            finally:
-                self._clean_up()
+        try:
+            self._set_camera()
+            if self.camera_configured:
+                self._start_detection()
+            else:
+                self.logger.error("Camera setup failed (no camera/source resolved from config).")
+        except (Exception, KeyboardInterrupt) as e:
+            self.logger.warning(
+                f"IPS base stopped: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
+                exc_info=not isinstance(e, KeyboardInterrupt))
+        finally:
+            self._clean_up()
 
     def _start_detection(self):
         """Start AprilTag detection"""
@@ -228,36 +242,27 @@ class IPSBase(Base):
             self.stream_kwargs['rtmp_url'] = self.selected_source
         elif self.source == 'file':
             self.stream_kwargs['file_path'] = self.selected_source
+        elif self.source == 'lsl':
+            self.stream_kwargs['lsl_name'] = self.selected_source
         self.logger.info(f"Using source: {self.selected_source}")
 
-        self.base_id = self._choose_base_id()
+        self.base_id = str(self._base_id_override) if self._base_id_override else '1'
         self.camera_configured = True
         print(f'\033]0;IPS Base {self.base_id}\007')
 
     def _configure_camera_params(self):
-        """Configure camera intrinsic parameters."""
+        """Configure camera intrinsic parameters for the selected base's camera."""
         cameras = self.config.get('Cameras', {})
         camera_choices = sorted(list(cameras.keys()))
         if not camera_choices:
             return None
-        for idx, choice in enumerate(camera_choices):
-            print(f"{idx}: {choice}")
-
-        default_selection = 0  # Default to the first camera
-        while True:
-            try:
-                selection_input = input(f"Choose your camera name with number [{default_selection}]: ")
-                if selection_input == '':
-                    selection = default_selection
-                else:
-                    selection = int(selection_input)
-                if not 0 <= selection < len(camera_choices):
-                    self.logger.warning("Invalid selection. Please choose a valid number.")
-                else:
-                    self.chosen_camera = camera_choices[selection]
-                    break
-            except ValueError:
-                self.logger.warning("Please enter a valid number or press Enter for default.")
+        # camera comes from the selected base entry (Bases[].camera); fall back
+        # to the first calibrated camera if unspecified
+        if self._camera_name and self._camera_name in cameras:
+            self.chosen_camera = self._camera_name
+        else:
+            self.chosen_camera = camera_choices[0]
+        self.logger.info(f"Using camera '{self.chosen_camera}'")
 
         camera_config = cameras[self.chosen_camera]
         fisheye = camera_config['fisheye']
@@ -300,21 +305,22 @@ class IPSBase(Base):
 
         elif self.source == 'file':
             base_config = self.config.get('Base', {})
-            
-            if 'initial_sync_time' not in base_config:
-                raise ValueError("initial_sync_time configuration is missing in the YAML file.")
-            self.initial_sync_time = float(base_config['initial_sync_time'])
-            if not validate_unix_timestamp(self.initial_sync_time):
-                raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
-            
-            if 'file_dir' not in base_config:
-                raise ValueError("File directory configuration is missing in the YAML file.")
-            file_dir = base_config['file_dir']
+
+            # file_dir is optional and defaults to the project directory
+            file_dir = base_config.get('file_dir') or self.project_dir
             if not os.path.isabs(file_dir):
                 file_dir = os.path.join(self.project_dir, file_dir)
-            if not os.path.exists(file_dir):
+            if not os.path.isdir(file_dir):
                 raise ValueError(f"File directory does not exist: {file_dir}")
-            
+
+            # initial_sync_time is auto-computed as the latest file start time
+            # (the common point where every file has begun), unless explicitly set
+            video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm')
+            self.initial_sync_time = compute_initial_sync_time(
+                file_dir, base_config.get('initial_sync_time'), exts=video_exts)
+            if not validate_unix_timestamp(self.initial_sync_time):
+                raise ValueError(f"Invalid initial_sync_time ({self.initial_sync_time})")
+
             # find all video files in directory (opencv-supported formats)
             video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
             for filename in sorted(os.listdir(file_dir)):
@@ -334,45 +340,46 @@ class IPSBase(Base):
                         available_sources.append(file_path)
                         available_source_idx += 1
 
+        elif self.source == 'lsl':
+            # the LSL stream is selected by name (source_index holds the name)
+            if self._source_index:
+                print(f"0 : LSL stream '{self._source_index}' is available.")
+                available_sources.append(self._source_index)
+            else:
+                raise ValueError("LSL source requires a stream name in the base's source_index.")
+
         if not available_sources:
             self.logger.warning(f"No video sources found for {self.source}.")
 
         return available_sources
 
     def _choose_video_source(self, available_sources: list[str] | None) -> str | None:
-        """Choose a video source (camera index or RTMP URL)."""
+        """Pick the video source for the selected base (source_index is an index
+        for opencv/rtmp, or a file/stream name for file/lsl)."""
         if not available_sources:
             return None
-        default_source_idx = 0  # Default to the first available source
-        while True:
-            try:
-                source_idx_input = input(f"Choose your video source index [{default_source_idx}]: ")
-                if source_idx_input == '':
-                    source_idx = default_source_idx
-                else:
-                    source_idx = int(source_idx_input)
-                if 0 <= source_idx < len(available_sources):
-                    selected_source = available_sources[source_idx]
-                    self.logger.info(f"Selected video source: {selected_source}")
-                    return selected_source
-                else:
-                    self.logger.warning("Invalid selection. Please choose a valid source index.")
-            except ValueError:
-                self.logger.warning("Please enter a valid number or press Enter for default.")
+        selected_source = select_source_by_index_or_name(self._source_index, available_sources)
+        self.logger.info(f"Using video source {selected_source}")
+        return selected_source
 
-    def _choose_base_id(self):
-        """Prompt user to choose a sender ID based on available keys in transform_matrices.json configuration."""
-        print(f"Available sender ids:\n- {self.main_id}")
-        for key in self.transform_matrices_dict.keys():
-            print(f"- {key}")
-        default_base_id = self.main_id  # Default sender id
+    def _pick_base_interactively(self):
+        """Pick a base from the config 'Bases' list (the only interaction)."""
+        bases = get_bases(self.config)
+        if not bases:
+            raise ValueError(
+                "No bases defined. Add entries under 'Bases' in config.yml (each with an 'id').")
+        print("Select a base:")
+        for idx, b in enumerate(bases):
+            print(f"  {idx}: id={b.get('id')} (camera: {b.get('camera')}, source_index: {b.get('source_index')})")
         while True:
-            base_id_input = input(f"Enter your sender id [{default_base_id}]: ")
-            base_id = base_id_input if base_id_input else default_base_id
-            if base_id in self.transform_matrices_dict or base_id == self.main_id:
-                return base_id
-            else:
-                print("Invalid selection. Please enter a valid sender id or press Enter for default.")
+            sel = input("Base number [0]: ").strip()
+            try:
+                index = int(sel) if sel else 0
+            except ValueError:
+                index = -1
+            if 0 <= index < len(bases):
+                return bases[index]
+            print("Invalid selection. Please enter a valid base number.")
 
     def _configure_video_stream(self):
         """Configure video stream."""
@@ -573,22 +580,11 @@ class IPSBase(Base):
         if not transformation_choices:
             return None
 
-        default_selection = 0  # Default to the first transformation matrix
-        while True:
-            try:
-                selection_input = input(f"Choose your main transformation matrices with number [{default_selection}]: ")
-                if selection_input == '':
-                    selection = default_selection
-                else:
-                    selection = int(selection_input)
-                if not 0 <= selection < len(transformation_choices):
-                    self.logger.warning("Invalid selection. Please choose a valid number.")
-                else:
-                    chosen_transformation = transformation_choices[selection]
-                    self.main_id = chosen_transformation.split('_')[-1].split('.')[0]
-                    break
-            except ValueError:
-                self.logger.warning("Please enter a valid number or press Enter for default.")
+        # non-interactive: use the first transform matrix file; main_id is its
+        # suffix (e.g. transformation_matrices_m.json -> main camera id 'm')
+        chosen_transformation = sorted(transformation_choices)[0]
+        self.main_id = chosen_transformation.split('_')[-1].split('.')[0]
+        self.logger.info(f"Using transform matrices '{chosen_transformation}' (main: {self.main_id})")
 
         with open(os.path.join(self.camera_sync_dir, chosen_transformation), 'r') as file:
             return json.load(file)

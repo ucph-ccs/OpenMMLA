@@ -9,7 +9,7 @@ import yaml
 from openmmla.services.asr.requests import request_audio_inference
 from openmmla.utils.audio.files import segment_wav
 from openmmla.utils.logger import get_logger
-from openmmla.utils.requests import resolve_url
+from openmmla.utils.requests import resolve_url, build_service_url
 
 
 class AudioRecognizer:
@@ -55,7 +55,7 @@ class AudioRecognizer:
         """
         config = yaml.safe_load(open(config_path, 'r'))
         self.profiles_dir = profiles_dir
-        self.audio_inferer_url = resolve_url(config['Server']['asr']['audio_inferer'])
+        self.audio_inferer_url = build_service_url(config, config['Server']['asr']['audio_inferer'])
         self.store = store
         print(f"Audio inferer URL: {self.audio_inferer_url}")
 
@@ -375,7 +375,9 @@ class AudioRecognizer:
             self.logger.info(f"Loaded {num_features} embeddings for {speaker_name}")
 
     def _infer(self, audio_path: str) -> np.ndarray:
-        return request_audio_inference(audio_path, os.path.basename(self.profiles_dir), self.audio_inferer_url)[0]
+        emb = request_audio_inference(audio_path, os.path.basename(self.profiles_dir), self.audio_inferer_url)
+        # Server may return (1, D) batched or (D,) flat; always return the 1-D embedding vector
+        return emb[0] if emb.ndim > 1 else emb
 
     def _update_features(self, speaker_name: str, new_feature: np.ndarray):
         new_feature_normalized = new_feature / np.linalg.norm(new_feature, ord=2)

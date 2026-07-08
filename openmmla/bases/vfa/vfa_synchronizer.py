@@ -13,6 +13,7 @@ from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
 from openmmla.utils.logger import get_logger
+from openmmla.utils.requests import build_service_url
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
 from .input import get_function_synchronizer
@@ -57,7 +58,7 @@ class VFASynchronizer(Synchronizer):
 
         self.buffer_expiry_time = float(sync_config.get('result_expiry_time', 30))
         self.match_tolerance = float(sync_config.get('match_tolerance', 0.5))
-        self.vllm_frame_analyzer_url = vfa_server_config['vllm_frame_analyzer']
+        self.vllm_frame_analyzer_url = build_service_url(self.config, vfa_server_config['vllm_frame_analyzer'])
         self.angle_config = base_config.get('angle_config', {})
         
         self.logger.info(f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")

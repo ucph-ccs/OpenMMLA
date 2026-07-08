@@ -48,34 +48,34 @@ def get_function_synchronizer(mode: str):
 def get_base_mode():
     """Get the operating mode from user input."""
     options = [
-        "Record Mode",
-        "Recognize Mode", 
-        "Full Mode"
+        "Capture Mode",
+        "Analyze Mode",
+        "Live Mode"
     ]
     descriptions = [
         "Store audio locally without recognizing",
         "Recognize locally stored audio without recording",
         "Record and recognize on-the-fly"
     ]
-    
+
     selected_index = interactive_menu("Select Operating Mode", options, descriptions, prompt_enter=False)
-    mode_map = ['record', 'recognize', 'full']
+    mode_map = ['capture', 'analyze', 'live']
     return mode_map[selected_index]
 
 
 def get_synchronizer_mode():
     """Get the operating mode from user input."""
     options = [
-        "Recognize Mode",
-        "Full Mode"
+        "Analyze Mode",
+        "Live Mode"
     ]
     descriptions = [
         "Recognize locally stored audio",
         "Recognize on-the-fly"
     ]
-    
+
     selected_index = interactive_menu("Select Synchronizer Mode", options, descriptions, prompt_enter=False)
-    mode_map = ['recognize', 'full']
+    mode_map = ['analyze', 'live']
     return mode_map[selected_index]
 
 

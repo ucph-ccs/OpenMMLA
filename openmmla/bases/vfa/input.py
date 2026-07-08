@@ -65,16 +65,16 @@ def get_mode():
         try:
             flush_input()
             selected_mode = int(input("Please select the mode:"
-                                      "\n1. Record, store video frame locally without analyzing"
+                                      "\n1. Capture, store video frame locally without analyzing"
                                       "\n2. Analyze, analyze locally stored video frame without recording"
-                                      "\n3. Full, record and analyze on-the-fly"
+                                      "\n3. Live, record and analyze on-the-fly"
                                       "\nSelected mode:"))
             if selected_mode == 1:
-                return 'record'
+                return 'capture'
             elif selected_mode == 2:
                 return 'analyze'
             elif selected_mode == 3:
-                return 'full'
+                return 'live'
             else:
                 print("Invalid mode, please select again.")
         except ValueError:

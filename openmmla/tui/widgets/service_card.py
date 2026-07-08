@@ -110,17 +110,22 @@ class ServiceCard(Widget):
     ServiceCard .card-params {
         margin: 0;
     }
+    /* counts wrap to the next row when the card is too narrow (grid column
+       count is recomputed on resize in on_resize); height auto so the card
+       grows instead of clipping the steppers */
     ServiceCard .card-counts {
-        layout: horizontal;
+        layout: grid;
+        grid-size: 3;
+        grid-rows: 3;
+        grid-columns: 38;
+        grid-gutter: 0 2;
         height: auto;
         margin: 0 0 1 0;
     }
     ServiceCard .param-cell {
         layout: horizontal;
-        width: 1fr;
-        min-width: 36;
+        width: 100%;
         height: 3;
-        margin-right: 2;
     }
     ServiceCard .param-row {
         layout: horizontal;
@@ -163,22 +168,57 @@ class ServiceCard(Widget):
         min-width: 22;
         height: 3;
     }
+    /* action buttons wrap to the next row when the card is too narrow (grid
+       column count is recomputed on resize in on_resize) */
     ServiceCard .card-actions {
+        layout: grid;
+        grid-size: 5;
+        grid-rows: 3;
+        grid-columns: 16;
+        grid-gutter: 0 1;
         height: auto;
         margin: 0 0 1 0;
     }
     ServiceCard .card-actions Button {
-        margin-right: 1;
-        width: 16;
-        min-width: 12;
+        width: 100%;
         height: 3;
     }
     """
+
+    # approximate widths (cols) used to compute how many items fit per row
+    _ACTION_BTN_W = 16
+    _ACTION_GUTTER = 1
+    _COUNT_CELL_W = 38
+    _COUNT_GUTTER = 2
+
+    def on_resize(self, event) -> None:
+        self._reflow_rows(event.size.width)
+
+    def _reflow_rows(self, width: int) -> None:
+        """Recompute grid column counts so action buttons / count steppers wrap
+        to the next row instead of being clipped when the card is too narrow."""
+        # usable inner width (border + padding ≈ 4 cols)
+        avail = max(1, int(width) - 4)
+        act_cols = max(1, (avail + self._ACTION_GUTTER) // (self._ACTION_BTN_W + self._ACTION_GUTTER))
+        cnt_cols = max(1, (avail + self._COUNT_GUTTER) // (self._COUNT_CELL_W + self._COUNT_GUTTER))
+        try:
+            for row in self.query(".card-actions"):
+                n = len(list(row.children))
+                row.styles.grid_size_columns = max(1, min(act_cols, n)) if n else 1
+        except Exception:
+            pass
+        try:
+            for row in self.query(".card-counts"):
+                n = len(list(row.children))
+                row.styles.grid_size_columns = max(1, min(cnt_cols, n)) if n else 1
+        except Exception:
+            pass
 
     def __init__(
         self,
         service_def: ServiceDef,
         is_running: bool = False,
+        stack_components: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.service_def = service_def
@@ -187,13 +227,44 @@ class ServiceCard(Widget):
             param.flag: self._initial_param_value(param)
             for param in self.service_def.params
         }
+        # sub-services of a stack service (e.g. AudioInferer, SpeechTranscriber);
+        # each gets a launch toggle, all enabled by default.
+        self.stack_components = list(stack_components or [])
+        self._component_enabled = {name: True for name in self.stack_components}
+
+    def _component_toggle_id(self, name: str) -> str:
+        return _safe_id(f"component_toggle__{self.service_def.name}__{name}")
+
+    def enabled_components(self) -> list[str]:
+        return [n for n in self.stack_components if self._component_enabled.get(n, True)]
+
+    def _toggle_component(self, name: str) -> None:
+        self._component_enabled[name] = not self._component_enabled.get(name, True)
+        try:
+            button = self.query_one(f"#{self._component_toggle_id(name)}", Button)
+            value = self._component_enabled[name]
+            button.label = self._bool_label(value)
+            button.variant = self._bool_variant(value)
+        except Exception:
+            pass
+
+    @property
+    def _is_interactive(self) -> bool:
+        """bash services run in their own terminal window and aren't tracked,
+        so they can't show a live status or be stopped from the TUI."""
+        return self.service_def.launch_type == "bash"
+
+    def _status_markup(self) -> str:
+        if self._is_interactive:
+            return "[yellow]Interactive (runs in its own terminal)[/yellow]"
+        return "[green]Running[/green]" if self._is_running else "[red]Stopped[/red]"
 
     def compose(self) -> ComposeResult:
         if self.service_def.launch_type == "collection":
             yield from self._compose_collection()
             return
 
-        status_text = "[green]Running[/green]" if self._is_running else "[red]Stopped[/red]"
+        status_text = self._status_markup()
 
         with Vertical():
             yield Static(f"[b]{self.service_def.name}[/b]", classes="card-title")
@@ -204,6 +275,21 @@ class ServiceCard(Widget):
             if self.service_def.description:
                 yield Static(f"  {self.service_def.description}", classes="card-meta")
             yield Static(f"  Status: {status_text}", classes="card-status")
+
+            if self.stack_components:
+                yield Static("  Services to launch:", classes="card-meta")
+                with Vertical(classes="card-params"):
+                    for name in self.stack_components:
+                        with Horizontal(classes="param-row"):
+                            yield Static(f"{name}:", classes="param-label")
+                            enabled = self._component_enabled.get(name, True)
+                            yield Button(
+                                self._bool_label(enabled),
+                                variant=self._bool_variant(enabled),
+                                compact=True,
+                                id=self._component_toggle_id(name),
+                                classes="param-toggle",
+                            )
 
             if self.service_def.params:
                 count_params = [p for p in self.service_def.params if p.param_type == "int"]
@@ -223,12 +309,15 @@ class ServiceCard(Widget):
                     compact=True,
                     id=_safe_id(f"start__{self.service_def.name}"),
                 )
-                yield Button(
-                    "Stop",
-                    variant="error",
-                    compact=True,
-                    id=_safe_id(f"stop__{self.service_def.name}"),
-                )
+                # interactive (bash) services are stopped from their own terminal,
+                # so don't offer a Stop button that can't do anything
+                if not self._is_interactive:
+                    yield Button(
+                        "Stop",
+                        variant="error",
+                        compact=True,
+                        id=_safe_id(f"stop__{self.service_def.name}"),
+                    )
                 yield Button(
                     "Logs",
                     variant="primary",
@@ -538,7 +627,23 @@ class ServiceCard(Widget):
     def update_status(self, is_running: bool) -> None:
         """update the displayed status."""
         self._is_running = is_running
-        status_text = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
+        # bash/interactive services keep the "Interactive" label regardless
+        try:
+            self.query_one(".card-status", Static).update(f"  Status: {self._status_markup()}")
+        except Exception:
+            pass
+
+    def update_stack_status(self, up: int, total: int) -> None:
+        """update status for a stack service as a running-count, e.g. '3/6'."""
+        self._is_running = total > 0 and up == total
+        if total <= 0:
+            status_text = "[red]Stopped[/red]"
+        elif up == 0:
+            status_text = f"[red]Stopped (0/{total})[/red]"
+        elif up < total:
+            status_text = f"[yellow]Partial ({up}/{total})[/yellow]"
+        else:
+            status_text = f"[green]Running ({up}/{total})[/green]"
         try:
             self.query_one(".card-status", Static).update(f"  Status: {status_text}")
         except Exception:
@@ -603,8 +708,15 @@ class ServiceCard(Widget):
                         self._toggle_collection_bool_param(role, param.flag)
                         return
 
+        for name in self.stack_components:
+            if btn_id == self._component_toggle_id(name):
+                self._toggle_component(name)
+                return
+
         if btn_id.startswith("start__"):
             params = self.collect_params()
+            if self.stack_components:
+                params["__components__"] = self.enabled_components()
             self.post_message(self.StartRequested(self.service_def.name, params))
         elif btn_id.startswith("stop__"):
             params = self.collect_params()

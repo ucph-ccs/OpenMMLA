@@ -11,7 +11,7 @@ from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
-from .input import get_function_base
+from .input import get_base_by_id, get_bases, select_source_by_index_or_name
 from .vector import get_outward_normal_vector
 
 
@@ -19,19 +19,38 @@ class CameraTagDetector(Base):
     """Class for detecting AprilTags from camera feed"""
     logger = get_logger('camera-tag-detector')
 
-    def __init__(self, project_dir: str | None, config_path: str, max_badge_id: int = 15):
+    def __init__(self, project_dir: str | None, config_path: str, max_badge_id: int = 15,
+                 graphics: bool = True, headless: bool = False, base: str | None = None):
         """Initialize the camera tag detector.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
             max_badge_id: maximum badge ID to detect (default: 15)
+            graphics: whether to display annotated video frames in a window.
+                Set False for headless/remote runs; detection/MQTT unaffected.
+            headless: no display (forces graphics off).
+            base: which base id from the config 'Bases' list to run; if omitted,
+                pick one interactively.
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
         """Camera detector parameters."""
         self.max_badge_id = max_badge_id
-        # self.cameras_dir = os.path.join(self.project_dir, 'camera_calib/cameras')
+        # display is independent of selection; headless implies no display
+        self.graphics = graphics and not headless
+        # profile-driven: every run loads a base from the config 'Bases' list
+        # (single source of truth) — by id if given, else picked interactively.
+        entry = get_base_by_id(self.config, base) if base else self._pick_base_interactively()
+        if entry is None:
+            raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+        self._camera_name = entry.get('camera')
+        # source_index is overloaded by source type: an index (opencv/rtmp), a
+        # file name (file) or a stream name (lsl) — keep it raw and interpret it
+        # when the source is known.
+        self._source_index = entry.get('source_index')
+        self._base_id_override = str(entry.get('id', base))
+        self._base_source = entry.get('source')  # per-base override of Base.source
 
         """Runtime attributes"""
         self.chosen_camera = None
@@ -53,7 +72,8 @@ class CameraTagDetector(Base):
         self.rotate = int(base_config.get('rotate', 0))
         self.fps = int(base_config.get('fps', 30))
 
-        self.source = base_config['source']
+        # per-base source (from the Bases entry) overrides the global Base.source
+        self.source = self._base_source or base_config['source']
         self.stream_kwargs = base_config['stream_kwargs']
         self.stream_kwargs['resolution'] = self.res
         self.stream_kwargs['fps'] = self.fps
@@ -70,26 +90,42 @@ class CameraTagDetector(Base):
             self.video_stream = None
         gc.collect()
 
-    def run(self):
-        """Run the camera tag detector."""
-        print('\033]0;Camera Detector\007')
-        func_map = {1: self._start_detection, 2: self._set_camera}
-
+    def _pick_base_interactively(self):
+        """Pick a base from the config 'Bases' list (the only interaction)."""
+        bases = get_bases(self.config)
+        if not bases:
+            raise ValueError(
+                "No bases defined. Add entries under 'Bases' in config.yml "
+                "(each with id, camera and source_index).")
+        print("Select a base:")
+        for idx, b in enumerate(bases):
+            print(f"  {idx}: id={b.get('id')} (camera: {b.get('camera')}, source_index: {b.get('source_index')})")
         while True:
+            sel = input("Base number [0]: ").strip()
             try:
-                select_fun = get_function_base(self.chosen_camera, self.selected_source, self.base_id, main_id='None')
-                if select_fun == 0:
-                    self.logger.info("Exiting video base...")
-                    break
-                func_map.get(select_fun, lambda: print("Invalid option."))()
-            except (Exception, KeyboardInterrupt) as e:
-                self.logger.warning(
-                    f"During running the tag detector, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
-                    exc_info=True)
-                if not isinstance(e, KeyboardInterrupt):
-                    show_error_and_pause(e, "return to the Camera Tag Detector menu")
-            finally:
-                self._clean_up()
+                index = int(sel) if sel else 0
+            except ValueError:
+                index = -1
+            if 0 <= index < len(bases):
+                return bases[index]
+            print("Invalid selection. Please enter a valid base number.")
+
+    def run(self):
+        """Run the camera tag detector — fully profile-driven (no menus)."""
+        print('\033]0;Camera Detector\007')
+        try:
+            self._set_camera()
+            if self.camera_configured:
+                self._start_detection()
+            else:
+                self.logger.error("Camera setup failed (no camera/source resolved from config).")
+        except (Exception, KeyboardInterrupt) as e:
+            self.logger.warning(
+                f"Tag detector stopped: "
+                f"{'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
+                exc_info=not isinstance(e, KeyboardInterrupt))
+        finally:
+            self._clean_up()
 
     def _start_detection(self):
         """Start AprilTag detection"""
@@ -109,8 +145,9 @@ class CameraTagDetector(Base):
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("%s, capture interrupted.", e, exc_info=False)
         finally:
-            cv2.destroyAllWindows()
-            cv2.waitKey(1)
+            if self.graphics:
+                cv2.destroyAllWindows()
+                cv2.waitKey(1)
 
     def _set_camera(self):
         """Set up camera source and id."""
@@ -133,38 +170,28 @@ class CameraTagDetector(Base):
             self.stream_kwargs['camera_index'] = self.selected_source
         elif self.source == 'rtmp':
             self.stream_kwargs['rtmp_url'] = self.selected_source
+        elif self.source == 'lsl':
+            self.stream_kwargs['lsl_name'] = self.selected_source
 
-        # Config camera base id
-        self.base_id = input("Input your sender (camera) id: ")
-        if not self.base_id:
-            self.base_id = '1'
+        # base id comes from the selected base entry
+        self.base_id = str(self._base_id_override) if self._base_id_override else '1'
         self.camera_configured = True
         print(f'\033]0;Camera Detector {self.base_id}\007')
 
     def _configure_camera_params(self):
-        """Configure camera intrinsic parameters."""
+        """Configure camera intrinsic parameters for the selected base's camera."""
         cameras = self.config.get('Cameras', {})
         camera_choices = sorted(list(cameras.keys()))
         if not camera_choices:
             return None
-        for idx, choice in enumerate(camera_choices):
-            print(f"{idx}: {choice}")
 
-        default_selection = 0  # Default to the first camera
-        while True:
-            try:
-                selection_input = input(f"Choose your camera name with number [{default_selection}]: ")
-                if selection_input == '':
-                    selection = default_selection
-                else:
-                    selection = int(selection_input)
-                if not 0 <= selection < len(camera_choices):
-                    self.logger.warning("Invalid selection. Please choose a valid number.")
-                else:
-                    self.chosen_camera = camera_choices[selection]
-                    break
-            except ValueError:
-                self.logger.warning("Please enter a valid number or press Enter for default.")
+        # camera comes from the selected base entry (Bases[].camera); fall back
+        # to the first calibrated camera if unspecified
+        if self._camera_name and self._camera_name in cameras:
+            self.chosen_camera = self._camera_name
+        else:
+            self.chosen_camera = camera_choices[0]
+        self.logger.info(f"Using camera '{self.chosen_camera}'")
 
         camera_config = cameras[self.chosen_camera]
         fisheye = camera_config['fisheye']
@@ -205,31 +232,27 @@ class CameraTagDetector(Base):
                 available_sources.append(url)
                 available_source_idx += 1
 
+        elif self.source == 'lsl':
+            # the LSL stream is selected by name (source_index holds the name)
+            if self._source_index:
+                print(f"0 : LSL stream '{self._source_index}' is available.")
+                available_sources.append(self._source_index)
+            else:
+                raise ValueError("LSL source requires a stream name in the base's source_index.")
+
         if not available_sources:
             self.logger.warning(f"No video sources found for {self.source}.")
 
         return available_sources
 
     def _choose_video_source(self, available_sources):
-        """Choose a video source (camera index or RTMP URL)."""
+        """Pick the video source for the selected base (source_index is an index
+        for opencv/rtmp, or a file/stream name for file/lsl)."""
         if not available_sources:
             return None
-        default_source_idx = 0  # Default to the first available source
-        while True:
-            try:
-                source_idx_input = input(f"Choose your video source index [{default_source_idx}]: ")
-                if source_idx_input == '':
-                    source_idx = default_source_idx
-                else:
-                    source_idx = int(source_idx_input)
-                if 0 <= source_idx < len(available_sources):
-                    selected_source = available_sources[source_idx]
-                    self.logger.info(f"Selected video source: {selected_source}")
-                    return selected_source
-                else:
-                    self.logger.warning("Invalid selection. Please choose a valid source index.")
-            except ValueError:
-                self.logger.warning("Please enter a valid number or press Enter for default.")
+        selected_source = select_source_by_index_or_name(self._source_index, available_sources)
+        self.logger.info(f"Using video source {selected_source}")
+        return selected_source
 
     def _configure_video_stream(self):
         """Configure video stream."""
@@ -282,8 +305,9 @@ class CameraTagDetector(Base):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
                 print(f"Tag ID: {tag.tag_id}, Rotation: {tag.pose_R}, Translation: {tag.pose_t}")
 
-            display_frame = cv2.resize(frame, (960, 540))
-            cv2.imshow(f'AprilTags Detection from camera {self.base_id}', display_frame)
+            if self.graphics:
+                display_frame = cv2.resize(frame, (960, 540))
+                cv2.imshow(f'AprilTags Detection from camera {self.base_id}', display_frame)
 
             message = {
                 "base_id": self.base_id,
@@ -293,5 +317,6 @@ class CameraTagDetector(Base):
             message_str = json.dumps(message)
             self.mqtt_client.publish("camera/synchronize", message_str, qos=0, retain=False)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            if self.graphics:
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break

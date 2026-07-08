@@ -23,21 +23,15 @@ Base:
   # keyframe_interval: 1.0, processing_rate: 2.0   → 1 FPS with half time allowance (0.5s per frame)
 
   # VideoStream settings
-  source: opencv                                    # VideoStream source type (opencv/rtmp/lsl/file)
-  file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
-  initial_sync_time: 1754398113.0                   # Unix timestamp to start synchronizing from
+  # NOTE: per-base 'source' and 'source_index' live in Bases (below). 'file_dir'
+  # is optional — when a base's source is 'file' it is the directory the file
+  # named in that base's source_index lives in (defaults to the project dir).
+  # initial_sync_time is auto-computed at runtime as the latest file start time.
+  file_dir: '/path/to/video/directory'              # (optional) directory of video files for source 'file'; filename format: <prefix>_<timestamp>.<extension>
   stream_kwargs:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
     format: MJPG                                    # Source format (e.g., MJPG (live camera), H264 (file), JPEG (lsl), raw (lsl))
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
-
-Synchronizer:
-  bucket_duration: 1                                # time bucket duration (seconds) for synchronized result
-
-# streams settings
-# each entry defines a video stream source. streams with ssh_profile can be started/stopped
-# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
-Streams:
   # example 1: external RTMP stream (already running, Base pulls from URL)
   # cam-external:
   #   target: rtmp://uber-server.local/ips/3
@@ -57,6 +51,34 @@ Streams:
   #   codec: libx264
   #   resolution: 1920x1080
   #   fps: 30
+
+# bases settings
+# Each entry defines one IPS base node (a camera position). A base references a
+# calibrated camera profile (from Cameras) and a video source. This is the single
+# source of truth for base id (name), camera, and source — used by interactive and
+# headless/remote runs and by camera sync. The base id is what appears in MQTT and
+# in the transform matrix keys.
+#
+# NOTE on modes: IPS has no separate capture/analyze/live mode (unlike ASR/VFA).
+# It always detects tags as frames arrive — "live" vs "analyze" is determined by
+# the source: a live source (opencv/rtmp/lsl) is real-time; source 'file' replays
+# and analyzes a recorded video.
+Bases:
+  # one template entry (edit it / use "+ Add Entry" in the TUI). Entries whose
+  # id is left as a <...> placeholder are ignored at runtime.
+  - id: <base-id>               # base id (identity; appears in MQTT + transform matrix)
+    camera: <camera-name>       # calibrated camera profile name (from Cameras)
+    source: rtmp                # source type (opencv/rtmp/lsl/file)
+    source_index: 0             # opencv/rtmp: index (0-based); file: file name in file_dir; lsl: stream name
+    main: false                 # mark exactly one base as the main reference for sync
+
+Synchronizer:
+  bucket_duration: 1                                # time bucket duration (seconds) for synchronized result
+
+# streams settings
+# each entry defines a video stream source. streams with ssh_profile can be started/stopped
+# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
+Streams:
 
 # Database settings
 InfluxDB:
@@ -105,6 +127,16 @@ Redis:
   host: <redis-example-server>
   port: <port-number>
   db: <database-number>
+
+# Gateway (Nginx) settings
+# Shared reverse-proxy/load-balancer endpoint that bases connect to. Stream
+# targets may be given as a full rtmp URL (used as-is) or composed against this
+# gateway's host/rtmp_port.
+Gateway:
+  host: <gateway-host>      # nginx host, e.g. uber-server.local
+  http_port: 8080           # nginx HTTP reverse-proxy port
+  rtmp_port: 1935           # nginx RTMP port for video/audio streams
+  scheme: http              # http or https
 
 Cameras:
   # Template for camera calibration parameters

@@ -14,7 +14,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
-from .input import get_function_sync_manager
+from .input import get_base_by_id, get_bases, get_function_sync_manager
 from .transform import (
     direct_transform_matrices, average_transform_matrices,
     transform_point, distance_between_points, transform_rotation,
@@ -31,7 +31,8 @@ class CameraSyncManager(Synchronizer):
 
     def __init__(self, project_dir: str | None, config_path: str, sync: bool = True,
                  top_K: int = 5000, distance_threshold: float = 0.1, angle_threshold: float = 3.0,
-                 time_threshold_sync: float = 0.05, time_threshold_unsync: float = 0.1):
+                 time_threshold_sync: float = 0.05, time_threshold_unsync: float = 0.1,
+                 base: str | None = None):
         """Initialize the camera sync manager.
 
         Args:
@@ -43,8 +44,12 @@ class CameraSyncManager(Synchronizer):
             angle_threshold: threshold for rotation angle (default: 3.0)
             time_threshold_sync: time threshold for sync mode (default: 0.05)
             time_threshold_unsync: time threshold for unsync mode (default: 0.1)
+            base: alternative base id (from config 'Bases') to synchronize against
+                the main base. The main base is the one flagged ``main: true``.
+                If omitted, the alternative is picked interactively.
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
+        self.launch_base = base
 
         """Synchronization parameters."""
         self.sync = sync
@@ -78,6 +83,58 @@ class CameraSyncManager(Synchronizer):
         self._setup_directories()
         self._setup_objects()
 
+        # profile-driven: resolve main/alt base ids from the config 'Bases' list
+        # (main = the entry flagged main: true; alt = -b entry, else picked).
+        self._resolve_bases(base)
+
+    def _resolve_bases(self, base):
+        """Resolve main_id (the base flagged main) and alt_id (-b or picked)."""
+        bases = get_bases(self.config)
+        if not bases:
+            raise ValueError(
+                "No bases defined. Add entries under 'Bases' in config.yml "
+                "(mark exactly one with main: true).")
+
+        mains = [b for b in bases if str(b.get('main')).lower() in ('true', '1', 'yes')]
+        if not mains:
+            raise ValueError("No main base found. Mark exactly one base with main: true in config 'Bases'.")
+        if len(mains) > 1:
+            raise ValueError(
+                f"Multiple main bases found ({[m.get('id') for m in mains]}); mark exactly one with main: true.")
+        self.main_id = str(mains[0].get('id'))
+
+        alts = [b for b in bases if str(b.get('id')) != self.main_id]
+        if not alts:
+            raise ValueError("No alternative base found; add at least one non-main base under 'Bases'.")
+
+        if base is not None:
+            alt = get_base_by_id(self.config, base)
+            if alt is None or str(alt.get('id')) == self.main_id:
+                raise ValueError(f"Alternative base '{base}' not found (or is the main base) in config 'Bases'.")
+        elif len(alts) == 1:
+            alt = alts[0]
+        else:
+            alt = self._pick_alt_interactively(alts)
+        self.alt_id = str(alt.get('id'))
+
+        self.logger.info(f"Camera sync: main={self.main_id}, alternative={self.alt_id}")
+        print(f"\033]0;Camera Sync Manager: main:{self.main_id} - alternative:{self.alt_id}\007")
+
+    def _pick_alt_interactively(self, alts):
+        """Pick the alternative base from non-main entries (the only interaction)."""
+        print(f"Main base is '{self.main_id}'. Select the alternative base to synchronize:")
+        for idx, b in enumerate(alts):
+            print(f"  {idx}: id={b.get('id')} (camera: {b.get('camera')})")
+        while True:
+            sel = input("Alternative base number [0]: ").strip()
+            try:
+                index = int(sel) if sel else 0
+            except ValueError:
+                index = -1
+            if 0 <= index < len(alts):
+                return alts[index]
+            print("Invalid selection. Please enter a valid base number.")
+
     def _setup_directories(self):
         """Set up required directories."""
         self.camera_sync_dir = os.path.join(self.project_dir, 'camera_sync')
@@ -104,17 +161,8 @@ class CameraSyncManager(Synchronizer):
                     show_error_and_pause(e, "return to the Camera Sync Manager menu")
 
     def _set_camera_id(self):
-        """Set camera IDs through user input."""
-        main_id = input("Please enter the main camera ID: ")
-        alt_id = input("Please enter the alternative camera ID: ")
-
-        if main_id == alt_id:
-            print("Main camera ID and alternative camera ID should be different.")
-            return
-
-        self.main_id = main_id
-        self.alt_id = alt_id
-        print(f"\033]0;Camera Sync Manager: main:{self.main_id} - alternative:{self.alt_id}\007")
+        """Re-resolve main/alt camera IDs from the config 'Bases' list (no input)."""
+        self._resolve_bases(self.launch_base)
 
     def _start_synchronization(self):
         try:
@@ -288,7 +336,11 @@ class CameraSyncManager(Synchronizer):
             json.dump(data, file, indent=4)
 
     def _export_transformations(self):
-        main_system = input("Please enter the main system ID: ")
+        # the "main system" is the main base (flagged main: true) resolved at init
+        main_system = self.main_id
+        if not main_system:
+            self.logger.warning("No main base resolved; cannot export transformations.")
+            return
         input_path = os.path.join(self.camera_sync_dir, 'transformation_matrices.json')
         output_path = os.path.join(self.camera_sync_dir, f'transformation_matrices_{main_system}.json')
         export_main_transformations_json(input_path, output_path, main_system)

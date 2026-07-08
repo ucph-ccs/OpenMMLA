@@ -36,7 +36,7 @@ def main():
     start_asr_synchronizer(
         project_dir=args.project_dir,
         config_path=args.config_path,
-        mode='full',  # Default mode for synchronizer
+        mode='live',  # Default mode for synchronizer
         dominant=args.dominant,
         sp=args.sp,
         session_id=args.session_id

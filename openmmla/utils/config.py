@@ -11,6 +11,102 @@ SYSTEM_SERVICES_REL_PATH = Path("config") / "system_services.yml"
 SYSTEM_SERVICE_SECTIONS = ("InfluxDB", "MongoDB", "MQTT", "Redis")
 
 
+def get_bases(config: dict) -> list[dict]:
+    """Return the configured base nodes from the 'Bases' config section.
+
+    Shared by ASR and IPS: each base is a dict with an 'id' (base identity;
+    numeric for ASR so udp/tcp ports can be derived, string for IPS).
+    Modality-specific keys differ — IPS: 'camera'/'source_index'/'main';
+    ASR: 'base_type'/'source_index'/'channel'. This list is the single source
+    of truth for base identity and per-device bindings.
+    """
+    bases = (config or {}).get("Bases") or []
+    result = []
+    for b in bases:
+        if not isinstance(b, dict):
+            continue
+        bid = b.get("id")
+        if bid is None:
+            continue
+        # ignore the shipped template entry (id left as a <...> placeholder)
+        if isinstance(bid, str) and bid.strip().startswith("<") and bid.strip().endswith(">"):
+            continue
+        result.append(b)
+    return result
+
+
+def get_base_by_id(config: dict, base_id) -> dict | None:
+    """Return the base entry whose id matches, or None."""
+    for base in get_bases(config):
+        if str(base.get("id")) == str(base_id):
+            return base
+    return None
+
+
+def coerce_source_index(value, default: int = 0) -> int:
+    """Return an int index for index-based sources (opencv/rtmp/pyaudio).
+
+    source_index is overloaded: a numeric index for index-based sources, a file
+    name for 'file' sources, and a stream name for 'lsl'. This coerces only the
+    numeric case, falling back to `default` for names/None.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def select_source_by_index_or_name(value, available: list):
+    """Pick an entry from `available` by integer index or by name.
+
+    Used by video bases when resolving source_index against the discovered
+    sources: an integer selects by position; a non-numeric value (e.g. a file
+    name for 'file' sources) matches by basename (or exact string).
+    """
+    if not available:
+        return None
+    try:
+        idx = int(value)
+        return available[idx] if 0 <= idx < len(available) else available[0]
+    except (TypeError, ValueError):
+        pass
+    target = str(value)
+    for src in available:
+        if os.path.basename(str(src)) == target or str(src) == target:
+            return src
+    return available[0]
+
+
+def compute_initial_sync_time(file_dir: str, configured=None, exts=None) -> float:
+    """Resolve the file-replay sync reference time.
+
+    Returns the explicit ``configured`` value when set; otherwise auto-computes
+    the latest (max) file start time parsed from ``_<timestamp>.<ext>`` file
+    names in ``file_dir`` — the common point at which every file has begun.
+    """
+    import re
+
+    if configured is not None and str(configured).strip() != "":
+        return float(configured)
+    starts: list[float] = []
+    try:
+        names = os.listdir(file_dir)
+    except OSError:
+        names = []
+    for name in names:
+        if exts and not name.lower().endswith(tuple(exts)):
+            continue
+        match = re.search(r"_(\d+(?:\.\d+)?)\.", name)
+        if match:
+            starts.append(float(match.group(1)))
+    if not starts:
+        raise ValueError(
+            f"Could not auto-compute initial_sync_time: no timestamped files "
+            f"(<name>_<unixtime>.<ext>) found in {file_dir}. Name files with a "
+            f"trailing _<timestamp> or set initial_sync_time explicitly.")
+    return max(starts)
+
+
 def load_yaml_config(config_path: str | os.PathLike[str]) -> dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}

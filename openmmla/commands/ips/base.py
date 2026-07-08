@@ -18,6 +18,9 @@ def get_parser():
     add_arg('verbose', bool, False, 'whether to print debug information', shortname='-v')
     add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
             shortname='-sid')
+    add_arg('base', str, None,
+            "base id from config 'Bases' (pulls camera/source/id from that entry); "
+            "if omitted, choose interactively", shortname='-b')
     return parser
 
 
@@ -36,7 +39,8 @@ def main():
         graphics=args.graphics,
         store=args.store,
         verbose=args.verbose,
-        session_id=args.session_id
+        session_id=args.session_id,
+        base=args.base
     )
     ips_base.run()
 

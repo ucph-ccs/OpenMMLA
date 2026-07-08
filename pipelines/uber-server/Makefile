@@ -227,22 +227,16 @@ else
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf
 endif
 ifeq ($(IS_MAC), 1)
-	$(SUDO) cp nginx/nginx.generated.conf /opt/homebrew/etc/nginx/nginx.conf
+	@$(SUDO) sh -c 'cp nginx/nginx.generated.conf /opt/homebrew/etc/nginx/nginx.conf; \
+		if pgrep nginx > /dev/null; then \
+			echo "🔁 Reloading NGINX (macOS)"; nginx -t && nginx -s reload; \
+		else \
+			echo "🚀 Starting NGINX (macOS)"; nginx; \
+		fi'
 else
-	$(SUDO) cp nginx/nginx.generated.conf /etc/nginx/nginx.conf
-endif
-ifeq ($(IS_MAC), 1)
-	@if pgrep nginx > /dev/null; then \
-		echo "🔁 Reloading NGINX (macOS)"; \
-		$(SUDO) nginx -t && $(SUDO) nginx -s reload; \
-	else \
-		echo "🚀 Starting NGINX (macOS)"; \
-		$(SUDO) nginx; \
-	fi
-else
-	echo "🔁 Restarting NGINX (Linux)"; \
-	$(SUDO) systemctl enable nginx
-	$(SUDO) systemctl restart nginx
+	@$(SUDO) sh -c 'cp nginx/nginx.generated.conf /etc/nginx/nginx.conf; \
+		echo "🔁 Restarting NGINX (Linux)"; \
+		systemctl enable nginx; systemctl restart nginx'
 endif
 
 next:
@@ -331,13 +325,14 @@ endif
 stop-nginx:
 ifeq ($(IS_MAC), 1)
 	@echo "🛑 Stopping NGINX (macOS)"
-	@$(SUDO) launchctl bootout system/homebrew.mxcl.nginx-full 2>/dev/null || true
-	@$(SUDO) nginx -s stop || true
-	@$(SUDO) pkill -f "nginx: master" || true
+	@$(SUDO) sh -c 'launchctl bootout system/homebrew.mxcl.nginx-full 2>/dev/null; \
+		nginx -s stop 2>/dev/null; \
+		pkill -f "nginx: master" 2>/dev/null; \
+		true'
 else
 	@echo "🛑 Stopping NGINX (Linux)"
-	@$(SUDO) systemctl stop nginx || echo "⚠️ NGINX not running"
-	@$(SUDO) systemctl disable nginx || echo "⚠️ Could not disable NGINX"
+	@$(SUDO) sh -c 'systemctl stop nginx || echo "⚠️ NGINX not running"; \
+		systemctl disable nginx || echo "⚠️ Could not disable NGINX"'
 endif
 
 stop-next:

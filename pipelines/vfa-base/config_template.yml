@@ -18,11 +18,12 @@ Base:
     "top": "View from above, showing a top-down perspective of the workspace and participants"
     
   # VideoStream settings
-  source: opencv                                    # VideoStream source type (opencv/rtmp/file/frames)
-  file_dir: '/path/to/video/directory'              # Directory path containing video files when source type is 'file', filename in format: <prefix>_<timestamp>.<extension>
-  frame_dir: '/path/to/frame/directory'             # Directory path containing .jpg/.jpeg/.png frames when source type is 'frames'
-  initial_sync_time: 1754398113.0                   # Unix timestamp to start synchronizing from
-  
+  # NOTE: per-base 'source' and 'source_index' live in Bases (below). 'file_dir'
+  # is optional — for source 'file' it is the directory of the file named in a
+  # base's source_index (defaults to the project dir). initial_sync_time is
+  # auto-computed at runtime as the latest file start time.
+  file_dir: '/path/to/video/directory'              # (optional) directory of video files for source 'file'; filename format: <prefix>_<timestamp>.<extension>
+
   # Frame processing settings (applies to all video sources)
   keyframe_interval: 30.0                          # Interval between processed frames in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
   processing_rate: 1.0                             # Real-time rate multiplier for file sources (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
@@ -43,16 +44,6 @@ Base:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
     format: MJPG                                    # Video format (e.g., MJPG, H264)
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
-
-Synchronizer:
-  result_expiry_time: 30                            # cleanup timeout (seconds)
-  match_tolerance: 0.5                              # matching tolerance (seconds) for incoming result to time buckets
-
-
-# streams settings
-# each entry defines a video stream source. streams with ssh_profile can be started/stopped
-# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
-Streams:
   # example 1: external RTMP stream (already running, Base pulls from URL)
   # cam-external:
   #   target: rtmp://uber-server.local/vfa/side
@@ -72,6 +63,28 @@ Streams:
   #   codec: libx264
   #   resolution: 1920x1080
   #   fps: 30
+
+# bases settings
+# Each entry defines one VFA base node (a camera/viewpoint). A base references a
+# calibrated camera profile (from Cameras) and a viewing angle. Single source of
+# truth for base id, camera, source and angle. Edit the template entry / use
+# "+ Add Entry" in the TUI; entries whose id is a <...> placeholder are ignored.
+Bases:
+  - id: <base-id>               # base id / identity (appears in storage paths {camera}_{id})
+    camera: <camera-name>       # calibrated camera profile name (from Cameras)
+    source: rtmp                # source type (opencv/rtmp/lsl/file)
+    source_index: 0             # opencv/rtmp: index (0-based); file: file name in file_dir; lsl: stream name
+    camera_angle: <camera-angle>  # viewing angle label (e.g. front, top, side)
+
+Synchronizer:
+  result_expiry_time: 30                            # cleanup timeout (seconds)
+  match_tolerance: 0.5                              # matching tolerance (seconds) for incoming result to time buckets
+
+
+# streams settings
+# each entry defines a video stream source. streams with ssh_profile can be started/stopped
+# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
+Streams:
 
 # Database settings
 InfluxDB:
@@ -120,6 +133,17 @@ Redis:
   host: <redis-example-server>
   port: <port-number>
   db: <database-number>
+
+# Gateway (Nginx) settings
+# Shared reverse-proxy/load-balancer endpoint that bases connect to. In the
+# Server section below, a service may be given either as a bare endpoint name
+# (composed against this gateway, e.g. 'vllm' -> {scheme}://{host}:{http_port}/vllm)
+# or as a full URL (used as-is, bypassing the gateway for a direct connection).
+Gateway:
+  host: <gateway-host>      # nginx host, e.g. uber-server.local
+  http_port: 8080           # nginx HTTP reverse-proxy port
+  rtmp_port: 1935           # nginx RTMP port for video/audio streams
+  scheme: http              # http or https
 
 # Server settings
 Server:

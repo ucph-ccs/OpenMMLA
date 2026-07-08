@@ -26,13 +26,14 @@ from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section
 from openmmla.utils.asr_scope import normalize_asr_scope
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url, show_error_and_pause
+from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url, show_error_and_pause, pause_after_error
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
-from openmmla.utils.requests import resolve_url
+from openmmla.utils.requests import resolve_url, build_service_url
 from .audio_recognizer import AudioRecognizer
-from .enums import BLUE, ENDC, GREEN, PURPLE, GREY
+from .enums import BLUE, ENDC, GREEN, PURPLE, GREY, RED
 from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion
+from openmmla.utils.config import get_bases, get_base_by_id
 
 
 def _resolve_speaker_verification(value, asr_scope: str) -> bool:
@@ -50,15 +51,15 @@ def _resolve_speaker_verification(value, asr_scope: str) -> bool:
     return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
 
 
-def start_asr_base(project_dir: str, config_path: str, mode: str = 'full', store: bool = True,
+def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = True,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
-                   hsr: bool = True, session_id: str | None = None):
+                   hsr: bool = True, session_id: str | None = None, base: str | None = None):
     """Start ASR Base with restart capability.
     
     Args:
         project_dir: Path to the project directory
         config_path: Path to the configuration file
-        mode: Operating mode ('record', 'recognize', or 'full')
+        mode: Operating mode ('capture', 'analyze', or 'live')
         store: Whether to store audio files
         vad: Whether to apply Voice Activity Detection
         nr: Whether to use denoiser to enhance speech
@@ -69,9 +70,9 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'full', store
     # restart loop - allows restarting the entire process
     while True:
         try:
-            asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode, 
+            asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode,
                               vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr,
-                              session_id=session_id)
+                              session_id=session_id, base=base)
             asr_base.run()
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
@@ -91,15 +92,15 @@ class ASRBase(Base):
 
     logger = get_logger(f'asr-base')
 
-    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'record', store: bool = True,
+    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'capture', store: bool = True,
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
-                 hsr: bool = True, session_id: str | None = None):
+                 hsr: bool = True, session_id: str | None = None, base: str | None = None):
         """Initialize the ASRBase class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
-            mode: operating mode, 'record', 'recognize', or 'full' (default: 'record')
+            mode: operating mode, 'capture', 'analyze', or 'live' (default: 'capture')
             store: whether to store audio files (default: True)
             vad: whether to apply Voice Activity Detection (default: True)
             nr: whether to apply noise reduction (default: True)
@@ -133,13 +134,42 @@ class ASRBase(Base):
         self.speaker_verification = True
         self.group_speaker_id = "group"
 
-        self.base_type = get_base_type(self.config)
-        self.id = get_id()
+        # base identity/type/device come from the config 'Bases' list (single
+        # source of truth) instead of typing the id / picking the type at startup
+        if base:
+            base_entry = get_base_by_id(self.config, base)
+            if base_entry is None:
+                raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+        else:
+            base_entry = self._choose_base_from_config()
+        self._base_entry = base_entry
+        self.base_type = str(base_entry['base_type'])
+        self.id = base_entry['id']  # identity (string or number); port is separate
         print(f"\033]0;ASR Base {self.base_type} {self.id} \007")
 
         self._setup_yaml()
         self._setup_directories()
         self._setup_objects()
+
+    def _choose_base_from_config(self):
+        """Interactively pick a base from the config 'Bases' list."""
+        bases = get_bases(self.config)
+        if not bases:
+            raise ValueError(
+                "No bases defined. Add entries under 'Bases' in config.yml "
+                "(each with id and base_type).")
+        print("Select a base:")
+        for idx, b in enumerate(bases):
+            print(f"  {idx}: id={b.get('id')} (type: {b.get('base_type')})")
+        while True:
+            sel = input("Base number [0]: ").strip()
+            try:
+                index = int(sel) if sel else 0
+            except ValueError:
+                index = -1
+            if 0 <= index < len(bases):
+                return bases[index]
+            print("Invalid selection. Please enter a valid base number.")
 
     def _setup_yaml(self):
         """Load and assign configuration parameters from the YAML configuration file.
@@ -172,22 +202,30 @@ class ASRBase(Base):
         self.gain = float(base_config['gain'])
         self.score_amplified = bool(base_config.get('score_amplified', False))
 
-        self.source = base_config['source']
+        # source comes from the per-base Bases entry (single source of truth);
+        # Base.<device>.source has been removed, so the base must define its source
+        self.source = self._base_entry.get('source') or base_config.get('source')
+        if not self.source:
+            raise ValueError(
+                f"Base '{self.id}' has no 'source'. Set 'source' in its Bases entry.")
         self.stream_kwargs = base_config['stream_kwargs']
 
-        self.speech_transcriber_url = resolve_url(asr_server_config['speech_transcriber'])
-        self.speech_separator_url = resolve_url(asr_server_config['speech_separator'])
-        self.speech_enhancer_url = resolve_url(asr_server_config['speech_enhancer'])
-        self.vad_url = resolve_url(asr_server_config['voice_activity_detector'])
+        self.speech_transcriber_url = build_service_url(self.config, asr_server_config['speech_transcriber'])
+        self.speech_separator_url = build_service_url(self.config, asr_server_config['speech_separator'])
+        self.speech_enhancer_url = build_service_url(self.config, asr_server_config['speech_enhancer'])
+        self.vad_url = build_service_url(self.config, asr_server_config['voice_activity_detector'])
 
         source_list = ['udp', 'tcp', 'pyaudio', 'rtmp', 'lsl', 'file']
         if self.source not in source_list:
             raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
 
-        # set port number for 'udp/tcp'
+        # set port number for 'udp/tcp' (explicit per-base 'port', decoupled from id)
         if self.source in ['udp', 'tcp']:
-            self.port_offset = int(base_config.get('port_offset', 0))
-            self.port = self.id + self.port_offset
+            if self._base_entry.get('port') is None:
+                raise ValueError(
+                    f"Base '{self.id}' uses source '{self.source}' but has no 'port' "
+                    "in its Bases entry. Add a 'port' to that base.")
+            self.port = int(self._base_entry['port'])
             free_port(self.port)
             self.stream_kwargs['port'] = self.port
 
@@ -212,16 +250,21 @@ class ASRBase(Base):
                     available_indexes.append(i)
                     device_info_list.append(device_info)
 
-            self.input_device_index = get_input_device_index(available_indexes, device_info_list)
+            # device index comes from the base entry's source_index (profile-driven)
+            if self._base_entry.get('source_index') is None:
+                raise ValueError(
+                    f"Base '{self.id}' uses source 'pyaudio' but has no 'source_index' "
+                    "(input device index) in its Bases entry.")
+            self.input_device_index = int(self._base_entry['source_index'])
             self.stream_kwargs['input_device_index'] = self.input_device_index
             device_info = p.get_device_info_by_host_api_device_index(0, self.input_device_index)
-            
+
             # update channels based on selected device capabilities
             device_channels = device_info.get('maxInputChannels', 1)
             self.stream_kwargs['channels'] = device_channels
-            
-            # allow channel selection if device has multiple channels
-            self.stream_kwargs['channel_select'] = get_channel_selection(device_info) if device_channels > 1 else None
+
+            # channel comes from the base entry if defined, else use full device
+            self.stream_kwargs['channel_select'] = self._base_entry.get('channel')
             self.logger.info(f"Selected device: {device_info.get('name')} with {device_channels} channels")
             self.logger.info(f"Selected channel option: {self.stream_kwargs['channel_select']}")
             p.terminate()
@@ -236,6 +279,17 @@ class ASRBase(Base):
             self.stream_kwargs['url'] = self.url
             self.logger.info(f"Using RTMP URL: {self.url}")
 
+        # set lsl_name for 'lsl' (the stream is selected by name; the base
+        # entry carries it in source_index, matching the unified config form)
+        elif self.source == 'lsl':
+            lsl_name = self._base_entry.get('source_index')
+            if not lsl_name:
+                raise ValueError(
+                    f"Base '{self.id}' uses source 'lsl' but has no stream name in "
+                    f"'source_index'. Set source_index to the LSL stream name.")
+            self.stream_kwargs['lsl_name'] = lsl_name
+            self.logger.info(f"Using LSL stream name: {lsl_name}")
+
         # set file_path for 'file'
         elif self.source == 'file':
             if 'file_dir' not in base_config:
@@ -246,20 +300,37 @@ class ASRBase(Base):
                 file_dir = base_config['file_dir']
                 if not os.path.isabs(file_dir):
                     file_dir = os.path.join(self.project_dir, file_dir)
-                
+
                 if not os.path.exists(file_dir):
                     # fallback to project directory if specified directory doesn't exist
                     self.logger.warning(f"Specified file directory does not exist: {file_dir}")
                     file_dir = self.project_dir
                     self.logger.info(f"Using project directory instead: {file_dir}")
-            
-            # use interactive file browser to select file and get initial_sync_time
+
             audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
-            print(f"\n{PURPLE}📁 Select Audio File{ENDC}")
-            print(f"{GREY}Choose audio file for ASR Base{ENDC}")
-            file_path, initial_sync_time = get_interactive_files(file_dir, file_extensions=audio_extensions, multiple=False, sync_input=True)
-            self.initial_sync_time = initial_sync_time
-            
+            sel = self._base_entry.get('source_index')
+            if sel:
+                # profile-driven: the base entry names the file (source_index) —
+                # resolve it and derive initial_sync_time without prompting
+                cand = str(sel) if os.path.isabs(str(sel)) else os.path.join(file_dir, str(sel))
+                if not os.path.exists(cand):
+                    raise ValueError(
+                        f"Base '{self.id}' source 'file' references '{sel}' but it was "
+                        f"not found in {file_dir}.")
+                file_path = cand
+                ist = base_config.get('initial_sync_time')
+                if ist is None:
+                    m = re.search(r'_(\d+(?:\.\d+)?)\.', os.path.basename(file_path))
+                    ist = float(m.group(1)) if m else None
+                self.initial_sync_time = float(ist) if ist is not None else None
+            else:
+                # interactive fallback: browse for a file and read initial_sync_time
+                print(f"\n{PURPLE}📁 Select Audio File{ENDC}")
+                print(f"{GREY}Choose audio file for ASR Base{ENDC}")
+                file_path, initial_sync_time = get_interactive_files(
+                    file_dir, file_extensions=audio_extensions, multiple=False, sync_input=True)
+                self.initial_sync_time = initial_sync_time
+
             self.stream_kwargs['file_path'] = file_path
             self.logger.info(f"Using audio file: {file_path}")
             self.logger.info(f"Using initial_sync_time: {self.initial_sync_time}")
@@ -410,7 +481,8 @@ class ASRBase(Base):
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                self.logger.warning(f"Error in speaker editing: {e}")
+                self.logger.warning(f"Error in speaker editing: {e}", exc_info=True)
+                show_error_and_pause(e, "return to the menu")
 
     def _register_speaker_from_stream(self):
         """Register a new speaker profile from audio stream."""
@@ -431,8 +503,12 @@ class ASRBase(Base):
         audio_path = self._audio_preprocessing(output_path, 1)
 
         if audio_path is None:
-            self.logger.info(
-                "The recorded audio file is not long enough or audio pre-processing failed, please record again.")
+            msg = ("Audio pre-processing failed: no speech detected or the VAD/NR service is unreachable "
+                   f"(vad={self.vad}, nr={self.nr}). Please check the ASR server and record again, "
+                   "or restart with -vad False -nr False to skip pre-processing.")
+            self.logger.info(msg)
+            print(f"\n{RED}❌ {msg}{ENDC}")
+            pause_after_error("return to the menu")
             return
 
         name = get_name()
@@ -513,7 +589,7 @@ class ASRBase(Base):
 
         Set up directories, queues, and MQTT communication before creating threads for:
           - Continuous recording.
-          - Loading and queuing pre-recorded files (if in 'recognize' mode).
+          - Loading and queuing pre-recorded files (if in 'analyze' mode).
           - Continuous recognition (with or without speech separation).
           - Continuous transcription (if enabled).
           - Listening for stop signals.
@@ -524,16 +600,16 @@ class ASRBase(Base):
         # check if any speakers are selected for participant-level recognition
         if self.speaker_verification and (not self.selected_speakers or len(self.selected_speakers) == 0):
             print("------------------------------------------------")
-            if self.mode in ['full', 'recognize']:
-                self.logger.info("No speakers selected for recognition. Please register and select speaker profiles or switch to 'record' mode.")
+            if self.mode in ['live', 'analyze']:
+                self.logger.info("No speakers selected for recognition. Please register and select speaker profiles or switch to 'capture' mode.")
                 return
-            elif self.mode == 'record':
+            elif self.mode == 'capture':
                 self.logger.warning("No speakers selected. Recording will continue without speaker recognition.")
-        elif self.speaker_verification and self.mode in ['full', 'recognize'] and len(self.audio_recognizer.speaker_names) == 0:
+        elif self.speaker_verification and self.mode in ['live', 'analyze'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
-            self.logger.info("Audio database is empty, please register speaker profiles or either switch the mode to 'record'.")
+            self.logger.info("Audio database is empty, please register speaker profiles or either switch the mode to 'capture'.")
             return
-        elif self.speaker_verification and self.mode == 'record' and len(self.audio_recognizer.speaker_names) == 0:
+        elif self.speaker_verification and self.mode == 'capture' and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.warning("Audio database is empty. Recording will continue without speaker recognition.")
         
@@ -572,11 +648,11 @@ class ASRBase(Base):
         self.mqtt_client.loop_start()
 
         # create threads based on the operating mode
-        if self.mode in ['record', 'full']:
+        if self.mode in ['capture', 'live']:
             self._create_thread(self._continuous_recording)
-        if self.mode == 'recognize':
+        if self.mode == 'analyze':
             self._create_thread(self._enqueue_recorded_files)
-        if self.mode in ['recognize', 'full']:
+        if self.mode in ['analyze', 'live']:
             if self.speaker_verification:
                 recognition_task = self._continuous_recognizing_sp if self.sp else self._continuous_recognizing
             else:
@@ -691,7 +767,7 @@ class ASRBase(Base):
         gc.collect()
 
     def _switch_mode(self):
-        """Switch the operating mode between 'record', 'recognize' and 'full'."""
+        """Switch the operating mode between 'capture', 'analyze' and 'live'."""
         self.mode = get_base_mode()
         self.logger.info(f"Switched to {self.mode} mode.")
 
@@ -699,8 +775,8 @@ class ASRBase(Base):
         """Continuously record audio from the audio stream and enqueue it for processing.
 
         Depending on the operating mode:
-          - In 'record' mode, writes recorded frames to a file.
-          - In 'full' mode, puts the audio frame bytes into the audio queue.
+          - In 'capture' mode, writes recorded frames to a file.
+          - In 'live' mode, puts the audio frame bytes into the audio queue.
 
         Raises:
             RecordingError: If an error occurs during the recording process.
@@ -711,7 +787,7 @@ class ASRBase(Base):
             return
             
         first_time = True
-        sub_dir = 'records' if self.mode == 'record' else 'temp'
+        sub_dir = 'records' if self.mode == 'capture' else 'temp'
         self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
         self.audio_stream.start()
 
@@ -723,7 +799,7 @@ class ASRBase(Base):
                 acquired_time = audio_frame.timestamp
                 output_path = os.path.join(self.audio_dir, sub_dir,
                                            f'{self.base_type}_{self.id}_record_{acquired_time:.4f}.wav')
-                if self.mode == 'record':
+                if self.mode == 'capture':
                     write_frame_to_wav(output_path, audio_frame)
                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
                 else:
@@ -741,7 +817,7 @@ class ASRBase(Base):
             RecordingError: If an error occurs during the file reading process.
         """
         try:
-            sub_dir = 'records' if self.mode == 'record' else 'temp'
+            sub_dir = 'records' if self.mode == 'capture' else 'temp'
             self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
             self.audio_stream.start()
 
@@ -772,7 +848,7 @@ class ASRBase(Base):
                         acquired_time = start_time + timestamp_offset
                         output_path = os.path.join(self.audio_dir, sub_dir, f'{self.base_type}_{self.id}_record_{acquired_time:.4f}.wav')
 
-                        if self.mode == 'record':
+                        if self.mode == 'capture':
                             write_frame_to_wav(output_path, audio_frame)
                             print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
                         else:
@@ -958,7 +1034,7 @@ class ASRBase(Base):
     def _enqueue_recorded_files(self):
         """Load pre-recorded audio files and queue them for recognition.
 
-        In 'recognize' mode, this method loads .wav files from the records directory,
+        In 'analyze' mode, this method loads .wav files from the records directory,
         reads their content, and queues them for further processing.
 
         Raises:
@@ -1337,7 +1413,7 @@ class ASRBase(Base):
             directory_path = os.path.join(self.audio_dir, subdir)
             os.makedirs(directory_path, exist_ok=True)
 
-        if self.mode == 'recognize':
+        if self.mode == 'analyze':
             for subdir in ['segments', 'chunks', 'separations']:
                 clear_directory(os.path.join(self.audio_dir, subdir))
 
