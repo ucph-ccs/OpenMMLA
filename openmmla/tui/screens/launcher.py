@@ -5118,8 +5118,9 @@ class ServicePanel(Widget):
         elif _is_stack_service(svc):
             rel = _stack_compose_rel_file(svc)
             if rel and os.path.isfile(os.path.join(self._root, rel)):
-                cmd = _compose_command(rel, "logs --tail 40 --no-color", ["nemo"])
-                self._cmd.run(f"cd {shlex.quote(self._root)} && {cmd}")
+                cmd = _compose_command(os.path.join(self._root, rel),
+                                       "logs --tail 40 --no-color", ["nemo"])
+                self._cmd.run(cmd)
             else:
                 self._log(f"[yellow]Compose file not found: {rel}[/yellow]")
             return
@@ -5166,8 +5167,9 @@ class ServicePanel(Widget):
             profile = get_profile_by_name(self._get_panel_target())
             remote_root = profile.remote_project_path if profile else "~/OpenMMLA"
             rel = _stack_compose_rel_file(svc)
-            cmd = _compose_command(rel, "logs --tail 40 --no-color", ["nemo"])
-            self._cmd.run(f"cd {_quote_remote_path(remote_root)} && {cmd}")
+            compose_path = _quote_remote_path(_remote_path_join(remote_root, rel))
+            cmd = f"docker compose -f {compose_path} --profile nemo logs --tail 40 --no-color"
+            self._cmd.run(cmd)
             return
         elif svc.launch_type == "collection":
             prefix = shlex.quote(_collection_session_prefix(svc))
@@ -6006,10 +6008,13 @@ class ServicePanel(Widget):
             return
         services = _compose_service_names(specs, config)
         profiles = ["nemo"] if "audio-inferer-nemo" in services else []
-        cmd = _compose_command(rel, f"up -d --build {' '.join(services)}", profiles)
+        # absolute -f path: CommandSession treats "cd ..."-prefixed input as a
+        # plain directory change and would swallow the command output
+        cmd = _compose_command(os.path.join(self._root, rel),
+                               f"up -d --build {' '.join(services)}", profiles)
         self._log(f"  Running: {cmd}")
         self._log("  [yellow]First build downloads several GB of images; progress streams below.[/yellow]")
-        self._cmd.run(f"cd {shlex.quote(self._root)} && {cmd}")
+        self._cmd.run(cmd)
 
     def _launch_vllm_server(self, svc: ServiceDef) -> None:
         session_name = _service_session_name(svc)
@@ -6090,9 +6095,9 @@ class ServicePanel(Widget):
                     rel = _stack_compose_rel_file(svc)
                     if rel and os.path.isfile(os.path.join(self._root, rel)):
                         # --profile nemo so profile-gated containers stop too
-                        cmd = _compose_command(rel, "down", ["nemo"])
+                        cmd = _compose_command(os.path.join(self._root, rel), "down", ["nemo"])
                         self._log(f"  Running: {cmd}")
-                        self._cmd.run(f"cd {shlex.quote(self._root)} && {cmd}")
+                        self._cmd.run(cmd)
                     else:
                         self._log(f"[red]Compose file not found: {rel}[/red]")
                     return
