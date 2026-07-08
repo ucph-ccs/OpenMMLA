@@ -7,6 +7,8 @@
 #
 # Requirements on the host: NVIDIA driver + nvidia-container-toolkit.
 
+name: openmmla-vfa
+
 x-gpu: &gpu
   deploy:
     resources:

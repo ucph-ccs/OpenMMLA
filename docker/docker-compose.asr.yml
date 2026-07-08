@@ -8,6 +8,8 @@
 # Model caches are shared through named volumes so re-created containers
 # don't re-download models.
 
+name: openmmla-asr
+
 x-common: &common
   restart: unless-stopped
   environment: &common-env
