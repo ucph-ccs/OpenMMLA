@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install \
         "torch==2.4.1" "torchaudio==2.4.1" \
+        "numpy<2" \
         "modelscope[framework]==1.16.1" \
         "rotary-embedding-torch==0.6.4" \
         "speechbrain==1.0.0" \
