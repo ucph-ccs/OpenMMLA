@@ -1643,6 +1643,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         conda_env="docker",
         config_dir=os.path.join(root, "pipelines", "asr-server"),
         launch_type="tmux",
+        display_type="docker",
         description=(
             "ASR inference services, one container per service "
             f"(AudioInferer: {_asr_audio_inferer_backend(root)})"
@@ -1655,6 +1656,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         conda_env="docker",
         config_dir=os.path.join(root, "pipelines", "vfa-server"),
         launch_type="tmux",
+        display_type="docker",
         description="VFA inference services, one container per service (VLLM frame analyzer, ...)",
     ))
 

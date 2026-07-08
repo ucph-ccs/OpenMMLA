@@ -35,6 +35,13 @@ class ServiceDef:
     params: list = field(default_factory=list)
     components: list = field(default_factory=list)
     artifact_pipeline: str = ""
+    # what the card shows as "type:"; falls back to launch_type (e.g. docker
+    # stacks keep launch_type "tmux" internally but display "docker")
+    display_type: str = ""
+
+    @property
+    def shown_type(self) -> str:
+        return self.display_type or self.launch_type
 
 
 @dataclass
@@ -287,7 +294,7 @@ class ServiceCard(Widget):
         with Vertical():
             yield Static(f"[b]{self.service_def.name}[/b]", classes="card-title")
             yield Static(
-                f"  env: {self.service_def.conda_env}  |  type: {self.service_def.launch_type}",
+                f"  env: {self.service_def.conda_env}  |  type: {self.service_def.shown_type}",
                 classes="card-meta",
             )
             if self.service_def.description:
@@ -377,7 +384,7 @@ class ServiceCard(Widget):
         with Vertical():
             yield Static(f"[b]{self.service_def.name}[/b]", classes="card-title")
             yield Static(
-                f"  env: {self.service_def.conda_env}  |  type: {self.service_def.launch_type}",
+                f"  env: {self.service_def.conda_env}  |  type: {self.service_def.shown_type}",
                 classes="card-meta",
             )
             if self.service_def.description:
@@ -692,7 +699,7 @@ class ServiceCard(Widget):
             metas = list(self.query(".card-meta"))
             if metas:
                 metas[0].update(
-                    f"  env: {service_def.conda_env}  |  type: {service_def.launch_type}"
+                    f"  env: {service_def.conda_env}  |  type: {service_def.shown_type}"
                 )
             if len(metas) > 1:
                 metas[1].update(f"  {service_def.description}")
