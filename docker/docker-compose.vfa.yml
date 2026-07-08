@@ -1,0 +1,61 @@
+# VFA server stack — frame analyzer (5007) plus optional local vLLM backends.
+# Run from the repository root:
+#   docker compose -f docker/docker-compose.vfa.yml up -d --build
+# With a local vLLM VLM server (OpenAI-compatible, port 8000):
+#   VLLM_VLM_MODEL=openbmb/MiniCPM-V-2_6 \
+#   docker compose -f docker/docker-compose.vfa.yml --profile mllm up -d
+#
+# Requirements on the host: NVIDIA driver + nvidia-container-toolkit.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  frame-analyzer:
+    <<: *gpu
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/vfa-frame-analyzer/Dockerfile
+    image: openmmla/vfa-frame-analyzer
+    environment:
+      PROJECT_DIR: /project
+      CONFIG_PATH: /project/config.yml
+    volumes:
+      - ../pipelines/vfa-server:/project
+      # action schema referenced by config (config/vfa/action_schemas.yml)
+      - ../config/vfa:/project/config/vfa:ro
+      - ${OPENMMLA_KEY_DIR:-~/.openmmla}:/root/.openmmla:ro
+      - hf-cache:/root/.cache/huggingface
+      - torch-cache:/root/.cache/torch
+    ports:
+      - "5007:5007"
+    extra_hosts:
+      # lets config URLs like http://localhost:8000/v1 keep working when the
+      # vLLM backend runs on the host or in the mllm profile below
+      - "host.docker.internal:host-gateway"
+
+  # optional local VLM backend (config backend: vllm → vlm_base_url http://<host>:8000/v1)
+  vllm-vlm:
+    <<: *gpu
+    profiles: ["mllm"]
+    image: vllm/vllm-openai:latest
+    restart: unless-stopped
+    command: ["--model", "${VLLM_VLM_MODEL:-openbmb/MiniCPM-V-2_6}", "--trust-remote-code"]
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    ipc: host
+
+volumes:
+  hf-cache:
+  torch-cache:

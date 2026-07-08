@@ -1,4 +1,4 @@
-.PHONY: all configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx flask next celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-next stop-flask stop-celery
+.PHONY: all configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx flask celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-flask stop-celery
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
@@ -31,7 +31,7 @@ CONDA_PREFIX := $(shell conda info --base)
 CONDA_ACTIVATE := . $(CONDA_PREFIX)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)
 
 # ======= Service exclusion ========
-SERVICES := influxdb redis mosquitto mongodb nginx flask next celery
+SERVICES := influxdb redis mosquitto mongodb nginx flask celery
 FILTERED_SERVICES = $(filter-out $(subst $(comma),$(space),$(without)),$(SERVICES))
 
 # Helper variables for parsing
@@ -239,10 +239,6 @@ else
 		systemctl enable nginx; systemctl restart nginx'
 endif
 
-next:
-	@echo "🔁 Starting Next.js frontend"
-	tmux new-session -d -s next 'cd dashboard/next-frontend && npm run build && npm run start'
-
 flask:
 	@echo "🔁 Starting Flask"
 	tmux new-session -d -s flask -n flask bash
@@ -272,7 +268,6 @@ clean-ports:
 				 $(filter 1883,$(if $(filter mosquitto,$(FILTERED_SERVICES)),1883,)) \
 				 $(filter 27017,$(if $(filter mongodb,$(FILTERED_SERVICES)),27017,)) \
 				 $(filter 8080,$(if $(filter nginx,$(FILTERED_SERVICES)),8080,)) \
-				 $(filter 3000,$(if $(filter next,$(FILTERED_SERVICES)),3000,)) \
 				 $(filter 5050,$(if $(filter flask,$(FILTERED_SERVICES)),5050,)); do \
 			echo "  Cleaning port $$p..."; \
 			$(SUDO) lsof -ti:$$p | xargs -r $(SUDO) kill -9 || true; \
@@ -334,17 +329,6 @@ else
 	@$(SUDO) sh -c 'systemctl stop nginx || echo "⚠️ NGINX not running"; \
 		systemctl disable nginx || echo "⚠️ Could not disable NGINX"'
 endif
-
-stop-next:
-	@echo "🛑 Stopping Next.js frontend"
-	@if tmux has-session -t next 2>/dev/null; then \
-		echo "Sending Ctrl+C to Next.js session..."; \
-		tmux send-keys -t next C-c; \
-		sleep 1; \
-		tmux kill-session -t next; \
-	else \
-		echo "⚠️ No Next.js session found"; \
-	fi
 
 stop-flask:
 	@echo "🛑 Stopping Flask backend"

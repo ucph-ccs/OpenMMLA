@@ -46,7 +46,7 @@ The platform's physical architecture consists of several interconnected hardware
 - **Base Stations**: Microprocessors/PCs that process various data streams. Each base station runs one or more instances of *Base* and *Synchronizer*, with specific types (e.g., *AudioSynchronizer*) synchronizing data from corresponding *Base* components (e.g., *AudioBase*).
 - **Servers**: Powerful PCs that provide centralized services for other devices within distributed environments. Based on functionality, it can be divided into:
    + *Base Server*: REST servers running AI services (infer, transcribe, vad, vllm... via Flask/FastAPI).
-   + *Uber Server*: Central servers running services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Next.js & Flask).
+   + *Uber Server*: Central servers running services like database (InfluxDB), Messaging (Redis, MQTT), RTMP streaming & Load balancing (Nginx), dashboard application (Flask + static frontend).
 - **Dashboard**: Web-page interfaces accessible via phone and web browsers, featuring session selection, real-time visualizations, post-time visualizations, and measurements downloads.
 
 </details>
@@ -96,7 +96,7 @@ The following services are typically run on a dedicated **Uber Server** to provi
 - [Redis](https://redis.io/downloads/) (required): Message broker for session Start/Stop control (and cache for Celery workers' tasks)
 - [Mosquitto](https://mosquitto.org/download/) (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*
 - [Nginx](https://github.com/nginx/nginx?tab=readme-ov-file#downloading-and-installing) (optional): Load balancer for AI/Algorithm services and RTMP server for streams
-- [Dashboard](https://openmmla-dashboard-ri2dd2eh1-lizaibeims-projects.vercel.app/) (optional): Next.js frontend & Flask backend server for real/post-time visualizations
+- [Dashboard](https://openmmla-dashboard-ri2dd2eh1-lizaibeims-projects.vercel.app/) (optional): Flask backend with a dependency-free static frontend for real/post-time visualizations
 
 <details>
 <summary>Services Installation</summary>
@@ -152,7 +152,7 @@ For detailed Nginx installation and configuration as both a load balancer and RT
 
 
 #### Dashboard Installation (Optional)
-For detailed instructions on setting up the Next.js frontend and Flask backend for the dashboard, please refer to the [Dashboard Setup Guide](docs/dashboard.md).
+For detailed instructions on setting up the dashboard (Flask backend + static frontend), please refer to the [Dashboard Setup Guide](docs/dashboard.md).
 
 </details>
 

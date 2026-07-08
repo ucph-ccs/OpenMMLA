@@ -46,6 +46,11 @@ class ParamDef:
     choices: list[str] = field(default_factory=list)
 
 
+# flags whose Select lists artifact/collection sessions; these get an inline
+# "↻" button so the list can be re-queried on demand (bypassing the cache)
+_SESSION_PARAM_FLAGS = {"-sid", "--session-id", "--artifact-session-id"}
+
+
 class ServiceCard(Widget):
     """card widget displaying a service with start/stop controls and parameters."""
 
@@ -67,6 +72,13 @@ class ServiceCard(Widget):
             self.service_name = service_name
 
     class RefreshRequested(Message):
+        def __init__(self, service_name: str) -> None:
+            super().__init__()
+            self.service_name = service_name
+
+    class SessionRefreshRequested(Message):
+        """user clicked the ↻ next to a session Select: re-query the session list."""
+
         def __init__(self, service_name: str) -> None:
             super().__init__()
             self.service_name = service_name
@@ -167,6 +179,12 @@ class ServiceCard(Widget):
         width: 44;
         min-width: 22;
         height: 3;
+    }
+    ServiceCard .param-refresh {
+        width: 5;
+        min-width: 5;
+        height: 3;
+        margin-left: 1;
     }
     /* action buttons wrap to the next row when the card is too narrow (grid
        column count is recomputed on resize in on_resize) */
@@ -481,6 +499,16 @@ class ServiceCard(Widget):
                     classes="param-select",
                 )
             )
+            if param.flag in _SESSION_PARAM_FLAGS:
+                widgets.append(
+                    Button(
+                        "↻",
+                        variant="primary",
+                        compact=True,
+                        id=param_id("sessionrefresh", param.flag),
+                        classes="param-refresh",
+                    )
+                )
         else:
             widgets.append(
                 Input(
@@ -671,6 +699,34 @@ class ServiceCard(Widget):
         except Exception:
             pass
 
+    def update_session_choices(self, choices: list[str]) -> None:
+        """replace the session Select options in place, keeping the current
+        selection when it is still in the fresh list (other params untouched)."""
+        choice_strs = [str(c) for c in choices if c]
+        params = []
+        for param in self.service_def.params:
+            if param.flag not in _SESSION_PARAM_FLAGS:
+                params.append(param)
+                continue
+            params.append(replace(param, choices=list(choice_strs)))
+            if self.service_def.launch_type == "collection":
+                widget_ids = [
+                    self._collection_param_id(role, "select", param.flag)
+                    for role in ("audio", "video")
+                ]
+            else:
+                widget_ids = [self._param_id("select", param.flag)]
+            for widget_id in widget_ids:
+                try:
+                    sel = self.query_one(f"#{widget_id}", Select)
+                except Exception:
+                    continue
+                current = sel.value
+                sel.set_options((c, c) for c in choice_strs)
+                if current is not Select.NULL and str(current) in choice_strs:
+                    sel.value = str(current)
+        self.service_def = replace(self.service_def, params=params)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
         if self.service_def.launch_type == "collection":
@@ -707,6 +763,9 @@ class ServiceCard(Widget):
                     if btn_id == self._collection_param_id(role, "toggle", param.flag):
                         self._toggle_collection_bool_param(role, param.flag)
                         return
+                    if btn_id == self._collection_param_id(role, "sessionrefresh", param.flag):
+                        self.post_message(self.SessionRefreshRequested(self.service_def.name))
+                        return
 
         for name in self.stack_components:
             if btn_id == self._component_toggle_id(name):
@@ -741,4 +800,7 @@ class ServiceCard(Widget):
                     return
                 if btn_id == self._param_id("toggle", param.flag):
                     self._toggle_bool_param(param.flag)
+                    return
+                if btn_id == self._param_id("sessionrefresh", param.flag):
+                    self.post_message(self.SessionRefreshRequested(self.service_def.name))
                     return

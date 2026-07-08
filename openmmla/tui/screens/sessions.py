@@ -346,6 +346,12 @@ class SessionsPanel(Widget):
     #sessions-target-select {
         width: 1fr;
     }
+    #sessions-target-refresh {
+        width: 5;
+        min-width: 5;
+        height: 3;
+        margin-left: 1;
+    }
     #sessions-table {
         height: 1fr;
     }
@@ -380,6 +386,7 @@ class SessionsPanel(Widget):
             with Horizontal(id="sessions-target-bar"):
                 yield Label("Host:")
                 yield Select(_target_options(), value="local", id="sessions-target-select")
+                yield Button("↻", variant="primary", compact=True, id="sessions-target-refresh")
             yield Static("Discovering database configuration...", id="sessions-summary")
             yield DataTable(id="sessions-table")
             with Horizontal(id="sessions-actions"):
@@ -623,6 +630,10 @@ class SessionsPanel(Widget):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
+        if bid == "sessions-target-refresh":
+            self.query_one("#sessions-log", RichLog).write("[yellow]Testing connections to all hosts...[/yellow]")
+            self.run_worker(self._async_probe_hosts(), group="sessions-host-probe", exclusive=True)
+            return
         if bid == "btn-ses-refresh":
             self.run_worker(self._async_init(self._target), exclusive=True)
             return

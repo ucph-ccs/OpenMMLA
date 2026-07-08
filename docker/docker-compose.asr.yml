@@ -1,0 +1,103 @@
+# ASR server stack — one container per service, ports match the nginx upstreams.
+# Run from the repository root:
+#   docker compose -f docker/docker-compose.asr.yml up -d --build
+# NeMo inferer variant (instead of wespeaker):
+#   docker compose -f docker/docker-compose.asr.yml --profile nemo up -d audio-inferer-nemo
+#
+# Requirements on the host: NVIDIA driver + nvidia-container-toolkit.
+# Model caches are shared through named volumes so re-created containers
+# don't re-download models.
+
+x-common: &common
+  restart: unless-stopped
+  environment: &common-env
+    PROJECT_DIR: /project
+    CONFIG_PATH: /project/config.yml
+  volumes:
+    # pipeline project dir (config.yml, temp/, runtime artifacts/logs)
+    - ../pipelines/asr-server:/project
+    # master key for decrypting ENC(...) values in config.yml (read-only)
+    - ${OPENMMLA_KEY_DIR:-~/.openmmla}:/root/.openmmla:ro
+    # model caches
+    - hf-cache:/root/.cache/huggingface
+    - torch-cache:/root/.cache/torch
+    - modelscope-cache:/root/.cache/modelscope
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  audio-inferer:
+    <<: [*common, *gpu]
+    build:
+      context: ..
+      dockerfile: docker/asr-audio-inferer-wespeaker/Dockerfile
+    image: openmmla/asr-audio-inferer-wespeaker
+    ports:
+      - "5001:5001"
+
+  audio-inferer-nemo:
+    <<: [*common, *gpu]
+    profiles: ["nemo"]
+    build:
+      context: ..
+      dockerfile: docker/asr-audio-inferer-nemo/Dockerfile
+    image: openmmla/asr-audio-inferer-nemo
+    ports:
+      - "5001:5001"
+
+  audio-resampler:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/asr-audio-resampler/Dockerfile
+    image: openmmla/asr-audio-resampler
+    ports:
+      - "5002:5002"
+
+  speech-enhancer:
+    <<: [*common, *gpu]
+    build:
+      context: ..
+      dockerfile: docker/asr-speech-enhancer/Dockerfile
+    image: openmmla/asr-speech-enhancer
+    ports:
+      - "5003:5003"
+
+  speech-separator:
+    <<: [*common, *gpu]
+    build:
+      context: ..
+      dockerfile: docker/asr-speech-separator/Dockerfile
+    image: openmmla/asr-speech-separator
+    ports:
+      - "5004:5004"
+
+  speech-transcriber:
+    <<: [*common, *gpu]
+    build:
+      context: ..
+      dockerfile: docker/asr-speech-transcriber/Dockerfile
+    image: openmmla/asr-speech-transcriber
+    ports:
+      - "5005:5005"
+
+  voice-activity-detector:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/asr-voice-activity-detector/Dockerfile
+    image: openmmla/asr-voice-activity-detector
+    ports:
+      - "5006:5006"
+
+volumes:
+  hf-cache:
+  torch-cache:
+  modelscope-cache:

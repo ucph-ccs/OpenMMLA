@@ -157,8 +157,41 @@ def merge_system_services(
     return merged
 
 
+def decrypt_config_values(data: Any) -> Any:
+    """Return a copy of a nested config structure with ENC(...) leaves
+    decrypted (best-effort: values stay encrypted if the crypto module or
+    master key is unavailable, and a warning is logged so a client using a
+    literal 'ENC(...)' credential is diagnosable)."""
+    try:
+        from openmmla.utils.crypto import is_encrypted, decrypt_value
+    except ImportError:
+        return data
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if isinstance(node, str) and is_encrypted(node):
+            try:
+                return decrypt_value(node)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Could not decrypt an ENC(...) config value — wrong or missing "
+                    "master key (~/.openmmla/master.key)? The encrypted form will be "
+                    "used as-is and will be rejected by the target service."
+                )
+                return node
+        return node
+
+    return walk(data)
+
+
 def load_config_with_system_services(
     config_path: str | os.PathLike[str],
 ) -> dict[str, Any]:
     config = load_yaml_config(config_path)
-    return merge_system_services(config, config_path)
+    merged = merge_system_services(config, config_path)
+    # client wrappers consume this directly: credentials must be plaintext here
+    return decrypt_config_values(merged)

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenMMLA Dashboard</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<nav class="topbar">
+  <a class="brand" href="/">Open<span>MMLA</span> Dashboard</a>
+</nav>
+
+<main class="hero">
+  <h1>Session Explorer</h1>
+  <p>Select a recorded session to watch it live or browse its analysis report.</p>
+
+  <div class="card picker">
+    <select id="session-select" aria-label="Session">
+      <option value="">Loading sessions…</option>
+    </select>
+    <div class="actions">
+      <a class="btn primary" id="btn-live" aria-disabled="true">● Live view</a>
+      <a class="btn" id="btn-report" aria-disabled="true">Analysis report</a>
+    </div>
+    <span class="empty-note" id="note" hidden>No sessions found — is InfluxDB reachable and populated?</span>
+  </div>
+</main>
+
+<script>
+const select = document.getElementById('session-select');
+const btnLive = document.getElementById('btn-live');
+const btnReport = document.getElementById('btn-report');
+const note = document.getElementById('note');
+
+function syncButtons() {
+  const id = select.value;
+  btnLive.href = id ? `/realtime?session=${encodeURIComponent(id)}` : '#';
+  btnReport.href = id ? `/posttime?session=${encodeURIComponent(id)}` : '#';
+  btnLive.setAttribute('aria-disabled', !id);
+  btnReport.setAttribute('aria-disabled', !id);
+  btnLive.style.pointerEvents = btnReport.style.pointerEvents = id ? '' : 'none';
+  btnLive.style.opacity = btnReport.style.opacity = id ? '' : '.5';
+}
+
+fetch('/api/get_sessions')
+  .then(r => r.json())
+  .then(ids => {
+    if (!Array.isArray(ids) || !ids.length) {
+      select.innerHTML = '<option value="">No sessions available</option>';
+      note.hidden = false;
+      return;
+    }
+    ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    select.innerHTML = '<option value="">— Choose a session —</option>' +
+      ids.map(id => `<option value="${id}">${id}</option>`).join('');
+  })
+  .catch(() => {
+    select.innerHTML = '<option value="">Failed to load sessions</option>';
+    note.hidden = false;
+  });
+
+select.addEventListener('change', syncButtons);
+syncButtons();
+</script>
+
+</body>
+</html>

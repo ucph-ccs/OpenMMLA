@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live — OpenMMLA Dashboard</title>
+<link rel="stylesheet" href="/css/style.css">
+<script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+</head>
+<body>
+
+<nav class="topbar">
+  <a class="brand" href="/">Open<span>MMLA</span> Dashboard</a>
+  <span class="session-tag" id="session-tag"></span>
+  <span class="spacer"></span>
+  <span class="status" id="status"><span class="dot"></span><span id="status-text">Connecting…</span></span>
+</nav>
+
+<main class="page">
+  <div class="grid">
+
+    <section class="card">
+      <div class="card-header"><h2>Live Transcript</h2><span class="hint">who said what</span></div>
+      <div class="feed" id="feed"><div class="placeholder">Waiting for speech…</div></div>
+    </section>
+
+    <div style="display:flex; flex-direction:column; gap:20px;">
+      <section class="card">
+        <div class="card-header"><h2>Speaking Participation</h2><span class="hint">share of total speaking time</span></div>
+        <div class="card-body bars" id="bars"><span class="placeholder">No speaker activity yet.</span></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header"><h2>Physical Proximity Map</h2><span class="hint">badge positions &amp; interaction links</span></div>
+        <canvas class="map-canvas" id="map"></canvas>
+      </section>
+    </div>
+
+    <section class="card full">
+      <div class="card-header"><h2>Diarization Log</h2><span class="hint">raw speaker-recognition windows</span></div>
+      <div class="log" id="log"><div class="placeholder">Waiting for recognition events…</div></div>
+    </section>
+
+  </div>
+</main>
+
+<script>
+const sessionId = new URLSearchParams(location.search).get('session');
+if (!sessionId) location.replace('/');
+document.getElementById('session-tag').textContent = sessionId;
+document.title = `Live · ${sessionId} — OpenMMLA`;
+
+/* ---------- helpers ---------- */
+const PALETTE = ['#2563eb', '#db2777', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#dc2626', '#65a30d'];
+const speakerColors = new Map();
+function colorFor(name) {
+  if (!speakerColors.has(name)) speakerColors.set(name, PALETTE[speakerColors.size % PALETTE.length]);
+  return speakerColors.get(name);
+}
+const fmtTime = ts => new Date(Math.round(ts) * 1000).toLocaleTimeString();
+const el = (tag, cls, html) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html !== undefined) n.innerHTML = html;
+  return n;
+};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---------- transcript feed ---------- */
+const feed = document.getElementById('feed');
+function addTranscript({ window_start_time, speaker, text }) {
+  feed.querySelector('.placeholder')?.remove();
+  const msg = el('div', 'msg');
+  const who = el('span', 'who', esc(speaker));
+  who.style.background = colorFor(speaker);
+  msg.append(who, el('span', 'txt', esc(text)), el('span', 'when', fmtTime(window_start_time)));
+  feed.appendChild(msg);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+/* ---------- participation bars ---------- */
+const bars = document.getElementById('bars');
+const speakingTime = new Map();
+function addRecognition({ speakers = [], durations = [] }) {
+  speakers.forEach((s, i) => {
+    const d = Number(durations[i]) || 0;
+    speakingTime.set(s, (speakingTime.get(s) || 0) + d);
+  });
+  renderBars();
+}
+function renderBars() {
+  const total = [...speakingTime.values()].reduce((a, b) => a + b, 0);
+  if (!total) return;
+  bars.innerHTML = '';
+  [...speakingTime.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([name, secs]) => {
+      const pct = (secs / total) * 100;
+      const row = el('div', 'row');
+      const track = el('div', 'track');
+      const fill = el('div', 'fill');
+      fill.style.width = pct.toFixed(1) + '%';
+      fill.style.background = colorFor(name);
+      track.appendChild(fill);
+      row.append(el('span', 'name', esc(name)), track, el('span', 'pct', pct.toFixed(0) + '%'));
+      bars.appendChild(row);
+    });
+}
+
+/* ---------- diarization log ---------- */
+const log = document.getElementById('log');
+function addLogEntry({ window_start_time, speakers, similarities, durations }) {
+  log.querySelector('.placeholder')?.remove();
+  const fmt = v => Array.isArray(v) ? v.map(x => typeof x === 'number' ? x.toFixed(2) : x).join(', ') : v;
+  log.appendChild(el('div', 'entry',
+    `${fmtTime(window_start_time)} · <b>${esc(fmt(speakers))}</b> · sim ${esc(fmt(similarities))} · dur ${esc(fmt(durations))}s`));
+  log.scrollTop = log.scrollHeight;
+}
+
+/* ---------- proximity map (canvas, no deps) ---------- */
+const canvas = document.getElementById('map');
+let mapState = null; // { nodes: {id: [x, y]}, links: [[src, tgt], ...] }
+function updateMap(graph, positions) {
+  const links = Object.entries(graph || {}).flatMap(([src, tgts]) => (tgts || []).map(t => [src, t]));
+  mapState = { nodes: positions || {}, links };
+  drawMap();
+}
+function drawMap() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  if (!mapState || !Object.keys(mapState.nodes).length) {
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for position data…', w / 2, h / 2);
+    return;
+  }
+
+  // fit physical coordinates into the canvas with padding
+  const pts = Object.values(mapState.nodes);
+  const xs = pts.map(p => p[1]), ys = pts.map(p => p[0]);
+  const pad = 44;
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const spanX = (maxX - minX) || 1, spanY = (maxY - minY) || 1;
+  const scale = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanY);
+  const px = p => pad + (p[1] - minX) * scale + (w - 2 * pad - spanX * scale) / 2;
+  const py = p => pad + (p[0] - minY) * scale + (h - 2 * pad - spanY * scale) / 2;
+
+  // links with arrowheads
+  ctx.strokeStyle = 'rgba(37, 99, 235, .45)';
+  ctx.fillStyle = 'rgba(37, 99, 235, .45)';
+  ctx.lineWidth = 1.8;
+  const R = 16;
+  for (const [src, tgt] of mapState.links) {
+    const a = mapState.nodes[src], b = mapState.nodes[tgt];
+    if (!a || !b) continue;
+    const x1 = px(a), y1 = py(a), x2 = px(b), y2 = py(b);
+    const ang = Math.atan2(y2 - y1, x2 - x1);
+    const ex = x2 - R * Math.cos(ang), ey = y2 - R * Math.sin(ang);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - 8 * Math.cos(ang - .45), ey - 8 * Math.sin(ang - .45));
+    ctx.lineTo(ex - 8 * Math.cos(ang + .45), ey - 8 * Math.sin(ang + .45));
+    ctx.closePath(); ctx.fill();
+  }
+
+  // nodes
+  for (const [id, p] of Object.entries(mapState.nodes)) {
+    const x = px(p), y = py(p), isBase = id === 'B';
+    ctx.beginPath();
+    ctx.arc(x, y, isBase ? 9 : 13, 0, 2 * Math.PI);
+    ctx.fillStyle = isBase ? '#9ca3af' : colorFor(id);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(id, x, y);
+  }
+}
+new ResizeObserver(drawMap).observe(canvas);
+
+/* ---------- socket ---------- */
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('status-text');
+function setStatus(live, text) {
+  statusEl.classList.toggle('live', live);
+  statusText.textContent = text;
+}
+
+fetch(`/api/real_time_visualize/${encodeURIComponent(sessionId)}`).catch(() => {});
+
+const socket = io();
+socket.on('connect', () => {
+  socket.emit('join_session', { session_id: sessionId, client_id: socket.id });
+  setStatus(true, 'Live');
+});
+socket.on('disconnect', () => setStatus(false, 'Disconnected'));
+socket.on('connect_error', () => setStatus(false, 'Connection failed'));
+
+socket.on('realtime_data', ({ session, data }) => {
+  if (session !== sessionId || !data) return;
+  if (data.transcription) addTranscript(data.transcription);
+  if (data.recognition) { addRecognition(data.recognition); addLogEntry(data.recognition); }
+  if (data.graph && data.positions) updateMap(data.graph, data.positions);
+});
+</script>
+
+</body>
+</html>

@@ -23,18 +23,15 @@ from openmmla.tui.widgets.command_session import CommandSession, _list_conda_env
 # project's pyproject.toml ([project.optional-dependencies].<group>), so this
 # table no longer carries a hardcoded package list.
 ENV_GROUPS = [
+    # NOTE: asr-server-* and vfa-server envs were removed — those services are
+    # dockerized now (see docker/README.md); their dependencies live in per-
+    # service images, not conda envs.
     {"group": "asr-base", "env": "asr-base", "python": "3.10",
      "description": "ASR base station"},
-    {"group": "asr-server-nemo", "env": "asr-server-nemo", "python": "3.10",
-     "description": "ASR server (NeMo backend)"},
-    {"group": "asr-server-wespeaker", "env": "asr-server-wespeaker", "python": "3.10",
-     "description": "ASR server (WeSpeaker backend)"},
     {"group": "vfa-base", "env": "vfa-base", "python": "3.10",
      "description": "VFA base station"},
-    {"group": "vfa-server", "env": "vfa-server", "python": "3.10",
-     "description": "VFA server wrapper"},
     {"group": "vfa-vllm-runtime", "env": "vfa-vllm", "python": "3.12",
-     "description": "VFA local vLLM runtime"},
+     "description": "VFA local vLLM runtime (MLLM Server)"},
     {"group": "ips-base", "env": "ips-base", "python": "3.10",
      "description": "IPS base station"},
     {"group": "uber-base", "env": "uber-base", "python": "3.10",
@@ -231,6 +228,12 @@ class EnvironmentPanel(Widget):
     #env-target-bar Select {
         width: 1fr;
     }
+    #env-target-refresh {
+        width: 5;
+        min-width: 5;
+        height: 3;
+        margin-left: 1;
+    }
     #env-actions {
         height: auto;
         padding: 1;
@@ -256,6 +259,7 @@ class EnvironmentPanel(Widget):
             with Horizontal(id="env-target-bar"):
                 yield Label("Host:")
                 yield Select(_target_options(), value="local", id="env-target-select")
+                yield Button("↻", variant="primary", compact=True, id="env-target-refresh")
             yield Static(
                 "Conda Environment Manager — select a row, then use actions",
                 id="env-header",
@@ -532,6 +536,10 @@ class EnvironmentPanel(Widget):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
+        if bid == "env-target-refresh":
+            self._cmd.log("[yellow]Testing connections to all hosts...[/yellow]")
+            self.run_worker(self._async_probe_hosts(), group="env-host-probe", exclusive=True)
+            return
         if bid == "btn-connect":
             self._refresh_target_options()
             self._set_target(self._get_selected_target())

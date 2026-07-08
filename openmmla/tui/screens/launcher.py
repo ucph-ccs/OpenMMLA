@@ -1640,11 +1640,11 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
     services.append(ServiceDef(
         name="ASR Server",
         category="ASR",
-        conda_env=_asr_server_conda_env(root),
+        conda_env="docker",
         config_dir=os.path.join(root, "pipelines", "asr-server"),
         launch_type="tmux",
         description=(
-            "ASR inference services "
+            "ASR inference services, one container per service "
             f"(AudioInferer: {_asr_audio_inferer_backend(root)})"
         ),
     ))
@@ -1652,10 +1652,10 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
     services.append(ServiceDef(
         name="VFA Server",
         category="VFA",
-        conda_env="vfa-server",
+        conda_env="docker",
         config_dir=os.path.join(root, "pipelines", "vfa-server"),
         launch_type="tmux",
-        description="VFA inference services (VLLM frame analyzer, ...)",
+        description="VFA inference services, one container per service (VLLM frame analyzer, ...)",
     ))
 
     mllm_config = _mllm_config(root)
@@ -1679,8 +1679,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ("Redis", "In-memory data store and message broker"),
             ("Mosquitto", "MQTT message broker"),
             ("Nginx", "Reverse proxy and load balancer"),
-            ("Flask", "Dashboard backend API"),
-            ("Next.js", "Dashboard frontend"),
+            ("Flask", "Dashboard (backend API + web frontend)"),
             ("Celery", "Async task worker"),
         ]:
             services.append(ServiceDef(
@@ -1917,8 +1916,53 @@ def _remote_kill_port_snippet(port: int) -> str:
     )
 
 
-def _is_stack_tmux_service(svc: ServiceDef) -> bool:
+def _is_stack_service(svc: ServiceDef) -> bool:
+    """ASR/VFA Server stacks are managed via docker compose (one container per
+    sub-service); status detection stays port-based."""
     return svc.launch_type == "tmux" and svc.name in ("ASR Server", "VFA Server")
+
+
+# compose file (relative to the repo root) per stack service
+_STACK_COMPOSE_FILES = {
+    "ASR Server": "docker/docker-compose.asr.yml",
+    "VFA Server": "docker/docker-compose.vfa.yml",
+}
+
+# config section name -> docker compose service name
+_STACK_COMPOSE_SERVICES = {
+    "AudioInferer": "audio-inferer",
+    "AudioResampler": "audio-resampler",
+    "SpeechEnhancer": "speech-enhancer",
+    "SpeechSeparator": "speech-separator",
+    "SpeechTranscriber": "speech-transcriber",
+    "VoiceActivityDetector": "voice-activity-detector",
+    "VLLMFrameAnalyzer": "frame-analyzer",
+}
+
+
+def _stack_compose_rel_file(svc: ServiceDef) -> str | None:
+    return _STACK_COMPOSE_FILES.get(svc.name)
+
+
+def _compose_service_names(specs: list[dict[str, object]], config: dict | None) -> list[str]:
+    """map selected config sections to compose service names; AudioInferer maps
+    to its nemo variant when the config backend is 'nemo'."""
+    backend = str(((config or {}).get("AudioInferer") or {}).get("backend") or "").strip().lower()
+    names = []
+    for spec in specs:
+        name = _STACK_COMPOSE_SERVICES.get(str(spec["name"]))
+        if not name:
+            continue
+        if name == "audio-inferer" and backend == "nemo":
+            name = "audio-inferer-nemo"
+        names.append(name)
+    return names
+
+
+def _compose_command(compose_rel_file: str, args: str, profiles: list[str] | None = None) -> str:
+    """build a `docker compose` command relative to the repo root."""
+    profile_part = "".join(f" --profile {p}" for p in (profiles or []))
+    return f"docker compose -f {shlex.quote(compose_rel_file)}{profile_part} {args}"
 
 
 def _stack_legacy_session(svc: ServiceDef) -> str | None:
@@ -1964,14 +2008,11 @@ _SYSTEM_SVC_PORTS: dict[str, int] = {
 }
 _NON_SESSION_ARTIFACT_NAMES = {*NON_SESSION_ARTIFACT_DIRS, ".DS_Store"}
 
-_MAKE_TARGET_OVERRIDES: dict[str, str] = {
-    "Uber: Next.js": "next",
-}
+_MAKE_TARGET_OVERRIDES: dict[str, str] = {}
 
 # (port, expected_command) for app services that need port cleanup on stop
 _APP_PORT_CMDS: dict[str, tuple[int, str]] = {
     "flask": (5050, "gunicorn"),
-    "next": (3000, "node"),
 }
 
 
@@ -2103,6 +2144,12 @@ class ServicePanel(Widget):
     #svc-target-bar Select {
         width: 1fr;
     }
+    #svc-target-refresh {
+        width: 5;
+        min-width: 5;
+        height: 3;
+        margin-left: 1;
+    }
     #svc-content-area {
         width: 1fr;
         height: 1fr;
@@ -2213,6 +2260,7 @@ class ServicePanel(Widget):
             with Horizontal(id="svc-target-bar"):
                 yield Label("Host:")
                 yield Select(target_options, value="local", id="svc-target-select")
+                yield Button("↻", variant="primary", compact=True, id="svc-target-refresh")
             with Vertical(id="svc-content-area"):
                 yield Static(
                     "Select a service from the sidebar.",
@@ -3410,6 +3458,14 @@ class ServicePanel(Widget):
         return fields
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "svc-target-refresh":
+            self._log("[yellow]Testing connections to all hosts...[/yellow]")
+            self.run_worker(
+                self._async_manual_probe(),
+                group="launcher-target-probe",
+                exclusive=True,
+            )
+            return
         if event.button.id == "btn-sync-remote":
             self._sync_to_remote()
         elif event.button.id == "btn-sync-local-target":
@@ -4118,7 +4174,7 @@ class ServicePanel(Widget):
 
     def _stack_component_names(self, svc: ServiceDef, target: str) -> list[str]:
         """names of the sub-services of a stack service, read from its config."""
-        if not _is_stack_tmux_service(svc):
+        if not _is_stack_service(svc):
             return []
         try:
             cfg, _ = self._load_config_for_target(
@@ -4132,7 +4188,7 @@ class ServicePanel(Widget):
 
     def _stack_running_counts(self, svc: ServiceDef, target: str) -> tuple[int, int] | None:
         """(up, total) listening ports for a stack service, or None if not one."""
-        if not _is_stack_tmux_service(svc):
+        if not _is_stack_service(svc):
             return None
         if target == "local":
             ports = _stack_ports(svc)
@@ -4331,7 +4387,7 @@ class ServicePanel(Widget):
         if svc.launch_type == "vllm":
             return _check_port_in_use(_mllm_config(self._root)["port"])
         if svc.launch_type == "tmux":
-            if _is_stack_tmux_service(svc):
+            if _is_stack_service(svc):
                 ports = _stack_ports(svc)
                 if ports:
                     return all(_check_port_in_use(port) for port in ports)
@@ -4401,7 +4457,7 @@ class ServicePanel(Widget):
                 return
         elif not is_remote and svc.launch_type == "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None
-            need_env = _make_target_for(svc.name) in ("flask", "next", "celery", "nginx")
+            need_env = _make_target_for(svc.name) in ("flask", "celery", "nginx")
             if need_env and has_conda and not _check_conda_env(svc.conda_env):
                 self._log(f"[red]conda env '{svc.conda_env}' not found. Aborting launch.[/red]")
                 self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
@@ -4460,7 +4516,7 @@ class ServicePanel(Widget):
     async def _async_refresh_single_status(self, svc: ServiceDef, target: str) -> None:
         """probe one service's running state off the UI thread."""
         counts = None
-        if _is_stack_tmux_service(svc):
+        if _is_stack_service(svc):
             counts = await asyncio.to_thread(self._stack_running_counts, svc, target)
             is_running = bool(counts) and counts[1] > 0 and counts[0] == counts[1]
         elif target == "local":
@@ -4482,6 +4538,55 @@ class ServicePanel(Widget):
         else:
             status = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
             self._log(f"{svc.name} ({target}): {status}")
+
+    def on_session_control_panel_refresh_requested(self, event: SessionControlPanel.RefreshRequested) -> None:
+        """↻ on the Session Control panel: re-query the active session list."""
+        event.stop()
+        target = self._get_panel_target()
+        self._invalidate_session_choice_cache(target)
+        self._log("Refreshing session list...")
+        self.run_worker(
+            self._async_refresh_session_control_choices(target),
+            group=_LAUNCHER_UI_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    async def _async_refresh_session_control_choices(self, target: str) -> None:
+        choices = await asyncio.to_thread(self._artifact_session_choices_for_target, target)
+        choices = [c for c in choices if c and c != _NEW_COLLECTION_SESSION_CHOICE]
+        if target != self._get_panel_target():
+            return
+        for panel in self.query(SessionControlPanel):
+            panel.update_session_choices(choices)
+        self._log(f"Session list updated ({len(choices)} session(s)).")
+
+    def on_service_card_session_refresh_requested(self, event: ServiceCard.SessionRefreshRequested) -> None:
+        """↻ next to a session Select: bypass the TTL cache and re-query the
+        active session list, then swap the dropdown options in place."""
+        svc = next((s for s in self._services if s.name == event.service_name), None)
+        if svc is None:
+            return
+        target = self._get_panel_target()
+        self._invalidate_session_choice_cache(target)
+        self._log("Refreshing session list...")
+        self.run_worker(
+            self._async_refresh_session_choices(svc.name, target),
+            group=_LAUNCHER_UI_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    async def _async_refresh_session_choices(self, service_name: str, target: str) -> None:
+        session_ids = await asyncio.to_thread(self._artifact_session_choices_for_target, target)
+        if target != self._get_panel_target():
+            return
+        choices = [_NEW_COLLECTION_SESSION_CHOICE]
+        for session_id in session_ids:
+            if session_id and session_id not in choices:
+                choices.append(session_id)
+        for card in self.query(ServiceCard):
+            if card.service_def.name == service_name:
+                card.update_session_choices(choices)
+        self._log(f"Session list updated ({len(choices) - 1} session(s)).")
 
     def on_service_card_download_requested(self, event: ServiceCard.DownloadRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
@@ -4939,7 +5044,7 @@ class ServicePanel(Widget):
                 return ssh_check_port(profile, port)
             return ssh_check_tmux(profile, target)
         elif svc.launch_type == "tmux":
-            if _is_stack_tmux_service(svc):
+            if _is_stack_service(svc):
                 ports = self._stack_ports_for_target(svc, profile_name)
                 if ports:
                     return all(ssh_check_port(profile, port) for port in ports)
@@ -4980,22 +5085,21 @@ class ServicePanel(Widget):
     def _logs_available(self, svc: ServiceDef, target: str) -> bool:
         if svc.launch_type not in ("tmux", "vllm", "collection"):
             return False
+        if _is_stack_service(svc):
+            # docker compose logs work whether or not containers are running
+            rel = _stack_compose_rel_file(svc)
+            if target == "local":
+                return bool(rel) and os.path.isfile(os.path.join(self._root, rel))
+            return get_profile_by_name(target) is not None
         if target == "local":
             if svc.launch_type == "collection":
                 return False
-            if _is_stack_tmux_service(svc):
-                return any(_check_tmux_session(session) for session in _stack_sessions(svc))
             return _check_tmux_session(_service_session_name(svc))
         profile = get_profile_by_name(target)
         if profile is None:
             return False
         if svc.launch_type == "collection":
             return False
-        if _is_stack_tmux_service(svc):
-            return any(
-                ssh_check_tmux(profile, session)
-                for session in self._stack_sessions_for_target(svc, target)
-            )
         return ssh_check_tmux(profile, _service_session_name(svc))
 
     def _view_logs_local(self, svc: ServiceDef) -> None:
@@ -5009,20 +5113,13 @@ class ServicePanel(Widget):
                 self._log(f"[cyan]── End of logs ──[/cyan]")
                 return
             session_name = target
-        elif _is_stack_tmux_service(svc):
-            self._log(f"[cyan]── Logs for {svc.name} ──[/cyan]")
-            captured = False
-            for session_name in _stack_sessions(svc):
-                if not _check_tmux_session(session_name):
-                    continue
-                captured = True
-                self._log(f"[cyan]── session: {session_name} ──[/cyan]")
-                output = _capture_tmux_pane(session_name)
-                for line in output.splitlines():
-                    self._log(line)
-            if not captured:
-                self._log("(no tmux sessions found)")
-            self._log(f"[cyan]── End of logs ──[/cyan]")
+        elif _is_stack_service(svc):
+            rel = _stack_compose_rel_file(svc)
+            if rel and os.path.isfile(os.path.join(self._root, rel)):
+                cmd = _compose_command(rel, "logs --tail 40 --no-color", ["nemo"])
+                self._cmd.run(f"cd {shlex.quote(self._root)} && {cmd}")
+            else:
+                self._log(f"[yellow]Compose file not found: {rel}[/yellow]")
             return
         elif svc.launch_type == "collection":
             self._log(f"[cyan]── Logs for {svc.name} ──[/cyan]")
@@ -5063,18 +5160,12 @@ class ServicePanel(Widget):
                 self._cmd.run(cmd)
                 return
             session_name = target
-        elif _is_stack_tmux_service(svc):
-            target = self._get_panel_target()
-            cmd_parts = []
-            for session_name in self._stack_sessions_for_target(svc, target):
-                quoted_session = shlex.quote(session_name)
-                heading = shlex.quote(f"── session: {session_name} ──")
-                cmd_parts.append(
-                    "if tmux has-session -t "
-                    f"{quoted_session} 2>/dev/null; then echo {heading}; "
-                    f"tmux capture-pane -t {quoted_session} -p -S -80; fi"
-                )
-            self._cmd.run(" ; ".join(cmd_parts) or "echo '(no tmux sessions configured)'")
+        elif _is_stack_service(svc):
+            profile = get_profile_by_name(self._get_panel_target())
+            remote_root = profile.remote_project_path if profile else "~/OpenMMLA"
+            rel = _stack_compose_rel_file(svc)
+            cmd = _compose_command(rel, "logs --tail 40 --no-color", ["nemo"])
+            self._cmd.run(f"cd {_quote_remote_path(remote_root)} && {cmd}")
             return
         elif svc.launch_type == "collection":
             prefix = shlex.quote(_collection_session_prefix(svc))
@@ -5889,6 +5980,18 @@ class ServicePanel(Widget):
         return [s for s in specs if str(s["name"]) in selset]
 
     def _launch_tmux_server(self, svc: ServiceDef, params: dict | None = None) -> None:
+        if _is_stack_service(svc):
+            self._launch_docker_stack(svc, params)
+            return
+        self._log(f"[yellow]No launch method for {svc.name}.[/yellow]")
+
+    def _launch_docker_stack(self, svc: ServiceDef, params: dict | None = None) -> None:
+        """start the selected stack sub-services with docker compose (one
+        container per service; replaces the old tmux+gunicorn flow)."""
+        rel = _stack_compose_rel_file(svc)
+        if not rel or not os.path.isfile(os.path.join(self._root, rel)):
+            self._log(f"[red]Compose file not found: {rel} (run from a repo with docker/ assets)[/red]")
+            return
         config_path = os.path.join(svc.config_dir, "config.yml")
         config = load_existing_config(config_path)
         specs = _stack_launch_specs_from_config(config)
@@ -5899,24 +6002,12 @@ class ServicePanel(Widget):
         if not specs:
             self._log("[yellow]No sub-services selected to start.[/yellow]")
             return
-
-        for spec in specs:
-            _kill_port_processes(int(spec["port"]))
-            session = str(spec["session"])
-            subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
-            service_cmd = _stack_service_shell_command(spec, svc.config_dir, config_path)
-            wrapped = wrap_local(f"{service_cmd}; exec bash", svc.conda_env)
-            subprocess.Popen(
-                ["tmux", "new-session", "-d", "-s", session, wrapped],
-                cwd=svc.config_dir,
-            )
-            self._log(f"  {spec['name']}: tmux '{session}' on port {spec['port']} ({spec['workers']} worker(s))")
-
-        # clean up legacy aggregate sessions from the old services.sh flow
-        for legacy in filter(None, (_service_session_name(svc), _stack_legacy_session(svc))):
-            subprocess.run(["tmux", "kill-session", "-t", legacy], capture_output=True)
-
-        self._log(f"[green]{svc.name}: {len(specs)} service(s) started in tmux.[/green]")
+        services = _compose_service_names(specs, config)
+        profiles = ["nemo"] if "audio-inferer-nemo" in services else []
+        cmd = _compose_command(rel, f"up -d --build {' '.join(services)}", profiles)
+        self._log(f"  Running: {cmd}")
+        self._log("  [yellow]First build downloads several GB of images; progress streams below.[/yellow]")
+        self._cmd.run(f"cd {shlex.quote(self._root)} && {cmd}")
 
     def _launch_vllm_server(self, svc: ServiceDef) -> None:
         session_name = _service_session_name(svc)
@@ -5993,7 +6084,17 @@ class ServicePanel(Widget):
                     exclusive=False,
                 )
             elif svc.launch_type in ("tmux", "vllm"):
-                sessions = _stack_sessions(svc) if _is_stack_tmux_service(svc) else [_service_session_name(svc)]
+                if _is_stack_service(svc):
+                    rel = _stack_compose_rel_file(svc)
+                    if rel and os.path.isfile(os.path.join(self._root, rel)):
+                        # --profile nemo so profile-gated containers stop too
+                        cmd = _compose_command(rel, "down", ["nemo"])
+                        self._log(f"  Running: {cmd}")
+                        self._cmd.run(f"cd {shlex.quote(self._root)} && {cmd}")
+                    else:
+                        self._log(f"[red]Compose file not found: {rel}[/red]")
+                    return
+                sessions = [_service_session_name(svc)]
                 for session_name in sessions:
                     subprocess.run(["tmux", "send-keys", "-t", session_name, "C-c"], capture_output=True)
                     subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
@@ -6083,33 +6184,23 @@ class ServicePanel(Widget):
                 if not specs:
                     self._log("[yellow]No sub-services selected to start.[/yellow]")
                     return
-                parts = []
-                for spec in specs:
-                    session = str(spec["session"])
-                    service_cmd = _stack_service_shell_command(
-                        spec, remote_config_dir, remote_config_path, remote=True,
-                    )
-                    wrapped = wrap_remote(f"{service_cmd}; exec bash", svc.conda_env)
-                    parts.append(
-                        f"{_remote_kill_port_snippet(int(spec['port']))}; "
-                        f"tmux kill-session -t {session} 2>/dev/null; "
-                        f"tmux new-session -d -s {session} {shlex.quote(wrapped)}"
-                    )
-                    self._log(f"  {spec['name']}: remote tmux '{session}' on port {spec['port']}")
-                run_cmd = (
-                    "; ".join(parts)
-                    + "; echo; echo 'Available tmux sessions:'; "
-                    "tmux list-sessions 2>/dev/null || true"
-                )
-                # Run directly over SSH instead of through an interactive Terminal:
-                # tmux -d detaches, so no window is needed, and this avoids the
-                # AppleScript/Terminal nested-quote truncation that left no sessions.
-                self._log(f"  Launching {len(specs)} service(s) on {profile_name} via tmux...")
+                rel = _stack_compose_rel_file(svc)
+                if not rel:
+                    self._log(f"[red]No compose file mapped for {svc.name}.[/red]")
+                    return
+                services = _compose_service_names(specs, config)
+                profiles = ["nemo"] if "audio-inferer-nemo" in services else []
+                compose_cmd = _compose_command(rel, f"up -d --build {' '.join(services)}", profiles)
+                run_cmd = f"cd {_quote_remote_path(remote_root)} && {compose_cmd}"
+                for spec, service in zip(specs, services):
+                    self._log(f"  {spec['name']}: container '{service}' on port {spec['port']}")
+                self._log(f"  Launching {len(specs)} container(s) on {profile_name} via docker compose...")
+                self._log("  [yellow]First build downloads several GB of images.[/yellow]")
                 self.run_worker(
                     self._run_remote_streamed(
                         profile_name,
                         run_cmd,
-                        f"[green]{svc.name}: tmux sessions created on {profile_name} "
+                        f"[green]{svc.name}: containers started on {profile_name} "
                         "(services are loading; click Refresh in a moment).[/green]",
                         f"{svc.name} remote launch failed",
                     )
@@ -6206,16 +6297,16 @@ class ServicePanel(Widget):
                 )
 
             elif svc.launch_type in ("tmux", "vllm"):
-                sessions = (
-                    self._stack_sessions_for_target(svc, profile_name)
-                    if _is_stack_tmux_service(svc)
-                    else [_service_session_name(svc)]
-                )
-                cmd = " ; ".join(
-                    f"tmux send-keys -t {shlex.quote(session)} C-c 2>/dev/null; "
-                    f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null"
-                    for session in sessions
-                )
+                if _is_stack_service(svc):
+                    rel = _stack_compose_rel_file(svc)
+                    compose_cmd = _compose_command(rel, "down", ["nemo"])
+                    cmd = f"cd {_quote_remote_path(remote_root)} && {compose_cmd}"
+                else:
+                    session = _service_session_name(svc)
+                    cmd = (
+                        f"tmux send-keys -t {shlex.quote(session)} C-c 2>/dev/null; "
+                        f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null"
+                    )
                 self._log(f"  Stopping {svc.name} on {profile_name}...")
                 self.run_worker(
                     self._run_remote_streamed(

@@ -22,7 +22,6 @@ KNOWN_SERVICES = [
     {"name": "Mosquitto", "port": 1883, "type": "system"},
     {"name": "Nginx", "port": 8080, "type": "system"},
     {"name": "Flask Dashboard", "port": 5050, "type": "tmux", "session": "flask"},
-    {"name": "Next.js Frontend", "port": 3000, "type": "tmux", "session": "next"},
     {"name": "Celery Worker", "port": None, "type": "tmux", "session": "celery"},
     {"name": "AudioInferer", "port": 5001, "type": "tmux", "session": "audioinferer"},
     {"name": "AudioResampler", "port": 5002, "type": "tmux", "session": "audioresampler"},

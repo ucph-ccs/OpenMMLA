@@ -4,6 +4,7 @@ import asyncio
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Label, Select, Static
 
@@ -16,6 +17,10 @@ class SessionControlPanel(Widget):
     Bases launched from the Launcher initialize and then block until a START
     signal arrives on the redis channel `<session_id>/<service>/control`
     (the role of the old control.sh / `mmla ses-ctl`)."""
+
+    class RefreshRequested(Message):
+        """user clicked the ↻ next to the session Select: the launcher
+        re-queries the active session list and calls update_session_choices."""
 
     DEFAULT_CSS = """
     SessionControlPanel {
@@ -41,6 +46,12 @@ class SessionControlPanel(Widget):
     }
     SessionControlPanel .sc-row Select {
         width: 1fr;
+    }
+    SessionControlPanel .sc-refresh {
+        width: 5;
+        min-width: 5;
+        height: 3;
+        margin-left: 1;
     }
     SessionControlPanel .sc-services {
         layout: horizontal;
@@ -89,6 +100,7 @@ class SessionControlPanel(Widget):
                 )
             else:
                 yield Select([], prompt="No sessions found", id="sc-session")
+            yield Button("↻", variant="primary", compact=True, id="sc-session-refresh", classes="sc-refresh")
         with Horizontal(classes="sc-services"):
             yield Checkbox("ASR", value=True, id="sc-svc-asr")
             yield Checkbox("IPS", value=True, id="sc-svc-ips")
@@ -128,6 +140,25 @@ class SessionControlPanel(Widget):
             self._dispatch("START")
         elif event.button.id == "sc-stop":
             self._dispatch("STOP")
+        elif event.button.id == "sc-session-refresh":
+            self._set_status("[yellow]Refreshing session list...[/yellow]")
+            self.post_message(self.RefreshRequested())
+
+    def update_session_choices(self, choices: list[str]) -> None:
+        """replace the session Select options in place, keeping the current
+        selection when it is still in the fresh list."""
+        self._choices = [str(c) for c in choices if c]
+        try:
+            sel = self.query_one("#sc-session", Select)
+        except Exception:
+            return
+        current = sel.value
+        sel.set_options((c, c) for c in self._choices)
+        if current is not Select.NULL and str(current) in self._choices:
+            sel.value = str(current)
+        elif self._choices:
+            sel.value = self._choices[0]
+        self._set_status(f"[green]Session list updated ({len(self._choices)} session(s)).[/green]")
 
     def _dispatch(self, command: str) -> None:
         session_id = self._selected_session()

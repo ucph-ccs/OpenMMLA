@@ -315,14 +315,15 @@ def target_state_label(name: str) -> str:
     return name
 
 
-# sentinel value: selecting this dropdown entry triggers a connectivity test
+# legacy sentinel: connectivity tests are now triggered by the ↻ button next
+# to each Host selector; kept so existing Select.Changed handlers stay valid
 REFRESH_TARGETS_OPTION = "__refresh_targets__"
 
 
 def target_options() -> list[tuple[str, str]]:
     """unified (label, value) options for all Host selectors."""
     return (
-        [("⟳  Test connections", REFRESH_TARGETS_OPTION), ("Local", "local")]
+        [("Local", "local")]
         + [(target_state_label(p.name), p.name) for p in load_ssh_profiles()]
     )
 
