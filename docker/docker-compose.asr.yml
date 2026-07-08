@@ -24,6 +24,7 @@ x-common: &common
     - hf-cache:/root/.cache/huggingface
     - torch-cache:/root/.cache/torch
     - modelscope-cache:/root/.cache/modelscope
+    - wespeaker-cache:/root/.wespeaker
 
 x-gpu: &gpu
   deploy:
@@ -103,3 +104,4 @@ volumes:
   hf-cache:
   torch-cache:
   modelscope-cache:
+  wespeaker-cache:
