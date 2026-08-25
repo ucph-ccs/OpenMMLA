@@ -7,12 +7,14 @@ actions into predefined categories.
 ## Pipeline Overview
 <img src="docs/video_frame_analyzer.png" alt="video_frame_analyzer" width="800"/>
 
-The system performs nonverbal behavior analysis using large language models (LLMs) and vision-language models (VLMs), processing image frames every 30 seconds:
-- Image frame capture from base station (vfa-base)
-- AprilTag detection and in-image coordinate calculation
-- Prompt construction for VLM to describe gestures, postures, and interactions
-- VLM output links AprilTag IDs to natural language descriptions
-- Prompt construction for LLM using VLM-generated descriptions
+The system performs nonverbal behavior analysis using large language models (LLMs) and vision-language models (VLMs), processing image frames at a configurable interval (`keyframe_interval`, 30 seconds by default):
+- Image frame capture from base stations (vfa-base), one per camera angle
+- Frame synchronization across all angles into one time bucket (vfa-sync), sent to the server as a single request
+- Server-side AprilTag detection, each tag repainted onto the frame as a black square carrying its ID in white
+- Server-side gaze detection, drawing face boxes, gaze lines and an in-frame probability onto the same frame
+- Prompt construction for VLM from the rendered frames plus the camera angle and participant descriptions
+- VLM output links AprilTag IDs to natural language observations (gaze focus, hand status, position, clothing)
+- Prompt construction for LLM using VLM observations, action definitions and decision process
 - LLM classification of actions into predefined behavior categories
 - Output generation in structured <ID, Action> dictionary format
 
@@ -54,10 +56,10 @@ For these options, you'll need to obtain API keys from the respective providers 
 - **Google Gemini**: Google's multimodal LLM 
   - Requires a [Gemini API key](https://ai.google.dev/)
   
-- **DeepSeek**: DeepSeek's vision-language models
+- **DeepSeek**: DeepSeek's text models, usable for the classification (LLM) step only. The shipped block points both `vlm_model` and `llm_model` at `deepseek-reasoner`, which does not accept images
   - Requires a [DeepSeek API key](https://platform.deepseek.com)
   
-- **Qwen**: Alibaba's multimodal models via ModelScope
+- **Qwen**: Alibaba's models via DashScope's OpenAI-compatible endpoint. The template default `qwen2.5-72b-instruct` is text-only, so set `vlm_model` to a `-vl` model for the VLM step
   - Requires a [Qwen API key](https://help.aliyun.com/document_detail/611472.html)
 
 Configure your chosen backend in the `config.yml` file under the appropriate VLM/LLM section.
