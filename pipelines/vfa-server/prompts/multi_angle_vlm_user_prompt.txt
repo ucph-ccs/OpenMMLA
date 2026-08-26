@@ -1,0 +1,83 @@
+# Multi-Perspective Lab Activity Observation
+
+Let's think step by step across all views when identifying, and observing participants.
+
+## 1. Context
+
+### 1.1 Visual Elements (Legend)
+- **Non-detected AprilTags**: a tag with black and white pattern worn by participants
+- **Detected AprilTags**: a tag rendered as a single black square with a white ID number 
+- **Face Boxes**: Colored rectangles around detected faces
+- **Gaze Lines**: Colored lines showing gaze direction from faces
+- **'in: X.XX' Values**: Probability that gaze is within frame
+  - HIGH (0.5-1.0): Gaze likely within frame
+  - LOW (0.0-0.5): Gaze likely outside frame
+  - Values <0.3 strongly indicate looking outside frame
+
+### 1.2 Camera Setup
+You are analyzing {{num_perspectives}} synchronized camera views of the same scene:
+{{angle_descriptions}}
+
+### 1.3 Participant Descriptions
+The following people may appear in the images. Use this information to match clothing/appearance to the correct participant ID:
+{{participant_descriptions}}
+
+## 2. Image Observation
+
+### 2.1 Person Identification
+1. **Primary**: If worn AprilTag is detected, use its displayed tag ID number
+2. **Secondary**: If AprilTag is non-detected or no AprilTag worn, match clothing/appearance to participant descriptions - USE the correct participant ID from descriptions
+3. **Fallback**: Only assign sequential IDs starting from '100' for truly unidentified persons NOT in participant descriptions
+4. **CRITICAL**: Use ONLY numeric IDs in all responses and must not contain any prefixes or suffixes
+
+### 2.2 Evidence Extraction (Per Person, Multi-View)
+
+#### A. Gaze Focus:
+- Trace gaze lines across all camera views
+- Identify specific target (object/person/area) at gaze endpoint
+- Report 'in' probability value and interpretation
+- Note which camera view provides clearest gaze information
+- **No visible gaze line**: Mark as "INFERENCE (low confidence): Based on head orientation..."
+
+#### B. Hand Status:
+- Compare hand visibility across all camera angles
+- Analyze spatial relationships with precision:
+  - **Contact**: Fingertips/palm touching surfaces, hand occluding objects, object deformation
+  - **Hovering**: Clear gap/shadow between hand and object (specify distance if possible)
+  - **Inactive**: Hands resting, clasped, or in pockets
+- Specify which camera angle provides best hand-object spatial information
+- **Hands obscured**: Clearly state if not visible in ANY view
+
+#### C. Supporting Details:
+- **Position**: Basic location for identification
+- **Clothing**: Brief description for cross-reference with participant list
+
+### 2.3 Observation Rules
+- **Multi-view synthesis**: use all camera angles to resolve ambiguities
+- **Direct Observation**: What you can see clearly in at least one camera view
+- **Inference**: Conclusions when something is obscured in ALL views (mark with "INFERENCE:")
+- Always specify which camera perspective supports each observation
+
+## 3. Response & Validation
+
+Return the response in JSON format:
+
+```json
+{
+  "observations": {
+    "[ID]": {
+      "gaze_focus": "perspective_1: [gaze description]. perspective_2: [confirmation/additional detail]. 'in' probability: [value] indicates [interpretation].",
+      "hands_status": "[CONTACT/HOVERING/INACTIVE] - perspective_1: [specific spatial details]. perspective_2: [confirmation/additional view]. SPATIAL: [distance/contact evidence].",
+      "position": "[location in frame]",
+      "clothing": "[brief description, note if matches participant ID]"
+    }
+  }
+}
+```
+
+Before submitting your response, verify:
+- **ID Consistency**: Same numeric IDs used across observations, classifications, and justifications
+- **ID Accuracy**: Participant IDs must be clearly documented in the participant description
+- **Evidence Quality**: Specific visual details provided for gaze focus and hand status
+- **Multi-view Integration**: Information synthesized from all available camera perspectives
+- **JSON Structure**: All required fields present with proper formatting

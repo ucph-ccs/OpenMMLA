@@ -1,33 +1,61 @@
 import json
 import os
+from typing import Any, TYPE_CHECKING
 
-import pandas as pd
+from openmmla.utils.constants import INFLUXDB_MEASUREMENT, EVENT_TYPE_IPS_TRANSLATION
 
-
-def generate_query(bucket_name, measurement):
-    """Constructs an InfluxDB query string for a specific bucket, measurement, and fields."""
-    bucket_start_time = bucket_name.split('_')[1]
-    return f"""from(bucket: "{bucket_name}")
-                |> range(start: {bucket_start_time})
-                |> filter(fn: (r) => r._measurement == "{measurement}")
-                |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-            """
+if TYPE_CHECKING:
+    from openmmla.utils.client import InfluxDBClientWrapper
 
 
-def fetch_and_process_data(bucket_name, measurement, influx_client):
-    """Queries InfluxDB for specified data, converts it to JSON, and sorts it based on 'segment_start_time'."""
-    query = generate_query(bucket_name, measurement)
-    tables = influx_client.query(query)
-    json_str = tables.to_json(indent=5)
-    data = json.loads(json_str)
-    if measurement == 'speaker transcription':
-        data.sort(key=lambda x: x['chunk_start_time'])
-    else:
-        data.sort(key=lambda x: x['segment_start_time'])
-    return json.dumps(data, ensure_ascii=False, indent=5)
+def fetch_and_process_data(session_id: str, event_type: str, influx_client: "InfluxDBClientWrapper") -> list[dict]:
+    """Query InfluxDB for specified data and sort by window_start_time."""
+    events = influx_client.query_events(session_id, event_type)
+    data = [deep_parse_json(e) for e in events]
+    data.sort(key=lambda x: x.get('window_start_time', 0))
+    return data
 
 
-def read_json_file(file_path):
+def fetch_latest_entry(session_id: str, event_type: str, influx_client: "InfluxDBClientWrapper") -> dict | None:
+    """Retrieve the most recent entry from InfluxDB."""
+    event = influx_client.query_latest_event(session_id, event_type)
+    return deep_parse_json(event) if event else None
+
+
+def get_node_positions(session_id: str, influx_client: "InfluxDBClientWrapper", timestamp: int, dimension: str = '2d') -> dict:
+    """Retrieve badge positions from InfluxDB filtered by window_start_time."""
+    from openmmla.utils.client.influx_client import _to_flux_time
+    from datetime import datetime, timedelta, timezone
+
+    start_dt = datetime.fromtimestamp(int(timestamp) - 20, tz=timezone.utc)
+    query = f'''
+        from(bucket: "{influx_client.bucket}")
+        |> range(start: {_to_flux_time(start_dt)})
+        |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}")
+        |> filter(fn: (r) => r.session_id == "{session_id}")
+        |> filter(fn: (r) => r.event_type == "{EVENT_TYPE_IPS_TRANSLATION}")
+        |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+        |> filter(fn: (r) => r.window_start_time == {timestamp})
+    '''
+    events = influx_client._execute_query(query)
+    data = [deep_parse_json(e) for e in events]
+    translate_dict = data[0]["translations"]
+
+    positions = {'B': (0, 0)} if dimension == '2d' else {'B': (0, 0, 0)}
+    for badge_id, translation in translate_dict.items():
+        if dimension == '2d':
+            x = translation[0][0]
+            z = translation[2][0]
+            positions[badge_id] = (z, -x)
+        else:
+            x = translation[0][0]
+            y = translation[1][0]
+            z = translation[2][0]
+            positions[badge_id] = (x, -y, z)
+    return positions
+
+
+def read_json_file(file_path: str) -> Any:
     """Reads and returns the contents of a JSON file."""
     try:
         with open(file_path, 'r') as f:
@@ -37,20 +65,67 @@ def read_json_file(file_path):
         return None
 
 
-def save_to_json_file(bucket_name, data, suffix, log_dir):
-    """Saves the given data to a JSON file in a specified directory, naming it based on the bucket name and a suffix."""
-    json_path = os.path.join(log_dir, f"{bucket_name}_{suffix}.json")
+def save_to_json_file(session_id: str, data: Any, suffix: str, log_dir: str) -> str:
+    """Saves data to a JSON file named by session_id and suffix."""
+    json_path = os.path.join(log_dir, f"{session_id}_{suffix}.json")
     with open(json_path, 'w') as f:
-        f.write(data)
-    print(f"{suffix} saved to {bucket_name}_{suffix}.json")
+        json.dump(data, f, ensure_ascii=False, indent=5)
+    print(f"{suffix} saved to {session_id}_{suffix}.json")
     return json_path
 
 
-def convert_json_to_dataframe(json_data, json_columns):
-    """Converts JSON data into a pandas DataFrame and transforms specific JSON-formatted string columns into Python
+def convert_json_to_dataframe(json_data: Any, json_columns: list):
+    """Converts JSON data into a pandas DataFrame and transforms JSON-formatted string columns into Python
     dictionaries."""
+    import pandas as pd
+
     df = pd.DataFrame(json_data)[json_columns]
+
+    def try_json_loads(x: Any) -> Any:
+        if isinstance(x, str):
+            try:
+                return deep_parse_json(x)
+            except json.JSONDecodeError:
+                return x
+        return x
+
     for column in json_columns:
-        if column != 'segment_start_time':
-            df[column] = df[column].apply(json.loads)  # Convert JSON-formatted string to Python dictionary
+        df[column] = df[column].apply(try_json_loads)
+
     return df
+
+def deep_parse_json(obj: Any, max_depth: int = 5) -> Any:
+    """Recursively parse JSON strings at any depth within a nested data structure.
+    
+    This function traverses through strings, dictionaries, and lists, attempting to parse
+    any JSON-formatted strings it encounters. It handles nested scenarios where JSON strings
+    may contain other JSON strings (e.g., InfluxDB data with multiple levels of JSON encoding).
+    
+    Args:
+        obj (Any): The object to parse - can be a string, dict, list, or any other type
+        max_depth (int, optional): Maximum recursion depth to prevent infinite loops. Defaults to 5.
+    
+    Returns:
+        Any: The parsed object with all JSON strings converted to their corresponding Python objects.
+             Non-JSON strings and other data types are returned unchanged.
+    """
+    if max_depth <= 0:
+        return obj
+
+    if isinstance(obj, str):
+        stripped = obj.strip()
+        if stripped.startswith('{') or stripped.startswith('['):
+            try:
+                parsed = json.loads(stripped)
+                return deep_parse_json(parsed, max_depth - 1)
+            except json.JSONDecodeError:
+                return obj
+        return obj
+    
+    elif isinstance(obj, dict):
+        return {k: deep_parse_json(v, max_depth - 1) for k, v in obj.items()}
+    
+    elif isinstance(obj, list):
+        return [deep_parse_json(item, max_depth - 1) for item in obj]
+    
+    return obj

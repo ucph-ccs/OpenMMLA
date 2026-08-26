@@ -1,0 +1,61 @@
+# config_template.yml
+# Template configuration file for audio processing pipeline components.
+# Fill in or update values as needed for your environment.
+
+AudioInferer:
+  cuda: true # whether to use gpu acceleration, true/false
+  backend: nemo # nemo or wespeaker
+  port: 5001 # port number
+  workers: 1 # number of workers
+  nemo:
+    onnx: false # whether to use onnx runtime (faster but less precise)
+    model: <nemo-speaker-embedding-model> # e.g., titanet_large, ecapa_tdnn
+    model_onnx: <path-to-onnx-model> # optional pre-exported onnx model path
+  wespeaker:
+    model: w2vbert2_mfa # chinese, english, campplus, eres2net, vblinkp, vblinkf, w2vbert2_mfa
+
+AudioResampler:
+  port: 5002 
+  workers: 1 
+
+SpeechEnhancer:
+  cuda: true 
+  port: 5003 
+  workers: 1  
+
+SpeechSeparator:
+  cuda: true
+  model: <modelscope-speech-separation-model> # e.g., damo/speech_mossformer2_separation_temporal_8k
+  model_local: <modelscope-speech-separation-model-local-path>  # e.g., .cache/modelscope/hub/damo/speech_mossformer2_separation_temporal_8k
+  port: 5004 
+  workers: 1 
+
+SpeechTranscriber:
+  cuda: true
+  port: 5005 
+  workers: 1 
+
+  backend: <backend> # azure, local, or dashscope
+  azure:
+    subscription_key: <azure-subscription-key>
+    region: <azure-region>
+    language: <azure-language>
+    profanity_option: <azure-profanity-option> # raw, masked, removed
+    word_level: <bool> # word-level timestamps, true/false
+  local:
+    model: <model>  # e.g., base.en, small.en, medium.en, large.en for regular Whisper, or whisperx/large-v3, whisperx/medium for WhisperX with word-level timestamps
+    language: en  # language code, e.g., en, zh, fr, etc. Set to null for auto-detection
+    word_level: <bool>
+  dashscope:
+    api_key: <dashscope-api-key>  # or set DASHSCOPE_API_KEY environment variable
+    model: paraformer-realtime-v2  # paraformer-realtime-v2, qwen3-asr-flash, etc.
+    region: intl  # intl (Singapore) or cn (Beijing), endpoint selection for qwen3-asr models
+    word_level: <bool>  # word-level timestamps (paraformer only, not supported by qwen3-asr sync mode)
+    language: [zh, en, ja]  # list for paraformer multi-language hints, string for qwen-asr single language
+    enable_itn: false  # inverse text normalization, Chinese and English only (qwen3-asr only)
+
+VoiceActivityDetector:
+  cuda: true
+  onnx: true
+  port: 5006 
+  workers: 1 

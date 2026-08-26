@@ -1,24 +1,55 @@
 # Ignore directories
 venv/
 .idea/
+.cursor/
+.codex/
+.vscode/
 *.egg-info/
+.*/
 dist/
 build/
-__pycache__/
 temp/
 logger/
-.vscode/
+analysis/
+openmmla/analytics/framework/
+omini/
+group_state/
 
-# Ignore repositories
-mbox-audio/
-mbox-video/
-mbox-uber/
-test/
+# Ignore deprecated repositories
+deprecated/
+version_control/
+
+# Ignore directories at any level
+**/tests/
+tests/*
+**/__pycache__/
+**/data/
+**/logs/
+**/real-time/
+**/post-time/
+**/visualizations/
+**/camera_sync/
+**/fine_tune/
+/artifacts/
+/collection/
+
+# Ignore generated files
+*.generated.conf
+*.pt
+*.pth
+*.onnx
+**/.manifest.lock
+**/.next/
 
 # Ignore specific files
 .DS_Store
-test*.*
-*test.*
+twine.txt
+docs/paper.md
+
+# Ignore specific files at any level
+**/config.yml
 
 # Unignore specific files
 !.gitkeep
+CLAUDE.md
+AGENTS.md

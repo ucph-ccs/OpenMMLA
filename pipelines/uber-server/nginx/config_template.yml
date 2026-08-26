@@ -1,0 +1,124 @@
+# nginx/config_template.yml
+# Template configuration file for nginx load balancer setup.
+# Fill in or update values as needed for your environment.
+# Configuration explanation:
+# ----------------------
+# upstreams:
+#   - Each service (infer, resample, etc.) corresponds to a Flask endpoint
+#   - The service name must match the endpoint name used in create_app()
+#   - Each service can have multiple servers for load balancing
+#
+# host:
+#   - The hostname or IP address of the server running the service
+#   - Can be a domain name, localhost, or IP address
+#
+# port:
+#   - The port number where the service is running
+#   - Must match the port specified when starting the service
+#
+# weight:
+#   - Determines how requests are distributed among servers
+#   - Higher weight = more requests sent to that server
+#   - Example: weight 3 vs 1 means 3x more requests to the higher weight server
+#
+# rtmp_apps:
+#   - List of RTMP application names for video/audio streaming
+#   - Used in RTMP URLs to identify different streams
+#   - Each app name should be unique
+
+# Upstream configurations for different services
+# Each service can have multiple servers with different weights for load balancing
+upstreams:
+  # Audio inference service
+  infer:  # reserved for asr-infer
+    - host: <server-01-host>  # Hostname or IP address of the server, e.g. 192.168.1.12 or server-01.local
+      port: <port-number>     # Port number where the service is running, e.g. 5050
+      weight: 3              # Weight for load balancing (higher = more requests)
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  # Audio resampling service
+  resample:  # reserved for asr-resample
+    - host: <server-01-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  # Speech enhancement service
+  enhance:  # reserved for asr-enhance
+    - host: <server-01-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  # Speech separation service
+  separate:  # reserved for asr-separate
+    - host: <server-01-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  # Speech transcription service
+  transcribe:  # reserved for asr-transcribe
+    - host: <server-01-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  # Voice activity detection service
+  vad:  # reserved for asr-vad
+    - host: <server-01-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  vllm: # reserved for vfa-vllm
+    - host: <server-01-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-02-host>
+      port: <port-number>
+      weight: 3
+    - host: <server-03-host>
+      port: <port-number>
+      weight: 1
+
+  # reserved for your custom service created with create_app(), matched with the endpoint name defined in crate_app()
+  <your-service-endpoint-name>:
+    - host: <server-01-host>
+      port: <port-number
+
+# RTMP application names for video streaming
+# These are the application names that will be used in RTMP URLs
+# Format: rtmp://<nginx-host>/<stream-app-name>/<stream-name>
+rtmp_apps:
+  - <stream-app-name>  # e.g., replace it with your actual stream app name, e.g., ips, vfa

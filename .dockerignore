@@ -1,0 +1,14 @@
+.git
+.github
+.idea
+.vscode
+__pycache__
+**/__pycache__
+*.pyc
+artifacts/
+pipelines/*/temp/
+pipelines/*/config.yml
+docs/
+notebooks/
+*.egg-info
+.DS_Store

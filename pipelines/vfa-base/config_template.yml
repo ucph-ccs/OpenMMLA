@@ -1,0 +1,222 @@
+# VFA-BASE config_template.yml
+# Template configuration file for AprilTag detection, image capture, camera calibration, and server communication
+
+Base:
+  # AprilTags settings
+  tag_size: 0.08                                    # Size of the AprilTag in meters (e.g., 0.08 = 8cm)
+  families: tag36h11                                # Tag family name (e.g., tag36h11, tag25h9, tagStandard41h12)
+
+  # Image capture settings
+  resolution: [1920, 1080]                          # Image resolution in pixels (width, height)
+  rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
+  fps: 30                                           # Frames per second of the image capture
+
+  # camera angle configuration (key: angle_name, value: angle_description)
+  angle_config:
+    "front": "Direct front view at eye level, showing participants face-on"
+    "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
+    "top": "View from above, showing a top-down perspective of the workspace and participants"
+    
+  # VideoStream settings
+  # NOTE: per-base 'source' and 'source_index' live in Bases (below). 'file_dir'
+  # is optional — for source 'file' it is the directory of the file named in a
+  # base's source_index (defaults to the project dir). initial_sync_time is
+  # auto-computed at runtime as the latest file start time.
+  file_dir: '/path/to/video/directory'              # (optional) directory of video files for source 'file'; filename format: <prefix>_<timestamp>.<extension>
+
+  # Frame processing settings (applies to all video sources)
+  keyframe_interval: 30.0                          # Interval between processed frames in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
+  processing_rate: 1.0                             # Real-time rate multiplier for file sources (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
+  enable_timing_sync: true                         # Enforce accumulative timing synchronization for file sources (prevents drift and race conditions)
+  
+  # Examples:
+  # For real-time sources (opencv/rtmp): keyframe_interval controls frame saving frequency
+  # keyframe_interval: 30.0 → Save 1 frame every 30 seconds
+  # keyframe_interval: 1.0  → Save 1 frame every second (1 FPS)
+  #
+  # For file sources: keyframe_interval + processing_rate control playback timing
+  # keyframe_interval: 30.0, processing_rate: 1.0  → 1 frame per 30s in real-time
+  # keyframe_interval: 1.0, processing_rate: 1.0   → 1 FPS in real-time  
+  # keyframe_interval: 1.0, processing_rate: 0.5   → 1 FPS with 2x time allowance (2s per frame)
+  # keyframe_interval: 10.0, processing_rate: 2.0  → 1 frame per 10s with half time allowance (5s per frame)
+
+  stream_kwargs:
+    buffer_duration: 0.08                           # Buffer duration in seconds for video stream
+    format: MJPG                                    # Video format (e.g., MJPG, H264)
+    resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
+  # example 1: external RTMP stream (already running, Base pulls from URL)
+  # cam-external:
+  #   target: rtmp://uber-server.local/vfa/side
+  #
+  # example 2: managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  # cam-front:
+  #   ssh_profile: rpi-front          # must match a TUI SSH profile name
+  #   device: /dev/video0             # camera device on the remote machine
+  #   target: rtmp://uber-server.local/vfa/front  # RTMP URL
+  #   codec: libx264                  # video codec
+  #   resolution: 1920x1080           # video resolution
+  #   fps: 30                         # frames per second
+  # cam-top:
+  #   ssh_profile: rpi-top
+  #   device: /dev/video0
+  #   target: rtmp://uber-server.local/vfa/top
+  #   codec: libx264
+  #   resolution: 1920x1080
+  #   fps: 30
+
+# bases settings
+# Each entry defines one VFA base node (a camera/viewpoint). A base references a
+# calibrated camera profile (from Cameras) and a viewing angle. Single source of
+# truth for base id, camera, source and angle. Edit the template entry / use
+# "+ Add Entry" in the TUI; entries whose id is a <...> placeholder are ignored.
+Bases:
+  - id: <base-id>               # base id / identity (appears in storage paths {camera}_{id})
+    camera: <camera-name>       # calibrated camera profile name (from Cameras)
+    source: rtmp                # source type (opencv/rtmp/lsl/file)
+    source_index: 0             # opencv/rtmp: index (0-based); file: file name in file_dir; lsl: stream name
+    camera_angle: <camera-angle>  # viewing angle label (e.g. front, top, side)
+
+Synchronizer:
+  result_expiry_time: 30                            # cleanup timeout (seconds)
+  match_tolerance: 0.5                              # matching tolerance (seconds) for incoming result to time buckets
+
+
+# streams settings
+# each entry defines a video stream source. streams with ssh_profile can be started/stopped
+# from the TUI Launcher; streams without ssh_profile are treated as external (already running).
+Streams:
+
+# Database settings
+InfluxDB:
+  # Replace <inlfuxdb-example-server> with your actual sever address that runs the InfluxDB server, and the <port>
+  # with the actual port number that InfluxDB server is listening to. The default port for InfluxDB is 8086.
+  # Replace <influxdb-token> with your actual InfluxDB token, and <org-name> with your actual InfluxDB organization name.
+  # =================================================================================
+  # e.g., if your InfluxDB server is on uber-server.local machine and its IP address is 192.168.1.12 and listens on 8086,
+  # and it has a token named lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  # and organization named admin, then the following line should be:
+  # url: http://uber-server.local:8086
+  # token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  # org: admin
+  url: http://<influxdb-example-server>:<port>
+  token: <influxdb-token>
+  org: <org-name>
+  bucket: mmla-data
+
+MongoDB:
+  url: mongodb://<mongodb-example-server>:<port>
+  db: openmmla
+
+# MQTT settings
+MQTT:
+  # Replace <mqtt-example-server> with your actual sever address that runs the MQTT server, and the <port-number>
+  # with the actual port number that MQTT server is listening to. The default port for MQTT is 1883.
+  # =================================================================================
+  # e.g., if your MQTT server is on uber-server.local machine and its IP address is 192.168.1.12, and it has listening
+  # on port 1883, then the following line should be:
+  # host: uber-server.local
+  # port: 1883
+  host: <mqtt-example-server>
+  port: <port-number>
+
+# Redis settings
+Redis:
+  # Replace <redis-example-server> with your actual sever address that runs the Redis server, and the <port-number>
+  # with the actual port number that Redis server is listening to. Specify a certain database number you want to use for
+  # message queue. The default database number is 0. The default port for Redis is 6379.
+  # =================================================================================
+  # e.g., if your Redis server is on uber-server.local machine and its IP address is 192.168.1.12, and it has listening
+  # on port 6379, then the following line should be:
+  # host: uber-server.local
+  # port: 6379
+  # db: 0
+  host: <redis-example-server>
+  port: <port-number>
+  db: <database-number>
+
+# Gateway (Nginx) settings
+# Shared reverse-proxy/load-balancer endpoint that bases connect to. In the
+# Server section below, a service may be given either as a bare endpoint name
+# (composed against this gateway, e.g. 'vllm' -> {scheme}://{host}:{http_port}/vllm)
+# or as a full URL (used as-is, bypassing the gateway for a direct connection).
+Gateway:
+  host: <gateway-host>      # nginx host, e.g. uber-server.local
+  http_port: 8080           # nginx HTTP reverse-proxy port
+  rtmp_port: 1935           # nginx RTMP port for video/audio streams
+  scheme: http              # http or https
+
+# Server settings
+Server:
+  # VFA server settings
+  # Replace <vfa-example-server> with your actual sever address that runs the VFA server or the load balancer
+  # that proxy your VFA requests, and the <port> with the port numbers different VFA services listening on
+  # or the port number that the load balancer listening on. The default port for VFA services is vllm:5007
+  # The default port for load balancer is 8080.
+  # =================================================================================
+  # e.g., if your VFA server is run on vfa-server.local, and you have a load balancer on uber-server.local that proxy
+  # your ASR requests, then the following line could be:
+  # request ASR services from load balancer:
+  # vfa:
+  #   vllm_frame_analyzer: http://uber-server.local:8080/vllm
+  # or directly request VFA services from vfa-server:
+  # vfa:
+  #  vllm_frame_analyzer: http://vfa-server.local:5007/vllm
+  vfa:
+    vllm_frame_analyzer: http://<vfa-example-server>:<port>/vllm
+
+Cameras:
+  # Template for camera calibration parameters
+  # You can either config the camera by editing the parameters manually or use the camera calibration tool,
+  # `openmmla ips-ccal` to calibrate the camera and generate the parameters.
+  # camera_name:
+  #   fisheye: true               # Set to true if the camera uses a fisheye lens
+  #   params: [fx, fy, cx, cy]    # Camera intrinsic parameters
+  #   K:
+  #     - [fx, 0.0, cx]             # Intrinsic matrix row 1
+  #     - [0.0, fy, cy]             # Intrinsic matrix row 2
+  #     - [0.0, 0.0, 1.0]           # Intrinsic matrix row 3
+  #   D:
+  #     - [k1, k2, p1, p2, k3]      # Distortion coefficients (radial + tangential)
+
+  # Example calibrated camera: logitech C920
+  logitechC920:
+    fisheye: false
+    params: [1379.1460117344336, 1373.8668188142785, 978.7394037412176, 549.2014485300241]
+    K:
+      - [1379.1460117344336, 0.0, 978.7394037412176]
+      - [0.0, 1373.8668188142785, 549.2014485300241]
+      - [0.0, 0.0, 1.0]
+    D:
+      - [0.11384928515083662, -0.278469525889543, -0.0011019316382279247, 0.0008494229367841709,
+        0.19615171889145352]
+
+  # Example calibrated camera: macbook-air
+  macbook-air:
+    fisheye: false
+    params: [1457.358228890706, 1446.1032097123093, 992.9001932429544, 562.024872597483]
+    K:
+      - [1457.358228890706, 0.0, 992.9001932429544]
+      - [0.0, 1446.1032097123093, 562.024872597483]
+      - [0.0, 0.0, 1.0]
+    D:
+      - [0.1498718601497246, -0.27867312817642964, 0.006105669196899129, 0.012452039399984193,
+        0.2779506314756574]
+
+  # Example calibrated camera: iphone
+  iphone:
+    fisheye: false
+    params: [ 1400.0006464122796, 1394.1075948948992, 961.7378885085977, 511.47563254197104 ]
+    K:
+      - [ 1400.0006464122796, 0.0, 961.7378885085977 ]
+      - [ 0.0, 1394.1075948948992, 511.47563254197104 ]
+      - [ 0.0, 0.0, 1.0 ]
+    D:
+      - [ 0.25199391173920305, -1.129316666693021, -0.00023786301206534901, 0.0005621775211187798,
+          1.2069806447431342 ]
+
+  # Add more cameras using the same structure as above
+  # your-camera-id:
+  #   fisheye: true|false
+  #   params: [...]
+  #   K: [...]
+  #   D: [...]

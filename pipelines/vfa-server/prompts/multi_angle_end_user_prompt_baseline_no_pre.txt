@@ -1,0 +1,12 @@
+You are analyzing {{num_perspectives}} synchronized camera views ({{angle_descriptions}}) with participants ({{participant_descriptions}}).  
+ 
+Identify each person's ID by appearance. Classify each person’s action into one of the following categories {{action_definitions}} across all views.
+
+Return the result in JSON:
+
+```json
+{
+  "classifications": {
+    "[ID]": "[ActionName]"
+  }
+}

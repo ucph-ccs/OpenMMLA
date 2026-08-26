@@ -1,0 +1,7 @@
+maps:
+  collaboration_v1:
+    Communicating: 2
+    Manipulating: 2
+    Observing: 1
+    Idle-OffTask: 0
+    Unclear: 0

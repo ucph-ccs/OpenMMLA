@@ -1,5 +1,7 @@
-# StreamReceiver is a base class for receiving data streams, with specified sampling rate, channels, etc.
-# Data is received into a buffer, and the buffer can be read by the consumer.
+"""
+StreamReceiver is a base class for receiving data streams, with specified sampling rate, channels, etc.
+Data is received into a buffer, and the buffer can be read by the consumer.
+"""
 
 from abc import ABC, abstractmethod
 from typing import Any
@@ -18,9 +20,8 @@ class StreamReceiver(ABC):
         Args:
             **kwargs: Configuration parameters for the stream
         """
-        self.source = None  # stream type: 'pyaudio', 'socket', 'cv2'
+        self.source = None  # stream type: 'pyaudio', 'socket', 'cv2', 'rtmp', 'lsl', etc.
         self.stream = None  # stream object from pyaudio, cv2, etc.
-        self.socket = None  # socket object from socket, etc.
         self.buffer = None  # ring buffer for data storage
         self.config = kwargs
 

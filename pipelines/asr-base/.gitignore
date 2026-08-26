@@ -1,0 +1,7 @@
+# Ignore directories
+post-time/
+real-time/
+logger/
+logs/
+tests/
+visualizations/

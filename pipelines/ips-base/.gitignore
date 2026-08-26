@@ -1,0 +1,11 @@
+# Ignore specific directories
+.idea/
+tests/
+logs/
+logger/
+data/
+real-time/
+visualizations/
+
+# Ignore specific files
+transformation_matrices*.json

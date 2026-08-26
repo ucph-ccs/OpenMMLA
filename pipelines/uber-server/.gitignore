@@ -1,0 +1,16 @@
+.idea/
+
+# Ignore __pycache__ directories and .pyc files
+__pycache__/
+*.pyc
+
+**/static/
+
+# Ignore specific files
+test*.*
+*test.*
+
+# misc
+.DS_Store
+dump.rdb
+nginx/nginx.generated.conf

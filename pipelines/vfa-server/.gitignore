@@ -1,0 +1,5 @@
+# Ignore specific directories
+.idea/
+__pycache__/
+data/
+fine_tune/

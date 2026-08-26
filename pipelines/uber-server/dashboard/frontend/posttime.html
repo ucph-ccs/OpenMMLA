@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Report — OpenMMLA Dashboard</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<nav class="topbar">
+  <a class="brand" href="/">Open<span>MMLA</span> Dashboard</a>
+  <span class="session-tag" id="session-tag"></span>
+  <span class="spacer"></span>
+  <a class="btn" id="btn-live">● Live view</a>
+</nav>
+
+<main class="page">
+  <h1 class="page-title">Analysis Report</h1>
+  <p class="page-subtitle" id="subtitle">Post-session visualizations and measurement logs.</p>
+
+  <div class="generating" id="generating">
+    <div class="spinner"></div>
+    <span>Generating visualizations from session data… this can take a minute.</span>
+  </div>
+
+  <div class="gallery" id="gallery" hidden></div>
+
+  <section class="card" id="logs-card" style="margin-top: 28px;" hidden>
+    <div class="card-header"><h2>Measurement Logs</h2><span class="hint">select files to download</span></div>
+    <div class="card-body">
+      <div class="log-list" id="log-list"></div>
+      <div class="log-actions">
+        <button class="primary" id="btn-download" disabled>Download selected</button>
+        <button id="btn-select-all">Select all</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="lightbox" id="lightbox"><img id="lightbox-img" alt="Visualization enlarged"></div>
+
+<script>
+const sessionId = new URLSearchParams(location.search).get('session');
+if (!sessionId) location.replace('/');
+document.getElementById('session-tag').textContent = sessionId;
+document.getElementById('btn-live').href = `/realtime?session=${encodeURIComponent(sessionId)}`;
+document.title = `Report · ${sessionId} — OpenMMLA`;
+
+/* Human-readable captions for generated files */
+const CAPTIONS = [
+  [/speaker_diarization\.html$/, 'Speaker Diarization (interactive)'],
+  [/_nsin\.png$/, 'Speaking Interaction Network'],
+  [/_npin\.png$/, 'Physical Interaction Network'],
+  [/_hm\.png$/, 'Position Heatmap'],
+  [/_2d_positions\.png$/, '2D Positions'],
+  [/_2d_interpolated_trajectories\.png$/, '2D Movement Trajectories'],
+  [/_3d_positions\.png$/, '3D Positions'],
+  [/_3d_interpolated_trajectories\.png$/, '3D Movement Trajectories'],
+  [/asr_across_sessions.*\.html$/, 'Speech Metrics Across Sessions (interactive)'],
+  [/asr_across_sessions.*\.png$/, 'Speech Metrics Across Sessions'],
+  [/ips_across_sessions.*\.png$/, 'Movement Metrics Across Sessions'],
+];
+function captionFor(url) {
+  const name = url.split('/').pop();
+  for (const [re, label] of CAPTIONS) if (re.test(name)) return label;
+  return name.replace(/^.*?_/, '').replace(/\.(png|html)$/, '').replace(/_/g, ' ');
+}
+
+/* ---------- gallery with polling ---------- */
+const gallery = document.getElementById('gallery');
+const generating = document.getElementById('generating');
+let pollTimer = null, polls = 0;
+
+function renderGallery(files) {
+  generating.hidden = true;
+  gallery.hidden = false;
+  gallery.innerHTML = '';
+  const images = files.filter(f => !f.endsWith('.html')).sort();
+  const pages = files.filter(f => f.endsWith('.html')).sort();
+
+  for (const url of images) {
+    const card = document.createElement('figure');
+    card.className = 'card viz-card';
+    card.style.margin = 0;
+    card.innerHTML = `
+      <img src="${url}" alt="${captionFor(url)}" loading="lazy">
+      <figcaption class="caption"><span>${captionFor(url)}</span>
+        <a href="${url}" download onclick="event.stopPropagation()">download</a></figcaption>`;
+    card.addEventListener('click', () => openLightbox(url));
+    gallery.appendChild(card);
+  }
+  for (const url of pages) {
+    const card = document.createElement('a');
+    card.className = 'card viz-card interactive';
+    card.href = url;
+    card.target = '_blank';
+    card.rel = 'noopener';
+    card.style.textDecoration = 'none';
+    card.innerHTML = `
+      <div class="thumb">⤢ ${captionFor(url)}<small>opens in a new tab</small></div>
+      <div class="caption"><span>${captionFor(url)}</span></div>`;
+    gallery.appendChild(card);
+  }
+}
+
+function fetchVisualizations() {
+  fetch(`/api/get_post_time_visualizations/${encodeURIComponent(sessionId)}`)
+    .then(r => r.json())
+    .then(({ files = [] }) => {
+      if (files.length) {
+        clearInterval(pollTimer);
+        renderGallery(files);
+      } else if (++polls > 40) { // ~2.5 min
+        clearInterval(pollTimer);
+        generating.innerHTML = 'No visualizations were produced for this session. Check the Celery worker logs.';
+      }
+    })
+    .catch(() => {});
+}
+
+/* kick off generation (backend throttles regeneration), then poll */
+fetch('/api/post_time_visualize', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ session_id: sessionId }),
+}).catch(() => {});
+fetchVisualizations();
+pollTimer = setInterval(fetchVisualizations, 4000);
+
+/* ---------- logs ---------- */
+const logsCard = document.getElementById('logs-card');
+const logList = document.getElementById('log-list');
+const btnDownload = document.getElementById('btn-download');
+const btnSelectAll = document.getElementById('btn-select-all');
+
+function refreshLogs() {
+  fetch(`/api/get_logs/${encodeURIComponent(sessionId)}`)
+    .then(r => r.json())
+    .then(({ logs = [] }) => {
+      if (!logs.length) { setTimeout(refreshLogs, 5000); return; }
+      logsCard.hidden = false;
+      logList.innerHTML = logs.map(l =>
+        `<label><input type="checkbox" value="${l.url}"> ${l.name}</label>`).join('');
+      logList.addEventListener('change', updateDownloadState);
+      updateDownloadState();
+    })
+    .catch(() => {});
+}
+function checked() { return [...logList.querySelectorAll('input:checked')]; }
+function updateDownloadState() { btnDownload.disabled = !checked().length; }
+
+btnSelectAll.addEventListener('click', () => {
+  const boxes = logList.querySelectorAll('input');
+  const all = checked().length === boxes.length;
+  boxes.forEach(b => (b.checked = !all));
+  updateDownloadState();
+});
+
+btnDownload.addEventListener('click', async () => {
+  for (const box of checked()) {
+    const a = document.createElement('a');
+    a.href = box.value;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    await new Promise(res => setTimeout(res, 400));
+  }
+});
+refreshLogs();
+
+/* ---------- lightbox ---------- */
+const lightbox = document.getElementById('lightbox');
+const lightboxImg = document.getElementById('lightbox-img');
+function openLightbox(url) {
+  lightboxImg.src = url;
+  lightbox.classList.add('open');
+}
+lightbox.addEventListener('click', () => lightbox.classList.remove('open'));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') lightbox.classList.remove('open'); });
+</script>
+
+</body>
+</html>

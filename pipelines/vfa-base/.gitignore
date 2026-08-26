@@ -1,0 +1,7 @@
+# Ignore specific directories
+.idea/
+tests/
+logs/
+logger/
+data/
+real-time/

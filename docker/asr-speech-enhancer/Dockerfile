@@ -1,0 +1,31 @@
+# SpeechEnhancer (facebook denoiser) — noise reduction, port 5003, GPU
+# Build from the repository root:
+#   docker build -f docker/asr-speech-enhancer/Dockerfile -t openmmla/asr-speech-enhancer .
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install \
+        "torch==2.4.1" "torchaudio==2.4.1" \
+        "denoiser-compat==0.1.5.dev0" \
+        "soundfile" \
+        "flask==3.0.3" "gunicorn==23.0.0" "gevent==24.2.1" \
+        "pyyaml" "cryptography>=42.0.0"
+
+COPY pyproject.toml README.md /opt/openmmla/
+COPY openmmla /opt/openmmla/openmmla
+RUN pip install --no-deps /opt/openmmla
+
+ENV PROJECT_DIR=/project \
+    CONFIG_PATH=/project/config.yml \
+    PORT=5003 \
+    WORKERS=1
+
+CMD gunicorn -k gevent --timeout 0 -w ${WORKERS} -b 0.0.0.0:${PORT} \
+    openmmla.services.asr.apps.serve_speech_enhancer:app

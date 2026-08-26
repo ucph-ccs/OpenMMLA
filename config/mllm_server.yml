@@ -1,0 +1,9 @@
+server:
+  model: Qwen/Qwen3-VL-8B-Instruct
+  port: 8010
+  host: 0.0.0.0
+  dtype: auto
+  max_model_len: 8192
+  limit_mm_per_prompt: '{"image":2}'
+  gpu_memory_utilization: 0.95
+  api_key: EMPTY

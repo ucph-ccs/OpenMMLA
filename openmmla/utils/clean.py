@@ -6,6 +6,10 @@ import sys
 
 def clear_directory(directory):
     """Clears all files and subdirectories in the specified directory."""
+    if not os.path.exists(directory):
+        print(f"warning: directory {directory} does not exist")
+        return
+        
     for filename in os.listdir(directory):
         file_path = os.path.join(directory, filename)
         try:

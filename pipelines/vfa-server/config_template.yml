@@ -1,0 +1,90 @@
+# config_template.yml
+# Template configuration file for video frame analyzer pipeline components.
+# Fill in or update values as needed for your environment.
+VLLMFrameAnalyzer:
+  port: 5007 # port number
+  workers: 1 # number of workers
+
+  families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
+
+  backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek, llamacpp, grok
+  end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
+  image_detail: "auto"  # Image detail for vision models: "low" (faster, less detail), "high" (slower, more detail), "auto" (model decides)
+  prompt_profile: cot  # end-to-end prompt variant: cot (zero-shot CoT, paper default), baseline, baseline_no_pre
+  # action_schema: collaboration_v1  # optional explicit override; otherwise use config/vfa/action_schemas.yml default_schema
+
+  # Supported backends
+  ollama:
+    api_key: <OLLAMA_API_KEY>
+    vlm_base_url: "http://localhost:11434/v1" # base url for vlm
+    llm_base_url: "http://localhost:11434/v1" # base url for llm
+    vlm_model: "llava:13b" # vlm model name
+    llm_model: "llama3.1" # llm model name
+    top_p: 0 # top_p for LLM (from 0 to 1) - OPTIONAL: omit if model doesn't support it
+    temperature: 0 # temperature for LLM (from 0 to 1) - OPTIONAL: omit if model doesn't support it
+    VLMExtraBody: {} # extra body for vlm
+    LLMExtraBody: {} # extra body for llm
+
+  vllm:
+    api_key: <VLLM_API_KEY>
+    vlm_base_url: "http://localhost:8000/v1"
+    llm_base_url: "http://localhost:8001/v1"
+    vlm_model: "openbmb/MiniCPM-V-2_6"
+    llm_model: "microsoft/Phi-3-small-128k-instruct"
+    VLMExtraBody: 
+      stop_token_ids: [151645, 151643] # stop token ids for MiniCPM-V-2_6
+    LLMExtraBody: {}
+  
+  llamacpp:
+    api_key: "sk-no-key-required"
+    vlm_base_url: "http://localhost:8001/v1"
+    llm_base_url: "http://localhost:8001/v1"
+    vlm_model: "ggml-org/SmolVLM-500M-Instruct-GGUF"
+    llm_model: "ggml-org/SmolVLM-500M-Instruct-GGUF"
+    VLMExtraBody: {}
+    LLMExtraBody: {}
+
+  openai:
+    api_key: <OPENAI_API_KEY>
+    vlm_model: "gpt-4o"
+    llm_model: "gpt-4o"
+
+  gemini:
+    api_key: <GEMINI_API_KEY>
+    vlm_base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    llm_base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    vlm_model: "gemini-2.0-pro-exp-02-05"
+    llm_model: "gemini-2.0-pro-exp-02-05"
+
+  grok:
+    api_key: <GROK_API_KEY>
+    vlm_base_url: "https://api.x.ai/v1"
+    llm_base_url: "https://api.x.ai/v1"
+    vlm_model: grok-4-latest 
+    llm_model: grok-4-latest
+
+  deepseek:
+    api_key: <DEEPSEEK_API_KEY>
+    vlm_base_url: "https://api.deepseek.com"
+    llm_base_url: "https://api.deepseek.com"
+    vlm_model: "deepseek-reasoner"
+    llm_model: "deepseek-reasoner"
+  
+  qwen:
+    api_key: <QWEN_API_KEY>
+    vlm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    vlm_model: "qwen2.5-72b-instruct"
+    llm_model: "qwen2.5-72b-instruct"
+  
+  zhipuai:
+    api_key: <ZHIPU_API_KEY>
+    vlm_model: "glm-4.5v"
+    llm_model: "glm-4.5v"
+  
+  intern:
+    api_key: <INTERN_API_KEY>
+    vlm_base_url: "https://chat.intern-ai.org.cn/api/v1/"
+    llm_base_url: "https://chat.intern-ai.org.cn/api/v1/"
+    vlm_model: "internvl3.5-241b-a28b"
+    llm_model: "internvl3.5-241b-a28b"

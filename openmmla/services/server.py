@@ -1,61 +1,94 @@
 import os
+import time
 from abc import abstractmethod, ABC
 
 import yaml
 
+from openmmla.utils.artifact_paths import RUNTIME_ARTIFACTS_DIR, artifact_root, safe_segment
 from openmmla.utils.logger import get_logger
 
 
 class Server(ABC):
     """Base class for servers."""
 
-    def __init__(self, project_dir, config_path=None, use_cuda=True, use_onnx=False):
+    def __init__(self, project_dir: str | None = None, config_path: str | None = None):
         """Initialize the server base class.
 
         Args:
-            project_dir (str): The project directory.
-            config_path (str, optional): Path to the configuration file.
-            use_cuda (bool): Whether to use CUDA or not.
+            project_dir: path to the project directory (default: current working directory)
+            config_path: path to the configuration file (default: None)
         """
-        self.project_dir = project_dir
-        if not os.path.exists(self.project_dir):
-            raise FileNotFoundError(f"Project directory not found at {project_dir}")
-        self.use_cuda = use_cuda
-        self.use_onnx = use_onnx
+        if project_dir:
+            if not os.path.isabs(project_dir):
+                project_dir = os.path.join(os.getcwd(), project_dir)
+            if not os.path.exists(project_dir):
+                raise FileNotFoundError(f"Project directory not found at {project_dir}")
+            self.project_dir = project_dir
+        else:
+            self.project_dir = os.getcwd()
 
         if config_path:
-            if os.path.isabs(config_path):
-                self.config_path = config_path
-            else:
-                self.config_path = os.path.join(project_dir, config_path)
+            if not os.path.isabs(config_path):
+                config_path = os.path.join(os.getcwd(), config_path)
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Configuration file not found at {config_path}")
 
-            if not os.path.exists(self.config_path):
-                raise FileNotFoundError(f"Configuration file not found at {self.config_path}")
+        self.config_path = config_path
+        self.config = self._load_config() if self.config_path else None
 
-            self.config = self._load_config()
-        else:
-            self.config_path = None
-            self.config = None
-
-        self.server_logger_dir = os.path.join(project_dir, 'logger')
-        self.server_file_folder = os.path.join(project_dir, 'temp')
+        # setup server directories
+        self.server_logger_dir = os.fspath(
+            artifact_root(self.project_dir)
+            / RUNTIME_ARTIFACTS_DIR
+            / 'services'
+            / safe_segment(self.__class__.__name__, 'server')
+            / 'logger'
+        )
+        self.server_temp_folder = os.path.join(self.project_dir, 'temp')
         os.makedirs(self.server_logger_dir, exist_ok=True)
-        os.makedirs(self.server_file_folder, exist_ok=True)
-        self.logger = self._setup_logger()
+        os.makedirs(self.server_temp_folder, exist_ok=True)
+        self.logger = get_logger(f'{self.__class__.__name__}_{time.time()}',
+                                 os.path.join(self.server_logger_dir, f'{self.__class__.__name__}_{time.time()}_server.log'),
+                                 mode='a')
 
     def _load_config(self):
-        """Load the configuration file."""
+        """Load the configuration file, decrypting sensitive values and encrypting any
+        plaintext secrets back to the YAML file."""
         with open(self.config_path, 'r') as config_file:
-            return yaml.safe_load(config_file)
-
-    def _setup_logger(self):
-        """Set up the logger for the server."""
-        return get_logger(self.__class__.__name__,
-                          os.path.join(self.server_logger_dir, f'{self.__class__.__name__.lower()}_server.log'))
+            raw_data = yaml.safe_load(config_file)
+        try:
+            from openmmla.utils.crypto import process_config_dict
+            from openmmla.utils.yaml_dump import dump_yaml_pretty
+            runtime_data, needs_rewrite = process_config_dict(raw_data)
+            if needs_rewrite:
+                dump_yaml_pretty(raw_data, self.config_path)
+            return runtime_data
+        except (FileNotFoundError, ImportError):
+            return raw_data
 
     def _get_temp_file_path(self, prefix, base_id, extension):
         """Generate a temporary file path."""
-        return os.path.join(self.server_file_folder, f'{prefix}_{base_id}.{extension}')
+        return os.path.join(self.server_temp_folder, f'{prefix}_{base_id}.{extension}')
+    
+    def _clean_up(self):
+        """Free memory by resetting attributes."""
+        pass
+
+    def _reinit(self):
+        """Reinitialize the server by calling __init__ again with stored parameters."""
+        self.logger.info("Starting server reinitialization...")
+        
+        # Store the original initialization parameters
+        project_dir = getattr(self, 'project_dir', None)
+        config_path = getattr(self, 'config_path', None)
+        
+        # Clean up current state
+        self._clean_up()
+        
+        # Call __init__ again with the original parameters
+        self.__init__(project_dir=project_dir, config_path=config_path)
+        
+        self.logger.info("Server reinitialization completed successfully")
 
     @abstractmethod
     def process_request(self):

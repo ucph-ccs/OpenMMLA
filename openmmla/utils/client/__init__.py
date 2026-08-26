@@ -1,12 +1,20 @@
+from importlib import import_module
+
+
 def __getattr__(name):
     if name == "InfluxDBClientWrapper":
         from .influx_client import InfluxDBClientWrapper
         return InfluxDBClientWrapper
+    elif name == "MongoDBClientWrapper":
+        from .mongo_client import MongoDBClientWrapper
+        return MongoDBClientWrapper
     elif name == "MQTTClientWrapper":
         from .mqtt_client import MQTTClientWrapper
         return MQTTClientWrapper
     elif name == "RedisClientWrapper":
         from .redis_client import RedisClientWrapper
         return RedisClientWrapper
+    elif name in {"influx_client", "mongo_client", "mqtt_client", "redis_client"}:
+        return import_module(f"{__name__}.{name}")
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")
