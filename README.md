@@ -96,7 +96,7 @@ The following services are typically run on a dedicated **Uber Server** to provi
 - [Redis](https://redis.io/downloads/) (required): Message broker for session Start/Stop control (and cache for Celery workers' tasks)
 - [Mosquitto](https://mosquitto.org/download/) (required): MQTT broker for publish/subscribe measurement results among *Base* and *Synchronizer*
 - [Nginx](https://github.com/nginx/nginx?tab=readme-ov-file#downloading-and-installing) (optional): Load balancer for AI/Algorithm services and RTMP server for streams
-- [Dashboard](https://openmmla-dashboard-ri2dd2eh1-lizaibeims-projects.vercel.app/) (optional): Flask backend with a dependency-free static frontend for real/post-time visualizations
+- [Dashboard](docs/dashboard.md) (optional): Flask backend with a dependency-free static frontend for real/post-time visualizations
 
 <details>
 <summary>Services Installation</summary>
