@@ -89,7 +89,11 @@ Prompts** tab lists all templates, marks which are active, and lets you edit and
    - `multi_angle_vlm_system_prompt.txt` / `multi_angle_vlm_user_prompt.txt`: vision-only observations
    - `multi_angle_llm_system_prompt.txt` / `multi_angle_llm_user_prompt.txt`: classification from observations
 
-   All templates can use variable substitution with the syntax `{{variable_name}}`. Supported variables:
+   Templates substitute `{{variable_name}}` placeholders, but each one uses only its own subset:
+   the system prompts use none, and the `baseline` variants drop `{{decision_process}}`. A missing
+   templates directory raises at startup; a missing individual template file is skipped silently and
+   leaves that prompt empty, so check the path if the model starts receiving bare input. Supported
+   variables:
    - `{{num_perspectives}}`: Number of camera angles being analyzed
    - `{{angle_descriptions}}`: Descriptions of each camera perspective
    - `{{participant_descriptions}}`: Descriptions of known participants
@@ -156,7 +160,8 @@ mmla vfa-sync -c <config_path>  # start a vfa synchronizer
 
 # AI server (conda env: vfa-server)
 # one gunicorn process per service from openmmla/services/vfa/apps/
-export CONFIG_FILE=<config_path>
+export PROJECT_DIR=<project_dir_path>
+export CONFIG_PATH=<config_path>
 gunicorn -k gevent -w <workers> -b 0.0.0.0:<port> openmmla.services.vfa.apps.<serve_module>:app
 ```
 
