@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass, field, asdict
 
@@ -98,6 +99,28 @@ def _profiles_path() -> str:
     return os.path.join(root, PROFILES_DIR, PROFILES_FILE)
 
 
+def _decrypt_password(value) -> str:
+    """return a usable plaintext password from a stored profile value.
+
+    Profiles written before passwords were encrypted still hold plaintext, so
+    a non-ENC value is passed through unchanged. A value that is encrypted but
+    undecryptable yields "" rather than the ciphertext, so ssh falls back to
+    key auth instead of authenticating with the ENC(...) blob."""
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        from openmmla.utils.crypto import is_encrypted, decrypt_value
+    except Exception:
+        return text  # crypto unavailable: the value can only be plaintext
+    if not is_encrypted(text):
+        return text
+    try:
+        return decrypt_value(text)
+    except Exception:
+        return ""
+
+
 def load_ssh_profiles() -> list[SSHProfile]:
     """load ssh profiles from .openmmla/ssh_profiles.yml."""
     path = _profiles_path()
@@ -116,7 +139,7 @@ def load_ssh_profiles() -> list[SSHProfile]:
                     host=entry["host"],
                     user=entry.get("user", ""),
                     port=int(entry.get("port", 22)),
-                    password=entry.get("password", ""),
+                    password=_decrypt_password(entry.get("password", "")),
                     key_path=entry.get("key_path", ""),
                     remote_project_path=entry.get("remote_project_path", "~/OpenMMLA"),
                 ))
@@ -126,12 +149,26 @@ def load_ssh_profiles() -> list[SSHProfile]:
 
 
 def save_ssh_profiles(profiles: list[SSHProfile]) -> None:
-    """save ssh profiles to .openmmla/ssh_profiles.yml."""
+    """save ssh profiles to .openmmla/ssh_profiles.yml.
+
+    Passwords are encrypted to ENC(...) with the master key before hitting
+    disk, so a profile store that is copied or shared never carries a readable
+    password. The file is gitignored; ssh_profiles_template.yml is the tracked
+    stand-in."""
     path = _profiles_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = [asdict(p) for p in profiles]
+    try:
+        from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key
+        encrypt_sensitive_values(data, ensure_master_key())
+    except Exception:
+        pass  # crypto unavailable: fall back to writing values as-is
     with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
 
 
 def get_profile_by_name(name: str) -> SSHProfile | None:

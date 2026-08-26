@@ -94,32 +94,58 @@ def ensure_master_key() -> bytes:
         return load_master_key()
 
 
-def encrypt_sensitive_values(data: dict, key: bytes | None = None) -> int:
+def sensitive_plaintext(value) -> str | None:
+    """return the plaintext to encrypt for a sensitive key, or None to skip it.
+
+    yaml coerces unquoted scalars, so an all-digit password loads as an int and
+    would silently stay in plaintext under a str-only check. Non-string scalars
+    are stringified the same way the config consumers already read them.
+    Empty values, template placeholders (<...>) and values that are already
+    ENC(...) are left alone."""
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    if not isinstance(value, (str, int, float, bool)):
+        return None
+    text = str(value)
+    if not text or text.startswith("<") or is_encrypted(text):
+        return None
+    return text
+
+
+def encrypt_sensitive_values(data, key: bytes | None = None) -> int:
     """recursively encrypt plaintext sensitive values in-place.
 
-    Existing ENC(...) values and template placeholders (<...>) are left
-    untouched. Returns the number of values encrypted."""
+    Walks nested dicts and lists, so secrets held in a list of entries (e.g.
+    the ssh profile store) are covered too. Existing ENC(...) values and
+    template placeholders (<...>) are left untouched. Returns the number of
+    values encrypted."""
     if key is None:
         key = load_master_key()
     count = 0
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, (dict, list)):
+                count += encrypt_sensitive_values(item, key)
+        return count
+    if not isinstance(data, dict):
+        return count
     for k, v in data.items():
-        if isinstance(v, dict):
+        if isinstance(v, (dict, list)):
             count += encrypt_sensitive_values(v, key)
-        elif (
-            isinstance(v, str)
-            and v
-            and is_sensitive_key(k)
-            and not is_encrypted(v)
-            and not v.startswith("<")
-        ):
-            data[k] = encrypt_value(v, key)
-            count += 1
+        elif is_sensitive_key(k):
+            plaintext = sensitive_plaintext(v)
+            if plaintext is not None:
+                data[k] = encrypt_value(plaintext, key)
+                count += 1
     return count
 
 
-def process_config_dict(data: dict, key: bytes | None = None) -> tuple[dict, bool]:
-    """recursively walk a config dict, decrypt ENC() values in-place, and detect
-    plaintext sensitive values that need encryption.
+def process_config_dict(data, key: bytes | None = None) -> tuple:
+    """recursively walk a config structure, decrypt ENC() values in-place, and
+    detect plaintext sensitive values that need encryption.
+
+    Nested dicts and lists are both walked, so secrets held in a list of
+    entries are covered too.
 
     Returns (decrypted_data_for_runtime, needs_rewrite) where:
     - decrypted_data_for_runtime: a copy with all sensitive values decrypted
@@ -128,14 +154,30 @@ def process_config_dict(data: dict, key: bytes | None = None) -> tuple[dict, boo
     if key is None:
         key = load_master_key()
     needs_rewrite = False
+
+    if isinstance(data, list):
+        runtime_list = []
+        for item in data:
+            if isinstance(item, (dict, list)):
+                sub_runtime, sub_rewrite = process_config_dict(item, key)
+                runtime_list.append(sub_runtime)
+                if sub_rewrite:
+                    needs_rewrite = True
+            else:
+                runtime_list.append(item)
+        return runtime_list, needs_rewrite
+
+    if not isinstance(data, dict):
+        return data, needs_rewrite
+
     runtime_data = {}
     for k, v in data.items():
-        if isinstance(v, dict):
+        if isinstance(v, (dict, list)):
             sub_runtime, sub_rewrite = process_config_dict(v, key)
             runtime_data[k] = sub_runtime
             if sub_rewrite:
                 needs_rewrite = True
-        elif isinstance(v, str) and is_encrypted(v):
+        elif is_encrypted(v):
             try:
                 runtime_data[k] = decrypt_value(v, key)
             except Exception:
@@ -145,10 +187,14 @@ def process_config_dict(data: dict, key: bytes | None = None) -> tuple[dict, boo
                     f"machine that encrypted it."
                 )
                 runtime_data[k] = v
-        elif isinstance(v, str) and is_sensitive_key(k) and v and not v.startswith("<"):
-            data[k] = encrypt_value(v, key)
-            runtime_data[k] = v
-            needs_rewrite = True
+        elif is_sensitive_key(k):
+            plaintext = sensitive_plaintext(v)
+            if plaintext is not None:
+                data[k] = encrypt_value(plaintext, key)
+                runtime_data[k] = plaintext
+                needs_rewrite = True
+            else:
+                runtime_data[k] = v
         else:
             runtime_data[k] = v
     return runtime_data, needs_rewrite

@@ -1,0 +1,29 @@
+# ssh profile store template.
+#
+# copy this file to ssh_profiles.yml and fill in one entry per remote host, or
+# add the hosts from the TUI (Launcher -> SSH profiles), which writes the same
+# file. ssh_profiles.yml is gitignored because it holds real hostnames and
+# credentials for your own deployment.
+#
+# passwords are encrypted to ENC(...) with the master key at
+# ~/.openmmla/master.key whenever the file is saved, so a committed profile
+# never carries a readable password. keep that key off the repo, and sync it to
+# any machine that has to read these profiles.
+
+# password auth: sshpass is used, so it must be installed locally
+- name: <PROFILE_NAME>
+  host: <HOSTNAME>
+  user: <SSH_USER>
+  port: 22
+  password: <SSH_PASSWORD>
+  key_path: ''
+  remote_project_path: ~/OpenMMLA
+
+# key auth: leave password empty and point key_path at the private key
+- name: <PROFILE_NAME>
+  host: <HOSTNAME>
+  user: <SSH_USER>
+  port: 22
+  password: ''
+  key_path: ~/.ssh/id_ed25519
+  remote_project_path: ~/OpenMMLA

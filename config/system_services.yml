@@ -1,6 +1,6 @@
 InfluxDB:
   url: http://ericli.local:8086
-  token: lrn6PxfmD_Sbde1Ke3LL5QOIc-QQJLT9Tw58-Y1pHXWfcsdljWMfwSOJ8F3CP3c20qYPiJ9UL8bSslELPW27lw==
+  token: ENC(gAAAAABqS3IbSaPLwTFjDDtPEcoTf0tHLaheWBFokY4T0bcPOY-Sx8l_FRdvTaW_bJiYlpuVx8BhvtnIe2vjBWgLsGtcxyqWCYBwqKlL9p23WpXhXoJmnQ-jFbwuP00lHPuQzU-3U0ENdaWvkr9GkLnrpPUxe9ngJDUAcvfPOAwb6Rf_nPxlRBKSTaJRczaF4qa0Pxf3-7pu)
   org: admin
   bucket: mmla-data
 MongoDB:
@@ -13,3 +13,10 @@ Redis:
   host: ericli.local
   port: 6379
   db: 1
+Sudo:
+  password: ENC(gAAAAABqjrHqKEILNNfVbGDzpSqY5ewe3m7lQqlxrml4kaH-OsLqVuLk6tHnh0z6C7DnmWvNFIj_SOc9RPe9Q-QEO3LBncLBEg==)
+Gateway:
+  host: ericli.local
+  http_port: 8080
+  rtmp_port: 1935
+  scheme: http

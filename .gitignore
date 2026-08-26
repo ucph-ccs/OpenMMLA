@@ -45,6 +45,7 @@ tests/*
 .DS_Store
 twine.txt
 docs/paper.md
+config/ssh_profiles.yml
 
 # Ignore specific files at any level
 **/config.yml
