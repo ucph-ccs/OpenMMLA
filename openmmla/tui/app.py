@@ -16,7 +16,7 @@ CSS_PATH = Path(__file__).parent / "styles" / "app.tcss"
 
 class OpenMMLAApp(App):
     TITLE = "OpenMMLA Management Console"
-    SUB_TITLE = "Env / Launcher / Sessions / Monitor"
+    SUB_TITLE = "Environment / Launcher / Sessions / Status"
 
     CSS_PATH = CSS_PATH
 

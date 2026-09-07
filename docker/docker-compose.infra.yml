@@ -49,7 +49,7 @@ services:
       # org and bucket must match config/system_services.yml
       DOCKER_INFLUXDB_INIT_ORG: "${INFLUXDB_INIT_ORG:-admin}"
       DOCKER_INFLUXDB_INIT_BUCKET: "${INFLUXDB_INIT_BUCKET:-mmla-data}"
-      # the same value goes into TUI System Services -> InfluxDB -> token. left empty,
+      # the same value goes into TUI System Settings -> InfluxDB -> token. left empty,
       # influx generates one; recover it with `... exec influxdb influx auth list`
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: "${INFLUXDB_INIT_ADMIN_TOKEN:-}"
     volumes:

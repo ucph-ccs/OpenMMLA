@@ -179,7 +179,7 @@ INFLUXDB_PORT=8087
 MONGODB_PORT=27018
 ```
 
-然后 System Services 里的 url 带上新端口（`http://server-01:8087`、
+然后 System Settings 里的 url 带上新端口（`http://server-01:8087`、
 `mongodb://server-01:27018`）。TUI 卡片的状态探测会从 url 里读端口，不用改代码。
 容器内部仍是 8086 / 27017，healthcheck 和数据都不受影响。
 
@@ -189,7 +189,7 @@ MONGODB_PORT=27018
 
 ### 让 OpenMMLA 指向这套基础设施
 
-`mmla tui` → Launcher → System Services，只改这三处：
+`mmla tui` → Launcher → System Settings，只改这三处：
 
 | 字段 | 值 |
 |---|---|
@@ -287,7 +287,7 @@ docker compose（tmux+gunicorn 方式已移除）：
 中心基础设施目前**没有**接进 TUI，`docker-compose.infra.yml` 只能手动
 `docker compose` 起停：
 
-- **状态**：`Uber: InfluxDB` / `Uber: MongoDB` 卡片探的是 System Services 里配的
+- **状态**：`Uber: InfluxDB` / `Uber: MongoDB` 卡片探的是 System Settings 里配的
   url（从 TUI 这台机器直接 TCP 连 host:port），和 Host 选择器无关；只有 url 写成
   localhost 时才退回"探选中主机自己的回环"。Status 页同理，端口列会显示实际
   探测的 host:port
@@ -302,14 +302,14 @@ docker compose（tmux+gunicorn 方式已移除）：
 - **Fetch Token**（只在 `Uber: InfluxDB` 卡片上，docker 模式）：到选中的 Host 上读
   docker stack 的 admin token——优先读运行中容器的 `/etc/influxdb2/influx-configs`
   （连 influx 自己生成的 token 也能拿到），没有再读 `docker/.env`——然后加密写进
-  System Services 的 `InfluxDB.token`。token 不会出现在日志里，只显示首尾各 4 位。
+  System Settings 的 `InfluxDB.token`。token 不会出现在日志里，只显示首尾各 4 位。
   url 指向的主机和读 token 的主机不一致时会提醒
 - **Status 页的 Host 列**对 InfluxDB / MongoDB / Redis / Mosquitto / Nginx 显示的是
   **配置里它所在的机器**（`server-01`、`ericli.local`），不是 TUI 在哪跑；Port 列
   就是端口。View Logs 会按这个主机找对应的 SSH profile（按 profile 名或 host 匹配），
   主机是本机自己的名字时直接读本地；docker 容器存在就读容器日志，否则回落到
   journalctl / brew 日志
-- 状态探测**直接连 System Services 里配的 host:port**，从跑 TUI 的这台机器发起——
+- 状态探测**直接连 System Settings 里配的 host:port**，从跑 TUI 的这台机器发起——
   也就是 pipeline 真正走的那条路。`InfluxDB.url` 写 `http://server-01:8087`，卡片和
   Status 页就去连 `server-01:8087`，`INFRA_BIND_ADDRESS` 绑在哪张网卡都无所谓。
   卡片描述里会写出探的是哪个地址。两个推论：

@@ -24,7 +24,7 @@ KNOWN_SERVICES = [
     {"name": "Redis", "port": 6379, "type": "system", "target": "redis"},
     {"name": "Mosquitto", "port": 1883, "type": "system", "target": "mosquitto"},
     {"name": "Nginx", "port": 8080, "type": "system", "target": "nginx"},
-    {"name": "Flask Dashboard", "port": 5050, "type": "tmux", "session": "flask"},
+    {"name": "Flask Dashboard", "port": 5050, "type": "tmux", "session": "flask", "target": "flask"},
     {"name": "Celery Worker", "port": None, "type": "tmux", "session": "celery"},
     {"name": "AudioInferer", "port": 5001, "type": "tmux", "session": "audioinferer"},
     {"name": "AudioResampler", "port": 5002, "type": "tmux", "session": "audioresampler"},
@@ -247,9 +247,11 @@ class StatusPanel(Widget):
             session = svc.get("session", "")
 
             host_label = "local"
-            if svc["type"] == "system":
-                # the address pipelines are configured with, probed from here;
-                # the Host column names that machine, not where the TUI runs
+            configured = svc["type"] == "system" or svc.get("target") == "flask"
+            if configured:
+                # the address pipelines (or the browser) are configured with,
+                # probed from here; the Host column names that machine, not
+                # where the TUI runs
                 host, port = system_service_endpoint(root, svc["target"]) or ("", port)
                 port_ok = system_service_reachable(root, svc["target"])
                 port_label = str(port)
@@ -259,7 +261,7 @@ class StatusPanel(Widget):
                 port_ok = _check_port(port) if port else False
                 port_label = str(port) if port else "-"
             session_ok = session in tmux_sessions if session else False
-            is_up = port_ok if svc["type"] == "system" else session_ok
+            is_up = port_ok if configured else session_ok
 
             if is_up:
                 running_count += 1
@@ -317,7 +319,7 @@ class StatusPanel(Widget):
                 r_session_ok = False
 
                 loop = asyncio.get_event_loop()
-                if svc["type"] == "system":
+                if svc["type"] == "system" or svc.get("target") == "flask":
                     host, _ = system_service_endpoint(root, svc["target"]) or ("", None)
                     if not is_loopback_host(host):
                         # one configured address for everyone: the local row
@@ -329,6 +331,7 @@ class StatusPanel(Widget):
                         system_service_reachable, root, svc["target"],
                         lambda p, _profile=profile: ssh_check_port(_profile, p),
                     )
+                    port = (system_service_endpoint(root, svc["target"]) or ("", port))[1]
                 elif port:
                     r_port_ok = await loop.run_in_executor(
                         None, ssh_check_port, profile, port,

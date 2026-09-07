@@ -41,6 +41,12 @@ class ServiceDef:
     # extra (label, action id) buttons on the card; the launcher handles them
     # through ActionRequested, e.g. ("Fetch Token", "fetch-token")
     extra_actions: list = field(default_factory=list)
+    # what the tree and the card title show; name stays the internal key
+    label: str = ""
+
+    @property
+    def display_name(self) -> str:
+        return self.label or self.name
 
     @property
     def shown_type(self) -> str:
@@ -318,7 +324,7 @@ class ServiceCard(Widget):
         status_text = self._status_markup()
 
         with Vertical():
-            yield Static(f"[b]{self.service_def.name}[/b]", classes="card-title")
+            yield Static(f"[b]{self.service_def.display_name}[/b]", classes="card-title")
             yield Static(
                 f"  env: {self.service_def.conda_env}  |  type: {self.service_def.shown_type}",
                 classes="card-meta",
@@ -415,7 +421,7 @@ class ServiceCard(Widget):
     def _compose_collection(self) -> ComposeResult:
         status_text = "[green]Running[/green]" if self._is_running else "[red]Stopped[/red]"
         with Vertical():
-            yield Static(f"[b]{self.service_def.name}[/b]", classes="card-title")
+            yield Static(f"[b]{self.service_def.display_name}[/b]", classes="card-title")
             yield Static(
                 f"  env: {self.service_def.conda_env}  |  type: {self.service_def.shown_type}",
                 classes="card-meta",

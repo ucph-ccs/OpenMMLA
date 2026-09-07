@@ -8,6 +8,8 @@ IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
 BREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
 OPENMMLA_BIND_ADDRESS ?= 0.0.0.0
 OPENMMLA_MQTT_ALLOW_ANONYMOUS ?= true
+# dashboard backend port; the TUI passes the Dashboard section's value
+DASHBOARD_PORT ?= 5050
 
 MONGO_CONFIG_MAC ?= $(BREW_PREFIX)/etc/mongod.conf
 MONGO_CONFIG_LINUX ?= /etc/mongod.conf
@@ -244,7 +246,7 @@ flask:
 	tmux new-session -d -s flask -n flask bash
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t flask 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
-	tmux send-keys -t flask 'gunicorn -k gevent -w 1 -b 0.0.0.0:5050 dashboard:app' C-m
+	tmux send-keys -t flask 'gunicorn -k gevent -w 1 -b 0.0.0.0:$(DASHBOARD_PORT) dashboard:app' C-m
 
 celery:
 	@echo "🔁 Starting Celery worker"

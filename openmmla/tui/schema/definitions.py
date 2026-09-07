@@ -90,6 +90,21 @@ SHARED_SECTIONS = {
             },
         },
     },
+    "Dashboard": {
+        "label": "Dashboard (Flask)",
+        "fields": {
+            "host": {
+                "description": "Host the dashboard backend runs on, as reached from this machine (e.g. localhost or server-01)",
+                "field_type": "str",
+                "default": "localhost",
+            },
+            "port": {
+                "description": "Dashboard backend (gunicorn) port; `make flask` binds to it (default 5050)",
+                "field_type": "int",
+                "default": 5050,
+            },
+        },
+    },
     "Gateway": {
         "label": "Gateway (Nginx)",
         "fields": {

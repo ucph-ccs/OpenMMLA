@@ -8,6 +8,8 @@ This document outlines the setup and configuration of the OpenMMLA dashboard. It
 - Redis (required for Celery)
 - InfluxDB (required for accessing measurements data)
 
+The backend listens on port 5050 by default. Change it under **System Settings → Connections → Dashboard (Flask)** in the TUI (the Launcher passes it to `make flask` as `DASHBOARD_PORT`, and the Status tab probes that host:port), or run `make flask DASHBOARD_PORT=<port>` by hand.
+
 ## Installation
 
 ### Step 1: Clone the Repository

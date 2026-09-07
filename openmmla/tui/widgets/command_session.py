@@ -436,7 +436,7 @@ class CommandSession(Widget):
         return tail.endswith("password:") or "password for" in tail
 
     def _stored_sudo_password(self) -> str | None:
-        """local sudo password from the System Services store (None if unset)."""
+        """local sudo password from the System Settings store (None if unset)."""
         try:
             from openmmla.tui.system_services import get_sudo_password
             return get_sudo_password(self._root)
@@ -454,7 +454,7 @@ class CommandSession(Widget):
         ):
             proc.stdin.write((password + "\n").encode())
             await proc.stdin.drain()
-            self.log("[dim]> (password auto-filled from System Services)[/dim]")
+            self.log("[dim]> (password auto-filled from System Settings)[/dim]")
             return sends + 1
         return sends
 

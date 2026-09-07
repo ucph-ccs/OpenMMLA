@@ -176,6 +176,102 @@ def _missing_packages(installed_packages: set[str], required: set[str]) -> list[
     return missing
 
 
+def _required_map_from_text(pyproject_text: str | None) -> dict[str, set[str]]:
+    """{group: required package names} parsed from pyproject text; empty when
+    the text is missing (callers then have nothing to check against)."""
+    result: dict[str, set[str]] = {}
+    if not pyproject_text:
+        return result
+    for entry in ENV_GROUPS:
+        deps = _parse_optional_deps_from_text(pyproject_text, entry["group"])
+        if deps is not None:
+            deps = set(deps)
+            deps.add("openmmla")  # the editable project itself is always installed
+            result[entry["group"]] = deps
+    return result
+
+
+def env_statuses_local(root: str) -> dict[str, str]:
+    """{conda env: Ready | Partial: ... | Missing | Unknown} for every
+    ENV_GROUPS entry on this machine. Runs conda, so call it off the UI thread."""
+    conda_envs = _list_conda_envs_sync()
+    packages = {
+        entry["env"]: _list_conda_packages_sync(entry["env"])
+        for entry in ENV_GROUPS if entry["env"] in conda_envs
+    }
+    try:
+        with open(os.path.join(root, "pyproject.toml"), encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        text = None
+    required = _required_map_from_text(text)
+    return {
+        entry["env"]: _format_env_status(entry, conda_envs, packages, required)
+        for entry in ENV_GROUPS
+    }
+
+
+async def _remote_pyproject(profile) -> str | None:
+    proc = await ssh_run_async(
+        profile, wrap_remote(f"cat {profile.remote_project_path}/pyproject.toml")
+    )
+    assert proc.stdout is not None
+    output = ""
+    async for line in proc.stdout:
+        output += line.decode(errors="replace")
+    rc = await proc.wait()
+    if rc != 0 or not output.strip():
+        return None
+    return output
+
+
+async def _remote_conda_packages(profile, conda_envs: set[str]) -> dict[str, set[str]]:
+    env_names = [entry["env"] for entry in ENV_GROUPS if entry["env"] in conda_envs]
+    if not env_names:
+        return {}
+    cmd_parts = [
+        f"echo __OPENMMLA_ENV__{env_name}; conda list -n {env_name} 2>/dev/null || true"
+        for env_name in env_names
+    ]
+    proc = await ssh_run_async(profile, wrap_remote("; ".join(cmd_parts)))
+    output = ""
+    assert proc.stdout is not None
+    async for line in proc.stdout:
+        output += line.decode()
+    await proc.wait()
+    packages: dict[str, set[str]] = {}
+    current_env: str | None = None
+    current_lines: list[str] = []
+    for line in output.splitlines():
+        if line.startswith("__OPENMMLA_ENV__"):
+            if current_env is not None:
+                packages[current_env] = _parse_conda_packages("\n".join(current_lines))
+            current_env = line.replace("__OPENMMLA_ENV__", "", 1).strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_env is not None:
+        packages[current_env] = _parse_conda_packages("\n".join(current_lines))
+    return packages
+
+
+async def env_statuses_remote(profile) -> dict[str, str]:
+    """same as env_statuses_local, for the host behind an SSH profile."""
+    proc = await ssh_run_async(profile, wrap_remote("conda env list"))
+    output = ""
+    assert proc.stdout is not None
+    async for line in proc.stdout:
+        output += line.decode()
+    await proc.wait()
+    conda_envs = _parse_conda_envs(output)
+    packages = await _remote_conda_packages(profile, conda_envs)
+    required = _required_map_from_text(await _remote_pyproject(profile))
+    return {
+        entry["env"]: _format_env_status(entry, conda_envs, packages, required)
+        for entry in ENV_GROUPS
+    }
+
+
 def _format_env_status(
     entry: dict,
     conda_envs: set[str],
@@ -411,16 +507,7 @@ class EnvironmentPanel(Widget):
         Falls back to an empty map (callers then use the hardcoded sentinel
         list) when the text is missing or a group can't be parsed.
         """
-        result: dict[str, set[str]] = {}
-        if not pyproject_text:
-            return result
-        for entry in ENV_GROUPS:
-            deps = _parse_optional_deps_from_text(pyproject_text, entry["group"])
-            if deps is not None:
-                deps = set(deps)
-                deps.add("openmmla")  # the editable project itself is always installed
-                result[entry["group"]] = deps
-        return result
+        return _required_map_from_text(pyproject_text)
 
     def _list_selected_conda_packages(self, conda_envs: set[str]) -> dict[str, set[str]]:
         packages: dict[str, set[str]] = {}
@@ -469,18 +556,7 @@ class EnvironmentPanel(Widget):
         self._log("[green]Remote env list refreshed.[/green]")
 
     async def _read_remote_pyproject(self, profile) -> str | None:
-        remote_path = profile.remote_project_path
-        proc = await ssh_run_async(
-            profile, wrap_remote(f"cat {remote_path}/pyproject.toml")
-        )
-        assert proc.stdout is not None
-        output = ""
-        async for line in proc.stdout:
-            output += line.decode(errors="replace")
-        rc = await proc.wait()
-        if rc != 0 or not output.strip():
-            return None
-        return output
+        return await _remote_pyproject(profile)
 
     async def _list_remote_conda_packages(
         self,
@@ -490,38 +566,7 @@ class EnvironmentPanel(Widget):
         profile = get_profile_by_name(profile_name)
         if profile is None:
             return {}
-        env_names = [
-            entry["env"] for entry in ENV_GROUPS
-            if entry["env"] in conda_envs
-        ]
-        if not env_names:
-            return {}
-        cmd_parts = []
-        for env_name in env_names:
-            cmd_parts.append(
-                f"echo __OPENMMLA_ENV__{env_name}; "
-                f"conda list -n {env_name} 2>/dev/null || true"
-            )
-        proc = await ssh_run_async(profile, wrap_remote("; ".join(cmd_parts)))
-        output = ""
-        assert proc.stdout is not None
-        async for line in proc.stdout:
-            output += line.decode()
-        await proc.wait()
-        packages: dict[str, set[str]] = {}
-        current_env: str | None = None
-        current_lines: list[str] = []
-        for line in output.splitlines():
-            if line.startswith("__OPENMMLA_ENV__"):
-                if current_env is not None:
-                    packages[current_env] = _parse_conda_packages("\n".join(current_lines))
-                current_env = line.replace("__OPENMMLA_ENV__", "", 1).strip()
-                current_lines = []
-            else:
-                current_lines.append(line)
-        if current_env is not None:
-            packages[current_env] = _parse_conda_packages("\n".join(current_lines))
-        return packages
+        return await _remote_conda_packages(profile, conda_envs)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         table = self.query_one("#env-table", DataTable)

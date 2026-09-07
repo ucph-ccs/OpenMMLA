@@ -35,7 +35,7 @@ def usable_system_service_value(value: object) -> bool:
 
 # Top-level list key in a pipeline config naming shared sections that this
 # pipeline manages itself (an explicit escape hatch). Sections listed here are
-# NOT auto-synced from the central System Services store and stay editable in
+# NOT auto-synced from the central System Settings store and stay editable in
 # the pipeline's own Config tab.
 SYSTEM_SERVICES_OVERRIDE_KEY = "SystemServicesOverride"
 
@@ -173,7 +173,7 @@ def save_system_services_config(root: str | os.PathLike[str], values: dict[str, 
 
 
 def get_sudo_password(root: str | os.PathLike[str]) -> str | None:
-    """Return the decrypted local sudo password from the System Services store,
+    """Return the decrypted local sudo password from the System Settings store,
     or None if unset/unusable."""
     config = load_system_services_config(root)
     section = config.get("Sudo") if isinstance(config, dict) else None
@@ -213,6 +213,10 @@ SYSTEM_SERVICE_DEFAULT_PORTS: dict[str, int] = {
     "mosquitto": 1883,
     "nginx": 8080,
 }
+
+# the dashboard backend is a make target too, but not a port-probed system
+# service; its port only matters for the Dashboard section and `make flask`
+DASHBOARD_DEFAULT_PORT = 5050
 
 # hosts that mean "this machine" rather than one specific address
 LOOPBACK_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
@@ -273,11 +277,11 @@ def _url_host_port(url: object) -> tuple[str, int | None]:
 def system_service_endpoint(root: str | os.PathLike[str], target: str) -> tuple[str, int] | None:
     """(host, port) that clients of an Uber system service are configured with.
 
-    Read from System Services, which is what every pipeline config is synced
+    Read from System Settings, which is what every pipeline config is synced
     from. The port falls back to the conventional default; the host is "" when
     unset, and a loopback host means "wherever the service runs" rather than a
     specific machine (see is_loopback_host)."""
-    default = SYSTEM_SERVICE_DEFAULT_PORTS.get(target)
+    default = DASHBOARD_DEFAULT_PORT if target == "flask" else SYSTEM_SERVICE_DEFAULT_PORTS.get(target)
     if default is None:
         return None
     try:
@@ -289,7 +293,9 @@ def system_service_endpoint(root: str | os.PathLike[str], target: str) -> tuple[
         value = config.get(name)
         return value if isinstance(value, dict) else {}
 
-    if target == "influxdb":
+    if target == "flask":
+        host, port = section("Dashboard").get("host"), section("Dashboard").get("port")
+    elif target == "influxdb":
         host, port = _url_host_port(section("InfluxDB").get("url"))
     elif target == "mongodb":
         host, port = _url_host_port(section("MongoDB").get("url"))

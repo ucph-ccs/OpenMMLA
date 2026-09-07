@@ -97,6 +97,7 @@ from openmmla.tui.widgets.ssh_form import SSHForm
 from openmmla.tui.widgets.stream_panel import StreamPanel
 from openmmla.tui.widgets.session_control import SessionControlPanel
 from openmmla.tui.widgets.task_form import TaskForm
+from openmmla.tui.screens.environment import ENV_GROUPS, env_statuses_local, env_statuses_remote
 
 
 _SVC_PIPELINE_NAMES: dict[str, str] = {
@@ -106,17 +107,21 @@ _SVC_PIPELINE_NAMES: dict[str, str] = {
 
 _STREAM_PIPELINES = {"ASR Base", "IPS Base", "VFA Base"}
 
-_GLOBAL_DEFAULT_NAV_ORDER = (
-    "SSH Profiles",
-    "Experiments",
-    "Tasks",
-    "MongoDB",
-    "InfluxDB",
-    "MQTT",
-    "Redis",
-    "Gateway",
+# the settings tree: fixed headings (not collapsible) over the forms they sort
+_SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Hosts", ("SSH Profiles",)),
+    ("Study", ("Experiments", "Tasks")),
+    ("Connections", ("MongoDB", "InfluxDB", "MQTT", "Redis", "Gateway", "Dashboard")),
+    ("Credentials", ("Sudo",)),
 )
-_SYSTEM_SERVICES_LABEL = "System Services"
+_SYSTEM_SERVICES_LABEL = "System Settings"
+
+# tree/card labels for infrastructure cards whose internal "Uber: <name>" key
+# is jargon; the key itself stays, everything else looks it up by name
+_INFRA_LABELS: dict[str, str] = {
+    "Flask": "Dashboard (Flask)",
+    "Celery": "Dashboard Worker (Celery)",
+}
 
 _MLLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 _MLLM_PORT = 8010
@@ -1698,7 +1703,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 else []
             )
             # the docker stack mints the influx admin token on the container host;
-            # this pulls it into System Services instead of a copy-paste over ssh
+            # this pulls it into System Settings instead of a copy-paste over ssh
             extra_actions = (
                 [("Fetch Token", _INFRA_FETCH_TOKEN_ACTION)]
                 if _make_target_for(name) == "influxdb"
@@ -1713,6 +1718,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 description=desc,
                 params=params,
                 extra_actions=extra_actions,
+                label=_INFRA_LABELS.get(svc_name, svc_name),
             ))
 
     return services
@@ -2083,6 +2089,41 @@ _APP_PORT_CMDS: dict[str, tuple[int, str]] = {
 }
 
 
+_ENV_NAMES = {entry["env"] for entry in ENV_GROUPS}
+# databases and brokers are brew/systemd/docker processes; their card's
+# conda_env is only the Makefile's home, not something they run in
+_INFRA_NO_ENV_TARGETS = {"influxdb", "mongodb", "redis", "mosquitto"}
+
+
+def _shared_section_label(section: str) -> str:
+    info = SHARED_SECTIONS.get(section) or {}
+    return str(info.get("label") or section)
+
+
+def _service_uses_conda_env(svc: ServiceDef) -> bool:
+    """whether the service actually runs Python in a conda env: pipelines and
+    the dashboard/nginx helpers do; databases, brokers and docker stacks do not."""
+    if svc.conda_env not in _ENV_NAMES:
+        return False
+    return not (svc.launch_type == "make" and _make_target_for(svc.name) in _INFRA_NO_ENV_TARGETS)
+
+
+def _env_marker_color(status: str | None) -> str | None:
+    if not status or status == "Unknown":
+        return None
+    if status == "Ready":
+        return "green"
+    return "yellow" if status.startswith("Partial") else "red"
+
+
+def _make_extra_vars(root: str, target: str) -> list[str]:
+    """make variables a target needs from System Settings."""
+    if target == "flask":
+        _, port = system_service_endpoint(root, "flask") or ("", 5050)
+        return [f"DASHBOARD_PORT={port}"]
+    return []
+
+
 def _make_target_for(svc_name: str) -> str:
     """derive the Makefile target name from a service name."""
     if svc_name in _MAKE_TARGET_OVERRIDES:
@@ -2227,6 +2268,10 @@ class ServicePanel(Widget):
     #svc-target-bar Select {
         width: 1fr;
     }
+    .svc-legend {
+        color: $text-muted;
+        padding: 0 1;
+    }
     #svc-target-refresh {
         width: 5;
         min-width: 5;
@@ -2241,7 +2286,7 @@ class ServicePanel(Widget):
         color: $text-muted;
         text-style: italic;
     }
-    /* System Services are always edited on this machine: swap the selector
+    /* System Settings are always edited on this machine: swap the selector
        for a "Local" note there instead of showing the remembered host greyed
        out, keeping the bar's height so the content below does not jump; the
        chosen host is kept for the next service node */
@@ -2361,6 +2406,9 @@ class ServicePanel(Widget):
         # card is rebuilt on every tree/host change and would otherwise fall back
         # to the ParamDef default, silently sending Stop down the other path
         self._infra_mode: dict[tuple[str, str], str] = {}
+        # target -> {conda env: Ready | Partial: ... | Missing}; feeds the tree's
+        # [E] markers and is refreshed off the UI thread (conda is slow)
+        self._env_statuses: dict[str, dict[str, str]] = {}
         # session id -> hosts this TUI launched it on, so "Stop All Hosts"
         # reaches a machine even when it is currently unreachable
         self._collection_launch_targets: dict[str, set[str]] = {}
@@ -2383,6 +2431,8 @@ class ServicePanel(Widget):
         ]
         with Vertical(id="svc-sidebar"):
             yield Static("[b]Launcher[/b]", classes="status-info")
+            yield Static("\\[E] env  \\[C] config  (R) running", classes="svc-legend")
+            yield Static("green ok · yellow partial · red missing", classes="svc-legend")
             tree: Tree[str] = Tree("OpenMMLA", id="svc-tree")
             tree.root.expand()
             yield tree
@@ -2391,7 +2441,7 @@ class ServicePanel(Widget):
                 yield Label("Host:")
                 yield Select(target_options, value="local", id="svc-target-select")
                 yield Static(
-                    "Local  (System Services live in this project)",
+                    "Local  (System Settings live in this project)",
                     id="svc-target-local-note",
                 )
                 yield Button("↻", variant="primary", compact=True, id="svc-target-refresh")
@@ -2410,6 +2460,31 @@ class ServicePanel(Widget):
         # instantly from cached states
         self._refresh_visible_statuses()
         self._probe_targets()
+        self._kick_env_status_refresh("local")
+
+    def _kick_env_status_refresh(self, target: str) -> None:
+        self.run_worker(
+            self._refresh_env_statuses(target),
+            group="launcher-env-status",
+            exclusive=True,
+        )
+
+    async def _refresh_env_statuses(self, target: str) -> None:
+        """recompute the conda env states behind the tree's [E] markers."""
+        try:
+            if target == "local":
+                statuses = await asyncio.to_thread(env_statuses_local, self._root)
+            else:
+                profile = get_profile_by_name(target)
+                if profile is None:
+                    return
+                statuses = await env_statuses_remote(profile)
+        except Exception as e:
+            self._log(f"[yellow]Environment check on {target} failed: {e}[/yellow]")
+            return
+        self._env_statuses[target] = statuses
+        if target == self._get_panel_target():
+            self._build_tree()
 
     # ── target reachability ──────────────────────────────────────
 
@@ -2433,6 +2508,7 @@ class ServicePanel(Widget):
         self._target_states = states
         self._refresh_target_options()
         self._log(f"[green]Connection test finished: {summarize_states(states)}.[/green]")
+        self._kick_env_status_refresh(self._get_panel_target())
 
     async def _async_probe_targets(self) -> None:
         try:
@@ -2512,7 +2588,7 @@ class ServicePanel(Widget):
         """swap the Host selector for a "Local" note on nodes that are always
         edited on this machine.
 
-        System Services (SSH profiles, experiments, tasks and the shared service
+        System Settings (SSH profiles, experiments, tasks and the shared service
         sections) live in the local project, so the selected host has no effect
         there. Showing the remembered host greyed out was misleading, so the
         selector and its refresh button are hidden instead; their value is left
@@ -2585,6 +2661,7 @@ class ServicePanel(Widget):
                 exclusive=True,
             )
             self._refresh_visible_statuses()
+            self._kick_env_status_refresh(val)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.tabbed_content.id != "svc-sub-tabs":
@@ -2611,19 +2688,24 @@ class ServicePanel(Widget):
         shared_node = tree.root.add(_SYSTEM_SERVICES_LABEL, data="__shared__")
         shared_node.expand()
         added_shared_sections: set[str] = set()
-        for item in _GLOBAL_DEFAULT_NAV_ORDER:
-            if item == "SSH Profiles":
-                shared_node.add_leaf("SSH Profiles", data="__ssh_profiles__")
-            elif item == "Experiments":
-                shared_node.add_leaf("Experiments", data="__experiments__")
-            elif item == "Tasks":
-                shared_node.add_leaf("Tasks", data="__tasks__")
-            elif item in SHARED_SECTIONS:
-                shared_node.add_leaf(item, data=f"__shared__{item}")
-                added_shared_sections.add(item)
+        for group_label, items in _SETTINGS_GROUPS:
+            # headings only sort the forms: always open, never collapsible
+            group = shared_node.add(f"[dim]{group_label}[/dim]", data=f"__cat_settings_{group_label}")
+            group.allow_expand = False
+            group.expand()
+            for item in items:
+                if item == "SSH Profiles":
+                    group.add_leaf("SSH Profiles", data="__ssh_profiles__")
+                elif item == "Experiments":
+                    group.add_leaf("Experiments", data="__experiments__")
+                elif item == "Tasks":
+                    group.add_leaf("Tasks", data="__tasks__")
+                elif item in SHARED_SECTIONS:
+                    group.add_leaf(_shared_section_label(item), data=f"__shared__{item}")
+                    added_shared_sections.add(item)
         for sec in SHARED_SECTIONS:
             if sec not in added_shared_sections:
-                shared_node.add_leaf(sec, data=f"__shared__{sec}")
+                shared_node.add_leaf(_shared_section_label(sec), data=f"__shared__{sec}")
 
         categories: dict[str, list[ServiceDef]] = {}
         for svc in self._services:
@@ -2634,14 +2716,14 @@ class ServicePanel(Widget):
             infra_node = tree.root.add("Infrastructure", data="__cat_Infrastructure")
             infra_node.expand()
             for svc in infra_svcs:
-                infra_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
+                infra_node.add_leaf(f"{svc.display_name}{self._svc_markers(svc)}", data=svc.name)
 
         collection_svcs = categories.get("Collection", [])
         if collection_svcs:
             collection_node = tree.root.add("Collection", data="__cat_Collection")
             collection_node.expand()
             for svc in collection_svcs:
-                collection_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
+                collection_node.add_leaf(f"{svc.display_name}{self._svc_markers(svc)}", data=svc.name)
 
         _PIPELINE_CATS = ["ASR", "IPS", "VFA"]
 
@@ -2654,8 +2736,9 @@ class ServicePanel(Widget):
             cat_node = pipeline_node.add(cat, data=f"__cat_{cat}")
             cat_node.expand()
             for svc in svcs:
-                cat_node.add_leaf(f"{svc.name}{self._svc_markers(svc)}", data=svc.name)
-        pipeline_node.add_leaf("Session Control", data="__session_control__")
+                cat_node.add_leaf(f"{svc.display_name}{self._svc_markers(svc)}", data=svc.name)
+        # a session start/stop spans every pipeline, so it is not filed under one
+        tree.root.add_leaf("Session Control", data="__session_control__")
 
     def _svc_markers(self, svc: ServiceDef) -> str:
         """build status marker string for a service tree leaf.
@@ -2663,12 +2746,18 @@ class ServicePanel(Widget):
         Reads the cached running state only — live detection (subprocess/
         socket/SSH probes) happens in the _refresh_visible_statuses worker,
         never on the UI thread while rendering the tree."""
-        is_running = self._svc_states.get(svc.name, False)
-        pipeline = self._pipeline_for_service(svc.name)
         markers = ""
-        if pipeline and os.path.isfile(pipeline.config_path):
-            markers += " [green]\\[OK][/green]"
-        if is_running:
+        if _service_uses_conda_env(svc):
+            statuses = self._env_statuses.get(self._get_panel_target()) or {}
+            color = _env_marker_color(statuses.get(svc.conda_env))
+            if color:
+                markers += f" [{color}]\\[E][/{color}]"
+        pipeline = self._pipeline_for_service(svc.name)
+        if pipeline:
+            # a config file this service needs: red when it has not been made yet
+            color = "green" if os.path.isfile(pipeline.config_path) else "red"
+            markers += f" [{color}]\\[C][/{color}]"
+        if self._svc_states.get(svc.name, False):
             markers += " [green](R)[/green]"
         return markers
 
@@ -3427,7 +3516,7 @@ class ServicePanel(Widget):
             is_shared = top_section in SHARED_SECTION_NAMES
             existing_val = get_nested_value(existing, f.path)
             # origin of the displayed value: the target's own config ("target"),
-            # the local System Services store used as a gap-filler ("shared"),
+            # the local System Settings store used as a gap-filler ("shared"),
             # or the template default ("default").
             if existing_val is not None:
                 values[f.path] = existing_val
@@ -3445,7 +3534,7 @@ class ServicePanel(Widget):
                 # remote value from a local fallback stand-in.
                 readonly_paths.add(f.path)
                 if is_local_host:
-                    sources[f.path] = "[yellow]· managed in System Services[/yellow]"
+                    sources[f.path] = "[yellow]· managed in System Settings[/yellow]"
                 elif origin == "target":
                     sources[f.path] = f"[cyan]· from {_src_target}[/cyan]"
                 elif origin == "shared":
@@ -3562,7 +3651,7 @@ class ServicePanel(Widget):
         overrides = set(pipeline_section_overrides(config))
         if section in overrides:
             overrides.discard(section)
-            action = f"{section} is now managed centrally (System Services)"
+            action = f"{section} is now managed centrally (System Settings)"
         else:
             overrides.add(section)
             action = f"{section} is now overridden on {pipeline.name} (edit it here)"
@@ -3737,7 +3826,7 @@ class ServicePanel(Widget):
             # host, so a separate sync button would be redundant. To push a
             # locally-edited config to a remote, switch Host to local and use
             # the SSH-profile picker + "Sync to Remote" below.
-            # System Services are different: Save always writes the local store
+            # System Settings are different: Save always writes the local store
             # whatever the Host selector says, so the picker stays and defaults
             # to the selected host.
             return
@@ -4042,7 +4131,7 @@ class ServicePanel(Widget):
             self._show_status(f"SSH profile '{profile_name}' not found.")
             return
 
-        # System Services shared-section view: push just this section to the
+        # System Settings shared-section view: push just this section to the
         # selected host (respecting any per-pipeline overrides on that host).
         if self._current_shared_section:
             self._sync_shared_section_to_target(self._current_shared_section, profile_name)
@@ -4323,7 +4412,7 @@ class ServicePanel(Widget):
 
     def _central_shared_sections(self) -> dict[str, dict]:
         """Return shared sections the user has explicitly saved to the central
-        System Services store (``config/system_services.yml``).
+        System Settings store (``config/system_services.yml``).
 
         Only sections actually present in that file are returned, so a section
         that has never been saved centrally is left untouched at launch (its
@@ -4432,7 +4521,7 @@ class ServicePanel(Widget):
             if drifted:
                 self._apply_central_sections_to_config_file(config_path, central, drifted)
                 self._log(
-                    f"[yellow]Updated {', '.join(drifted)} from System Services before "
+                    f"[yellow]Updated {', '.join(drifted)} from System Settings before "
                     f"launch (local config was out of date).[/yellow]"
                 )
             return True
@@ -4446,7 +4535,7 @@ class ServicePanel(Widget):
             return True
         self._log(
             f"[yellow]System-services config on '{target}' is out of date "
-            f"({', '.join(drifted)}); pushing latest from System Services...[/yellow]"
+            f"({', '.join(drifted)}); pushing latest from System Settings...[/yellow]"
         )
         self._sync_shared_sections_to_target(drifted, target, central)
         self._log(f"[yellow]Relaunch {svc.name} once the sync above completes.[/yellow]")
@@ -4730,6 +4819,8 @@ class ServicePanel(Widget):
                 # the address every pipeline is configured with, probed from here;
                 # a loopback url means "this machine" and keeps the local check
                 return system_service_reachable(self._root, target)
+            if target == "flask":
+                return system_service_reachable(self._root, "flask")
             return _check_tmux_session(target)
         elif svc.launch_type == "collection":
             # recorders run as tmux sessions under the service's prefix; any
@@ -4774,7 +4865,7 @@ class ServicePanel(Widget):
                     )
 
             # keep shared system-service sections consistent with the central
-            # System Services store before launching (single source of truth).
+            # System Settings store before launching (single source of truth).
             if not self._reconcile_shared_sections_before_launch(svc, target, is_remote):
                 return
 
@@ -5472,6 +5563,11 @@ class ServicePanel(Widget):
                     self._root, target,
                     remote_loopback_check=lambda port: ssh_check_port(profile, port),
                 )
+            if target == "flask":
+                return system_service_reachable(
+                    self._root, "flask",
+                    remote_loopback_check=lambda port: ssh_check_port(profile, port),
+                )
             return ssh_check_tmux(profile, target)
         elif svc.launch_type == "tmux":
             if _is_stack_service(svc):
@@ -5512,7 +5608,7 @@ class ServicePanel(Widget):
 
     async def _fetch_influx_token(self, target: str) -> None:
         """read the docker stack's influx admin token on `target` and store it
-        (encrypted) as InfluxDB.token in System Services. The token itself never
+        (encrypted) as InfluxDB.token in System Settings. The token itself never
         reaches the log pane."""
         profile = None
         try:
@@ -5561,7 +5657,7 @@ class ServicePanel(Widget):
 
         section["token"] = token
         path = save_system_service_section(self._root, "InfluxDB", section)
-        # remote pipeline configs are re-synced from System Services on launch
+        # remote pipeline configs are re-synced from System Settings on launch
         self._target_config_cache.clear()
         self._log(
             f"[green]InfluxDB.token updated from {origin}: {_mask_secret(token)} "
@@ -6709,12 +6805,12 @@ class ServicePanel(Widget):
 
         if target in _SYSTEM_SVC_PORTS:
             self._log(f"  Running: make {target}")
-            self._log("  [yellow]If it pauses at a Password: prompt, it is auto-filled from System Services → Sudo (or type it in the command box below and press Enter).[/yellow]")
+            self._log("  [yellow]If it pauses at a Password: prompt, it is auto-filled from System Settings → Sudo (or type it in the command box below and press Enter).[/yellow]")
             self._cmd.run(f'make -C {make_dir} {target} SUDO="sudo -S"')
         else:
             self._log(f"  Running: make {target}")
             subprocess.Popen(
-                ["make", target],
+                ["make", target, *_make_extra_vars(self._root, target)],
                 cwd=make_dir,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -6807,7 +6903,10 @@ class ServicePanel(Widget):
                     self._log(f"[red]{svc.name} stopped.[/red]")
                     kill_info = _APP_PORT_CMDS.get(make_name)
                     if kill_info:
-                        self._kill_port(kill_info[0], kill_info[1])
+                        port = kill_info[0]
+                        if make_name == "flask":
+                            port = (system_service_endpoint(self._root, "flask") or ("", port))[1]
+                        self._kill_port(port, kill_info[1])
             elif svc.launch_type == "bash":
                 self._log(f"[yellow]Bash-launched services must be stopped from their terminal windows.[/yellow]")
         except Exception as e:
@@ -6972,7 +7071,8 @@ class ServicePanel(Widget):
                 else:
                     target = _make_target_for(svc.name)
                     remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
-                    run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
+                    extra = "".join(f" {shlex.quote(v)}" for v in _make_extra_vars(self._root, target))
+                    run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}{extra}"
                 ssh_cmd = self._remote_terminal_command(profile, run_cmd)
                 self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {run_cmd}")
                 if self._open_collection_terminal([(svc.name, ssh_cmd)]):
