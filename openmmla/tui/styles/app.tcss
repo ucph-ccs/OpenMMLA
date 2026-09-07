@@ -51,8 +51,10 @@ FieldRow .field-textarea {
     height: 6;
 }
 
+/* no height here: ConfigForm is 1fr (its DEFAULT_CSS) and scrolls its fields
+   internally, so the sync bar and status line stay visible below it; an auto
+   height would let the form grow past the viewport and hide them */
 ConfigForm {
-    height: auto;
     padding: 1 2;
 }
 

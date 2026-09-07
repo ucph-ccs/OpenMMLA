@@ -2186,6 +2186,33 @@ class ServicePanel(Widget):
         height: 3;
         margin-left: 1;
     }
+    #svc-target-hint {
+        display: none;
+        width: auto;
+        padding-top: 1;
+        margin-left: 1;
+        color: $text-muted;
+        text-style: italic;
+    }
+    /* System Services are always edited on this machine: fade the Host bar
+       there so it reads as "not applicable" instead of hiding it, and keep
+       the chosen host for the next service node */
+    #svc-target-bar.local-only Label {
+        color: $text-muted;
+    }
+    #svc-target-bar.local-only Select,
+    #svc-target-bar.local-only Button {
+        opacity: 0.5;
+    }
+    #svc-target-bar.local-only #svc-target-hint {
+        display: block;
+    }
+    /* the bar must stay one row: never let a long "name  (offline ✗)" label
+       wrap when the hint takes its share of the width */
+    #svc-target-select SelectCurrent #label {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
     #svc-content-area {
         width: 1fr;
         height: 1fr;
@@ -2197,6 +2224,9 @@ class ServicePanel(Widget):
         color: $text-muted;
         text-style: italic;
     }
+    /* the config form scrolls internally (ConfigForm is 1fr), so its container
+       is a plain Vertical: the sync bar and status line mounted after the form
+       stay on screen below it instead of being pushed past the viewport */
     .svc-config-scroll {
         width: 1fr;
         height: 1fr;
@@ -2265,7 +2295,7 @@ class ServicePanel(Widget):
         self._current_form: ConfigForm | None = None
         self._current_shared_section: str | None = None
         self._current_config_local_path: str | None = None
-        self._config_container: VerticalScroll | None = None
+        self._config_container: Vertical | None = None
         self._ssh_profile_names: list[str] = [
             p.name for p in load_ssh_profiles()
         ]
@@ -2312,6 +2342,12 @@ class ServicePanel(Widget):
             with Horizontal(id="svc-target-bar"):
                 yield Label("Host:")
                 yield Select(target_options, value="local", id="svc-target-select")
+                hint = Static("(local only)", id="svc-target-hint")
+                hint.tooltip = (
+                    "System Services are stored in this project on this machine; "
+                    "the selected host has no effect here and is kept for the service nodes."
+                )
+                yield hint
                 yield Button("↻", variant="primary", compact=True, id="svc-target-refresh")
             with Vertical(id="svc-content-area"):
                 yield Static(
@@ -2425,6 +2461,30 @@ class ServicePanel(Widget):
             return str(val)
         except Exception:
             return "local"
+
+    def _set_host_bar_enabled(self, enabled: bool) -> None:
+        """grey out the Host bar on nodes that are always edited on this machine.
+
+        System Services (SSH profiles, experiments, tasks and the shared service
+        sections) live in the local project, so the selected host has no effect
+        there. The bar is faded rather than hidden, and its value is left alone
+        so the next service node lands on the same host."""
+        try:
+            bar = self.query_one("#svc-target-bar", Horizontal)
+            select = self.query_one("#svc-target-select", Select)
+            refresh = self.query_one("#svc-target-refresh", Button)
+        except Exception:
+            return
+        bar.set_class(not enabled, "local-only")
+        select.disabled = not enabled
+        refresh.disabled = not enabled
+
+    @staticmethod
+    def _is_local_only_node(node_str: str) -> bool:
+        """tree nodes whose content ignores the Host selector."""
+        return node_str.startswith("__shared__") or node_str in (
+            "__ssh_profiles__", "__experiments__", "__tasks__",
+        )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "svc-target-select":
@@ -2585,11 +2645,12 @@ class ServicePanel(Widget):
         self._current_config_local_path = None
         self._config_container = None
         self._current_service_name = None
+        self._set_host_bar_enabled(not self._is_local_only_node(node_str))
 
         if node_str.startswith("__shared__"):
             self._set_command_session_visible(False)
             section_name = node_str.replace("__shared__", "")
-            scroll = VerticalScroll(classes="svc-config-scroll")
+            scroll = Vertical(classes="svc-config-scroll")
             await content_area.mount(scroll)
             self._config_container = scroll
             self._current_shared_section = section_name
@@ -2654,6 +2715,12 @@ class ServicePanel(Widget):
         target = self._get_panel_target()
         display_svc, is_running = await self._service_view_state(svc, target)
         self._svc_states[svc.name] = is_running
+        if self._current_service_name != svc.name:
+            # the user moved to another tree node while the (possibly remote)
+            # probe ran; that node owns the content area now, so only refresh
+            # the tree markers
+            self._build_tree()
+            return
 
         content_area = self.query_one("#svc-content-area", Vertical)
         await content_area.remove_children()
@@ -2663,6 +2730,7 @@ class ServicePanel(Widget):
         self._current_config_local_path = None
         self._config_container = None
         self._set_command_session_visible(True)
+        self._set_host_bar_enabled(True)
         await self._mount_service_content(
             content_area,
             display_svc,
@@ -2687,7 +2755,7 @@ class ServicePanel(Widget):
         tabs: TabbedContent,
         svc: ServiceDef,
         pipeline: PipelineDef,
-        config_scroll: VerticalScroll,
+        config_scroll: Vertical,
     ) -> None:
         """fill the Config/Streams/Transform/Prompts panes after the first paint.
 
@@ -2751,7 +2819,7 @@ class ServicePanel(Widget):
             await tabs.add_pane(launch_pane)
             await launch_scroll.mount(card)
 
-            config_scroll = VerticalScroll(classes="svc-config-scroll")
+            config_scroll = Vertical(classes="svc-config-scroll")
             config_pane = TabPane("Config", config_scroll, id="svc-tab-config")
             await tabs.add_pane(config_pane)
             self._config_container = config_scroll
@@ -2773,7 +2841,7 @@ class ServicePanel(Widget):
             await tabs.add_pane(launch_pane)
             await launch_scroll.mount(card)
 
-            config_scroll = VerticalScroll(classes="svc-config-scroll")
+            config_scroll = Vertical(classes="svc-config-scroll")
             config_pane = TabPane("Config", config_scroll, id="svc-tab-config")
             await tabs.add_pane(config_pane)
             self._config_container = config_scroll
@@ -3198,7 +3266,7 @@ class ServicePanel(Widget):
 
     # ── config logic ─────────────────────────────────────────────
 
-    def _show_shared_form(self, container: VerticalScroll, section_name: str) -> None:
+    def _show_shared_form(self, container: Vertical, section_name: str) -> None:
         sec_info = SHARED_SECTIONS.get(section_name, {})
         fields = []
         for key, fdef in sec_info.get("fields", {}).items():
@@ -3255,7 +3323,7 @@ class ServicePanel(Widget):
                     files.append(fn)
         return files
 
-    def _show_pipeline_form(self, container: VerticalScroll, pipeline: PipelineDef) -> None:
+    def _show_pipeline_form(self, container: Vertical, pipeline: PipelineDef) -> None:
         existing, source_message = self._load_config_for_target(pipeline.config_path)
         apply_shared_values(pipeline.fields, self._shared_values)
 
@@ -3406,7 +3474,7 @@ class ServicePanel(Widget):
             self._show_status(source_message)
         self._show_sync_bar(pipeline)
 
-    def _show_mllm_form(self, container: VerticalScroll) -> None:
+    def _show_mllm_form(self, container: Vertical) -> None:
         values = _mllm_form_values(self._root)
         form = ConfigForm("MLLM Server", _MLLM_FIELDS, values)
         container.mount(form)
@@ -3601,11 +3669,14 @@ class ServicePanel(Widget):
         for old in container.query(".sync-bar"):
             old.remove()
         target = self._get_panel_target()
-        if target != "local":
-            # On a remote host, Save already writes directly to that host, so we
-            # don't show a separate sync button here. To push a locally-edited
-            # config to a remote, switch Host to local and use the SSH-profile
-            # picker + "Sync to Remote" below.
+        if target != "local" and shared_section is None:
+            # on a remote host, Save on a pipeline config already writes to that
+            # host, so a separate sync button would be redundant. To push a
+            # locally-edited config to a remote, switch Host to local and use
+            # the SSH-profile picker + "Sync to Remote" below.
+            # System Services are different: Save always writes the local store
+            # whatever the Host selector says, so the picker stays and defaults
+            # to the selected host.
             return
 
         if pipeline is None and local_path is None and shared_section is None:
