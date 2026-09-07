@@ -222,6 +222,39 @@ def is_loopback_host(host: object) -> bool:
     return str(host or "").strip().strip("[]").lower() in LOOPBACK_HOSTS
 
 
+def is_this_machine(host: object) -> bool:
+    """loopback, or this machine's own hostname (bare, .local, or fully qualified)."""
+    if is_loopback_host(host):
+        return True
+    name = str(host or "").strip().lower().rstrip(".")
+    try:
+        me = socket.gethostname().lower().rstrip(".")
+    except OSError:
+        return False
+    short = me.split(".")[0]
+    return name in {me, short, f"{short}.local"}
+
+
+def _resolved_addresses(host: str) -> set[str]:
+    try:
+        return {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except (OSError, ValueError):
+        return set()
+
+
+def hosts_match(a: object, b: object) -> bool:
+    """whether two host spellings name the same machine: equal names, equal
+    short names, or at least one shared resolved address (so a tailnet IP in a
+    url still matches an SSH profile that uses the hostname)."""
+    x = str(a or "").strip().lower().rstrip(".")
+    y = str(b or "").strip().lower().rstrip(".")
+    if not x or not y:
+        return False
+    if x == y or x.split(".")[0] == y.split(".")[0]:
+        return True
+    return bool(_resolved_addresses(x) & _resolved_addresses(y))
+
+
 def _url_host_port(url: object) -> tuple[str, int | None]:
     """hostname and port of a URL; port is None when absent or unparseable."""
     try:

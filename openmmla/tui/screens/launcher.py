@@ -39,6 +39,7 @@ from openmmla.tui.schema.definitions import (
 from openmmla.tui.system_services import (
     SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
     SYSTEM_SERVICE_DEFAULT_PORTS,
+    hosts_match,
     is_loopback_host,
     system_service_endpoint,
     system_service_reachable,
@@ -1696,6 +1697,13 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 if _make_target_for(name) in _INFRA_COMPOSE_SERVICES
                 else []
             )
+            # the docker stack mints the influx admin token on the container host;
+            # this pulls it into System Services instead of a copy-paste over ssh
+            extra_actions = (
+                [("Fetch Token", _INFRA_FETCH_TOKEN_ACTION)]
+                if _make_target_for(name) == "influxdb"
+                else []
+            )
             services.append(ServiceDef(
                 name=name,
                 category="Infrastructure",
@@ -1704,6 +1712,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 launch_type="make",
                 description=desc,
                 params=params,
+                extra_actions=extra_actions,
             ))
 
     return services
@@ -1961,6 +1970,24 @@ _INFRA_COMPOSE_FILE = "docker/docker-compose.infra.yml"
 # what the Run mode select starts on, and what a missing value means
 _INFRA_DEFAULT_MODE = "docker"
 
+_INFRA_FETCH_TOKEN_ACTION = "fetch-token"
+
+# prints the influx admin token of the docker stack on the host it runs on: the
+# running container's CLI config first (covers a token influx generated itself),
+# else docker/.env. runs from the repo root. prints nothing when neither has one.
+_INFRA_READ_TOKEN_SH = (
+    r"t=$(docker compose -f docker/docker-compose.infra.yml exec -T influxdb "
+    r"cat /etc/influxdb2/influx-configs 2>/dev/null"
+    r''' | sed -n 's/^[[:space:]]*token[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1); '''
+    r'''[ -n "$t" ] || t=$(sed -n 's/^INFLUXDB_INIT_ADMIN_TOKEN=//p' docker/.env 2>/dev/null | head -n1); '''
+    r'''printf '%s' "$t"'''
+)
+
+
+def _mask_secret(value: str) -> str:
+    return f"{value[:4]}…{value[-4:]}" if len(value) >= 12 else "…"
+
+
 # _make_target_for() name -> docker compose service name
 _INFRA_COMPOSE_SERVICES = {
     "influxdb": "influxdb",
@@ -2125,6 +2152,22 @@ def _collection_sessions_local(svc: ServiceDef) -> list[str]:
         ]
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
+
+
+def _collection_sessions_remote(profile, svc: ServiceDef) -> list[str]:
+    """recorder tmux sessions of a collection service on a remote host."""
+    prefix = _collection_session_prefix(svc)
+    try:
+        result = ssh_run_sync(
+            profile, "tmux list-sessions -F '#{session_name}' 2>/dev/null || true", timeout=8.0,
+        )
+    except (subprocess.TimeoutExpired, Exception):
+        return []
+    return [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith(prefix)
+    ]
 
 
 def _service_requires_config(svc: ServiceDef) -> bool:
@@ -4689,7 +4732,9 @@ class ServicePanel(Widget):
                 return system_service_reachable(self._root, target)
             return _check_tmux_session(target)
         elif svc.launch_type == "collection":
-            return False
+            # recorders run as tmux sessions under the service's prefix; any
+            # of them alive means a recording is in progress
+            return bool(_collection_sessions_local(svc))
         return False
 
     def on_service_card_start_requested(self, event: ServiceCard.StartRequested) -> None:
@@ -5442,8 +5487,95 @@ class ServicePanel(Widget):
         elif svc.launch_type == "vllm":
             return ssh_check_port(profile, _mllm_config(self._root)["port"])
         elif svc.launch_type == "collection":
-            return False
+            return bool(_collection_sessions_remote(profile, svc))
         return False
+
+    def on_service_card_action_requested(self, event: ServiceCard.ActionRequested) -> None:
+        svc = next((s for s in self._services if s.name == event.service_name), None)
+        if svc is None or event.action != _INFRA_FETCH_TOKEN_ACTION:
+            return
+        if not _infra_docker_mode(svc, event.params):
+            self._log(
+                "[yellow]Fetch Token reads the token the docker stack was set up with "
+                "(container config or docker/.env). Switch Run mode to docker; a native "
+                "InfluxDB manages its tokens in its own web UI.[/yellow]"
+            )
+            return
+        target = self._get_panel_target()
+        self._log(f"  Reading the InfluxDB admin token from {target}...")
+        self.run_worker(
+            self._fetch_influx_token(target),
+            name="fetch-influx-token",
+            group="launcher-fetch-token",
+            exclusive=True,
+        )
+
+    async def _fetch_influx_token(self, target: str) -> None:
+        """read the docker stack's influx admin token on `target` and store it
+        (encrypted) as InfluxDB.token in System Services. The token itself never
+        reaches the log pane."""
+        profile = None
+        try:
+            if target == "local":
+                result = await asyncio.to_thread(
+                    subprocess.run, ["sh", "-c", _INFRA_READ_TOKEN_SH],
+                    cwd=self._root, capture_output=True, text=True, timeout=30,
+                )
+                origin = "this machine"
+            else:
+                profile = get_profile_by_name(target)
+                if profile is None:
+                    self._log(f"[red]SSH profile '{target}' not found.[/red]")
+                    return
+                cmd = f"cd {_quote_remote_path(profile.remote_project_path)} && {_INFRA_READ_TOKEN_SH}"
+                result = await asyncio.to_thread(ssh_run_sync, profile, cmd, 30.0)
+                origin = f"{profile.name} ({profile.host})"
+        except (subprocess.TimeoutExpired, OSError) as e:
+            self._log(f"[red]Could not read the token: {e}[/red]")
+            return
+
+        token = result.stdout.strip().strip('"').strip("'")
+        if not token or any(ch.isspace() for ch in token) or len(token) < 16:
+            detail = (result.stderr or "").strip().splitlines()
+            self._log(
+                f"[red]No InfluxDB token found on {origin}: neither the running container's "
+                f"/etc/influxdb2/influx-configs nor docker/.env has one. Has the stack been "
+                f"started there?[/red]"
+            )
+            if detail:
+                self._log(f"  {detail[-1]}")
+            return
+
+        config = load_system_services_config(self._root)
+        section = dict((config.get("InfluxDB") if isinstance(config, dict) else None) or {})
+        current = str(section.get("token") or "")
+        try:
+            from openmmla.utils.crypto import is_encrypted, decrypt_value
+            if is_encrypted(current):
+                current = decrypt_value(current)
+        except Exception:
+            current = ""
+        if current == token:
+            self._log(f"[green]InfluxDB.token already matches {origin} ({_mask_secret(token)}).[/green]")
+            return
+
+        section["token"] = token
+        path = save_system_service_section(self._root, "InfluxDB", section)
+        # remote pipeline configs are re-synced from System Services on launch
+        self._target_config_cache.clear()
+        self._log(
+            f"[green]InfluxDB.token updated from {origin}: {_mask_secret(token)} "
+            f"→ stored encrypted in {os.path.relpath(path, self._root)}.[/green]"
+        )
+
+        url_host, _ = system_service_endpoint(self._root, "influxdb") or ("", 0)
+        if target != "local" and not is_loopback_host(url_host) and profile is not None:
+            if not (hosts_match(url_host, profile.host) or hosts_match(url_host, profile.name)):
+                self._log(
+                    f"[yellow]Note: InfluxDB.url points at {url_host}, but this token came from "
+                    f"{profile.host}. Point the url at the same host or the token will be "
+                    f"rejected.[/yellow]"
+                )
 
     def on_service_card_view_logs_requested(self, event: ServiceCard.ViewLogsRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)

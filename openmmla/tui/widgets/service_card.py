@@ -38,6 +38,9 @@ class ServiceDef:
     # what the card shows as "type:"; falls back to launch_type (e.g. docker
     # stacks keep launch_type "tmux" internally but display "docker")
     display_type: str = ""
+    # extra (label, action id) buttons on the card; the launcher handles them
+    # through ActionRequested, e.g. ("Fetch Token", "fetch-token")
+    extra_actions: list = field(default_factory=list)
 
     @property
     def shown_type(self) -> str:
@@ -80,6 +83,15 @@ class ServiceCard(Widget):
             super().__init__()
             self.service_name = service_name
             self.params = params or {}
+
+    class ActionRequested(Message):
+        """one of the service's extra_actions buttons was pressed."""
+
+        def __init__(self, service_name: str, action: str, params: dict) -> None:
+            super().__init__()
+            self.service_name = service_name
+            self.action = action
+            self.params = params
 
     class ViewLogsRequested(Message):
         def __init__(self, service_name: str) -> None:
@@ -369,6 +381,13 @@ class ServiceCard(Widget):
                     compact=True,
                     id=_safe_id(f"refresh__{self.service_def.name}"),
                 )
+                for label, action in self.service_def.extra_actions:
+                    yield Button(
+                        label,
+                        variant="warning",
+                        compact=True,
+                        id=self._action_id(action),
+                    )
                 if self.service_def.launch_type == "collection" or self.service_def.artifact_pipeline:
                     yield Button(
                         "Download" if self.service_def.launch_type == "collection" else "Artifacts",
@@ -576,6 +595,9 @@ class ServiceCard(Widget):
             except (TypeError, ValueError):
                 return 0
         return param.default
+
+    def _action_id(self, action: str) -> str:
+        return _safe_id(f"action__{action}__{self.service_def.name}")
 
     def _param_id(self, kind: str, flag: str) -> str:
         return _safe_id(f"param_{kind}__{self.service_def.name}__{flag}")
@@ -890,6 +912,13 @@ class ServiceCard(Widget):
             self.post_message(self.ViewLogsRequested(self.service_def.name))
         elif btn_id.startswith("refresh__"):
             self.post_message(self.RefreshRequested(self.service_def.name))
+        elif btn_id.startswith("action__"):
+            for _label, action in self.service_def.extra_actions:
+                if btn_id == self._action_id(action):
+                    self.post_message(
+                        self.ActionRequested(self.service_def.name, action, self.collect_params())
+                    )
+                    return
         elif btn_id.startswith("download__"):
             params = self.collect_params()
             self.post_message(self.DownloadRequested(self.service_def.name, params))

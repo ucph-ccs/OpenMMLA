@@ -13,7 +13,7 @@ from textual.widgets import Static, DataTable, RichLog, Button
 
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.system_services import (
-    is_loopback_host, system_service_endpoint, system_service_reachable,
+    hosts_match, is_loopback_host, is_this_machine, system_service_endpoint, system_service_reachable,
 )
 from openmmla.tui.ssh import load_ssh_profiles, probe_ssh_endpoint, ssh_check_port, ssh_check_tmux, ssh_run_sync, get_profile_by_name, SSHProfile
 
@@ -42,6 +42,54 @@ def _check_port(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> boo
             return True
     except (ConnectionRefusedError, OSError, socket.timeout):
         return False
+
+
+def _profile_for_host(host: str) -> SSHProfile | None:
+    """the SSH profile whose host is `host`, when the Host column names a
+    machine rather than a profile."""
+    for profile in load_ssh_profiles():
+        if hosts_match(profile.host, host):
+            return profile
+    return None
+
+
+def _infra_container_logs_local(svc_key: str) -> str:
+    """logs of the docker infra container for a system service, or "" when the
+    compose project has no container for it (bare-metal deployment)."""
+    from openmmla.tui.screens.launcher import _INFRA_COMPOSE_FILE, _INFRA_COMPOSE_SERVICES
+    service = _INFRA_COMPOSE_SERVICES.get(svc_key)
+    compose = os.path.join(_find_project_root(), _INFRA_COMPOSE_FILE)
+    if not service or not os.path.isfile(compose):
+        return ""
+    try:
+        ps = subprocess.run(
+            ["docker", "compose", "-f", compose, "ps", "-a", "-q", service],
+            capture_output=True, text=True, timeout=10,
+        )
+        if not ps.stdout.strip():
+            return ""
+        logs = subprocess.run(
+            ["docker", "compose", "-f", compose, "logs", "--tail", "80", "--no-color", service],
+            capture_output=True, text=True, timeout=15,
+        )
+        return logs.stdout or logs.stderr
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _infra_container_logs_remote_cmd(svc_key: str, remote_root: str, fallback: str) -> str:
+    """shell that prints the docker infra container's logs when one exists on
+    the remote host, else runs the bare-metal log command."""
+    from openmmla.tui.screens.launcher import _INFRA_COMPOSE_FILE, _INFRA_COMPOSE_SERVICES
+    service = _INFRA_COMPOSE_SERVICES.get(svc_key)
+    if not service:
+        return fallback
+    compose = f"{remote_root.rstrip('/')}/{_INFRA_COMPOSE_FILE}"
+    return (
+        f'if [ -n "$(docker compose -f {compose} ps -a -q {service} 2>/dev/null)" ]; '
+        f"then docker compose -f {compose} logs --tail 80 --no-color {service}; "
+        f"else {fallback}; fi"
+    )
 
 
 def _list_tmux_sessions() -> dict[str, str]:
@@ -198,11 +246,15 @@ class StatusPanel(Widget):
             port = svc.get("port")
             session = svc.get("session", "")
 
+            host_label = "local"
             if svc["type"] == "system":
-                # the address pipelines are configured with, probed from here
+                # the address pipelines are configured with, probed from here;
+                # the Host column names that machine, not where the TUI runs
                 host, port = system_service_endpoint(root, svc["target"]) or ("", port)
                 port_ok = system_service_reachable(root, svc["target"])
-                port_label = str(port) if is_loopback_host(host) else f"{host}:{port}"
+                port_label = str(port)
+                if not is_loopback_host(host):
+                    host_label = host
             else:
                 port_ok = _check_port(port) if port else False
                 port_label = str(port) if port else "-"
@@ -216,7 +268,7 @@ class StatusPanel(Widget):
 
             rows.append((
                 name,
-                "local",
+                host_label,
                 "Running" if is_up else "Stopped",
                 port_label,
                 session if session else "-",
@@ -346,7 +398,7 @@ class StatusPanel(Widget):
         svc_type = svc_def["type"] if svc_def else ("tmux" if session else "unknown")
         svc_key = name.lower().split()[0] if svc_def and svc_type == "system" else ""
 
-        if host == "local":
+        if host == "local" or (svc_type == "system" and is_this_machine(host)):
             self._view_logs_local(log, name, svc_type, svc_key, session)
         else:
             self._view_logs_remote(log, name, host, svc_type, svc_key, session)
@@ -355,7 +407,7 @@ class StatusPanel(Widget):
         if svc_type == "system" and svc_key:
             from openmmla.tui.screens.launcher import _get_system_service_log
             log.write(f"[bold]Logs for {name} (local)[/bold]\n")
-            output = _get_system_service_log(svc_key)
+            output = _infra_container_logs_local(svc_key) or _get_system_service_log(svc_key)
             for line in output.splitlines():
                 log.write(line)
         elif session:
@@ -367,9 +419,12 @@ class StatusPanel(Widget):
             log.write(f"[yellow]No logs available for {name}[/yellow]")
 
     def _view_logs_remote(self, log: RichLog, name: str, host: str, svc_type: str, svc_key: str, session: str) -> None:
-        profile = get_profile_by_name(host)
+        profile = get_profile_by_name(host) or _profile_for_host(host)
         if profile is None:
-            log.write(f"[red]SSH profile '{host}' not found.[/red]")
+            log.write(
+                f"[red]No SSH profile reaches '{host}'. Add one whose host is '{host}' "
+                f"under Launcher → SSH Profiles to read its logs.[/red]"
+            )
             return
 
         _REMOTE_LOG_CMDS: dict[str, str] = {
@@ -382,8 +437,11 @@ class StatusPanel(Widget):
 
         if svc_type == "system" and svc_key in _REMOTE_LOG_CMDS:
             log.write(f"[bold]Logs for {name} ({host})[/bold]\n")
+            cmd = _infra_container_logs_remote_cmd(
+                svc_key, profile.remote_project_path, _REMOTE_LOG_CMDS[svc_key],
+            )
             try:
-                result = ssh_run_sync(profile, _REMOTE_LOG_CMDS[svc_key], timeout=15.0)
+                result = ssh_run_sync(profile, cmd, timeout=15.0)
                 output = result.stdout if result.returncode == 0 else result.stderr
                 for line in output.splitlines():
                     log.write(line)
