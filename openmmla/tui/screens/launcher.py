@@ -6,7 +6,6 @@ import json
 import os
 import re
 import shlex
-from urllib.parse import urlparse
 import shutil
 import socket
 import subprocess
@@ -39,6 +38,10 @@ from openmmla.tui.schema.definitions import (
 )
 from openmmla.tui.system_services import (
     SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
+    SYSTEM_SERVICE_DEFAULT_PORTS,
+    is_loopback_host,
+    system_service_endpoint,
+    system_service_reachable,
     load_system_service_values,
     load_system_services_config,
     save_system_service_section,
@@ -1689,7 +1692,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             # only the services with a container equivalent in the infra compose
             # file get a run-mode switch; the rest stay Makefile-only
             params = (
-                [ParamDef("--mode", "Run mode", "str", "native", ["native", "docker"])]
+                [ParamDef("--mode", "Run mode", "str", _INFRA_DEFAULT_MODE, ["native", "docker"])]
                 if _make_target_for(name) in _INFRA_COMPOSE_SERVICES
                 else []
             )
@@ -1955,6 +1958,9 @@ _STACK_COMPOSE_SERVICES = {
 # cards listed below can drive either the bare-metal Makefile or these containers
 _INFRA_COMPOSE_FILE = "docker/docker-compose.infra.yml"
 
+# what the Run mode select starts on, and what a missing value means
+_INFRA_DEFAULT_MODE = "docker"
+
 # _make_target_for() name -> docker compose service name
 _INFRA_COMPOSE_SERVICES = {
     "influxdb": "influxdb",
@@ -1996,10 +2002,11 @@ def _infra_compose_service(svc: ServiceDef) -> str | None:
 
 def _infra_docker_mode(svc: ServiceDef, params: dict | None = None) -> bool:
     """whether this card's Run mode asks for the container instead of the
-    bare-metal Makefile; anything but an explicit "docker" stays native."""
+    bare-metal Makefile; a missing value means _INFRA_DEFAULT_MODE."""
     if _infra_compose_service(svc) is None:
         return False
-    return str((params or {}).get("--mode") or "native").strip().lower() == "docker"
+    mode = str((params or {}).get("--mode") or _INFRA_DEFAULT_MODE).strip().lower()
+    return mode == "docker"
 
 
 def _stack_legacy_session(svc: ServiceDef) -> str | None:
@@ -2036,58 +2043,9 @@ _TARGET_PROBE_INTERVAL_SEC = 30.0
 
 _probe_ssh_endpoint = probe_ssh_endpoint
 
-_SYSTEM_SVC_PORTS: dict[str, int] = {
-    "influxdb": 8086,
-    "mongodb": 27017,
-    "redis": 6379,
-    "mosquitto": 1883,
-    "nginx": 8080,
-}
-
-
-def _url_port(url: object) -> int | None:
-    """port component of a URL, or None when absent or unparseable."""
-    try:
-        return urlparse(str(url or "").strip()).port
-    except ValueError:
-        return None
-
-
-def _system_service_port(root: str, target: str) -> int | None:
-    """port to probe for an Uber system service.
-
-    Prefers what System Services is configured with — a docker stack may publish
-    a non-default host port when another project already holds the usual one —
-    and falls back to the conventional default in _SYSTEM_SVC_PORTS."""
-    default = _SYSTEM_SVC_PORTS.get(target)
-    if default is None:
-        return None
-    try:
-        config = load_system_services_config(root) or {}
-    except Exception:
-        return default
-
-    def section(name: str) -> dict:
-        value = config.get(name)
-        return value if isinstance(value, dict) else {}
-
-    if target == "influxdb":
-        port = _url_port(section("InfluxDB").get("url"))
-    elif target == "mongodb":
-        port = _url_port(section("MongoDB").get("url"))
-    elif target == "redis":
-        port = section("Redis").get("port")
-    elif target == "mosquitto":
-        port = section("MQTT").get("port")
-    elif target == "nginx":
-        port = section("Gateway").get("http_port")
-    else:
-        port = None
-    try:
-        port = int(port)
-    except (TypeError, ValueError):
-        return default
-    return port if 0 < port < 65536 else default
+# conventional ports of the Uber system services, keyed by make target; the
+# reachability probe itself lives in openmmla.tui.system_services
+_SYSTEM_SVC_PORTS: dict[str, int] = SYSTEM_SERVICE_DEFAULT_PORTS
 _NON_SESSION_ARTIFACT_NAMES = {*NON_SESSION_ARTIFACT_DIRS, ".DS_Store"}
 
 _MAKE_TARGET_OVERRIDES: dict[str, str] = {}
@@ -2357,7 +2315,7 @@ class ServicePanel(Widget):
         self._collection_role: str = "audio"
         # (target, service name) -> "native" | "docker" for the infra cards; the
         # card is rebuilt on every tree/host change and would otherwise fall back
-        # to the ParamDef default, silently sending Stop down the make path
+        # to the ParamDef default, silently sending Stop down the other path
         self._infra_mode: dict[tuple[str, str], str] = {}
         # session id -> hosts this TUI launched it on, so "Stop All Hosts"
         # reaches a machine even when it is currently unreachable
@@ -3199,6 +3157,7 @@ class ServicePanel(Widget):
         svc = self._service_with_collection_defaults(svc, target)
         svc = self._service_with_session_choices(svc, target)
         svc = self._service_with_infra_mode(svc, target)
+        svc = self._service_with_endpoint_note(svc)
         if svc.name != "ASR Server":
             return svc
         config_path = os.path.join(svc.config_dir, "config.yml")
@@ -3209,6 +3168,20 @@ class ServicePanel(Widget):
             conda_env=_asr_server_conda_env_from_config(config),
             description=f"ASR inference services (AudioInferer: {backend})",
         )
+
+    def _service_with_endpoint_note(self, svc: ServiceDef) -> ServiceDef:
+        """say on the card which address the status probe connects to."""
+        if svc.launch_type != "make":
+            return svc
+        endpoint = system_service_endpoint(self._root, _make_target_for(svc.name))
+        if endpoint is None:
+            return svc
+        host, port = endpoint
+        where = (
+            f"loopback:{port} on the selected host" if is_loopback_host(host)
+            else f"{host}:{port}"
+        )
+        return replace(svc, description=f"{svc.description} (status probe: {where})")
 
     def _service_with_infra_mode(self, svc: ServiceDef, target: str) -> ServiceDef:
         """re-seed a rebuilt infra card with the Run mode last chosen for this host."""
@@ -4709,9 +4682,10 @@ class ServicePanel(Widget):
                 return _check_tmux_session("vfa-services")
         elif svc.launch_type == "make":
             target = _make_target_for(svc.name)
-            port = _system_service_port(self._root, target)
-            if port is not None:
-                return _check_port_in_use(port)
+            if target in _SYSTEM_SVC_PORTS:
+                # the address every pipeline is configured with, probed from here;
+                # a loopback url means "this machine" and keeps the local check
+                return system_service_reachable(self._root, target)
             return _check_tmux_session(target)
         elif svc.launch_type == "collection":
             return False
@@ -5445,9 +5419,13 @@ class ServicePanel(Widget):
             return False
         if svc.launch_type == "make":
             target = _make_target_for(svc.name)
-            port = _system_service_port(self._root, target)
-            if port is not None:
-                return ssh_check_port(profile, port)
+            if target in _SYSTEM_SVC_PORTS:
+                # probed from this machine at the configured address; only a
+                # loopback url falls back to asking the host about its own port
+                return system_service_reachable(
+                    self._root, target,
+                    remote_loopback_check=lambda port: ssh_check_port(profile, port),
+                )
             return ssh_check_tmux(profile, target)
         elif svc.launch_type == "tmux":
             if _is_stack_service(svc):

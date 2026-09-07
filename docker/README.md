@@ -287,23 +287,26 @@ docker compose（tmux+gunicorn 方式已移除）：
 中心基础设施目前**没有**接进 TUI，`docker-compose.infra.yml` 只能手动
 `docker compose` 起停：
 
-- **状态**：`Uber: InfluxDB` / `Uber: MongoDB` 卡片是纯端口探测，容器把 8086 /
-  27017 发布出来后就会显示 [OK]（本地探 127.0.0.1，远程 Host 走 SSH 探远端），
-  Status 页同理
-- **Start / Stop / Logs**：卡片上新增了一个 **Run mode** 下拉（`native` / `docker`），
-  默认 `native`（brew / systemctl 裸机路径，行为不变）。在跑容器的那台机器上把它
-  切成 `docker`，三个按钮就改走
+- **状态**：`Uber: InfluxDB` / `Uber: MongoDB` 卡片探的是 System Services 里配的
+  url（从 TUI 这台机器直接 TCP 连 host:port），和 Host 选择器无关；只有 url 写成
+  localhost 时才退回"探选中主机自己的回环"。Status 页同理，端口列会显示实际
+  探测的 host:port
+- **Start / Stop / Logs**：卡片上有一个 **Run mode** 下拉（`docker` / `native`），
+  **默认 `docker`**。还在用 brew / systemctl 裸机数据库的机器把它切回 `native`，
+  否则 Start 会在那台机器上起容器、和裸机实例抢端口。`docker` 模式下三个按钮走
   `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <服务>`。
   停止用 `stop` 而不是 `down`：两张卡片共用一个 compose 文件，`down` 会把另一个
   数据库容器一起拆掉
 - Run mode 是按「主机 + 服务」记住的，切换 Host 或点别的节点再回来不会丢。但它
-  只存在这次 TUI 会话里，重启 TUI 会回到 `native`
-- 状态探测的**端口**跟着 System Services 里的 url 走：`InfluxDB.url` 写
-  `:8087`，卡片就探 8087，换端口不用改代码。但探测的**地址**仍写死 127.0.0.1（本地
-  `_check_port_in_use`，远程 `nc -z 127.0.0.1`），所以 **`INFRA_BIND_ADDRESS` 改成具体
-  IP 会让卡片误报未运行**：默认的 `0.0.0.0` 包含回环所以没问题；填成 `100.106.25.54`
-  之后容器照常服务，卡片却是灰的。介意的话就保持 `0.0.0.0`，用防火墙或
-  `DOCKER-USER` 链来收窄
+  只存在这次 TUI 会话里，重启 TUI 会回到默认的 `docker`
+- 状态探测**直接连 System Services 里配的 host:port**，从跑 TUI 的这台机器发起——
+  也就是 pipeline 真正走的那条路。`InfluxDB.url` 写 `http://server-01:8087`，卡片和
+  Status 页就去连 `server-01:8087`，`INFRA_BIND_ADDRESS` 绑在哪张网卡都无所谓。
+  卡片描述里会写出探的是哪个地址。两个推论：
+  - url 是 `localhost` / `127.0.0.1` 时它不指向任何一台特定机器，这时沿用老逻辑：
+    本地探本机回环，远程 Host 走 SSH 探那台机器自己的回环
+  - "可达"是**从 TUI 这台机器看**的。TUI 机器不在 tailnet 里、或者被防火墙挡着，
+    卡片会灰，哪怕 pipeline 机器连得上
 - 数据库搬到 server-01 之后，Mac 本地的这两张卡片会一直显示未运行（本地探测写死
   127.0.0.1），这是预期现象，不是连不上。**这时更不要在 Mac 上点 Start**：
   按钮走的是 `make influxdb` / `make mongodb`，会在本机 8086 / 27017 起一个裸机

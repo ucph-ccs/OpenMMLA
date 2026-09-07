@@ -12,15 +12,18 @@ from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button
 
 from openmmla.tui.schema.loader import _find_project_root
+from openmmla.tui.system_services import (
+    is_loopback_host, system_service_endpoint, system_service_reachable,
+)
 from openmmla.tui.ssh import load_ssh_profiles, probe_ssh_endpoint, ssh_check_port, ssh_check_tmux, ssh_run_sync, get_profile_by_name, SSHProfile
 
 
 KNOWN_SERVICES = [
-    {"name": "InfluxDB", "port": 8086, "type": "system"},
-    {"name": "MongoDB", "port": 27017, "type": "system"},
-    {"name": "Redis", "port": 6379, "type": "system"},
-    {"name": "Mosquitto", "port": 1883, "type": "system"},
-    {"name": "Nginx", "port": 8080, "type": "system"},
+    {"name": "InfluxDB", "port": 8086, "type": "system", "target": "influxdb"},
+    {"name": "MongoDB", "port": 27017, "type": "system", "target": "mongodb"},
+    {"name": "Redis", "port": 6379, "type": "system", "target": "redis"},
+    {"name": "Mosquitto", "port": 1883, "type": "system", "target": "mosquitto"},
+    {"name": "Nginx", "port": 8080, "type": "system", "target": "nginx"},
     {"name": "Flask Dashboard", "port": 5050, "type": "tmux", "session": "flask"},
     {"name": "Celery Worker", "port": None, "type": "tmux", "session": "celery"},
     {"name": "AudioInferer", "port": 5001, "type": "tmux", "session": "audioinferer"},
@@ -185,6 +188,7 @@ class StatusPanel(Widget):
         """collect all local probe results (runs in a worker thread)."""
         tmux_sessions = _list_tmux_sessions()
         profiles = load_ssh_profiles()
+        root = _find_project_root()
         rows: list[tuple] = []
         running_count = 0
         port_count = 0
@@ -194,7 +198,14 @@ class StatusPanel(Widget):
             port = svc.get("port")
             session = svc.get("session", "")
 
-            port_ok = _check_port(port) if port else False
+            if svc["type"] == "system":
+                # the address pipelines are configured with, probed from here
+                host, port = system_service_endpoint(root, svc["target"]) or ("", port)
+                port_ok = system_service_reachable(root, svc["target"])
+                port_label = str(port) if is_loopback_host(host) else f"{host}:{port}"
+            else:
+                port_ok = _check_port(port) if port else False
+                port_label = str(port) if port else "-"
             session_ok = session in tmux_sessions if session else False
             is_up = port_ok if svc["type"] == "system" else session_ok
 
@@ -207,7 +218,7 @@ class StatusPanel(Widget):
                 name,
                 "local",
                 "Running" if is_up else "Stopped",
-                str(port) if port else "-",
+                port_label,
                 session if session else "-",
                 tmux_sessions.get(session, "-") if session else "-",
             ))
@@ -234,6 +245,7 @@ class StatusPanel(Widget):
         table = self.query_one("#status-table", DataTable)
         log = self.query_one("#log-panel", RichLog)
         added = 0
+        root = _find_project_root()
 
         reachable = []
         for profile in self._ssh_profiles:
@@ -253,7 +265,19 @@ class StatusPanel(Widget):
                 r_session_ok = False
 
                 loop = asyncio.get_event_loop()
-                if port:
+                if svc["type"] == "system":
+                    host, _ = system_service_endpoint(root, svc["target"]) or ("", None)
+                    if not is_loopback_host(host):
+                        # one configured address for everyone: the local row
+                        # already shows it as host:port, a per-host copy would
+                        # just repeat the same probe result
+                        continue
+                    # a loopback url means this host's own port, asked over ssh
+                    r_port_ok = await asyncio.to_thread(
+                        system_service_reachable, root, svc["target"],
+                        lambda p, _profile=profile: ssh_check_port(_profile, p),
+                    )
+                elif port:
                     r_port_ok = await loop.run_in_executor(
                         None, ssh_check_port, profile, port,
                     )
@@ -270,7 +294,12 @@ class StatusPanel(Widget):
                 if not r_up:
                     continue
 
-                port_str = str(port) if port else "-"
+                if svc["type"] == "system":
+                    # only loopback-configured services reach here
+                    _, eport = system_service_endpoint(root, svc["target"]) or ("", port)
+                    port_str = str(eport)
+                else:
+                    port_str = str(port) if port else "-"
                 session_str = session if session else "-"
                 table.add_row(
                     svc["name"], profile.name, "Running", port_str, session_str, "-",

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import socket
+from typing import Callable
+from urllib.parse import urlsplit
+
 import os
 from pathlib import Path
 from typing import Any
@@ -197,3 +201,107 @@ def save_system_service_section(
     config[section_name] = dict(section_data)
     values = config_to_flat_values(config)
     return save_system_services_config(root, values)
+
+
+# ── system service endpoints ──────────────────────────────────────
+
+# conventional ports of the Uber system services, keyed by make target
+SYSTEM_SERVICE_DEFAULT_PORTS: dict[str, int] = {
+    "influxdb": 8086,
+    "mongodb": 27017,
+    "redis": 6379,
+    "mosquitto": 1883,
+    "nginx": 8080,
+}
+
+# hosts that mean "this machine" rather than one specific address
+LOOPBACK_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def is_loopback_host(host: object) -> bool:
+    return str(host or "").strip().strip("[]").lower() in LOOPBACK_HOSTS
+
+
+def _url_host_port(url: object) -> tuple[str, int | None]:
+    """hostname and port of a URL; port is None when absent or unparseable."""
+    try:
+        parts = urlsplit(str(url or "").strip())
+    except ValueError:
+        return "", None
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        # e.g. a mongodb replica-set list "h1:27017,h2:27017"
+        port = None
+    return host, port
+
+
+def system_service_endpoint(root: str | os.PathLike[str], target: str) -> tuple[str, int] | None:
+    """(host, port) that clients of an Uber system service are configured with.
+
+    Read from System Services, which is what every pipeline config is synced
+    from. The port falls back to the conventional default; the host is "" when
+    unset, and a loopback host means "wherever the service runs" rather than a
+    specific machine (see is_loopback_host)."""
+    default = SYSTEM_SERVICE_DEFAULT_PORTS.get(target)
+    if default is None:
+        return None
+    try:
+        config = load_system_services_config(root) or {}
+    except Exception:
+        config = {}
+
+    def section(name: str) -> dict:
+        value = config.get(name)
+        return value if isinstance(value, dict) else {}
+
+    if target == "influxdb":
+        host, port = _url_host_port(section("InfluxDB").get("url"))
+    elif target == "mongodb":
+        host, port = _url_host_port(section("MongoDB").get("url"))
+    elif target == "redis":
+        host, port = section("Redis").get("host"), section("Redis").get("port")
+    elif target == "mosquitto":
+        host, port = section("MQTT").get("host"), section("MQTT").get("port")
+    else:
+        host, port = section("Gateway").get("host"), section("Gateway").get("http_port")
+    host = str(host or "").strip()
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = default
+    if not 0 < port < 65536:
+        port = default
+    return host, port
+
+
+def check_endpoint(host: str, port: int, timeout: float = 1.5) -> bool:
+    """TCP-connect probe from this machine; resolves names the way clients do."""
+    try:
+        with socket.create_connection((host or "127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def system_service_reachable(
+    root: str | os.PathLike[str],
+    target: str,
+    remote_loopback_check: Callable[[int], bool] | None = None,
+) -> bool:
+    """whether the configured endpoint of an Uber system service answers.
+
+    Probed from this machine at the configured host:port, i.e. the path the
+    pipelines actually take. A loopback host names no machine in particular, so
+    it is checked on the selected host instead: through remote_loopback_check
+    (an ssh probe of that host's own port) when given, else locally."""
+    endpoint = system_service_endpoint(root, target)
+    if endpoint is None:
+        return False
+    host, port = endpoint
+    if is_loopback_host(host):
+        if remote_loopback_check is not None:
+            return bool(remote_loopback_check(port))
+        return check_endpoint("127.0.0.1", port)
+    return check_endpoint(host, port)
