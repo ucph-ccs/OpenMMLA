@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+from urllib.parse import urlparse
 import shutil
 import socket
 import subprocess
@@ -2042,6 +2043,51 @@ _SYSTEM_SVC_PORTS: dict[str, int] = {
     "mosquitto": 1883,
     "nginx": 8080,
 }
+
+
+def _url_port(url: object) -> int | None:
+    """port component of a URL, or None when absent or unparseable."""
+    try:
+        return urlparse(str(url or "").strip()).port
+    except ValueError:
+        return None
+
+
+def _system_service_port(root: str, target: str) -> int | None:
+    """port to probe for an Uber system service.
+
+    Prefers what System Services is configured with — a docker stack may publish
+    a non-default host port when another project already holds the usual one —
+    and falls back to the conventional default in _SYSTEM_SVC_PORTS."""
+    default = _SYSTEM_SVC_PORTS.get(target)
+    if default is None:
+        return None
+    try:
+        config = load_system_services_config(root) or {}
+    except Exception:
+        return default
+
+    def section(name: str) -> dict:
+        value = config.get(name)
+        return value if isinstance(value, dict) else {}
+
+    if target == "influxdb":
+        port = _url_port(section("InfluxDB").get("url"))
+    elif target == "mongodb":
+        port = _url_port(section("MongoDB").get("url"))
+    elif target == "redis":
+        port = section("Redis").get("port")
+    elif target == "mosquitto":
+        port = section("MQTT").get("port")
+    elif target == "nginx":
+        port = section("Gateway").get("http_port")
+    else:
+        port = None
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return default
+    return port if 0 < port < 65536 else default
 _NON_SESSION_ARTIFACT_NAMES = {*NON_SESSION_ARTIFACT_DIRS, ".DS_Store"}
 
 _MAKE_TARGET_OVERRIDES: dict[str, str] = {}
@@ -4663,7 +4709,7 @@ class ServicePanel(Widget):
                 return _check_tmux_session("vfa-services")
         elif svc.launch_type == "make":
             target = _make_target_for(svc.name)
-            port = _SYSTEM_SVC_PORTS.get(target)
+            port = _system_service_port(self._root, target)
             if port is not None:
                 return _check_port_in_use(port)
             return _check_tmux_session(target)
@@ -5399,7 +5445,7 @@ class ServicePanel(Widget):
             return False
         if svc.launch_type == "make":
             target = _make_target_for(svc.name)
-            port = _SYSTEM_SVC_PORTS.get(target)
+            port = _system_service_port(self._root, target)
             if port is not None:
                 return ssh_check_port(profile, port)
             return ssh_check_tmux(profile, target)

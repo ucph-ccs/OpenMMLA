@@ -71,7 +71,8 @@ frame analyzer 容器内已配置 `host.docker.internal` → 宿主机，config 
 ## 中心基础设施 (InfluxDB / MongoDB)
 
 `docker-compose.infra.yml` 把 Uber Server 的两个数据库跑成容器，替代 brew /
-apt 的裸机安装。端口与 `config/system_services.yml` 一致，pipeline 只需改主机名。
+apt 的裸机安装。默认端口与 `config/system_services.yml` 一致，pipeline 只需改主机名；
+宿主机端口可以用 `INFLUXDB_PORT` / `MONGODB_PORT` 改掉（见下面「和别的项目共用一台机器」）。
 
 | Service | Image | Port | GPU | Stack |
 |---|---|---|---|---|
@@ -87,7 +88,8 @@ InfluxDB 3 Core（没有 org/bucket/token 那套语义，`influxdb-client==1.44.
 不需要 build context）。
 
 先停掉可能占着 8086 / 27017 的裸机服务，否则 `up -d` 会以
-`Bind for 0.0.0.0:8086 failed: port is already allocated` 失败：
+`Bind for 0.0.0.0:8086 failed: port is already allocated` 失败（端口被**别的项目的
+容器**占着的情况见下面「和别的项目共用一台机器」，那种不能停，要换端口）：
 
 ```bash
 # macOS
@@ -165,6 +167,26 @@ docker cp "$(docker compose -f docker/docker-compose.infra.yml ps -q influxdb)":
 采集进行中不要 `down`；两个服务都设了 `stop_grace_period: 60s`，但正常流程是
 先结束 session 再停 stack。
 
+### 和别的项目共用一台机器
+
+同一台机器上如果已经有别的项目的 InfluxDB / MongoDB 容器（哪怕它们只绑
+`127.0.0.1:8086`），我们的 `0.0.0.0:8086` 也起不来——内核不允许同一端口上
+通配地址和具体地址并存。**不要去停别人的容器**，改我们的宿主机端口：
+
+```bash
+# docker/.env
+INFLUXDB_PORT=8087
+MONGODB_PORT=27018
+```
+
+然后 System Services 里的 url 带上新端口（`http://server-01:8087`、
+`mongodb://server-01:27018`）。TUI 卡片的状态探测会从 url 里读端口，不用改代码。
+容器内部仍是 8086 / 27017，healthcheck 和数据都不受影响。
+
+不要反过来"共用"别人的实例：它多半只绑 loopback（别的机器连不上）、开了认证
+（密码得明文进 `MongoDB.url`），而且 `influxdb:latest` 在 2026-09-15 之后一次
+`pull` 就会变成 InfluxDB 3，把你的数据一起带进坑里。
+
 ### 让 OpenMMLA 指向这套基础设施
 
 `mmla tui` → Launcher → System Services，只改这三处：
@@ -174,6 +196,13 @@ docker cp "$(docker compose -f docker/docker-compose.infra.yml ps -q influxdb)":
 | `InfluxDB.url` | `http://server-01.local:8086`（`org: admin`、`bucket: mmla-data` 保持不变） |
 | `InfluxDB.token` | 上面那个 `INFLUXDB_INIT_ADMIN_TOKEN`，把原来的 `ENC(...)` 整串替换成明文 |
 | `MongoDB.url` | `mongodb://server-01.local:27017`（`db: openmmla` 不变） |
+
+**主机名怎么写取决于你的网络。** `.local` 是 mDNS，只在**同一个局域网**里有效。如果你的
+Mac 和 server-01 不在一个网段、中间走的是 Tailscale（`ssh admin@server-01` 能通、
+但 `ping server-01.local` 不通就是这种情况），要写 Tailscale 的 MagicDNS 名字或
+tailnet IP：`http://server-01:8086`、`http://100.x.x.x:8086`。这也意味着**每一台跑
+base station 的机器都得在 tailnet 里**，否则它到不了数据库。改了端口的话把端口
+一起写上：`http://server-01:8087`。
 
 保存时 token 会自动重新加密成 `ENC(...)`，并同步写回所有本地
 `pipelines/*/config.yml`，**不要手改那些文件**（会被覆盖，运行时也以
@@ -269,10 +298,12 @@ docker compose（tmux+gunicorn 方式已移除）：
   数据库容器一起拆掉
 - Run mode 是按「主机 + 服务」记住的，切换 Host 或点别的节点再回来不会丢。但它
   只存在这次 TUI 会话里，重启 TUI 会回到 `native`
-- **`INFRA_BIND_ADDRESS` 改成具体 IP 会让卡片误报未运行**：状态探测写死了
-  127.0.0.1（本地 `_check_port_in_use`，远程 `nc -z 127.0.0.1`）。默认的 `0.0.0.0`
-  包含回环地址所以没问题；填成 `192.168.1.20` 之后容器照常服务，卡片却是灰的。
-  介意的话就保持 `0.0.0.0`，用防火墙或 `DOCKER-USER` 链来收窄
+- 状态探测的**端口**跟着 System Services 里的 url 走：`InfluxDB.url` 写
+  `:8087`，卡片就探 8087，换端口不用改代码。但探测的**地址**仍写死 127.0.0.1（本地
+  `_check_port_in_use`，远程 `nc -z 127.0.0.1`），所以 **`INFRA_BIND_ADDRESS` 改成具体
+  IP 会让卡片误报未运行**：默认的 `0.0.0.0` 包含回环所以没问题；填成 `100.106.25.54`
+  之后容器照常服务，卡片却是灰的。介意的话就保持 `0.0.0.0`，用防火墙或
+  `DOCKER-USER` 链来收窄
 - 数据库搬到 server-01 之后，Mac 本地的这两张卡片会一直显示未运行（本地探测写死
   127.0.0.1），这是预期现象，不是连不上。**这时更不要在 Mac 上点 Start**：
   按钮走的是 `make influxdb` / `make mongodb`，会在本机 8086 / 27017 起一个裸机

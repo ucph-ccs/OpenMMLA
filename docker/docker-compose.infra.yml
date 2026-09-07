@@ -58,7 +58,9 @@ services:
       - influxdb-data:/var/lib/influxdb2
       - influxdb-config:/etc/influxdb2
     ports:
-      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:8086:8086"
+      # host port is overridable so this stack can share a machine with another
+      # project's influxdb (e.g. one already holding 8086 on loopback)
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${INFLUXDB_PORT:-8086}:8086"
     healthcheck:
       # /health needs no token, and curl ships in the official image
       test: ["CMD", "curl", "-sf", "http://localhost:8086/health"]
@@ -89,7 +91,7 @@ services:
       - mongodb-data:/data/db
       - mongodb-config:/data/configdb
     ports:
-      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:27017:27017"
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MONGODB_PORT:-27017}:27017"
     healthcheck:
       # mongosh is the shell in 7.x (the legacy `mongo` binary is gone) and ping needs no
       # auth, so this keeps working if credentials are enabled later
