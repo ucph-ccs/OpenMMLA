@@ -2190,29 +2190,30 @@ class ServicePanel(Widget):
         height: 3;
         margin-left: 1;
     }
-    #svc-target-hint {
+    #svc-target-local-note {
         display: none;
-        width: auto;
+        width: 1fr;
+        height: 3;
         padding-top: 1;
-        margin-left: 1;
         color: $text-muted;
         text-style: italic;
     }
-    /* System Services are always edited on this machine: fade the Host bar
-       there so it reads as "not applicable" instead of hiding it, and keep
-       the chosen host for the next service node */
+    /* System Services are always edited on this machine: swap the selector
+       for a "Local" note there instead of showing the remembered host greyed
+       out, keeping the bar's height so the content below does not jump; the
+       chosen host is kept for the next service node */
     #svc-target-bar.local-only Label {
         color: $text-muted;
     }
     #svc-target-bar.local-only Select,
     #svc-target-bar.local-only Button {
-        opacity: 0.5;
+        display: none;
     }
-    #svc-target-bar.local-only #svc-target-hint {
+    #svc-target-bar.local-only #svc-target-local-note {
         display: block;
     }
     /* the bar must stay one row: never let a long "name  (offline ✗)" label
-       wrap when the hint takes its share of the width */
+       wrap at narrow terminal widths */
     #svc-target-select SelectCurrent #label {
         text-wrap: nowrap;
         text-overflow: ellipsis;
@@ -2346,12 +2347,10 @@ class ServicePanel(Widget):
             with Horizontal(id="svc-target-bar"):
                 yield Label("Host:")
                 yield Select(target_options, value="local", id="svc-target-select")
-                hint = Static("(local only)", id="svc-target-hint")
-                hint.tooltip = (
-                    "System Services are stored in this project on this machine; "
-                    "the selected host has no effect here and is kept for the service nodes."
+                yield Static(
+                    "Local  (System Services live in this project)",
+                    id="svc-target-local-note",
                 )
-                yield hint
                 yield Button("↻", variant="primary", compact=True, id="svc-target-refresh")
             with Vertical(id="svc-content-area"):
                 yield Static(
@@ -2467,12 +2466,14 @@ class ServicePanel(Widget):
             return "local"
 
     def _set_host_bar_enabled(self, enabled: bool) -> None:
-        """grey out the Host bar on nodes that are always edited on this machine.
+        """swap the Host selector for a "Local" note on nodes that are always
+        edited on this machine.
 
         System Services (SSH profiles, experiments, tasks and the shared service
         sections) live in the local project, so the selected host has no effect
-        there. The bar is faded rather than hidden, and its value is left alone
-        so the next service node lands on the same host."""
+        there. Showing the remembered host greyed out was misleading, so the
+        selector and its refresh button are hidden instead; their value is left
+        alone so the next service node lands on the same host."""
         try:
             bar = self.query_one("#svc-target-bar", Horizontal)
             select = self.query_one("#svc-target-select", Select)
