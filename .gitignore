@@ -46,6 +46,7 @@ tests/*
 twine.txt
 docs/paper.md
 config/ssh_profiles.yml
+config/experiments.yaml
 
 # Ignore specific files at any level
 **/config.yml

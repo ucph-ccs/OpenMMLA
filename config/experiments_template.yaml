@@ -1,0 +1,25 @@
+# experiment registry template.
+#
+# copy this file to experiments.yaml and add your own experiments, or manage
+# them from the TUI (Launcher -> System Services -> Experiments), which writes
+# the same file. experiments.yaml is gitignored because it holds participant
+# names and descriptions from your own study — personal data that should not
+# reach a shared repository.
+#
+# task_type must match a file under config/tasks/ (e.g. microbit_circuit ->
+# config/tasks/microbit_circuit.yaml).
+
+active_experiments:
+- experiment_id: <EXPERIMENT_ID>      # e.g. exp_20260907_microbit
+  title: <EXPERIMENT_TITLE>
+  status: active                      # active | inactive
+  task_type: <TASK_TYPE>              # e.g. microbit_circuit
+
+# one entry per participant, keyed by experiment id then participant name.
+# tag_id is the AprilTag worn by that participant; group_id groups them.
+assignments:
+  <EXPERIMENT_ID>:
+    <PARTICIPANT_NAME>:
+      group_id: group_01
+      tag_id: '1'
+      description: <SHORT_APPEARANCE_NOTE>
