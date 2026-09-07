@@ -1,0 +1,106 @@
+# Central infrastructure stack — InfluxDB (8086) + MongoDB (27017) for the Uber Server.
+# Ports match config/system_services.yml, so pipelines only need their host name changed.
+#
+# Run from the repository root, on the machine that should hold the databases:
+#   cp docker/.env.example docker/.env      # then fill in the secrets it lists
+#   docker compose -f docker/docker-compose.infra.yml up -d
+#
+# Keep the secrets in docker/.env rather than the shell: compose reads it for every
+# subcommand, so `ps`, `logs` and `down` behave the same in any shell and after a reboot.
+#
+# Requirements on the host: Docker Engine only (no GPU, no nvidia-container-toolkit).
+# The databases live in named volumes — `down` keeps them, `down -v` DESTROYS them.
+#
+# SECURITY: both ports publish on every host interface, and on Linux Docker's NAT rules run
+# before ufw, so a ufw rule does NOT block them. MongoDB starts WITHOUT authentication
+# unless MONGO_ROOT_USER and MONGO_ROOT_PASSWORD are both set on the very first start.
+#
+# Setup, backups, migrating off the bare-metal databases and known caveats:
+# docker/README.md -> 中心基础设施 (InfluxDB / MongoDB)
+#
+# Redis (6379) and Mosquitto (1883) would join this same file if they are ever
+# containerized too; today they stay bare-metal via pipelines/uber-server/Makefile.
+
+name: openmmla-infra
+
+x-logging: &logging
+  # stock docker never rotates json-file logs, and mongod logs every client connect
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  influxdb:
+    <<: *logging
+    image: influxdb:2.7.12
+    restart: unless-stopped
+    # a database gets more than compose's default 10s to flush and close cleanly
+    stop_grace_period: 60s
+    environment:
+      # honored only on the FIRST start against an empty influxdb-data volume; editing
+      # them afterwards silently does nothing (see 已知注意点 in docker/README.md)
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: "${INFLUXDB_INIT_USERNAME:-admin}"
+      # empty fails the first start (influx setup demands 8+ chars) and the container
+      # then restart-loops — check `docker compose ... logs influxdb` if 8086 never opens
+      DOCKER_INFLUXDB_INIT_PASSWORD: "${INFLUXDB_INIT_PASSWORD:-}"
+      # org and bucket must match config/system_services.yml
+      DOCKER_INFLUXDB_INIT_ORG: "${INFLUXDB_INIT_ORG:-admin}"
+      DOCKER_INFLUXDB_INIT_BUCKET: "${INFLUXDB_INIT_BUCKET:-mmla-data}"
+      # the same value goes into TUI System Services -> InfluxDB -> token. left empty,
+      # influx generates one; recover it with `... exec influxdb influx auth list`
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: "${INFLUXDB_INIT_ADMIN_TOKEN:-}"
+    volumes:
+      # data (influxd.bolt + engine) and the server/CLI config, both declared VOLUME
+      # by the image — the admin token is recoverable from /etc/influxdb2/influx-configs
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    ports:
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:8086:8086"
+    healthcheck:
+      # /health needs no token, and curl ships in the official image
+      test: ["CMD", "curl", "-sf", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # the first start runs the whole setup wrapper before 8086 opens
+      start_period: 40s
+
+  mongodb:
+    <<: *logging
+    image: mongo:7.0.40-jammy
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      # auth is opt-in and applies only on the FIRST start against an empty mongodb-data
+      # volume; both empty keeps the credential-free behaviour of the bare-metal setup,
+      # both set adds --auth and creates the root user. setting only one makes the
+      # container restart-loop while `up -d` still reports success.
+      # with auth on, the URL becomes mongodb://<user>:<pass>@server-01.local:27017/?authSource=admin
+      # — and note that MongoDB.url is stored in PLAINTEXT in the git-tracked
+      # config/system_services.yml, since only key names like token/password are encrypted
+      MONGO_INITDB_ROOT_USERNAME: "${MONGO_ROOT_USER:-}"
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_ROOT_PASSWORD:-}"
+    volumes:
+      # /data/db holds the database; /data/configdb is declared VOLUME by the image and is
+      # named here only so container re-creation doesn't pile up anonymous volumes
+      - mongodb-data:/data/db
+      - mongodb-config:/data/configdb
+    ports:
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:27017:27017"
+    healthcheck:
+      # mongosh is the shell in 7.x (the legacy `mongo` binary is gone) and ping needs no
+      # auth, so this keeps working if credentials are enabled later
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  influxdb-data:
+  influxdb-config:
+  mongodb-data:
+  mongodb-config:

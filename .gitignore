@@ -47,8 +47,10 @@ twine.txt
 docs/paper.md
 config/ssh_profiles.yml
 config/experiments.yaml
+.env
 
 # Ignore specific files at any level
+**/.env
 **/config.yml
 
 # Unignore specific files

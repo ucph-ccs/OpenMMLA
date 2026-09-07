@@ -98,6 +98,10 @@ The following services are typically run on a dedicated **Uber Server** to provi
 - [Nginx](https://github.com/nginx/nginx?tab=readme-ov-file#downloading-and-installing) (optional): Load balancer for AI/Algorithm services and RTMP server for streams
 - [Dashboard](docs/dashboard.md) (optional): Flask backend with a dependency-free static frontend for real/post-time visualizations
 
+> **Docker alternative for InfluxDB + MongoDB**: instead of installing those two natively, run them as containers on the Uber Server with [`docker/docker-compose.infra.yml`](docker/docker-compose.infra.yml). On that host, clone the repo (or just copy those two files — the stack needs no build context), then `cp docker/.env.example docker/.env`, fill in the two secrets it lists, and `docker compose -f docker/docker-compose.infra.yml up -d`.
+> Point `InfluxDB.url` / `MongoDB.url` at that host from the TUI (e.g. `http://server-01.local:8086`, `mongodb://server-01.local:27017`) and paste the same token into `InfluxDB.token`.
+> ⚠️ The containers start **empty** — migrate first if you have existing data — and MongoDB starts with **no authentication**, publishing 27017 on every interface. Read [docker/README.md](docker/README.md) before pointing a live deployment at it: migration, backups, MongoDB auth, and LAN exposure are all covered there.
+
 <details>
 <summary>Services Installation</summary>
 
