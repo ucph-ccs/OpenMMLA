@@ -73,6 +73,14 @@ class ServiceCard(Widget):
             self.service_name = service_name
             self.params = params or {}
 
+    class StopAllRequested(Message):
+        """stop a collection session on every host it may be recording on."""
+
+        def __init__(self, service_name: str, params: dict | None = None) -> None:
+            super().__init__()
+            self.service_name = service_name
+            self.params = params or {}
+
     class ViewLogsRequested(Message):
         def __init__(self, service_name: str) -> None:
             super().__init__()
@@ -244,10 +252,16 @@ class ServiceCard(Widget):
         service_def: ServiceDef,
         is_running: bool = False,
         stack_components: list[str] | None = None,
+        initial_collection_role: str = "audio",
     ) -> None:
         super().__init__()
         self.service_def = service_def
         self._is_running = is_running
+        # which of the collection card's Audio/Video tabs opens first; the
+        # launcher passes back whatever tab was showing before a rebuild
+        self._initial_collection_role = (
+            initial_collection_role if initial_collection_role in ("audio", "video") else "audio"
+        )
         self._param_values = {
             param.flag: self._initial_param_value(param)
             for param in self.service_def.params
@@ -391,9 +405,12 @@ class ServiceCard(Widget):
                 yield Static(f"  {self.service_def.description}", classes="card-meta")
             yield Static(f"  Status: {status_text}", classes="card-status")
 
-            with TabbedContent(id=_safe_id(f"collection_tabs__{self.service_def.name}")):
+            with TabbedContent(
+                initial=self._collection_tab_id(self._initial_collection_role),
+                id=self._collection_tabs_id(),
+            ):
                 for label, role in (("Audio", "audio"), ("Video", "video")):
-                    with TabPane(label, id=_safe_id(f"collection_tab__{self.service_def.name}__{role}")):
+                    with TabPane(label, id=self._collection_tab_id(role)):
                         yield from self._compose_collection_role(role)
 
     def _compose_collection_role(self, role: str) -> ComposeResult:
@@ -420,6 +437,14 @@ class ServiceCard(Widget):
                 variant="error",
                 compact=True,
                 id=_safe_id(f"stop_collection__{self.service_def.name}__{role}"),
+            )
+            # recordings for one session usually run on several machines at
+            # once; this stops them all without visiting each host in turn
+            yield Button(
+                "Stop All Hosts",
+                variant="error",
+                compact=True,
+                id=_safe_id(f"stop_all_collection__{self.service_def.name}__{role}"),
             )
             yield Button(
                 "Logs",
@@ -557,6 +582,47 @@ class ServiceCard(Widget):
 
     def _collection_param_id(self, role: str, kind: str, flag: str) -> str:
         return _safe_id(f"param_{kind}__{self.service_def.name}__{role}__{flag}")
+
+    def _collection_tabs_id(self) -> str:
+        return _safe_id(f"collection_tabs__{self.service_def.name}")
+
+    def _collection_tab_id(self, role: str) -> str:
+        return _safe_id(f"collection_tab__{self.service_def.name}__{role}")
+
+    def active_collection_role(self) -> str:
+        """the Audio/Video tab currently showing on a collection card."""
+        if self.service_def.launch_type != "collection":
+            return ""
+        try:
+            active = self.query_one(f"#{self._collection_tabs_id()}", TabbedContent).active
+        except Exception:
+            return self._initial_collection_role
+        for role in ("audio", "video"):
+            if active == self._collection_tab_id(role):
+                return role
+        return self._initial_collection_role
+
+    def collection_snapshot(self) -> dict:
+        """every collection control's current value plus the active tab.
+
+        The launcher stores this before it rebuilds the card (switching host,
+        refreshing) so the user's choices survive the rebuild. Audio and Video
+        render their own widgets for the shared flags, so the active tab wins
+        for anything both panes carry."""
+        if self.service_def.launch_type != "collection":
+            return {}
+        active = self.active_collection_role()
+        ordered = [role for role in ("audio", "video") if role != active] + [active]
+        values: dict[str, Any] = {}
+        for role in ordered:
+            for flag, value in self._collect_collection_params(role).items():
+                if (
+                    flag not in values
+                    or isinstance(value, (bool, int))
+                    or str(value or "").strip()
+                ):
+                    values[flag] = value
+        return {"role": active, "values": values}
 
     def _collection_count_param(self, role: str) -> ParamDef | None:
         count_flag = next(
@@ -734,6 +800,35 @@ class ServiceCard(Widget):
                     sel.value = str(current)
         self.service_def = replace(self.service_def, params=params)
 
+    def select_collection_session(self, session_id: str) -> None:
+        """point both role tabs at a session, adding it to the options if new.
+
+        Called when a launch resolves (or creates) the session id, so the card
+        on screen agrees with it without waiting for a rebuild."""
+        if self.service_def.launch_type != "collection" or not session_id:
+            return
+        choices: list[str] = []
+        params = []
+        for param in self.service_def.params:
+            if param.flag != "--session-id":
+                params.append(param)
+                continue
+            choices = [str(choice) for choice in param.choices]
+            if session_id not in choices:
+                choices.append(session_id)
+            params.append(replace(param, choices=choices, default=session_id))
+        self.service_def = replace(self.service_def, params=params)
+        self._param_values["--session-id"] = session_id
+        for role in ("audio", "video"):
+            try:
+                sel = self.query_one(
+                    f"#{self._collection_param_id(role, 'select', '--session-id')}", Select
+                )
+            except Exception:
+                continue
+            sel.set_options((choice, choice) for choice in choices)
+            sel.value = session_id
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
         if self.service_def.launch_type == "collection":
@@ -745,6 +840,10 @@ class ServiceCard(Widget):
                 if btn_id == _safe_id(f"stop_collection__{self.service_def.name}__{role}"):
                     params = self._collect_collection_params(role)
                     self.post_message(self.StopRequested(self.service_def.name, params))
+                    return
+                if btn_id == _safe_id(f"stop_all_collection__{self.service_def.name}__{role}"):
+                    params = self._collect_collection_params(role)
+                    self.post_message(self.StopAllRequested(self.service_def.name, params))
                     return
                 if btn_id == _safe_id(f"logs_collection__{self.service_def.name}__{role}"):
                     self.post_message(self.ViewLogsRequested(self.service_def.name))

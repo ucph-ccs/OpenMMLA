@@ -2236,6 +2236,18 @@ class ServicePanel(Widget):
             p.name for p in load_ssh_profiles()
         ]
         self._collection_last_params: dict[tuple[str, str], dict] = {}
+        # collection choices that describe the *recording session* rather than
+        # the machine doing the recording: they follow the user from host to
+        # host, so setting up a multi-machine session is one pass, not one
+        # full re-entry per host.
+        self._collection_sticky: dict[str, object] = {}
+        # ...and the ones that are per-machine (output root, host label), kept
+        # so a rebuild on the same host does not discard local edits
+        self._collection_target_sticky: dict[str, dict[str, object]] = {}
+        self._collection_role: str = "audio"
+        # session id -> hosts this TUI launched it on, so "Stop All Hosts"
+        # reaches a machine even when it is currently unreachable
+        self._collection_launch_targets: dict[str, set[str]] = {}
         self._pending_collection_delete: tuple[str, str] | None = None
         self._target_config_cache: dict[tuple[str, str], dict] = {}
         self._target_platform_cache: dict[str, str] = {}
@@ -2410,6 +2422,9 @@ class ServicePanel(Widget):
                     exclusive=False,
                 )
                 return
+            # snapshot against the host the card still belongs to, so per-host
+            # values (output root, host label) are not filed under the new one
+            self._capture_collection_card_state(self._last_target)
             self._last_target = val
             if val != "local":
                 self._log(f"[yellow]Switching host to '{val}' — loading remote state...[/yellow]")
@@ -2418,7 +2433,7 @@ class ServicePanel(Widget):
             # stale states from the previous target should not linger
             self._svc_states.clear()
             self.run_worker(
-                self._reload_current_service_view(),
+                self._reload_current_service_view(capture=False),
                 group=_LAUNCHER_UI_WORKER_GROUP,
                 exclusive=True,
             )
@@ -2521,6 +2536,7 @@ class ServicePanel(Widget):
         if node_str.startswith("__cat_") or node_str == "__shared__":
             return
 
+        self._capture_collection_card_state()
         content_area = self.query_one("#svc-content-area", Vertical)
         await content_area.remove_children()
         self._current_pipeline = None
@@ -2579,8 +2595,14 @@ class ServicePanel(Widget):
 
         await self._mount_service_content(content_area, svc, is_running)
 
-    async def _reload_current_service_view(self) -> None:
-        """rebuild the selected service panel after target-dependent state changes."""
+    async def _reload_current_service_view(self, capture: bool = True) -> None:
+        """rebuild the selected service panel after target-dependent state changes.
+
+        `capture` is off for reloads that follow a launch: the launcher has
+        already recorded the resolved session id, and the card on screen still
+        shows the pre-launch selection."""
+        if capture:
+            self._capture_collection_card_state()
         if not self._current_service_name:
             self._build_tree()
             return
@@ -2722,6 +2744,7 @@ class ServicePanel(Widget):
             await scroll.mount(ServiceCard(
                 svc,
                 is_running=is_running,
+                initial_collection_role=self._collection_role,
             ))
             # calibration captures per-camera image folders; offer a manager to
             # browse/delete them without digging into the project on disk
@@ -2815,6 +2838,79 @@ class ServicePanel(Widget):
                 choices.append(choice)
         return choices
 
+    @staticmethod
+    def _collection_session_scoped_flags(svc: ServiceDef) -> set[str]:
+        """flags that describe the recording session, not the recording host.
+
+        These carry over when the Host selector changes: the same session is
+        normally recorded by several machines at once."""
+        return {comp.count_flag for comp in svc.components} | {
+            "--session-id",
+            "--experiment-group",
+        }
+
+    def _capture_collection_card_state(self, target: str | None = None) -> None:
+        """remember the collection card's choices before the card is rebuilt.
+
+        `target` names the host the card was built for; on a host switch that
+        is the *previous* one, since the Select has already moved on."""
+        target = target or self._get_panel_target()
+        try:
+            cards = list(self.query(ServiceCard))
+        except Exception:
+            return
+        for card in cards:
+            if card.service_def.launch_type != "collection":
+                continue
+            snapshot = card.collection_snapshot()
+            if not snapshot:
+                continue
+            self._collection_role = snapshot.get("role") or self._collection_role
+            shared_flags = self._collection_session_scoped_flags(card.service_def)
+            target_values = self._collection_target_sticky.setdefault(target, {})
+            for flag, value in (snapshot.get("values") or {}).items():
+                if flag == "--session-id":
+                    # "" records an explicit "Create MongoDB Session" pick, which
+                    # must survive a host switch just like a real session id does
+                    self._collection_sticky[flag] = (
+                        "" if _is_new_collection_session_choice(value) else _safe_session_id(value)
+                    )
+                    continue
+                if not isinstance(value, (bool, int)) and not str(value or "").strip():
+                    continue
+                if flag in shared_flags:
+                    self._collection_sticky[flag] = value
+                else:
+                    target_values[flag] = value
+            break
+
+    def _remember_collection_session(self, session_id: object) -> None:
+        """make the session a launch just resolved the default everywhere.
+
+        The first host creates the MongoDB session; every host after it should
+        record into that same session rather than creating another one."""
+        session_id = _safe_session_id(session_id)
+        if not session_id:
+            return
+        self._collection_sticky["--session-id"] = session_id
+        # a brand new session is in no target's cached choice list yet
+        self._invalidate_session_choice_cache()
+        # keep the card on screen in step: a capture before the next rebuild
+        # would otherwise read back a stale "Create MongoDB Session"
+        try:
+            cards = list(self.query(ServiceCard))
+        except Exception:
+            return
+        for card in cards:
+            if card.service_def.launch_type == "collection":
+                card.select_collection_session(session_id)
+
+    def _remember_collection_launch(self, target: str, session_id: object) -> None:
+        session_id = _safe_session_id(session_id)
+        if not session_id:
+            return
+        self._collection_launch_targets.setdefault(session_id, set()).add(target)
+
     def _service_with_collection_defaults(self, svc: ServiceDef, target: str | None = None) -> ServiceDef:
         if svc.launch_type != "collection":
             return svc
@@ -2823,18 +2919,36 @@ class ServicePanel(Widget):
         defaults = self._collection_defaults_for_current_target(target)
         session_choices = self._artifact_session_choices_for_target(target)
         experiment_group_choices = self._collection_experiment_group_choices()
-        last_session = self._collection_session_id(
-            self._collection_last_params.get((target, svc.name), {})
-        )
-        if last_session and last_session not in session_choices and not self._svc_states.get(svc.name, False):
-            last_session = ""
+        last_params = self._collection_last_params.get((target, svc.name), {})
+        sticky = self._collection_sticky
+        target_sticky = self._collection_target_sticky.get(target, {})
+        shared_flags = self._collection_session_scoped_flags(svc)
+
+        if "--session-id" in sticky:
+            # an explicit pick (or a session a launch just created): always
+            # offered, even before the databases list it
+            last_session = _safe_session_id(sticky["--session-id"])
+        else:
+            last_session = self._collection_session_id(last_params)
+            if (
+                last_session
+                and last_session not in session_choices
+                and not self._svc_states.get(svc.name, False)
+            ):
+                last_session = ""
         last_experiment_group = str(
-            self._collection_last_params.get((target, svc.name), {}).get("--experiment-group") or ""
+            sticky.get("--experiment-group")
+            or last_params.get("--experiment-group")
+            or ""
         ).strip()
         params = []
         for param in self._collection_param_defs(svc, defaults):
             default = defaults.get(param.flag, param.default)
             choices = list(param.choices)
+            if param.flag in shared_flags and param.flag in sticky:
+                default = sticky[param.flag]
+            elif param.flag in target_sticky:
+                default = target_sticky[param.flag]
             if param.flag == "--session-id":
                 choices = [_NEW_COLLECTION_SESSION_CHOICE]
                 for session_id in [last_session, *session_choices]:
@@ -4415,6 +4529,9 @@ class ServicePanel(Widget):
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
             return
+        # capture before launching: the launch overwrites the sticky session id
+        # with the one it resolves, and the reload afterwards skips the capture
+        self._capture_collection_card_state()
         svc = self._service_for_current_target(svc)
 
         target = self._get_panel_target()
@@ -4493,6 +4610,32 @@ class ServicePanel(Widget):
             self._stop_remote(svc, target, event.params)
         else:
             self._stop_service(svc, event.params)
+        self.set_timer(2.0, self._refresh_visible_statuses)
+
+    def on_service_card_stop_all_requested(self, event: ServiceCard.StopAllRequested) -> None:
+        """stop one collection session's audio and video on every host at once."""
+        svc = next((s for s in self._services if s.name == event.service_name), None)
+        if svc is None or svc.launch_type != "collection":
+            return
+
+        target = self._get_panel_target()
+        params = self._collection_params_for_action(svc, event.params, target)
+        session_id = self._collection_session_id(params)
+        if not session_id:
+            self._log("[yellow]Select a collection session before stopping it on every host.[/yellow]")
+            return
+
+        targets = self._collection_stop_targets(session_id)
+        self._log(
+            f"[red]Stopping collection session '{session_id}' on {len(targets)} host(s): "
+            f"{', '.join(targets)}[/red]"
+        )
+        self.run_worker(
+            self._run_collection_stop_all(session_id, targets),
+            name=f"collection-stop-all:{session_id}",
+            group=_LAUNCHER_COLLECTION_STOP_WORKER_GROUP,
+            exclusive=False,
+        )
         self.set_timer(2.0, self._refresh_visible_statuses)
 
     def on_service_card_refresh_requested(self, event: ServiceCard.RefreshRequested) -> None:
@@ -4740,23 +4883,49 @@ class ServicePanel(Widget):
         else:
             self._log(f"[red]Remote collection delete failed (exit {rc}).[/red]")
 
-    async def _run_collection_remote_stop(self, profile_name: str, session_id: str) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
-            return
+    async def _mark_session_ended(self, session_id: str, target: str = "local") -> None:
+        """record the stop in MongoDB without blocking the event loop."""
+        note = await asyncio.to_thread(self._mark_mongodb_session_ended, session_id, target)
+        if note:
+            self._log(note)
 
+    async def _collection_stop_on_target(self, target: str, session_id: str) -> tuple[int, str]:
+        """run the session-scoped stop command on one host.
+
+        The command matches both the audio and the video recorders of that one
+        session, so a single run stops everything the host records for it."""
         command = self._collection_stop_command(session_id)
-        remote_command = f"bash -lc {shlex.quote(f'cd $HOME && {command}')}"
-        self._log(
-            f"[red]Stopping collection session '{session_id}' on '{profile_name}' ...[/red]"
-        )
-        proc = await ssh_run_async(profile, remote_command)
+        if target == "local":
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=self._root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        else:
+            profile = get_profile_by_name(target)
+            if profile is None:
+                return 127, f"SSH profile '{target}' not found."
+            proc = await ssh_run_async(
+                profile,
+                f"bash -lc {shlex.quote(f'cd $HOME && {command}')}",
+            )
         output = ""
         if proc.stdout is not None:
             async for line in proc.stdout:
                 output += line.decode(errors="replace")
         rc = await proc.wait()
+        return rc, output
+
+    async def _run_collection_remote_stop(self, profile_name: str, session_id: str) -> None:
+        if get_profile_by_name(profile_name) is None:
+            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
+            return
+
+        self._log(
+            f"[red]Stopping collection session '{session_id}' on '{profile_name}' ...[/red]"
+        )
+        rc, output = await self._collection_stop_on_target(profile_name, session_id)
         for line in output.strip().splitlines():
             self._log(rich_escape(line))
         if rc == 0:
@@ -4765,28 +4934,70 @@ class ServicePanel(Widget):
             )
         else:
             self._log(f"[red]Remote collection stop failed (exit {rc}).[/red]")
+        await self._mark_session_ended(session_id, profile_name)
         await self._reload_current_service_view()
 
     async def _run_collection_local_stop(self, session_id: str) -> None:
-        command = self._collection_stop_command(session_id)
         self._log(f"[red]Stopping collection session '{session_id}' locally ...[/red]")
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=self._root,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        output = ""
-        if proc.stdout is not None:
-            async for line in proc.stdout:
-                output += line.decode(errors="replace")
-        rc = await proc.wait()
+        rc, output = await self._collection_stop_on_target("local", session_id)
         for line in output.strip().splitlines():
             self._log(rich_escape(line))
         if rc == 0:
             self._log(f"[green]Stop command completed for collection session '{session_id}'.[/green]")
         else:
             self._log(f"[yellow]Collection stop command finished with warnings (exit {rc}).[/yellow]")
+        await self._mark_session_ended(session_id, "local")
+        await self._reload_current_service_view()
+
+    def _collection_stop_targets(self, session_id: str) -> list[str]:
+        """every host that could still be recording this session.
+
+        Hosts this TUI launched the session on come first and are always
+        included; the rest of the configured hosts are swept too (the stop
+        command is session-scoped, so it is a no-op where nothing matches),
+        minus the ones a probe has shown to be offline."""
+        targets: list[str] = ["local"]
+        for name in sorted(self._collection_launch_targets.get(session_id, set())):
+            if name not in targets:
+                targets.append(name)
+        for profile in load_ssh_profiles():
+            if profile.name in targets:
+                continue
+            if self._target_states.get(profile.name) == "offline":
+                continue
+            targets.append(profile.name)
+        return targets
+
+    async def _run_collection_stop_all(self, session_id: str, targets: list[str]) -> None:
+        results = await asyncio.gather(
+            *(self._collection_stop_on_target(target, session_id) for target in targets),
+            return_exceptions=True,
+        )
+        stopped = 0
+        for target, result in zip(targets, results):
+            label = "local" if target == "local" else f"'{target}'"
+            if isinstance(result, BaseException):
+                self._log(f"[red]{label}: stop failed ({result}).[/red]")
+                continue
+            rc, output = result
+            for line in output.strip().splitlines():
+                # a bare "[host]" prefix would be swallowed as rich markup
+                self._log(f"  [cyan]{rich_escape(target)}[/cyan]  {rich_escape(line)}")
+            if rc == 0:
+                stopped += 1
+                self._log(f"[green]{label}: stop command completed.[/green]")
+            else:
+                self._log(f"[yellow]{label}: stop command finished with warnings (exit {rc}).[/yellow]")
+        if stopped == len(targets):
+            self._log(
+                f"[green]Collection session '{session_id}' stopped on all {len(targets)} host(s).[/green]"
+            )
+        else:
+            self._log(
+                f"[yellow]Collection session '{session_id}': {stopped}/{len(targets)} host(s) "
+                f"stopped cleanly; check the lines above.[/yellow]"
+            )
+        await self._mark_session_ended(session_id, "local")
         await self._reload_current_service_view()
 
     @staticmethod
@@ -5515,6 +5726,65 @@ class ServicePanel(Widget):
         self._invalidate_session_choice_cache()
         return session_id
 
+    def _mark_mongodb_session_ended(self, session_id: str, target: str = "local") -> str:
+        """flip one session's MongoDB record to ended and return a log line.
+
+        Stopping the recorders is the real work; this record keeping must never
+        break a stop, so a missing config, a missing pymongo, an unreachable
+        server and a session that was never registered all come back as a
+        warning line instead of an exception. Runs off the event loop (the
+        remote config lookup can go over SSH), hence the returned string rather
+        than a direct self._log call."""
+        if not session_id:
+            return ""
+
+        mongo_config, _ = self._collection_mongodb_config(target)
+        if not mongo_config:
+            return (
+                f"[yellow]No usable MongoDB config found; session '{session_id}' "
+                f"still shows as active.[/yellow]"
+            )
+
+        try:
+            from pymongo import MongoClient
+
+            from openmmla.utils.constants import MONGODB_DEFAULT_DB
+        except ModuleNotFoundError as e:
+            return f"[yellow]Cannot mark session '{session_id}' ended: {e}[/yellow]"
+
+        db_name = str(mongo_config.get("db") or MONGODB_DEFAULT_DB)
+        url = str(mongo_config.get("url") or "").strip()
+        try:
+            client = MongoClient(
+                url,
+                serverSelectionTimeoutMS=1500,
+                connectTimeoutMS=1500,
+            )
+            try:
+                client.admin.command("ping")
+                result = client[db_name]["sessions"].update_one(
+                    {"session_id": session_id},
+                    {"$set": {
+                        "end_time": datetime.now(timezone.utc),
+                        "status": "ended",
+                    }},
+                )
+            finally:
+                client.close()
+        except Exception as e:
+            return (
+                f"[yellow]MongoDB unreachable ({e}); session '{session_id}' "
+                f"still shows as active.[/yellow]"
+            )
+
+        if result.matched_count:
+            return f"[green]Session '{session_id}' marked ended in MongoDB.[/green]"
+        # sessions started while MongoDB was down were never registered
+        return (
+            f"[yellow]Session '{session_id}' is not registered in MongoDB; "
+            f"nothing to mark ended.[/yellow]"
+        )
+
     def _create_collection_mongodb_session(self, experiment_group: object, target: str = "local") -> str:
         return self._create_mongodb_session(experiment_group, target=target, created_by="tui_collection")
 
@@ -5693,18 +5963,30 @@ class ServicePanel(Widget):
     @staticmethod
     def _collection_stop_command(session_id: str) -> str:
         quoted_session = shlex.quote(session_id)
+
+        # the session id reaches each pattern through $SESSION_ID rather than
+        # being baked into the pattern text, so no complete pattern ever
+        # appears in this command's own argv. Otherwise the shell running it
+        # matches its own patterns -- "audio_recording.sh.*--session-id <id>"
+        # is spelled out inside the "scripts/collection/..." pattern next to
+        # it -- and linux pgrep/pkill -f, which scan every /proc/PID/cmdline
+        # and only skip themselves, would report the recorders as still alive
+        # and signal the stop command itself.
+        def pattern_word(prefix: str) -> str:
+            return shlex.quote(_non_self_matching_process_pattern(prefix)) + '"$SESSION_ID"'
+
         recorder_patterns = " ".join(
-            shlex.quote(_non_self_matching_process_pattern(pattern))
-            for pattern in (
-                f"openmmla.commands.collect.audio.*--session-id {session_id}",
-                f"openmmla.commands.collect.video.*--session-id {session_id}",
-                f"scripts/collection/audio_recording.sh.*--session-id {session_id}",
-                f"scripts/collection/video_recording.sh.*--session-id {session_id}",
-                f"audio_recording.sh.*--session-id {session_id}",
-                f"video_recording.sh.*--session-id {session_id}",
+            pattern_word(prefix)
+            for prefix in (
+                "openmmla.commands.collect.audio.*--session-id ",
+                "openmmla.commands.collect.video.*--session-id ",
+                "scripts/collection/audio_recording.sh.*--session-id ",
+                "scripts/collection/video_recording.sh.*--session-id ",
+                "audio_recording.sh.*--session-id ",
+                "video_recording.sh.*--session-id ",
             )
         )
-        ffmpeg_pattern = shlex.quote(_non_self_matching_process_pattern(f"ffmpeg.*{session_id}"))
+        ffmpeg_pattern = pattern_word("ffmpeg.*")
         return (
             f"SESSION_ID={quoted_session}; "
             "echo \"Stopping OpenMMLA collection session: $SESSION_ID\"; "
@@ -5797,6 +6079,8 @@ class ServicePanel(Widget):
             self._log("[red]Could not resolve a collection session id.[/red]")
             return
         self._collection_last_params[(self._get_panel_target(), svc.name)] = dict(prepared)
+        self._remember_collection_session(prepared.get("--session-id"))
+        self._remember_collection_launch("local", prepared.get("--session-id"))
         launched = 0
         self._log(f"  Session ID: {prepared['--session-id']}")
         self._log("  Sync time: auto; manifest will use the earliest common replay time")
@@ -5809,7 +6093,7 @@ class ServicePanel(Widget):
                 command = self._collection_component_command(comp, prepared, self._root)
                 run_cmd = f"cd {shlex.quote(self._root)} && {command}"
                 tab_cmds.append((label, run_cmd))
-                self._log(f"    [{label}] {command}")
+                self._log(rich_escape(f"    [{label}] {command}"))
         if tab_cmds and self._open_collection_terminal(tab_cmds):
             launched = len(tab_cmds)
 
@@ -5817,7 +6101,7 @@ class ServicePanel(Widget):
             output_root = str(prepared.get("--output-root") or "collection")
             self._log(f"[green]Collection recording started; files will be written under {output_root}.[/green]")
             self.run_worker(
-                self._reload_current_service_view(),
+                self._reload_current_service_view(capture=False),
                 group=_LAUNCHER_UI_WORKER_GROUP,
                 exclusive=True,
             )
@@ -5885,7 +6169,7 @@ class ServicePanel(Widget):
 
         self._log(f"  Launching {len(tab_cmds)} tab(s)...")
         for label, cmd in tab_cmds:
-            self._log(f"    [{label}] {cmd.split(' && ')[-1]}")
+            self._log(rich_escape(f"    [{label}] {cmd.split(' && ')[-1]}"))
 
         if sys.platform == "darwin":
             self._open_tabs_mac(tab_cmds)
@@ -6168,7 +6452,10 @@ class ServicePanel(Widget):
             if svc.launch_type == "bash":
                 tab_cmds = self._remote_bash_terminal_commands(svc, params, profile)
                 for label, command in tab_cmds:
-                    self._log(f"    [{label}] ssh {profile.ssh_destination()} {command.split(' bash -lc ', 1)[-1]}")
+                    self._log(rich_escape(
+                        f"    [{label}] ssh {profile.ssh_destination()} "
+                        f"{command.split(' bash -lc ', 1)[-1]}"
+                    ))
                 if tab_cmds and self._open_collection_terminal(tab_cmds):
                     self._log(f"[green]{svc.name} launched in SSH terminal(s).[/green]")
                 else:
@@ -6241,6 +6528,8 @@ class ServicePanel(Widget):
                     self._log("[red]Could not resolve a collection session id.[/red]")
                     return
                 self._collection_last_params[(profile_name, svc.name)] = dict(prepared)
+                self._remember_collection_session(prepared.get("--session-id"))
+                self._remember_collection_launch(profile_name, prepared.get("--session-id"))
                 self._log(f"  Session ID: {prepared['--session-id']}")
                 self._log("  Sync time: auto; manifest will use the earliest common replay time")
                 success, msg = ssh_test_connection(profile)
@@ -6258,12 +6547,12 @@ class ServicePanel(Widget):
                         command = self._collection_remote_component_command(comp, prepared)
                         ssh_cmd = self._collection_remote_terminal_command(profile, command)
                         tab_cmds.append((label, ssh_cmd))
-                        self._log(f"    [{label}] ssh {profile.ssh_destination()} {command}")
+                        self._log(rich_escape(f"    [{label}] ssh {profile.ssh_destination()} {command}"))
                 if tab_cmds and self._open_collection_terminal(tab_cmds):
                     launched = len(tab_cmds)
                     self._log(f"[green]{svc.name} launched in SSH terminal(s).[/green]")
                     self.run_worker(
-                        self._reload_current_service_view(),
+                        self._reload_current_service_view(capture=False),
                         group=_LAUNCHER_UI_WORKER_GROUP,
                         exclusive=True,
                     )

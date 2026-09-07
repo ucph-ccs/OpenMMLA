@@ -182,6 +182,8 @@ mmla collect-video --session-id demo --video-device /dev/video0 --camera-label c
 
 Recordings land in `artifacts/<session_id>/collection/<host>/{audio,video}`, together with `manifest.yml`/`manifest.json` containing the shared sync time and ready-to-use `file_dir` values for replay.
 
+One session is usually recorded by several machines. Set the Audio/Video tab, the recorder count and the session once, then switch the **Host** selector: the Launcher keeps that setup and reuses the session the first launch created, so each extra machine only needs a Start. Per-host values (Output Root, Host Label) still follow the host. **Stop All Hosts** stops every audio and video recorder of the selected session across all of them in one go.
+
 ### OpenMMLA Codebase Setup
 
 1.  **Clone the Repository:**
