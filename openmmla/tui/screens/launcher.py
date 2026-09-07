@@ -1684,13 +1684,22 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ("Flask", "Dashboard (backend API + web frontend)"),
             ("Celery", "Async task worker"),
         ]:
+            name = f"Uber: {svc_name}"
+            # only the services with a container equivalent in the infra compose
+            # file get a run-mode switch; the rest stay Makefile-only
+            params = (
+                [ParamDef("--mode", "Run mode", "str", "native", ["native", "docker"])]
+                if _make_target_for(name) in _INFRA_COMPOSE_SERVICES
+                else []
+            )
             services.append(ServiceDef(
-                name=f"Uber: {svc_name}",
+                name=name,
                 category="Infrastructure",
                 conda_env="uber-server",
                 config_dir=uber_dir,
                 launch_type="make",
                 description=desc,
+                params=params,
             ))
 
     return services
@@ -1941,6 +1950,16 @@ _STACK_COMPOSE_SERVICES = {
     "VLLMFrameAnalyzer": "frame-analyzer",
 }
 
+# central infrastructure compose stack (relative to the repo root); the Uber
+# cards listed below can drive either the bare-metal Makefile or these containers
+_INFRA_COMPOSE_FILE = "docker/docker-compose.infra.yml"
+
+# _make_target_for() name -> docker compose service name
+_INFRA_COMPOSE_SERVICES = {
+    "influxdb": "influxdb",
+    "mongodb": "mongodb",
+}
+
 
 def _stack_compose_rel_file(svc: ServiceDef) -> str | None:
     return _STACK_COMPOSE_FILES.get(svc.name)
@@ -1965,6 +1984,21 @@ def _compose_command(compose_rel_file: str, args: str, profiles: list[str] | Non
     """build a `docker compose` command relative to the repo root."""
     profile_part = "".join(f" --profile {p}" for p in (profiles or []))
     return f"docker compose -f {shlex.quote(compose_rel_file)}{profile_part} {args}"
+
+
+def _infra_compose_service(svc: ServiceDef) -> str | None:
+    """compose service name for an Uber card that has a container equivalent."""
+    if svc.launch_type != "make":
+        return None
+    return _INFRA_COMPOSE_SERVICES.get(_make_target_for(svc.name))
+
+
+def _infra_docker_mode(svc: ServiceDef, params: dict | None = None) -> bool:
+    """whether this card's Run mode asks for the container instead of the
+    bare-metal Makefile; anything but an explicit "docker" stays native."""
+    if _infra_compose_service(svc) is None:
+        return False
+    return str((params or {}).get("--mode") or "native").strip().lower() == "docker"
 
 
 def _stack_legacy_session(svc: ServiceDef) -> str | None:
@@ -2245,6 +2279,10 @@ class ServicePanel(Widget):
         # so a rebuild on the same host does not discard local edits
         self._collection_target_sticky: dict[str, dict[str, object]] = {}
         self._collection_role: str = "audio"
+        # (target, service name) -> "native" | "docker" for the infra cards; the
+        # card is rebuilt on every tree/host change and would otherwise fall back
+        # to the ParamDef default, silently sending Stop down the make path
+        self._infra_mode: dict[tuple[str, str], str] = {}
         # session id -> hosts this TUI launched it on, so "Stop All Hosts"
         # reaches a machine even when it is currently unreachable
         self._collection_launch_targets: dict[str, set[str]] = {}
@@ -2425,6 +2463,7 @@ class ServicePanel(Widget):
             # snapshot against the host the card still belongs to, so per-host
             # values (output root, host label) are not filed under the new one
             self._capture_collection_card_state(self._last_target)
+            self._capture_infra_mode(self._last_target)
             self._last_target = val
             if val != "local":
                 self._log(f"[yellow]Switching host to '{val}' — loading remote state...[/yellow]")
@@ -2537,6 +2576,7 @@ class ServicePanel(Widget):
             return
 
         self._capture_collection_card_state()
+        self._capture_infra_mode()
         content_area = self.query_one("#svc-content-area", Vertical)
         await content_area.remove_children()
         self._current_pipeline = None
@@ -2603,6 +2643,7 @@ class ServicePanel(Widget):
         shows the pre-launch selection."""
         if capture:
             self._capture_collection_card_state()
+            self._capture_infra_mode()
         if not self._current_service_name:
             self._build_tree()
             return
@@ -2849,6 +2890,24 @@ class ServicePanel(Widget):
             "--experiment-group",
         }
 
+    def _capture_infra_mode(self, target: str | None = None) -> None:
+        """remember an infra card's Run mode before the card is rebuilt."""
+        target = target or self._get_panel_target()
+        try:
+            cards = list(self.query(ServiceCard))
+        except Exception:
+            return
+        for card in cards:
+            svc = card.service_def
+            if _infra_compose_service(svc) is None:
+                continue
+            try:
+                mode = str((card.collect_params() or {}).get("--mode") or "").strip().lower()
+            except Exception:
+                continue
+            if mode in ("native", "docker"):
+                self._infra_mode[(target, svc.name)] = mode
+
     def _capture_collection_card_state(self, target: str | None = None) -> None:
         """remember the collection card's choices before the card is rebuilt.
 
@@ -3025,6 +3084,7 @@ class ServicePanel(Widget):
     def _service_for_target(self, svc: ServiceDef, target: str) -> ServiceDef:
         svc = self._service_with_collection_defaults(svc, target)
         svc = self._service_with_session_choices(svc, target)
+        svc = self._service_with_infra_mode(svc, target)
         if svc.name != "ASR Server":
             return svc
         config_path = os.path.join(svc.config_dir, "config.yml")
@@ -3034,6 +3094,21 @@ class ServicePanel(Widget):
             svc,
             conda_env=_asr_server_conda_env_from_config(config),
             description=f"ASR inference services (AudioInferer: {backend})",
+        )
+
+    def _service_with_infra_mode(self, svc: ServiceDef, target: str) -> ServiceDef:
+        """re-seed a rebuilt infra card with the Run mode last chosen for this host."""
+        if _infra_compose_service(svc) is None:
+            return svc
+        mode = self._infra_mode.get((target, svc.name))
+        if mode is None:
+            return svc
+        return replace(
+            svc,
+            params=[
+                replace(p, default=mode) if p.flag == "--mode" else p
+                for p in svc.params
+            ],
         )
 
     def _streams_for_pipeline_target(self, pipeline: PipelineDef) -> list:
@@ -4532,6 +4607,7 @@ class ServicePanel(Widget):
         # capture before launching: the launch overwrites the sticky session id
         # with the one it resolves, and the reload afterwards skips the capture
         self._capture_collection_card_state()
+        self._capture_infra_mode()
         svc = self._service_for_current_target(svc)
 
         target = self._get_panel_target()
@@ -5290,12 +5366,32 @@ class ServicePanel(Widget):
             self._log(f"[yellow]{svc.name} is not running ({target}). Start the service first.[/yellow]")
             return
 
+        # the Logs message carries no params, so read the card's controls directly
+        params = self._card_params(svc.name)
         if is_remote:
-            self._view_logs_remote(svc)
+            self._view_logs_remote(svc, params)
         else:
-            self._view_logs_local(svc)
+            self._view_logs_local(svc, params)
+
+    def _card_params(self, service_name: str) -> dict:
+        """current control values of the mounted card for a service, if any."""
+        for card in self.query(ServiceCard):
+            if card.service_def.name == service_name:
+                try:
+                    return card.collect_params()
+                except Exception:
+                    return {}
+        return {}
 
     def _logs_available(self, svc: ServiceDef, target: str) -> bool:
+        if _infra_compose_service(svc) is not None and _infra_docker_mode(
+            svc, self._card_params(svc.name)
+        ):
+            # a container that crash-loops never opens its port, and that is
+            # exactly when its logs are worth reading
+            if target == "local":
+                return os.path.isfile(os.path.join(self._root, _INFRA_COMPOSE_FILE))
+            return get_profile_by_name(target) is not None
         if svc.launch_type not in ("tmux", "vllm", "collection"):
             return False
         if _is_stack_service(svc):
@@ -5315,8 +5411,19 @@ class ServicePanel(Widget):
             return False
         return ssh_check_tmux(profile, _service_session_name(svc))
 
-    def _view_logs_local(self, svc: ServiceDef) -> None:
+    def _view_logs_local(self, svc: ServiceDef, params: dict | None = None) -> None:
         if svc.launch_type == "make":
+            if _infra_docker_mode(svc, params):
+                compose_path = self._infra_compose_path()
+                if compose_path is None:
+                    return
+                cmd = _compose_command(
+                    compose_path,
+                    f"logs --tail 80 --no-color {_infra_compose_service(svc)}",
+                )
+                self._log(f"  Running: {cmd}")
+                self._cmd.run(cmd)
+                return
             target = _make_target_for(svc.name)
             if target in _SYSTEM_SVC_PORTS:
                 self._log(f"[cyan]── Logs for {svc.name} ──[/cyan]")
@@ -5359,8 +5466,23 @@ class ServicePanel(Widget):
             self._log(line)
         self._log(f"[cyan]── End of logs ──[/cyan]")
 
-    def _view_logs_remote(self, svc: ServiceDef) -> None:
+    def _view_logs_remote(self, svc: ServiceDef, params: dict | None = None) -> None:
         if svc.launch_type == "make":
+            if _infra_docker_mode(svc, params):
+                profile = get_profile_by_name(self._get_panel_target())
+                remote_root = profile.remote_project_path if profile else "~/OpenMMLA"
+                # the infra compose file lives at the repo root, not in
+                # pipelines/uber-server like the Makefile does. no "cd" prefix:
+                # CommandSession routes those to its directory-change path, which
+                # discards the output we are trying to show
+                compose_path = _quote_remote_path(
+                    _remote_path_join(remote_root, _INFRA_COMPOSE_FILE)
+                )
+                service = _infra_compose_service(svc)
+                cmd = f"docker compose -f {compose_path} logs --tail 80 --no-color {service}"
+                self._log(f"  Running: {cmd}")
+                self._cmd.run(cmd)
+                return
             target = _make_target_for(svc.name)
             if target in _SYSTEM_SVC_PORTS:
                 log_cmds = {
@@ -5408,7 +5530,7 @@ class ServicePanel(Widget):
             elif svc.launch_type == "vllm":
                 self._launch_vllm_server(svc)
             elif svc.launch_type == "make":
-                self._launch_make(svc)
+                self._launch_make(svc, params)
             elif svc.launch_type == "collection":
                 self._launch_collection(svc, params)
         except Exception as e:
@@ -6317,7 +6439,39 @@ class ServicePanel(Widget):
         self._log(f"  Command: {vllm_cmd}")
         self._log(f"[green]{svc.name} tmux session '{session_name}' started on port {config['port']}.[/green]")
 
-    def _launch_make(self, svc: ServiceDef) -> None:
+    @staticmethod
+    def _infra_container_exists(compose_path: str, service: str) -> bool:
+        """whether the compose project has a container for this service."""
+        try:
+            result = subprocess.run(
+                ["docker", "compose", "-f", compose_path, "ps", "-a", "-q", service],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # docker missing or wedged: let the stop command itself report it
+            return True
+        return bool(result.stdout.strip())
+
+    def _infra_compose_path(self) -> str | None:
+        """absolute path to the infra compose file, or None (logged) if missing."""
+        compose_path = os.path.join(self._root, _INFRA_COMPOSE_FILE)
+        if not os.path.isfile(compose_path):
+            self._log(f"[red]Compose file not found: {compose_path}[/red]")
+            return None
+        return compose_path
+
+    def _launch_make(self, svc: ServiceDef, params: dict | None = None) -> None:
+        if _infra_docker_mode(svc, params):
+            compose_path = self._infra_compose_path()
+            if compose_path is None:
+                return
+            # absolute -f path: CommandSession treats "cd ..."-prefixed input as a
+            # plain directory change and would swallow the command output
+            cmd = _compose_command(compose_path, f"up -d {_infra_compose_service(svc)}")
+            self._log(f"  Running: {cmd}")
+            self._cmd.run(cmd)
+            return
+
         target = _make_target_for(svc.name)
         make_dir = svc.config_dir
         makefile = os.path.join(make_dir, "Makefile")
@@ -6391,6 +6545,26 @@ class ServicePanel(Widget):
                     subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
                 self._log(f"[red]{svc.name} stopped.[/red]")
             elif svc.launch_type == "make":
+                if _infra_docker_mode(svc, params):
+                    compose_path = self._infra_compose_path()
+                    if compose_path is None:
+                        return
+                    service = _infra_compose_service(svc)
+                    if not self._infra_container_exists(compose_path, service):
+                        # `compose stop` exits 0 and prints nothing for a service
+                        # with no container, which otherwise reads as a success
+                        self._log(
+                            f"[yellow]No container for '{service}' in this compose project. "
+                            f"If {svc.name} is running on its port, it is the native "
+                            f"service — switch Run mode to native to stop it.[/yellow]"
+                        )
+                        return
+                    # stop, not down: both infra cards share one compose file, so a
+                    # down from the InfluxDB card would tear down MongoDB as well
+                    cmd = _compose_command(compose_path, f"stop {service}")
+                    self._log(f"  Running: {cmd}")
+                    self._cmd.run(cmd)
+                    return
                 make_name = _make_target_for(svc.name)
                 stop_target = "stop-" + make_name
                 if make_name in _SYSTEM_SVC_PORTS:
@@ -6560,9 +6734,17 @@ class ServicePanel(Widget):
                     self._log("[yellow]No remote collection components launched.[/yellow]")
 
             elif svc.launch_type == "make":
-                target = _make_target_for(svc.name)
-                remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
-                run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
+                if _infra_docker_mode(svc, params):
+                    # the infra compose file lives at the repo root, not in
+                    # pipelines/uber-server like the Makefile does
+                    compose_cmd = _compose_command(
+                        _INFRA_COMPOSE_FILE, f"up -d {_infra_compose_service(svc)}"
+                    )
+                    run_cmd = f"cd {_quote_remote_path(remote_root)} && {compose_cmd}"
+                else:
+                    target = _make_target_for(svc.name)
+                    remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
+                    run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
                 ssh_cmd = self._remote_terminal_command(profile, run_cmd)
                 self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {run_cmd}")
                 if self._open_collection_terminal([(svc.name, ssh_cmd)]):
@@ -6615,9 +6797,19 @@ class ServicePanel(Widget):
                 )
 
             elif svc.launch_type == "make":
-                target = "stop-" + _make_target_for(svc.name)
-                remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
-                run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
+                if _infra_docker_mode(svc, params):
+                    # stop, not down: both infra cards share one compose file, so a
+                    # down from the InfluxDB card would tear down MongoDB as well.
+                    # the file lives at the repo root, not in pipelines/uber-server
+                    compose_cmd = _compose_command(
+                        _INFRA_COMPOSE_FILE, f"stop {_infra_compose_service(svc)}"
+                    )
+                    run_cmd = f"cd {_quote_remote_path(remote_root)} && {compose_cmd}"
+                    self._log(f"  Running: {run_cmd}")
+                else:
+                    target = "stop-" + _make_target_for(svc.name)
+                    remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
+                    run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
                 self._log(f"  Stopping {svc.name} on {profile_name}...")
                 self.run_worker(
                     self._run_remote_streamed(
