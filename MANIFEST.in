@@ -1,0 +1,2 @@
+# the local tests/ directory is gitignored; setuptools would still pack tests/test*.py into the sdist
+prune tests
