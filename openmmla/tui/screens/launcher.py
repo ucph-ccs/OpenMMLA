@@ -1711,7 +1711,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             )
             services.append(ServiceDef(
                 name=name,
-                category="Infrastructure",
+                category="System Services",
                 conda_env="uber-server",
                 config_dir=uber_dir,
                 launch_type="make",
@@ -2711,9 +2711,9 @@ class ServicePanel(Widget):
         for svc in self._services:
             categories.setdefault(svc.category, []).append(svc)
 
-        infra_svcs = categories.get("Infrastructure", [])
+        infra_svcs = categories.get("System Services", [])
         if infra_svcs:
-            infra_node = tree.root.add("Infrastructure", data="__cat_Infrastructure")
+            infra_node = tree.root.add("System Services", data="__cat_System Services")
             infra_node.expand()
             for svc in infra_svcs:
                 infra_node.add_leaf(f"{svc.display_name}{self._svc_markers(svc)}", data=svc.name)
