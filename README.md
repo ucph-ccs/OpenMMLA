@@ -61,7 +61,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 
     Guide to every tab and card: [Management Console (TUI)](docs/tui.md).
 
-4. **Pipelines**: set up and run [ASR with diarization](docs/pipelines/asr.md), the [Indoor positioning system](docs/pipelines/ips.md) or the [Video frame analyzer](docs/pipelines/vfa.md).
+4. **Pipelines**: set up and run [ASR with diarization](docs/pipelines/asr.md), the [Indoor positioning system](docs/pipelines/ips.md) or the [Video frame analyzer](docs/pipelines/vfa/index.md).
 
 ## Documentation
 
@@ -70,8 +70,8 @@ A pipeline built with the toolkit follows a three-stage data flow:
 | [System Prerequisites](docs/prerequisites.md) | Conda, Git, tmux, PortAudio, FFmpeg per OS |
 | [System Services](docs/system_services.md) | InfluxDB, MongoDB, Redis, Mosquitto, Nginx, dashboard: install, start/stop, System Settings |
 | [Management Console](docs/tui.md) | the TUI: environments, launcher tree, cards, sessions, status, remote hosts |
-| [ASR](docs/pipelines/asr.md), [IPS](docs/pipelines/ips.md), [VFA](docs/pipelines/vfa.md) | the three pipelines end to end |
-| [Human coding interface](docs/coding_interface.md) | coding VFA ground truth frame by frame, in the pipeline's own output format |
+| [ASR](docs/pipelines/asr.md), [IPS](docs/pipelines/ips.md), [VFA](docs/pipelines/vfa/index.md) | the three pipelines end to end |
+| [Human coding interface](docs/pipelines/vfa/coding_interface.md) | coding VFA ground truth frame by frame, in the pipeline's own output format |
 | [Docker](docs/docker.md) | the ASR/VFA AI service stacks and the InfluxDB/MongoDB stack |
 | [Dashboard](docs/dashboard.md) | Flask backend, Celery worker and the static frontend |
 | [Nginx](docs/nginx.md), [RTMP Streaming](docs/rtmp_streaming.md) | load balancing and camera/microphone streaming |

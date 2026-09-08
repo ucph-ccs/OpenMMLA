@@ -6,16 +6,16 @@ The pipeline, its prompt design and its evaluation against human coders are desc
 
 ## Pipeline overview
 
-![Video frame analysis pipeline: frame capture, frame synchronization, frame analysis, vision-language processing](../img/video_frame_analyzer.png)
+![Video frame analysis pipeline: frame capture, frame synchronization, frame analysis, vision-language processing](../../img/video_frame_analyzer.png)
 
 The pipeline has four stages:
 
 1. **Frame Capture (FC)**: each VFA base captures a frame from its video stream every `keyframe_interval` seconds (30 s by default) and broadcasts the frame metadata (camera angle description, frame path) over MQTT.
 2. **Frame Synchronization (FS)**: the VFA synchronizer listens on the MQTT channel, aligns the messages of all bases in time, and sends the synchronized multi-angle frames together with the participant and angle descriptions to the analyzer in one HTTP request.
 3. **Frame Analysis (FA)**: the VFA analyzer (the VFA server) runs AprilTag detection and gaze detection (RetinaFace for faces, [Gaze-LLE](https://github.com/fkryan/gazelle) for gaze targets), renders the frames with the overlays below, builds the structured prompt, and sends it to the VLM.
-4. **Vision-Language Processing (VLP)**: the VLM, local or in the cloud behind an OpenAI-compatible API, performs grounding, captioning and classification and returns JSON. The result goes back to the synchronizer, which writes it to InfluxDB as `vfa_action` events (see the [Database Reference](../database.md)).
+4. **Vision-Language Processing (VLP)**: the VLM, local or in the cloud behind an OpenAI-compatible API, performs grounding, captioning and classification and returns JSON. The result goes back to the synchronizer, which writes it to InfluxDB as `vfa_action` events (see the [Database Reference](../../database.md)).
 
-![A rendered frame with face boxes, gaze lines, in-frame probabilities and a repainted AprilTag](../img/vfa_rendered_frame.png)
+![A rendered frame with face boxes, gaze lines, in-frame probabilities and a repainted AprilTag](../../img/vfa_rendered_frame.png)
 
 A rendered frame carries the cues the prompt refers to: each detected AprilTag is repainted as a black square with its id in white, each detected face gets a coloured box, a gaze line points at the estimated gaze target, and `in: 0.98` is the probability that the gaze target lies inside the frame.
 
@@ -40,11 +40,11 @@ Every participant in every frame is assigned one of five mutually exclusive acti
 | Idle-OffTask | Not engaged in the task: looking at personal items (phone, snacks) or outside the camera frame, whatever the hands do. |
 | Unclear | The gaze or the hands cannot be seen well enough to tell, because of occlusion, blur or poor visibility. |
 
-The same scheme ships as the default template of the [human coding interface](../coding_interface.md), so machine and human codings use identical labels.
+The same scheme ships as the default template of the [human coding interface](coding_interface.md), so machine and human codings use identical labels.
 
 ## Prompt engineering
 
-![Structure of the chain-of-thought prompt: persona, context, grounding, captioning, classifying, formulating](../img/vfa_prompt_structure.png)
+![Structure of the chain-of-thought prompt: persona, context, grounding, captioning, classifying, formulating](../../img/vfa_prompt_structure.png)
 
 The prompt mirrors the human annotation process as a stepwise reasoning chain:
 
@@ -65,7 +65,7 @@ The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnal
 
 Local:
 
-- **vLLM**: the **MLLM Server** card runs `vllm serve` with the model, port and limits from `config/mllm_server.yml` (Qwen3-VL-8B-Instruct by default) in the `vfa-vllm` environment (`pip install -e '.[vfa-vllm-runtime]'`, Python 3.12). Point `vllm.vlm_base_url` at it. Alternatively the `mllm` profile of the VFA compose file runs the official vLLM image; see the [Docker guide](../docker.md#local-vllm-vlm-backend).
+- **vLLM**: the **MLLM Server** card runs `vllm serve` with the model, port and limits from `config/mllm_server.yml` (Qwen3-VL-8B-Instruct by default) in the `vfa-vllm` environment (`pip install -e '.[vfa-vllm-runtime]'`, Python 3.12). Point `vllm.vlm_base_url` at it. Alternatively the `mllm` profile of the VFA compose file runs the official vLLM image; see the [Docker guide](../../docker.md#local-vllm-vlm-backend).
 - **Ollama**: install from https://ollama.com/download and pull a multimodal model (`ollama pull llava`); backend `ollama`.
 - **llama.cpp**: backend `llamacpp` against a llama-server endpoint.
 
@@ -120,7 +120,7 @@ Streams:
     fps: 30
 ```
 
-Managed streams are started and stopped from the **Streams** tab; see [RTMP Streaming](../rtmp_streaming.md).
+Managed streams are started and stopped from the **Streams** tab; see [RTMP Streaming](../../rtmp_streaming.md).
 
 ## Run from the TUI
 
@@ -158,7 +158,7 @@ python pipelines/vfa-base/examples/analyze_video_frame.py front.jpg side.jpg \
 
 ## Human coding and evaluation
 
-Ground truth for VFA is produced with the [human coding interface](../coding_interface.md), a single HTML page in `pipelines/vfa-base/coding-interface/`. Run a base in `capture` mode (or `live` with `Store Frames` on) to collect frames; they land under `artifacts/runtime/pipelines/vfa-base/<host>/real-time/runtime/<camera>_<base-id>/` named `<unix-timestamp>.jpg`. Coders load the same frames and the action template, code every participant in every frame, and export a JSON file whose windows mirror the pipeline's `action_recognition` output, so human and machine codings can be joined on the frame timestamp and the participant id.
+Ground truth for VFA is produced with the [human coding interface](coding_interface.md), a single HTML page in `pipelines/vfa-base/coding-interface/`. Run a base in `capture` mode (or `live` with `Store Frames` on) to collect frames; they land under `artifacts/runtime/pipelines/vfa-base/<host>/real-time/runtime/<camera>_<base-id>/` named `<unix-timestamp>.jpg`. Coders load the same frames and the action template, code every participant in every frame, and export a JSON file whose windows mirror the pipeline's `action_recognition` output, so human and machine codings can be joined on the frame timestamp and the participant id.
 
 In the paper, three researchers coded two pilot sessions this way (Cohen's κ 0.73 to 0.84), a majority vote formed the gold standard, and each VLM was run five times over 214 person-frame codings. Manipulating and Observing were recognised most reliably; Communicating was the hardest class.
 

@@ -15,6 +15,7 @@ theme:
   name: material
   features:
     - navigation.sections
+    - navigation.indexes
     - navigation.top
     - navigation.footer
     - toc.follow
@@ -66,8 +67,9 @@ nav:
   - Pipelines:
       - ASR with diarization: pipelines/asr.md
       - Indoor positioning (IPS): pipelines/ips.md
-      - Video frame analyzer (VFA): pipelines/vfa.md
-      - Human coding interface: coding_interface.md
+      - Video frame analyzer (VFA):
+          - pipelines/vfa/index.md
+          - Human coding interface: pipelines/vfa/coding_interface.md
   - Deployment:
       - Docker: docker.md
       - Dashboard: dashboard.md

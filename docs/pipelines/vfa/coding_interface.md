@@ -1,8 +1,8 @@
 # Human Coding Interface
 
-`pipelines/vfa-base/coding-interface/human_coding_interface.html` is a single self-contained web page for coding what each participant is doing in a series of video frames. It produces the human ground truth for the [VFA pipeline](pipelines/vfa.md): coders see the same frames the pipeline analyzes and pick from the same action categories, and the export has the same shape as the pipeline's own output, so human and machine codings can be compared frame by frame.
+`pipelines/vfa-base/coding-interface/human_coding_interface.html` is a single self-contained web page for coding what each participant is doing in a series of video frames. It produces the human ground truth for the [VFA pipeline](index.md): coders see the same frames the pipeline analyzes and pick from the same action categories, and the export has the same shape as the pipeline's own output, so human and machine codings can be compared frame by frame.
 
-![The human coding interface with a frame on the left and one annotation block per participant on the right](img/human_coding_interface.png)
+![The human coding interface with a frame on the left and one annotation block per participant on the right](../../img/human_coding_interface.png)
 
 ## What you need
 
