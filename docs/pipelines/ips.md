@@ -26,7 +26,7 @@ An alternative input path skips the cameras entirely: a Nicla Vision badge runni
 
 ## Setup order
 
-The four IPS cards depend on each other. Do them in this order; every step is a leaf under `Launcher → Pipelines → IPS`.
+The IPS cards depend on each other. Steps 1 to 4 are one-time setup for a camera arrangement, done in this order from the leaves under `Launcher → Pipelines → IPS`; redo step 3 and 4 whenever a camera moves. Running a session is described under [Run from the TUI](#run-from-the-tui).
 
 ### 1. Calibrate each camera model
 
@@ -62,12 +62,6 @@ Redo this step whenever a camera is moved.
 
 The **Transform Matrix** tab of the IPS Base card shows the exported files as editable JSON. With Host set to `Local`, **Sync to Remote** copies them into `pipelines/ips-base/camera_sync/` on the chosen base station; with a remote host selected, the tab edits that host's copy directly. Every base station that runs an IPS base needs the exported file.
 
-### 5. Run the session
-
-**IPS Base**: choose the number of bases, synchronizers and visualizers, the **Session**, and the toggles (`Graphics` shows the annotated frames, `Store` saves frames, `Verbose` prints debug output). **Start** opens one terminal window per instance; each base asks which `Bases` entry it is. Then send **START** from **Session Control**, and **STOP** at the end.
-
-IPS has no capture/analyze/live mode switch: a live source (`opencv`, `rtmp`, `lsl`) runs in real time and a `file` source replays the recording at the configured pace.
-
 ## Input sources
 
 | Source | Description | Setup |
@@ -96,6 +90,14 @@ Streams:
 ```
 
 Managed streams are started and stopped from the **Streams** tab; see [RTMP Streaming](../rtmp_streaming.md) for the FFmpeg commands.
+
+## Run from the TUI
+
+1. **System services** running and reachable, and the setup above done: calibrated `Cameras`, `Bases` with one `main: true`, and the exported transform matrices on every base station.
+2. **IPS Base**: `Launcher → Pipelines → IPS → IPS Base`, Host set to the base station. Choose the number of bases, synchronizers and visualizers, the **Session** (or `Create MongoDB Session` from an experiment group), and the toggles (`Graphics` shows the annotated frames, `Store` saves frames, `Verbose` prints debug output). **Start** opens one terminal window per instance; each base asks which `Bases` entry it is.
+3. **Session Control**: once every window reports that it is waiting, send **START** for the session; send **STOP** at the end.
+
+IPS has no capture/analyze/live mode switch: a live source (`opencv`, `rtmp`, `lsl`) runs in real time and a `file` source replays the recording at the configured pace.
 
 ## Manual CLI
 
