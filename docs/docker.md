@@ -210,7 +210,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
   `docker compose -f docker/docker-compose.infra.yml exec mongodb mongosh admin --eval 'db.createUser({user:"openmmla",pwd:"<password>",roles:["root"]})'`
 - Setting only one of the two variables makes the container **restart-loop** while `up -d` still reports success. If 27017 never opens, check `docker compose -f docker/docker-compose.infra.yml ps` and `... logs mongodb`.
 - With auth on, the URL must be `mongodb://<user>:<pass>@server-01.local:27017/?authSource=admin`; without `authSource=admin` authentication fails.
-- `url` is not on the list of encrypted fields (only keys such as token/password/secret are encrypted), and `config/system_services.yml` is **tracked by git**, so a URL with a password is committed in plaintext. Weigh that before enabling auth, at least until `MongoDB` gets separate username/password fields.
+- `url` is not on the list of encrypted fields (only keys such as token/password/secret are encrypted), so a URL with a password sits in plaintext in `config/system_services.yml` and in every synced `pipelines/*/config.yml`. Those files are gitignored, but keep that in mind before enabling auth, at least until `MongoDB` gets separate username/password fields.
 
 ## Mounts
 

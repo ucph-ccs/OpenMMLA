@@ -1,0 +1,34 @@
+# system services template.
+#
+# copy this file to system_services.yml, or simply fill in the forms under
+# TUI -> Launcher -> System Settings -> Connections, which write the same file
+# and mirror every section into pipelines/*/config.yml. system_services.yml is
+# gitignored because it names the machines of your own deployment and carries
+# the InfluxDB token and the local sudo password (both encrypted to ENC(...)
+# with ~/.openmmla/master.key when saved from the TUI).
+
+InfluxDB:
+  url: http://<uber-server>:8086      # host that runs InfluxDB; add the port if it is not 8086
+  token: <influxdb-token>             # operator/all-access API token, encrypted on save
+  org: admin
+  bucket: mmla-data
+MongoDB:
+  url: mongodb://<uber-server>:27017  # with auth: mongodb://<user>:<pass>@<host>:27017/?authSource=admin
+  db: openmmla
+MQTT:
+  host: <uber-server>                 # Mosquitto broker
+  port: 1883
+Redis:
+  host: <uber-server>
+  port: 6379
+  db: 1                               # a db other than 0 keeps the Celery queue apart from the control bus
+Dashboard:
+  host: <uber-server>                 # where make flask runs; the Status tab probes host:port
+  port: 5050
+Gateway:
+  host: <uber-server>                 # nginx entry point for AI services (http_port) and streams (rtmp_port)
+  http_port: 8080
+  rtmp_port: 1935
+  scheme: http
+Sudo:
+  password: <local-sudo-password>     # only used on this machine for native service starts; encrypted on save

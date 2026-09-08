@@ -127,7 +127,7 @@ make clean-ports 8086 5050              # kill whatever holds those ports
 
 ## Pointing the pipelines at the services
 
-Open **Launcher → System Settings → Connections** in the TUI and fill in the sections below; **Save** writes `config/system_services.yml` and copies the sections into `pipelines/asr-base/config.yml`, `pipelines/vfa-base/config.yml`, `pipelines/ips-base/config.yml` and the dashboard backend config.
+Open **Launcher → System Settings → Connections** in the TUI and fill in the sections below; **Save** writes `config/system_services.yml` and copies the sections into `pipelines/asr-base/config.yml`, `pipelines/vfa-base/config.yml`, `pipelines/ips-base/config.yml` and the dashboard backend config. The file is gitignored, like the pipeline configs, because it names your machines and holds the token and sudo password; `config/system_services_template.yml` shows its layout.
 
 | Section | Fields | Notes |
 |---|---|---|

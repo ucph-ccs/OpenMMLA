@@ -81,8 +81,8 @@ services:
       # both set adds --auth and creates the root user. setting only one makes the
       # container restart-loop while `up -d` still reports success.
       # with auth on, the URL becomes mongodb://<user>:<pass>@server-01.local:27017/?authSource=admin
-      # — and note that MongoDB.url is stored in PLAINTEXT in the git-tracked
-      # config/system_services.yml, since only key names like token/password are encrypted
+      # — and note that MongoDB.url is stored in PLAINTEXT in config/system_services.yml
+      # (gitignored), since only key names like token/password are encrypted
       MONGO_INITDB_ROOT_USERNAME: "${MONGO_ROOT_USER:-}"
       MONGO_INITDB_ROOT_PASSWORD: "${MONGO_ROOT_PASSWORD:-}"
     volumes:

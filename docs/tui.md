@@ -147,7 +147,7 @@ The server cards are different:
 - **MLLM Server** starts `vllm serve` from `config/mllm_server.yml` in the `vfa-vllm` environment, inside a tmux session named `mllm-server`, for VFA setups that use a local vision-language model.
 - **IPS Camera Calibration** and **IPS Camera Sync** run the interactive calibration and multi-camera synchronisation tools; the calibration card also lists the captured calibration images per camera.
 
-The pipeline guides walk through each one end to end: [ASR](pipelines/asr.md), [IPS](pipelines/ips.md), [VFA](pipelines/vfa.md).
+The pipeline guides walk through each one end to end: [ASR](pipelines/asr.md), [IPS](pipelines/ips.md), [VFA](pipelines/vfa/index.md).
 
 ### Session Control
 
@@ -175,7 +175,7 @@ The six ASR service rows still expect tmux sessions named after the services. Wi
 
 | Path | Content |
 |---|---|
-| `config/system_services.yml` | System Settings connections and the sudo password (secrets encrypted); tracked by git |
+| `config/system_services.yml` | System Settings connections and the sudo password (secrets encrypted); gitignored, template `config/system_services_template.yml` |
 | `config/ssh_profiles.yml` | SSH profiles (gitignored) |
 | `config/experiments.yaml` | experiments and participants (gitignored) |
 | `config/tasks/*.yaml`, `config/vfa/action_schemas.yml`, `config/mllm_server.yml` | task definitions, VFA action schema, MLLM Server settings |
