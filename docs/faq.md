@@ -118,8 +118,7 @@ then the mDNSResponder is restarted successfully
 **Restart the network, and reboot the router and devices if the above actions doesn't work** 
 
 ## Speech separation doesn't perform well
-The reason may be that you are not using the latest pytroch version, right now the pytroch
-2.1.1 with the speech separation version 1.9.5 performs well, with 945 components indexed.
+The reason may be a PyTorch version mismatch. PyTorch 2.1.1 with speech separation (modelscope) 1.9.5 is known to perform well, with 945 components indexed. The dockerized speech separator pins a working combination; see the [Docker guide](docker.md).
 
 ## Speech separation couldn't load 
 If you find `ImportError: cannot import name '_datasets_server' from 'datasets.utils'`, you can
@@ -127,16 +126,13 @@ either downgrade the modelscope to 1.12.0 with `pip install modelscope==1.12.0` 
 `pip install datasets==2.18.0`.
 
 ## Server couldn't download the model
-If you run the server script to run all services for the first time, you might experience the failure of downloading the model.
-Please go to the server scripts and run the service script separately.
+The first start of the AI services downloads the models, which can time out when every service starts at once. Start the failing service alone (select only that service on the ASR Server / VFA Server card in the TUI, or `docker compose -f docker/docker-compose.asr.yml up -d <service>`) and retry.
 
 ## Redis address already in use
-Simply shutdown the redis server if you are on Mac and then start it again
-```cmd
+Shut the running Redis down and let the Makefile restart it with the OpenMMLA listener config:
+```bash
 redis-cli shutdown
-```
-```cmd
-redis-server --protected-mode no
+make -C pipelines/uber-server redis
 ```
 
 ## Update Arduino's Wi-Fi firmware
@@ -165,7 +161,7 @@ sudo kill -9 3440
 Or directly kill the process by 
 `kill -9 $(lsof -ti:50004)`
 
-Or you can use _free_port(**[port]**)_ in _/utils/port.py_ to free up the port. 
+Or free the port with the Makefile: `make -C pipelines/uber-server clean-ports 50004`.
 
 ## Connect smraza fisheye camera to Raspberry Pi
 Check [Youtube Tutorial](https://www.youtube.com/watch?v=iyITuOcHCjg)

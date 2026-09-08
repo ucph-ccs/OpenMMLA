@@ -1,8 +1,12 @@
 # RTMP Streaming
-This readme introduces how to setup your RTMP server, and how to stream from clients to your RTMP server, and how to record from the RTMP server via OBS.
+
+How to run an RTMP server, push camera and microphone streams to it with FFmpeg, and record the streams with OBS or FFmpeg.
+
+In a deployment managed from the TUI you rarely type these FFmpeg commands yourself: a `Streams` entry with an `ssh_profile`, `device` and `target` in the pipeline config makes the Launcher's **Streams** tab start and stop the same kind of FFmpeg process on the remote device over SSH. The commands below are what runs under the hood, and what to use for devices without SSH access.
 
 ## Server side
-If you haven't setup your RTMP server, here is a guide for how to setup your RTMP server manually.
+
+The RTMP server is Nginx with the RTMP module. The full install and the templated configuration are in the [Nginx Setup Guide](nginx.md); the manual configuration below is the minimum for streaming only.
 
 ### Installation
 
@@ -12,7 +16,7 @@ brew tap denji/nginx
 brew install nginx-full --with-rtmp-module
 
 # Ubuntu
-sudo apt update && install nginx libnginx-mod-rtmp
+sudo apt update && sudo apt install -y nginx libnginx-mod-rtmp
 ```
 
 ### Configuring RTMP
@@ -46,7 +50,8 @@ sudo nginx -s reload
 ```
 
 ## Client side
-On your devices which you want to stream data to the RTMP server, could be Raspberry Pi or PCs.
+
+On the devices that stream to the RTMP server (Raspberry Pis or PCs).
 
 ### Installation
  ```bash
@@ -179,7 +184,7 @@ You can record the streams from RTMP server via the OBS on your devices by follo
     ```
 
 ## Troubleshooting
-1. Check the publishing stream is up and running, go to the `http://<rtmp-server-ip-address>/8080/stat`
+1. Check that the stream is being published: open `http://<rtmp-server-host>:8080/stat` (needs the `stat.xsl` from the Nginx guide)
 2. Check the stream is in correct format and can be read by ffmpeg and ffplay
    ```sh
    ffmpeg -i rtmp://<host>/<app>/<stream> -f null -

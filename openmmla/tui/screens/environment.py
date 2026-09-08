@@ -24,7 +24,7 @@ from openmmla.tui.widgets.command_session import CommandSession, _list_conda_env
 # table no longer carries a hardcoded package list.
 ENV_GROUPS = [
     # NOTE: asr-server-* and vfa-server envs were removed — those services are
-    # dockerized now (see docker/README.md); their dependencies live in per-
+    # dockerized now (see docs/docker.md); their dependencies live in per-
     # service images, not conda envs.
     {"group": "asr-base", "env": "asr-base", "python": "3.10",
      "description": "ASR base station"},

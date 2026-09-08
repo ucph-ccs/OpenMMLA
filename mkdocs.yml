@@ -1,0 +1,78 @@
+site_name: OpenMMLA
+site_description: An IoT-based multimodal data collection toolkit for learning analytics
+site_url: https://openmmla.readthedocs.io/
+repo_url: https://github.com/ucph-ccs/OpenMMLA
+repo_name: ucph-ccs/OpenMMLA
+edit_uri: edit/main/docs/
+copyright: MIT License
+
+docs_dir: docs
+# the pip requirements for this site are not a page
+exclude_docs: |
+  requirements.txt
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+  # index.md pulls in the repository README so the landing page has one source
+  - include-markdown
+
+nav:
+  - Overview: index.md
+  - Getting started:
+      - System prerequisites: prerequisites.md
+      - System services: system_services.md
+      - Management console (TUI): tui.md
+  - Pipelines:
+      - ASR with diarization: pipelines/asr.md
+      - Indoor positioning (IPS): pipelines/ips.md
+      - Video frame analyzer (VFA): pipelines/vfa.md
+  - Deployment:
+      - Docker: docker.md
+      - Dashboard: dashboard.md
+      - Nginx: nginx.md
+      - RTMP streaming: rtmp_streaming.md
+      - Raspberry Pi: raspi_config.md
+  - Reference:
+      - Databases: database.md
+      - FAQ: faq.md

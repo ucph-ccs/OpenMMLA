@@ -1,0 +1,15 @@
+# Read the Docs build configuration: https://docs.readthedocs.io/en/stable/config-file/v2.html
+# The site is MkDocs (Material theme); pages live in docs/ and are indexed by mkdocs.yml.
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.12"
+
+mkdocs:
+  configuration: mkdocs.yml
+
+python:
+  install:
+    - requirements: docs/requirements.txt

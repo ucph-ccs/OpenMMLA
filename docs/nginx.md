@@ -1,111 +1,107 @@
-# Nginx Documentation
+# Nginx Setup Guide
 
-This document outlines the setup and configuration of Nginx for load balancing and RTMP streaming.
+Nginx is optional. It plays two roles in OpenMMLA:
+
+- **Load balancer**: one HTTP entry point (port 8080 by default) in front of the ASR and VFA AI services, so base stations only need the gateway address and requests can be spread over several servers.
+- **RTMP server**: ingest point (port 1935) for camera and microphone streams pushed with FFmpeg from Raspberry Pis or PCs; the bases then pull from `rtmp://<gateway>/<app>/<stream>`. See [RTMP Streaming](rtmp_streaming.md).
+
+The gateway address is set once under **System Settings → Gateway** in the TUI (`host`, `http_port`, `rtmp_port`, `scheme`) and synced into every pipeline config.
 
 ## Installation
 
-Choose the appropriate installation based on your needs:
-
-### Basic Installation (Load Balancer Only)
+### Load balancer only
 
 ```bash
-# macOS
+# macOS (config: /opt/homebrew/etc/nginx/nginx.conf)
 brew install nginx
-# config file located at `/opt/homebrew/etc/nginx/nginx.conf`
 
-# Ubuntu
-sudo apt update && sudo apt install nginx
-# config file located at `/etc/nginx/nginx.conf`
+# Ubuntu / Debian (config: /etc/nginx/nginx.conf)
+sudo apt update && sudo apt install -y nginx
 ```
 
-### Complete Installation (Load Balancer + RTMP)
+### Load balancer + RTMP
 
-If you need RTMP functionality, use this installation instead:
+Use this build instead if you need RTMP streaming:
 
 ```bash
 # macOS
 brew tap denji/nginx
 brew install nginx-full --with-rtmp-module
-# config file located at `/opt/homebrew/etc/nginx/nginx.conf`
 
-# Ubuntu
-sudo apt update && sudo apt install nginx libnginx-mod-rtmp
-# config file located at `/etc/nginx/nginx.conf`
+# Ubuntu / Debian
+sudo apt update && sudo apt install -y nginx libnginx-mod-rtmp
 
-# Add stat.xsl to visualize the RTMP statistics
+# stat.xsl renders the RTMP statistics page at http://<host>:8080/stat
 sudo mkdir -p /usr/local/nginx/html
 sudo curl -o /usr/local/nginx/html/stat.xsl https://raw.githubusercontent.com/arut/nginx-rtmp-module/master/stat.xsl
 ```
 
 ## Configuration
 
-The Nginx configuration is managed through a Jinja2 templating system with three key files:
+The Nginx config is rendered from a Jinja2 template. Three files under `pipelines/uber-server/nginx/` are involved:
 
-1. `nginx/config.yml` - Contains configuration variables and service definitions
-2. `nginx/nginx.conf.j2` - The Jinja2 template file for the Nginx configuration
-3. `nginx/nginx.generated.conf` - The final rendered configuration file
+1. `config.yml`: your upstreams and RTMP apps (copy `config_template.yml` to start).
+2. `nginx.conf.j2`: the template.
+3. `nginx.generated.conf`: the rendered file (gitignored) that is copied over the system `nginx.conf`.
 
-### Configuring Services
-
-1. Edit the `config.yml` file to define your services and their configurations:
+Edit `config.yml`:
 
 ```yaml
-# Example configuration for load balancer
+# load balancer: one entry per AI service endpoint, one server line per host that runs it
 upstreams:
   transcribe:
     - host: server-01.local
-      port: 5000
+      port: 5005
       weight: 3
-    - host: 192.168.1.12 
-      port: 5000
-      weight: 3
+    - host: 192.168.1.12
+      port: 5005
+      weight: 1
 
-# Example configuration for RTMP (only if you need streaming)
+# RTMP: one application per stream group (only if you need streaming)
 rtmp_apps:
-  - stream_01
-  - stream_02
-  - stream_03
+  - ips
+  - vfa
 ```
 
-2. The `nginx.conf.j2` template will use these configurations to generate:
-   - Upstream server blocks for load balancing (if upstream services are defined and reachable)
-   - Location blocks for service routing (if corresponding upstream server blocks exist)
-   - RTMP configuration (if RTMP apps are defined)
+The endpoint names (`infer`, `resample`, `enhance`, `separate`, `transcribe`, `vad`, `vllm`) must match the service endpoint names; the default service ports are 5001 to 5006 for ASR and 5007 for VFA. The template generates an upstream block and a matching `location` for every service that is defined and reachable, and an `rtmp` block when `rtmp_apps` is not empty.
 
-### Running the Nginx 
-Use the Makefile to render and apply the Nginx configuration:
+## Running
+
+The Makefile in `pipelines/uber-server` renders the config, installs it and (re)starts Nginx. It activates the `uber-server` conda environment for the render step, so create that environment first (TUI Environment tab, or `pip install -e '.[uber-server]'`).
 
 ```bash
-# Regular deployment
-make nginx
-
-# Deploy with port availability checking
-make nginx -check-port=1
+cd pipelines/uber-server
+make nginx          # render with an upstream port check, install, reload/restart
+make nginx false    # skip the port check
+make stop-nginx
 ```
 
-## Additional Setup for macOS
+From the TUI, the same targets run behind **Launcher → System Services → Nginx**.
 
-For macOS users, you may need to configure the firewall:
-- Go to **System Preferences** -> **Privacy & Security** and ensure that Nginx is allowed to receive incoming connections
+### macOS firewall
+
+Go to **System Settings → Privacy & Security → Firewall** and make sure Nginx is allowed to accept incoming connections.
 
 ## Troubleshooting
-1. **Port conflicts**:
-   If you encounter port conflicts, you can clean specific ports:
+
+1. **Port conflicts**
+
    ```bash
-   # Clean port if it conflicts with 8080
-   make clean-ports PORT=8080
-   ```
-2. **Service management**:
-   ```bash
-   # Stop nginx services if it already exists
-   make stop-nginx
+   make clean-ports 8080 1935
    ```
 
-3. **View Nginx error logs**:
-   ```bash
-   # On macOS
-   tail -f /opt/homebrew/var/log/nginx/error.log
+2. **Error logs**
 
-   # On Linux
-   tail -f /var/log/nginx/error.log
+   ```bash
+   tail -f /opt/homebrew/var/log/nginx/error.log   # macOS
+   tail -f /var/log/nginx/error.log                # Linux
    ```
+
+3. **Check the installed config** before blaming Nginx: `sudo nginx -t`.
+
+4. **RTMP statistics**: `http://<host>:8080/stat` lists the live publishers and their bitrates.
+
+## Official links
+
+- Nginx: https://nginx.org/en/docs/install.html
+- nginx-rtmp-module: https://github.com/arut/nginx-rtmp-module

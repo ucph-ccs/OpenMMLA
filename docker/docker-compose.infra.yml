@@ -1,4 +1,4 @@
-# Central infrastructure stack — InfluxDB (8086) + MongoDB (27017) for the Uber Server.
+# Database stack — InfluxDB (8086) + MongoDB (27017) for the Uber Server.
 # Ports match config/system_services.yml, so pipelines only need their host name changed.
 #
 # Run from the repository root, on the machine that should hold the databases:
@@ -16,7 +16,7 @@
 # unless MONGO_ROOT_USER and MONGO_ROOT_PASSWORD are both set on the very first start.
 #
 # Setup, backups, migrating off the bare-metal databases and known caveats:
-# docker/README.md -> 中心基础设施 (InfluxDB / MongoDB)
+# docs/docker.md -> Database stack: InfluxDB and MongoDB
 #
 # Redis (6379) and Mosquitto (1883) would join this same file if they are ever
 # containerized too; today they stay bare-metal via pipelines/uber-server/Makefile.
@@ -40,7 +40,7 @@ services:
     stop_grace_period: 60s
     environment:
       # honored only on the FIRST start against an empty influxdb-data volume; editing
-      # them afterwards silently does nothing (see 已知注意点 in docker/README.md)
+      # them afterwards silently does nothing (see Known caveats in docs/docker.md)
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: "${INFLUXDB_INIT_USERNAME:-admin}"
       # empty fails the first start (influx setup demands 8+ chars) and the container

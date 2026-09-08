@@ -1,0 +1,132 @@
+# Video Frame Analyzer (VFA)
+
+Nonverbal behaviour analysis with vision-language and large language models. Bases capture a frame per camera angle at a fixed interval, the synchronizer bundles the angles of one moment into a single request, and the VFA server grounds each participant by their AprilTag, describes what they are doing and classifies it into predefined action categories.
+
+## Pipeline overview
+
+![Video frame analyzer](../img/video_frame_analyzer.png)
+
+1. Frame capture on each base, one per camera angle, every `keyframe_interval` seconds (30 s by default)
+2. Frame synchronization across all angles into one time bucket, sent to the server as a single request
+3. Server-side AprilTag detection; each tag is repainted as a black square carrying its id
+4. Server-side gaze detection: face boxes, gaze lines and an in-frame probability drawn onto the frame
+5. A VLM prompt built from the rendered frames, the camera-angle descriptions and the participant descriptions
+6. The VLM links tag ids to observations (gaze focus, hand status, position, clothing)
+7. An LLM classifies the observations into actions (two-step mode), or the VLM does both at once (end-to-end mode)
+8. The result, a `<tag id, action>` dictionary, is written as `vfa_action` events
+
+| Component | Runs on | Command | Environment |
+|---|---|---|---|
+| VFA Base, one per camera angle | base station | `mmla vfa-base` | conda env `vfa-base` |
+| VFA Synchronizer, one per session | base station | `mmla vfa-sync` | conda env `vfa-base` |
+| VFA Server: the multi-angle frame analyzer | GPU base server | docker compose | image in `docker/` |
+| MLLM Server, optional local vision-language model | GPU server | `vllm serve` | conda env `vfa-vllm` |
+
+Create the `vfa-base` environment from the TUI's Environment tab or by hand (`conda create -n vfa-base python=3.10 -y && pip install -e '.[vfa-base]'`). For an `lsl` source add `pip install pylsl==1.17.6` and `conda install -c conda-forge liblsl=1.16.2`.
+
+## Model backend
+
+The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnalyzer.backend` in `pipelines/vfa-server/config.yml` and fill in the matching block; the template lists every supported one.
+
+Local:
+
+- **vLLM**: the **MLLM Server** card runs `vllm serve` with the model, port and limits from `config/mllm_server.yml` (Qwen3-VL-8B-Instruct by default) in the `vfa-vllm` environment (`pip install -e '.[vfa-vllm-runtime]'`, Python 3.12). Point `vllm.vlm_base_url` at it. Alternatively the `mllm` profile of the VFA compose file runs the official vLLM image; see the [Docker guide](../docker.md#local-vllm-vlm-backend).
+- **Ollama**: install from https://ollama.com/download and pull a multimodal model (`ollama pull llava`); backend `ollama`.
+- **llama.cpp**: backend `llamacpp` against a llama-server endpoint.
+
+Cloud, each needing an API key in its block (stored encrypted on save):
+
+- **OpenAI** (`openai`), **Google Gemini** (`gemini`), **xAI Grok** (`grok`), **Zhipu** (`zhipuai`), **InternLM** (`intern`): vision-capable models for both steps.
+- **DeepSeek** (`deepseek`): text models only, so usable for the classification step; the shipped block points `vlm_model` at `deepseek-reasoner`, which does not accept images.
+- **Qwen** (`qwen`) through DashScope's OpenAI-compatible endpoint: the template default `qwen2.5-72b-instruct` is text-only, so set `vlm_model` to a `-vl` model.
+
+Because the frame analyzer runs in a container, a backend on the same machine is reached as `http://host.docker.internal:<port>/v1`, not `localhost`.
+
+## Prompt templates and action schema
+
+Prompts are plain text files under `pipelines/vfa-server/prompts/` (`prompt_templates_dir`), edited from the **Prompts** tab of the VFA Server card, which marks the templates in use. `prompt_profile` selects the end-to-end variant (`cot`: zero-shot chain-of-thought, the paper's main condition; `baseline`: direct classification; `baseline_no_pre`: baseline without the pre-context block), and `end_to_end: false` switches to the fixed two-step templates (`multi_angle_vlm_*` then `multi_angle_llm_*`).
+
+Templates substitute `{{variable}}` placeholders, each using only its own subset: `{{num_perspectives}}`, `{{angle_descriptions}}`, `{{participant_descriptions}}`, `{{action_definitions}}`, `{{decision_process}}` (not in the baseline variants) and `{{image_description}}` (LLM prompts only). The participant descriptions come from the experiment selected for the session (`config/experiments.yaml`, edited under **System Settings → Study → Experiments**). A missing templates directory is an error at startup; a missing single template is skipped silently and leaves that prompt empty, so check the path if the model starts receiving bare input.
+
+The action categories come from `config/vfa/action_schemas.yml`, edited from the **Action Schema** tab; `action_schema` in the server config overrides the default schema.
+
+## Configuration
+
+`pipelines/vfa-base/config.yml` for the bases (created from the Config tab with **Save**, or copied from `config_template.yml`):
+
+| Section | What it holds |
+|---|---|
+| `Base` | shared settings: `tag_size` and `families`, `resolution`, `rotate`, `fps`, `keyframe_interval` (seconds between analyzed frames), `angle_config` (a description per camera angle name), `file_dir` for replay, the file-replay pacing (`processing_rate`), `stream_kwargs` |
+| `Bases` | one entry per camera angle: `id`, `camera` (a calibrated profile from `Cameras`, shared with IPS), `source`, `source_index`, `camera_angle` (a key of `angle_config`) |
+| `Synchronizer` | `result_expiry_time`, `match_tolerance` |
+| `Streams` | managed and external streams |
+| `Server.vfa` | the frame analyzer endpoint, through the gateway (`http://<gateway>:8080/vllm`) or direct (`http://<server>:5007/vllm`) |
+| `Cameras` | calibrated camera profiles; calibrate with the IPS camera calibration tool |
+| `InfluxDB`, `MongoDB`, `MQTT`, `Redis`, `Gateway` | mirrored from System Settings |
+
+### Input sources
+
+| Source | Description | Setup |
+|---|---|---|
+| `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index; the base lists the devices it finds |
+| `rtmp` | video pulled from the Nginx RTMP server | a `Streams` entry with `target: rtmp://...`; `source_index` is the position among the RTMP entries |
+| `lsl` | Lab Streaming Layer | `source_index` is the stream name; needs `pylsl` |
+| `file` | replay of a recorded video | `source_index` is the file name inside `Base.file_dir`; the start time comes from the file name |
+
+### Streams
+
+```yaml
+Streams:
+  # external RTMP stream (already running, the base only pulls from the URL)
+  cam-external:
+    target: rtmp://uber-server.local/vfa/side
+
+  # managed stream: the TUI starts/stops ffmpeg on a remote Raspberry Pi over SSH
+  cam-front:
+    ssh_profile: rpi-front          # must match a TUI SSH profile name
+    device: /dev/video0             # camera device on the remote machine
+    target: rtmp://uber-server.local/vfa/front
+    codec: libx264
+    resolution: 1920x1080
+    fps: 30
+```
+
+Managed streams are started and stopped from the **Streams** tab; see [RTMP Streaming](../rtmp_streaming.md).
+
+## Run from the TUI
+
+1. **VFA Server**: `Launcher → Pipelines → VFA → VFA Server`, Host set to the GPU server. Set the backend, models, `end_to_end` and `prompt_profile` on the Config tab, review the Prompts and Action Schema tabs, then **Start**: the card runs `docker compose -f docker/docker-compose.vfa.yml up -d --build frame-analyzer`. Start the **MLLM Server** card first if you use a local vLLM model.
+2. **System services** running, and `Server.vfa` pointing at the server or the gateway.
+3. **VFA Base**: Host set to the base station. Choose the number of bases and synchronizers, the **Session**, the **Mode** and the toggles (`Graphics`, `Store Frames`, `Verbose`). **Start** opens one terminal window per instance; each base asks which `Bases` entry it is.
+4. **Session Control**: send **START**, and **STOP** at the end.
+
+Modes: `live` analyzes frames as they are captured (the TUI default); `capture` only stores frames; `analyze` re-runs the analysis on the frames this session stored earlier.
+
+## Manual CLI
+
+```bash
+conda activate vfa-base
+mmla vfa-base -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -m live -sid <session-id> -b <base-id>
+mmla vfa-sync -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -sid <session-id>
+```
+
+To run the server without Docker (`pip install -e '.[vfa-server]'`):
+
+```bash
+export PROJECT_DIR=pipelines/vfa-server CONFIG_PATH=pipelines/vfa-server/config.yml
+gunicorn -k gevent -w 1 -b 0.0.0.0:5007 openmmla.services.vfa.apps.serve_multi_angle_vllm_frame_analyzer:app
+```
+
+## Smoke test
+
+With the VFA Server running, send still frames straight to it without starting any base:
+
+```bash
+python pipelines/vfa-base/examples/analyze_video_frame.py front.jpg side.jpg \
+  --angles front,side \
+  --participant-descriptions '{"1": "person with red shirt"}'
+```
+
+## Post-time processing
+
+Record with **Collection → Collection Session**, then set each base's `source` to `file`, `Base.file_dir` to the `video/` directory from the collection manifest and `source_index` to the file name, and run in `live` mode; `keyframe_interval` and `processing_rate` control the replay pace.

@@ -1,139 +1,130 @@
-# Dockerized OpenMMLA services (ASR / VFA / 中心基础设施)
+# Dockerized OpenMMLA services
 
-One image per service, so每个服务的 Python 环境完全隔离，升级互不影响。
-端口与 nginx 网关的 upstream 完全一致，网关配置无需改动。
+Two kinds of stacks live in this directory:
 
-下表是 AI 服务；中心基础设施（InfluxDB / MongoDB）见
-[中心基础设施 (InfluxDB / MongoDB)](#中心基础设施-influxdb--mongodb)。
+- **AI service stacks** (`docker-compose.asr.yml`, `docker-compose.vfa.yml`): one image per ASR/VFA service, so every service keeps its own Python environment and can be upgraded without touching the others. The ports match the Nginx gateway upstreams, so the gateway config needs no change.
+- **Database stack** (`docker-compose.infra.yml`): InfluxDB and MongoDB for the uber server, as an alternative to installing them with brew/apt. See [Database stack: InfluxDB and MongoDB](#database-stack-influxdb-and-mongodb).
 
 | Service | Image | Port | GPU | Stack |
 |---|---|---|---|---|
 | AudioInferer (wespeaker) | `openmmla/asr-audio-inferer-wespeaker` | 5001 | ✅ | torch 2.4.1 + wespeaker |
-| AudioInferer (nemo, 可选) | `openmmla/asr-audio-inferer-nemo` | 5001 | ✅ | nemo-toolkit ≤1.23 |
+| AudioInferer (nemo, optional) | `openmmla/asr-audio-inferer-nemo` | 5001 | ✅ | nemo-toolkit ≤1.23 |
 | AudioResampler | `openmmla/asr-audio-resampler` | 5002 | — | librosa (CPU) |
 | SpeechEnhancer | `openmmla/asr-speech-enhancer` | 5003 | ✅ | torch 2.4.1 + denoiser |
 | SpeechSeparator | `openmmla/asr-speech-separator` | 5004 | ✅ | torch 2.4.1 + modelscope |
-| SpeechTranscriber | `openmmla/asr-speech-transcriber` | 5005 | ✅ | **whisperx 3.8.6 + torch 2.8 + ct2≥4.5 (cuDNN 9)** |
+| SpeechTranscriber | `openmmla/asr-speech-transcriber` | 5005 | ✅ | **whisperx 3.8.6 + torch 2.8 + ct2 ≥4.5 (cuDNN 9)** |
 | VoiceActivityDetector | `openmmla/asr-voice-activity-detector` | 5006 | — | silero-vad (CPU torch) |
 | VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | ✅ | torch 2.7 + tf-keras/retina-face |
-| vLLM VLM 后端 (可选) | `vllm/vllm-openai` | 8000 | ✅ | 官方镜像, profile `mllm` |
+| vLLM VLM backend (optional) | `vllm/vllm-openai` | 8000 | ✅ | official image, profile `mllm` |
 
-## 宿主机要求 (server-01)
+## Host requirements
 
-- NVIDIA 驱动（已有 595.71.05）
+For the AI service stacks (a GPU base server):
+
+- NVIDIA driver
 - Docker Engine + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-- `~/.openmmla/master.key`（解密 config 里的 ENC(...) 值，只读挂载进容器）
+- `~/.openmmla/master.key`, mounted read-only into the containers to decrypt the `ENC(...)` values in the config
+- the current user in the `docker` group, so `docker` runs without `sudo` (the TUI runs plain `docker compose`)
 
-中心基础设施（`docker-compose.infra.yml`）只需要 Docker Engine：不用 GPU、
-不用 nvidia-container-toolkit、也不需要 master key。
+The database stack only needs Docker Engine: no GPU, no nvidia-container-toolkit, no master key.
 
-## 使用
+## AI service stacks: ASR and VFA
 
-在仓库根目录执行：
+Run from the repository root:
 
 ```bash
-# ASR 全部服务（构建 + 启动）
+# all ASR services (build + start)
 docker compose -f docker/docker-compose.asr.yml up -d --build
 
 # VFA frame analyzer
 docker compose -f docker/docker-compose.vfa.yml up -d --build
 
-# 查看状态 / 日志
+# status / logs
 docker compose -f docker/docker-compose.asr.yml ps
 docker compose -f docker/docker-compose.asr.yml logs -f speech-transcriber
 
-# 停止
+# stop
 docker compose -f docker/docker-compose.asr.yml down
 ```
 
-### 切换 inferer 后端（wespeaker ⇄ nemo）
+The service configs stay on the host: `pipelines/asr-server/config.yml` and `pipelines/vfa-server/config.yml` are bind-mounted into the containers as `/project/config.yml`, so edit them exactly as before (the TUI's Config tab on the ASR Server / VFA Server cards writes the same files).
 
-两者都占 5001，同时只能跑一个：
+### Switching the inferer backend: wespeaker or nemo
+
+Both listen on 5001, so only one can run at a time:
 
 ```bash
 docker compose -f docker/docker-compose.asr.yml stop audio-inferer
 docker compose -f docker/docker-compose.asr.yml --profile nemo up -d audio-inferer-nemo
 ```
 
-同时把 `pipelines/asr-server/config.yml` 里 `AudioInferer.backend` 改为 `nemo`。
+Set `AudioInferer.backend` to `nemo` in `pipelines/asr-server/config.yml` at the same time. The TUI picks the container from that setting automatically.
 
-### 本地 vLLM VLM 后端
+### Local vLLM VLM backend
 
 ```bash
 VLLM_VLM_MODEL=openbmb/MiniCPM-V-2_6 \
 docker compose -f docker/docker-compose.vfa.yml --profile mllm up -d
 ```
 
-frame analyzer 容器内已配置 `host.docker.internal` → 宿主机，config 里的
-`http://localhost:8000/v1` 需改为 `http://host.docker.internal:8000/v1`
-（或直接用 compose 服务名 `http://vllm-vlm:8000/v1`）。
+The frame analyzer container maps `host.docker.internal` to the host, so a `vlm_base_url` of `http://localhost:8000/v1` in the config has to become `http://host.docker.internal:8000/v1` (or the compose service name, `http://vllm-vlm:8000/v1`).
 
-## 中心基础设施 (InfluxDB / MongoDB)
+This is separate from the TUI's **MLLM Server** card, which runs vLLM natively in the `vfa-vllm` conda environment from `config/mllm_server.yml`.
 
-`docker-compose.infra.yml` 把 Uber Server 的两个数据库跑成容器，替代 brew /
-apt 的裸机安装。默认端口与 `config/system_services.yml` 一致，pipeline 只需改主机名；
-宿主机端口可以用 `INFLUXDB_PORT` / `MONGODB_PORT` 改掉（见下面「和别的项目共用一台机器」）。
+## Database stack: InfluxDB and MongoDB
+
+`docker-compose.infra.yml` runs the two uber-server databases as containers instead of bare-metal brew/apt installs. The default ports match `config/system_services.yml`, so the pipelines only need the host name changed; the host ports can be overridden with `INFLUXDB_PORT` / `MONGODB_PORT` (see [Sharing a host with another project](#sharing-a-host-with-another-project)).
 
 | Service | Image | Port | GPU | Stack |
 |---|---|---|---|---|
-| InfluxDB | `influxdb:2.7.12` | 8086 | — | 官方镜像，v2 API（org/bucket/token + Flux） |
-| MongoDB | `mongo:7.0.40-jammy` | 27017 | — | 官方镜像，默认不开认证 |
+| InfluxDB | `influxdb:2.7.12` | 8086 | — | official image, v2 API (org/bucket/token + Flux) |
+| MongoDB | `mongo:7.0.40-jammy` | 27017 | — | official image, no authentication by default |
 
-镜像标签是钉死的，不要换成 `latest`：`influxdb:latest` 在 2026-09-15 会指向
-InfluxDB 3 Core（没有 org/bucket/token 那套语义，`influxdb-client==1.44.0` 直接失效），
-`mongo:latest` 则会跟着大版本漂移。两个标签都同时发布 linux/amd64 和 linux/arm64。
+The image tags are pinned on purpose; do not switch them to `latest`. From 2026-09-15 `influxdb:latest` points at InfluxDB 3 Core, which has no org/bucket/token semantics and breaks `influxdb-client==1.44.0` outright, and `mongo:latest` drifts across major versions. Both pinned tags are published for linux/amd64 and linux/arm64.
 
-在**要放数据库的那台机器**（下文假设主机名 `server-01`）的仓库根目录执行。
-这台机器只需要拉一份仓库（或者干脆只拷贝 `docker/` 下这两个文件，本 stack
-不需要 build context）。
+### Setup
 
-先停掉可能占着 8086 / 27017 的裸机服务，否则 `up -d` 会以
-`Bind for 0.0.0.0:8086 failed: port is already allocated` 失败（端口被**别的项目的
-容器**占着的情况见下面「和别的项目共用一台机器」，那种不能停，要换端口）：
+Run the commands on the **machine that will hold the databases** (called `server-01` below), from the repository root. That machine only needs a clone of the repository, or just these two files from `docker/`: the stack has no build context.
+
+First stop any bare-metal service that may hold 8086 / 27017, otherwise `up -d` fails with `Bind for 0.0.0.0:8086 failed: port is already allocated`. If the port is held by **another project's container**, do not stop it; change our host port instead, see [Sharing a host with another project](#sharing-a-host-with-another-project).
 
 ```bash
 # macOS
 brew services stop influxdb mongodb-community
-# Ubuntu/Debian
+# Ubuntu / Debian
 sudo systemctl disable --now influxdb mongod
 ```
 
-然后填密钥并启动：
+Then fill in the secrets and start:
 
 ```bash
 cp docker/.env.example docker/.env && chmod 600 docker/.env
-# 编辑 docker/.env，至少填 INFLUXDB_INIT_ADMIN_TOKEN 和 INFLUXDB_INIT_PASSWORD
-#   openssl rand -hex 32      → INFLUXDB_INIT_ADMIN_TOKEN
-#   openssl rand -base64 24   → INFLUXDB_INIT_PASSWORD
+# edit docker/.env: at least INFLUXDB_INIT_ADMIN_TOKEN and INFLUXDB_INIT_PASSWORD
+#   openssl rand -hex 32      -> INFLUXDB_INIT_ADMIN_TOKEN
+#   openssl rand -base64 24   -> INFLUXDB_INIT_PASSWORD
 
 docker compose -f docker/docker-compose.infra.yml up -d
 
-# 状态 / 日志 / 停止（down 保留 volume，down -v 会删光数据）
+# status / logs / stop (down keeps the volumes, down -v deletes all data)
 docker compose -f docker/docker-compose.infra.yml ps
 docker compose -f docker/docker-compose.infra.yml logs -f influxdb
 docker compose -f docker/docker-compose.infra.yml down
 ```
 
-密钥请写进 `docker/.env`（已被 `.gitignore` 忽略），不要用 `export`：compose
-读取 `.env` 是对**每一条子命令**生效的，换个 shell 或重启之后 `ps` / `logs` /
-`down` 行为一致；`export` 出来的值只活在当前那个 shell 里。`export` 还会把 token
-留在 `~/.bash_history` 里。`INFRA_BIND_ADDRESS` 同理——写进 `.env` 才能保证之后每次
-`up -d` 都用同一个绑定地址，否则会悄悄退回 `0.0.0.0`。
+Keep the secrets in `docker/.env` (gitignored) rather than `export`ing them: compose reads `.env` for **every** subcommand, so `ps`, `logs` and `down` behave the same from any shell and after a reboot, while an exported value only lives in that one shell and ends up in `~/.bash_history`. The same goes for `INFRA_BIND_ADDRESS`: only a value in `.env` guarantees that every later `up -d` uses the same bind address instead of silently falling back to `0.0.0.0`.
 
-### 从裸机数据库迁移过来（先做这一步）
+### Migrating from the bare-metal databases (do this first)
 
-容器起来时两个数据库都是**全新的空库**。直接改 URL 指过去，TUI 的 session 列表、
-dashboard 的历史 session、以及全部历史 `sensor_events` 都会看起来「消失」——
-数据还在旧机器上，只是没人再连它了。
+Both containers start as **brand-new, empty databases**. If you just repoint the URLs, the TUI's session list, the dashboard's session history and every historical `sensor_events` point will appear to vanish. The data is still on the old machine; nothing connects to it any more.
 
-要保留历史数据，先迁移再改 URL。在**旧的** Uber Server（比如 `ericli.local`）上导出：
+To keep the history, migrate before changing the URLs. On the **old** uber server export:
 
 ```bash
 mongodump --uri "mongodb://localhost:27017" --db openmmla --archive=openmmla.archive
-influx backup ./influx-backup -t "<旧的 admin token>"
+influx backup ./influx-backup -t "<old admin token>"
 ```
 
-拷到 server-01 之后导入容器：
+Copy both to `server-01` and import into the containers:
 
 ```bash
 docker compose -f docker/docker-compose.infra.yml exec -T mongodb \
@@ -144,16 +135,13 @@ docker compose -f docker/docker-compose.infra.yml exec influxdb \
   influx restore /tmp/influx-backup --full
 ```
 
-`influx restore --full` 会连同 token 一起覆盖成旧实例的，之后 TUI 里填**旧
-token**；不想覆盖就用 `--bucket mmla-data` 只恢复数据，token 用新的。
+`influx restore --full` also overwrites the tokens with the old instance's, so afterwards enter the **old** token in the TUI. To keep the new token, restore only the data with `--bucket mmla-data`.
 
-不想迁移也可以：把旧机器继续开着，只是新旧数据从此分家。
+Not migrating is fine too: leave the old machine running, the old and new data just stay apart from then on.
 
-### 备份
+### Backups
 
-数据只存在 named volume 里，`docker compose down -v`、`docker volume rm`、
-以及某些「重置一下」的教程命令都会**永久删除**它们，没有回收站。
-至少定期跑一次上面那两条导出命令，落到 Docker 之外的路径：
+The data lives only in named volumes. `docker compose down -v`, `docker volume rm` and a few "just reset it" tutorial commands **delete them permanently**; there is no recycle bin. Run the two exports below regularly and keep the output outside Docker:
 
 ```bash
 docker compose -f docker/docker-compose.infra.yml exec -T mongodb \
@@ -164,14 +152,11 @@ docker compose -f docker/docker-compose.infra.yml exec influxdb \
 docker cp "$(docker compose -f docker/docker-compose.infra.yml ps -q influxdb)":/tmp/backup /backup/influx-$(date +%F)
 ```
 
-采集进行中不要 `down`；两个服务都设了 `stop_grace_period: 60s`，但正常流程是
-先结束 session 再停 stack。
+Do not `down` the stack while a collection is running. Both services have `stop_grace_period: 60s`, but the normal order is: end the session, then stop the stack.
 
-### 和别的项目共用一台机器
+### Sharing a host with another project
 
-同一台机器上如果已经有别的项目的 InfluxDB / MongoDB 容器（哪怕它们只绑
-`127.0.0.1:8086`），我们的 `0.0.0.0:8086` 也起不来——内核不允许同一端口上
-通配地址和具体地址并存。**不要去停别人的容器**，改我们的宿主机端口：
+If the machine already runs another project's InfluxDB / MongoDB containers, even ones bound only to `127.0.0.1:8086`, our `0.0.0.0:8086` will not come up: the kernel does not allow a wildcard bind and a specific bind on the same port. **Do not stop their containers**; change our host ports:
 
 ```bash
 # docker/.env
@@ -179,39 +164,27 @@ INFLUXDB_PORT=8087
 MONGODB_PORT=27018
 ```
 
-然后 System Settings 里的 url 带上新端口（`http://server-01:8087`、
-`mongodb://server-01:27018`）。TUI 卡片的状态探测会从 url 里读端口，不用改代码。
-容器内部仍是 8086 / 27017，healthcheck 和数据都不受影响。
+Then put the new ports in the System Settings URLs (`http://server-01:8087`, `mongodb://server-01:27018`). The TUI's status probe reads the port from the URL, so nothing else changes. Inside the containers the ports stay 8086 / 27017, so the healthchecks and the data are unaffected.
 
-不要反过来"共用"别人的实例：它多半只绑 loopback（别的机器连不上）、开了认证
-（密码得明文进 `MongoDB.url`），而且 `influxdb:latest` 在 2026-09-15 之后一次
-`pull` 就会变成 InfluxDB 3，把你的数据一起带进坑里。
+Do not go the other way and reuse the other project's instance: it is usually bound to loopback only (unreachable from other machines), has authentication enabled (the password would have to go into `MongoDB.url` in plaintext), and if it runs `influxdb:latest`, one `pull` after 2026-09-15 turns it into InfluxDB 3 and takes your data with it.
 
-### 让 OpenMMLA 指向这套基础设施
+### Pointing OpenMMLA at the stack
 
-`mmla tui` → Launcher → System Settings，只改这三处：
+`mmla tui` → Launcher → **System Settings → Connections**; only three fields change:
 
-| 字段 | 值 |
+| Field | Value |
 |---|---|
-| `InfluxDB.url` | `http://server-01.local:8086`（`org: admin`、`bucket: mmla-data` 保持不变） |
-| `InfluxDB.token` | 上面那个 `INFLUXDB_INIT_ADMIN_TOKEN`，把原来的 `ENC(...)` 整串替换成明文 |
-| `MongoDB.url` | `mongodb://server-01.local:27017`（`db: openmmla` 不变） |
+| `InfluxDB.url` | `http://server-01.local:8086` (`org: admin` and `bucket: mmla-data` stay as they are) |
+| `InfluxDB.token` | the `INFLUXDB_INIT_ADMIN_TOKEN` from above, replacing the whole `ENC(...)` string with the plain value; or press **Fetch Token** on the InfluxDB card (see below) |
+| `MongoDB.url` | `mongodb://server-01.local:27017` (`db: openmmla` stays) |
 
-**主机名怎么写取决于你的网络。** `.local` 是 mDNS，只在**同一个局域网**里有效。如果你的
-Mac 和 server-01 不在一个网段、中间走的是 Tailscale（`ssh admin@server-01` 能通、
-但 `ping server-01.local` 不通就是这种情况），要写 Tailscale 的 MagicDNS 名字或
-tailnet IP：`http://server-01:8086`、`http://100.x.x.x:8086`。这也意味着**每一台跑
-base station 的机器都得在 tailnet 里**，否则它到不了数据库。改了端口的话把端口
-一起写上：`http://server-01:8087`。
+**How you spell the host name depends on your network.** `.local` is mDNS and only works on the **same LAN**. If your Mac and `server-01` are on different subnets with Tailscale in between (`ssh admin@server-01` works but `ping server-01.local` does not), use the Tailscale MagicDNS name or the tailnet IP: `http://server-01:8086`, `http://100.x.x.x:8086`. That also means **every base station has to be in the tailnet**, or it cannot reach the databases. If you changed the ports, include them: `http://server-01:8087`.
 
-保存时 token 会自动重新加密成 `ENC(...)`，并同步写回所有本地
-`pipelines/*/config.yml`，**不要手改那些文件**（会被覆盖，运行时也以
-`config/system_services.yml` 为准）。远程 Host 的第一次 launch 会先同步 config
-再要求重新 launch，这是设计如此，不是报错。
+On save the token is re-encrypted to `ENC(...)` and written into every local `pipelines/*/config.yml`. **Do not edit those files by hand**: they get overwritten, and at runtime `config/system_services.yml` wins anyway. The first launch on a remote host syncs the config first and then asks you to launch again; that is by design, not an error.
 
-新容器是全新的 InfluxDB，旧的 token 一定认证失败，必须换成新 token。
+The new container is a fresh InfluxDB, so the old token is guaranteed to fail authentication; it must be replaced with the new one.
 
-验证顺序（从 Mac 上执行）：
+Verify, from the machine that runs the TUI:
 
 ```bash
 ping -c1 server-01.local
@@ -219,136 +192,65 @@ curl -sf http://server-01.local:8086/health
 mongosh mongodb://server-01.local:27017 --eval 'db.adminCommand({ping:1})'
 ```
 
-`server-01.local` 依赖 mDNS：Ubuntu Server 默认既没有 avahi-daemon 也没有
-libnss-mdns（`sudo apt install -y avahi-daemon libnss-mdns` +
-`sudo hostnamectl set-hostname server-01`），且 mDNS 不跨子网 / VLAN。
-解析不了就退回固定 IP 或 `/etc/hosts`。
+`server-01.local` relies on mDNS. Ubuntu Server ships neither `avahi-daemon` nor `libnss-mdns` by default (`sudo apt install -y avahi-daemon libnss-mdns` and `sudo hostnamectl set-hostname server-01`), and mDNS does not cross subnets or VLANs. If the name does not resolve, fall back to a fixed IP or `/etc/hosts`.
 
-**注意这三条验证命令是在宿主机上跑的，但真正读这些 URL 的还有 ASR / VFA 容器**，
-而 bridge 网络里的容器默认不做 mDNS 解析——宿主机 `ping server-01.local` 通，
-不代表容器里通。同时要用容器化 AI 服务的话，`config/system_services.yml` 里
-建议直接填固定 IP，或者给那两个 compose 文件加 `extra_hosts`。
+**These three checks run on the host, but the ASR / VFA containers read the same URLs**, and containers on a bridge network do no mDNS resolution by default: `ping server-01.local` working on the host does not mean it works inside the container. When the containerized AI services are in use as well, put a fixed IP in `config/system_services.yml`, or add `extra_hosts` to the two AI compose files.
 
-### MongoDB 认证（可选，强烈建议）
+### MongoDB authentication (optional, strongly recommended)
 
-默认不开认证，和现在的裸机部署一致。要开就在**第一次启动前**同时设置两个变量：
+Authentication is off by default, matching the bare-metal setup. To enable it, set both variables **before the first start**:
 
 ```bash
 export MONGO_ROOT_USER=openmmla
-export MONGO_ROOT_PASSWORD="<密码>"
+export MONGO_ROOT_PASSWORD="<password>"
 docker compose -f docker/docker-compose.infra.yml up -d
 ```
 
-- 只在 `mongodb-data` volume 为空时生效；volume 里已经有数据之后再加变量，
-  会变成「开了 `--auth` 但没有任何用户」，谁都连不上。**这时不要删 volume**：
-  把两个变量清空再 `up -d` 就回到无认证状态、数据分毫不动；或者用容器内的
-  localhost exception 建用户：
-  `docker compose -f docker/docker-compose.infra.yml exec mongodb mongosh admin --eval 'db.createUser({user:"openmmla",pwd:"<密码>",roles:["root"]})'`
-- 只设置其中一个变量，容器会**反复重启**，而 `up -d` 依然报告成功。
-  27017 一直不通就查 `docker compose -f docker/docker-compose.infra.yml ps` 和
-  `... logs mongodb`
-- 开了之后 URL 必须写成
-  `mongodb://<user>:<pass>@server-01.local:27017/?authSource=admin`，
-  漏掉 `authSource=admin` 会认证失败
-- 但要注意：`url` 不在加密字段名单里（只有 token/password/secret 这类 key 会加密），
-  而 `config/system_services.yml` 是**被 git 跟踪的**，所以带密码的 URL 会以明文提交。
-  在给 `MongoDB` 增加独立的 username/password 字段之前，先权衡这一点
+- This only takes effect while the `mongodb-data` volume is empty. Adding the variables once the volume holds data gives you `--auth` with no users at all, and nobody can connect. **Do not delete the volume** in that case: clear both variables and `up -d` again to return to no-auth with the data untouched, or create the user through the container's localhost exception:
+  `docker compose -f docker/docker-compose.infra.yml exec mongodb mongosh admin --eval 'db.createUser({user:"openmmla",pwd:"<password>",roles:["root"]})'`
+- Setting only one of the two variables makes the container **restart-loop** while `up -d` still reports success. If 27017 never opens, check `docker compose -f docker/docker-compose.infra.yml ps` and `... logs mongodb`.
+- With auth on, the URL must be `mongodb://<user>:<pass>@server-01.local:27017/?authSource=admin`; without `authSource=admin` authentication fails.
+- `url` is not on the list of encrypted fields (only keys such as token/password/secret are encrypted), and `config/system_services.yml` is **tracked by git**, so a URL with a password is committed in plaintext. Weigh that before enabling auth, at least until `MongoDB` gets separate username/password fields.
 
-## 挂载说明
+## Mounts
 
-- `pipelines/asr-server` / `pipelines/vfa-server` → 容器 `/project`：
-  config.yml、temp/、runtime 日志都落在宿主机，行为和 conda 方式一致
-- 模型缓存（HuggingFace / torch hub / ModelScope）用 named volume 共享，
-  容器重建不用重新下载
-- `~/.openmmla` 只读挂载：容器内可解密 ENC(...) 密钥
-- 基础设施的数据全在 named volume 里：`influxdb-data`（`/var/lib/influxdb2`，
-  含 influxd.bolt 与 engine）、`influxdb-config`（`/etc/influxdb2`，含
-  `influx-configs`，admin token 可从这里找回）、`mongodb-data`（`/data/db`）、
-  `mongodb-config`（`/data/configdb`）。不要用 bind mount 挂 `/data/db`，
-  WiredTiger 需要真实的文件锁语义
-- 基础设施容器**不**挂 `~/.openmmla`：官方 influxdb / mongo 镜像里没有 openmmla
-  代码，也不会读 config.yml，没有可解密的东西
+- `pipelines/asr-server` / `pipelines/vfa-server` → `/project` in the container: `config.yml`, `temp/` and runtime logs stay on the host, the same as with conda.
+- Model caches (HuggingFace / torch hub / ModelScope / wespeaker) are shared named volumes, so re-created containers do not download again.
+- `~/.openmmla` is mounted read-only so the containers can decrypt `ENC(...)` secrets.
+- The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.
+- The database containers do **not** mount `~/.openmmla`: the official influxdb / mongo images contain no OpenMMLA code, never read `config.yml`, and have nothing to decrypt.
 
-## 与 TUI 的关系
+## How the TUI uses these stacks
 
-TUI Launcher 中 ASR Server / VFA Server 的 Start / Stop / Logs 已全部改为
-docker compose（tmux+gunicorn 方式已移除）：
+**ASR Server / VFA Server** cards (Launcher → Pipelines → ASR → ASR Server, Launcher → Pipelines → VFA → VFA Server): Start / Stop / Logs all go through docker compose; the tmux + gunicorn way has been removed.
 
-- **Start**：`docker compose -f docker/docker-compose.*.yml up -d --build <选中的子服务>`
-  （AudioInferer 按 config 的 `backend` 自动选 wespeaker 或 nemo 容器）
-- **Stop**：`docker compose ... down`
-- **Logs**：`docker compose ... logs --tail 40`
-- **状态**：仍按端口探测，容器起来即显示 [OK]
+- **Start**: `docker compose -f docker/docker-compose.*.yml up -d --build <selected services>` (AudioInferer picks the wespeaker or nemo container from `backend` in the config)
+- **Stop**: `docker compose ... down`
+- **Logs**: `docker compose ... logs --tail 40`
+- **Status**: still probed by port; a running container shows `Running` on the card and the `(R)` marker in the tree
 
-远程 Host 走 SSH 在远端仓库目录执行同样的命令，因此远程机器需要：
-仓库已拉取（含 docker/ 目录）、Docker Engine + nvidia-container-toolkit、
-当前用户在 docker 组（无需 sudo 运行 docker）。
+A remote host runs the same commands over SSH in its repository directory, so it needs: the repository cloned (including `docker/`), Docker Engine + nvidia-container-toolkit, and the current user in the `docker` group.
 
-中心基础设施目前**没有**接进 TUI，`docker-compose.infra.yml` 只能手动
-`docker compose` 起停：
+**InfluxDB / MongoDB** cards (Launcher → System Services):
 
-- **状态**：`Uber: InfluxDB` / `Uber: MongoDB` 卡片探的是 System Settings 里配的
-  url（从 TUI 这台机器直接 TCP 连 host:port），和 Host 选择器无关；只有 url 写成
-  localhost 时才退回"探选中主机自己的回环"。Status 页同理，端口列会显示实际
-  探测的 host:port
-- **Start / Stop / Logs**：卡片上有一个 **Run mode** 下拉（`docker` / `native`），
-  **默认 `docker`**。还在用 brew / systemctl 裸机数据库的机器把它切回 `native`，
-  否则 Start 会在那台机器上起容器、和裸机实例抢端口。`docker` 模式下三个按钮走
-  `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <服务>`。
-  停止用 `stop` 而不是 `down`：两张卡片共用一个 compose 文件，`down` 会把另一个
-  数据库容器一起拆掉
-- Run mode 是按「主机 + 服务」记住的，切换 Host 或点别的节点再回来不会丢。但它
-  只存在这次 TUI 会话里，重启 TUI 会回到默认的 `docker`
-- **Fetch Token**（只在 `Uber: InfluxDB` 卡片上，docker 模式）：到选中的 Host 上读
-  docker stack 的 admin token——优先读运行中容器的 `/etc/influxdb2/influx-configs`
-  （连 influx 自己生成的 token 也能拿到），没有再读 `docker/.env`——然后加密写进
-  System Settings 的 `InfluxDB.token`。token 不会出现在日志里，只显示首尾各 4 位。
-  url 指向的主机和读 token 的主机不一致时会提醒
-- **Status 页的 Host 列**对 InfluxDB / MongoDB / Redis / Mosquitto / Nginx 显示的是
-  **配置里它所在的机器**（`server-01`、`ericli.local`），不是 TUI 在哪跑；Port 列
-  就是端口。View Logs 会按这个主机找对应的 SSH profile（按 profile 名或 host 匹配），
-  主机是本机自己的名字时直接读本地；docker 容器存在就读容器日志，否则回落到
-  journalctl / brew 日志
-- 状态探测**直接连 System Settings 里配的 host:port**，从跑 TUI 的这台机器发起——
-  也就是 pipeline 真正走的那条路。`InfluxDB.url` 写 `http://server-01:8087`，卡片和
-  Status 页就去连 `server-01:8087`，`INFRA_BIND_ADDRESS` 绑在哪张网卡都无所谓。
-  卡片描述里会写出探的是哪个地址。两个推论：
-  - url 是 `localhost` / `127.0.0.1` 时它不指向任何一台特定机器，这时沿用老逻辑：
-    本地探本机回环，远程 Host 走 SSH 探那台机器自己的回环
-  - "可达"是**从 TUI 这台机器看**的。TUI 机器不在 tailnet 里、或者被防火墙挡着，
-    卡片会灰，哪怕 pipeline 机器连得上
-- 数据库搬到 server-01 之后，Mac 本地的这两张卡片会一直显示未运行（本地探测写死
-  127.0.0.1），这是预期现象，不是连不上。**这时更不要在 Mac 上点 Start**：
-  按钮走的是 `make influxdb` / `make mongodb`，会在本机 8086 / 27017 起一个裸机
-  数据库，卡片随即变绿 [OK]——但那是一个空的本地库，pipeline 连的仍然是
-  server-01，绿灯反而会误导。搬完之后把 Mac 上的这两个裸机服务也停掉
+- **Status**: the cards probe the URL configured in System Settings, with a direct TCP connect from the TUI machine to host:port, independent of the Host selector. Only when the URL says `localhost` do they fall back to probing the selected host's own loopback. The Status tab does the same and its port column shows the host:port that was actually probed.
+- **Start / Stop / Logs**: each card has a **Run mode** dropdown (`docker` / `native`), **`docker` by default**. Switch a machine that still uses brew / systemctl databases to `native`, otherwise Start brings up a container on that machine and fights the bare-metal instance for the port. In `docker` mode the three buttons run `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <service>`. Stop uses `stop`, not `down`: both cards share one compose file and `down` would take the other database's container with it.
+- Run mode is remembered per host + service, so switching Host or clicking another node and coming back keeps it, but only for this TUI session; a restart returns to `docker`.
+- **Fetch Token** (InfluxDB card only, docker mode): reads the docker stack's admin token on the selected Host, first from the running container's `/etc/influxdb2/influx-configs` (which also covers a token influx generated itself), then from `docker/.env`, and stores it encrypted in System Settings as `InfluxDB.token`. The token never appears in the logs; only its first and last 4 characters are shown. The TUI warns when the URL's host and the host the token was read from differ.
+- **Status tab, Host column**: for InfluxDB / MongoDB / Redis / Mosquitto / Nginx it shows **the machine the service is configured on** (`server-01`, `ericli.local`), not where the TUI runs; the Port column is the port. View Logs finds the SSH profile for that host (matched by profile name or host), reads locally when the host is this machine, reads the container logs when a container exists, and otherwise falls back to journalctl / brew logs.
+- Reachability is judged **from the TUI machine**, which is the path the pipelines actually take. With `InfluxDB.url` set to `http://server-01:8087`, the card and the Status tab connect to `server-01:8087`; which interface `INFRA_BIND_ADDRESS` binds does not matter. The card description states the address being probed. Two consequences: a `localhost` / `127.0.0.1` URL names no particular machine, so the old logic applies (local probes this machine, a remote Host is probed over SSH on its own loopback); and if the TUI machine is outside the tailnet or behind a firewall, the card is grey even when the pipeline machines can connect.
+- After the databases move to `server-01`, the two cards on a Mac with `localhost` URLs stay grey, because the local probe hits 127.0.0.1. That is expected, not a connectivity problem. **Do not press Start on the Mac in that state**: in `native` mode it runs `make influxdb` / `make mongodb`, which starts a bare-metal database on local 8086 / 27017, and the card turns green `Running` for an empty local database while the pipelines still use `server-01`. Stop those two local services once the move is done.
 
-## 已知注意点
+## Known caveats
 
-- nemo 镜像标记为实验性：nemo-toolkit ≤1.23 依赖较老，构建时间长
-- transcriber 镜像用 whisperx 3.8.6（语言、模型名等 config 不变：`whisperx/small`、`da`）；
-  首次请求会下载模型到 hf-cache volume
-- separator 的 MossFormer2 模型缓存写在 `/root/.cache/modelscope`（named volume）
-- **`DOCKER_INFLUXDB_INIT_*` 只在第一次启动、且 `influxdb-data` 为空时生效**。
-  entrypoint 见到 `influxd.bolt` 就整个跳过 setup，之后改 token / org / bucket /
-  密码再 `up -d` 不报错也不生效。事后换 token 要用
-  `docker compose -f docker/docker-compose.infra.yml exec influxdb influx auth create --org admin --all-access`；
-  找回初始 token 用 `... exec influxdb cat /etc/influxdb2/influx-configs`
-- **不要为了重新 bootstrap 去删 `influxd.bolt`**。entrypoint 只用它是否存在来判断
-  要不要跑 setup；删掉之后 setup 会重跑，而 `/etc/influxdb2` 是持久化的、里面已经
-  有配置，setup 大概率失败，其失败路径会对 engine 目录执行 `rm -rf`——数据全没。
-  要换 token 用上一条的 `influx auth create`
-- InfluxDB 的 Web UI 同样发布在 8086 上，任何能访问这个端口的人都能用
-  `admin` + `INFLUXDB_INIT_PASSWORD` 登进去。这个密码别用 8 位凑数，
-  用 `openssl rand -base64 24` 生成
-- **在跑容器化数据库的机器上不要执行 `make -C pipelines/uber-server all`**：
-  `all` 先跑 `clean-ports`，会对占用 8086 / 27017 的进程 `kill -9`，也就是
-  docker-proxy；随后的 `influxdb` / `mongodb` target 还会去启动裸机服务。
-  这类机器上请用 `make all without=influxdb,mongodb`
-- MongoDB 默认无认证，且在 Linux 上 Docker 的 NAT 规则先于 ufw 生效，
-  `ufw deny 27017` 挡不住已发布的端口。只在可信实验室网段里用，或者用
-  `INFRA_BIND_ADDRESS=<内网 IP>` 把发布限制在一张网卡上，
-  再不然写 `DOCKER-USER` 链的 iptables 规则
-- MongoDB 5.0+ 要求 x86_64 有 AVX 指令集（arm64 要求 ARMv8.2-A 以上）。
-  老 CPU 上容器会以 exit 132 反复重启，`up -d` 却是「成功」的。上线前先在
-  server-01 上跑 `grep -m1 -o avx /proc/cpuinfo`
+- The nemo image is experimental: nemo-toolkit ≤1.23 has old dependencies and a long build.
+- The transcriber image uses whisperx 3.8.6 with the config unchanged (`whisperx/small`, `da`, ...); the first request downloads the model into the hf-cache volume.
+- The separator's MossFormer2 model cache is written to `/root/.cache/modelscope` (named volume).
+- **`DOCKER_INFLUXDB_INIT_*` only apply on the first start against an empty `influxdb-data` volume.** Once the entrypoint sees `influxd.bolt` it skips setup entirely; changing the token / org / bucket / password afterwards and running `up -d` neither errors nor takes effect. To change the token later use
+  `docker compose -f docker/docker-compose.infra.yml exec influxdb influx auth create --org admin --all-access`;
+  to recover the initial token use `... exec influxdb cat /etc/influxdb2/influx-configs`.
+- **Do not delete `influxd.bolt` to re-run the bootstrap.** The entrypoint only checks whether the file exists; with it gone, setup runs again against a persisted `/etc/influxdb2` that already holds a config, most likely fails, and its failure path runs `rm -rf` on the engine directory. All data gone. Use `influx auth create` from the previous point to change tokens.
+- The InfluxDB web UI is published on the same port 8086; anyone who can reach it can log in with `admin` + `INFLUXDB_INIT_PASSWORD`. Do not pad that password to 8 characters; generate it with `openssl rand -base64 24`.
+- **Do not run `make -C pipelines/uber-server all` on a machine that runs the containerized databases**: `all` starts with `clean-ports`, which `kill -9`s whatever holds 8086 / 27017, i.e. docker-proxy, and the `influxdb` / `mongodb` targets then start bare-metal services on top. Use `make all without=influxdb,mongodb` there.
+- MongoDB runs without authentication by default, and on Linux Docker's NAT rules run before ufw, so `ufw deny 27017` does not block a published port. Use it only on a trusted lab network, restrict publishing to one interface with `INFRA_BIND_ADDRESS=<LAN IP>`, or add iptables rules to the `DOCKER-USER` chain.
+- MongoDB 5.0+ requires AVX on x86_64 (ARMv8.2-A or newer on arm64). On an older CPU the container restart-loops with exit code 132 while `up -d` reports success. Check with `grep -m1 -o avx /proc/cpuinfo` on the server before going live.

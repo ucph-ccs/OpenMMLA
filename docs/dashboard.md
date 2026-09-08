@@ -1,109 +1,62 @@
 # Dashboard Setup Guide
 
-This document outlines the setup and configuration of the OpenMMLA dashboard. It consists of a Flask backend, Celery for background task processing, and a dependency-free static frontend (plain HTML/CSS/JS) served directly by Flask — no Node.js, npm, or build step required.
+The dashboard shows a session live and as a report afterwards. It is a Flask backend served by gunicorn, a Celery worker that renders the post-time visualizations, and a dependency-free static frontend (plain HTML, CSS and JavaScript) served by the same Flask process. No Node.js, npm or build step is involved.
 
 ## Prerequisites
 
-- Conda (for managing Python environments)
-- Redis (required for Celery)
-- InfluxDB (required for accessing measurements data)
+- The `uber-server` conda environment: create it from the TUI's Environment tab, or by hand:
 
-The backend listens on port 5050 by default. Change it under **System Settings → Connections → Dashboard (Flask)** in the TUI (the Launcher passes it to `make flask` as `DASHBOARD_PORT`, and the Status tab probes that host:port), or run `make flask DASHBOARD_PORT=<port>` by hand.
+    ```bash
+    conda create -n uber-server python=3.10 -y
+    conda activate uber-server
+    pip install -e '.[uber-server]'
+    ```
 
-## Installation
+- Redis, as the Celery broker and result store.
+- InfluxDB, for the measurements. MongoDB is not needed by the dashboard itself.
 
-### Step 1: Clone the Repository
-```bash
-git clone https://github.com/ucph-ccs/openmmla.git
-cd OpenMMLA
-```
+Both are described in [System Services](system_services.md).
 
-### Step 2: Install Dependencies
+## Configuration
 
-```bash
-conda create -n uber-server -c conda-forge python=3.10.12 -y
-conda activate uber-server
-pip install -e .[uber-server]
-```
+The backend reads `pipelines/uber-server/dashboard/flask-backend/config.yml`. Its `InfluxDB`, `MongoDB` and `Redis` sections are among the files that the TUI fills from **System Settings → Connections**, so saving the connections there configures the dashboard too. To edit it by hand, copy `config_template.yml` next to it and fill in:
 
-### Step 3: Configure the Backend
-
-Edit `pipelines/uber-server/dashboard/flask-backend/config.yml` to set up your database connection:
-
-```yml
+```yaml
 InfluxDB:
-  # Replace <influxdb-example-server> with the address of the machine running InfluxDB,
-  # and <port> with its port (default 8086). Fill in your token and organization name.
-  # e.g. url: http://uber-server.local:8086
-  url: http://<influxdb-example-server>:<port>
+  url: http://<influxdb-host>:8086
   token: <influxdb-token>
-  org: <org-name>
+  org: admin
+  bucket: mmla-data
 
 Redis:
-  # Replace <redis-example-server> with the address of the machine running Redis,
-  # and <port-number> with its port (default 6379). Pick a database number for the
-  # Celery message queue (default 0).
-  host: <redis-example-server>
-  port: <port-number>
-  db: <database-number>
+  host: <redis-host>
+  port: 6379
+  db: 1          # a database number other than 0, so the Celery queue stays apart from the session control bus
 ```
 
-That's it — the frontend needs no configuration. It lives in `pipelines/uber-server/dashboard/frontend/` and talks to the backend over same-origin URLs.
+The backend listens on port 5050 by default. Change it under **System Settings → Connections → Dashboard (Flask)**; the TUI passes it to `make flask` as `DASHBOARD_PORT` and the Status tab probes that host and port. The frontend needs no configuration: it lives in `pipelines/uber-server/dashboard/frontend/` and talks to the backend over same-origin URLs.
 
-## Running the Dashboard
+## Running
 
-From the `pipelines/uber-server` directory:
+From the TUI: **Launcher → System Services → Dashboard (Flask)** and **Dashboard Worker (Celery)**, Start on each. From a shell:
 
 ```bash
-# Start the Flask backend on port 5050 (Gunicorn, gevent worker) — also serves the frontend
-make flask
-# Start the Celery worker that generates post-time visualizations
-make celery
+cd pipelines/uber-server
+make flask DASHBOARD_PORT=5050   # gunicorn with the gevent worker, in a tmux session named flask
+make celery                      # the visualization worker, in a tmux session named celery
 ```
 
-## Accessing the Dashboard
+Then open `http://localhost:5050` on the server, or `http://<dashboard-host>:5050` from any device on the network.
 
-```bash
-# From the dashboard server
-http://localhost:5050
+## Pages
 
-# From other devices on the same network
-http://<dashboard-example-server>:5050
-```
+- **Session explorer** (`/`): every session found in InfluxDB, each openable live or as a report.
+- **Live view** (`/realtime?session=<id>`): the running transcript (who said what, when), speaking-participation bars, the physical proximity map with badge positions and interaction links, and the raw diarization log.
+- **Analysis report** (`/posttime?session=<id>`): triggers the visualization job and polls until it is ready, then shows the gallery (interaction networks, heatmap, trajectories, interactive diarization) with zoom and per-image download, plus the measurement logs for download.
 
 ## Troubleshooting
 
-1. **Port conflicts**:
-   ```bash
-   make clean-ports 5050
-   ```
-
-2. **Service management**:
-   ```bash
-   make stop-flask
-   make stop-celery
-   ```
-
-3. **Log files** (tmux sessions; `Ctrl+B` then `D` to detach):
-   ```bash
-   tmux attach -t flask   # Flask logs
-   tmux attach -t celery  # Celery logs
-   ```
-
-4. **Database / Redis issues**:
-   Ensure InfluxDB and Redis are running and reachable, and that `flask-backend/config.yml` is correctly set up.
-
-## Dashboard Features
-
-1. **Session explorer** (`/`): lists all recorded sessions from InfluxDB; open a session live or as a report.
-
-2. **Live view** (`/realtime?session=<id>`):
-   - Live transcript feed (who said what, when)
-   - Speaking-participation bars (share of total speaking time per speaker)
-   - Physical proximity map (badge positions and interaction links)
-   - Raw diarization log
-
-3. **Analysis report** (`/posttime?session=<id>`):
-   - Triggers visualization generation automatically and polls until ready
-   - Gallery of generated plots (interaction networks, heatmap, trajectories, interactive diarization) with zoom and per-image download
-   - Measurement log selection and download
+- **Port in use**: `make clean-ports 5050`.
+- **Stop**: `make stop-flask`, `make stop-celery`, or the Stop buttons on the two cards.
+- **Logs**: the Logs button on the cards, or attach to the tmux sessions (`tmux attach -t flask`, `tmux attach -t celery`; `Ctrl+B` then `D` detaches).
+- **No sessions or empty charts**: check that InfluxDB and Redis are reachable from the dashboard host and that `flask-backend/config.yml` carries the right token, org and bucket. The Status tab of the TUI shows what it can reach.
