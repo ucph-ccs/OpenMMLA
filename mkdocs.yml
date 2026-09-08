@@ -67,6 +67,7 @@ nav:
       - ASR with diarization: pipelines/asr.md
       - Indoor positioning (IPS): pipelines/ips.md
       - Video frame analyzer (VFA): pipelines/vfa.md
+      - Human coding interface: coding_interface.md
   - Deployment:
       - Docker: docker.md
       - Dashboard: dashboard.md

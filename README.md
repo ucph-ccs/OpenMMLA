@@ -71,6 +71,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 | [System Services](docs/system_services.md) | InfluxDB, MongoDB, Redis, Mosquitto, Nginx, dashboard: install, start/stop, System Settings |
 | [Management Console](docs/tui.md) | the TUI: environments, launcher tree, cards, sessions, status, remote hosts |
 | [ASR](docs/pipelines/asr.md), [IPS](docs/pipelines/ips.md), [VFA](docs/pipelines/vfa.md) | the three pipelines end to end |
+| [Human coding interface](docs/coding_interface.md) | coding VFA ground truth frame by frame, in the pipeline's own output format |
 | [Docker](docs/docker.md) | the ASR/VFA AI service stacks and the InfluxDB/MongoDB stack |
 | [Dashboard](docs/dashboard.md) | Flask backend, Celery worker and the static frontend |
 | [Nginx](docs/nginx.md), [RTMP Streaming](docs/rtmp_streaming.md) | load balancing and camera/microphone streaming |

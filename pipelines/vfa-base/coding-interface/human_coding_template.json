@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "template_version": "2.0",
+    "created_date": "2025-01-23",
+    "description": "Human coding template for the VFA collaborative action scheme (Communicating / Observing / Manipulating / Idle-OffTask / Unclear). Replace participant_descriptions with the AprilTag ids and appearance of your participants; the same descriptions go into config/experiments.yaml for the VLM prompts."
+  },
+  "classification_schema": {
+    "action_categories": [
+      "Communicating",
+      "Observing",
+      "Manipulating",
+      "Idle-OffTask",
+      "Unclear"
+    ],
+    "definitions": {
+      "Communicating": "Person is actively communicating with others. This happens when: (1) Looking at work items (screen, documents, hardware) while clearly pointing at those items, OR (2) Looking at another person while gesturing or pointing with hands.",
+      "Observing": "Person is watching or monitoring but not actively communicating or manipulating. This happens when: Looking at work items or people, but hands are either resting/inactive, hovering without touching, or touching something different from what they're looking at.",
+      "Manipulating": "Person is directly working with something. This happens when: Looking at work items (screen, keyboard, documents, hardware) while at least one hand is clearly touching or contacting the same item they're looking at.",
+      "Idle-OffTask": "Person is not engaged in the work task. This happens when: Looking at personal items (phone, snacks) or looking outside the camera frame. Hands can be doing anything.",
+      "Unclear": "Cannot tell what the person is doing. This happens when: Cannot clearly see where they're looking or what their hands are doing due to blocking, blur, or poor visibility."
+    }
+  },
+  "participant_descriptions": {
+    "<tag-id-1>": "<position in frame> - <appearance, e.g. yellow-brown sweater>",
+    "<tag-id-2>": "<position in frame> - <appearance, e.g. dark-blue shirt>"
+  }
+}

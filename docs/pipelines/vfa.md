@@ -1,19 +1,23 @@
 # Video Frame Analyzer (VFA)
 
-Nonverbal behaviour analysis with vision-language and large language models. Bases capture a frame per camera angle at a fixed interval, the synchronizer bundles the angles of one moment into a single request, and the VFA server grounds each participant by their AprilTag, describes what they are doing and classifies it into predefined action categories.
+Gaze-augmented collaborative action recognition with vision-language models. Bases capture a frame per camera angle at a fixed interval, the synchronizer bundles the angles of one moment into a single request, and the VFA server grounds each participant by their AprilTag, overlays gaze cues, and asks a VLM to describe what each person is doing and to classify it into one of five collaborative actions with a transparent, step-by-step justification.
+
+The pipeline, its prompt design and its evaluation against human coders are described in the ICALT 2026 paper *Designing for Transparency: Gaze-Augmented Collaborative Action Recognition with Vision-Language Models*.
 
 ## Pipeline overview
 
-![Video frame analyzer](../img/video_frame_analyzer.png)
+![Video frame analysis pipeline: frame capture, frame synchronization, frame analysis, vision-language processing](../img/video_frame_analyzer.png)
 
-1. Frame capture on each base, one per camera angle, every `keyframe_interval` seconds (30 s by default)
-2. Frame synchronization across all angles into one time bucket, sent to the server as a single request
-3. Server-side AprilTag detection; each tag is repainted as a black square carrying its id
-4. Server-side gaze detection: face boxes, gaze lines and an in-frame probability drawn onto the frame
-5. A VLM prompt built from the rendered frames, the camera-angle descriptions and the participant descriptions
-6. The VLM links tag ids to observations (gaze focus, hand status, position, clothing)
-7. An LLM classifies the observations into actions (two-step mode), or the VLM does both at once (end-to-end mode)
-8. The result, a `<tag id, action>` dictionary, is written as `vfa_action` events
+The pipeline has four stages:
+
+1. **Frame Capture (FC)**: each VFA base captures a frame from its video stream every `keyframe_interval` seconds (30 s by default) and broadcasts the frame metadata (camera angle description, frame path) over MQTT.
+2. **Frame Synchronization (FS)**: the VFA synchronizer listens on the MQTT channel, aligns the messages of all bases in time, and sends the synchronized multi-angle frames together with the participant and angle descriptions to the analyzer in one HTTP request.
+3. **Frame Analysis (FA)**: the VFA analyzer (the VFA server) runs AprilTag detection and gaze detection (RetinaFace for faces, [Gaze-LLE](https://github.com/fkryan/gazelle) for gaze targets), renders the frames with the overlays below, builds the structured prompt, and sends it to the VLM.
+4. **Vision-Language Processing (VLP)**: the VLM, local or in the cloud behind an OpenAI-compatible API, performs grounding, captioning and classification and returns JSON. The result goes back to the synchronizer, which writes it to InfluxDB as `vfa_action` events (see the [Database Reference](../database.md)).
+
+![A rendered frame with face boxes, gaze lines, in-frame probabilities and a repainted AprilTag](../img/vfa_rendered_frame.png)
+
+A rendered frame carries the cues the prompt refers to: each detected AprilTag is repainted as a black square with its id in white, each detected face gets a coloured box, a gaze line points at the estimated gaze target, and `in: 0.98` is the probability that the gaze target lies inside the frame.
 
 | Component | Runs on | Command | Environment |
 |---|---|---|---|
@@ -24,9 +28,40 @@ Nonverbal behaviour analysis with vision-language and large language models. Bas
 
 Create the `vfa-base` environment from the TUI's Environment tab or by hand (`conda create -n vfa-base python=3.10 -y && pip install -e '.[vfa-base]'`). For an `lsl` source add `pip install pylsl==1.17.6` and `conda install -c conda-forge liblsl=1.16.2`.
 
+## Action coding scheme
+
+Every participant in every frame is assigned one of five mutually exclusive actions. Human coders work from the descriptive definitions below; the VLM receives a rule-based formalization of the same definitions, written as explicit conditions on gaze and hands plus a hierarchical decision process (`config/vfa/action_schemas.yml`, schema `collaboration_v1`, editable from the **Action Schema** tab of the VFA Server card).
+
+| Action | Definition |
+|---|---|
+| Communicating | Actively communicating with others: looking at work items (screen, documents, hardware) while clearly pointing at them, or looking at another person while gesturing or pointing. |
+| Observing | Watching or monitoring without communicating or manipulating: looking at work items or people while the hands are resting, hovering without touching, or touching something other than what is being looked at. |
+| Manipulating | Directly working with something: looking at a work item while at least one hand clearly touches the same item. |
+| Idle-OffTask | Not engaged in the task: looking at personal items (phone, snacks) or outside the camera frame, whatever the hands do. |
+| Unclear | The gaze or the hands cannot be seen well enough to tell, because of occlusion, blur or poor visibility. |
+
+The same scheme ships as the default template of the [human coding interface](../coding_interface.md), so machine and human codings use identical labels.
+
+## Prompt engineering
+
+![Structure of the chain-of-thought prompt: persona, context, grounding, captioning, classifying, formulating](../img/vfa_prompt_structure.png)
+
+The prompt mirrors the human annotation process as a stepwise reasoning chain:
+
+1. **Persona assignment** (system prompt): the VLM acts as an expert multi-perspective lab activity analyst.
+2. **Context**: a legend of the visual overlays, the camera setup (`{{num_perspectives}}`, `{{angle_descriptions}}`) and the participant descriptions (`{{participant_descriptions}}`).
+3. **Grounding**: identify each person by the AprilTag id, else by matching the appearance to the participant descriptions, else assign an id from 100 upwards.
+4. **Captioning**: describe gaze focus, hand status (contact, hovering, inactive), position and clothing per person, citing the camera view that supports each observation.
+5. **Classifying**: apply `{{action_definitions}}` and `{{decision_process}}` top down, stopping at the first match, with contact evidence when a rule requires contact.
+6. **Formulating**: answer in a fixed JSON layout with `observations`, `classifications` and `justifications` per id.
+
+The templates are plain text files under `pipelines/vfa-server/prompts/` (`prompt_templates_dir`), edited from the **Prompts** tab of the VFA Server card, which marks the templates in use. `prompt_profile` selects the end-to-end variant: `cot` (the chain-of-thought prompt above, the paper's main condition), `baseline` (direct classification without the reasoning steps) and `baseline_no_pre` (baseline without the pre-context block). `end_to_end: false` switches to the older two-step mode with the fixed `multi_angle_vlm_*` (vision) and `multi_angle_llm_*` (classification) templates.
+
+Templates substitute `{{variable}}` placeholders, each using only its own subset: `{{num_perspectives}}`, `{{angle_descriptions}}`, `{{participant_descriptions}}`, `{{action_definitions}}`, `{{decision_process}}` (not in the baseline variants) and `{{image_description}}` (two-step LLM prompts only). The participant descriptions come from the experiment selected for the session (`config/experiments.yaml`, edited under **System Settings → Study → Experiments**). A missing templates directory is an error at startup; a missing single template is skipped silently and leaves that prompt empty, so check the path if the model starts receiving bare input.
+
 ## Model backend
 
-The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnalyzer.backend` in `pipelines/vfa-server/config.yml` and fill in the matching block; the template lists every supported one.
+The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnalyzer.backend` in `pipelines/vfa-server/config.yml` and fill in the matching block; the template lists every supported one. In the paper, GLM-4.5V, InternVL-3.5, Gemini-2.5-Pro and GPT-5 were evaluated with the `cot` profile.
 
 Local:
 
@@ -37,18 +72,10 @@ Local:
 Cloud, each needing an API key in its block (stored encrypted on save):
 
 - **OpenAI** (`openai`), **Google Gemini** (`gemini`), **xAI Grok** (`grok`), **Zhipu** (`zhipuai`), **InternLM** (`intern`): vision-capable models for both steps.
-- **DeepSeek** (`deepseek`): text models only, so usable for the classification step; the shipped block points `vlm_model` at `deepseek-reasoner`, which does not accept images.
+- **DeepSeek** (`deepseek`): text models only, so usable for the classification step of the two-step mode; the shipped block points `vlm_model` at `deepseek-reasoner`, which does not accept images.
 - **Qwen** (`qwen`) through DashScope's OpenAI-compatible endpoint: the template default `qwen2.5-72b-instruct` is text-only, so set `vlm_model` to a `-vl` model.
 
 Because the frame analyzer runs in a container, a backend on the same machine is reached as `http://host.docker.internal:<port>/v1`, not `localhost`.
-
-## Prompt templates and action schema
-
-Prompts are plain text files under `pipelines/vfa-server/prompts/` (`prompt_templates_dir`), edited from the **Prompts** tab of the VFA Server card, which marks the templates in use. `prompt_profile` selects the end-to-end variant (`cot`: zero-shot chain-of-thought, the paper's main condition; `baseline`: direct classification; `baseline_no_pre`: baseline without the pre-context block), and `end_to_end: false` switches to the fixed two-step templates (`multi_angle_vlm_*` then `multi_angle_llm_*`).
-
-Templates substitute `{{variable}}` placeholders, each using only its own subset: `{{num_perspectives}}`, `{{angle_descriptions}}`, `{{participant_descriptions}}`, `{{action_definitions}}`, `{{decision_process}}` (not in the baseline variants) and `{{image_description}}` (LLM prompts only). The participant descriptions come from the experiment selected for the session (`config/experiments.yaml`, edited under **System Settings → Study → Experiments**). A missing templates directory is an error at startup; a missing single template is skipped silently and leaves that prompt empty, so check the path if the model starts receiving bare input.
-
-The action categories come from `config/vfa/action_schemas.yml`, edited from the **Action Schema** tab; `action_schema` in the server config overrides the default schema.
 
 ## Configuration
 
@@ -63,6 +90,8 @@ The action categories come from `config/vfa/action_schemas.yml`, edited from the
 | `Server.vfa` | the frame analyzer endpoint, through the gateway (`http://<gateway>:8080/vllm`) or direct (`http://<server>:5007/vllm`) |
 | `Cameras` | calibrated camera profiles; calibrate with the IPS camera calibration tool |
 | `InfluxDB`, `MongoDB`, `MQTT`, `Redis`, `Gateway` | mirrored from System Settings |
+
+`pipelines/vfa-server/config.yml` for the server: `backend` and its block, `end_to_end`, `prompt_profile`, `image_detail`, the AprilTag `families`, and optionally `action_schema`.
 
 ### Input sources
 
@@ -100,7 +129,7 @@ Managed streams are started and stopped from the **Streams** tab; see [RTMP Stre
 3. **VFA Base**: Host set to the base station. Choose the number of bases and synchronizers, the **Session**, the **Mode** and the toggles (`Graphics`, `Store Frames`, `Verbose`). **Start** opens one terminal window per instance; each base asks which `Bases` entry it is.
 4. **Session Control**: send **START**, and **STOP** at the end.
 
-Modes: `live` analyzes frames as they are captured (the TUI default); `capture` only stores frames; `analyze` re-runs the analysis on the frames this session stored earlier.
+Modes: `live` analyzes frames as they are captured (the TUI default); `capture` only stores frames, which is how frames for human coding are collected; `analyze` re-runs the analysis on the frames this session stored earlier.
 
 ## Manual CLI
 
@@ -126,6 +155,12 @@ python pipelines/vfa-base/examples/analyze_video_frame.py front.jpg side.jpg \
   --angles front,side \
   --participant-descriptions '{"1": "person with red shirt"}'
 ```
+
+## Human coding and evaluation
+
+Ground truth for VFA is produced with the [human coding interface](../coding_interface.md), a single HTML page in `pipelines/vfa-base/coding-interface/`. Run a base in `capture` mode (or `live` with `Store Frames` on) to collect frames; they land under `artifacts/runtime/pipelines/vfa-base/<host>/real-time/runtime/<camera>_<base-id>/` named `<unix-timestamp>.jpg`. Coders load the same frames and the action template, code every participant in every frame, and export a JSON file whose windows mirror the pipeline's `action_recognition` output, so human and machine codings can be joined on the frame timestamp and the participant id.
+
+In the paper, three researchers coded two pilot sessions this way (Cohen's κ 0.73 to 0.84), a majority vote formed the gold standard, and each VLM was run five times over 214 person-frame codings. Manipulating and Observing were recognised most reliably; Communicating was the hardest class.
 
 ## Post-time processing
 

@@ -1,0 +1,1951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Human Action Recognition Coding Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .main-container {
+            display: flex;
+            gap: 20px;
+        }
+        .media-panel {
+            flex: 1;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            height: 600px; /* Fixed height for visual data panel */
+            overflow-y: auto; /* Make content scrollable */
+        }
+        .coding-panel {
+            flex: 1;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            height: 600px; /* Match media panel height */
+            overflow-y: auto; /* Make content scrollable */
+        }
+        .media-container {
+            background-color: #000;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+            min-height: 400px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .media-container img, .media-container video {
+            max-width: 100%;
+            max-height: 500px;
+            border-radius: 4px;
+        }
+        /* Compact Slider Styles */
+        .frame-slider-container {
+            margin: 10px 0;
+            padding: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+        }
+        .frame-slider-label {
+            color: white;
+            font-weight: bold;
+            margin-bottom: 8px;
+            text-align: center;
+            font-size: 14px;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+        .slider-wrapper {
+            position: relative;
+            margin: 8px 0;
+        }
+        .frame-slider {
+            width: 100%;
+            height: 8px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.3);
+            outline: none;
+            -webkit-appearance: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 0 10px; /* prevent thumb from exceeding container */
+            width: calc(100% - 20px); /* account for margin */
+        }
+        .frame-slider:hover {
+            background: rgba(255, 255, 255, 0.4);
+        }
+        .frame-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+            transition: all 0.2s ease;
+            border: 2px solid white;
+        }
+        .frame-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.1);
+            box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+        }
+        .frame-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+            cursor: pointer;
+            border: 2px solid white;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+        }
+        .frame-slider::-moz-range-track {
+            height: 8px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.3);
+        }
+        .slider-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 8px;
+            color: white;
+        }
+        .slider-controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .nav-frame-btn {
+            padding: 6px 10px;
+            background: rgba(255, 255, 255, 0.15);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+        .nav-frame-btn:hover {
+            background: rgba(255, 255, 255, 0.25);
+            border-color: rgba(255, 255, 255, 0.5);
+            transform: translateY(-1px);
+        }
+        .nav-frame-btn:disabled {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.1);
+            cursor: not-allowed;
+            opacity: 0.4;
+            transform: none;
+        }
+        .frame-info {
+            text-align: center;
+            font-family: monospace;
+            font-size: 14px;
+            font-weight: bold;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+        .progress-indicator {
+            background: rgba(255, 255, 255, 0.15);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-weight: bold;
+            font-size: 12px;
+            backdrop-filter: blur(10px);
+        }
+        .control-btn {
+            padding: 8px 15px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+        .control-btn:hover {
+            background-color: #2980b9;
+        }
+        .participant-section {
+            border: 2px solid #3498db;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+            background-color: #ecf0f1;
+        }
+        .participant-0 {
+            border-color: #e74c3c;
+            background-color: #fdf2f2;
+        }
+        .participant-1 {
+            border-color: #27ae60;
+            background-color: #f2f9f2;
+        }
+        .form-group {
+            margin: 10px 0;
+        }
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #2c3e50;
+        }
+        select, textarea, input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #bdc3c7;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        textarea {
+            height: 40px; /* Shorter input fields */
+            resize: vertical;
+            min-height: 40px;
+        }
+        .classification-buttons {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin: 10px 0;
+        }
+        .classification-btn {
+            padding: 6px 10px;
+            border: 2px solid #bdc3c7;
+            background-color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 12px;
+            font-weight: bold;
+            position: relative;
+        }
+        .classification-btn:hover {
+            background-color: #ecf0f1;
+        }
+        .classification-btn:hover::after {
+            content: attr(data-definition);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #2c3e50;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: normal;
+            white-space: nowrap;
+            max-width: 300px;
+            white-space: normal;
+            width: max-content;
+            z-index: 1000;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .classification-btn:hover::before {
+            content: '';
+            position: absolute;
+            bottom: 95%;
+            left: 50%;
+            transform: translateX(-50%);
+            border: 5px solid transparent;
+            border-top-color: #2c3e50;
+            z-index: 1001;
+        }
+        .classification-btn.selected {
+            background-color: #3498db;
+            color: white;
+            border-color: #2980b9;
+        }
+        .btn-manipulating.selected { background-color: #e74c3c; border-color: #c0392b; }
+        .btn-observing.selected { background-color: #27ae60; border-color: #229954; }
+        .btn-communicating.selected { background-color: #f39c12; border-color: #e67e22; }
+        .btn-idle.selected { background-color: #95a5a6; border-color: #7f8c8d; }
+        .btn-unclear.selected { background-color: #9b59b6; border-color: #8e44ad; }
+        
+        /* Collapsible details styling */
+        .details-toggle {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 13px;
+            color: #6c757d;
+            margin: 8px 0;
+            transition: all 0.3s ease;
+            user-select: none;
+        }
+        .details-toggle:hover {
+            background-color: #e9ecef;
+            color: #495057;
+        }
+        .details-toggle.expanded {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        .details-content {
+            display: none;
+            margin-top: 5px;
+        }
+        .details-content.expanded {
+            display: block;
+        }
+        .toggle-icon {
+            float: right;
+            transition: transform 0.3s ease;
+        }
+        .toggle-icon.expanded {
+            transform: rotate(90deg);
+        }
+        
+        /* Bottom navigation bar styling */
+        .annotation-nav-bar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 12px 15px;
+            border-radius: 8px;
+            margin: 20px 0 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .annotation-nav-bar .nav-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .annotation-nav-btn {
+            padding: 8px 14px;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+        .annotation-nav-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.5);
+            transform: translateY(-1px);
+        }
+        .annotation-nav-btn:disabled {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.1);
+            cursor: not-allowed;
+            opacity: 0.5;
+            transform: none;
+        }
+        .annotation-nav-btn.export-btn {
+            background: rgba(255, 87, 51, 0.8);
+            border-color: rgba(255, 87, 51, 1);
+        }
+        .annotation-nav-btn.export-btn:hover {
+            background: rgba(255, 87, 51, 1);
+        }
+        
+        .nav-btn {
+            padding: 10px 16px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 4px;
+            transition: all 0.3s ease;
+        }
+        .nav-btn:hover {
+            background-color: #2980b9;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(52, 152, 219, 0.3);
+        }
+        .nav-btn:disabled {
+            background-color: #6c757d !important;
+            cursor: not-allowed !important;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+        .nav-btn:disabled:hover {
+            background-color: #6c757d !important;
+            transform: none !important;
+        }
+        .definitions-panel {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .definition-item {
+            margin: 5px 0;
+            padding: 5px;
+            background-color: white;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .time-info {
+            background-color: #d4edda;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .save-status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .saved {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .unsaved {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .media-info {
+            background-color: #e8f4fd;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+        .no-media {
+            color: #7f8c8d;
+            font-style: italic;
+            font-size: 18px;
+        }
+        .timestamp-display {
+            background-color: rgba(44, 62, 80, 0.9);
+            color: #fff;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            position: absolute;
+            top: 10px;
+            right: 10px;
+        }
+        .coding-content {
+            flex: 1;
+            overflow-y: auto;
+            padding-right: 10px; /* Space for scrollbar */
+        }
+        .coding-content::-webkit-scrollbar {
+            width: 8px;
+        }
+        .coding-content::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 4px;
+        }
+        .coding-content::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 4px;
+        }
+        .coding-content::-webkit-scrollbar-thumb:hover {
+            background: #a8a8a8;
+        }
+        .template-editor-panel {
+            background-color: #fff3cd;
+            border: 2px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .action-category-item, .participant-item {
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 12px 35px 12px 12px; /* add right padding to make room for delete button */
+            margin: 8px 0;
+            position: relative;
+        }
+        .action-category-item input, .participant-item input {
+            width: 100%;
+            margin-bottom: 8px;
+            padding: 6px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .action-category-item textarea {
+            width: 100%;
+            height: 60px;
+            padding: 6px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        .delete-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            width: 22px;
+            height: 22px;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .delete-btn:hover {
+            background-color: #c0392b;
+            transform: scale(1.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Human Action Recognition Coding Interface</h1>
+        <p>Annotate participant behavior with visual data preview</p>
+        
+        <!-- Main Controls moved to top -->
+        <div style="text-align: center; margin-top: 20px; padding: 15px; background-color: rgba(255,255,255,0.1); border-radius: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button class="nav-btn" onclick="document.getElementById('mediaInput').click()">📁 Load Media</button>
+                    <button class="nav-btn" onclick="loadTemplate()">📂 Load Template</button>
+                    <button class="nav-btn" onclick="showTemplateEditor()">⚙️ Edit Template</button>
+                    <button class="nav-btn" id="exportResultsBtn" onclick="exportFinalData()" style="background-color: #6c757d; cursor: not-allowed;" disabled>📥 Export Results</button>
+                </div>
+                
+                <!-- Coder ID moved to header -->
+                <div style="display: flex; align-items: center; gap: 10px; min-width: 200px;">
+                    <label for="coderIdInput" style="color: white; font-weight: bold; white-space: nowrap;">👤 Coder ID:</label>
+                    <input type="text" id="coderIdInput" placeholder="Enter your ID" autocomplete="off" style="padding: 6px 10px; border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; background: rgba(255,255,255,0.9); font-size: 14px; flex: 1;">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="definitions-panel" id="definitionsPanel" style="display: none;">
+        <div class="details-toggle" onclick="toggleQuickReference()" id="quickRefToggle" style="margin: 0 0 10px 0; background-color: #e9ecef; border-color: #ced4da;">
+            <span class="toggle-icon" id="quickRefIcon">▶</span>
+            Quick Reference - Action Categories
+        </div>
+        <div class="details-content" id="quickRefContent">
+            <div id="categoriesReference" style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <!-- Categories will be populated from template -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Template Editor Panel -->
+    <div class="template-editor-panel" id="templateEditorPanel" style="display: none;">
+        <h3>Template Editor</h3>
+        <div style="display: flex; gap: 20px;">
+            <!-- Action Categories Editor -->
+            <div style="flex: 1; background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #ddd;">
+                <h4>Action Categories & Definitions</h4>
+                <div id="actionCategoriesEditor">
+                    <!-- Action categories will be populated here -->
+                </div>
+                <button class="control-btn" onclick="addNewActionCategory()">+ Add New Action</button>
+            </div>
+            
+            <!-- Participants Editor -->
+            <div style="flex: 1; background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #ddd;">
+                <h4>Participants</h4>
+                <div id="participantsEditor">
+                    <!-- Participants will be populated here -->
+                </div>
+                <button class="control-btn" onclick="addNewParticipant()">+ Add New Participant</button>
+            </div>
+        </div>
+        
+        <div style="text-align: center; margin-top: 15px;">
+            <button class="nav-btn" onclick="applyTemplateChanges()">✅ Apply Changes</button>
+            <button class="nav-btn" onclick="exportModifiedTemplate()">📥 Export Template</button>
+            <button class="nav-btn" onclick="hideTemplateEditor()">❌ Close Editor</button>
+        </div>
+    </div>
+
+
+    <div class="main-container">
+        <!-- Media Panel -->
+        <div class="media-panel" id="mediaPanel">
+            <h3 style="margin-top: 0;">Visual Data</h3>
+            
+            <div style="margin-bottom: 15px; text-align: center;">
+                <button id="loadMediaButton" class="control-btn" onclick="document.getElementById('mediaInput').click()">📁 Load Media</button>
+                <input type="file" id="mediaInput" multiple accept="image/*,video/*" onchange="loadMedia(event)" style="display: none;">
+            </div>
+
+            <div class="media-container" id="mediaContainer">
+                <div class="no-media">No media loaded<br>Click "Load Media" to begin</div>
+            </div>
+
+            <!-- Beautiful Frame Slider with Navigation -->
+            <div class="frame-slider-container" id="frameSliderContainer" style="display: none;">
+                <div class="frame-slider-label">🎬 Frame Navigation</div>
+                
+                <div class="slider-wrapper">
+                    <input type="range" class="frame-slider" id="frameSlider" min="1" max="100" value="1" oninput="goToFrame(this.value)">
+                </div>
+                
+                <div class="slider-info">
+                    <div class="slider-controls">
+                        <button class="nav-frame-btn" onclick="previousFrame()" id="prevFrameBtn">◀ Previous</button>
+                        <button class="nav-frame-btn" onclick="nextFrame()" id="nextFrameBtn">Next ▶</button>
+                    </div>
+                    
+                    <div class="frame-info">
+                        <strong>Frame: <span id="currentFrameNumber">1</span></strong>
+                    </div>
+                    
+                    <div class="progress-indicator">
+                        <span id="frameProgress">0%</span> Complete
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-info" id="mediaInfo" style="display: none;">
+                <strong>File:</strong> <span id="currentFileName">--</span><br>
+                <strong>Resolution:</strong> <span id="mediaResolution">--</span><br>
+                <strong>Frame:</strong> <span id="frameIndex">--</span> / <span id="totalFramesDisplay">--</span>
+            </div>
+
+            <div class="time-info" id="timeInfo" style="display: none;">
+                <strong>Unix Timestamp:</strong> <span id="unixTimestamp">--</span><br>
+                <strong>Human Time:</strong> <span id="humanTimestamp">--</span><br>
+                <strong>Source:</strong> <span id="timestampSource">--</span>
+            </div>
+
+
+            <!-- Status at bottom of Visual Data Panel -->
+            <div style="background-color: #f8f9fa; padding: 10px; border-radius: 4px; margin-top: 15px;">
+                <div id="frameStatus" style="text-align: center; font-weight: bold; color: #6c757d;">
+                    Ready to begin
+                </div>
+            </div>
+        </div>
+
+        <!-- Coding Panel -->
+        <div class="coding-panel" id="codingPanel">
+            <h3 style="margin-top: 0; flex-shrink: 0;">Annotation Panel</h3>
+            
+            <div class="coding-content">
+                <div id="templateRequired" style="text-align: center; padding: 40px; color: #7f8c8d;">
+                    <h3>📂 Ready to Start</h3>
+                    <p>Load a template (or create one) to begin annotation.</p>
+                    <div style="margin-top: 20px;">
+                        <button class="nav-btn" onclick="loadTemplate()" style="font-size: 16px; padding: 12px 20px; margin: 5px;">📂 Load Template</button>
+                        <button class="nav-btn" onclick="showTemplateEditor()" style="font-size: 16px; padding: 12px 20px; margin: 5px;">⚙️ Create Template</button>
+                    </div>
+                </div>
+
+                <div id="annotationPanel" style="display: none;">
+                    <!-- Participants will be dynamically generated based on template -->
+                    <div id="participantsContainer">
+                        <!-- Participants will be inserted here after template load -->
+                    </div>
+
+                    <div class="form-group">
+                        <label for="confidenceLevel">Confidence Level:</label>
+                        <select id="confidenceLevel">
+                            <option value="high">High - Very confident</option>
+                            <option value="medium">Medium - Some uncertainty</option>
+                            <option value="low">Low - Significant uncertainty</option>
+                        </select>
+                    </div>
+
+                </div>
+                
+                <!-- Annotation Navigation Bar - moved outside coding-content -->
+                <div class="annotation-nav-bar" id="annotationNavBar" style="display: none;">
+                    <div class="nav-group">
+                        <button class="annotation-nav-btn" onclick="previousFrame()" id="prevFrameBtnNav">◀ Previous</button>
+                        <button class="annotation-nav-btn" onclick="nextFrame()" id="nextFrameBtnNav">Next ▶</button>
+                    </div>
+                    
+                    <div class="nav-group">
+                        <button class="annotation-nav-btn" onclick="saveProgressToFile()">📥 Save Progress</button>
+                        <button class="annotation-nav-btn" onclick="loadPreviousWork()">📄 Load Progress</button>
+                        <button class="annotation-nav-btn export-btn" onclick="exportFinalData()" id="exportFinalBtnNav" style="display: none;">📥 Export Results</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        // global variables
+        let currentFrameIndex = 0;
+        let totalFrames = 0;
+        let codingData = [];
+        let classifications = {0: '', 1: ''};
+        let hasUnsavedChanges = false;
+        let framesSavedThisSession = 0; // track new saves
+        
+        // media handling variables
+        let mediaFiles = [];
+        let mediaType = 'none'; // 'images', 'video', 'none'
+        let videoElement = null;
+        let videoStartTimestamp = 0;
+        
+        // template configuration - empty until template is loaded
+        let templateConfig = {
+            action_categories: [],
+            participant_descriptions: {},
+            definitions: {}
+        };
+
+        // initialize interface
+        function initializeInterface() {
+            // reset coder ID field on page load
+            document.getElementById('coderIdInput').value = '';
+            updateFrameInfo();
+        }
+
+        // timestamp extraction from filename
+        function extractTimestampFromFilename(filename) {
+            // pattern: [prefix]_[unix_timestamp]_[suffix].[extension]
+            // examples: frame_1737559212.1234_somepostfix.jpg, video_1737559212_recording.mp4
+            const timestampRegex = /(\d{10}(?:\.\d+)?)/;
+            const match = filename.match(timestampRegex);
+            
+            if (match) {
+                return parseFloat(match[1]);
+            }
+            
+            // fallback: return null if no timestamp found
+            console.warn(`Could not extract timestamp from filename: ${filename}`);
+            return null;
+        }
+
+        // media loading functions
+        function loadMedia(event) {
+            const files = Array.from(event.target.files);
+            if (files.length === 0) return;
+            
+            mediaFiles = files.filter(f => f.type.startsWith('image/') || f.type.startsWith('video/'));
+            
+            if (mediaFiles.length === 0) {
+                alert('No valid image or video files found');
+                return;
+            }
+            
+            // sort files by name for consistent ordering
+            mediaFiles.sort((a, b) => a.name.localeCompare(b.name));
+            
+            // reset coding data when loading new media
+            codingData = [];
+            currentFrameIndex = 0;
+            hasUnsavedChanges = false;
+            framesSavedThisSession = 0;
+            
+            // clear classifications for all participants
+            if (templateConfig && templateConfig.participant_descriptions) {
+                Object.keys(templateConfig.participant_descriptions).forEach(participantId => {
+                    classifications[participantId] = '';
+                });
+            }
+            
+            if (mediaFiles[0].type.startsWith('video/')) {
+                mediaType = 'video';
+                videoStartTimestamp = extractTimestampFromFilename(mediaFiles[0].name);
+                loadVideo();
+            } else {
+                mediaType = 'images';
+                totalFrames = mediaFiles.length;
+                currentFrameIndex = 0;
+                loadImage();
+            }
+            
+            setupSlider();
+            document.getElementById('frameSliderContainer').style.display = 'block';
+            document.getElementById('mediaInfo').style.display = 'block';
+            document.getElementById('timeInfo').style.display = 'block';
+            updateFrameInfo();
+            
+            // hide the load media button in visual data panel
+            document.getElementById('loadMediaButton').style.display = 'none';
+            
+            // clear the annotation form when new media is loaded
+            clearForm();
+            
+            // update navigation states
+            updateExportButtons();
+            updateAnnotationNavBar();
+            
+            // update frame status
+            updateFrameStatus('New media loaded - ready for coding', false);
+        }
+
+        function loadImage() {
+            if (mediaType !== 'images' || currentFrameIndex >= mediaFiles.length) return;
+            
+            const file = mediaFiles[currentFrameIndex];
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                const container = document.getElementById('mediaContainer');
+                container.innerHTML = `
+                    <img src="${e.target.result}" alt="Frame ${currentFrameIndex + 1}">
+                    <div class="timestamp-display">Frame ${currentFrameIndex + 1}/${totalFrames}</div>
+                `;
+                
+                const imageElement = container.querySelector('img');
+                imageElement.onload = function() {
+                    updateMediaInfo(file.name, this.naturalWidth, this.naturalHeight);
+                };
+            };
+            
+            reader.readAsDataURL(file);
+        }
+
+        function loadVideo() {
+            if (mediaType !== 'video' || mediaFiles.length === 0) return;
+            
+            const file = mediaFiles[0];
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                const container = document.getElementById('mediaContainer');
+                container.innerHTML = `
+                    <video src="${e.target.result}" controls>
+                        Your browser does not support video playback.
+                    </video>
+                    <div class="timestamp-display">00:00</div>
+                `;
+                
+                videoElement = container.querySelector('video');
+                videoElement.onloadedmetadata = function() {
+                    totalFrames = Math.ceil(this.duration); // assume 1 frame per second
+                    updateMediaInfo(file.name, this.videoWidth, this.videoHeight);
+                    setupSlider();
+                    updateFrameInfo();
+                    updateExportButtons();
+                    updateAnnotationNavBar();
+                };
+                
+                videoElement.ontimeupdate = function() {
+                    const newFrameIndex = Math.floor(this.currentTime);
+                    if (newFrameIndex !== currentFrameIndex) {
+                        saveCurrentToMemory();
+                        currentFrameIndex = newFrameIndex;
+                        loadWindow();
+                        updateSliderInfo();
+                        updateTimestamp();
+                        updateExportButtons();
+                        updateAnnotationNavBar();
+                    }
+                };
+            };
+            
+            reader.readAsDataURL(file);
+        }
+
+        function setupSlider() {
+            const slider = document.getElementById('frameSlider');
+            slider.min = 1;
+            slider.max = totalFrames;
+            slider.value = currentFrameIndex + 1;
+            updateSliderInfo();
+        }
+
+        function updateSliderInfo() {
+            const slider = document.getElementById('frameSlider');
+            slider.value = currentFrameIndex + 1;
+            
+            document.getElementById('currentFrameNumber').textContent = currentFrameIndex + 1;
+            const progress = ((currentFrameIndex + 1) / totalFrames * 100).toFixed(1);
+            document.getElementById('frameProgress').textContent = progress + '%';
+            
+            // update button states
+            document.getElementById('prevFrameBtn').disabled = currentFrameIndex === 0;
+            document.getElementById('nextFrameBtn').disabled = currentFrameIndex >= totalFrames - 1;
+        }
+
+        // navigation functions
+        function previousFrame() {
+            if (currentFrameIndex > 0) {
+                saveCurrentToMemory();
+                currentFrameIndex--;
+                
+                if (mediaType === 'images') {
+                    loadImage();
+                } else if (mediaType === 'video' && videoElement) {
+                    videoElement.currentTime = currentFrameIndex;
+                }
+                
+                loadWindow(); // this will show previous annotations if they exist
+                updateFrameInfo();
+                updateSliderInfo();
+                updateExportButtons();
+                updateAnnotationNavBar();
+            }
+        }
+
+        function nextFrame() {
+            if (currentFrameIndex < totalFrames - 1) {
+                saveCurrentToMemory();
+                currentFrameIndex++;
+                
+                if (mediaType === 'images') {
+                    loadImage();
+                } else if (mediaType === 'video' && videoElement) {
+                    videoElement.currentTime = currentFrameIndex;
+                }
+                
+                loadWindow(); // this will show previous annotations if they exist
+                updateFrameInfo();
+                updateSliderInfo();
+                updateExportButtons();
+                updateAnnotationNavBar();
+            }
+        }
+
+        function goToFrame(frameNumber) {
+            const frameIndex = parseInt(frameNumber) - 1; // convert to 0-based
+            
+            if (frameIndex < 0 || frameIndex >= totalFrames || frameIndex === currentFrameIndex) {
+                return; // no change needed
+            }
+            
+            saveCurrentToMemory();
+            currentFrameIndex = frameIndex;
+            
+            if (mediaType === 'images') {
+                loadImage();
+            } else if (mediaType === 'video' && videoElement) {
+                videoElement.currentTime = currentFrameIndex;
+            }
+            
+            loadWindow(); // this will show previous annotations if they exist
+            updateFrameInfo();
+            updateSliderInfo();
+            updateExportButtons();
+            updateAnnotationNavBar();
+        }
+
+        function updateTimestamp() {
+            let timestamp, source;
+            
+            if (mediaType === 'images' && mediaFiles[currentFrameIndex]) {
+                // extract timestamp from image filename
+                const currentFile = mediaFiles[currentFrameIndex];
+                timestamp = extractTimestampFromFilename(currentFile.name);
+                source = 'Extracted from filename';
+            } else if (mediaType === 'video') {
+                // calculate timestamp from video start time + current frame (1 frame = 1 second)
+                timestamp = videoStartTimestamp + currentFrameIndex;
+                source = 'Video start + frame offset';
+            } else {
+                // no media loaded, don't show timestamp
+                document.getElementById('unixTimestamp').textContent = '--';
+                document.getElementById('humanTimestamp').textContent = '--';
+                document.getElementById('timestampSource').textContent = '--';
+                return;
+            }
+            
+            document.getElementById('unixTimestamp').textContent = timestamp.toFixed(3);
+            document.getElementById('humanTimestamp').textContent = new Date(timestamp * 1000).toISOString();
+            document.getElementById('timestampSource').textContent = source;
+        }
+
+        function updateMediaInfo(fileName, width, height) {
+            document.getElementById('currentFileName').textContent = fileName;
+            document.getElementById('mediaResolution').textContent = `${width} x ${height}`;
+            document.getElementById('frameIndex').textContent = currentFrameIndex + 1;
+            document.getElementById('totalFramesDisplay').textContent = totalFrames;
+        }
+
+        function updateFrameInfo() {
+            updateTimestamp();
+        }
+
+
+
+        function updateFrameStatus(message, isSuccess = true) {
+            const frameStatus = document.getElementById('frameStatus');
+            frameStatus.textContent = message;
+            
+            if (isSuccess) {
+                frameStatus.style.backgroundColor = '#d4edda';
+                frameStatus.style.color = '#155724';
+            } else {
+                frameStatus.style.backgroundColor = '#f8d7da';
+                frameStatus.style.color = '#721c24';
+            }
+        }
+
+        // classification functions
+        function selectClassification(participantId, category) {
+            const buttons = document.querySelectorAll(`.participant-section.participant-${participantId} .classification-btn`);
+            const clickedButton = event.target;
+            
+            // check if the clicked button is already selected (allow untoggling)
+            if (clickedButton.classList.contains('selected')) {
+                // untoggle: remove selection and clear classification
+                clickedButton.classList.remove('selected');
+                classifications[participantId] = '';
+            } else {
+                // normal selection: clear all and select the clicked one
+                buttons.forEach(btn => btn.classList.remove('selected'));
+                clickedButton.classList.add('selected');
+                classifications[participantId] = category;
+            }
+            
+            hasUnsavedChanges = true;
+        }
+
+        function loadWindow() {
+            // always clear form first to prevent auto-fill issues
+            clearForm();
+            
+            // check if we have existing data for this frame and populate the form
+            const existingData = codingData[currentFrameIndex];
+            if (existingData) {
+                // populate form fields with existing annotations - handle dynamic participants
+                if (existingData.action_recognition && existingData.action_recognition.classifications) {
+                    Object.keys(existingData.action_recognition.classifications).forEach(participantId => {
+                        classifications[participantId] = existingData.action_recognition.classifications[participantId] || '';
+                    });
+                }
+                
+                // small delay to ensure form is cleared before populating
+                setTimeout(() => {
+                    updateClassificationButtons();
+                    populateFormFields(existingData);
+                }, 10);
+                
+                // show that this frame was previously coded
+                updateFrameStatus('Previously coded frame loaded', true);
+            } else {
+                // show new frame status
+                updateFrameStatus('New frame - ready for coding', false);
+            }
+            
+            hasUnsavedChanges = false;
+        }
+
+        function updateClassificationButtons() {
+            document.querySelectorAll('.classification-btn').forEach(btn => btn.classList.remove('selected'));
+            
+            Object.keys(classifications).forEach(participantId => {
+                const category = classifications[participantId];
+                if (category) {
+                    const btnClass = `.btn-${category.toLowerCase().replace('-', '')}`;
+                    const selector = `.participant-section.participant-${participantId} ${btnClass}`;
+                    const button = document.querySelector(selector);
+                    if (button) button.classList.add('selected');
+                }
+            });
+        }
+
+        function populateFormFields(data) {
+            const obs = data.action_recognition.observations;
+            const just = data.action_recognition.justifications;
+            
+            // populate fields for each participant dynamically
+            Object.keys(templateConfig.participant_descriptions).forEach(participantId => {
+                const gazeField = document.getElementById(`gaze${participantId}`);
+                const handsField = document.getElementById(`hands${participantId}`);
+                const clothingField = document.getElementById(`clothing${participantId}`);
+                const positionField = document.getElementById(`position${participantId}`);
+                const justField = document.getElementById(`justification${participantId}`);
+                
+                if (gazeField) gazeField.value = (obs[participantId] && obs[participantId].gaze_focus) ? obs[participantId].gaze_focus : '';
+                if (handsField) handsField.value = (obs[participantId] && obs[participantId].hands_status) ? obs[participantId].hands_status : '';
+                if (clothingField) clothingField.value = (obs[participantId] && obs[participantId].clothing) ? obs[participantId].clothing : '';
+                if (positionField) positionField.value = (obs[participantId] && obs[participantId].position) ? obs[participantId].position : '';
+                if (justField) justField.value = (just[participantId]) ? just[participantId] : '';
+                
+                // auto-expand details section if any field has content
+                checkAndExpandDetails(participantId);
+            });
+            
+            document.getElementById('confidenceLevel').value = data.confidence_level || 'high';
+        }
+
+        function clearForm() {
+            // clear classifications - handle dynamic participants
+            if (templateConfig && templateConfig.participant_descriptions) {
+                Object.keys(templateConfig.participant_descriptions).forEach(participantId => {
+                    classifications[participantId] = '';
+                });
+                
+                // force clear all form fields dynamically based on participants
+                Object.keys(templateConfig.participant_descriptions).forEach(participantId => {
+                    const gazeField = document.getElementById(`gaze${participantId}`);
+                    const handsField = document.getElementById(`hands${participantId}`);
+                    const clothingField = document.getElementById(`clothing${participantId}`);
+                    const positionField = document.getElementById(`position${participantId}`);
+                    const justField = document.getElementById(`justification${participantId}`);
+                    
+                    if (gazeField) {
+                        gazeField.value = '';
+                        gazeField.defaultValue = '';
+                    }
+                    if (handsField) {
+                        handsField.value = '';
+                        handsField.defaultValue = '';
+                    }
+                    if (clothingField) {
+                        clothingField.value = '';
+                        clothingField.defaultValue = '';
+                    }
+                    if (positionField) {
+                        positionField.value = '';
+                        positionField.defaultValue = '';
+                    }
+                    if (justField) {
+                        justField.value = '';
+                        justField.defaultValue = '';
+                    }
+                });
+            }
+            
+            const confidenceField = document.getElementById('confidenceLevel');
+            if (confidenceField) {
+                confidenceField.value = 'high';
+            }
+            
+            updateClassificationButtons();
+        }
+
+        function saveCurrentToMemory() {
+            // save current frame data to memory only (codingData array)
+            // this happens automatically when navigating between frames
+            let timestamp;
+            if (mediaType === 'images' && mediaFiles[currentFrameIndex]) {
+                const currentFile = mediaFiles[currentFrameIndex];
+                timestamp = extractTimestampFromFilename(currentFile.name);
+            } else if (mediaType === 'video') {
+                timestamp = videoStartTimestamp + currentFrameIndex;
+            } else {
+                timestamp = 1737557022.0 + (currentFrameIndex * 1);
+            }
+            
+            // only include participants that have been classified (non-empty classification)
+            const participantsWithClassification = Object.keys(templateConfig.participant_descriptions).filter(pid => 
+                classifications[pid] && classifications[pid].trim() !== ''
+            );
+            
+            // always save frame data (even if empty) - frame navigation indicates completion
+            const windowData = {
+                result: "_result",
+                table: 0,
+                _time: new Date().toISOString(),
+                _measurement: "action_recognition",
+                action_recognition: {
+                    classifications: Object.fromEntries(
+                        participantsWithClassification.map(pid => [
+                            pid, classifications[pid]
+                        ])
+                    ),
+                    justifications: Object.fromEntries(
+                        participantsWithClassification.map(pid => {
+                            const justField = document.getElementById(`justification${pid}`);
+                            return [pid, justField ? justField.value : ''];
+                        })
+                    ),
+                    observations: Object.fromEntries(
+                        participantsWithClassification.map(pid => {
+                            const gazeField = document.getElementById(`gaze${pid}`);
+                            const handsField = document.getElementById(`hands${pid}`);
+                            const clothingField = document.getElementById(`clothing${pid}`);
+                            const positionField = document.getElementById(`position${pid}`);
+                            return [pid, {
+                                gaze_focus: gazeField ? gazeField.value : '',
+                                hands_status: handsField ? handsField.value : '',
+                                clothing: clothingField ? clothingField.value : '',
+                                position: positionField ? positionField.value : ''
+                            }];
+                        })
+                    )
+                },
+                window_end_time: timestamp, // snapshot
+                window_start_time: timestamp,
+                confidence_level: document.getElementById('confidenceLevel').value,
+                frame_index: currentFrameIndex,
+                media_file: mediaFiles[currentFrameIndex]?.name || 'unknown',
+                extracted_timestamp: timestamp
+            };
+            
+            codingData[currentFrameIndex] = windowData;
+            hasUnsavedChanges = false;
+        }
+
+
+        // save functions - these save to local drive
+        function saveProgressToFile() {
+            saveCurrentToMemory(); // save current work first
+            
+            const coderID = document.getElementById('coderIdInput').value.trim() || 'anonymous';
+            const sessionTimestamp = getSessionTimestamp();
+            
+            // use same format as export - just the data array without metadata
+            const exportData = codingData.filter(w => w);
+            
+            const dataStr = JSON.stringify(exportData, null, 2);
+            const blob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            
+            const filename = `session_${sessionTimestamp}_${coderID}_progress.json`;
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            alert(`Progress saved as: ${filename}\n${codingData.filter(w => w).length} frames coded so far.`);
+        }
+
+        function exportFinalData() {
+            saveCurrentToMemory();
+            
+            const coderID = document.getElementById('coderIdInput').value.trim() || 'anonymous';
+            const sessionTimestamp = getSessionTimestamp();
+            
+            // export in machine format - just the data array without metadata wrapper
+            const exportData = codingData.filter(w => w);
+            
+            const dataStr = JSON.stringify(exportData, null, 2);
+            const blob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            
+            const filename = `session_${sessionTimestamp}_${coderID}_human_coded.json`;
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            alert(`Final results exported as: ${filename}\n${codingData.filter(w => w).length} frames coded (${((codingData.filter(w => w).length / totalFrames) * 100).toFixed(1)}% complete).\n\nFormat matches machine results for direct comparison!`);
+        }
+
+        function getSessionTimestamp() {
+            // get timestamp from first image if available, otherwise use current time
+            if (mediaType === 'images' && mediaFiles.length > 0) {
+                const firstImageTimestamp = extractTimestampFromFilename(mediaFiles[0].name);
+                if (firstImageTimestamp) {
+                    return new Date(firstImageTimestamp * 1000).toISOString().slice(0,19).replace(/:/g, '-').replace('T', 'T');
+                }
+            } else if (mediaType === 'video' && videoStartTimestamp) {
+                return new Date(videoStartTimestamp * 1000).toISOString().slice(0,19).replace(/:/g, '-').replace('T', 'T');
+            }
+            
+            // fallback to current time
+            return new Date().toISOString().slice(0,19).replace(/:/g, '-').replace('T', 'T');
+        }
+
+        function loadTemplate() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.onchange = function(event) {
+                const file = event.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        try {
+                            const data = JSON.parse(e.target.result);
+                            if (data.classification_schema) {
+                                // initialize template configuration if null
+                                if (!templateConfig) {
+                                    templateConfig = {};
+                                }
+                                
+                                // load template configuration
+                                templateConfig.action_categories = data.classification_schema.action_categories || [];
+                                templateConfig.definitions = data.classification_schema.definitions || {};
+                                
+                                // load participant descriptions - check multiple possible locations
+                                if (data.participant_descriptions) {
+                                    templateConfig.participant_descriptions = data.participant_descriptions;
+                                } else if (data.classification_schema.participant_descriptions) {
+                                    templateConfig.participant_descriptions = data.classification_schema.participant_descriptions;
+                                }
+                                
+                                
+                                // create the annotation interface
+                                createAnnotationInterface();
+                                
+                                // hide template required message and show annotation panel
+                                document.getElementById('templateRequired').style.display = 'none';
+                                document.getElementById('annotationPanel').style.display = 'block';
+                                
+                                // update frame display if we already have media loaded
+                                if (mediaType !== 'none') {
+                                    loadWindow();
+                                }
+                                
+                                // template loaded successfully - update all UI states
+                                updateExportButtons();
+                                updateAnnotationNavBar();
+                            } else {
+                                alert('Invalid template file. Please select a valid human_coding_template.json file with classification_schema.');
+                            }
+                        } catch (error) {
+                            alert('Error loading template: ' + error.message);
+                        }
+                    };
+                    reader.readAsText(file);
+                }
+            };
+            input.click();
+        }
+
+        function createAnnotationInterface() {
+            // create categories reference panel
+            const categoriesRef = document.getElementById('categoriesReference');
+            const categoryColors = {
+                'Manipulating': '#e74c3c',
+                'Observing': '#27ae60', 
+                'Communicating': '#f39c12',
+                'Idle-OffTask': '#95a5a6',
+                'Unclear': '#9b59b6'
+            };
+            
+            if (!templateConfig || !templateConfig.action_categories) {
+                console.error('Template configuration not loaded');
+                return;
+            }
+            
+            categoriesRef.innerHTML = templateConfig.action_categories.map(category => {
+                const color = categoryColors[category] || '#3498db';
+                const definition = getDefinitionForCategory(category);
+                return `<div class="definition-item">
+                    <strong style="color: ${color};">${category}:</strong> ${definition}
+                </div>`;
+            }).join('');
+            
+            // show definitions panel
+            document.getElementById('definitionsPanel').style.display = 'block';
+            
+            // create participant sections
+            const container = document.getElementById('participantsContainer');
+            container.innerHTML = '';
+            
+            Object.keys(templateConfig.participant_descriptions).forEach(participantId => {
+                const participantSection = document.createElement('div');
+                participantSection.className = `participant-section participant-${participantId}`;
+                participantSection.innerHTML = `
+                    <h4>Participant ${participantId}: ${templateConfig.participant_descriptions[participantId]}</h4>
+                    
+                    <div class="form-group">
+                        <label>Action Classification:</label>
+                        <div class="classification-buttons" id="classificationButtons${participantId}">
+                            ${templateConfig.action_categories.map(category => 
+                                `<button class="classification-btn btn-${category.toLowerCase().replace('-', '')}" 
+                                        onclick="selectClassification(${participantId}, '${category}')"
+                                        data-definition="${getDefinitionForCategory(category)}"
+                                        title="${getDefinitionForCategory(category)}">${category}</button>`
+                            ).join('')}
+                        </div>
+                    </div>
+
+                    <!-- Collapsible details section -->
+                    <div class="details-toggle" onclick="toggleDetails(${participantId})" id="detailsToggle${participantId}">
+                        <span class="toggle-icon" id="toggleIcon${participantId}">▶</span>
+                        Optional Details (Gaze, Hands, Clothing, Position, Justification)
+                    </div>
+                    
+                    <div class="details-content" id="detailsContent${participantId}">
+                        <div class="form-group">
+                            <label for="gaze${participantId}">Gaze Focus:</label>
+                            <textarea id="gaze${participantId}" placeholder="Where is participant looking?"></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="hands${participantId}">Hand Status:</label>
+                            <textarea id="hands${participantId}" placeholder="Hand positions and contact evidence"></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="clothing${participantId}">Clothing Description:</label>
+                            <textarea id="clothing${participantId}" placeholder="What is the participant wearing?"></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="position${participantId}">Position/Location:</label>
+                            <textarea id="position${participantId}" placeholder="Where is the participant positioned?"></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="justification${participantId}">Justification:</label>
+                            <textarea id="justification${participantId}" placeholder="Why this classification? Reference specific conditions and evidence"></textarea>
+                        </div>
+                    </div>
+                `;
+                
+                container.appendChild(participantSection);
+            });
+        }
+
+        function getDefinitionForCategory(category) {
+            // use definitions from loaded template only - no hardcoded fallbacks
+            if (!templateConfig || !templateConfig.definitions) {
+                return 'Template not loaded';
+            }
+            return templateConfig.definitions[category] || 'Definition not found in template';
+        }
+
+
+        function loadPreviousWork() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.onchange = function(event) {
+                const file = event.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        try {
+                            const data = JSON.parse(e.target.result);
+                            
+                            // expect direct array format (unified format)
+                            if (!Array.isArray(data)) {
+                                alert('Invalid file format. Please select a valid progress or export file (should be a JSON array).');
+                                return;
+                            }
+                            
+                            // extract coder ID from filename
+                            // filename format: session_TIMESTAMP_CODERID_progress.json or session_TIMESTAMP_CODERID_human_coded.json
+                            const filename = file.name;
+                            const coderIdMatch = filename.match(/session_[^_]+_([^_]+)_(?:progress|human_coded)\.json$/);
+                            if (coderIdMatch) {
+                                document.getElementById('coderIdInput').value = coderIdMatch[1];
+                            }
+                            
+                            // load the coding data
+                            framesSavedThisSession = 0; // reset counter since we're loading existing work
+                            
+                            // start from beginning
+                            currentFrameIndex = 0;
+                            
+                            // ensure proper sparse array handling
+                            const maxIndex = Math.max(...data.map(item => item.frame_index || 0));
+                            if (maxIndex >= 0) {
+                                // rebuild codingData as sparse array with proper indexing
+                                const newCodingData = [];
+                                data.forEach(item => {
+                                    if (item.frame_index !== undefined) {
+                                        newCodingData[item.frame_index] = item;
+                                    }
+                                });
+                                codingData = newCodingData;
+                            } else {
+                                codingData = data;
+                            }
+                            
+                            // populate classifications for current frame if data exists
+                            const currentFrameData = codingData[currentFrameIndex];
+                            if (currentFrameData && currentFrameData.action_recognition && currentFrameData.action_recognition.classifications) {
+                                // populate the global classifications variable
+                                Object.keys(currentFrameData.action_recognition.classifications).forEach(participantId => {
+                                    classifications[participantId] = currentFrameData.action_recognition.classifications[participantId] || '';
+                                });
+                            }
+                            
+                            // update media display for current frame
+                            if (mediaType === 'images') {
+                                loadImage();
+                            } else if (mediaType === 'video' && videoElement) {
+                                videoElement.currentTime = currentFrameIndex;
+                            }
+                            
+                            loadWindow(); // this will show the annotations for the current frame
+                            updateFrameInfo();
+                            updateSliderInfo();
+                            updateExportButtons();
+                            updateAnnotationNavBar();
+                            
+                            alert(`Previous work loaded! ${data.length} frames of coding restored. Navigate between frames to see your previous annotations.`);
+                            
+                        } catch (error) {
+                            alert('Error loading previous work: ' + error.message);
+                        }
+                    };
+                    reader.readAsText(file);
+                }
+            };
+            input.click();
+        }
+
+        function updateParticipantLabels() {
+            // update participant section headers based on template config
+            const headers = document.querySelectorAll('.participant-section h4');
+            if (headers.length >= 2) {
+                headers[0].textContent = templateConfig.participant_descriptions["0"] || "Participant 0";
+                headers[1].textContent = templateConfig.participant_descriptions["1"] || "Participant 1";
+            }
+        }
+
+        // keyboard shortcuts
+        document.addEventListener('keydown', function(event) {
+            if (event.ctrlKey || event.metaKey) {
+                switch(event.key) {
+                    case 's':
+                        event.preventDefault();
+                        saveCurrentFrame();
+                        break;
+                    case 'ArrowLeft':
+                        event.preventDefault();
+                        previousFrame();
+                        break;
+                    case 'ArrowRight':
+                        event.preventDefault();
+                        nextFrame();
+                        break;
+                }
+            }
+        });
+
+        // auto-save to memory every 30 seconds
+        setInterval(() => {
+            if (hasUnsavedChanges) {
+                saveCurrentToMemory();
+            }
+        }, 30000);
+
+        // track changes
+        document.addEventListener('input', function() {
+            hasUnsavedChanges = true;
+        });
+
+        // template editor functions
+        function showTemplateEditor() {
+            // initialize empty template if none exists
+            if (!templateConfig || !templateConfig.action_categories) {
+                templateConfig = {
+                    action_categories: [],
+                    participant_descriptions: {},
+                    definitions: {}
+                };
+            }
+            
+            populateTemplateEditor();
+            document.getElementById('templateEditorPanel').style.display = 'block';
+        }
+
+        function hideTemplateEditor() {
+            document.getElementById('templateEditorPanel').style.display = 'none';
+        }
+
+        function populateTemplateEditor() {
+            populateActionCategoriesEditor();
+            populateParticipantsEditor();
+        }
+
+        function populateActionCategoriesEditor() {
+            const container = document.getElementById('actionCategoriesEditor');
+            container.innerHTML = '';
+            
+            templateConfig.action_categories.forEach((category, index) => {
+                const categoryItem = document.createElement('div');
+                categoryItem.className = 'action-category-item';
+                categoryItem.innerHTML = `
+                    <button class="delete-btn" onclick="deleteActionCategory(${index})" title="Delete this action category">×</button>
+                    <input type="text" value="${category}" onchange="updateActionCategory(${index}, this.value)" placeholder="Action category name">
+                    <textarea onchange="updateActionDefinitionByIndex(${index}, this.value)" placeholder="Definition for this action category">${templateConfig.definitions[category] || ''}</textarea>
+                `;
+                container.appendChild(categoryItem);
+            });
+        }
+
+        function populateParticipantsEditor() {
+            const container = document.getElementById('participantsEditor');
+            container.innerHTML = '';
+            
+            Object.keys(templateConfig.participant_descriptions).forEach(participantId => {
+                const participantItem = document.createElement('div');
+                participantItem.className = 'participant-item';
+                participantItem.innerHTML = `
+                    <button class="delete-btn" onclick="deleteParticipant('${participantId}')" title="Delete this participant">×</button>
+                    <label>Participant ID:</label>
+                    <input type="text" value="${participantId}" onchange="updateParticipantId('${participantId}', this.value)" placeholder="Enter participant ID" style="margin-bottom: 8px;">
+                    <input type="text" value="${templateConfig.participant_descriptions[participantId]}" onchange="updateParticipantDescription('${participantId}', this.value)" placeholder="Enter participant description">
+                `;
+                container.appendChild(participantItem);
+            });
+        }
+
+        function addNewActionCategory() {
+            // add empty category that user can edit inline
+            const newCategoryName = `New Action ${templateConfig.action_categories.length + 1}`;
+            templateConfig.action_categories.push(newCategoryName);
+            templateConfig.definitions[newCategoryName] = '';
+            populateActionCategoriesEditor();
+            updateQuickReferencePanel();
+            
+            // focus on the new category name input
+            setTimeout(() => {
+                const inputs = document.querySelectorAll('#actionCategoriesEditor .action-category-item input');
+                const lastInput = inputs[inputs.length - 1];
+                if (lastInput) {
+                    lastInput.focus();
+                    lastInput.select(); // select all text for easy editing
+                }
+            }, 50);
+        }
+
+        function deleteActionCategory(index) {
+            if (confirm('Are you sure you want to delete this action category?')) {
+                const categoryName = templateConfig.action_categories[index];
+                templateConfig.action_categories.splice(index, 1);
+                delete templateConfig.definitions[categoryName];
+                populateActionCategoriesEditor();
+                updateQuickReferencePanel(); // update the quick reference when categories change
+            }
+        }
+
+        function updateActionCategory(index, newName) {
+            if (newName && newName.trim()) {
+                const oldName = templateConfig.action_categories[index];
+                const newNameTrimmed = newName.trim();
+                
+                // check for duplicates
+                if (templateConfig.action_categories.includes(newNameTrimmed) && newNameTrimmed !== oldName) {
+                    // silently revert to original name instead of showing alert
+                    event.target.value = oldName;
+                    return;
+                }
+                
+                // update category name
+                templateConfig.action_categories[index] = newNameTrimmed;
+                
+                // move definition to new name and clean up old definition
+                if (templateConfig.definitions[oldName]) {
+                    templateConfig.definitions[newNameTrimmed] = templateConfig.definitions[oldName];
+                    delete templateConfig.definitions[oldName];
+                } else {
+                    // ensure new name has a definition entry (even if empty)
+                    if (!templateConfig.definitions[newNameTrimmed]) {
+                        templateConfig.definitions[newNameTrimmed] = '';
+                    }
+                }
+                
+                populateActionCategoriesEditor();
+                updateQuickReferencePanel(); // update the quick reference when categories change
+            }
+        }
+
+        function updateActionDefinitionByIndex(index, newDefinition) {
+            if (index >= 0 && index < templateConfig.action_categories.length) {
+                const categoryName = templateConfig.action_categories[index];
+                templateConfig.definitions[categoryName] = newDefinition;
+                updateQuickReferencePanel(); // update the quick reference when definitions change
+            }
+        }
+
+        function addNewParticipant() {
+            // create new participant with empty ID that user can customize
+            const participantId = '';
+            templateConfig.participant_descriptions[participantId] = '';
+            populateParticipantsEditor();
+            
+            // focus on the new participant ID input
+            setTimeout(() => {
+                const participantItems = document.querySelectorAll('#participantsEditor .participant-item');
+                const lastItem = participantItems[participantItems.length - 1];
+                if (lastItem) {
+                    const firstInput = lastItem.querySelector('input');
+                    if (firstInput) {
+                        firstInput.focus();
+                        firstInput.select(); // select all text for easy editing
+                    }
+                }
+            }, 50);
+        }
+
+        function deleteParticipant(participantId) {
+            if (confirm(`Are you sure you want to delete participant ${participantId}?`)) {
+                delete templateConfig.participant_descriptions[participantId];
+                populateParticipantsEditor();
+            }
+        }
+
+        function updateParticipantDescription(participantId, newDescription) {
+            templateConfig.participant_descriptions[participantId] = newDescription;
+        }
+
+        function updateParticipantId(oldId, newId) {
+            if (newId && newId.trim()) {
+                const newIdTrimmed = newId.trim();
+                
+                // check for duplicates
+                if (templateConfig.participant_descriptions[newIdTrimmed] && newIdTrimmed !== oldId) {
+                    // silently revert to original ID
+                    event.target.value = oldId;
+                    return;
+                }
+                
+                // move participant data to new ID
+                templateConfig.participant_descriptions[newIdTrimmed] = templateConfig.participant_descriptions[oldId];
+                
+                // delete old ID entry if it's different
+                if (oldId !== newIdTrimmed) {
+                    delete templateConfig.participant_descriptions[oldId];
+                }
+                
+                populateParticipantsEditor();
+            }
+        }
+
+        function applyTemplateChanges() {
+            // check if we have any action categories to apply
+            if (!templateConfig.action_categories || templateConfig.action_categories.length === 0) {
+                alert('Please add at least one action category before applying changes.');
+                return;
+            }
+            
+            // regenerate the annotation interface with updated template
+            createAnnotationInterface();
+            
+            // show annotation panel and hide template required message
+            document.getElementById('templateRequired').style.display = 'none';
+            document.getElementById('annotationPanel').style.display = 'block';
+            
+            // refresh current frame data if annotations exist
+            if (codingData[currentFrameIndex]) {
+                clearForm();
+                loadWindow();
+            }
+            
+            hideTemplateEditor();
+            updateExportButtons();
+            updateAnnotationNavBar();
+            alert('Template changes applied successfully! The annotation interface is now ready.');
+        }
+
+        function updateQuickReferencePanel() {
+            // update the quick reference panel with current template categories
+            const categoriesRef = document.getElementById('categoriesReference');
+            const categoryColors = {
+                'Manipulating': '#e74c3c',
+                'Observing': '#27ae60', 
+                'Communicating': '#f39c12',
+                'Idle-OffTask': '#95a5a6',
+                'Unclear': '#9b59b6'
+            };
+            
+            if (!templateConfig || !templateConfig.action_categories) {
+                categoriesRef.innerHTML = '<p style="color: #7f8c8d; font-style: italic;">Load a template to see action categories and definitions</p>';
+                return;
+            }
+            
+            categoriesRef.innerHTML = templateConfig.action_categories.map(category => {
+                const color = categoryColors[category] || '#3498db';
+                const definition = getDefinitionForCategory(category);
+                return `<div class="definition-item">
+                    <strong style="color: ${color};">${category}:</strong> ${definition}
+                </div>`;
+            }).join('');
+        }
+
+        function exportModifiedTemplate() {
+            // clean up orphaned definitions before export
+            const cleanDefinitions = {};
+            templateConfig.action_categories.forEach(category => {
+                cleanDefinitions[category] = templateConfig.definitions[category] || '';
+            });
+            
+            const exportData = {
+                metadata: {
+                    template_version: "2.0",
+                    created_date: new Date().toISOString().split('T')[0],
+                    description: "Human coding template for action recognition analysis (modified in interface)"
+                },
+                classification_schema: {
+                    action_categories: templateConfig.action_categories,
+                    definitions: cleanDefinitions
+                },
+                participant_descriptions: templateConfig.participant_descriptions
+            };
+            
+            const dataStr = JSON.stringify(exportData, null, 2);
+            const blob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            
+            const filename = `human_coding_template_modified_${new Date().toISOString().split('T')[0]}.json`;
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            alert(`Modified template exported as: ${filename}`);
+        }
+
+        // collapsible details functionality
+        function toggleDetails(participantId) {
+            const toggle = document.getElementById(`detailsToggle${participantId}`);
+            const content = document.getElementById(`detailsContent${participantId}`);
+            const icon = document.getElementById(`toggleIcon${participantId}`);
+            
+            const isExpanded = content.classList.contains('expanded');
+            
+            if (isExpanded) {
+                // collapse
+                content.classList.remove('expanded');
+                toggle.classList.remove('expanded');
+                icon.classList.remove('expanded');
+                icon.textContent = '▶';
+            } else {
+                // expand
+                content.classList.add('expanded');
+                toggle.classList.add('expanded');
+                icon.classList.add('expanded');
+                icon.textContent = '▼';
+            }
+        }
+
+        // auto-expand details if any field has content
+        function checkAndExpandDetails(participantId) {
+            const gazeField = document.getElementById(`gaze${participantId}`);
+            const handsField = document.getElementById(`hands${participantId}`);
+            const clothingField = document.getElementById(`clothing${participantId}`);
+            const positionField = document.getElementById(`position${participantId}`);
+            const justField = document.getElementById(`justification${participantId}`);
+            
+            if ((gazeField && gazeField.value.trim()) || 
+                (handsField && handsField.value.trim()) || 
+                (clothingField && clothingField.value.trim()) || 
+                (positionField && positionField.value.trim()) || 
+                (justField && justField.value.trim())) {
+                
+                const content = document.getElementById(`detailsContent${participantId}`);
+                const toggle = document.getElementById(`detailsToggle${participantId}`);
+                const icon = document.getElementById(`toggleIcon${participantId}`);
+                
+                if (!content.classList.contains('expanded')) {
+                    content.classList.add('expanded');
+                    toggle.classList.add('expanded');
+                    icon.classList.add('expanded');
+                    icon.textContent = '▼';
+                }
+            }
+        }
+
+        // toggle quick reference panel
+        function toggleQuickReference() {
+            const toggle = document.getElementById('quickRefToggle');
+            const content = document.getElementById('quickRefContent');
+            const icon = document.getElementById('quickRefIcon');
+            
+            const isExpanded = content.classList.contains('expanded');
+            
+            if (isExpanded) {
+                // collapse
+                content.classList.remove('expanded');
+                toggle.classList.remove('expanded');
+                icon.classList.remove('expanded');
+                icon.textContent = '▶';
+            } else {
+                // expand
+                content.classList.add('expanded');
+                toggle.classList.add('expanded');
+                icon.classList.add('expanded');
+                icon.textContent = '▼';
+            }
+        }
+
+        // check if both media and template are loaded to enable export
+        function updateExportButtons() {
+            const hasMedia = mediaType !== 'none' && mediaFiles.length > 0;
+            const hasTemplate = templateConfig && templateConfig.action_categories && templateConfig.action_categories.length > 0;
+            const isLastFrame = currentFrameIndex >= totalFrames - 1;
+            const canExport = hasMedia && hasTemplate && isLastFrame;
+            
+            // update main export button
+            const mainExportBtn = document.getElementById('exportResultsBtn');
+            if (canExport) {
+                mainExportBtn.disabled = false;
+                mainExportBtn.style.backgroundColor = '#3498db';
+                mainExportBtn.style.cursor = 'pointer';
+            } else {
+                mainExportBtn.disabled = true;
+                mainExportBtn.style.backgroundColor = '#6c757d';
+                mainExportBtn.style.cursor = 'not-allowed';
+            }
+        }
+
+        // update annotation navigation bar
+        function updateAnnotationNavBar() {
+            const hasMedia = mediaType !== 'none' && mediaFiles.length > 0;
+            const hasTemplate = templateConfig && templateConfig.action_categories && templateConfig.action_categories.length > 0;
+            
+            const navBar = document.getElementById('annotationNavBar');
+            
+            if (hasMedia && hasTemplate) {
+                navBar.style.display = 'flex';
+                updateNavigationButtons();
+                
+                // show export button only on last frame of current media
+                const exportBtn = document.getElementById('exportFinalBtnNav');
+                const isLastFrame = currentFrameIndex >= totalFrames - 1;
+                
+                if (isLastFrame && totalFrames > 0) {
+                    exportBtn.style.display = 'block';
+                } else {
+                    exportBtn.style.display = 'none';
+                }
+            } else {
+                navBar.style.display = 'none';
+            }
+        }
+
+        // update navigation button states
+        function updateNavigationButtons() {
+            const prevBtn = document.getElementById('prevFrameBtnNav');
+            const nextBtn = document.getElementById('nextFrameBtnNav');
+            
+            if (prevBtn) {
+                prevBtn.disabled = currentFrameIndex === 0;
+            }
+            if (nextBtn) {
+                nextBtn.disabled = currentFrameIndex >= totalFrames - 1;
+            }
+        }
+
+        // initialize on page load
+        window.onload = function() {
+            initializeInterface();
+            updateExportButtons();
+            updateAnnotationNavBar();
+        };
+    </script>
+</body>
+</html>
