@@ -138,7 +138,7 @@ The ASR, IPS and VFA base cards share one shape:
 
 - **Launch** tab: how many bases and synchronizers (and IPS visualizers) to start, the **Session** (an existing id or `Create MongoDB Session` from the **Experiment Group**), the mode for ASR and VFA (`live`, `capture`, `analyze`) and the pipeline's toggles. Start opens one terminal window per instance; each base asks which entry of the `Bases` list it is, then waits for the START signal.
 - **Config** tab: the pipeline's `config.yml`. `+ Add Stream` adds a `Streams` entry and, for ASR, `+ Add Base` adds a device type under `Base`. `Bases` entries are edited with dropdowns filled from the config (calibrated cameras, base types, sources, files in `file_dir`).
-- **Streams** tab: the `Streams` entries of the config, with **Start**, **Stop**, **Logs**, **Probe**, **Start All** and **Stop All**. A stream with an `ssh_profile` is started as an FFmpeg process inside a tmux session named `mmla-stream-<name>` on that host; a stream without one is shown as `External` and only pulled from.
+- **Streams** tab: the `Streams` entries of the config, with **Start**, **Stop**, **Logs**, **Probe**, **Start All** and **Stop All**. A stream with an `ssh_profile` is started as an FFmpeg process inside a tmux session named `mmla-stream-<name>` on that host (H.264 in FLV for `rtmp://` targets, raw PCM for the `udp://` and `tcp://` targets of ASR bases); a stream without one is shown as `External` and only pulled from.
 - **Transform Matrix** tab (IPS only): the `transformation_matrices*.json` files produced by camera sync, editable as JSON, with **Sync to Remote** to copy them to a base station.
 
 The server cards are different:

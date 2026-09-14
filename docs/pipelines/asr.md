@@ -41,7 +41,7 @@ Create the `asr-base` environment from the TUI's Environment tab or by hand (`co
 | Source | Description | Setup |
 |---|---|---|
 | `pyaudio` | USB or built-in microphone on the base station (Jabra Speak2 75, laptop mic, ...) | `source_index` is the PyAudio device index; `channel` picks the input channel of a multi-channel device. Leave them unset to be asked at startup. |
-| `udp` / `tcp` | Nicla Vision or Portenta H7 badge streaming over Wi-Fi | flash the firmware under `pipelines/wearables/nicla-vision/asr/` or `pipelines/wearables/portenta-h7/asr/` with the Wi-Fi credentials and the base's host and `port` in `arduino_secrets.h`; the badge format must match `stream_kwargs` (16 kHz, mono, 16-bit PCM by default) |
+| `udp` / `tcp` | Nicla Vision or Portenta H7 badge streaming over Wi-Fi, or a managed FFmpeg stream from a Raspberry Pi (see [Streams](#streams)) | badges: flash the firmware under `pipelines/wearables/nicla-vision/asr/` or `pipelines/wearables/portenta-h7/asr/` with the Wi-Fi credentials and the base's host and `port` in `arduino_secrets.h`. The sender's format must match `stream_kwargs` (16 kHz, mono, 16-bit PCM by default). The `audio_streaming_udp_ms` firmware prefixes every packet with an 18-byte header carrying the badge's clock; the other firmware and FFmpeg send header-less PCM. The base tells the two apart on the first packet (`stream_kwargs.packet_format: auto`); set it to `timestamped` or `raw` to force one. |
 | `rtmp` | audio pulled from the Nginx RTMP server | add a `Streams` entry with `target: rtmp://...`; `source_index` is the position of that stream among the RTMP entries |
 | `lsl` | Lab Streaming Layer | `source_index` is the LSL stream name; needs `pylsl` |
 | `file` | replay of a recorded file | `source_index` is the file name inside `Base.<device>.file_dir`; the start time is read from the file name (`<prefix>_<timestamp>.wav`), so the sync time needs no configuration |
@@ -66,7 +66,7 @@ Streams:
     channels: 1
 ```
 
-See [RTMP Streaming](../rtmp_streaming.md) for the FFmpeg commands behind this.
+For a `udp://` or `tcp://` target the Streams tab runs `ffmpeg -f alsa -ac 1 -ar 16000 -i hw:1,0 -c:a pcm_s16le -f s16le udp://asr-base.local:5001` on that host: raw PCM, one packet per ALSA period, which the base re-frames to its `chunk_size`. Header-less packets carry no clock, so the base timestamps them by counting samples from the arrival of the first packet. See [RTMP Streaming](../rtmp_streaming.md) for the video commands.
 
 ## Run from the TUI
 

@@ -117,13 +117,35 @@ def _read_stream_start_time_with_retry(
     return None
 
 
+# raw PCM sample formats the ASR base can receive (AudioStream SUPPORTED_FORMATS),
+# keyed by both the ffmpeg spelling and the base config spelling
+_PCM_SAMPLE_FORMATS = {
+    "s16le": "s16le", "int16": "s16le",
+    "s32le": "s32le", "int32": "s32le",
+    "f32le": "f32le", "float32": "f32le",
+}
+
+
+def _pcm_sample_format(value: str) -> str:
+    """map a Streams 'format' value to the ffmpeg raw PCM sample format."""
+    key = (value or "s16le").strip().lower()
+    if key not in _PCM_SAMPLE_FORMATS:
+        supported = ", ".join(sorted(set(_PCM_SAMPLE_FORMATS.values())))
+        raise ValueError(f"unsupported audio stream format '{value}', use one of: {supported}")
+    return _PCM_SAMPLE_FORMATS[key]
+
+
 def _build_ffmpeg_cmd(stream: StreamDef) -> str:
     """build the ffmpeg command string from a stream definition."""
     target = stream.target
     is_audio = target.startswith("udp://") or target.startswith("tcp://")
 
     if is_audio:
-        fmt = stream.format or "s16le"
+        # the ASR base reads a header-less PCM byte stream on udp/tcp (see
+        # AudioStream._read_socket_chunk), so send raw samples rather than AAC in
+        # FLV. ffmpeg flushes once per ALSA period and keeps udp datagrams below
+        # the MTU; the base re-frames whatever arrives to its own chunk_size.
+        fmt = _pcm_sample_format(stream.format)
         rate = stream.rate or 16000
         channels = stream.channels or 1
         device = stream.device or "hw:0,0"
@@ -131,8 +153,7 @@ def _build_ffmpeg_cmd(stream: StreamDef) -> str:
         addr = target.split("://", 1)[1]
         return (
             f"ffmpeg -f alsa -ac {channels} -ar {rate} -i {device} "
-            f"-c:a aac -b:a 128k "
-            f"-f flv {proto}://{addr}"
+            f"-c:a pcm_{fmt} -f {fmt} {proto}://{addr}"
         )
 
     device = stream.device or "/dev/video0"
@@ -372,7 +393,11 @@ class StreamPanel(Widget):
             self._rebuild_table()
             return
 
-        ffmpeg_cmd = _build_ffmpeg_cmd(stream)
+        try:
+            ffmpeg_cmd = _build_ffmpeg_cmd(stream)
+        except ValueError as e:
+            self._log(f"[red]Cannot start {stream.name}: {e}[/red]")
+            return
         tmux_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd)
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[green]Starting {stream.name} {target_label}...[/green]")

@@ -4,6 +4,7 @@ import struct
 import subprocess
 import threading
 import time
+from collections import deque
 
 import numpy as np
 import pyaudio
@@ -53,6 +54,47 @@ RTMP_CODEC = {
     'float32': 'pcm_f32le',
 }
 
+# packet layouts accepted on udp/tcp sources. 'timestamped' is the wearable badge
+# protocol (audio_streaming_udp_ms.py): an 18-byte header with a packet counter and
+# the sender's UTC time, followed by one chunk of PCM. 'raw' is a header-less PCM
+# byte stream, as sent by the badge firmware without '_ms' and by FFmpeg
+# (`-c:a pcm_s16le -f s16le udp://...`). 'auto' sniffs the first packet.
+PACKET_FORMATS = ('auto', 'timestamped', 'raw')
+SOCKET_HEADER_FORMAT = '>I7H'
+SOCKET_HEADER_SIZE = struct.calcsize(SOCKET_HEADER_FORMAT)  # 18 bytes
+RAW_TIMESTAMP_MAX_DRIFT = 0.5  # seconds before raw stream timestamps are re-anchored to the receiver clock
+SOCKET_RECV_SIZE = 65536
+
+
+def _now() -> float:
+    """current unix time, wrapped so tests can control the receiver clock."""
+    return time.time()
+
+
+def parse_socket_header(data: bytes) -> float | None:
+    """Return the sender timestamp encoded in a wearable packet header, or None.
+
+    The header is '>I7H': a packet counter, then year, month, day, hour, minute,
+    second and milliseconds in UTC. Only structurally valid dates are accepted,
+    which is enough to tell a header apart from PCM samples: six consecutive
+    samples would all have to fall inside the calendar ranges.
+    """
+    if len(data) < SOCKET_HEADER_SIZE:
+        return None
+    _counter, year, month, day, hour, minute, second, millis = struct.unpack(
+        SOCKET_HEADER_FORMAT, data[:SOCKET_HEADER_SIZE])
+    if not (1 <= month <= 12 and 1 <= day <= 31 and hour < 24 and minute < 60
+            and second < 60 and millis < 1000):
+        return None
+    try:
+        timestamp = datetime.datetime(
+            year, month, day, hour, minute, second, millis * 1000,  # milliseconds to microseconds
+            tzinfo=datetime.timezone.utc
+        ).timestamp()
+    except ValueError:
+        return None
+    return timestamp
+
 
 def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
     """Write AudioFrame to a wave file. The default format is PCM_16.
@@ -85,6 +127,9 @@ class AudioStream(StreamReceiver):
             resample_method (ResampleMethod, optional): Method for resampling (default: AUDIO_LIBROSA)
             host (str, optional): Socket host (required for 'udp' or 'tcp' sources)
             port (int, optional): Socket port (required for 'udp' or 'tcp' sources)
+            packet_format (str, optional): udp/tcp packet layout: 'timestamped' (18-byte wearable header +
+                one PCM chunk), 'raw' (header-less PCM byte stream, e.g. from FFmpeg) or 'auto' to sniff
+                the first packet (default: 'auto')
             url (str, optional): RTMP URL (required for 'rtmp' source)
             file_path (str, optional): Path to the audio file (required for 'file' source)
         """
@@ -116,8 +161,14 @@ class AudioStream(StreamReceiver):
         if self.source in ['udp', 'tcp']:
             self.host = self.require_kwarg(kwargs, 'host', "UDP/TCP source requires a 'host' parameter")
             self.port = self.require_kwarg(kwargs, 'port', "UDP/TCP source requires a 'port' parameter")
+            self.packet_format = str(kwargs.get('packet_format') or 'auto').strip().lower()
+            if self.packet_format not in PACKET_FORMATS:
+                raise ValueError(f"Unsupported packet_format: {self.packet_format}, must be one of {PACKET_FORMATS}")
             self.sock = None
             self.conn = None  # For TCP connection
+            self._frame_bytes = self.channels * self.sample_width
+            self._chunk_bytes = self.chunk_size * self._frame_bytes
+            self._reset_socket_framing()
 
         # RTMP objects
         if self.source == 'rtmp':
@@ -557,6 +608,7 @@ class AudioStream(StreamReceiver):
         if self.sock:
             self.sock.close()
             self.sock = None
+        self._reset_socket_framing()
 
     def _cleanup_rtmp(self) -> None:
         """Clean up RTMP (FFmpeg) process."""
@@ -623,14 +675,132 @@ class AudioStream(StreamReceiver):
                 logger.error(f"Fatal error in receive loop: {e}")
                 self.stop()
 
+    def _reset_socket_framing(self) -> None:
+        """Forget the sniffed packet format and any partially received chunk."""
+        self._detected_packet_format = None if self.packet_format == 'auto' else self.packet_format
+        self._pending_bytes = bytearray()
+        self._pending_frames: deque[AudioFrame] = deque()
+        self._raw_anchor_time: float | None = None
+        self._raw_frames_emitted = 0
+
+    def _read_socket_chunk(self) -> AudioFrame | None:
+        """Read the next chunk from a udp/tcp source.
+
+        Two packet layouts are supported (see PACKET_FORMATS): the wearable header
+        followed by one chunk of PCM, whose timestamp is the sender's clock, and a
+        header-less PCM byte stream that is re-framed here to chunk_size frames.
+        A socket timeout counts as a missed read rather than an error.
+        """
+        if self._pending_frames:
+            return self._pending_frames.popleft()
+        try:
+            if self.source == 'udp':
+                return self._read_udp_chunk()
+            return self._read_tcp_chunk()
+        except socket.timeout:
+            return None
+
+    def _read_udp_chunk(self) -> AudioFrame | None:
+        while not self._pending_frames:
+            data, _ = self.sock.recvfrom(SOCKET_RECV_SIZE)
+            received = _now()
+            if not data:
+                return None
+            if self._resolve_packet_format(data, received) == 'timestamped':
+                return self._frame_from_timestamped_packet(data, received)
+            self._push_raw_bytes(data, received)
+        return self._pending_frames.popleft()
+
+    def _read_tcp_chunk(self) -> AudioFrame | None:
+        if self._detected_packet_format is None:
+            # sniff the first header-sized piece of the stream
+            head = self._recv_exact(SOCKET_HEADER_SIZE)
+            received = _now()
+            if head is None:
+                return None
+            if self._resolve_packet_format(head, received) == 'timestamped':
+                payload = self._recv_exact(self._chunk_bytes)
+                if payload is None:
+                    return None
+                return self._frame_from_timestamped_packet(head + payload, received)
+            self._push_raw_bytes(head, received)
+        if self._detected_packet_format == 'timestamped':
+            packet = self._recv_exact(SOCKET_HEADER_SIZE + self._chunk_bytes)
+            if packet is None:
+                return None
+            return self._frame_from_timestamped_packet(packet, _now())
+        while not self._pending_frames:
+            data = self.conn.recv(SOCKET_RECV_SIZE)
+            if not data:
+                return None  # the peer closed the connection
+            self._push_raw_bytes(data, _now())
+        return self._pending_frames.popleft()
+
+    def _recv_exact(self, size: int) -> bytes | None:
+        """Read exactly size bytes from the tcp connection, or None if the peer closed it."""
+        buf = bytearray()
+        while len(buf) < size:
+            data = self.conn.recv(size - len(buf))
+            if not data:
+                return None
+            buf += data
+        return bytes(buf)
+
+    def _resolve_packet_format(self, data: bytes, received: float) -> str:
+        """Return the packet format, sniffing the first packet when set to 'auto'."""
+        if self._detected_packet_format is None:
+            header_time = parse_socket_header(data)
+            self._detected_packet_format = 'timestamped' if header_time is not None else 'raw'
+            logger.info(f"Detected '{self._detected_packet_format}' packets on {self.source} stream "
+                        f"{self.host}:{self.port}")
+        return self._detected_packet_format
+
+    def _frame_from_timestamped_packet(self, packet: bytes, received: float) -> AudioFrame | None:
+        """Build a frame from a header + PCM packet, stamped with the sender's clock."""
+        timestamp = parse_socket_header(packet)
+        if timestamp is None:
+            logger.warning(f"Invalid packet header on {self.source} stream, using the receiver clock")
+            timestamp = received
+        payload = packet[SOCKET_HEADER_SIZE:]
+        usable = len(payload) - len(payload) % self._frame_bytes
+        if usable <= 0:
+            return None
+        return AudioFrame(data=np.frombuffer(payload[:usable], dtype=self.dtype), timestamp=timestamp,
+                          metadata=self._frame_metadata)
+
+    def _push_raw_bytes(self, data: bytes, received: float) -> None:
+        """Append header-less PCM bytes and cut them into chunk_size frames.
+
+        Timestamps count samples from the arrival of the first packet, which keeps
+        them evenly spaced; when packet loss or a sender restart pulls them more than
+        RAW_TIMESTAMP_MAX_DRIFT away from the receiver clock they are re-anchored.
+        """
+        self._pending_bytes += data
+        pending_frames = len(self._pending_bytes) // self._frame_bytes
+        if self._raw_anchor_time is None:
+            # the newest sample was captured just before this packet arrived
+            self._raw_anchor_time = received - pending_frames / self.rate
+        else:
+            expected = self._raw_anchor_time + (self._raw_frames_emitted + pending_frames) / self.rate
+            drift = received - expected
+            if abs(drift) > RAW_TIMESTAMP_MAX_DRIFT:
+                logger.warning(f"Raw {self.source} stream drifted {drift:+.3f}s from the receiver clock, "
+                               "re-anchoring timestamps")
+                self._raw_anchor_time += drift
+        while len(self._pending_bytes) >= self._chunk_bytes:
+            chunk = bytes(self._pending_bytes[:self._chunk_bytes])
+            del self._pending_bytes[:self._chunk_bytes]
+            timestamp = self._raw_anchor_time + self._raw_frames_emitted / self.rate
+            self._raw_frames_emitted += self.chunk_size
+            self._pending_frames.append(AudioFrame(data=np.frombuffer(chunk, dtype=self.dtype),
+                                                   timestamp=timestamp, metadata=self._frame_metadata))
+
     def _read_chunk(self) -> AudioFrame | None:
         """Read a chunk of audio data continuously.
 
-        For UDP/TCP sources, the packet format is:
-          - Metadata (18 bytes):
-              - 4 bytes (uint32): packet counter
-              - 14 bytes (7 x uint16): timestamp (year, month, day, hour, minute, second, milliseconds)
-          - Audio data: (chunk_size frames × channels × sample_width bytes)
+        UDP/TCP sources are handled by _read_socket_chunk, which accepts both the
+        18-byte wearable header (packet counter + sender UTC time) in front of one
+        PCM chunk and a plain PCM byte stream that is re-framed to chunk_size.
 
         For RTMP, we assume FFmpeg outputs raw PCM data with no extra metadata.
         """
@@ -646,25 +816,7 @@ class AudioStream(StreamReceiver):
                         logger.warning(f"Invalid channel index: {self.channel_select}, but only {self.channels} channels available. Using all channels.")
                 timestamp = time.time()
             elif self.source in ['udp', 'tcp']:
-                # For UDP/TCP, include 18 bytes of metadata.
-                expected_bytes = self.chunk_size * self.channels * self.sample_width + 18
-                if self.source == 'udp':
-                    data, _ = self.sock.recvfrom(expected_bytes)
-                else:
-                    data = self.conn.recv(expected_bytes)
-
-                if not data or len(data) < 18:
-                    return None
-
-                metadata_format = '>I7H'
-                packet_counter, year, month, day, hour, minute, second, milliseconds = \
-                    struct.unpack(metadata_format, data[:18])
-                timestamp = datetime.datetime(
-                    year, month, day, hour, minute, second,
-                    milliseconds * 1000,  # Convert milliseconds to microseconds
-                    tzinfo=datetime.timezone.utc
-                ).timestamp()
-                audio_data = np.frombuffer(data[18:], dtype=self.dtype)
+                return self._read_socket_chunk()
             elif self.source == 'rtmp':
                 # For RTMP, expected bytes is the raw audio data only.
                 expected_bytes = self.chunk_size * self.channels * self.sample_width

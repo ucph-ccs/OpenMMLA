@@ -27,22 +27,24 @@ Base:
       channels:                   # Number of audio channels of the input device (if channels >1, channel selection is required)
       rate:                       # Sampling rate in Hz (e.g., 16000 for 16kHz)
       format:                     # Audio format, e.g., int16, float32
-      chunk_size:                 # Size of each audio chunk in bytes (default to 512)
+      chunk_size:                 # Size of each audio chunk in frames (default to 512)
       buffer_duration:            # Buffer duration in seconds for audio stream
       resample_method:            # Resampling method for audio processing
-      host:                       # listening address for udp/tcp streams (0.0.0 for all interfaces)
+      host:                       # listening address for udp/tcp streams (0.0.0.0 for all interfaces)
+      packet_format:              # udp/tcp packet layout: auto (default, sniffs the first packet), timestamped (badge 18-byte header + PCM) or raw (header-less PCM, e.g. FFmpeg)
   # example 1: external RTMP stream (already running, Base pulls from URL)
   # rtmp-mic-1:
   #   target: rtmp://uber-server.local/stream_01
   #
-  # example 2: managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  # example 2: managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH);
+  # ffmpeg sends raw PCM to the port of the Bases entry that uses source udp/tcp
   # rpi-mic-1:
   #   ssh_profile: rpi-table-1        # must match a TUI SSH profile name
   #   device: hw:1,0                  # ALSA audio device on the remote machine
   #   target: udp://asr-base.local:5001  # target address (udp://<host>:<port> or tcp://<host>:<port>)
-  #   format: s16le                   # audio format (s16le, f32le, etc.)
-  #   rate: 16000                     # sample rate in Hz
-  #   channels: 1                     # number of audio channels
+  #   format: s16le                   # PCM sample format (s16le, s32le, f32le); must match stream_kwargs.format (int16, int32, float32)
+  #   rate: 16000                     # sample rate in Hz; must match stream_kwargs.rate
+  #   channels: 1                     # number of audio channels; must match stream_kwargs.channels
 
 # bases settings
 # Each entry defines one ASR base node (a microphone). A base references a base
