@@ -3,7 +3,7 @@
 Two kinds of stacks live in this directory:
 
 - **AI service stacks** (`docker-compose.asr.yml`, `docker-compose.vfa.yml`): one image per ASR/VFA service, so every service keeps its own Python environment and can be upgraded without touching the others. The ports match the Nginx gateway upstreams, so the gateway config needs no change.
-- **Database stack** (`docker-compose.infra.yml`): InfluxDB and MongoDB for the uber server, as an alternative to installing them with brew/apt. See [Database stack: InfluxDB and MongoDB](#database-stack-influxdb-and-mongodb).
+- **Database and streaming stack** (`docker-compose.infra.yml`): InfluxDB, MongoDB and the MediaMTX streaming server for the uber server, as an alternative to installing them with brew/apt. See [Database stack: InfluxDB and MongoDB](#database-stack-influxdb-and-mongodb).
 
 | Service | Image | Port | GPU | Stack |
 |---|---|---|---|---|
@@ -73,12 +73,13 @@ This is separate from the TUI's **MLLM Server** card, which runs vLLM natively i
 
 ## Database stack: InfluxDB and MongoDB
 
-`docker-compose.infra.yml` runs the two uber-server databases as containers instead of bare-metal brew/apt installs. The default ports match `config/system_services.yml`, so the pipelines only need the host name changed; the host ports can be overridden with `INFLUXDB_PORT` / `MONGODB_PORT` (see [Sharing a host with another project](#sharing-a-host-with-another-project)).
+`docker-compose.infra.yml` runs the two uber-server databases, and the MediaMTX streaming server, as containers instead of bare-metal brew/apt installs. The default ports match `config/system_services.yml`, so the pipelines only need the host name changed; the host ports can be overridden with `INFLUXDB_PORT` / `MONGODB_PORT` / `MEDIAMTX_*_PORT` (see [Sharing a host with another project](#sharing-a-host-with-another-project)).
 
 | Service | Image | Port | GPU | Stack |
 |---|---|---|---|---|
 | InfluxDB | `influxdb:2.7.12` | 8086 | — | official image, v2 API (org/bucket/token + Flux) |
 | MongoDB | `mongo:7.0.40-jammy` | 27017 | — | official image, no authentication by default |
+| MediaMTX | `bluenviron/mediamtx:1.21.0` | 1935 RTMP, 8554 RTSP, 8890/udp SRT, 9997 API, 9996 playback | — | official image; config from `pipelines/uber-server/mediamtx/mediamtx.yml`, recordings bind-mounted to `artifacts/recordings/` (`MEDIAMTX_RECORD_DIR`), see the [Streaming guide](rtmp_streaming.md) |
 
 The image tags are pinned on purpose; do not switch them to `latest`. From 2026-09-15 `influxdb:latest` points at InfluxDB 3 Core, which has no org/bucket/token semantics and breaks `influxdb-client==1.44.0` outright, and `mongo:latest` drifts across major versions. Both pinned tags are published for linux/amd64 and linux/arm64.
 
@@ -219,6 +220,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
 - `~/.openmmla` is mounted read-only so the containers can decrypt `ENC(...)` secrets.
 - The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.
 - The database containers do **not** mount `~/.openmmla`: the official influxdb / mongo images contain no OpenMMLA code, never read `config.yml`, and have nothing to decrypt.
+- MediaMTX mounts its config read-only and writes its recordings to a bind mount, `artifacts/recordings/` of the repository by default, so the files are plain fMP4 segments on the host.
 
 ## How the TUI uses these stacks
 
@@ -231,10 +233,10 @@ docker compose -f docker/docker-compose.infra.yml up -d
 
 A remote host runs the same commands over SSH in its repository directory, so it needs: the repository cloned (including `docker/`), Docker Engine + nvidia-container-toolkit, and the current user in the `docker` group.
 
-**InfluxDB / MongoDB** cards (Launcher → System Services):
+**InfluxDB / MongoDB / MediaMTX** cards (Launcher → System Services):
 
 - **Status**: the cards probe the URL configured in System Settings, with a direct TCP connect from the TUI machine to host:port, independent of the Host selector. Only when the URL says `localhost` do they fall back to probing the selected host's own loopback. The Status tab does the same and its port column shows the host:port that was actually probed.
-- **Start / Stop / Logs**: each card has a **Run mode** dropdown (`docker` / `native`), **`docker` by default**. Switch a machine that still uses brew / systemctl databases to `native`, otherwise Start brings up a container on that machine and fights the bare-metal instance for the port. In `docker` mode the three buttons run `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <service>`. Stop uses `stop`, not `down`: both cards share one compose file and `down` would take the other database's container with it.
+- **Start / Stop / Logs**: each card has a **Run mode** dropdown (`docker` / `native`), **`docker` by default**. Switch a machine that still uses brew / systemctl databases to `native`, otherwise Start brings up a container on that machine and fights the bare-metal instance for the port. In `docker` mode the three buttons run `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <service>`. Stop uses `stop`, not `down`: the cards share one compose file and `down` would take the other containers with it. The MediaMTX card probes the Gateway's `rtmp_port`.
 - Run mode is remembered per host + service, so switching Host or clicking another node and coming back keeps it, but only for this TUI session; a restart returns to `docker`.
 - **Fetch Token** (InfluxDB card only, docker mode): reads the docker stack's admin token on the selected Host, first from the running container's `/etc/influxdb2/influx-configs` (which also covers a token influx generated itself), then from `docker/.env`, and stores it encrypted in System Settings as `InfluxDB.token`. The token never appears in the logs; only its first and last 4 characters are shown. The TUI warns when the URL's host and the host the token was read from differ.
 - **Status tab, Host column**: for InfluxDB / MongoDB / Redis / Mosquitto / Nginx it shows **the machine the service is configured on** (`server-01`, `ericli.local`), not where the TUI runs; the Port column is the port. View Logs finds the SSH profile for that host (matched by profile name or host), reads locally when the host is this machine, reads the container logs when a container exists, and otherwise falls back to journalctl / brew logs.

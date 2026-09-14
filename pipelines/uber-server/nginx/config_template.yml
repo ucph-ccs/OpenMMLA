@@ -21,10 +21,8 @@
 #   - Higher weight = more requests sent to that server
 #   - Example: weight 3 vs 1 means 3x more requests to the higher weight server
 #
-# rtmp_apps:
-#   - List of RTMP application names for video/audio streaming
-#   - Used in RTMP URLs to identify different streams
-#   - Each app name should be unique
+# streams are not nginx's job any more: cameras and microphones publish to
+# MediaMTX (pipelines/uber-server/mediamtx/mediamtx.yml, see docs/rtmp_streaming.md)
 
 # Upstream configurations for different services
 # Each service can have multiple servers with different weights for load balancing
@@ -115,10 +113,4 @@ upstreams:
   # reserved for your custom service created with create_app(), matched with the endpoint name defined in crate_app()
   <your-service-endpoint-name>:
     - host: <server-01-host>
-      port: <port-number
-
-# RTMP application names for video streaming
-# These are the application names that will be used in RTMP URLs
-# Format: rtmp://<nginx-host>/<stream-app-name>/<stream-name>
-rtmp_apps:
-  - <stream-app-name>  # e.g., replace it with your actual stream app name, e.g., ips, vfa
+      port: <port-number>

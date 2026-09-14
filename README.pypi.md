@@ -29,7 +29,7 @@ pip install -e ".[tui]"
 mmla tui
 ```
 
-See the documentation for the system prerequisites (conda, git, tmux, PortAudio, FFmpeg), the system services (InfluxDB, MongoDB, Redis, Mosquitto, Nginx, dashboard) and the pipeline guides.
+See the documentation for the system prerequisites (conda, git, tmux, PortAudio, FFmpeg), the system services (InfluxDB, MongoDB, Redis, Mosquitto, Nginx, MediaMTX, dashboard) and the pipeline guides.
 
 ## Citation
 

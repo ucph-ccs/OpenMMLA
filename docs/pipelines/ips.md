@@ -41,24 +41,24 @@ An alternative input path skips the cameras entirely: a Nicla Vision badge runni
 Bases:
   - id: cam-front            # base id; appears in MQTT and as the transform matrix key
     camera: logitechC920     # a calibrated profile from Cameras
-    source: opencv           # opencv | rtmp | lsl | file
-    source_index: 0          # opencv/rtmp: 0-based index; file: file name in Base.file_dir; lsl: stream name
+    source: opencv           # opencv | stream | lsl | file (rtmp is the old name of stream)
+    source_index: 0          # opencv: camera index; stream: index among the pullable Streams entries; file: file name in Base.file_dir; lsl: stream name
     main: true               # exactly one base is the main reference frame
   - id: cam-side
     camera: logitechC920
-    source: rtmp
+    source: stream
     source_index: 0
     main: false
 ```
 
-IPS has no capture/analyze/live mode switch: a live source (`opencv`, `rtmp`, `lsl`) runs in real time and a `file` source replays the recording at the configured pace.
+IPS has no capture/analyze/live mode switch: a live source (`opencv`, `stream`, `lsl`) runs in real time and a `file` source replays the recording at the configured pace.
 
 ### Input sources
 
 | Source | Description | Setup |
 |---|---|---|
 | `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index (0 to 3); the base lists the devices it finds |
-| `rtmp` | video pulled from the Nginx RTMP server | a `Streams` entry with `target: rtmp://...`; `source_index` is the position among the RTMP entries |
+| `stream` | video pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` is its position among those entries |
 | `lsl` | Lab Streaming Layer | `source_index` is the stream name; needs `pylsl` |
 | `file` | replay of a recorded video | `source_index` is the file name inside `Base.file_dir`; the start time comes from the file name |
 
@@ -66,21 +66,25 @@ IPS has no capture/analyze/live mode switch: a live source (`opencv`, `rtmp`, `l
 
 ```yaml
 Streams:
-  # external RTMP stream (already running, the base only pulls from the URL)
+  # external stream (already running; the base pulls read_target, else target)
   cam-external:
-    target: rtmp://uber-server.local/ips/3
+    target: rtmp://uber-server.local:1935/ips/3
+    read_target: rtsp://uber-server.local:8554/ips/3
 
   # managed stream: the TUI starts/stops ffmpeg on a remote Raspberry Pi over SSH
   cam-1:
     ssh_profile: rpi-living-room    # must match a TUI SSH profile name
     device: /dev/video0             # camera device on the remote machine
-    target: rtmp://uber-server.local/ips/1
+    target: rtmp://uber-server.local:1935/ips/1       # published to MediaMTX
+    read_target: rtsp://uber-server.local:8554/ips/1  # pulled by the base
     codec: libx264
     resolution: 1920x1080
     fps: 30
+    bitrate: 1M
+    record: true                    # also keep an mkv on the Pi for later replay
 ```
 
-Managed streams are started and stopped from the **Streams** tab; see [RTMP Streaming](../rtmp_streaming.md) for the FFmpeg commands.
+Managed streams are started and stopped from the **Streams** tab; see the [Streaming guide](../rtmp_streaming.md) for the FFmpeg commands and the recording layout.
 
 ## Camera calibration and synchronization
 

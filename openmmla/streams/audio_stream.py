@@ -18,6 +18,7 @@ except ImportError:
     StreamInlet = None
 
 from openmmla.streams.resampling import resample_audio, ResampleMethod
+from openmmla.utils.constants import normalize_source
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sockets import clear_socket_udp
 from openmmla.utils.threads import RaisingThread
@@ -115,7 +116,8 @@ class AudioStream(StreamReceiver):
         """Initialize audio stream.
 
         Args:
-            source (str): Stream source type ('pyaudio', 'udp', 'tcp', 'rtmp', 'lsl', 'file').
+            source (str): Stream source type ('pyaudio', 'udp', 'tcp', 'stream', 'lsl', 'file';
+                'rtmp' is an alias of 'stream').
 
         Keyword Args:
             buffer_duration (float, optional): Duration of the ring buffer in seconds (default: 5.0)
@@ -130,11 +132,11 @@ class AudioStream(StreamReceiver):
             packet_format (str, optional): udp/tcp packet layout: 'timestamped' (18-byte wearable header +
                 one PCM chunk), 'raw' (header-less PCM byte stream, e.g. from FFmpeg) or 'auto' to sniff
                 the first packet (default: 'auto')
-            url (str, optional): RTMP URL (required for 'rtmp' source)
+            url (str, optional): stream URL, rtmp:// rtsp:// or srt:// (required for the 'stream' source)
             file_path (str, optional): Path to the audio file (required for 'file' source)
         """
         super().__init__(**kwargs)
-        self.source = source
+        self.source = normalize_source(source)
 
         # Stream configuration
         self.buffer_duration = kwargs.get('buffer_duration', 5.0)
@@ -170,9 +172,10 @@ class AudioStream(StreamReceiver):
             self._chunk_bytes = self.chunk_size * self._frame_bytes
             self._reset_socket_framing()
 
-        # RTMP objects
-        if self.source == 'rtmp':
-            self.rtmp_url = self.require_kwarg(kwargs, 'url', "RTMP source requires a 'url' parameter")
+        # network stream objects: ffmpeg decodes the URL to raw PCM
+        if self.source == 'stream':
+            self.url = self.require_kwarg(kwargs, 'url', "Stream source requires a 'url' parameter")
+            self.rtmp_url = self.url  # name from before MediaMTX, kept for callers
             self.ffmpeg_proc: subprocess.Popen | None = None
 
         # LSL objects
@@ -216,7 +219,7 @@ class AudioStream(StreamReceiver):
             self._initialize_udp()
         elif self.source == 'tcp':
             self._initialize_tcp()
-        elif self.source == 'rtmp':
+        elif self.source == 'stream':
             self._initialize_rtmp()
         elif self.source == 'lsl':
             self._initialize_lsl()
@@ -233,7 +236,7 @@ class AudioStream(StreamReceiver):
         self._receive_thread.daemon = True
         self._receive_thread.start()
 
-        if self.source == 'rtmp':
+        if self.source == 'stream':
             time.sleep(3)
 
         logger.info(f"Audio stream started with source: {self.source}")
@@ -255,7 +258,7 @@ class AudioStream(StreamReceiver):
             self._cleanup_pyaudio()
         elif self.source in ['udp', 'tcp']:
             self._cleanup_socket()
-        elif self.source == 'rtmp':
+        elif self.source == 'stream':
             self._cleanup_rtmp()
         elif self.source == 'lsl':
             self._cleanup_lsl()
@@ -481,18 +484,20 @@ class AudioStream(StreamReceiver):
             logger.info(f"Successfully initialized TCP audio stream on {self.host}:{self.port}")
 
     def _initialize_rtmp(self, max_retries: int = 3) -> None:
-        """Initialize RTMP stream using FFmpeg.
+        """Initialize a network stream (rtmp/rtsp/srt) using FFmpeg.
 
-        Spawns an FFmpeg process that connects to the provided RTMP URL and outputs
-        raw PCM audio on stdout.
+        Spawns an FFmpeg process that connects to the stream URL and outputs raw
+        PCM audio on stdout, with read-ahead buffering off to keep latency low.
         """
         # Determine the correct format and codec based on self.format.
         fmt = RTMP_FORMATS[self.format]
         codec = RTMP_CODEC[self.format]
 
-        command = [
-            'ffmpeg',
-            '-i', self.rtmp_url,
+        command = ['ffmpeg', '-fflags', 'nobuffer', '-flags', 'low_delay']
+        if self.url.startswith('rtsp://'):
+            command += ['-rtsp_transport', 'tcp']  # no packet loss on Wi-Fi
+        command += [
+            '-i', self.url,
             '-f', fmt,
             '-acodec', codec,
             '-ar', str(self.rate),
@@ -509,11 +514,11 @@ class AudioStream(StreamReceiver):
                     self._cleanup_rtmp()
                     self._initialize_rtmp(max_retries=max_retries - 1)
                 else:
-                    raise RuntimeError(f"Failed to initialize RTMP audio stream from {self.rtmp_url}")
+                    raise RuntimeError(f"Failed to initialize audio stream from {self.url}")
             else:
-                logger.info(f"Successfully initialized RTMP audio stream from {self.rtmp_url}")
+                logger.info(f"Successfully initialized audio stream from {self.url}")
         except Exception as e:
-            raise RuntimeError(f"Error initializing RTMP stream: {e}") from e
+            raise RuntimeError(f"Error initializing stream: {e}") from e
 
     def _initialize_lsl(self, max_retries: int = 3):
         """Initialize lab streaming layer stream."""
@@ -663,7 +668,7 @@ class AudioStream(StreamReceiver):
                         elif self.source == 'tcp':
                             self._cleanup_socket()
                             self._initialize_tcp()
-                        elif self.source == 'rtmp':
+                        elif self.source == 'stream':
                             self._cleanup_rtmp()
                             self._initialize_rtmp()
                         elif self.source == 'lsl':
@@ -802,7 +807,7 @@ class AudioStream(StreamReceiver):
         18-byte wearable header (packet counter + sender UTC time) in front of one
         PCM chunk and a plain PCM byte stream that is re-framed to chunk_size.
 
-        For RTMP, we assume FFmpeg outputs raw PCM data with no extra metadata.
+        For network streams (ffmpeg), we assume FFmpeg outputs raw PCM data with no extra metadata.
         """
         try:
             if self.source == 'pyaudio':
@@ -817,8 +822,8 @@ class AudioStream(StreamReceiver):
                 timestamp = time.time()
             elif self.source in ['udp', 'tcp']:
                 return self._read_socket_chunk()
-            elif self.source == 'rtmp':
-                # For RTMP, expected bytes is the raw audio data only.
+            elif self.source == 'stream':
+                # for ffmpeg-decoded streams, expected bytes is the raw audio data only
                 expected_bytes = self.chunk_size * self.channels * self.sample_width
                 data = self.ffmpeg_proc.stdout.read(expected_bytes)
                 if not data or len(data) < expected_bytes:

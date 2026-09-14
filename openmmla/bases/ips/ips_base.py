@@ -105,7 +105,9 @@ class IPSBase(Base):
         self.stream_kwargs['resolution'] = self.res
         self.stream_kwargs['fps'] = self.fps
 
-        source_list = ['opencv', 'rtmp', 'lsl', 'file']
+        from openmmla.utils.constants import normalize_source
+        self.source = normalize_source(self.source)
+        source_list = ['opencv', 'stream', 'lsl', 'file']
         if self.source not in source_list:
             raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
 
@@ -238,8 +240,8 @@ class IPSBase(Base):
         # Configure stream based on source type
         if self.source == 'opencv':
             self.stream_kwargs['camera_index'] = self.selected_source
-        elif self.source == 'rtmp':
-            self.stream_kwargs['rtmp_url'] = self.selected_source
+        elif self.source == 'stream':
+            self.stream_kwargs['url'] = self.selected_source
         elif self.source == 'file':
             self.stream_kwargs['file_path'] = self.selected_source
         elif self.source == 'lsl':
@@ -293,13 +295,13 @@ class IPSBase(Base):
                     available_sources.append(i)
                 cap.release()
 
-        elif self.source == 'rtmp':
+        elif self.source == 'stream':
             from openmmla.utils.constants import get_stream_urls
-            rtmp_urls = get_stream_urls(self.config, "rtmp")
-            if not rtmp_urls:
-                raise ValueError("No RTMP streams found in Streams (or legacy RTMP) config section.")
-            for url in rtmp_urls:
-                print(f"{available_source_idx} : RTMP stream {url} is available.")
+            stream_urls = get_stream_urls(self.config)
+            if not stream_urls:
+                raise ValueError("No pullable stream (rtmp/rtsp/srt URL) found in the Streams config section.")
+            for url in stream_urls:
+                print(f"{available_source_idx} : Stream {url} is available.")
                 available_sources.append(url)
                 available_source_idx += 1
 
@@ -355,7 +357,7 @@ class IPSBase(Base):
 
     def _choose_video_source(self, available_sources: list[str] | None) -> str | None:
         """Pick the video source for the selected base (source_index is an index
-        for opencv/rtmp, or a file/stream name for file/lsl)."""
+        for opencv/stream, or a file/stream name for file/lsl)."""
         if not available_sources:
             return None
         selected_source = select_source_by_index_or_name(self._source_index, available_sources)
@@ -468,7 +470,7 @@ class IPSBase(Base):
                 break
 
     def _process_continuous_frames(self):
-        """Process real-time video streams continuously (opencv, rtmp, lsl)."""
+        """Process real-time video streams continuously (opencv, stream, lsl)."""
         print("Processing real-time streams...")
         runtime_root = pipeline_section_dir(self.project_dir, self.session_id, 'ips-base', 'real-time') / 'runtime'
         runtime_root.mkdir(parents=True, exist_ok=True)

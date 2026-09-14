@@ -58,3 +58,6 @@ config/system_services.yml
 !.gitkeep
 CLAUDE.md
 AGENTS.md
+
+# MediaMTX recordings of a native `make mediamtx` run
+pipelines/uber-server/recordings/

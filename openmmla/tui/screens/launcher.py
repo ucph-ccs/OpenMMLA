@@ -242,9 +242,15 @@ _MLLM_FIELDS = [
 ]
 
 _STREAM_FIELDS_TEMPLATE = [
-    ("target", "str", "", "rtmp://<host>/<app>/<stream> or udp://<host>:<port>", False),
+    ("target", "str", "",
+     "publish URL: rtmp://<gateway>:1935/<app>/<name> (or rtsp://, srt://), or udp://<base>:<port> for raw audio to an ASR base",
+     False),
+    ("read_target", "str", "",
+     "URL the bases pull from, e.g. rtsp://<gateway>:8554/<app>/<name>; empty = target", False),
     ("ssh_profile", "str", "", "SSH profile for remote stream management", True),
     ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
+    ("record", "bool", False,
+     "also record the stream on the streaming host under <record_root>/<session>/collection/<host>/", False),
 ]
 
 
@@ -1691,6 +1697,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ("Redis", "In-memory data store and message broker"),
             ("Mosquitto", "MQTT message broker"),
             ("Nginx", "Reverse proxy and load balancer"),
+            ("MediaMTX", "Streaming server: RTMP/SRT/RTSP in, RTSP/SRT/RTMP out, recording"),
             ("Flask", "Dashboard (backend API + web frontend)"),
             ("Celery", "Async task worker"),
         ]:
@@ -1752,6 +1759,9 @@ def _capture_tmux_pane(session_name: str, lines: int = 80) -> str:
 
 def _get_system_service_log(service_name: str, lines: int = 80) -> str:
     """get log output for a brew-managed system service."""
+    if service_name == "mediamtx":
+        # a native MediaMTX runs inside the tmux session `make mediamtx` opened
+        return _capture_tmux_pane("mediamtx")
     try:
         prefix = subprocess.run(
             ["brew", "--prefix"], capture_output=True, text=True, timeout=5,
@@ -1998,6 +2008,7 @@ def _mask_secret(value: str) -> str:
 _INFRA_COMPOSE_SERVICES = {
     "influxdb": "influxdb",
     "mongodb": "mongodb",
+    "mediamtx": "mediamtx",
 }
 
 
@@ -2092,7 +2103,7 @@ _APP_PORT_CMDS: dict[str, tuple[int, str]] = {
 _ENV_NAMES = {entry["env"] for entry in ENV_GROUPS}
 # databases and brokers are brew/systemd/docker processes; their card's
 # conda_env is only the Makefile's home, not something they run in
-_INFRA_NO_ENV_TARGETS = {"influxdb", "mongodb", "redis", "mosquitto"}
+_INFRA_NO_ENV_TARGETS = {"influxdb", "mongodb", "redis", "mosquitto", "mediamtx"}
 
 
 def _shared_section_label(section: str) -> str:
@@ -2909,7 +2920,12 @@ class ServicePanel(Widget):
                 stream_pane = TabPane("Streams", stream_scroll, id="svc-tab-streams")
                 await tabs.add_pane(stream_pane)
                 stream_config_path = pipeline.config_path if self._get_panel_target() == "local" else ""
-                panel = StreamPanel(streams, config_path=stream_config_path, project_dir=self._root)
+                panel = StreamPanel(
+                    streams,
+                    config_path=stream_config_path,
+                    project_dir=self._root,
+                    session_provider=lambda name=svc.name: self._stream_record_session(name),
+                )
                 await stream_scroll.mount(panel)
 
             if svc.name == "IPS Base":
@@ -3485,9 +3501,9 @@ class ServicePanel(Widget):
             cameras = sorted((existing.get("Cameras") or {}).keys())
             base_types = sorted((existing.get("Base") or {}).keys())
             source_types = {
-                "ASR Base": ["udp", "tcp", "pyaudio", "rtmp", "lsl", "file"],
-                "IPS Base": ["opencv", "rtmp", "lsl", "file"],
-                "VFA Base": ["opencv", "rtmp", "lsl", "file"],
+                "ASR Base": ["udp", "tcp", "pyaudio", "stream", "rtmp", "lsl", "file"],
+                "IPS Base": ["opencv", "stream", "rtmp", "lsl", "file"],
+                "VFA Base": ["opencv", "stream", "rtmp", "lsl", "file"],
             }.get(pipeline.name, [])
             source_files = self._list_source_files(existing, self._get_panel_target())
             for f in pipeline.fields:
@@ -5707,6 +5723,14 @@ class ServicePanel(Widget):
                     return {}
         return {}
 
+    def _stream_record_session(self, service_name: str) -> str:
+        """session id the Streams tab records under: the card's Session, unless
+        that is the create-new choice (then the panel falls back to streams-<date>)."""
+        value = self._card_params(service_name).get("-sid")
+        if _is_new_collection_session_choice(value):
+            return ""
+        return str(value or "").strip()
+
     def _logs_available(self, svc: ServiceDef, target: str) -> bool:
         if _infra_compose_service(svc) is not None and _infra_docker_mode(
             svc, self._card_params(svc.name)
@@ -5815,6 +5839,7 @@ class ServicePanel(Widget):
                     "redis": "journalctl -u redis-server -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/redis/redis-server.log 2>/dev/null || echo '(no redis logs found)'",
                     "mosquitto": "journalctl -u mosquitto -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/mosquitto/mosquitto.log 2>/dev/null || echo '(no mosquitto logs found)'",
                     "nginx": "journalctl -u nginx -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/nginx/error.log 2>/dev/null || echo '(no nginx logs found)'",
+                    "mediamtx": "if tmux has-session -t mediamtx 2>/dev/null; then tmux capture-pane -p -t mediamtx | tail -n 80; else echo '(no mediamtx tmux session found)'; fi",
                 }
                 cmd = log_cmds.get(target, f"echo '(no log command for {target})'")
                 self._cmd.run(cmd)

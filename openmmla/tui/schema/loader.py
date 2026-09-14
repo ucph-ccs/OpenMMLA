@@ -50,6 +50,27 @@ class StreamDef:
     format: str = ""
     rate: int = 0
     channels: int = 0
+    # URL the bases pull from when it differs from the publish target (MediaMTX
+    # serves an rtmp:// publish as rtsp:// for lower latency); empty = target
+    read_target: str = ""
+    # 'audio' or 'video'; inferred from the target and device when empty
+    kind: str = ""
+    # also record the stream to a file on the streaming host while it is pushed
+    record: bool = False
+    # recording root on that host; empty = the Collection default (~/artifacts)
+    record_root: str = ""
+    # video bitrate shared by the stream and its recording; empty = 1M
+    bitrate: str = ""
+
+    @property
+    def read_url(self) -> str:
+        return self.read_target or self.target
+
+
+def _stream_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
 
 def _clean_stream_optional(value) -> str:
@@ -86,6 +107,11 @@ def streams_from_config(data: dict) -> list[StreamDef]:
             format=props.get("format", ""),
             rate=int(props.get("rate", 0)),
             channels=int(props.get("channels", 0)),
+            read_target=_clean_stream_optional(props.get("read_target")),
+            kind=_clean_stream_optional(props.get("kind")).lower(),
+            record=_stream_bool(props.get("record")),
+            record_root=_clean_stream_optional(props.get("record_root")),
+            bitrate=_clean_stream_optional(props.get("bitrate")),
         ))
     return streams
 
@@ -95,10 +121,11 @@ def load_streams(config_path: str) -> list[StreamDef]:
     return streams_from_config(load_existing_config(config_path))
 
 
-def get_stream_targets(config_path: str, protocol: str = "rtmp") -> list[str]:
-    """extract target URLs from Streams config, filtered by protocol prefix."""
-    streams = load_streams(config_path)
-    return [s.target for s in streams if s.target.startswith(f"{protocol}://")]
+def get_stream_targets(config_path: str, protocol=None) -> list[str]:
+    """the URLs bases can pull from a pipeline config's Streams (read_target or target; rtmp/rtsp/srt)."""
+    from openmmla.utils.constants import get_stream_urls
+
+    return get_stream_urls(load_existing_config(config_path), protocol)
 
 
 def _infer_type(value):

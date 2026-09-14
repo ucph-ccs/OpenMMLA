@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
+import re
 import shlex
+import socket
 import subprocess
 import time
 
@@ -14,6 +17,8 @@ from textual.widgets import Static, Button, DataTable
 
 from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, ssh_run_sync
+from openmmla.utils.artifact_paths import safe_segment
+from openmmla.utils.constants import STREAM_URL_SCHEMES
 from openmmla.utils.stream_registry import register_stream_start, mark_stream_stopped
 
 
@@ -51,8 +56,25 @@ def _check_remote_tmux(profile, session_name: str) -> bool:
         return False
 
 
+# ALSA-style device names mark an audio stream when no kind is given
+_ALSA_DEVICE_PREFIXES = ("hw:", "plughw:", "default", "sysdefault", "dsnoop", "plug:", "pulse")
+
+# recording root on a remote streaming host when record_root is unset; the same
+# root the Collection card records under, so Collection -> Download fetches both
+STREAM_RECORD_ROOT = "$HOME/artifacts"
+
+# seconds Stop waits for ffmpeg to finalize its files after Ctrl-C before the
+# tmux session is killed
+STREAM_STOP_GRACE_SECONDS = 8
+
+
 def _stream_start_file(session_name: str) -> str:
     return f"$HOME/.openmmla/streams/{session_name}.start"
+
+
+def _stream_record_file(session_name: str) -> str:
+    """holds the expanded recording path of a managed stream on its host."""
+    return f"$HOME/.openmmla/streams/{session_name}.record"
 
 
 def _project_root_from_config(config_path: str) -> str:
@@ -65,12 +87,29 @@ def _project_root_from_config(config_path: str) -> str:
     return os.path.dirname(path)
 
 
-def _build_tmux_stream_cmd(session: str, ffmpeg_cmd: str) -> str:
+def _build_tmux_stream_cmd(
+    session: str,
+    ffmpeg_cmd: str,
+    record_dir: str | None = None,
+    record_path: str | None = None,
+) -> str:
+    """wrap the ffmpeg command in a detached tmux session that first notes the
+    capture-side start time and, when recording, creates the recording folder and
+    notes the file path (the ${START_TIME} in it expands on the host)."""
     start_file = _stream_start_file(session)
+    record_file = _stream_record_file(session)
+    if record_dir and record_path:
+        record_part = (
+            f'mkdir -p "{record_dir}"; '
+            f"printf '%s\\n' \"{record_path}\" > {record_file}; "
+        )
+    else:
+        record_part = f"rm -f {record_file}; "
     inner_cmd = (
         f"mkdir -p $HOME/.openmmla/streams; "
         f"START_TIME=$(python3 -c \"import time; print('%.6f' % time.time())\" 2>/dev/null || date +%s); "
         f"printf '%s\\n' \"$START_TIME\" > {start_file}; "
+        f"{record_part}"
         f"{ffmpeg_cmd}; exec bash"
     )
     return _with_stream_path(f"tmux new-session -d -s {shlex.quote(session)} {shlex.quote(inner_cmd)}")
@@ -117,6 +156,46 @@ def _read_stream_start_time_with_retry(
     return None
 
 
+def _build_stop_stream_cmd(session: str) -> str:
+    """Ctrl-C the ffmpeg in the stream's tmux session, wait until it has exited
+    (it finalizes the recording's index and duration on the way out), then close
+    the session. ffmpeg is a child of the pane's shell, which is what the wait
+    polls; the shell itself is what tmux reports as the pane's command."""
+    quoted_session = shlex.quote(session)
+    return (
+        f"tmux send-keys -t {quoted_session} C-c 2>/dev/null; "
+        f"p=$(tmux list-panes -t {quoted_session} -F '#{{pane_pid}}' 2>/dev/null | head -n1); i=0; "
+        f'while [ -n "$p" ] && pgrep -P "$p" -x ffmpeg >/dev/null 2>&1 '
+        f"&& [ $i -lt {STREAM_STOP_GRACE_SECONDS * 2} ]; do sleep 0.5; i=$((i+1)); done; "
+        f"tmux kill-session -t {quoted_session} 2>/dev/null; "
+        f"echo DONE"
+    )
+
+
+def _read_stream_record_path(profile, session: str, is_local: bool, attempts: int = 10, delay: float = 0.1) -> str | None:
+    """the recording path the tmux wrapper noted, once it exists."""
+    path = f"~/.openmmla/streams/{session}.record"
+    for attempt in range(max(1, attempts)):
+        value = None
+        if is_local:
+            try:
+                with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
+                    value = f.read().strip()
+            except OSError:
+                value = None
+        else:
+            try:
+                result = ssh_run_sync(profile, _with_stream_path(f"cat {_stream_record_file(session)} 2>/dev/null"), timeout=5.0)
+                value = result.stdout.strip() if result.returncode == 0 else None
+            except Exception:
+                value = None
+        if value:
+            return value
+        if attempt < attempts - 1:
+            time.sleep(delay)
+    return None
+
+
 # raw PCM sample formats the ASR base can receive (AudioStream SUPPORTED_FORMATS),
 # keyed by both the ffmpeg spelling and the base config spelling
 _PCM_SAMPLE_FORMATS = {
@@ -135,49 +214,127 @@ def _pcm_sample_format(value: str) -> str:
     return _PCM_SAMPLE_FORMATS[key]
 
 
-def _build_ffmpeg_cmd(stream: StreamDef) -> str:
-    """build the ffmpeg command string from a stream definition."""
-    target = stream.target
-    is_audio = target.startswith("udp://") or target.startswith("tcp://")
+def _stream_kind(stream: StreamDef) -> str:
+    """'audio' or 'video': the explicit kind, else inferred from target and device."""
+    kind = (stream.kind or "").strip().lower()
+    if kind in ("audio", "video"):
+        return kind
+    if stream.target.startswith(("udp://", "tcp://")):
+        return "audio"
+    if (stream.device or "").strip().lower().startswith(_ALSA_DEVICE_PREFIXES):
+        return "audio"
+    return "video"
 
-    if is_audio:
-        # the ASR base reads a header-less PCM byte stream on udp/tcp (see
-        # AudioStream._read_socket_chunk), so send raw samples rather than AAC in
-        # FLV. ffmpeg flushes once per ALSA period and keeps udp datagrams below
-        # the MTU; the base re-frames whatever arrives to its own chunk_size.
-        fmt = _pcm_sample_format(stream.format)
+
+def _publish_muxer(target: str) -> tuple[str, dict[str, str]]:
+    """(ffmpeg output format, its options) for a publish target URL."""
+    if target.startswith("rtmp://"):
+        return "flv", {}
+    if target.startswith("rtsp://"):
+        return "rtsp", {"rtsp_transport": "tcp"}
+    if target.startswith("srt://"):
+        return "mpegts", {}
+    raise ValueError(
+        f"unsupported stream target '{target}': use rtmp://, rtsp:// or srt://, "
+        "or udp:// / tcp:// for raw audio to an ASR base")
+
+
+def _cli_options(options: dict[str, str]) -> str:
+    return "".join(f"-{key} {value} " for key, value in options.items())
+
+
+def _tee_slave(muxer: str, options: dict[str, str], url: str, onfail_ignore: bool = False) -> str:
+    """one output of the tee muxer: [f=<muxer>:<opt>=<val>:...]<url>."""
+    parts = [f"f={muxer}", *(f"{key}={value}" for key, value in options.items())]
+    if onfail_ignore:
+        parts.append("onfail=ignore")
+    return f"[{':'.join(parts)}]{url}"
+
+
+def _double_rate(rate: str) -> str:
+    """'1M' -> '2M', '800k' -> '1600k': maxrate and bufsize follow the bitrate."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM]?)\s*", rate or "")
+    if not match:
+        raise ValueError(f"invalid bitrate '{rate}', use e.g. 1M or 800k")
+    return f"{float(match.group(1)) * 2:g}{match.group(2)}"
+
+
+def _record_path(stream: StreamDef, record_dir: str) -> str:
+    """the recording file on the streaming host; ${START_TIME} expands in the tmux
+    wrapper so the name carries the capture-side start time the file source expects."""
+    extension = "wav" if _stream_kind(stream) == "audio" else "mkv"
+    return f"{record_dir.rstrip('/')}/{stream.name}_${{START_TIME}}.{extension}"
+
+
+def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None) -> str:
+    """build the ffmpeg command string from a stream definition.
+
+    With record_dir the same capture is also written to a file there, so a
+    session keeps its raw recording next to the live stream: one encode with two
+    outputs, via the tee muxer for video and a second PCM output for audio.
+    """
+    target = stream.target
+    record_to = _record_path(stream, record_dir) if record_dir else None
+
+    if _stream_kind(stream) == "audio":
         rate = stream.rate or 16000
         channels = stream.channels or 1
         device = stream.device or "hw:0,0"
-        proto = "udp" if target.startswith("udp://") else "tcp"
-        addr = target.split("://", 1)[1]
-        return (
-            f"ffmpeg -f alsa -ac {channels} -ar {rate} -i {device} "
-            f"-c:a pcm_{fmt} -f {fmt} {proto}://{addr}"
-        )
+        capture = f"ffmpeg -f alsa -ac {channels} -ar {rate} -i {device} "
+        if target.startswith(("udp://", "tcp://")):
+            # the ASR base reads a header-less PCM byte stream on udp/tcp (see
+            # AudioStream._read_socket_chunk), so send raw samples rather than AAC
+            # in FLV. ffmpeg flushes once per ALSA period and keeps udp datagrams
+            # below the MTU; the base re-frames whatever arrives to its own chunk_size.
+            fmt = _pcm_sample_format(stream.format)
+            proto = "udp" if target.startswith("udp://") else "tcp"
+            addr = target.split("://", 1)[1]
+            live = f"-c:a pcm_{fmt} -f {fmt} {proto}://{addr}"
+            file_codec = f"pcm_{fmt}"
+        else:
+            muxer, options = _publish_muxer(target)
+            live = f"-c:a aac -b:a 128k -f {muxer} {_cli_options(options)}{target}"
+            file_codec = "pcm_s16le"
+        if not record_to:
+            return capture + live
+        return f"{capture}-map 0:a {live} -map 0:a -c:a {file_codec} -f wav {record_to}"
 
     device = stream.device or "/dev/video0"
     codec = stream.codec or "libx264"
     resolution = stream.resolution or "1920x1080"
     fps = stream.fps or 30
-    return (
+    bitrate = stream.bitrate or "1M"
+    peak = _double_rate(bitrate)
+    muxer, options = _publish_muxer(target)
+    encode = (
         f"ffmpeg -fflags +genpts -use_wallclock_as_timestamps 1 "
         f"-f v4l2 -input_format mjpeg -framerate {fps} -video_size {resolution} -i {device} "
         f"-c:v {codec} -preset ultrafast -tune zerolatency "
         f"-g {fps} -keyint_min {fps} -sc_threshold 0 "
         f'-x264-params "keyint={fps}:min-keyint={fps}:no-scenecut=1:repeat-headers=1" '
-        f"-b:v 1M -maxrate 2M -bufsize 2M "
-        f"-f flv {target}"
+        f"-b:v {bitrate} -maxrate {peak} -bufsize {peak} "
+    )
+    if not record_to:
+        return f"{encode}-f {muxer} {_cli_options(options)}{target}"
+    # one encode, two outputs: the tee muxer needs the global-header flag spelled
+    # out, and onfail=ignore keeps the recording going when the server is down
+    return (
+        f"{encode}-flags +global_header -map 0:v -f tee "
+        f'"{_tee_slave(muxer, options, target, onfail_ignore=True)}|[f=matroska]{record_to}"'
     )
 
 
-def _probe_rtmp_target(target: str, timeout: float = 10.0) -> tuple[bool, str]:
-    """probe an RTMP target by asking ffmpeg to decode a short sample."""
-    if not target.startswith("rtmp://"):
-        return False, "Probe currently supports RTMP targets only."
+def _probe_stream_target(target: str, timeout: float = 10.0) -> tuple[bool, str]:
+    """probe a pullable stream URL by asking ffmpeg to decode a short sample."""
+    if not target.startswith(tuple(f"{scheme}://" for scheme in STREAM_URL_SCHEMES)):
+        return False, "Probe supports rtmp://, rtsp:// and srt:// URLs only."
+    command = ["ffmpeg", "-v", "error"]
+    if target.startswith("rtsp://"):
+        command += ["-rtsp_transport", "tcp"]
+    command += ["-i", target, "-t", "2", "-f", "null", "-"]
     try:
         result = subprocess.run(
-            ["ffmpeg", "-v", "error", "-i", target, "-t", "2", "-f", "null", "-"],
+            command,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -185,14 +342,18 @@ def _probe_rtmp_target(target: str, timeout: float = 10.0) -> tuple[bool, str]:
     except FileNotFoundError:
         return False, "ffmpeg command not found on this machine."
     except subprocess.TimeoutExpired:
-        return False, "Probe timed out while reading the RTMP target."
+        return False, "Probe timed out while reading the stream."
 
     if result.returncode == 0:
-        return True, "RTMP target is readable."
+        return True, "Stream is readable."
     output = (result.stderr or result.stdout or "").strip()
     if not output:
         output = f"ffmpeg exited with code {result.returncode}"
     return False, output
+
+
+# name from before MediaMTX, when every pullable stream was RTMP
+_probe_rtmp_target = _probe_stream_target
 
 
 class StreamPanel(Widget):
@@ -220,12 +381,53 @@ class StreamPanel(Widget):
     }
     """
 
-    def __init__(self, streams: list[StreamDef], config_path: str = "", project_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        streams: list[StreamDef],
+        config_path: str = "",
+        project_dir: str | None = None,
+        session_provider=None,
+    ) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
         self._project_dir = project_dir or _project_root_from_config(config_path)
         self._statuses: dict[str, bool] = {}
+        # callable returning the session id recordings are filed under (the
+        # pipeline card's Session); None or "" falls back to streams-<date>
+        self._session_provider = session_provider
+
+    def _record_session(self) -> str:
+        value = ""
+        if self._session_provider is not None:
+            try:
+                value = str(self._session_provider() or "").strip()
+            except Exception:
+                value = ""
+        session = safe_segment(value, "") if value else ""
+        return session or f"streams-{datetime.date.today():%Y%m%d}"
+
+    @staticmethod
+    def _record_host_label(stream: StreamDef) -> str:
+        """host folder under <session>/collection/, the same the Collection card uses."""
+        if stream.ssh_profile == "local":
+            return safe_segment(socket.gethostname().split(".", 1)[0], "host")
+        return safe_segment(stream.ssh_profile, "host")
+
+    def _record_dir(self, stream: StreamDef) -> str | None:
+        """recording folder on the streaming host, or None when the stream does not record."""
+        if not stream.record:
+            return None
+        if stream.record_root:
+            root = stream.record_root.rstrip("/")
+            if root == "~" or root.startswith("~/"):
+                root = "$HOME" + root[1:]
+        elif stream.ssh_profile == "local":
+            root = os.path.join(self._project_dir, "artifacts")
+        else:
+            root = STREAM_RECORD_ROOT
+        kind = _stream_kind(stream)
+        return f"{root}/{self._record_session()}/collection/{self._record_host_label(stream)}/{kind}"
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -241,7 +443,7 @@ class StreamPanel(Widget):
 
     def on_mount(self) -> None:
         table = self.query_one("#stream-table", DataTable)
-        table.add_columns("Name", "SSH Profile", "Device", "Target", "Status")
+        table.add_columns("Name", "SSH Profile", "Device", "Target", "Record", "Status")
         table.cursor_type = "row"
         if self._streams:
             self._refresh_all()
@@ -295,6 +497,7 @@ class StreamPanel(Widget):
                 stream.ssh_profile or "-",
                 stream.device or "-",
                 stream.target,
+                "yes" if stream.record else "-",
                 status,
             )
 
@@ -393,15 +596,19 @@ class StreamPanel(Widget):
             self._rebuild_table()
             return
 
+        record_dir = self._record_dir(stream)
         try:
-            ffmpeg_cmd = _build_ffmpeg_cmd(stream)
+            ffmpeg_cmd = _build_ffmpeg_cmd(stream, record_dir)
         except ValueError as e:
             self._log(f"[red]Cannot start {stream.name}: {e}[/red]")
             return
-        tmux_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd)
+        record_path = _record_path(stream, record_dir) if record_dir else None
+        tmux_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd, record_dir, record_path)
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[green]Starting {stream.name} {target_label}...[/green]")
         self._log(f"  {ffmpeg_cmd}")
+        if record_dir:
+            self._log(f"  Recording to {record_dir}/ on the streaming host")
 
         try:
             if is_local:
@@ -425,6 +632,12 @@ class StreamPanel(Widget):
                         "[yellow]Could not read capture-side stream_start_time; "
                         "using local registration time.[/yellow]"
                     )
+                recorded_file = None
+                if record_dir:
+                    recorded_file = await loop.run_in_executor(
+                        None,
+                        lambda: _read_stream_record_path(profile, session, is_local),
+                    )
                 register_stream_start(
                     stream.name,
                     stream.target,
@@ -432,9 +645,15 @@ class StreamPanel(Widget):
                     project_dir=self._project_dir,
                     ssh_profile=stream.ssh_profile,
                     device=stream.device,
+                    read_target=stream.read_target,
+                    record_path=recorded_file or "",
                 )
                 self._log(f"[green]{stream.name} started.[/green]")
                 self._log(f"  stream_start_time={start_time:.6f}")
+                if recorded_file:
+                    self._log(f"  recording={recorded_file}")
+                elif record_dir:
+                    self._log("[yellow]Could not read back the recording path; check the stream logs.[/yellow]")
                 self._statuses[stream.name] = True
             else:
                 output = result.stdout.strip() if result.stdout else result.stderr.strip()
@@ -455,13 +674,7 @@ class StreamPanel(Widget):
                 self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                 return
 
-        quoted_session = shlex.quote(session)
-        stop_cmd = (
-            f"tmux send-keys -t {quoted_session} C-c 2>/dev/null; "
-            f"sleep 1; "
-            f"tmux kill-session -t {quoted_session} 2>/dev/null; "
-            f"echo DONE"
-        )
+        stop_cmd = _build_stop_stream_cmd(session)
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[red]Stopping {stream.name} {target_label}...[/red]")
 
@@ -481,6 +694,13 @@ class StreamPanel(Widget):
                 self._log(f"[red]{stream.name} stopped.[/red]")
                 mark_stream_stopped(stream.name, project_dir=self._project_dir)
                 self._statuses[stream.name] = False
+                record_dir = self._record_dir(stream)
+                if record_dir:
+                    self._log(
+                        f"  Recording kept under {record_dir}/; fetch it with "
+                        f"Collection -> Download (session {self._record_session()}, "
+                        f"host label {self._record_host_label(stream)})."
+                    )
             else:
                 self._log(f"[yellow]{stream.name} may still be running.[/yellow]")
         except Exception as e:
@@ -523,9 +743,10 @@ class StreamPanel(Widget):
             self._log(f"[red]Error reading logs for {stream.name}: {e}[/red]")
 
     async def _async_probe_stream(self, stream: StreamDef) -> None:
-        self._log(f"[cyan]Probing {stream.target}...[/cyan]")
+        url = stream.read_url
+        self._log(f"[cyan]Probing {url}...[/cyan]")
         loop = asyncio.get_event_loop()
-        success, message = await loop.run_in_executor(None, _probe_rtmp_target, stream.target)
+        success, message = await loop.run_in_executor(None, _probe_stream_target, url)
         if success:
             self._log(f"[green]{stream.name}: {message}[/green]")
         else:

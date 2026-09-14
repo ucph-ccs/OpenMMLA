@@ -212,6 +212,7 @@ SYSTEM_SERVICE_DEFAULT_PORTS: dict[str, int] = {
     "redis": 6379,
     "mosquitto": 1883,
     "nginx": 8080,
+    "mediamtx": 1935,
 }
 
 # the dashboard backend is a make target too, but not a port-probed system
@@ -303,6 +304,8 @@ def system_service_endpoint(root: str | os.PathLike[str], target: str) -> tuple[
         host, port = section("Redis").get("host"), section("Redis").get("port")
     elif target == "mosquitto":
         host, port = section("MQTT").get("host"), section("MQTT").get("port")
+    elif target == "mediamtx":
+        host, port = section("Gateway").get("host"), section("Gateway").get("rtmp_port")
     else:
         host, port = section("Gateway").get("host"), section("Gateway").get("http_port")
     host = str(host or "").strip()

@@ -101,9 +101,9 @@ class CameraCalibrator(Base):
             cap.release()
 
         from openmmla.utils.constants import get_stream_urls
-        rtmp_urls = get_stream_urls(self.config, "rtmp")
-        for url in rtmp_urls:
-            print(f"{number_of_detected_seeds} : RTMP stream {url} is available.")
+        stream_urls = get_stream_urls(self.config)
+        for url in stream_urls:
+            print(f"{number_of_detected_seeds} : Stream {url} is available.")
             available_video_seeds.append(url)
             number_of_detected_seeds += 1
 

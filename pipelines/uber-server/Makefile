@@ -1,4 +1,4 @@
-.PHONY: all configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx flask celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-flask stop-celery
+.PHONY: all configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx mediamtx flask celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-mediamtx stop-flask stop-celery
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
@@ -10,6 +10,9 @@ OPENMMLA_BIND_ADDRESS ?= 0.0.0.0
 OPENMMLA_MQTT_ALLOW_ANONYMOUS ?= true
 # dashboard backend port; the TUI passes the Dashboard section's value
 DASHBOARD_PORT ?= 5050
+# MediaMTX streaming gateway (native run; the docker run is in docker/docker-compose.infra.yml)
+MEDIAMTX_BIN ?= mediamtx
+MEDIAMTX_CONFIG ?= mediamtx/mediamtx.yml
 
 MONGO_CONFIG_MAC ?= $(BREW_PREFIX)/etc/mongod.conf
 MONGO_CONFIG_LINUX ?= /etc/mongod.conf
@@ -255,6 +258,12 @@ celery:
 	tmux send-keys -t celery 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
 	tmux send-keys -t celery 'celery -A dashboard.celery worker --loglevel=info' C-m
 
+mediamtx:
+	@echo "🔁 Starting MediaMTX"
+	@command -v $(MEDIAMTX_BIN) >/dev/null 2>&1 || { echo "❌ $(MEDIAMTX_BIN) not found: brew install mediamtx, or unpack a release into /usr/local/bin (docs/rtmp_streaming.md)"; exit 1; }
+	tmux new-session -d -s mediamtx -n mediamtx bash
+	tmux send-keys -t mediamtx '$(MEDIAMTX_BIN) $(MEDIAMTX_CONFIG)' C-m
+
 # ======= Utility =======
 clean-ports:
 	@echo "🧹 Cleaning ports..."
@@ -331,6 +340,16 @@ else
 	@$(SUDO) sh -c 'systemctl stop nginx || echo "⚠️ NGINX not running"; \
 		systemctl disable nginx || echo "⚠️ Could not disable NGINX"'
 endif
+
+stop-mediamtx:
+	@echo "🛑 Stopping MediaMTX"
+	@if tmux has-session -t mediamtx 2>/dev/null; then \
+		tmux send-keys -t mediamtx C-c; \
+		sleep 1; \
+		tmux kill-session -t mediamtx; \
+	else \
+		echo "⚠️ No MediaMTX session found"; \
+	fi
 
 stop-flask:
 	@echo "🛑 Stopping Flask backend"

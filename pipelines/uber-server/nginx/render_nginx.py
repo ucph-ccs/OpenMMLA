@@ -7,8 +7,6 @@ import asyncio
 from jinja2 import Environment, FileSystemLoader
 from concurrent.futures import ThreadPoolExecutor
 
-import platform
-
 
 # ========== 工具函数 ==========
 
@@ -104,10 +102,7 @@ def render_nginx_template(config, template_path, output_path):
     # Ensure required keys exist in config
     if "upstreams" not in config:
         config["upstreams"] = {}
-    
-    if "rtmp_apps" not in config:
-        config["rtmp_apps"] = []
-    
+
     rendered = template.render(config=config)
 
     with open(output_path, 'w') as f:
@@ -127,14 +122,9 @@ def render_nginx_template(config, template_path, output_path):
                 for s in servers:
                     status = f"✅ {s['ip']}" if s.get("reachable") else "❌ Not reachable"
                     print(f"{s['host']} ({service}) → {status}")
-    
-    if not config.get("rtmp_apps"):
-        print("ℹ️ No RTMP applications defined in config.")
-    else:
-        print("\n RTMP Applications:")
-        print("=" * 40)
-        for app in config.get("rtmp_apps", []):
-            print(f"✅ {app}")
+
+    if config.get("rtmp_apps"):
+        print("ℹ️ rtmp_apps is ignored: streams go through MediaMTX now (docs/rtmp_streaming.md).")
 
 
 # ========== 主入口 ==========
@@ -148,7 +138,6 @@ if __name__ == "__main__":
     check_port = "--port-check" in sys.argv
 
     config = load_config(config_path)
-    config["is_linux"] = platform.system().lower() == "linux"
 
     asyncio.run(resolve_and_check_servers(config, check_port=check_port))
     render_nginx_template(config, template_path, output_path)

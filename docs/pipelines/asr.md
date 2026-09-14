@@ -6,7 +6,7 @@ Automatic speech recognition with speaker diarization. Audio from microphones or
 
 ![Real-time ASR analyzer](../img/real_time_asr_analyzer.png)
 
-1. Audio capture from a microphone, a badge stream, an RTMP stream, LSL, or a recorded file
+1. Audio capture from a microphone, a badge stream, a MediaMTX stream, LSL, or a recorded file
 2. Voice activity detection to isolate speech segments
 3. Speech enhancement, and optionally speech separation, to clean the signal
 4. Speaker recognition against the speaker profiles registered on the base
@@ -42,7 +42,7 @@ Create the `asr-base` environment from the TUI's Environment tab or by hand (`co
 |---|---|---|
 | `pyaudio` | USB or built-in microphone on the base station (Jabra Speak2 75, laptop mic, ...) | `source_index` is the PyAudio device index; `channel` picks the input channel of a multi-channel device. Leave them unset to be asked at startup. |
 | `udp` / `tcp` | Nicla Vision or Portenta H7 badge streaming over Wi-Fi, or a managed FFmpeg stream from a Raspberry Pi (see [Streams](#streams)) | badges: flash the firmware under `pipelines/wearables/nicla-vision/asr/` or `pipelines/wearables/portenta-h7/asr/` with the Wi-Fi credentials and the base's host and `port` in `arduino_secrets.h`. The sender's format must match `stream_kwargs` (16 kHz, mono, 16-bit PCM by default). The `audio_streaming_udp_ms` firmware prefixes every packet with an 18-byte header carrying the badge's clock; the other firmware and FFmpeg send header-less PCM. The base tells the two apart on the first packet (`stream_kwargs.packet_format: auto`); set it to `timestamped` or `raw` to force one. |
-| `rtmp` | audio pulled from the Nginx RTMP server | add a `Streams` entry with `target: rtmp://...`; `source_index` is the position of that stream among the RTMP entries |
+| `stream` | audio pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` is its position among those entries |
 | `lsl` | Lab Streaming Layer | `source_index` is the LSL stream name; needs `pylsl` |
 | `file` | replay of a recorded file | `source_index` is the file name inside `Base.<device>.file_dir`; the start time is read from the file name (`<prefix>_<timestamp>.wav`), so the sync time needs no configuration |
 
@@ -52,11 +52,12 @@ Every stream a base pulls from is declared once under `Streams`. An entry with a
 
 ```yaml
 Streams:
-  # external RTMP stream (already running, the base only pulls from the URL)
-  rtmp-mic-1:
-    target: rtmp://uber-server.local/stream_01
+  # external stream (already running; the base pulls read_target, else target)
+  mic-external:
+    target: rtmp://uber-server.local:1935/asr/mic1
+    read_target: rtsp://uber-server.local:8554/asr/mic1
 
-  # managed stream: the TUI starts/stops ffmpeg on a remote Raspberry Pi over SSH
+  # managed stream straight to this base: the TUI starts/stops ffmpeg on a Raspberry Pi over SSH
   rpi-mic-1:
     ssh_profile: rpi-table-1        # must match a TUI SSH profile name
     device: hw:1,0                  # ALSA audio device on the remote machine
@@ -64,9 +65,18 @@ Streams:
     format: s16le
     rate: 16000
     channels: 1
+    record: true                    # also keep a wav on the Pi for later replay
+
+  # managed stream through MediaMTX (AAC), pulled as RTSP by a `stream` source
+  rpi-mic-2:
+    ssh_profile: rpi-table-2
+    device: hw:1,0
+    kind: audio
+    target: rtmp://uber-server.local:1935/asr/mic2
+    read_target: rtsp://uber-server.local:8554/asr/mic2
 ```
 
-For a `udp://` or `tcp://` target the Streams tab runs `ffmpeg -f alsa -ac 1 -ar 16000 -i hw:1,0 -c:a pcm_s16le -f s16le udp://asr-base.local:5001` on that host: raw PCM, one packet per ALSA period, which the base re-frames to its `chunk_size`. Header-less packets carry no clock, so the base timestamps them by counting samples from the arrival of the first packet. See [RTMP Streaming](../rtmp_streaming.md) for the video commands.
+For a `udp://` or `tcp://` target the Streams tab runs `ffmpeg -f alsa -ac 1 -ar 16000 -i hw:1,0 -c:a pcm_s16le -f s16le udp://asr-base.local:5001` on that host: raw PCM, one packet per ALSA period, which the base re-frames to its `chunk_size`. Header-less packets carry no clock, so the base timestamps them by counting samples from the arrival of the first packet. With `record: true` the same process also writes `<name>_<start time>.wav` next to the stream, in the Collection layout, ready for [post-time processing](#post-time-processing). See the [Streaming guide](../rtmp_streaming.md) for the server, the other commands and the recording layout.
 
 ## Run from the TUI
 

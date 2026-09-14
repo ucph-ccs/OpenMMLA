@@ -74,7 +74,7 @@ nav:
       - Docker: docker.md
       - Dashboard: dashboard.md
       - Nginx: nginx.md
-      - RTMP streaming: rtmp_streaming.md
+      - Streaming (MediaMTX): rtmp_streaming.md
       - Raspberry Pi: raspi_config.md
   - Reference:
       - Databases: database.md

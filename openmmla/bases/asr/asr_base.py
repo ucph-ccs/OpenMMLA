@@ -26,7 +26,7 @@ from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section
 from openmmla.utils.asr_scope import normalize_asr_scope
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_rtmp_url, show_error_and_pause, pause_after_error
+from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url, build_service_url
@@ -215,7 +215,9 @@ class ASRBase(Base):
         self.speech_enhancer_url = build_service_url(self.config, asr_server_config['speech_enhancer'])
         self.vad_url = build_service_url(self.config, asr_server_config['voice_activity_detector'])
 
-        source_list = ['udp', 'tcp', 'pyaudio', 'rtmp', 'lsl', 'file']
+        from openmmla.utils.constants import normalize_source
+        self.source = normalize_source(self.source)
+        source_list = ['udp', 'tcp', 'pyaudio', 'stream', 'lsl', 'file']
         if self.source not in source_list:
             raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
 
@@ -269,15 +271,15 @@ class ASRBase(Base):
             self.logger.info(f"Selected channel option: {self.stream_kwargs['channel_select']}")
             p.terminate()
 
-        # set url for 'rtmp'
-        elif self.source == 'rtmp':
+        # set url for 'stream': a pullable URL (rtmp/rtsp/srt) from the Streams section
+        elif self.source == 'stream':
             from openmmla.utils.constants import get_stream_urls
-            rtmp_urls = get_stream_urls(self.config, "rtmp")
-            if not rtmp_urls:
-                raise ValueError("No RTMP streams found in Streams (or legacy RTMP) config section.")
-            self.url = get_rtmp_url(rtmp_urls)
+            stream_urls = get_stream_urls(self.config)
+            if not stream_urls:
+                raise ValueError("No pullable stream (rtmp/rtsp/srt URL) found in the Streams config section.")
+            self.url = get_stream_url(stream_urls)
             self.stream_kwargs['url'] = self.url
-            self.logger.info(f"Using RTMP URL: {self.url}")
+            self.logger.info(f"Using stream URL: {self.url}")
 
         # set lsl_name for 'lsl' (the stream is selected by name; the base
         # entry carries it in source_index, matching the unified config form)

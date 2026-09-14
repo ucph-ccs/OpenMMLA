@@ -30,7 +30,7 @@ Base:
   enable_timing_sync: true                         # Enforce accumulative timing synchronization for file sources (prevents drift and race conditions)
   
   # Examples:
-  # For real-time sources (opencv/rtmp): keyframe_interval controls frame saving frequency
+  # For real-time sources (opencv/stream): keyframe_interval controls frame saving frequency
   # keyframe_interval: 30.0 → Save 1 frame every 30 seconds
   # keyframe_interval: 1.0  → Save 1 frame every second (1 FPS)
   #
@@ -44,22 +44,27 @@ Base:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
     format: MJPG                                    # Video format (e.g., MJPG, H264)
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
-  # example 1: external RTMP stream (already running, Base pulls from URL)
+  # example 1: external stream (already running; the base pulls read_target, else target)
   # cam-external:
-  #   target: rtmp://uber-server.local/vfa/side
+  #   target: rtmp://uber-server.local:1935/vfa/side
+  #   read_target: rtsp://uber-server.local:8554/vfa/side
   #
-  # example 2: managed stream (TUI starts/stops ffmpeg on remote Raspberry Pi via SSH)
+  # example 2: managed stream (TUI starts/stops ffmpeg on a remote Raspberry Pi via SSH)
   # cam-front:
   #   ssh_profile: rpi-front          # must match a TUI SSH profile name
   #   device: /dev/video0             # camera device on the remote machine
-  #   target: rtmp://uber-server.local/vfa/front  # RTMP URL
+  #   target: rtmp://uber-server.local:1935/vfa/front     # publish URL on MediaMTX (rtmp://, rtsp:// or srt://)
+  #   read_target: rtsp://uber-server.local:8554/vfa/front  # what the base pulls; empty = target
   #   codec: libx264                  # video codec
   #   resolution: 1920x1080           # video resolution
   #   fps: 30                         # frames per second
+  #   bitrate: 1M                     # H.264 bitrate of the stream and of its recording
+  #   record: true                    # also keep an mkv on the Pi under ~/artifacts/<session>/collection/<profile>/video/
   # cam-top:
   #   ssh_profile: rpi-top
   #   device: /dev/video0
-  #   target: rtmp://uber-server.local/vfa/top
+  #   target: rtmp://uber-server.local:1935/vfa/top
+  #   read_target: rtsp://uber-server.local:8554/vfa/top
   #   codec: libx264
   #   resolution: 1920x1080
   #   fps: 30
@@ -72,8 +77,8 @@ Base:
 Bases:
   - id: <base-id>               # base id / identity (appears in storage paths {camera}_{id})
     camera: <camera-name>       # calibrated camera profile name (from Cameras)
-    source: rtmp                # source type (opencv/rtmp/lsl/file)
-    source_index: 0             # opencv/rtmp: index (0-based); file: file name in file_dir; lsl: stream name
+    source: stream              # source type (opencv/stream/lsl/file; rtmp is the old name of stream)
+    source_index: 0             # opencv: camera index; stream: index among the pullable Streams entries; file: file name in file_dir; lsl: stream name
     camera_angle: <camera-angle>  # viewing angle label (e.g. front, top, side)
 
 Synchronizer:
@@ -140,9 +145,10 @@ Redis:
 # (composed against this gateway, e.g. 'vllm' -> {scheme}://{host}:{http_port}/vllm)
 # or as a full URL (used as-is, bypassing the gateway for a direct connection).
 Gateway:
-  host: <gateway-host>      # nginx host, e.g. uber-server.local
+  host: <gateway-host>      # gateway host, e.g. uber-server.local (nginx + MediaMTX)
   http_port: 8080           # nginx HTTP reverse-proxy port
-  rtmp_port: 1935           # nginx RTMP port for video/audio streams
+  rtmp_port: 1935           # MediaMTX RTMP port that cameras and microphones publish to
+  rtsp_port: 8554           # MediaMTX RTSP port that bases pull streams from
   scheme: http              # http or https
 
 # Server settings

@@ -8,7 +8,7 @@ Every machine that runs an OpenMMLA component needs the tools below: base statio
 | Git | cloning the repository; the TUI runs from a checkout and can clone it onto remote hosts |
 | tmux | services and pipeline components run in detached tmux sessions, so they survive a closed terminal |
 | PortAudio | audio input for ASR base stations and raw audio collection (PyAudio builds against it) |
-| FFmpeg | RTMP streaming, raw audio/video collection and file replay |
+| FFmpeg | streaming to MediaMTX, raw audio/video collection and file replay |
 
 ## Conda
 

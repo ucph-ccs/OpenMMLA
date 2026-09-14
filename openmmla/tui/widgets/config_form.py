@@ -269,7 +269,8 @@ class DictListField(Widget):
     # and the widget type — see _source_index_widget)
     _SOURCE_INDEX_HINTS = {
         "opencv": "→ which local camera (0-based index)",
-        "rtmp": "→ which RTMP stream from Streams (0-based index)",
+        "stream": "→ which pullable Streams entry (0-based index among rtmp/rtsp/srt URLs)",
+        "rtmp": "→ same as stream (legacy name)",
         "file": "→ pick a video file from file_dir",
         "pyaudio": "→ PyAudio input device index",
         "lsl": "→ LSL stream name (resolved by name)",

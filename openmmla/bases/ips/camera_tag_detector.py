@@ -45,7 +45,7 @@ class CameraTagDetector(Base):
         if entry is None:
             raise ValueError(f"Base '{base}' not found in config 'Bases'.")
         self._camera_name = entry.get('camera')
-        # source_index is overloaded by source type: an index (opencv/rtmp), a
+        # source_index is overloaded by source type: an index (opencv/stream), a
         # file name (file) or a stream name (lsl) — keep it raw and interpret it
         # when the source is known.
         self._source_index = entry.get('source_index')
@@ -73,7 +73,8 @@ class CameraTagDetector(Base):
         self.fps = int(base_config.get('fps', 30))
 
         # per-base source (from the Bases entry) overrides the global Base.source
-        self.source = self._base_source or base_config['source']
+        from openmmla.utils.constants import normalize_source
+        self.source = normalize_source(self._base_source or base_config['source'])
         self.stream_kwargs = base_config['stream_kwargs']
         self.stream_kwargs['resolution'] = self.res
         self.stream_kwargs['fps'] = self.fps
@@ -168,8 +169,8 @@ class CameraTagDetector(Base):
         # Configure stream based on source type
         if self.source == 'opencv':
             self.stream_kwargs['camera_index'] = self.selected_source
-        elif self.source == 'rtmp':
-            self.stream_kwargs['rtmp_url'] = self.selected_source
+        elif self.source == 'stream':
+            self.stream_kwargs['url'] = self.selected_source
         elif self.source == 'lsl':
             self.stream_kwargs['lsl_name'] = self.selected_source
 
@@ -222,13 +223,13 @@ class CameraTagDetector(Base):
                     available_sources.append(i)
                 cap.release()
 
-        elif self.source == 'rtmp':
+        elif self.source == 'stream':
             from openmmla.utils.constants import get_stream_urls
-            rtmp_urls = get_stream_urls(self.config, "rtmp")
-            if not rtmp_urls:
-                raise ValueError("No RTMP streams found in Streams (or legacy RTMP) config section.")
-            for url in rtmp_urls:
-                print(f"{available_source_idx} : RTMP stream {url} is available.")
+            stream_urls = get_stream_urls(self.config)
+            if not stream_urls:
+                raise ValueError("No pullable stream (rtmp/rtsp/srt URL) found in the Streams config section.")
+            for url in stream_urls:
+                print(f"{available_source_idx} : Stream {url} is available.")
                 available_sources.append(url)
                 available_source_idx += 1
 
@@ -247,7 +248,7 @@ class CameraTagDetector(Base):
 
     def _choose_video_source(self, available_sources):
         """Pick the video source for the selected base (source_index is an index
-        for opencv/rtmp, or a file/stream name for file/lsl)."""
+        for opencv/stream, or a file/stream name for file/lsl)."""
         if not available_sources:
             return None
         selected_source = select_source_by_index_or_name(self._source_index, available_sources)

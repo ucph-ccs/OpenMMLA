@@ -8,10 +8,11 @@ The services below are shared by every pipeline. They usually run together on on
 | [MongoDB](#mongodb) | 27017 | yes | session metadata (start/end time, experiment, group, participants) |
 | [Redis](#redis) | 6379 | yes | session start/stop control between bases and synchronizers; Celery broker for the dashboard |
 | [Mosquitto](#mosquitto) | 1883 | yes | MQTT broker that carries results between *Bases* and *Synchronizers* |
-| [Nginx](#nginx-optional) | 8080 HTTP, 1935 RTMP | optional | load balancer in front of the AI services; RTMP ingest for camera and microphone streams |
+| [Nginx](#nginx-optional) | 8080 | optional | load balancer in front of the AI services |
+| [MediaMTX](#mediamtx-optional) | 1935 RTMP, 8554 RTSP, 8890 SRT, 9997 API | optional | streaming server: cameras and microphones publish to it, the bases pull from it, every stream is recorded |
 | [Dashboard](#dashboard-optional) | 5050 | optional | Flask backend and static frontend for live and post-time views |
 
-InfluxDB and MongoDB can run natively (this page) or as containers from `docker/docker-compose.infra.yml`; see [Docker: Database stack](docker.md#database-stack-influxdb-and-mongodb). Redis, Mosquitto, Nginx and the dashboard run natively. What is stored in the two databases is described in the [Database Reference](database.md).
+InfluxDB, MongoDB and MediaMTX can run natively (this page) or as containers from `docker/docker-compose.infra.yml`; see [Docker: Database stack](docker.md#database-stack-influxdb-and-mongodb). Redis, Mosquitto, Nginx and the dashboard run natively. What is stored in the two databases is described in the [Database Reference](database.md).
 
 ## Installation
 
@@ -77,13 +78,27 @@ sudo systemctl enable --now mosquitto
 
 ```bash
 # macOS
-brew install nginx            # or: brew tap denji/nginx && brew install nginx-full --with-rtmp-module
+brew install nginx
 
 # Ubuntu / Debian
-sudo apt install -y nginx     # add libnginx-mod-rtmp for RTMP streaming
+sudo apt install -y nginx
 ```
 
-Configuration (upstreams, RTMP apps) is rendered from `pipelines/uber-server/nginx/config.yml`; see the [Nginx Setup Guide](nginx.md).
+Configuration (the upstreams) is rendered from `pipelines/uber-server/nginx/config.yml`; see the [Nginx Setup Guide](nginx.md).
+
+### MediaMTX (optional)
+
+The streaming server. With Docker it is a service of `docker/docker-compose.infra.yml` and needs no install. Natively:
+
+```bash
+# macOS
+brew install mediamtx
+
+# Linux: unpack the release for your architecture from
+# https://github.com/bluenviron/mediamtx/releases into /usr/local/bin
+```
+
+It reads `pipelines/uber-server/mediamtx/mediamtx.yml`; see the [Streaming guide](rtmp_streaming.md).
 
 ### Dashboard (optional)
 
@@ -106,7 +121,7 @@ The original files are backed up as `*.openmmla.bak`. Set `OPENMMLA_BIND_ADDRESS
 
 ### From the TUI
 
-`mmla tui` → **Launcher → System Services** lists one card per service (InfluxDB, MongoDB, Redis, Mosquitto, Nginx, Dashboard (Flask), Dashboard Worker (Celery)). Select the host (local, or an SSH profile) and press **Start**, **Stop** or **Logs**. The card status is a TCP probe of the address configured in System Settings, so it reflects what the pipelines will see. The InfluxDB and MongoDB cards have a **Run mode** dropdown: `docker` (default) drives the compose stack, `native` runs the make targets below. Native starts need `sudo`; store the password under **System Settings → Credentials → Sudo (local admin)** and the console types it when the prompt appears. See the [TUI guide](tui.md#system-services).
+`mmla tui` → **Launcher → System Services** lists one card per service (InfluxDB, MongoDB, Redis, Mosquitto, Nginx, MediaMTX, Dashboard (Flask), Dashboard Worker (Celery)). Select the host (local, or an SSH profile) and press **Start**, **Stop** or **Logs**. The card status is a TCP probe of the address configured in System Settings, so it reflects what the pipelines will see. The InfluxDB, MongoDB and MediaMTX cards have a **Run mode** dropdown: `docker` (default) drives the compose stack, `native` runs the make targets below. Native starts need `sudo`; store the password under **System Settings → Credentials → Sudo (local admin)** and the console types it when the prompt appears. See the [TUI guide](tui.md#system-services).
 
 ### From the shell
 
@@ -118,6 +133,7 @@ make all                                # free the default ports, then (re)start
 make all without=nginx,flask,celery     # everything except some services
 make influxdb mongodb redis mosquitto   # start (and reconfigure) individual services
 make flask celery                       # dashboard backend + worker (uber-server conda env)
+make mediamtx                           # streaming server in a tmux session (needs the mediamtx binary)
 make stop                               # stop everything
 make stop-redis                         # stop one service
 make clean-ports 8086 5050              # kill whatever holds those ports
@@ -136,7 +152,7 @@ Open **Launcher → System Settings → Connections** in the TUI and fill in the
 | `MQTT` | `host`, `port` | Mosquitto, 1883 |
 | `Redis` | `host`, `port`, `db` | use a db number other than 0 for the Celery queue, e.g. 1 |
 | `Dashboard` | `host`, `port` | where the Flask backend runs, 5050 |
-| `Gateway` | `host`, `http_port`, `rtmp_port`, `scheme` | the Nginx entry point that bases and streams use |
+| `Gateway` | `host`, `http_port`, `rtmp_port`, `rtsp_port`, `scheme` | one host for both gateways: Nginx (`http_port`) for the AI services, MediaMTX (`rtmp_port` to publish, `rtsp_port` to pull) for the streams |
 | `Sudo (local admin)` | `password` | local sudo password for native service starts (under Credentials, never copied into pipeline configs) |
 
 - Keys named `token`, `password`, `api_key`, `secret` or `subscription_key` are encrypted to `ENC(...)` with the Fernet key in `~/.openmmla/master.key` when the file is saved and decrypted by the services at startup. The key is created on first use, and the TUI copies it to a remote host together with any config that contains encrypted values.
@@ -159,3 +175,4 @@ mosquitto_sub -h <uber-server> -t '$SYS/broker/version' -C 1
 - Redis: https://redis.io/downloads/
 - Mosquitto: https://mosquitto.org/download/
 - Nginx: https://nginx.org/en/docs/install.html
+- MediaMTX: https://github.com/bluenviron/mediamtx

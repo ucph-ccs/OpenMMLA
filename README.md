@@ -37,7 +37,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 - **Base stations**: microprocessors or PCs that process the streams. Each runs one or more *Base* instances and a *Synchronizer* of the same pipeline.
 - **Servers**: PCs that provide centralized services.
     + *Base server*: the AI services (speaker inference, transcription, VAD, frame analysis, ...) as Docker containers on a GPU machine.
-    + *Uber server*: the system services: InfluxDB and MongoDB (databases), Redis and Mosquitto (messaging), Nginx (load balancing and RTMP streaming) and the dashboard.
+    + *Uber server*: the system services: InfluxDB and MongoDB (databases), Redis and Mosquitto (messaging), Nginx (load balancing), MediaMTX (streaming) and the dashboard.
 - **Dashboard**: web pages for phones and browsers with session selection, real-time and post-time visualizations, and measurement downloads.
 
 </details>
@@ -72,9 +72,9 @@ A pipeline built with the toolkit follows a three-stage data flow:
 | [Management Console](docs/tui.md) | the TUI: environments, launcher tree, cards, sessions, status, remote hosts |
 | [ASR](docs/pipelines/asr.md), [IPS](docs/pipelines/ips.md), [VFA](docs/pipelines/vfa/index.md) | the three pipelines end to end |
 | [Human coding interface](docs/pipelines/vfa/coding_interface.md) | coding VFA ground truth frame by frame, in the pipeline's own output format |
-| [Docker](docs/docker.md) | the ASR/VFA AI service stacks and the InfluxDB/MongoDB stack |
+| [Docker](docs/docker.md) | the ASR/VFA AI service stacks and the InfluxDB/MongoDB/MediaMTX stack |
 | [Dashboard](docs/dashboard.md) | Flask backend, Celery worker and the static frontend |
-| [Nginx](docs/nginx.md), [RTMP Streaming](docs/rtmp_streaming.md) | load balancing and camera/microphone streaming |
+| [Nginx](docs/nginx.md), [Streaming](docs/rtmp_streaming.md) | load balancing; camera/microphone streaming and recording through MediaMTX |
 | [Raspberry Pi](docs/raspi_config.md) | a Pi as streaming device or base station |
 | [Databases](docs/database.md) | what is stored in InfluxDB and MongoDB, CLI tips, backups, migration |
 | [FAQ](docs/faq.md) | known problems and fixes |

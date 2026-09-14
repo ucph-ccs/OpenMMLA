@@ -59,6 +59,8 @@ def register_stream_start(
     registry_path: str | None = None,
     ssh_profile: str = "",
     device: str = "",
+    read_target: str = "",
+    record_path: str = "",
 ) -> dict[str, Any]:
     """record that a managed stream has started."""
     data = load_stream_registry(project_dir, registry_path)
@@ -66,6 +68,8 @@ def register_stream_start(
     entry = {
         "name": stream_name,
         "target": target,
+        "read_target": read_target,
+        "record_path": record_path,
         "ssh_profile": ssh_profile,
         "device": device,
         "stream_start_time": float(stream_start_time),
@@ -98,13 +102,13 @@ def resolve_stream_by_target(
     project_dir: str | None = None,
     registry_path: str | None = None,
 ) -> dict[str, Any] | None:
-    """resolve the newest running stream metadata for a target URL."""
+    """resolve the newest running stream metadata for a publish or read URL."""
     data = load_stream_registry(project_dir, registry_path)
     matches = [
         entry
         for entry in data.get("streams", {}).values()
         if isinstance(entry, dict)
-        and entry.get("target") == target
+        and target in (entry.get("target"), entry.get("read_target"))
         and entry.get("status") == "running"
         and entry.get("stream_start_time") is not None
     ]
@@ -120,8 +124,16 @@ def resolve_rtmp_timestamp(
     stream_start_time: float | None = None,
     receiver_pts_offset: float | None = None,
     stream_name: str = "",
+    max_latency: float = 30.0,
 ) -> tuple[float, dict[str, Any], float | None]:
-    """resolve an RTMP frame timestamp from stream-start metadata and media PTS."""
+    """resolve a stream frame timestamp from stream-start metadata and media PTS.
+
+    The PTS a reader sees counts from the first packet it received, so
+    stream_start_time + PTS only holds for a base that joined at the
+    publisher's start; a timestamp more than max_latency behind the receiver
+    clock (a late joiner) or ahead of it (clock skew) falls back to calibrating
+    the PTS against the receiver clock on the first frame.
+    """
     metadata: dict[str, Any] = {
         "received_time": received_time,
         "rtmp_pts_ms": pts_ms,
@@ -130,10 +142,13 @@ def resolve_rtmp_timestamp(
         pts_seconds = pts_ms / 1000.0
         metadata["rtmp_pts_seconds"] = pts_seconds
         if stream_start_time is not None and pts_seconds < 30 * 24 * 60 * 60:
-            metadata["timestamp_source"] = "rtmp_stream_start_pts"
-            metadata["stream_start_time"] = stream_start_time
-            metadata["stream_name"] = stream_name
-            return stream_start_time + pts_seconds, metadata, receiver_pts_offset
+            candidate = stream_start_time + pts_seconds
+            if 0.0 <= received_time - candidate <= max_latency:
+                metadata["timestamp_source"] = "rtmp_stream_start_pts"
+                metadata["stream_start_time"] = stream_start_time
+                metadata["stream_name"] = stream_name
+                return candidate, metadata, receiver_pts_offset
+            metadata["rejected_stream_start_time"] = stream_start_time
         if pts_seconds > 1_000_000_000:
             metadata["timestamp_source"] = "rtmp_absolute_pts"
             return pts_seconds, metadata, receiver_pts_offset

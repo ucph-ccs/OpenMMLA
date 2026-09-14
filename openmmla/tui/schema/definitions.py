@@ -106,10 +106,10 @@ SHARED_SECTIONS = {
         },
     },
     "Gateway": {
-        "label": "Gateway (Nginx)",
+        "label": "Gateway (Nginx + MediaMTX)",
         "fields": {
             "host": {
-                "description": "Nginx gateway host that bases connect to (e.g. localhost)",
+                "description": "Gateway host that bases and streams connect to: Nginx for the AI services, MediaMTX for streams (e.g. localhost)",
                 "field_type": "str",
                 "default": "localhost",
             },
@@ -119,9 +119,14 @@ SHARED_SECTIONS = {
                 "default": 8080,
             },
             "rtmp_port": {
-                "description": "Nginx RTMP port for video/audio streams (default 1935)",
+                "description": "MediaMTX RTMP port that cameras and microphones publish to (default 1935)",
                 "field_type": "int",
                 "default": 1935,
+            },
+            "rtsp_port": {
+                "description": "MediaMTX RTSP port that bases pull streams from (default 8554)",
+                "field_type": "int",
+                "default": 8554,
             },
             "scheme": {
                 "description": "URL scheme for HTTP services (http or https)",

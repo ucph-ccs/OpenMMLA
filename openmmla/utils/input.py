@@ -694,25 +694,28 @@ def get_number_of_bases(default: int = 1) -> int:
         except ValueError:
             print("Please enter a valid number.")
 
-def get_rtmp_url(available_urls: list[str]) -> str:
-    """Get the RTMP URL from user input using interactive menu.
-    
+def get_stream_url(available_urls: list[str]) -> str:
+    """Pick one of the pullable stream URLs (rtmp/rtsp/srt) with the interactive menu.
+
     Args:
-        available_urls: List of available RTMP URLs
-        
+        available_urls: List of available stream URLs
+
     Returns:
-        Selected RTMP URL
+        Selected stream URL
     """
     if not available_urls:
-        raise ValueError("No available RTMP URLs found")
-    
-    # Create options with URL descriptions
+        raise ValueError("No available stream URLs found")
+
     options = []
     descriptions = []
-    
     for i, url in enumerate(available_urls):
-        options.append(f"RTMP Stream {i + 1}")
+        options.append(f"Stream {i + 1}")
         descriptions.append(f"URL: {url}")
-    
-    selected_index = interactive_menu("Select RTMP URL", options, descriptions, prompt_enter=False)    
+
+    selected_index = interactive_menu("Select stream URL", options, descriptions, prompt_enter=False)
     return available_urls[selected_index]
+
+
+# name used before MediaMTX, when every pullable stream was RTMP
+get_rtmp_url = get_stream_url
+

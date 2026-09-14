@@ -1,0 +1,62 @@
+# MediaMTX configuration for the OpenMMLA streaming gateway.
+#
+# cameras and microphones publish with FFmpeg to rtmp://<gateway>:1935/<app>/<name>
+# (or srt:// / rtsp://), the bases pull the same path as rtsp://<gateway>:8554/<app>/<name>,
+# and every published stream is also recorded on the server. Started by
+# `make mediamtx` in pipelines/uber-server (native) or by docker/docker-compose.infra.yml;
+# both read this file. Every key not listed here keeps the MediaMTX default.
+# Reference: https://github.com/bluenviron/mediamtx (mediamtx.yml in the release).
+
+logLevel: info
+
+# control API (curl http://<gateway>:9997/v3/paths/list) and Prometheus metrics
+api: yes
+apiAddress: :9997
+metrics: yes
+metricsAddress: :9998
+
+# playback server: download a time range of a recording,
+# e.g. http://<gateway>:9996/get?path=vfa/front&start=<RFC3339>&duration=60
+playback: yes
+playbackAddress: :9996
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [udp, multicast, tcp]
+rtmp: yes
+rtmpAddress: :1935
+srt: yes
+srtAddress: :8890
+hls: no
+webrtc: no
+
+# lab-network defaults: anyone may publish, read and use the API. To require
+# credentials, give the users a pass and restrict the api action (see the
+# MediaMTX reference); the base configs then need the credentials in the URLs.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+
+pathDefaults:
+  # record every published path; segments are fMP4 files named after their
+  # start time. ./recordings is pipelines/uber-server/recordings when started with
+  # make, and the artifacts/recordings bind mount when started with docker compose
+  record: yes
+  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 10m
+  # 0s keeps the recordings; the MediaMTX default deletes them after one day
+  recordDeleteAfter: 0s
+
+paths:
+  # any path name works: the <app>/<name> of the publish URL is created on the fly
+  all_others:

@@ -2,7 +2,7 @@
 
 A Raspberry Pi can play two roles in OpenMMLA:
 
-- **Streaming device**: it pushes a camera or microphone stream to the RTMP gateway (or straight to an ASR base over UDP) with FFmpeg. The TUI starts and stops that FFmpeg process over SSH, so the Pi only needs FFmpeg and an SSH login. See [RTMP Streaming](rtmp_streaming.md) and the `Streams` section of the pipeline configs.
+- **Streaming device**: it pushes a camera or microphone stream to the MediaMTX gateway (or straight to an ASR base over UDP) with FFmpeg, and can record the same stream to its SD card at the same time. The TUI starts and stops that FFmpeg process over SSH, so the Pi only needs FFmpeg and an SSH login. See [Streaming](rtmp_streaming.md) and the `Streams` section of the pipeline configs.
 - **Base station**: it runs an IPS/VFA/ASR base itself, which needs the full [prerequisites](prerequisites.md), a clone of the repository and a conda environment (the TUI's Environment tab can create it remotely).
 
 ## Headless setup
@@ -87,4 +87,4 @@ The TUI's SSH profile for the Pi should point `remote_project_path` at the clone
 ## Related
 
 - [FAQ: Connect the smraza fisheye camera to a Raspberry Pi](faq.md#connect-smraza-fisheye-camera-to-raspberry-pi)
-- [RTMP Streaming](rtmp_streaming.md)
+- [Streaming](rtmp_streaming.md)

@@ -44,7 +44,7 @@ def get_base_by_id(config: dict, base_id) -> dict | None:
 
 
 def coerce_source_index(value, default: int = 0) -> int:
-    """Return an int index for index-based sources (opencv/rtmp/pyaudio).
+    """Return an int index for index-based sources (opencv/stream/pyaudio).
 
     source_index is overloaded: a numeric index for index-based sources, a file
     name for 'file' sources, and a stream name for 'lsl'. This coerces only the

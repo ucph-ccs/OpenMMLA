@@ -24,6 +24,7 @@ KNOWN_SERVICES = [
     {"name": "Redis", "port": 6379, "type": "system", "target": "redis"},
     {"name": "Mosquitto", "port": 1883, "type": "system", "target": "mosquitto"},
     {"name": "Nginx", "port": 8080, "type": "system", "target": "nginx"},
+    {"name": "MediaMTX", "port": 1935, "type": "system", "target": "mediamtx"},
     {"name": "Flask Dashboard", "port": 5050, "type": "tmux", "session": "flask", "target": "flask"},
     {"name": "Celery Worker", "port": None, "type": "tmux", "session": "celery"},
     {"name": "AudioInferer", "port": 5001, "type": "tmux", "session": "audioinferer"},
@@ -436,6 +437,7 @@ class StatusPanel(Widget):
             "redis": "journalctl -u redis-server -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/redis/redis-server.log 2>/dev/null || echo '(no redis logs found)'",
             "mosquitto": "journalctl -u mosquitto -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/mosquitto/mosquitto.log 2>/dev/null || echo '(no mosquitto logs found)'",
             "nginx": "journalctl -u nginx -n 80 --no-pager 2>/dev/null || tail -n 80 /var/log/nginx/error.log 2>/dev/null || echo '(no nginx logs found)'",
+            "mediamtx": "if tmux has-session -t mediamtx 2>/dev/null; then tmux capture-pane -p -t mediamtx | tail -n 80; else echo '(no mediamtx tmux session found)'; fi",
         }
 
         if svc_type == "system" and svc_key in _REMOTE_LOG_CMDS:

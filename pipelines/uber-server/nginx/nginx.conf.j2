@@ -1,12 +1,3 @@
-{% if config.is_linux %}
-load_module modules/ngx_rtmp_module.so;
-{% endif %}
-
-{% if config.rtmp_apps | length > 0 %}
-rtmp_auto_push on;
-rtmp_auto_push_reconnect 1s;
-{% endif %}
-
 worker_processes auto;
 
 events {
@@ -45,16 +36,6 @@ http {
             root html;
         }
 
-        location /stat {
-            rtmp_stat all;
-            rtmp_stat_stylesheet stat.xsl;
-            add_header Cache-Control no-cache;
-        }
-
-        location /stat.xsl {
-            root /usr/local/nginx/html;
-        }
-
         {# Only render location for valid streams #}
         {% for name, servers in config.upstreams.items() if servers | selectattr('reachable') | list | length > 0 %}
         location /{{ name }} {
@@ -68,19 +49,3 @@ http {
         {% endfor %}
     }
 }
-
-{% if config.rtmp_apps and config.rtmp_apps | length > 0 %}
-rtmp {
-    server {
-        listen 1935;
-        chunk_size 4096;
-
-        {% for app in config.rtmp_apps %}
-        application {{ app }} {
-            live on;
-            record off;
-        }
-        {% endfor %}
-    }
-}
-{% endif %}

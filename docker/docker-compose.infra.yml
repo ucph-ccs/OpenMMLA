@@ -1,4 +1,5 @@
-# Database stack — InfluxDB (8086) + MongoDB (27017) for the Uber Server.
+# Database and streaming stack — InfluxDB (8086), MongoDB (27017) and MediaMTX
+# (1935 RTMP, 8554 RTSP, 8890 SRT, 9997 API, 9996 playback) for the Uber Server.
 # Ports match config/system_services.yml, so pipelines only need their host name changed.
 #
 # Run from the repository root, on the machine that should hold the databases:
@@ -20,6 +21,10 @@
 #
 # Redis (6379) and Mosquitto (1883) would join this same file if they are ever
 # containerized too; today they stay bare-metal via pipelines/uber-server/Makefile.
+#
+# MediaMTX reads pipelines/uber-server/mediamtx/mediamtx.yml and records every
+# published stream under MEDIAMTX_RECORD_DIR (default artifacts/recordings in the
+# repository); see docs/rtmp_streaming.md.
 
 name: openmmla-infra
 
@@ -100,6 +105,24 @@ services:
       timeout: 5s
       retries: 5
       start_period: 40s
+
+  mediamtx:
+    <<: *logging
+    image: bluenviron/mediamtx:1.21.0
+    restart: unless-stopped
+    volumes:
+      - ../pipelines/uber-server/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+      # recordings land on the host, next to the other session artifacts
+      - "${MEDIAMTX_RECORD_DIR:-../artifacts/recordings}:/recordings"
+    ports:
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_RTMP_PORT:-1935}:1935"
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_RTSP_PORT:-8554}:8554"
+      # RTP/RTCP of RTSP readers that choose UDP transport (the bases use TCP)
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:8000:8000/udp"
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:8001:8001/udp"
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_SRT_PORT:-8890}:8890/udp"
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_API_PORT:-9997}:9997"
+      - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_PLAYBACK_PORT:-9996}:9996"
 
 volumes:
   influxdb-data:
