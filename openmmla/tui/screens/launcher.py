@@ -50,16 +50,17 @@ from openmmla.tui.system_services import (
     shared_section_drift,
 )
 from openmmla.tui.ssh import (
-    REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel, probe_all_profiles, probe_ssh_endpoint, summarize_states, target_options, target_state_label,
+    REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel, probe_all_profiles, probe_ssh_endpoint, set_current_target, summarize_states, target_options, target_state_label,
     load_ssh_profiles, get_profile_by_name, ssh_run_sync,
-    scp_file_async, scp_from_remote_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
+    scp_file_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
     ssh_test_connection,
     wrap_local, wrap_remote,
 )
 from openmmla.tui.artifacts import (
-    collection_artifact_dir, merge_tree, pipeline_artifact_dir,
+    collection_artifact_dir, merge_tree, pipeline_artifact_dir, pipeline_slug,
     safe_segment, update_collection_manifest, update_pipeline_manifest,
 )
+from openmmla.tui import download as dl
 from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -170,6 +171,8 @@ _COLLECTION_HIDDEN_PRESET_FLAGS = {
 _LAUNCHER_UI_WORKER_GROUP = "launcher-ui"
 _LAUNCHER_STATUS_WORKER_GROUP = "launcher-status"
 _LAUNCHER_DOWNLOAD_WORKER_GROUP = "launcher-downloads"
+# its own group: Cancel targets downloads, and must not kill the sweep
+_LAUNCHER_STAGING_SWEEP_WORKER_GROUP = "launcher-staging-sweep"
 _LAUNCHER_REMOTE_DELETE_WORKER_GROUP = "launcher-remote-delete"
 _LAUNCHER_REMOTE_STOP_WORKER_GROUP = "launcher-remote-stop"
 _LAUNCHER_COLLECTION_STOP_WORKER_GROUP = "launcher-collection-stop"
@@ -1623,8 +1626,8 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         launch_type="collection",
         description="Record raw audio/video files for post-time processing",
         params=[
-            ParamDef("-na", "Num Audio", "int", 0),
-            ParamDef("-nv", "Num Video", "int", 0),
+            ParamDef("-na", "Num Audio", "int", 1),
+            ParamDef("-nv", "Num Video", "int", 1),
             ParamDef("--session-id", "Session ID", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
             ParamDef("--output-root", "Output Root", "str", "artifacts"),
@@ -2424,6 +2427,11 @@ class ServicePanel(Widget):
         # reaches a machine even when it is currently unreachable
         self._collection_launch_targets: dict[str, set[str]] = {}
         self._pending_collection_delete: tuple[str, str] | None = None
+        # (target, session, host) keys of downloads already running, so a second
+        # press — or the other collection tab's Download — is refused instead of
+        # racing the first one into the same staging directory
+        self._downloads_in_flight: set[str] = set()
+        self._staging_swept: bool = False
         self._target_config_cache: dict[tuple[str, str], dict] = {}
         self._target_platform_cache: dict[str, str] = {}
         self._current_service_name: str | None = None
@@ -2467,6 +2475,7 @@ class ServicePanel(Widget):
         self._pipelines = discover_pipelines()
         self._pipeline_map = {p.name: p for p in self._pipelines}
         self._build_tree()
+        self._sweep_staging_once()
         # populate running markers asynchronously; the tree itself renders
         # instantly from cached states
         self._refresh_visible_statuses()
@@ -2575,6 +2584,7 @@ class ServicePanel(Widget):
                 else:
                     sel.value = "local"
                     self._last_target = "local"
+                    set_current_target("local")
                     self.query_one("#svc-cmd-session", CommandSession).set_target("local")
             finally:
                 self.call_after_refresh(self._clear_target_suppression)
@@ -2660,6 +2670,7 @@ class ServicePanel(Widget):
             self._capture_collection_card_state(self._last_target)
             self._capture_infra_mode(self._last_target)
             self._last_target = val
+            set_current_target(val)
             if val != "local":
                 self._log(f"[yellow]Switching host to '{val}' — loading remote state...[/yellow]")
             cmd = self.query_one("#svc-cmd-session", CommandSession)
@@ -4810,6 +4821,50 @@ class ServicePanel(Widget):
         except Exception:
             pass
 
+    # the command session is mounted once by compose() and never rebuilt, so a
+    # card rebuild mid-download cannot orphan the progress row
+    def _progress_start(self, label: str, total: int | None) -> None:
+        try:
+            self._cmd.start_progress(label, total)
+        except Exception:
+            pass
+
+    def _progress_update(self, done: int, total: int, detail: str) -> None:
+        try:
+            self._cmd.update_progress(done, total, detail)
+        except Exception:
+            pass
+
+    def _progress_end(self) -> None:
+        # one row is shared by every download; the finishing worker still holds
+        # its own key here, so anything above one means another is still running
+        if len(self._downloads_in_flight) > 1:
+            return
+        try:
+            self._cmd.end_progress()
+        except Exception:
+            pass
+
+    def _sweep_staging_once(self) -> None:
+        """drop abandoned download staging trees, once per process."""
+        if self._staging_swept:
+            return
+        self._staging_swept = True
+        self.run_worker(
+            asyncio.to_thread(dl.sweep_staging, self._root, 14),
+            group=_LAUNCHER_STAGING_SWEEP_WORKER_GROUP,
+            exclusive=True,
+        )
+
+    def on_command_session_download_cancel_requested(
+        self, event: CommandSession.DownloadCancelRequested
+    ) -> None:
+        self._log("[yellow]Cancelling download; the data already fetched is kept for resume.[/yellow]")
+        try:
+            self.workers.cancel_group(self, _LAUNCHER_DOWNLOAD_WORKER_GROUP)
+        except Exception:
+            pass
+
     def on_stream_panel_stream_log(self, event: StreamPanel.StreamLog) -> None:
         self._log(event.text)
 
@@ -5067,9 +5122,15 @@ class ServicePanel(Widget):
             if not session_id:
                 self._log("[yellow]No valid collection session id. Enter one or start a collection first.[/yellow]")
                 return
+            host_label = safe_segment(params.get("--host-label") or target, "host")
+            key = f"collection-download:{target}:{session_id}:{host_label}"
+            if key in self._downloads_in_flight:
+                self._log("[yellow]A download for this session and host is already running.[/yellow]")
+                return
+            self._downloads_in_flight.add(key)
             self.run_worker(
-                self._run_collection_download(target, params),
-                name=f"collection-download:{target}:{session_id}",
+                self._run_collection_download(target, params, key),
+                name=key,
                 group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
                 exclusive=False,
             )
@@ -5084,9 +5145,14 @@ class ServicePanel(Widget):
         if not session_id:
             self._log("[yellow]Enter a valid Artifact Session before downloading base artifacts.[/yellow]")
             return
+        key = f"pipeline-download:{target}:{svc.name}:{session_id}"
+        if key in self._downloads_in_flight:
+            self._log("[yellow]A download for these artifacts is already running.[/yellow]")
+            return
+        self._downloads_in_flight.add(key)
         self.run_worker(
-            self._run_pipeline_artifacts_download(target, svc, session_id),
-            name=f"pipeline-download:{target}:{svc.name}:{session_id}",
+            self._run_pipeline_artifacts_download(target, svc, session_id, key),
+            name=key,
             group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
             exclusive=False,
         )
@@ -5119,58 +5185,109 @@ class ServicePanel(Widget):
             exclusive=False,
         )
 
-    async def _run_collection_download(self, profile_name: str, params: dict) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
-            return
-        session_id = self._collection_session_id(params)
-        remote_path = self._collection_remote_path(profile, params)
-        remote_transfer_path = await asyncio.to_thread(
-            lambda: _expand_remote_home_path(remote_path, _remote_home(profile))
-        )
-        local_path = self._collection_local_path(params, profile_name)
-        self._log(f"[cyan]Downloading {profile_name}:{remote_transfer_path} -> {local_path}[/cyan]")
-        with tempfile.TemporaryDirectory(prefix="openmmla-collection-") as tmp_dir:
-            proc = await scp_from_remote_async(profile, remote_transfer_path, tmp_dir)
-            assert proc.stdout is not None
-            output = ""
-            async for line in proc.stdout:
-                output += line.decode(errors="replace")
-            rc = await proc.wait()
-            if rc != 0:
-                self._log(f"[red]Download failed (exit {rc}).[/red]")
-                for line in output.strip().splitlines():
-                    self._log(rich_escape(line))
+    async def _run_collection_download(self, profile_name: str, params: dict, key: str = "") -> None:
+        try:
+            profile = get_profile_by_name(profile_name)
+            if profile is None:
+                self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
                 return
+            session_id = self._collection_session_id(params)
+            host_label = safe_segment(params.get("--host-label") or profile_name, "host")
+            remote_path = self._collection_remote_path(profile, params)
+            remote_transfer_path = await asyncio.to_thread(
+                lambda: _expand_remote_home_path(remote_path, _remote_home(profile))
+            )
+            local_path = Path(self._collection_local_path(params, profile_name))
+            staging = dl.staging_root(self._root, session_id, "collection", host_label)
+            self._log(f"[cyan]Downloading {profile_name}:{remote_transfer_path} -> {local_path}[/cyan]")
 
-            downloaded = Path(tmp_dir) / os.path.basename(remote_transfer_path.rstrip("/"))
-            if not downloaded.exists():
-                children = [path for path in Path(tmp_dir).iterdir() if path.name != ".DS_Store"]
-                downloaded = children[0] if len(children) == 1 else downloaded
-            if not downloaded.exists():
-                self._log("[red]Download completed, but no collection directory was found in the transfer.[/red]")
+            # the row goes up before the remote scan, so Cancel is reachable
+            # while a large tree is being sized
+            self._progress_start(f"{host_label} · scanning…", None)
+            try:
+                plan = await dl.probe_remote(profile, remote_transfer_path)
+                if plan.unreachable:
+                    self._log(f"[red]Could not reach {profile_name}: {rich_escape(plan.unreachable)}[/red]")
+                    return
+                if not plan.exists:
+                    self._log(f"[red]Remote collection directory not found: {remote_transfer_path}[/red]")
+                    return
+                if not plan.file_count:
+                    self._log("[yellow]Remote collection is empty; nothing to download.[/yellow]")
+                    return
+                if plan.rejected:
+                    self._log(
+                        f"[yellow]Skipping {len(plan.rejected)} remote file(s) with unsupported names.[/yellow]"
+                    )
+
+                self._progress_start(
+                    f"{host_label} · {plan.file_count} file(s)", plan.total_bytes
+                )
+                result = await dl.download_tree(
+                    profile,
+                    remote_transfer_path,
+                    staging=staging,
+                    plan=plan,
+                    on_progress=self._progress_update,
+                    log=self._log,
+                )
+            finally:
+                self._progress_end()
+
+            if result.status != "complete":
+                self._report_incomplete_transfer(result)
                 return
 
             stats = await asyncio.to_thread(
                 merge_tree,
-                downloaded,
-                Path(local_path),
+                result.staged_root,
+                local_path,
                 conflict_label=profile_name,
             )
-        manifest = await asyncio.to_thread(
-            update_collection_manifest,
-            self._root,
-            session_id=session_id,
-            host_name=safe_segment(params.get("--host-label") or profile_name, "host"),
-            remote_path=remote_transfer_path,
-            local_path=Path(local_path),
-        )
+            manifest = await asyncio.to_thread(
+                update_collection_manifest,
+                self._root,
+                session_id=session_id,
+                host_name=host_label,
+                remote_path=remote_transfer_path,
+                local_path=local_path,
+            )
+            await asyncio.to_thread(dl.finalize, staging)
+            self._log(
+                f"[green]Downloaded collection to {local_path} via {result.tool} "
+                f"(copied {stats['copied']}, skipped {stats['skipped']}, conflicts {stats['conflicted']}).[/green]"
+            )
+            self._log(f"[green]Updated session manifest: {manifest}[/green]")
+        except asyncio.CancelledError:
+            self._progress_end()
+            self._log("[yellow]Download cancelled; press Download again to resume.[/yellow]")
+            raise
+        finally:
+            self._downloads_in_flight.discard(key)
+
+    def _report_incomplete_transfer(self, result) -> None:
+        """explain a transfer that must not be merged, and how to continue."""
+        if result.status == "growing":
+            names = ", ".join(result.grew[:3])
+            more = f" (+{len(result.grew) - 3} more)" if len(result.grew) > 3 else ""
+            self._log(
+                f"[yellow]{len(result.grew)} file(s) are still being written on the remote host: "
+                f"{rich_escape(names)}{more}.[/yellow]"
+            )
+            self._log("[yellow]Stop the recorders, then download again.[/yellow]")
+        elif result.status == "incomplete":
+            self._log(
+                f"[red]Download incomplete via {result.tool}: "
+                f"{len(result.missing)} file(s) did not arrive in full.[/red]"
+            )
+        else:
+            self._log(f"[red]Download failed via {result.tool} (exit {result.rc}).[/red]")
+        for line in str(result.output or "").strip().splitlines()[-20:]:
+            self._log(rich_escape(line))
         self._log(
-            f"[green]Downloaded collection to {local_path} "
-            f"(copied {stats['copied']}, skipped {stats['skipped']}, conflicts {stats['conflicted']}).[/green]"
+            "[yellow]Nothing was merged into artifacts/. The data already fetched is kept — "
+            "press Download again to resume.[/yellow]"
         )
-        self._log(f"[green]Updated session manifest: {manifest}[/green]")
 
     async def _run_collection_remote_delete(self, profile_name: str, params: dict) -> None:
         profile = get_profile_by_name(profile_name)
@@ -5332,66 +5449,83 @@ class ServicePanel(Widget):
         profile_name: str,
         svc: ServiceDef,
         session_id: str,
+        key: str = "",
     ) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
-            return
-        pipeline_name = svc.artifact_pipeline or svc.name
-        artifact_host = await self._resolve_remote_pipeline_artifact_host(
-            profile,
-            session_id,
-            pipeline_name,
-            fallback=profile_name,
-        )
-        local_root = pipeline_artifact_dir(
-            self._root,
-            session_id,
-            pipeline_name,
-            artifact_host,
-        )
-        downloaded_paths: list[str] = []
-        total = {"copied": 0, "skipped": 0, "conflicted": 0}
-        remote_root = self._remote_pipeline_artifact_root(profile, session_id, pipeline_name, artifact_host)
-        self._log(f"[cyan]Downloading {svc.name} artifacts from {profile_name}:{remote_root}[/cyan]")
-
-        for remote_rel, local_rel in self._pipeline_artifact_sources():
-            remote_path = f"{remote_root.rstrip('/')}/{remote_rel}"
-            exists = await self._remote_path_exists(profile, remote_path)
-            if not exists:
-                self._log(f"  [yellow]Missing remote path: {remote_rel}[/yellow]")
-                continue
-            destination = local_root / local_rel
-            stats = await self._download_remote_item(
+        try:
+            profile = get_profile_by_name(profile_name)
+            if profile is None:
+                self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
+                return
+            pipeline_name = svc.artifact_pipeline or svc.name
+            artifact_host = await self._resolve_remote_pipeline_artifact_host(
                 profile,
-                remote_path,
-                destination,
-                conflict_label=profile_name,
+                session_id,
+                pipeline_name,
+                fallback=profile_name,
             )
-            if stats is None:
-                continue
-            downloaded_paths.append(remote_rel)
-            for key, value in stats.items():
-                total[key] += value
+            local_root = pipeline_artifact_dir(
+                self._root,
+                session_id,
+                pipeline_name,
+                artifact_host,
+            )
+            downloaded_paths: list[str] = []
+            total = {"copied": 0, "skipped": 0, "conflicted": 0}
+            remote_root = self._remote_pipeline_artifact_root(profile, session_id, pipeline_name, artifact_host)
+            self._log(f"[cyan]Downloading {svc.name} artifacts from {profile_name}:{remote_root}[/cyan]")
 
-        if not downloaded_paths:
-            self._log(f"[yellow]No artifacts found for session '{session_id}' on {profile_name}.[/yellow]")
-            return
+            sources = self._pipeline_artifact_sources()
+            for index, (remote_rel, local_rel) in enumerate(sources, start=1):
+                remote_path = f"{remote_root.rstrip('/')}/{remote_rel}"
+                destination = local_root / local_rel
+                # the probe inside _download_remote_item reports a missing path
+                # itself, so this costs the same one ssh round trip as before
+                stats = await self._download_remote_item(
+                    profile,
+                    remote_path,
+                    destination,
+                    conflict_label=profile_name,
+                    staging=dl.staging_root(
+                        self._root,
+                        session_id,
+                        "pipelines",
+                        pipeline_slug(pipeline_name),
+                        artifact_host,
+                        *Path(local_rel).parts,
+                    ),
+                    label=f"{remote_rel} ({index}/{len(sources)})",
+                )
+                if stats is None:
+                    continue
+                downloaded_paths.append(remote_rel)
+                for stat_key, value in stats.items():
+                    total[stat_key] += value
 
-        manifest = update_pipeline_manifest(
-            self._root,
-            session_id=session_id,
-            pipeline_name=pipeline_name,
-            host_name=artifact_host,
-            remote_root=remote_root,
-            local_path=local_root,
-            downloaded_paths=downloaded_paths,
-        )
-        self._log(
-            f"[green]Downloaded {svc.name} artifacts to {local_root} "
-            f"(copied {total['copied']}, skipped {total['skipped']}, conflicts {total['conflicted']}).[/green]"
-        )
-        self._log(f"[green]Updated session manifest: {manifest}[/green]")
+            if not downloaded_paths:
+                self._log(f"[yellow]No artifacts found for session '{session_id}' on {profile_name}.[/yellow]")
+                return
+
+            manifest = await asyncio.to_thread(
+                update_pipeline_manifest,
+                self._root,
+                session_id=session_id,
+                pipeline_name=pipeline_name,
+                host_name=artifact_host,
+                remote_root=remote_root,
+                local_path=local_root,
+                downloaded_paths=downloaded_paths,
+            )
+            self._log(
+                f"[green]Downloaded {svc.name} artifacts to {local_root} "
+                f"(copied {total['copied']}, skipped {total['skipped']}, conflicts {total['conflicted']}).[/green]"
+            )
+            self._log(f"[green]Updated session manifest: {manifest}[/green]")
+        except asyncio.CancelledError:
+            self._progress_end()
+            self._log("[yellow]Download cancelled; press Artifacts again to resume.[/yellow]")
+            raise
+        finally:
+            self._downloads_in_flight.discard(key)
 
     def _remote_pipeline_root(self, profile, svc: ServiceDef) -> str:
         rel_dir = os.path.relpath(svc.config_dir, self._root)
@@ -5500,36 +5634,49 @@ class ServicePanel(Widget):
         destination: Path,
         *,
         conflict_label: str,
+        staging: Path,
+        label: str,
     ) -> dict[str, int] | None:
         remote_transfer_path = await asyncio.to_thread(
             lambda: _expand_remote_home_path(remote_path, _remote_home(profile))
         )
-        with tempfile.TemporaryDirectory(prefix="openmmla-artifact-") as tmp_dir:
-            proc = await scp_from_remote_async(profile, remote_transfer_path, tmp_dir)
-            assert proc.stdout is not None
-            output = ""
-            async for line in proc.stdout:
-                output += line.decode(errors="replace")
-            rc = await proc.wait()
-            if rc != 0:
-                self._log(f"[red]Download failed for {remote_path} (exit {rc}).[/red]")
-                for line in output.strip().splitlines():
-                    self._log(rich_escape(line))
+        self._progress_start(f"{label} · scanning…", None)
+        try:
+            plan = await dl.probe_remote(profile, remote_transfer_path)
+            if plan.unreachable:
+                self._log(f"  [red]Could not reach the host: {rich_escape(plan.unreachable)}[/red]")
+                return None
+            if not plan.exists:
+                self._log(f"  [yellow]Missing remote path: {remote_path}[/yellow]")
+                return None
+            if not plan.file_count:
+                self._log(f"  [yellow]Empty remote path: {remote_path}[/yellow]")
                 return None
 
-            downloaded = Path(tmp_dir) / os.path.basename(remote_transfer_path.rstrip("/"))
-            if not downloaded.exists():
-                children = [path for path in Path(tmp_dir).iterdir() if path.name != ".DS_Store"]
-                downloaded = children[0] if len(children) == 1 else downloaded
-            if not downloaded.exists():
-                self._log(f"[red]Download completed, but no artifact was found for {remote_path}.[/red]")
-                return None
-            return await asyncio.to_thread(
-                merge_tree,
-                downloaded,
-                destination,
-                conflict_label=conflict_label,
+            self._progress_start(label, plan.total_bytes)
+            result = await dl.download_tree(
+                profile,
+                remote_transfer_path,
+                staging=staging,
+                plan=plan,
+                on_progress=self._progress_update,
+                log=self._log,
             )
+        finally:
+            self._progress_end()
+
+        if result.status != "complete":
+            self._report_incomplete_transfer(result)
+            return None
+
+        stats = await asyncio.to_thread(
+            merge_tree,
+            result.staged_root,
+            destination,
+            conflict_label=conflict_label,
+        )
+        await asyncio.to_thread(dl.finalize, staging)
+        return stats
 
     def _refresh_visible_statuses(self) -> None:
         self.run_worker(

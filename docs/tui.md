@@ -128,9 +128,17 @@ One card per system service: **InfluxDB**, **MongoDB**, **Redis**, **Mosquitto**
 - **Session**: an existing session id, or `Create MongoDB Session` to mint one from the selected **Experiment Group** (`<experiment>/<group>`).
 - **Output Root** and **Host Label**: stored per host. The default root, `artifacts` locally and `~/artifacts` remotely, puts files under `artifacts/<session>/collection/<host label>/{audio,video}/`; any other root puts them under `<root>/<session>/{audio,video}/`.
 
-Devices and formats are chosen interactively in the recorder terminal; the encoding defaults follow the host platform (`avfoundation` on macOS, `alsa` and `v4l2` on Linux). A recorder opens as a terminal window per instance and writes `manifest.yml` and `manifest.json` next to the files, with the shared `initial_sync_time` and ready-made `file_dir` values for the pipelines.
+Each tab starts at one recorder; step the count down to zero to skip that role on this host. Devices and formats are chosen interactively in the recorder terminal; the encoding defaults follow the host platform (`avfoundation` on macOS, `alsa` and `v4l2` on Linux). A recorder opens as a terminal window per instance and writes `manifest.yml` and `manifest.json` next to the files, with the shared `initial_sync_time` and ready-made `file_dir` values for the pipelines.
 
-One session is usually recorded by several machines: set the tab, the recorder count and the session once, then switch **Host** and press Start on each machine. The session-scoped fields follow you across hosts, so every machine records into the same session. **Stop All Hosts** stops every recorder of the session on every host, then marks the session as ended in MongoDB. **Download** copies a remote host's recordings into the local `artifacts/<session>/collection/<host label>/` and merges the manifests; **Delete Remote** removes them from the remote machine after a second confirming press.
+One session is usually recorded by several machines: set the tab, the recorder count and the session once, then switch **Host** and press Start on each machine. The session-scoped fields follow you across hosts, so every machine records into the same session. **Stop All Hosts** stops every recorder of the session on every host, then marks the session as ended in MongoDB. **Delete Remote** removes a host's recordings from the remote machine after a second confirming press.
+
+#### Downloading a session
+
+**Download** copies a remote host's recordings into the local `artifacts/<session>/collection/<host label>/` and merges the manifests. A progress bar appears under the command log while the transfer runs, showing the transferred and total bytes, the current rate and an estimate of the time left; **Cancel** next to it stops the transfer.
+
+Files are staged under `artifacts/<session>/.staging/` and are merged into the artifact tree only once every file has arrived at its full remote size, so an interrupted download can never leave a truncated recording in `artifacts/`. If a download is interrupted — the network drops, you press Cancel, or you quit the console — the staged data is kept: press **Download** again and the transfer picks up where it stopped. Resume is byte-exact when `rsync` is installed on both machines; without it the console falls back to scp, which resumes file by file — the recordings that already arrived in full are skipped, and only a partly-written one is fetched again from the start. The log names the transport that was used. A second **Download** for a session and host that is already downloading is ignored.
+
+A session that is still recording downloads as far as it has been written: the files that are still growing are named in the log and kept in staging rather than merged, because FFmpeg only finalizes a container when the recorder stops. Stop the recorders and download again.
 
 ### Pipelines
 
@@ -159,6 +167,8 @@ A typical run is therefore: start the AI servers and the system services, start 
 
 A table of sessions with `Session ID`, `Experiment`, `Group`, `Status`, `Started` and `Source`, merged from the MongoDB `sessions` collection and, on the local host, from the `artifacts/<id>/` and `collection/<id>/` directories and their manifests. The addresses come from `config/system_services.yml`; with a remote host selected, its pipeline config is read over SSH instead.
 
+The Host selector opens on the Launcher's host; while that one is Local it opens on the machine the MongoDB address in System Settings names, as long as a saved SSH profile matches that address and answers — a database that lives on another machine is therefore listed without switching by hand. A host picked here stays until the Launcher's host changes again.
+
 - **Export Measurements** writes one JSON file per event type (speaker recognition and transcription, IPS translation, rotation and relation, VFA actions) from InfluxDB into `artifacts/<session>/measurements/`, plus a text transcript.
 - **Export Visualizations** and **Export All** additionally render the ASR diarization and speaking-interaction plots and the IPS trajectories, heatmap and physical-interaction network into `artifacts/<session>/analysis/visualizations/`. VFA has no visualizations yet.
 - **Delete Session** removes the InfluxDB measurements and the MongoDB document, keeping local artifacts. **Delete Artifacts** removes the local directory, keeping the database records. Both need a second press.
@@ -182,4 +192,5 @@ The six ASR service rows still expect tmux sessions named after the services. Wi
 | `pipelines/*/config.yml` | pipeline configs, with the shared sections mirrored from System Settings (gitignored) |
 | `pipelines/ips-base/camera_calib/`, `camera_sync/` | calibration images and transform matrices |
 | `artifacts/<session>/` | recordings, exported measurements and visualizations, manifests |
+| `artifacts/<session>/.staging/` | partly-downloaded remote data and its resume ledger; removed when a download completes, and swept after 14 days |
 | `~/.openmmla/master.key` | encryption key; `~/.openmmla/streams/` holds stream start times, `~/.openmmla/collection-runtime/` the pushed recorder code on remote hosts |

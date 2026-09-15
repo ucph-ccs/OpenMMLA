@@ -171,6 +171,71 @@ def _find_config_source(target: str) -> SessionConfigSource | None:
     return None
 
 
+def _local_db_config() -> dict:
+    """the local config whose MongoDB/InfluxDB sections this panel reads.
+
+    Same precedence as _find_config_source: System Settings first, then the
+    first pipeline config that still carries the database sections."""
+    from openmmla.tui.schema.loader import discover_pipelines, load_existing_config, _find_project_root
+    from openmmla.tui.system_services import load_system_services_config
+
+    system_config = load_system_services_config(_find_project_root())
+    if _has_database_config(system_config):
+        return system_config
+    for pipeline in discover_pipelines():
+        config = load_existing_config(pipeline.config_path)
+        if _has_database_config(config):
+            return config
+    return {}
+
+
+def _target_for_db_host(host: str, profiles: list) -> str:
+    """target that serves `host`: an SSH profile name, "local" for this
+    machine, or "" when no saved profile matches."""
+    from openmmla.tui.system_services import hosts_match, is_this_machine
+
+    if not host:
+        return ""
+    if is_this_machine(host):
+        return "local"
+    for profile in profiles:
+        if hosts_match(host, profile.host) or hosts_match(host, profile.name):
+            return profile.name
+    return ""
+
+
+def _resolve_default_target(launcher_target: str = "local") -> str:
+    """host this panel should open on.
+
+    The Launcher's host wins while it is on a remote profile; otherwise the
+    configured MongoDB endpoint decides, so a database that lives on another
+    machine lists its sessions without a manual switch. A host known to be
+    offline is never picked. Blocking: reads config files, resolves names and
+    may probe the derived host."""
+    from openmmla.tui.ssh import (
+        TARGET_STATES, get_profile_by_name, load_ssh_profiles, probe_ssh_endpoint,
+    )
+
+    def usable(name: str) -> bool:
+        return bool(name) and name != "local" and TARGET_STATES.get(name) != "offline"
+
+    # the launcher refuses to switch to an offline host, so its value is good
+    if usable(launcher_target):
+        return launcher_target
+
+    derived = _target_for_db_host(_db_host_from_config(_local_db_config()), load_ssh_profiles())
+    if not usable(derived):
+        return "local"
+    if TARGET_STATES.get(derived) == "online":
+        return derived
+    # a host nobody has probed yet: check it rather than strand the panel on an
+    # unreachable host it picked on the user's behalf
+    profile = get_profile_by_name(derived)
+    if profile is None or not probe_ssh_endpoint(profile.host, profile.port):
+        return "local"
+    return derived
+
+
 def _write_temp_config(config: dict) -> str:
     handle = tempfile.NamedTemporaryFile(
         "w",
@@ -380,6 +445,11 @@ class SessionsPanel(Widget):
         self._pending_delete_session_id: str | None = None
         self._pending_delete_artifacts_session_id: str | None = None
         self._target = "local"
+        self._suppress_select = False
+        self._bootstrapping = False
+        # launcher host this panel last took its default from; a manual pick
+        # here must survive a trip through the other tabs
+        self._followed_launcher_target = "local"
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -402,10 +472,54 @@ class SessionsPanel(Widget):
         table = self.query_one("#sessions-table", DataTable)
         table.add_columns("Session ID", "Experiment", "Group", "Status", "Started", "Source")
         table.cursor_type = "row"
-        self.run_worker(self._async_init(self._target), exclusive=True)
+        self._start_bootstrap()
 
     def on_show(self) -> None:
         self._refresh_target_options()
+        from openmmla.tui.ssh import current_target
+        if current_target() != self._followed_launcher_target:
+            self._start_bootstrap()
+        elif self._mongo_client is None and not self._bootstrapping:
+            # nothing connected: retry on the way in, as rebuilding the Host
+            # options used to do as a side effect
+            self.run_worker(self._async_init(self._target), exclusive=True)
+
+    def _start_bootstrap(self) -> None:
+        from openmmla.tui.ssh import current_target
+        self._followed_launcher_target = current_target()
+        self._bootstrapping = True
+        self.run_worker(self._async_bootstrap(self._followed_launcher_target), exclusive=True)
+
+    async def _async_bootstrap(self, launcher_target: str) -> None:
+        """open on the launcher's host, or else on the host serving MongoDB."""
+        try:
+            target = await asyncio.to_thread(_resolve_default_target, launcher_target)
+            if self._apply_target(target):
+                reason = "Launcher" if target == launcher_target else "MongoDB endpoint"
+                self._log(f"[cyan]Host follows the {reason}: '{target}'.[/cyan]")
+            await self._async_init(self._target)
+        finally:
+            self._bootstrapping = False
+
+    def _apply_target(self, target: str) -> bool:
+        """point the panel and its Host selector at `target` without
+        re-entering the selector's change handler."""
+        if target == self._target:
+            return False
+        try:
+            select = self.query_one("#sessions-target-select", Select)
+            if not any(value == target for _, value in _target_options()):
+                return False
+            self._suppress_select = True
+            select.value = target
+            self.call_after_refresh(self._clear_select_suppression)
+        except Exception:
+            self._suppress_select = False
+            return False
+        self._target = target
+        self._config_path = None
+        self._config_source = None
+        return True
 
     def on_unmount(self) -> None:
         self._close_clients()
@@ -594,7 +708,7 @@ class SessionsPanel(Widget):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "sessions-target-select":
             return
-        if getattr(self, "_suppress_select", False):
+        if self._suppress_select:
             return
         from openmmla.tui.ssh import REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel
         if is_select_sentinel(event.value):
@@ -613,9 +727,13 @@ class SessionsPanel(Widget):
             self._revert_select(event.select)
             self.run_worker(self._async_test_single_host(target), group="sessions-host-probe", exclusive=False)
             return
-        if target == self._target and self._mongo_client is not None:
+        # rebuilding the options re-emits Changed for the host already shown;
+        # reloading there would cancel the worker that is resolving the default
+        if target == self._target:
             return
         self._target = target
+        from openmmla.tui.ssh import current_target
+        self._followed_launcher_target = current_target()
         self._config_path = None
         self._config_source = None
         self.run_worker(self._async_init(target), exclusive=True)

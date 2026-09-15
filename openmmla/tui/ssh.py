@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -91,6 +92,27 @@ class SSHProfile:
             args.extend(["-i", os.path.expanduser(self.key_path)])
         if self.port != 22:
             args.extend(["-P", str(self.port)])
+        return args
+
+    def rsync_shell_arg(self) -> str:
+        """return the ssh command line rsync should use for -e.
+
+        rsync word-splits the -e value, so every token is shell-quoted here.
+        Note ssh spells the port -p, unlike scp's -P."""
+        parts = [_resolve_local_command("ssh")] + self._common_ssh_opts()
+        if self.key_path:
+            parts.extend(["-i", os.path.expanduser(self.key_path)])
+        if self.port != 22:
+            parts.extend(["-p", str(self.port)])
+        return " ".join(shlex.quote(part) for part in parts)
+
+    def base_rsync_args(self) -> list[str]:
+        """return the rsync argument prefix; the caller appends -e and paths.
+
+        sshpass wraps rsync itself rather than living inside -e: a password
+        containing a space would be mangled by rsync's word-splitting."""
+        args = self._sshpass_prefix()
+        args.append(_resolve_local_command("rsync"))
         return args
 
 
@@ -334,12 +356,33 @@ def resolve_ssh_endpoint(host: str, port: int) -> tuple[str, int]:
 TARGET_STATES: dict[str, str] = {}
 
 
+# host the Launcher's Host bar is on; other screens open on the same host
+# instead of always falling back to "local"
+_CURRENT_TARGET = "local"
+
+
 def is_select_sentinel(value) -> bool:
     """True for the placeholder values a Select emits while (re)building its
     options (Select.BLANK / Select.NULL depending on textual version)."""
     if value is None:
         return True
     return str(value) in ("Select.BLANK", "Select.NULL")
+
+
+def set_current_target(name) -> None:
+    """record the host the Launcher's Host bar moved to."""
+    global _CURRENT_TARGET
+    if is_select_sentinel(name):
+        return
+    text = str(name or "").strip()
+    if not text or text == REFRESH_TARGETS_OPTION:
+        return
+    _CURRENT_TARGET = text
+
+
+def current_target() -> str:
+    """host the Launcher's Host bar is on ("local" until it is switched)."""
+    return _CURRENT_TARGET
 
 
 def target_state_label(name: str) -> str:

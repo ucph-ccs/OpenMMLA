@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import RichLog, Label, Input, Select, Static
+from textual.widgets import RichLog, Label, Input, Select, Static, ProgressBar, Button
 
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.ssh import (
@@ -114,6 +114,9 @@ class CommandSession(Widget):
             super().__init__()
             self.target = target
 
+    class DownloadCancelRequested(Message):
+        """emitted when the user presses Cancel on the progress row."""
+
     DEFAULT_CSS = """
     CommandSession {
         height: auto;
@@ -134,6 +137,46 @@ class CommandSession(Widget):
     .cmd-log {
         height: 4;
         padding: 0 1;
+    }
+    /* the transfer progress row; height auto because a bare Horizontal
+       defaults to 1fr and would blow the panel open */
+    .cmd-progress {
+        layout: horizontal;
+        height: auto;
+        min-height: 1;
+        padding: 0 1;
+        display: none;
+    }
+    .cmd-progress.active {
+        display: block;
+    }
+    .cmd-progress-label {
+        width: 22;
+        height: auto;
+        color: $text-muted;
+    }
+    .cmd-progress ProgressBar {
+        width: 1fr;
+        height: auto;
+    }
+    .cmd-progress Bar {
+        width: 1fr;
+    }
+    .cmd-progress-detail {
+        width: 34;
+        height: auto;
+        color: $text-muted;
+        text-align: right;
+    }
+    .cmd-progress-detail.narrow {
+        display: none;
+    }
+    #cmd-progress-cancel {
+        width: 9;
+        min-width: 9;
+        height: auto;
+        min-height: 1;
+        margin-left: 1;
     }
     .cmd-bar {
         layout: horizontal;
@@ -162,6 +205,8 @@ class CommandSession(Widget):
         self._running_proc: asyncio.subprocess.Process | None = None
         self._connected: bool = False
         self._log_height: int = 4
+        self._progress_total: int = 0
+        self._progress_label: str = ""
 
     @property
     def log_height(self) -> int:
@@ -190,6 +235,13 @@ class CommandSession(Widget):
                 yield Select(target_options, value="local", id="cmd-target-select")
         yield LogResizeHandle(self)
         yield RichLog(classes="cmd-log", highlight=True, markup=True)
+        with Horizontal(classes="cmd-progress"):
+            yield Static("", classes="cmd-progress-label")
+            # show_eta=False: the built-in estimate is a since-start average,
+            # which lies on a bursty ssh link; the detail column carries ours
+            yield ProgressBar(total=None, show_eta=False, id="cmd-progress-bar")
+            yield Static("", classes="cmd-progress-detail")
+            yield Button("Cancel", variant="error", compact=True, id="cmd-progress-cancel")
         with Horizontal(classes="cmd-bar"):
             yield Label("$", classes="cmd-prompt")
             yield Input(
@@ -248,6 +300,62 @@ class CommandSession(Widget):
         """write a message to the log (public API for parents)."""
         try:
             self.query_one(".cmd-log", RichLog).write(msg)
+        except Exception:
+            pass
+
+    def start_progress(self, label: str, total: int | None = None) -> None:
+        """show the progress row for a new transfer."""
+        self._progress_label = label
+        self._progress_total = int(total or 0)
+        try:
+            bar = self.query_one("#cmd-progress-bar", ProgressBar)
+            # clearing the total first is what resets the internal eta clock
+            bar.update(total=None)
+            bar.update(total=float(total) if total else None, progress=0)
+            self.query_one(".cmd-progress-label", Static).update(label)
+            self.query_one(".cmd-progress-detail", Static).update("")
+            self.query_one(".cmd-progress", Horizontal).add_class("active")
+        except Exception:
+            pass
+
+    def update_progress(self, done: int, total: int | None = None, detail: str = "") -> None:
+        """move the bar; done is clamped so a file that grew cannot overflow it."""
+        if total:
+            self._progress_total = int(total)
+        ceiling = self._progress_total
+        value = max(0, int(done))
+        if ceiling:
+            value = min(value, ceiling)
+        try:
+            bar = self.query_one("#cmd-progress-bar", ProgressBar)
+            if ceiling and bar.total != float(ceiling):
+                bar.update(total=float(ceiling))
+            bar.update(progress=value)
+            self.query_one(".cmd-progress-detail", Static).update(detail)
+        except Exception:
+            pass
+
+    def end_progress(self) -> None:
+        """hide the progress row and stop the indeterminate bar's animation."""
+        self._progress_total = 0
+        self._progress_label = ""
+        try:
+            self.query_one(".cmd-progress", Horizontal).remove_class("active")
+            self.query_one("#cmd-progress-bar", ProgressBar).update(total=None, progress=0)
+            self.query_one(".cmd-progress-detail", Static).update("")
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cmd-progress-cancel":
+            event.stop()
+            self.post_message(self.DownloadCancelRequested())
+
+    def on_resize(self, event) -> None:
+        """drop the rate/eta column on a narrow terminal so the row stays one line."""
+        try:
+            detail = self.query_one(".cmd-progress-detail", Static)
+            detail.set_class(event.size.width < 78, "narrow")
         except Exception:
             pass
 

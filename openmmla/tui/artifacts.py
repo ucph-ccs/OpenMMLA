@@ -175,6 +175,19 @@ def _conflict_path(path: Path, label: str) -> Path:
     return candidate
 
 
+def _parses_as_metadata(path: Path) -> bool:
+    """True when a manifest/config file is readable and well-formed."""
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            if path.suffix == ".json":
+                json.load(file)
+            else:
+                yaml.safe_load(file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError):
+        return False
+    return True
+
+
 def merge_tree(source: Path, destination: Path, *, conflict_label: str) -> dict[str, int]:
     """merge source into destination without clobbering media/data files."""
     stats = {"copied": 0, "skipped": 0, "conflicted": 0}
@@ -189,7 +202,9 @@ def merge_tree(source: Path, destination: Path, *, conflict_label: str) -> dict[
         dest_root = destination / rel_root
         dest_root.mkdir(parents=True, exist_ok=True)
         for filename in files:
-            if filename in {".DS_Store", ".manifest.lock"}:
+            # *.tmp / *.part are half-written files the recorder replaces
+            # atomically; a live pull can catch one mid-write
+            if filename in {".DS_Store", ".manifest.lock"} or filename.endswith((".tmp", ".part")):
                 continue
             _merge_file(
                 Path(root) / filename,
@@ -207,8 +222,14 @@ def _merge_file(source: Path, destination: Path, *, conflict_label: str, stats: 
         stats["copied"] += 1
         return
     if destination.name in METADATA_FILENAMES:
-        shutil.copy2(source, destination)
-        stats["copied"] += 1
+        # metadata is meant to be overwritten, but never with a truncated copy
+        if _parses_as_metadata(source):
+            shutil.copy2(source, destination)
+            stats["copied"] += 1
+            return
+        conflict = _conflict_path(destination, conflict_label)
+        shutil.copy2(source, conflict)
+        stats["conflicted"] += 1
         return
     if _same_file(source, destination):
         stats["skipped"] += 1
