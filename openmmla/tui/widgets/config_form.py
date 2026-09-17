@@ -1152,6 +1152,22 @@ class ConfigForm(Widget):
         except Exception:
             self.mount(collapsible)
 
+    def set_field_value(self, path: str, value) -> bool:
+        """show another value in a text field: what Save made of what was typed."""
+        try:
+            widget = self.query_one(f"#{_safe_id(f'field__{path}')}")
+        except Exception:
+            return False
+        text = "" if value is None else str(value)
+        if isinstance(widget, Input):
+            widget.value = text
+        elif isinstance(widget, TextArea):
+            widget.text = text
+        else:
+            return False
+        self._values[path] = value
+        return True
+
     def remove_section(self, section_name: str) -> None:
         """remove a dynamic section by name."""
         self._dynamic_sections.pop(section_name, None)

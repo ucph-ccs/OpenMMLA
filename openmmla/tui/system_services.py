@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import socket
 import time
 from typing import Callable
@@ -120,6 +121,101 @@ def stream_server_section(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(gateway, dict):
         return {}
     return {key: gateway[key] for key in ("host", "rtmp_port", "rtsp_port") if gateway.get(key) is not None}
+
+
+# what MediaMTX accepts as a path name, one or more segments
+_STREAM_PATH_RE = re.compile(r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]*(?:/[A-Za-z0-9._~-]+)*$")
+
+
+def is_stream_path(value: object) -> bool:
+    """a Streams target in its short form: the <app>/<name> path on the stream
+    server, without scheme or host. A first segment with a dot is taken for a
+    host that lost its scheme (ericli.local/ips/cam-1), not for a path."""
+    text = str(value or "").strip().strip("/")
+    if not text or "://" in text or not _STREAM_PATH_RE.match(text):
+        return False
+    return "." not in text.split("/", 1)[0]
+
+
+def _stream_server_port(value: object, default: int) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return default
+    return port if 0 < port < 65536 else default
+
+
+def stream_server_urls(section: dict[str, Any], path: str) -> tuple[str, str]:
+    """(publish URL, pull URL) of a path on the stream server: capture devices
+    publish it over RTMP and the bases pull the same path over RTSP."""
+    host = str((section or {}).get("host") or "").strip() or "localhost"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    rtmp_port = _stream_server_port((section or {}).get("rtmp_port"), 1935)
+    rtsp_port = _stream_server_port((section or {}).get("rtsp_port"), 8554)
+    path = str(path).strip().strip("/")
+    return f"rtmp://{host}:{rtmp_port}/{path}", f"rtsp://{host}:{rtsp_port}/{path}"
+
+
+def complete_stream_urls(values: dict[str, object], stream_server: dict[str, Any]) -> list[str]:
+    """expand, in place, the short form in the Streams values of a pipeline form
+    (flat paths, Streams.<name>.target): a target that is a bare path is
+    published to the stream server of System Settings and, unless read_target
+    says otherwise, pulled from it; a bare read_target is completed the same way.
+    Full URLs are left as they are, and so is an empty read_target next to a full
+    target (it means: pull the target). Returns the streams it completed."""
+    completed: list[str] = []
+    for key in list(values):
+        if not (key.startswith("Streams.") and key.endswith(".target")):
+            continue
+        name = key[len("Streams."):-len(".target")]
+        read_key = f"Streams.{name}.read_target"
+        target = str(values.get(key) or "").strip()
+        read_target = str(values.get(read_key) or "").strip()
+        changed = False
+        if is_stream_path(target):
+            publish, pull = stream_server_urls(stream_server, target)
+            values[key] = publish
+            if not read_target:
+                values[read_key] = pull
+            changed = True
+        if is_stream_path(read_target):
+            values[read_key] = stream_server_urls(stream_server, read_target)[1]
+            changed = True
+        if changed:
+            completed.append(name)
+    return completed
+
+
+_STREAM_SERVER_URL_PORTS = {"rtmp": ("rtmp_port", 1935), "rtsp": ("rtsp_port", 8554)}
+
+
+def repoint_stream_url(url: object, old: dict[str, Any], new: dict[str, Any]) -> str:
+    """the same stream on the stream server's new address, when the URL named
+    the old one (host, and the port of its scheme); any other URL comes back
+    unchanged: a stream that was pointed somewhere else on purpose stays there."""
+    text = str(url or "").strip()
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        return text
+    if parts.scheme not in _STREAM_SERVER_URL_PORTS or not parts.hostname:
+        return text
+    key, default_port = _STREAM_SERVER_URL_PORTS[parts.scheme]
+    old_host = str((old or {}).get("host") or "").strip().strip("[]").lower()
+    same_host = parts.hostname.lower() == old_host or (
+        is_loopback_host(parts.hostname) and is_loopback_host(old_host))
+    if not old_host or not same_host:
+        return text
+    if (port or default_port) != _stream_server_port((old or {}).get(key), default_port):
+        return text
+    publish, pull = stream_server_urls(new, "")
+    base = (publish if parts.scheme == "rtmp" else pull).rstrip("/")
+    userinfo = f"{parts.netloc.rsplit('@', 1)[0]}@" if "@" in parts.netloc else ""
+    scheme, address = base.split("://", 1)
+    rest = parts.path + (f"?{parts.query}" if parts.query else "")
+    return f"{scheme}://{userinfo}{address}{rest}"
 
 
 def config_to_flat_values(config: dict[str, Any], *, include_defaults: bool = True) -> dict[str, object]:

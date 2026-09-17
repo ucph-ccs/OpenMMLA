@@ -441,7 +441,7 @@ class StreamPanel(Widget):
     HELP = (
         "A stream is one entry under Streams in this card's config: a camera or microphone that ffmpeg "
         "publishes to the Stream Server (target), and that the bases pull from it (read_target). Add one "
-        "with + Add Stream on the Config tab.\n"
+        "with + Add Stream on the Config tab; its URLs come from the Stream Server of System Settings.\n"
         "Recording has two independent switches. On the capture device: the Record column, which "
         "Record on/off flips for the selected stream (written next to the stream while it is pushed, so "
         "it survives a network drop). On the server: MediaMTX records every stream that reaches it, set "

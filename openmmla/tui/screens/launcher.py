@@ -42,8 +42,12 @@ from openmmla.tui.system_services import (
     SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
     SYSTEM_SERVICE_DEFAULT_PORTS,
     SYSTEM_SERVICE_LABELS,
+    complete_stream_urls,
     hosts_match,
     is_loopback_host,
+    is_stream_path,
+    repoint_stream_url,
+    stream_server_urls,
     system_service_endpoint,
     system_service_port_conflict,
     system_service_probe_ports,
@@ -286,12 +290,17 @@ def _server_section_note(gateway: str) -> str:
     )
 
 
+# {publish} and {pull} are the stream server's URLs of <app>/<name>, see _make_stream_fields
 _STREAM_FIELDS_TEMPLATE = [
     ("target", "str", "",
-     "publish URL: rtmp://<gateway>:1935/<app>/<name> (or rtsp://, srt://), or udp://<base>:<port> for raw audio to an ASR base",
+     "where the capture device publishes. The path alone (e.g. ips/cam-1) is completed on Save with the Stream Server "
+     "of System Settings: {publish}. Or a full URL (rtmp://, rtsp://, srt://), or udp://<base>:<port> for raw "
+     "audio to an ASR base",
      False),
     ("read_target", "str", "",
-     "URL the bases pull from, e.g. rtsp://<gateway>:8554/<app>/<name>; empty = target", False),
+     "what the bases pull. Empty: {pull} when target is a path, the target itself when it is a full URL. "
+     "A path or a full URL is taken as well",
+     False),
     ("ssh_profile", "str", "", "SSH profile for remote stream management", True),
     ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
     ("record", "bool", False,
@@ -1683,12 +1692,15 @@ class StreamServerConfigPanel(Widget):
             self._show_recording_state()
 
 
-def _make_stream_fields(stream_name: str) -> list[LoaderFieldDef]:
-    """create FieldDef list for a single stream entry."""
+def _make_stream_fields(stream_name: str, stream_server: dict | None = None) -> list[LoaderFieldDef]:
+    """create FieldDef list for a single stream entry. With the Stream Server
+    section of System Settings, the help names its real address."""
     section = f"Streams.{stream_name}"
     ssh_profile_names = ["local"] + [p.name for p in load_ssh_profiles()]
+    publish, pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
     fields = []
     for key, ftype, default, desc, is_choices in _STREAM_FIELDS_TEMPLATE:
+        desc = desc.replace("{publish}", publish).replace("{pull}", pull)
         choices = ssh_profile_names if is_choices else []
         fields.append(LoaderFieldDef(
             path=f"Streams.{stream_name}.{key}",
@@ -4345,7 +4357,7 @@ class ServicePanel(Widget):
                     if not isinstance(stream_props, dict):
                         continue
                     section_name = f"Streams.{stream_name}"
-                    s_fields = _make_stream_fields(stream_name)
+                    s_fields = _make_stream_fields(stream_name, self._stream_server_address())
                     dynamic_sections[section_name] = s_fields
                     for f in s_fields:
                         val = get_nested_value(existing, f.path)
@@ -4367,7 +4379,8 @@ class ServicePanel(Widget):
         if pipeline.name in _STREAM_PIPELINES:
             group_add_buttons["Streams"] = ("+ Add Stream", "btn-add-stream")
 
-        section_titles, section_notes = self._pipeline_section_help(form_fields, values)
+        section_titles, section_notes = self._pipeline_section_help(
+            form_fields, values, self._stream_server_address())
         form = ConfigForm(pipeline.name, form_fields, values, dynamic_sections,
                           group_add_buttons=group_add_buttons,
                           base_section=pipeline.base_section or None,
@@ -4385,10 +4398,13 @@ class ServicePanel(Widget):
         self._show_sync_bar(pipeline)
 
     @staticmethod
-    def _pipeline_section_help(fields: list[LoaderFieldDef], values: dict) -> tuple[dict[str, str], dict[str, str]]:
+    def _pipeline_section_help(
+        fields: list[LoaderFieldDef], values: dict, stream_server: dict | None = None,
+    ) -> tuple[dict[str, str], dict[str, str]]:
         """what the sections of a pipeline config are called in the form, and a
         note on the ones that only make sense together: Gateway, Server and
         Streams. Also says, under each Server entry, where its value leads."""
+        publish, pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "ips/cam-1")
         titles = {
             name: str(info.get("label") or name)
             for name, info in SHARED_SECTIONS.items() if info.get("label") and info["label"] != name
@@ -4403,10 +4419,10 @@ class ServicePanel(Widget):
             "Server": _server_section_note(gateway),
             "Streams": (
                 "One entry per camera or microphone stream. target is where the capture device "
-                "publishes (the Stream Server, e.g. rtmp://<stream-server>:1935/<app>/<name>), read_target what "
-                "the bases pull (rtsp://<stream-server>:8554/<app>/<name>; empty = target). record: true also "
-                "records on the capture device; the Stream Server records on its side whatever "
-                "reaches it (its card, Config tab). Its address: System Settings → Stream Server."
+                "publishes, read_target what the bases pull. Write the path alone (ips/cam-1) and Save "
+                f"completes both with the Stream Server of System Settings: {publish} and {pull}. "
+                "A full URL is kept as written. record: true also records on the capture device; the "
+                "Stream Server records on its side whatever reaches it (its card, Config tab)."
             ),
         }
         for field in fields:
@@ -4554,6 +4570,7 @@ class ServicePanel(Widget):
                 # that machine's own settings file and its pipeline configs
                 self._sync_shared_section_to_target(section_name, target, save=True)
                 return
+            old_stream_server = self._stream_server_address() if section_name == "StreamServer" else None
             for path, val in event.values.items():
                 self._shared_values[path] = val
             config_path = save_system_service_section(
@@ -4562,9 +4579,17 @@ class ServicePanel(Widget):
                 self._shared_section_data(section_name),
             )
             updated = self._apply_shared_section_to_local_configs(section_name)
-            self._show_status(
-                f"{section_name} system service saved to {config_path} and {updated} local pipeline config(s)"
-            )
+            message = f"{section_name} system service saved to {config_path} and {updated} local pipeline config(s)"
+            if old_stream_server is not None:
+                message = f"{section_name} system service saved to {config_path}"
+                moved, configs = self._repoint_local_streams(old_stream_server, self._stream_server_address())
+                if moved:
+                    message += (
+                        f"; {moved} stream URL(s) in {configs} local pipeline config(s) followed it to "
+                        f"{self._stream_server_address().get('host')} (Sync to Remote on a pipeline's Config tab "
+                        f"takes them to another host)"
+                    )
+            self._show_status(message)
             # the address may now name another machine: move the markers along
             self._refresh_visible_statuses()
             return
@@ -4584,7 +4609,8 @@ class ServicePanel(Widget):
 
         form = self._current_form
         all_fields = form.all_fields if form else pipeline.fields
-        self._save_pipeline_config_for_target(pipeline, all_fields, event.values)
+        stream_note = self._complete_stream_targets(pipeline, event.values)
+        self._save_pipeline_config_for_target(pipeline, all_fields, event.values, note=stream_note)
 
         if pipeline.name == "ASR Server":
             self._services = _build_service_registry(self._root)
@@ -4870,9 +4896,114 @@ class ServicePanel(Widget):
             return
 
         section_name = f"Streams.{name}"
-        fields = _make_stream_fields(name)
-        form.add_section(section_name, fields, {})
+        fields = _make_stream_fields(name, self._stream_server_address())
+        form.add_section(section_name, fields, self._new_stream_values(name))
         self._restore_add_stream_button()
+
+    def _stream_server_address(self) -> dict[str, object]:
+        """host and ports of System Settings → Stream Server, as this console holds them."""
+        return {
+            key: self._shared_values.get(f"StreamServer.{key}", fdef.get("default", ""))
+            for key, fdef in SHARED_SECTIONS["StreamServer"]["fields"].items()
+        }
+
+    def _complete_stream_targets(self, pipeline: PipelineDef, values: dict) -> str:
+        """Streams written as a bare path (ips/cam-1) get the Stream Server address
+        of System Settings before the config is written, and the form shows what
+        they became. Returns what to tell the user, to go after the save message."""
+        if pipeline.name not in _STREAM_PIPELINES:
+            return ""
+        server = self._stream_server_address()
+        host = str(server.get("host") or "").strip() or "localhost"
+        names = [
+            key[len("Streams."):-len(".target")] for key in values
+            if key.startswith("Streams.") and key.endswith(".target")
+        ]
+        held_back: dict[str, str] = {}
+        if is_loopback_host(host):
+            # localhost in a URL is the machine that opens it: right for a stream
+            # captured and pulled on this machine, wrong for any other
+            config_host = self._get_panel_target()
+            for name in names:
+                short = any(is_stream_path(values.get(f"Streams.{name}.{key}")) for key in ("target", "read_target"))
+                capture = str(values.get(f"Streams.{name}.ssh_profile") or "").strip()
+                if is_select_sentinel(capture) or capture == "local":
+                    capture = ""
+                elsewhere = capture or (config_host if config_host != "local" else "")
+                if short and elsewhere:
+                    held_back[name] = elsewhere
+        open_values = {key: val for key, val in values.items() if not any(
+            key.startswith(f"Streams.{name}.") for name in held_back)}
+        completed = complete_stream_urls(open_values, server)
+        form = self._current_form
+        for name in completed:
+            for key in ("target", "read_target"):
+                path = f"Streams.{name}.{key}"
+                values[path] = open_values.get(path, values.get(path))
+                if form is not None:
+                    form.set_field_value(path, values[path])
+        notes = []
+        if completed:
+            reach = " (reachable from this machine only)" if is_loopback_host(host) else ""
+            notes.append(f"{', '.join(completed)}: completed with the Stream Server of System Settings, {host}{reach}")
+        if held_back:
+            who = ", ".join(sorted(set(held_back.values())))
+            notes.append(
+                f"{', '.join(held_back)}: left as a path, because the Stream Server is '{host}' under System "
+                f"Settings and {who} cannot reach that. Put this machine's name there "
+                f"(e.g. {socket.gethostname()}) and Save here again"
+            )
+        return "".join(f". {note}" for note in notes)
+
+    def _repoint_local_streams(self, old: dict, new: dict) -> tuple[int, int]:
+        """the Stream Server moved: the stream URLs of the local pipeline configs
+        that named its old address follow it. (URLs moved, configs written)"""
+        if all(str(old.get(key)) == str(new.get(key)) for key in ("host", "rtmp_port", "rtsp_port")):
+            return 0, 0
+        if not self._pipelines:
+            self._pipelines = discover_pipelines()
+            self._pipeline_map = {pipeline.name: pipeline for pipeline in self._pipelines}
+        moved = configs = 0
+        for pipeline in self._pipelines:
+            if pipeline.name not in _STREAM_PIPELINES or not os.path.isfile(pipeline.config_path):
+                continue
+            config = load_existing_config(pipeline.config_path)
+            streams = config.get("Streams") if isinstance(config, dict) else None
+            if not isinstance(streams, dict):
+                continue
+            changed = 0
+            for entry in streams.values():
+                if not isinstance(entry, dict):
+                    continue
+                for key in ("target", "read_target"):
+                    url = str(entry.get(key) or "").strip()
+                    repointed = repoint_stream_url(url, old, new) if url else url
+                    if repointed != url:
+                        entry[key] = repointed
+                        changed += 1
+            if not changed:
+                continue
+            with open(pipeline.config_path, "w", encoding="utf-8") as file:
+                yaml.safe_dump(config, file, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            moved += changed
+            configs += 1
+        if configs:
+            self._target_config_cache.clear()
+        return moved, configs
+
+    def _new_stream_values(self, name: str) -> dict[str, object]:
+        """a new stream opens on the Stream Server's URLs of <pipeline>/<name>, so
+        the address typed once under System Settings is not typed again. With a
+        loopback address there, only the path is filled in: whether localhost is
+        right depends on the capture host, which Save looks at."""
+        pipeline = self._current_pipeline
+        app = pipeline.name.split()[0].lower() if pipeline is not None else "stream"
+        path = f"{app}/{safe_segment(name, 'stream')}"
+        server = self._stream_server_address()
+        if is_loopback_host(server.get("host")):
+            return {f"Streams.{name}.target": path}
+        publish, pull = stream_server_urls(server, path)
+        return {f"Streams.{name}.target": publish, f"Streams.{name}.read_target": pull}
 
     def _cancel_add_stream(self) -> None:
         self._restore_add_stream_button()
@@ -4951,6 +5082,7 @@ class ServicePanel(Widget):
         pipeline: PipelineDef,
         fields: list[LoaderFieldDef],
         values: dict,
+        note: str = "",
     ) -> None:
         target = self._get_panel_target()
         if target == "local":
@@ -4958,7 +5090,7 @@ class ServicePanel(Widget):
             self._target_config_cache[self._config_cache_key(pipeline.config_path, "local")] = (
                 load_existing_config(pipeline.config_path)
             )
-            self._show_status(f"Saved locally to {pipeline.config_path}")
+            self._show_status(f"Saved locally to {pipeline.config_path}{note}")
             return
 
         profile = get_profile_by_name(target)
@@ -4988,6 +5120,7 @@ class ServicePanel(Widget):
                 cleanup_local=True,
                 cache_key=cache_key,
                 cache_config=cache_config,
+                note=note,
             ),
             exclusive=True,
         )
@@ -5628,6 +5761,7 @@ class ServicePanel(Widget):
         cleanup_local: bool = False,
         cache_key: tuple[str, str] | None = None,
         cache_config: dict | None = None,
+        note: str = "",
     ) -> None:
         profile = get_profile_by_name(profile_name)
         if profile is None:
@@ -5647,7 +5781,7 @@ class ServicePanel(Widget):
                 if cache_key is not None and cache_config is not None:
                     self._target_config_cache[cache_key] = cache_config
                     self._refresh_service_cards()
-                self._show_status(f"Saved to {profile_name}:{remote_path}")
+                self._show_status(f"Saved to {profile_name}:{remote_path}{note}")
                 await self._maybe_push_master_key(profile, local_path)
             else:
                 self._show_status(f"Save failed: {output.strip()}")

@@ -72,6 +72,8 @@ Streams are declared once per pipeline under `Streams` in `pipelines/<pipeline>-
 | `format`, `rate`, `channels` | audio sample format (`s16le`), rate (`16000`) and channels (`1`) |
 | `record`, `record_root` | also record on the capture host, see [Recording](#recording) |
 
+The address of the stream server is typed once, under **System Settings → Connections → Stream Server (MediaMTX)**. In the Config tab of a pipeline, `target` takes the path alone (`ips/cam-1`): **Save** completes it to `rtmp://<stream-server>:<rtmp_port>/ips/cam-1` and fills an empty `read_target` with `rtsp://<stream-server>:<rtsp_port>/ips/cam-1`, and **+ Add Stream** opens a new entry on those two URLs. The config file always holds the full URLs, which is what the bases and FFmpeg read; a full URL typed by hand is kept as written. While the Stream Server is `localhost`, a path is not completed for a stream captured on another machine (that machine would publish to itself): put the server's name under System Settings first. When the Stream Server is saved with another host or port, the stream URLs of the local pipeline configs that named the old address follow it; URLs that point elsewhere are left alone, and **Sync to Remote** on the pipeline's Config tab takes the change to another host.
+
 The commands the Streams tab runs, and what to run by hand on a device without SSH access:
 
 ```bash

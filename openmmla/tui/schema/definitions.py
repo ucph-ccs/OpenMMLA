@@ -126,14 +126,15 @@ SHARED_SECTIONS = {
         },
     },
     # a section of its own: the stream server need not share a machine with the
-    # load balancer. Only the console reads it (where the MediaMTX card runs and
-    # what it probes); streams and bases use the full URLs of their Streams
-    # entries, so it is not copied into the pipeline configs
+    # load balancer. Only the console reads it (where the MediaMTX card runs,
+    # what it probes, and what completes a stream written as a bare path);
+    # streams and bases use the full URLs of their Streams entries, so it is
+    # not copied into the pipeline configs
     "StreamServer": {
         "label": "Stream Server (MediaMTX)",
         "fields": {
             "host": {
-                "description": "Host MediaMTX runs on: the machine in the rtmp:// and rtsp:// URLs of the Streams entries (e.g. localhost)",
+                "description": "Host MediaMTX runs on, by the name cameras and bases on other machines reach it (localhost only when everything runs here). A stream written as a path (ips/cam-1) is completed with it",
                 "field_type": "str",
                 "default": "localhost",
             },
