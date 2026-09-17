@@ -6,7 +6,7 @@ MediaMTX replaced the Nginx RTMP module. The `rtmp://` push from the devices is 
 
 ## Server: MediaMTX
 
-All ports are on the **Gateway** host of **System Settings → Connections → Gateway** in the TUI:
+All ports are on the host of **System Settings → Connections → Stream Server (MediaMTX)** in the TUI, which need not be the machine that runs Nginx:
 
 | Port | Setting | Used for |
 |---|---|---|
@@ -145,7 +145,7 @@ To replay such a file through a pipeline, name it `<prefix>_<unix start time>.mp
 
 ## Troubleshooting
 
-1. **Nothing in `/v3/paths/list`** while the device shows a running ffmpeg: the gateway host or port 1935 is not reachable from the device; check `Gateway.host` in System Settings and the server firewall (macOS: System Settings → Privacy & Security → Firewall).
+1. **Nothing in `/v3/paths/list`** while the device shows a running ffmpeg: the MediaMTX host or port 1935 is not reachable from the device; check the host in the stream's `target` URL (and `StreamServer.host` in System Settings, which the MediaMTX card uses) and the server firewall (macOS: System Settings → Privacy & Security → Firewall).
 2. **The Streams tab says Running but the base gets no frames**: press **Probe**, which decodes two seconds of the read URL with ffmpeg on this machine; the error text is the server's answer.
 3. **Grey or torn frames**: the reader chose UDP transport; the bases default to TCP, keep `rtsp_transport;tcp` in the capture options.
 4. **Delay grows over the session**: the RTMP push over Wi-Fi is buffering; publish with SRT instead, or move the Pi to Ethernet.

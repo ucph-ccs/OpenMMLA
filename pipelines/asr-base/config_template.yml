@@ -138,10 +138,8 @@ Redis:
 # (composed against this gateway, e.g. 'infer' -> {scheme}://{host}:{http_port}/infer)
 # or as a full URL (used as-is, bypassing the gateway for a direct connection).
 Gateway:
-  host: <gateway-host>      # gateway host, e.g. uber-server.local (nginx + MediaMTX)
+  host: <gateway-host>      # nginx load balancer host, e.g. uber-server.local
   http_port: 8080           # nginx HTTP reverse-proxy port
-  rtmp_port: 1935           # MediaMTX RTMP port that cameras and microphones publish to
-  rtsp_port: 8554           # MediaMTX RTSP port that bases pull streams from
   scheme: http              # http or https
 
 # Server settings

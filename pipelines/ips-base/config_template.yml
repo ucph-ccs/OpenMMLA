@@ -137,10 +137,8 @@ Redis:
 # Shared entry point that bases connect to: nginx for the AI services, MediaMTX
 # for the streams. Stream URLs in Streams are used as-is.
 Gateway:
-  host: <gateway-host>      # gateway host, e.g. uber-server.local (nginx + MediaMTX)
+  host: <gateway-host>      # nginx load balancer host, e.g. uber-server.local
   http_port: 8080           # nginx HTTP reverse-proxy port
-  rtmp_port: 1935           # MediaMTX RTMP port that cameras and microphones publish to
-  rtsp_port: 8554           # MediaMTX RTSP port that bases pull streams from
   scheme: http              # http or https
 
 Cameras:

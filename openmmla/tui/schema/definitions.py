@@ -106,10 +106,10 @@ SHARED_SECTIONS = {
         },
     },
     "Gateway": {
-        "label": "Gateway (Nginx + MediaMTX)",
+        "label": "Gateway (Nginx)",
         "fields": {
             "host": {
-                "description": "Gateway host that bases and streams connect to: Nginx for the AI services, MediaMTX for streams (e.g. localhost)",
+                "description": "Host of the Nginx load balancer that the bases reach the AI services through (e.g. localhost)",
                 "field_type": "str",
                 "default": "localhost",
             },
@@ -117,6 +117,25 @@ SHARED_SECTIONS = {
                 "description": "Nginx HTTP reverse-proxy port (default 8080)",
                 "field_type": "int",
                 "default": 8080,
+            },
+            "scheme": {
+                "description": "URL scheme for HTTP services (http or https)",
+                "field_type": "str",
+                "default": "http",
+            },
+        },
+    },
+    # a section of its own: the stream server need not share a machine with the
+    # load balancer. Only the console reads it (where the MediaMTX card runs and
+    # what it probes); streams and bases use the full URLs of their Streams
+    # entries, so it is not copied into the pipeline configs
+    "StreamServer": {
+        "label": "Stream Server (MediaMTX)",
+        "fields": {
+            "host": {
+                "description": "Host MediaMTX runs on: the machine in the rtmp:// and rtsp:// URLs of the Streams entries (e.g. localhost)",
+                "field_type": "str",
+                "default": "localhost",
             },
             "rtmp_port": {
                 "description": "MediaMTX RTMP port that cameras and microphones publish to (default 1935)",
@@ -128,14 +147,13 @@ SHARED_SECTIONS = {
                 "field_type": "int",
                 "default": 8554,
             },
-            "scheme": {
-                "description": "URL scheme for HTTP services (http or https)",
-                "field_type": "str",
-                "default": "http",
-            },
         },
     },
 }
+
+# sections only the console itself reads: nothing to copy to another machine's
+# pipeline configs
+CONSOLE_ONLY_SECTIONS = frozenset({"Sudo", "StreamServer"})
 
 
 SHARED_SECTION_NAMES = set(SHARED_SECTIONS.keys())

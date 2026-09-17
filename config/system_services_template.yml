@@ -26,9 +26,12 @@ Dashboard:
   host: <uber-server>                 # where make flask runs; the Status tab probes host:port
   port: 5050
 Gateway:
-  host: <uber-server>                 # nginx entry point for AI services (http_port) and streams (rtmp_port)
+  host: <uber-server>                 # nginx load balancer the bases reach the AI services through
   http_port: 8080
-  rtmp_port: 1935
   scheme: http
+StreamServer:
+  host: <uber-server>                 # MediaMTX; may be another machine than the gateway. Read by the console only
+  rtmp_port: 1935
+  rtsp_port: 8554
 Sudo:
   password: <local-sudo-password>     # only used on this machine for native service starts; encrypted on save

@@ -35,7 +35,7 @@ from openmmla.tui.schema.loader import (
     load_streams, streams_from_config,
 )
 from openmmla.tui.schema.definitions import (
-    SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
+    CONSOLE_ONLY_SECTIONS, SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
 )
 from openmmla.tui.system_services import (
     SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
@@ -120,7 +120,7 @@ _SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Hosts", ("SSH Profiles",)),
     ("Study", ("Experiments", "Tasks")),
     # the order of the System Services cards below them
-    ("Connections", ("InfluxDB", "MongoDB", "Redis", "MQTT", "Gateway", "Dashboard")),
+    ("Connections", ("InfluxDB", "MongoDB", "Redis", "MQTT", "Gateway", "StreamServer", "Dashboard")),
     ("Credentials", ("Sudo",)),
 )
 _SYSTEM_SERVICES_LABEL = "System Settings"
@@ -2026,7 +2026,7 @@ _SERVICE_HOST_FIELDS: dict[str, str] = {
     "redis": "Redis.host",
     "mosquitto": "MQTT.host",
     "nginx": "Gateway.host",
-    "mediamtx": "Gateway.host",
+    "mediamtx": "StreamServer.host",
     "flask": "Dashboard.host",
     "celery": "Dashboard.host",
 }
@@ -2040,6 +2040,7 @@ _LOCAL_SETTINGS_NOTES: dict[str, str] = {
     "__experiments__": "Local  (a session takes its participants to every host through MongoDB)",
     "__tasks__": "Local  (task definitions are read by this console only)",
     "__shared__Sudo": "Local  (this machine's admin password; a remote host uses its SSH profile's)",
+    "__shared__StreamServer": "Local  (read by this console only: where the MediaMTX card runs and what it probes)",
 }
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
 
@@ -4353,9 +4354,10 @@ class ServicePanel(Widget):
             return
         for old in container.query(".sync-bar, .sync-note"):
             old.remove()
-        if shared_section == "Sudo":
-            # this machine's own admin password: no pipeline config carries it,
-            # and another machine has no use for it
+        if shared_section in CONSOLE_ONLY_SECTIONS:
+            # read by this console only (the admin password of this machine,
+            # where MediaMTX runs): no pipeline config carries it, and another
+            # machine has no use for it
             return
         if shared_section is not None and self._settings_host(shared_section) != "local":
             # the form shows that machine's settings and Save writes them there
@@ -4995,7 +4997,7 @@ class ServicePanel(Widget):
             return None
         updated = dict(remote_store)
         for name, data in sections.items():
-            if name != "Sudo":
+            if name not in CONSOLE_ONLY_SECTIONS:
                 updated[name] = dict(data)
         if updated == remote_store:
             return None
@@ -5020,7 +5022,7 @@ class ServicePanel(Widget):
         if isinstance(remote_store, dict):
             for name in SHARED_SECTION_NAMES:
                 data = remote_store.get(name)
-                if name != "Sudo" and isinstance(data, dict) and data:
+                if name not in CONSOLE_ONLY_SECTIONS and isinstance(data, dict) and data:
                     reference[name] = data
         return reference
 
@@ -5065,8 +5067,8 @@ class ServicePanel(Widget):
         result: dict[str, dict] = {}
         if isinstance(stored, dict):
             for name in SHARED_SECTION_NAMES:
-                if name == "Sudo":
-                    continue  # local credential; never synced into pipeline configs
+                if name in CONSOLE_ONLY_SECTIONS:
+                    continue  # read by this console only; never synced into pipeline configs
                 data = stored.get(name)
                 if isinstance(data, dict) and data:
                     result[name] = data

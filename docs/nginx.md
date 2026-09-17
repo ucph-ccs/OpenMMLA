@@ -2,7 +2,7 @@
 
 Nginx is optional. It is the **load balancer** in front of the ASR and VFA AI services: one HTTP entry point (port 8080 by default) so base stations only need the gateway address and requests can be spread over several servers.
 
-Streams no longer go through Nginx: cameras and microphones publish to [MediaMTX](rtmp_streaming.md), which shares the gateway host. The gateway address is set once under **System Settings → Gateway** in the TUI (`host`, `http_port`, `rtmp_port`, `rtsp_port`, `scheme`) and synced into every pipeline config.
+Streams no longer go through Nginx: cameras and microphones publish to [MediaMTX](rtmp_streaming.md), which has an address of its own and may run on another machine. The Nginx address is set once under **System Settings → Connections → Gateway (Nginx)** in the TUI (`host`, `http_port`, `scheme`) and synced into every pipeline config.
 
 ## Installation
 

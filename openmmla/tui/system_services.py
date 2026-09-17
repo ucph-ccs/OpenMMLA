@@ -109,10 +109,23 @@ def flat_values_to_config(values: dict[str, object]) -> dict[str, Any]:
     return config
 
 
+def stream_server_section(config: dict[str, Any]) -> dict[str, Any]:
+    """the StreamServer section of a settings store. A store written before
+    MediaMTX had a section of its own keeps its host and ports under Gateway
+    (one machine for both): that is what it meant, so that is what it yields."""
+    section = config.get("StreamServer") if isinstance(config, dict) else None
+    if isinstance(section, dict) and section:
+        return section
+    gateway = config.get("Gateway") if isinstance(config, dict) else None
+    if not isinstance(gateway, dict):
+        return {}
+    return {key: gateway[key] for key in ("host", "rtmp_port", "rtsp_port") if gateway.get(key) is not None}
+
+
 def config_to_flat_values(config: dict[str, Any], *, include_defaults: bool = True) -> dict[str, object]:
     values = get_shared_defaults() if include_defaults else {}
     for section_name, info in SHARED_SECTIONS.items():
-        section = config.get(section_name)
+        section = stream_server_section(config) if section_name == "StreamServer" else config.get(section_name)
         if not isinstance(section, dict):
             continue
         for key, field in info.get("fields", {}).items():
@@ -147,7 +160,7 @@ def harvest_system_services_from_configs(configs: list[dict]) -> dict[str, objec
         if not isinstance(config, dict):
             continue
         for section_name, info in SHARED_SECTIONS.items():
-            section = config.get(section_name)
+            section = stream_server_section(config) if section_name == "StreamServer" else config.get(section_name)
             if not isinstance(section, dict):
                 continue
             for key in info.get("fields", {}):
@@ -229,15 +242,15 @@ SYSTEM_SERVICE_DEFAULT_PORTS: dict[str, int] = {
 # sidebar, the Status tab, the log), keyed by make target: "Role (Product)",
 # where the role is the System Settings → Connections section that holds its
 # address. The Connections forms are labelled the same way in
-# schema/definitions.py, so "Gateway (Nginx)" visibly belongs to "Gateway (Nginx
-# + MediaMTX)" and nobody has to know that Mosquitto is the MQTT broker
+# schema/definitions.py, so a card and the form with its address share a name
+# and nobody has to know that Mosquitto is the MQTT broker
 SYSTEM_SERVICE_LABELS: dict[str, str] = {
     "influxdb": "InfluxDB",
     "mongodb": "MongoDB",
     "redis": "Redis",
     "mosquitto": "MQTT (Mosquitto)",
     "nginx": "Gateway (Nginx)",
-    "mediamtx": "Gateway (MediaMTX)",
+    "mediamtx": "Stream Server (MediaMTX)",
     "flask": "Dashboard (Flask)",
     "celery": "Dashboard (Celery)",
 }
@@ -375,7 +388,8 @@ def system_service_endpoint(root: str | os.PathLike[str], target: str) -> tuple[
     elif target == "mosquitto":
         host, port = section("MQTT").get("host"), section("MQTT").get("port")
     elif target == "mediamtx":
-        host, port = section("Gateway").get("host"), section("Gateway").get("rtmp_port")
+        stream_server = stream_server_section(config)
+        host, port = stream_server.get("host"), stream_server.get("rtmp_port")
     else:
         host, port = section("Gateway").get("host"), section("Gateway").get("http_port")
     host = str(host or "").strip()
@@ -412,10 +426,10 @@ def system_service_probe_ports(root: str | os.PathLike[str], target: str) -> lis
     ports = [endpoint[1]]
     if target == "mediamtx":
         try:
-            gateway = (load_system_services_config(root) or {}).get("Gateway")
+            stream_server = stream_server_section(load_system_services_config(root) or {})
         except Exception:
-            gateway = None
-        rtsp = gateway.get("rtsp_port") if isinstance(gateway, dict) else None
+            stream_server = {}
+        rtsp = stream_server.get("rtsp_port")
         try:
             rtsp = int(rtsp)
         except (TypeError, ValueError):
