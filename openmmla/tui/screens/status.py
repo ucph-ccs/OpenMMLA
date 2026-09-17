@@ -27,14 +27,10 @@ KNOWN_SERVICES = [
     {"name": SYSTEM_SERVICE_LABELS["nginx"], "port": 8080, "type": "system", "target": "nginx"},
     {"name": SYSTEM_SERVICE_LABELS["mediamtx"], "port": 1935, "type": "system", "target": "mediamtx"},
     {"name": SYSTEM_SERVICE_LABELS["flask"], "port": 5050, "type": "tmux", "session": "flask", "target": "flask"},
-    {"name": SYSTEM_SERVICE_LABELS["celery"], "port": None, "type": "tmux", "session": "celery"},
-    {"name": "AudioInferer", "port": 5001, "type": "tmux", "session": "audioinferer"},
-    {"name": "AudioResampler", "port": 5002, "type": "tmux", "session": "audioresampler"},
-    {"name": "SpeechEnhancer", "port": 5003, "type": "tmux", "session": "speechenhancer"},
-    {"name": "SpeechSeparator", "port": 5004, "type": "tmux", "session": "speechseparator"},
-    {"name": "SpeechTranscriber", "port": 5005, "type": "tmux", "session": "speechtranscriber"},
-    {"name": "VoiceActivityDetector", "port": 5006, "type": "tmux", "session": "voiceactivitydetector"},
+    {"name": SYSTEM_SERVICE_LABELS["celery"], "port": None, "type": "tmux", "session": "celery", "target": "celery"},
 ]
+# the ASR / VFA servers and the MLLM server are not in this list: the Launcher
+# knows which host each of them was put on, and status_rows() asks it
 
 
 def _check_port(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
@@ -166,9 +162,14 @@ class StatusPanel(Widget):
     def __init__(self) -> None:
         super().__init__()
         self._tmux_sessions: dict[str, str] = {}
-        self._selected_row: tuple[str, str, str, str] | None = None  # (name, host, status, session)
+        self._selected_row: tuple[str, str, str, str] | None = None  # (name, host, status, tmux session)
+        # row key -> tmux session name, for View Logs (the cell shows more than the name)
+        self._row_sessions: dict = {}
         self._ssh_profiles: list[SSHProfile] = []
         self._summary_text: str = ""
+        # a stopped service gets a row only when System Settings put it on a
+        # named machine (its being down matters); "Show all" lists the rest
+        self._show_all: bool = False
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -178,11 +179,14 @@ class StatusPanel(Widget):
             with Horizontal(id="status-actions"):
                 yield Button("Refresh", variant="primary", id="btn-refresh")
                 yield Button("View Logs", variant="default", id="btn-view-logs")
+                yield Button("Show all", variant="default", id="btn-show-all")
             yield RichLog(id="log-panel", highlight=True, markup=True)
 
     def on_mount(self) -> None:
         table = self.query_one("#status-table", DataTable)
-        table.add_columns("Service", "Host", "Status", "Port", "Session", "Started")
+        # "tmux", not "Session": a session is a recording everywhere else in the
+        # console, and this column is only the tmux session a service runs in
+        table.add_columns("Service", "Host", "Status", "Port", "tmux")
         table.cursor_type = "row"
         self._is_visible = False
         self._schedule_refresh()
@@ -211,27 +215,80 @@ class StatusPanel(Widget):
             exclusive=True,
         )
 
+    def _launcher(self):
+        """the Launcher panel of this console, which knows every service's host."""
+        try:
+            from openmmla.tui.screens.launcher import ServicePanel
+            return self.app.query_one(ServicePanel)
+        except Exception:
+            return None
+
     async def _async_refresh_status(self, include_remote: bool) -> None:
-        tmux_sessions, profiles, rows, running_count, port_count = await asyncio.to_thread(
-            self._gather_local_status
-        )
+        launcher = self._launcher()
+        if launcher is not None:
+            tmux_sessions, profiles, rows, running_count, hidden = await asyncio.to_thread(
+                self._gather_launcher_status, launcher, include_remote, self._show_all
+            )
+            summary_text = f"Services: {running_count} running"
+            if hidden:
+                summary_text += f" · {hidden} stopped (Show all)"
+        else:
+            tmux_sessions, profiles, rows, running_count, port_count = await asyncio.to_thread(
+                self._gather_local_status
+            )
+            summary_text = f"Services: {running_count} running | Ports: {port_count} active"
         self._tmux_sessions = tmux_sessions
         self._ssh_profiles = profiles
 
         table = self.query_one("#status-table", DataTable)
         table.clear()
+        self._row_sessions.clear()
         for row in rows:
-            table.add_row(*row)
+            self._add_row(table, *row)
 
-        self._summary_text = (
-            f"Services: {running_count} running | Ports: {port_count} active | "
-            f"tmux: {len(tmux_sessions)} | SSH profiles: {len(profiles)}"
-        )
+        self._summary_text = f"{summary_text} | tmux: {len(tmux_sessions)} | SSH profiles: {len(profiles)}"
         summary = self.query_one("#status-summary", Static)
         summary.update(self._summary_text)
 
         if include_remote and profiles:
             self.run_worker(self._refresh_remote_status(), exclusive=True)
+
+    @staticmethod
+    def _gather_launcher_status(launcher, use_ssh: bool, show_all: bool) -> tuple[dict, list, list[tuple], int, int]:
+        """rows from the Launcher's own picture of the deployment (worker thread):
+        each service on the host its card is on, probed like its sidebar marker."""
+        tmux_sessions = _list_tmux_sessions()
+        profiles = load_ssh_profiles()
+        rows: list[tuple] = []
+        running_count = hidden = 0
+        listed_sessions: set[str] = set()
+        # the system services first, in the order of the Launcher's tree
+        entries = sorted(launcher.status_rows(use_ssh=use_ssh), key=lambda entry: not entry["make_target"])
+        for entry in entries:
+            running, counts = entry["running"], entry["counts"]
+            if entry["session"]:
+                listed_sessions.add(entry["session"])
+            if running:
+                running_count += 1
+            elif not (entry["placed"] or show_all):
+                hidden += 1
+                continue
+            if running is None:
+                status = "? (Refresh)"  # its host is only asked on a Refresh
+            elif counts is not None:
+                status = f"Running {counts[0]}/{counts[1]}" if counts[0] else "Stopped"
+            else:
+                status = "Running" if running else "Stopped"
+            session = entry["session"]
+            started = tmux_sessions.get(session, "-") if session and entry["target"] == "local" else "-"
+            rows.append((entry["name"], entry["host"], status, entry["port"], session or "-", started))
+
+        for session_name in sorted(set(tmux_sessions) - listed_sessions):
+            if session_name in ("asr-services", "vfa-services"):
+                continue
+            rows.append((f"[tmux] {session_name}", "local", "Running", "-", session_name, tmux_sessions[session_name]))
+            running_count += 1
+        return tmux_sessions, profiles, rows, running_count, hidden
 
     @staticmethod
     def _gather_local_status() -> tuple[dict[str, str], list, list[tuple], int, int]:
@@ -311,6 +368,7 @@ class StatusPanel(Widget):
             else:
                 log.write(f"[yellow]Skipping '{profile.name}' ({profile.host}): SSH port unreachable.[/yellow]")
 
+        shown = {(str(table.get_row(key)[0]), str(table.get_row(key)[1])) for key in table.rows}
         for profile in reachable:
             from openmmla.tui.ssh import TARGET_PLATFORMS
             if TARGET_PLATFORMS.get(profile.name) == "windows":
@@ -352,7 +410,7 @@ class StatusPanel(Widget):
                 else:
                     r_up = r_session_ok or r_port_ok
 
-                if not r_up:
+                if not r_up or (svc["name"], profile.name) in shown:
                     continue
 
                 if svc["type"] == "system":
@@ -361,10 +419,7 @@ class StatusPanel(Widget):
                     port_str = str(eport)
                 else:
                     port_str = str(port) if port else "-"
-                session_str = session if session else "-"
-                table.add_row(
-                    svc["name"], profile.name, "Running", port_str, session_str, "-",
-                )
+                self._add_row(table, svc["name"], profile.name, "Running", port_str, session or "-", "-")
                 added += 1
 
         if added > 0:
@@ -372,10 +427,30 @@ class StatusPanel(Widget):
             summary.update(f"{self._summary_text} (+{added} remote)")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-refresh":
+        if event.button.id == "btn-show-all":
+            self._show_all = not self._show_all
+            event.button.label = "Running only" if self._show_all else "Show all"
+            self._refresh_status(include_remote=False)
+        elif event.button.id == "btn-refresh":
             self._refresh_status(include_remote=True)
         elif event.button.id == "btn-view-logs":
             self._view_selected_logs()
+
+    def _add_row(self, table: DataTable, name: str, host: str, status: str, port: str,
+                 session: str, started: str) -> None:
+        """one table row. The last column says which tmux session a service
+        runs in and since when; services that are brew, systemd or docker
+        processes have none and show "-"."""
+        session = "" if session == "-" else session
+        if not session:
+            shown = "-"
+        elif started and started != "-":
+            # "2026-09-17 13:40:12" -> "09-17 13:40"
+            shown = f"{session} · since {started[5:16]}"
+        else:
+            shown = session
+        key = table.add_row(name, host, status, port, shown)
+        self._row_sessions[key] = session
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         table = self.query_one("#status-table", DataTable)
@@ -385,7 +460,7 @@ class StatusPanel(Widget):
             name = str(row_data[0])
             host = str(row_data[1])
             status = str(row_data[2])
-            session = str(row_data[4]) if row_data[4] and row_data[4] != "-" else ""
+            session = self._row_sessions.get(row_key, "")
             self._selected_row = (name, host, status, session)
         except Exception:
             self._selected_row = None
@@ -407,6 +482,9 @@ class StatusPanel(Widget):
         svc_type = svc_def["type"] if svc_def else ("tmux" if session else "unknown")
         svc_key = svc_def.get("target", "") if svc_def and svc_type == "system" else ""
 
+        # from here on the name is only printed: "[tmux] x" would read as markup
+        from rich.markup import escape
+        name = escape(name)
         if host == "local" or (svc_type == "system" and is_this_machine(host)):
             self._view_logs_local(log, name, svc_type, svc_key, session)
         else:
@@ -425,7 +503,7 @@ class StatusPanel(Widget):
             for line in output.splitlines():
                 log.write(line)
         else:
-            log.write(f"[yellow]No logs available for {name}[/yellow]")
+            log.write(f"[yellow]No logs here for {name}: open its card in the Launcher and press Logs.[/yellow]")
 
     def _view_logs_remote(self, log: RichLog, name: str, host: str, svc_type: str, svc_key: str, session: str) -> None:
         profile = get_profile_by_name(host) or _profile_for_host(host)

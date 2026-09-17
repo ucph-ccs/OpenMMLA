@@ -45,6 +45,7 @@ from openmmla.tui.system_services import (
     is_loopback_host,
     system_service_endpoint,
     system_service_port_conflict,
+    system_service_probe_ports,
     system_service_reachable,
     target_for_service_host,
     config_to_flat_values,
@@ -6395,6 +6396,65 @@ class ServicePanel(Widget):
         if target == "local":
             return self._detect_running(svc), None
         return self._detect_running_remote(svc, target), None
+
+    def _status_needs_ssh(self, svc: ServiceDef, node: NodeHost) -> bool:
+        """whether this node's state can only be had by logging into its host
+        (an address that names a machine is probed from here instead)."""
+        if node.target == "local":
+            return False
+        if svc.launch_type != "make" or not node.machine_target:
+            return True
+        make_target = _make_target_for(svc.name)
+        return not (make_target in _SYSTEM_SVC_PORTS or make_target == "flask")
+
+    def status_rows(self, use_ssh: bool = True) -> list[dict]:
+        """what the Status tab lists: every service the console can start, on
+        its own host and probed the way its sidebar marker is, so the two tabs
+        cannot disagree. Runs in a worker thread.
+
+        Without `use_ssh` (the tab's five-second refresh) a node that can only
+        be asked over ssh keeps the state of the last full pass; `running` is
+        None when it has never been asked."""
+        rows: list[dict] = []
+        profiles = load_ssh_profiles()
+        memo: dict[str, tuple] = self.__dict__.setdefault("_status_memo", {})
+        for svc in self._services:
+            if svc.launch_type == "bash":
+                continue  # interactive: lives in its own terminal, nothing to probe
+            node = self._resolve_node_host(svc, profiles)
+            if use_ssh or not self._status_needs_ssh(svc, node):
+                running, counts = self._detect_node_status(svc, node)
+                memo[svc.name] = (node.target, running, counts)
+                self._svc_states[svc.name] = running
+            else:
+                known = memo.get(svc.name)
+                running, counts = (known[1], known[2]) if known and known[0] == node.target else (None, None)
+
+            port, session, make_target = "-", "", ""
+            if svc.launch_type == "make":
+                make_target = _make_target_for(svc.name)
+                ports = system_service_probe_ports(self._root, "flask" if make_target == "celery" else make_target)
+                port = "/".join(str(p) for p in ports) if make_target != "celery" and ports else "-"
+                session = make_target if make_target in ("flask", "celery") else ""
+            elif svc.launch_type == "vllm":
+                port = str(_mllm_config(self._root)["port"])
+                session = _service_session_name(svc)
+            rows.append({
+                "name": svc.display_name,
+                "key": svc.name,
+                "make_target": make_target,
+                # the machine as System Settings write it, else the card's host
+                "host": node.machine or ("local" if node.target == "local" else node.target),
+                "target": node.target,
+                # placed by System Settings on a named machine: part of the
+                # deployment, so its being down is worth a row of its own
+                "placed": bool(node.follows),
+                "running": running,
+                "counts": counts,
+                "port": port,
+                "session": session,
+            })
+        return rows
 
     def _detect_running_remote(self, svc: ServiceDef, profile_name: str) -> bool:
         """check if a service is running on a remote host via SSH."""
