@@ -2586,6 +2586,9 @@ class ServicePanel(Widget):
         # reaches a machine even when it is currently unreachable
         self._collection_launch_targets: dict[str, set[str]] = {}
         self._pending_collection_delete: tuple[str, str] | None = None
+        # (host, session id) of a Start that was held back because the session
+        # has ended; the second press on the same pair goes ahead
+        self._pending_ended_start: tuple[str, str] | None = None
         # (target, session, host) keys of downloads already running, so a second
         # press — or the other collection tab's Download — is refused instead of
         # racing the first one into the same staging directory
@@ -5607,6 +5610,9 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
                 return
 
+        if svc.launch_type == "collection" and not self._confirm_start_into_ended_session(event.params, target):
+            return
+
         launch_params = dict(event.params)
         if not self._ensure_pipeline_session_for_launch(svc, launch_params, target=target):
             self._log("[red]Could not resolve a launch session id.[/red]")
@@ -6050,7 +6056,7 @@ class ServicePanel(Widget):
             )
         else:
             self._log(f"[red]Remote collection stop failed (exit {rc}).[/red]")
-        await self._mark_session_ended(session_id, profile_name)
+        await self._end_session_unless_still_recording(session_id, profile_name)
         await self._reload_current_service_view()
 
     async def _run_collection_local_stop(self, session_id: str) -> None:
@@ -6062,8 +6068,40 @@ class ServicePanel(Widget):
             self._log(f"[green]Stop command completed for collection session '{session_id}'.[/green]")
         else:
             self._log(f"[yellow]Collection stop command finished with warnings (exit {rc}).[/yellow]")
-        await self._mark_session_ended(session_id, "local")
+        await self._end_session_unless_still_recording(session_id, "local")
         await self._reload_current_service_view()
+
+    def _hosts_still_recording(self, session_id: str, stopped: str) -> list[str]:
+        """the other hosts this console started the session on (and this
+        machine) where one of its recorders is still alive. Asks each of them
+        for its processes, so it runs off the event loop."""
+        candidates = {"local", *self._collection_launch_targets.get(session_id, set())} - {stopped}
+        busy = []
+        for host in sorted(candidates):
+            if host == "local":
+                recorders = _collection_recorders_local()
+            else:
+                profile = get_profile_by_name(host)
+                if (profile is None or self._target_states.get(host) == "offline"
+                        or TARGET_PLATFORMS.get(host) == "windows"):
+                    continue
+                recorders = _collection_recorders_remote(profile)
+            if any(session == session_id for _, session, _ in recorders):
+                busy.append("this machine" if host == "local" else f"'{host}'")
+        return busy
+
+    async def _end_session_unless_still_recording(self, session_id: str, stopped: str) -> None:
+        """Stop on one host: the session as a whole has only ended when no
+        other host is still recording it. It used to be marked ended at the
+        first Stop, in the middle of a recording that went on elsewhere."""
+        busy = await asyncio.to_thread(self._hosts_still_recording, session_id, stopped)
+        if busy:
+            self._log(
+                f"[yellow]Session '{session_id}' is still being recorded on {', '.join(busy)}: not marked "
+                f"ended. Stop All Hosts ends it everywhere.[/yellow]"
+            )
+            return
+        await self._mark_session_ended(session_id, stopped)
 
     def _collection_stop_targets(self, session_id: str) -> list[str]:
         """every host that could still be recording this session.
@@ -6081,6 +6119,8 @@ class ServicePanel(Widget):
                 continue
             if self._target_states.get(profile.name) == "offline":
                 continue
+            if TARGET_PLATFORMS.get(profile.name) == "windows":
+                continue  # no recorder can run there, and no bash to stop one with
             targets.append(profile.name)
         return targets
 
@@ -7076,6 +7116,19 @@ class ServicePanel(Widget):
                 client.admin.command("ping")
                 sessions = client[db_name]["sessions"]
                 sessions.create_index([("session_id", ASCENDING)], unique=True)
+                # the id this console was recording under is lost with a
+                # restart, and another console never had it: say so before a
+                # live session is split in two
+                running = sessions.find_one(
+                    {"experiment_id": exp_id, "group_id": group_id, "status": "active"},
+                    sort=[("start_time", -1)],
+                )
+                if running and running.get("session_id") != session_id:
+                    self._log(
+                        f"[yellow]{exp_id}/{group_id} already has an active session, "
+                        f"'{running.get('session_id')}'. A new one is created; to join that one, pick it "
+                        f"under Session ID instead.[/yellow]"
+                    )
                 sessions.insert_one({
                     "session_id": session_id,
                     "experiment_id": exp_id,
@@ -7163,10 +7216,143 @@ class ServicePanel(Widget):
     def _create_collection_mongodb_session(self, experiment_group: object, target: str = "local") -> str:
         return self._create_mongodb_session(experiment_group, target=target, created_by="tui_collection")
 
+    def _ensure_session_registered(self, session_id: str, experiment_group: object,
+                                   target: str, created_by: str) -> None:
+        """a launch under an existing session id: register it when MongoDB does
+        not know it (any more). The id may come from a list that is a few
+        seconds old, from artifacts on disk, or from a session another console
+        deleted; recording under it regardless left files that belong to no
+        session, which Stop then could not mark ended. Never blocks a launch."""
+        try:
+            mongo_config, _ = self._collection_mongodb_config(target)
+            from pymongo import MongoClient
+            from openmmla.utils.constants import MONGODB_DEFAULT_DB
+        except Exception:
+            return  # no config, no pymongo: nothing to check the id against
+        if not mongo_config:
+            return
+        db_name = str(mongo_config.get("db") or MONGODB_DEFAULT_DB)
+        try:
+            client = MongoClient(
+                str(mongo_config.get("url") or "").strip(),
+                serverSelectionTimeoutMS=1500, connectTimeoutMS=1500,
+            )
+            try:
+                sessions = client[db_name]["sessions"]
+                if sessions.find_one({"session_id": session_id}, {"_id": 1}) is not None:
+                    return
+                exp_id, group_id = self._parse_collection_experiment_group(experiment_group)
+                # the id names its experiment and group; the card may show another
+                if not exp_id or not group_id or not session_id.startswith(f"{exp_id}_{group_id}_"):
+                    self._log(
+                        f"[yellow]Session '{session_id}' is not registered in MongoDB, and the selected "
+                        f"Experiment Group is not the one it belongs to: not registered, it will only "
+                        f"show up through its artifacts.[/yellow]"
+                    )
+                    return
+                data = load_experiments(self._root)
+                sessions.insert_one({
+                    "session_id": session_id,
+                    "experiment_id": exp_id,
+                    "group_id": group_id,
+                    "participants": list(get_participant_aliases(exp_id, group_id, data).values()),
+                    "start_time": datetime.now(timezone.utc),
+                    "end_time": None,
+                    "status": "active",
+                    "metadata": {"created_by": created_by, "registered_again": True},
+                })
+            finally:
+                client.close()
+        except Exception as e:
+            self._log(f"[yellow]MongoDB unreachable ({e}); could not check session '{session_id}'.[/yellow]")
+            return
+        self._log(
+            f"[yellow]Session '{session_id}' was not in MongoDB (deleted, or created while it was "
+            f"down): registered it again for {exp_id}/{group_id}.[/yellow]"
+        )
+        self._invalidate_session_choice_cache()
+
+    def _session_record(self, session_id: str, target: str, update: dict | None = None) -> dict | None:
+        """the MongoDB document of a session (after `update`, a $set, when one
+        is given); None when there is none or MongoDB cannot be asked."""
+        try:
+            mongo_config, _ = self._collection_mongodb_config(target)
+            from pymongo import MongoClient
+            from openmmla.utils.constants import MONGODB_DEFAULT_DB
+        except Exception:
+            return None
+        if not mongo_config:
+            return None
+        try:
+            client = MongoClient(
+                str(mongo_config.get("url") or "").strip(),
+                serverSelectionTimeoutMS=1500, connectTimeoutMS=1500,
+            )
+            try:
+                sessions = client[str(mongo_config.get("db") or MONGODB_DEFAULT_DB)]["sessions"]
+                if update:
+                    sessions.update_one({"session_id": session_id}, {"$set": update})
+                return sessions.find_one({"session_id": session_id})
+            finally:
+                client.close()
+        except Exception:
+            return None
+
+    def _confirm_start_into_ended_session(self, params: dict, target: str) -> bool:
+        """hold a collection Start back when its session has already ended.
+
+        The session id follows the user from host to host, and it still does
+        after Stop All Hosts: the next Start, meant as a new take, would quietly
+        go into the finished session. The second press goes ahead and makes
+        the session active again."""
+        session_id = self._collection_session_id(params)
+        if not session_id:
+            return True  # "Create MongoDB Session"
+        record = self._session_record(session_id, target)
+        if not record or record.get("status") != "ended":
+            self._pending_ended_start = None
+            return True
+        if self._pending_ended_start == (target, session_id):
+            self._pending_ended_start = None
+            self._session_record(session_id, target, {"status": "active", "end_time": None})
+            self._log(f"[yellow]Recording into '{session_id}' again: it is active once more.[/yellow]")
+            return True
+        self._pending_ended_start = (target, session_id)
+        ended = record.get("end_time")
+        when = f" at {ended.strftime('%H:%M UTC')}" if isinstance(ended, datetime) else ""
+        self._log(
+            f"[yellow]Session '{session_id}' has ended{when}. Pick 'Create MongoDB Session' for a new "
+            f"take, or press Start again to record into it all the same.[/yellow]"
+        )
+        return False
+
+    def forget_session(self, session_id: str) -> None:
+        """a session was deleted in the Sessions tab: stop offering its id. The
+        cards kept it as their selection, so the next Start recorded into a
+        session MongoDB no longer had."""
+        session_id = _safe_session_id(session_id)
+        if not session_id:
+            return
+        if self._collection_sticky.get("--session-id") == session_id:
+            self._collection_sticky.pop("--session-id", None)
+        for key, params in list(self._collection_last_params.items()):
+            if self._collection_session_id(params) == session_id:
+                del self._collection_last_params[key]
+        self._collection_launch_targets.pop(session_id, None)
+        self._invalidate_session_choice_cache()
+        if self._current_service_name:
+            self.run_worker(
+                self._reload_current_service_view(capture=False),
+                group=_LAUNCHER_UI_WORKER_GROUP,
+                exclusive=True,
+            )
+
     def _ensure_collection_session_for_launch(self, params: dict, target: str = "local") -> bool:
         session_id = self._collection_session_id(params)
         if session_id:
             params["--session-id"] = session_id
+            self._ensure_session_registered(
+                session_id, params.get("--experiment-group"), target, "tui_collection")
             return True
         session_id = self._create_collection_mongodb_session(params.get("--experiment-group"), target=target)
         if not session_id:
@@ -7181,6 +7367,9 @@ class ServicePanel(Widget):
         session_id = "" if _is_new_collection_session_choice(raw_session) else _safe_session_id(raw_session)
         if session_id:
             params["-sid"] = session_id
+            self._ensure_session_registered(
+                session_id, params.get("--experiment-group"), target,
+                f"tui_{safe_segment(svc.artifact_pipeline, 'pipeline')}")
             return True
 
         session_id = self._create_mongodb_session(

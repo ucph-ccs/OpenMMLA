@@ -17,6 +17,7 @@ import yaml
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
+from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button, Select, Label
 
@@ -259,6 +260,18 @@ def _coerce_start_timestamp(value) -> float:
         return 0.0
 
 
+def _format_start_time(value) -> str:
+    """a session's start as the table shows it. MongoDB gives a datetime; a
+    session known only from its artifacts has the manifest's epoch seconds or
+    ISO text, which used to be printed raw (1789654864.817)."""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M UTC")
+    stamp = _coerce_start_timestamp(value)
+    if stamp > 0:
+        return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return str(value or "-")
+
+
 def _read_manifest(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -377,6 +390,15 @@ def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict
 
 
 class SessionsPanel(Widget):
+
+    class SessionDeleted(Message):
+        """a session's database records were deleted here: the Launcher must
+        stop offering its id, or the next recording goes to a session MongoDB
+        no longer knows."""
+
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
 
     DEFAULT_CSS = """
     SessionsPanel {
@@ -673,7 +695,7 @@ class SessionsPanel(Widget):
             grp = ses.get("group_id", "")
             status = ses.get("status", "unknown")
             start = ses.get("start_time")
-            start_str = start.strftime("%Y-%m-%d %H:%M UTC") if isinstance(start, datetime) else str(start or "-")
+            start_str = _format_start_time(start)
             table.add_row(sid, exp, grp, status, start_str, ses.get("_source", "-"))
 
         source = self._config_source.label if self._config_source else self._target
@@ -797,6 +819,7 @@ class SessionsPanel(Widget):
         import asyncio
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._do_delete, session_id)
+        self.post_message(self.SessionDeleted(session_id))
         self._refresh_sessions()
 
     async def _run_delete_artifacts(self, session_id: str) -> None:

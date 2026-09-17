@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from textual import on
 from textual.app import App, ComposeResult
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
@@ -36,3 +37,8 @@ class OpenMMLAApp(App):
             with TabPane("Status", id="tab-status"):
                 yield StatusPanel()
         yield Footer()
+
+    @on(SessionsPanel.SessionDeleted)
+    def _forget_deleted_session(self, event: SessionsPanel.SessionDeleted) -> None:
+        # the two tabs are siblings: the news has to be carried across
+        self.query_one(ServicePanel).forget_session(event.session_id)
