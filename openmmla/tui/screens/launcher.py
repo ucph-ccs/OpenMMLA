@@ -304,7 +304,8 @@ _STREAM_FIELDS_TEMPLATE = [
     ("ssh_profile", "str", "", "SSH profile for remote stream management", True),
     ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
     ("record", "bool", False,
-     "also record the stream on the streaming host under <record_root>/<session>/collection/<host>/", False),
+     "also record the stream on the capture host, under <record_root>/streams-<date>/collection/<host>/ "
+     "(filed by day: a stream is shared by the sessions that pull it)", False),
 ]
 
 
@@ -650,6 +651,44 @@ def _local_collection_session_ids(root: str) -> list[str]:
         ],
         reverse=True,
     )
+
+
+def _remote_stream_recording_days(profile, record_root: str, host_label: str) -> list[tuple[str, str]] | None:
+    """(streams-<date>, absolute path of its collection/<host label> tree) for
+    every day a capture host holds stream recordings, newest first. None when
+    the host could not be asked, which is not the same as having none."""
+    root = _quote_remote_path(str(record_root or "").rstrip("/") or "$HOME/artifacts")
+    script = (
+        f"for d in {root}/streams-*/collection/{shlex.quote(host_label)}; do "
+        'if [ -d "$d" ]; then (cd "$d" && pwd -P); fi; done; echo LISTED'
+    )
+    # bash, whatever the login shell is: zsh stops at a glob that matches nothing
+    cmd = f"bash -c {shlex.quote(script)}"
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=15.0)
+    except Exception:
+        return None
+    lines = [line.strip() for line in (result.stdout or "").splitlines()]
+    if "LISTED" not in lines:
+        return None
+    days = []
+    for line in lines:
+        parts = line.rstrip("/").split("/")
+        if line.startswith("/") and len(parts) >= 4 and parts[-2] == "collection" and parts[-3].startswith("streams-"):
+            days.append((parts[-3], line))
+    return sorted(set(days), reverse=True)
+
+
+def _tree_is_here(local_path: Path, plan) -> bool:
+    """every file of a remote plan is already at its place, at its full size."""
+    for item in plan.files:
+        target = local_path / item.rel
+        try:
+            if not target.is_file() or target.stat().st_size != item.size:
+                return False
+        except OSError:
+            return False
+    return bool(plan.files)
 
 
 def _remote_artifact_session_ids(profile) -> list[str]:
@@ -3571,7 +3610,6 @@ class ServicePanel(Widget):
                     streams,
                     config_path=stream_config_path,
                     project_dir=self._root,
-                    session_provider=lambda name=svc.name: self._stream_record_session(name),
                 )
                 await stream_scroll.mount(panel)
 
@@ -6347,66 +6385,145 @@ class ServicePanel(Widget):
                 lambda: _expand_remote_home_path(remote_path, _remote_home(profile))
             )
             local_path = Path(self._collection_local_path(params, profile_name))
-            staging = dl.staging_root(self._root, session_id, "collection", host_label)
-            self._log(f"[cyan]Downloading {profile_name}:{remote_transfer_path} -> {local_path}[/cyan]")
+            await self._transfer_collection_tree(
+                profile, profile_name, session_id, host_label, remote_transfer_path, local_path)
+        except asyncio.CancelledError:
+            self._progress_end()
+            self._log("[yellow]Download cancelled; press Download again to resume.[/yellow]")
+            raise
+        finally:
+            self._downloads_in_flight.discard(key)
 
-            # the row goes up before the remote scan, so Cancel is reachable
-            # while a large tree is being sized
-            self._progress_start(f"{host_label} · scanning…", None)
-            try:
-                plan = await dl.probe_remote(profile, remote_transfer_path)
-                if plan.unreachable:
-                    self._log(f"[red]Could not reach {profile_name}: {rich_escape(plan.unreachable)}[/red]")
-                    return
-                if not plan.exists:
-                    self._log(f"[red]Remote collection directory not found: {remote_transfer_path}[/red]")
-                    return
-                if not plan.file_count:
-                    self._log("[yellow]Remote collection is empty; nothing to download.[/yellow]")
-                    return
-                if plan.rejected:
-                    self._log(
-                        f"[yellow]Skipping {len(plan.rejected)} remote file(s) with unsupported names.[/yellow]"
-                    )
+    async def _transfer_collection_tree(
+        self,
+        profile,
+        profile_name: str,
+        session_id: str,
+        host_label: str,
+        remote_transfer_path: str,
+        local_path: Path,
+        skip_if_present: bool = False,
+    ) -> bool:
+        """scan, download (staged, resumable) and merge one remote
+        <folder>/collection/<host label> tree: a session's recordings, or a day
+        of stream recordings. True when it is here afterwards."""
+        staging = dl.staging_root(self._root, session_id, "collection", host_label)
+        self._log(f"[cyan]Downloading {profile_name}:{remote_transfer_path} -> {local_path}[/cyan]")
 
-                self._progress_start(
-                    f"{host_label} · {plan.file_count} file(s)", plan.total_bytes
+        # the row goes up before the remote scan, so Cancel is reachable
+        # while a large tree is being sized
+        self._progress_start(f"{host_label} · scanning…", None)
+        try:
+            plan = await dl.probe_remote(profile, remote_transfer_path)
+            if plan.unreachable:
+                self._log(f"[red]Could not reach {profile_name}: {rich_escape(plan.unreachable)}[/red]")
+                return False
+            if not plan.exists:
+                self._log(f"[red]Remote collection directory not found: {remote_transfer_path}[/red]")
+                return False
+            if not plan.file_count:
+                self._log("[yellow]Remote collection is empty; nothing to download.[/yellow]")
+                return False
+            if plan.rejected:
+                self._log(
+                    f"[yellow]Skipping {len(plan.rejected)} remote file(s) with unsupported names.[/yellow]"
                 )
-                result = await dl.download_tree(
-                    profile,
-                    remote_transfer_path,
-                    staging=staging,
-                    plan=plan,
-                    on_progress=self._progress_update,
-                    log=self._log,
-                )
-            finally:
-                self._progress_end()
+            if skip_if_present and plan.exact and await asyncio.to_thread(_tree_is_here, local_path, plan):
+                self._log(f"[green]{session_id}: all {plan.file_count} file(s) are already here.[/green]")
+                return True
 
-            if result.status != "complete":
-                self._report_incomplete_transfer(result)
+            self._progress_start(
+                f"{host_label} · {plan.file_count} file(s)", plan.total_bytes
+            )
+            result = await dl.download_tree(
+                profile,
+                remote_transfer_path,
+                staging=staging,
+                plan=plan,
+                on_progress=self._progress_update,
+                log=self._log,
+            )
+        finally:
+            self._progress_end()
+
+        if result.status != "complete":
+            self._report_incomplete_transfer(result)
+            return False
+
+        stats = await asyncio.to_thread(
+            merge_tree,
+            result.staged_root,
+            local_path,
+            conflict_label=profile_name,
+        )
+        manifest = await asyncio.to_thread(
+            update_collection_manifest,
+            self._root,
+            session_id=session_id,
+            host_name=host_label,
+            remote_path=remote_transfer_path,
+            local_path=local_path,
+        )
+        await asyncio.to_thread(dl.finalize, staging)
+        self._log(
+            f"[green]Downloaded collection to {local_path} via {result.tool} "
+            f"(copied {stats['copied']}, skipped {stats['skipped']}, conflicts {stats['conflicted']}).[/green]"
+        )
+        self._log(f"[green]Updated session manifest: {manifest}[/green]")
+        return True
+
+    def on_stream_panel_download_requested(self, event: StreamPanel.DownloadRequested) -> None:
+        """Download in the Streams tab: the stream recordings of one capture host."""
+        event.stop()
+        key = f"stream-download:{event.ssh_profile}:{event.host_label}"
+        if key in self._downloads_in_flight:
+            self._log("[yellow]A download of this host's stream recordings is already running.[/yellow]")
+            return
+        self._downloads_in_flight.add(key)
+        self.run_worker(
+            self._run_stream_recordings_download(event.ssh_profile, event.record_root, event.host_label, key),
+            name=key,
+            group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    async def _run_stream_recordings_download(
+        self, profile_name: str, record_root: str, host_label: str, key: str = "",
+    ) -> None:
+        """a stream's recordings are filed by day on its capture host, outside
+        any session, so the Collection card (one session at a time) does not
+        reach them: fetch every day that host holds, newest first, into the same
+        local layout, artifacts/streams-<date>/collection/<host label>/."""
+        try:
+            profile = get_profile_by_name(profile_name)
+            if profile is None:
+                self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
                 return
-
-            stats = await asyncio.to_thread(
-                merge_tree,
-                result.staged_root,
-                local_path,
-                conflict_label=profile_name,
-            )
-            manifest = await asyncio.to_thread(
-                update_collection_manifest,
-                self._root,
-                session_id=session_id,
-                host_name=host_label,
-                remote_path=remote_transfer_path,
-                local_path=local_path,
-            )
-            await asyncio.to_thread(dl.finalize, staging)
-            self._log(
-                f"[green]Downloaded collection to {local_path} via {result.tool} "
-                f"(copied {stats['copied']}, skipped {stats['skipped']}, conflicts {stats['conflicted']}).[/green]"
-            )
-            self._log(f"[green]Updated session manifest: {manifest}[/green]")
+            self._log(f"[cyan]Looking for stream recordings on '{profile_name}'...[/cyan]")
+            days = await asyncio.to_thread(_remote_stream_recording_days, profile, record_root, host_label)
+            if days is None:
+                self._log(f"[red]Could not reach {profile_name} to list its stream recordings.[/red]")
+                return
+            if not days:
+                self._log(
+                    f"[yellow]No stream recordings on '{profile_name}' under "
+                    f"{record_root}/streams-<date>/collection/{host_label}/. A stream records while its "
+                    f"Record column says yes (Record on/off, then Start).[/yellow]"
+                )
+                return
+            fetched = 0
+            for day, remote_dir in days:
+                local_path = Path(collection_artifact_dir(self._root, day, host_label))
+                if await self._transfer_collection_tree(
+                    profile, profile_name, day, host_label, remote_dir, local_path, skip_if_present=True,
+                ):
+                    fetched += 1
+            if fetched:
+                self._log(
+                    f"[green]{fetched} of {len(days)} day(s) of stream recordings from '{profile_name}' are under "
+                    f"artifacts/streams-<date>/collection/{host_label}/. Replay one with source: file and "
+                    f"Base.file_dir on its video/ or audio/ folder.[/green]"
+                )
         except asyncio.CancelledError:
             self._progress_end()
             self._log("[yellow]Download cancelled; press Download again to resume.[/yellow]")
@@ -7164,14 +7281,6 @@ class ServicePanel(Widget):
                 except Exception:
                     return {}
         return {}
-
-    def _stream_record_session(self, service_name: str) -> str:
-        """session id the Streams tab records under: the card's Session, unless
-        that is the create-new choice (then the panel falls back to streams-<date>)."""
-        value = self._card_params(service_name).get("-sid")
-        if _is_new_collection_session_choice(value):
-            return ""
-        return str(value or "").strip()
 
     def _logs_available(self, svc: ServiceDef, target: str) -> bool:
         if _infra_compose_service(svc) is not None and _infra_docker_mode(

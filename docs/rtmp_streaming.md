@@ -127,13 +127,15 @@ Frame timestamps: a managed stream's capture-side start time is recorded when th
 Files follow the Collection layout so the same tools handle them:
 
 ```
-<record_root>/<session>/collection/<host label>/video/<name>_<start time>.mkv
-<record_root>/<session>/collection/<host label>/audio/<name>_<start time>.wav
+<record_root>/streams-<date>/collection/<host label>/video/<name>_<start time>.mkv
+<record_root>/streams-<date>/collection/<host label>/audio/<name>_<start time>.wav
 ```
 
-`record_root` defaults to `~/artifacts` on a remote host and to `artifacts/` of the project for `local`; `<session>` is the **Session** chosen on the pipeline card's Launch tab (or `streams-<date>` while none is chosen); `<host label>` is the SSH profile name; `<start time>` is the unix time the stream started, which is what the file source reads back. **Stop** sends Ctrl-C and waits for FFmpeg to finalize the file before the tmux session is closed.
+`record_root` defaults to `~/artifacts` on a remote host and to `artifacts/` of the project for `local`; `streams-<date>` is the day the stream was started (`streams-20260917`); `<host label>` is the SSH profile name; `<start time>` is the unix time the stream started, which is what the file source reads back. **Stop** sends Ctrl-C and waits for FFmpeg to finalize the file before the tmux session is closed, and names the file.
 
-After the session, **Collection → Download** with that session and host label copies the recordings into `artifacts/<session>/collection/<host label>/` on this machine, and the pipelines replay them with `source: file`, `Base.file_dir` pointing at the `video/` or `audio/` folder and `source_index` naming the file, exactly like a Collection Session recording. A camera or microphone can be either streamed or recorded by the Collection card, not both at once; `record: true` is the way to get both.
+A recording is filed by day and not under a session, because a stream does not belong to one: it is started once and any number of sessions pull it, one after another or at the same time (several groups in one room share a camera, each group being a session of its own). Nothing has to be chosen before a stream is started, and a stream is not restarted between sessions. What ties a recording to a session is time: the file name carries the capture-side start time, and the session's `start_time` and `end_time` are in MongoDB (**Sessions** tab).
+
+**Download** on the Streams tab copies what the selected stream's capture host has recorded, every day it holds and newest first, into `artifacts/streams-<date>/collection/<host label>/` on this machine; a day that is already here in full is skipped, and an interrupted transfer resumes like a Collection download. (The Collection card's own Download fetches one *session* of its recorders, which is a different thing: a Collection recorder is started by a session and ends with it, so its files are filed under that session, while a stream is started on its own and shared.) The pipelines replay the downloaded files with `source: file`, `Base.file_dir` pointing at the `video/` or `audio/` folder and `source_index` naming the file, exactly like a Collection Session recording. A camera or microphone can be either streamed or recorded by the Collection card, not both at once; `record: true` is the way to get both.
 
 ### On the server
 

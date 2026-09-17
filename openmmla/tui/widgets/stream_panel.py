@@ -19,7 +19,7 @@ from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, ssh_run_sync
 from openmmla.utils.artifact_paths import safe_segment
 from openmmla.utils.constants import STREAM_URL_SCHEMES
-from openmmla.utils.stream_registry import register_stream_start, mark_stream_stopped
+from openmmla.utils.stream_registry import load_stream_registry, register_stream_start, mark_stream_stopped
 
 
 STREAM_REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -386,26 +386,20 @@ class StreamPanel(Widget):
         streams: list[StreamDef],
         config_path: str = "",
         project_dir: str | None = None,
-        session_provider=None,
     ) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
         self._project_dir = project_dir or _project_root_from_config(config_path)
         self._statuses: dict[str, bool] = {}
-        # callable returning the session id recordings are filed under (the
-        # pipeline card's Session); None or "" falls back to streams-<date>
-        self._session_provider = session_provider
 
-    def _record_session(self) -> str:
-        value = ""
-        if self._session_provider is not None:
-            try:
-                value = str(self._session_provider() or "").strip()
-            except Exception:
-                value = ""
-        session = safe_segment(value, "") if value else ""
-        return session or f"streams-{datetime.date.today():%Y%m%d}"
+    @staticmethod
+    def _record_session() -> str:
+        """the folder a stream's recording is filed under: the day, never a
+        session. A stream outlives sessions and is shared by them (several groups
+        in one room pull the same camera), so its recording belongs to none of
+        them; the start time in the file name is what ties it to a session."""
+        return f"streams-{datetime.date.today():%Y%m%d}"
 
     @staticmethod
     def _record_host_label(stream: StreamDef) -> str:
@@ -414,20 +408,50 @@ class StreamPanel(Widget):
             return safe_segment(socket.gethostname().split(".", 1)[0], "host")
         return safe_segment(stream.ssh_profile, "host")
 
-    def _record_dir(self, stream: StreamDef) -> str | None:
-        """recording folder on the streaming host, or None when the stream does not record."""
-        if not stream.record:
-            return None
+    def _record_root(self, stream: StreamDef) -> str:
+        """the folder on the capture host that holds the streams-<date> folders."""
         if stream.record_root:
             root = stream.record_root.rstrip("/")
             if root == "~" or root.startswith("~/"):
                 root = "$HOME" + root[1:]
-        elif stream.ssh_profile == "local":
-            root = os.path.join(self._project_dir, "artifacts")
-        else:
-            root = STREAM_RECORD_ROOT
+            return root
+        if stream.ssh_profile == "local":
+            return os.path.join(self._project_dir, "artifacts")
+        return STREAM_RECORD_ROOT
+
+    def _record_dir(self, stream: StreamDef) -> str | None:
+        """recording folder on the streaming host, or None when the stream does not record."""
+        if not stream.record:
+            return None
         kind = _stream_kind(stream)
-        return f"{root}/{self._record_session()}/collection/{self._record_host_label(stream)}/{kind}"
+        return (
+            f"{self._record_root(stream)}/{self._record_session()}/collection/"
+            f"{self._record_host_label(stream)}/{kind}"
+        )
+
+    @staticmethod
+    def _fetch_hint(stream: StreamDef) -> str:
+        return "." if stream.ssh_profile == "local" else f" on {stream.ssh_profile}; Download on this tab copies it here."
+
+    def _registered_record_path(self, stream_name: str) -> str:
+        """the recording file noted when the stream was started, if it records."""
+        try:
+            entry = load_stream_registry(self._project_dir).get("streams", {}).get(stream_name)
+        except Exception:
+            return ""
+        if not isinstance(entry, dict) or entry.get("status") != "running":
+            return ""
+        return str(entry.get("record_path") or "").strip()
+
+    class DownloadRequested(Message):
+        """fetch the recordings a capture host holds; the launcher owns the
+        transfer (progress row, staging, resume), as it does for Collection."""
+
+        def __init__(self, ssh_profile: str, record_root: str, host_label: str) -> None:
+            super().__init__()
+            self.ssh_profile = ssh_profile
+            self.record_root = record_root
+            self.host_label = host_label
 
     class RecordToggleRequested(Message):
         """flip a stream's capture-side recording; the launcher owns the config
@@ -445,7 +469,11 @@ class StreamPanel(Widget):
         "Recording has two independent switches. On the capture device: the Record column, which "
         "Record on/off flips for the selected stream (written next to the stream while it is pushed, so "
         "it survives a network drop). On the server: MediaMTX records every stream that reaches it, set "
-        "on the Stream Server (MediaMTX) card, Config tab."
+        "on the Stream Server (MediaMTX) card, Config tab.\n"
+        "A stream is shared: start it once and any number of sessions can pull it, one after another or "
+        "at the same time. Its recording is therefore filed by day (streams-<date>), not under a session; "
+        "the start time in the file name and the session's start and end tell which part belongs to which. "
+        "Download copies what the selected stream's capture host has recorded into artifacts/ here."
     )
 
     def compose(self) -> ComposeResult:
@@ -459,6 +487,7 @@ class StreamPanel(Widget):
                 yield Button("Logs", variant="primary", id="stream-btn-logs")
                 yield Button("Probe", variant="warning", id="stream-btn-probe")
                 yield Button("Record on/off", variant="default", id="stream-btn-record")
+                yield Button("Download", variant="warning", id="stream-btn-download")
                 yield Button("Start All", variant="success", id="stream-btn-start-all")
                 yield Button("Stop All", variant="error", id="stream-btn-stop-all")
                 yield Button("Refresh", variant="primary", id="stream-btn-refresh")
@@ -579,6 +608,23 @@ class StreamPanel(Widget):
                 self._log(f"[yellow]Stop {stream.name} first: its ffmpeg was started without the change.[/yellow]")
             else:
                 self.post_message(self.RecordToggleRequested(stream.name, not stream.record))
+        elif btn == "stream-btn-download":
+            stream = self._get_selected_stream()
+            if stream is None:
+                self._log("[yellow]Select a stream row first.[/yellow]")
+            elif not stream.ssh_profile:
+                self._log(
+                    f"[yellow]{stream.name} is external: the console did not start it, so no host "
+                    f"it manages holds a recording of it.[/yellow]"
+                )
+            elif stream.ssh_profile == "local":
+                self._log(
+                    f"[cyan]{stream.name} is captured on this machine: its recordings are already here, under "
+                    f"{self._record_root(stream)}/streams-<date>/collection/{self._record_host_label(stream)}/.[/cyan]"
+                )
+            else:
+                self.post_message(self.DownloadRequested(
+                    stream.ssh_profile, self._record_root(stream), self._record_host_label(stream)))
         elif btn == "stream-btn-probe":
             stream = self._get_selected_stream()
             if stream:
@@ -734,15 +780,16 @@ class StreamPanel(Widget):
                 )
             if "DONE" in (result.stdout or ""):
                 self._log(f"[red]{stream.name} stopped.[/red]")
+                recorded = self._registered_record_path(stream.name)
                 mark_stream_stopped(stream.name, project_dir=self._project_dir)
                 self._statuses[stream.name] = False
                 record_dir = self._record_dir(stream)
-                if record_dir:
-                    self._log(
-                        f"  Recording kept under {record_dir}/; fetch it with "
-                        f"Collection -> Download (session {self._record_session()}, "
-                        f"host label {self._record_host_label(stream)})."
-                    )
+                if recorded:
+                    # where Start put it: the card's Session may have changed since,
+                    # and the file did not move with it
+                    self._log(f"  Recording kept at {recorded}{self._fetch_hint(stream)}")
+                elif record_dir:
+                    self._log(f"  Recording kept under {record_dir}/{self._fetch_hint(stream)}")
             else:
                 self._log(f"[yellow]{stream.name} may still be running.[/yellow]")
         except Exception as e:

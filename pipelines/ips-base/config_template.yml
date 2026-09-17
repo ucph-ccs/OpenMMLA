@@ -47,7 +47,7 @@ Base:
   #   resolution: 1920x1080           # video resolution
   #   fps: 30                         # frames per second
   #   bitrate: 1M                     # H.264 bitrate of the stream and of its recording
-  #   record: true                    # also keep an mkv on the Pi under ~/artifacts/<session>/collection/<profile>/video/
+  #   record: true                    # also keep an mkv on the Pi under ~/artifacts/streams-<date>/collection/<profile>/video/
   # cam-2:
   #   ssh_profile: rpi-kitchen
   #   device: /dev/video0

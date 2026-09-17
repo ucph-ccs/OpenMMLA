@@ -46,7 +46,7 @@ Base:
   #   format: s16le                   # PCM sample format (s16le, s32le, f32le); must match stream_kwargs.format (int16, int32, float32)
   #   rate: 16000                     # sample rate in Hz; must match stream_kwargs.rate
   #   channels: 1                     # number of audio channels; must match stream_kwargs.channels
-  #   record: true                    # also keep a wav on the Pi under ~/artifacts/<session>/collection/<profile>/audio/
+  #   record: true                    # also keep a wav on the Pi under ~/artifacts/streams-<date>/collection/<profile>/audio/
   #
   # example 3: managed microphone published to MediaMTX (AAC); the base pulls it as RTSP
   # rpi-mic-2:
