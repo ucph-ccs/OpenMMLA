@@ -51,7 +51,7 @@ class StreamDef:
     rate: int = 0
     channels: int = 0
     # URL the bases pull from when it differs from the publish target (MediaMTX
-    # serves an rtmp:// publish as rtsp:// for lower latency); empty = target
+    # serves an rtmp:// publish as rtsp:// too, which a reader opens faster); empty = target
     read_target: str = ""
     # 'audio' or 'video'; inferred from the target and device when empty
     kind: str = ""

@@ -2,7 +2,7 @@
 
 How camera and microphone streams move through OpenMMLA: FFmpeg on the capture device pushes to a **MediaMTX** server, the bases pull from it, MediaMTX records every stream on the server, and a managed stream can keep a raw recording on the capture device at the same time.
 
-MediaMTX replaced the Nginx RTMP module. The `rtmp://` push from the devices is unchanged; what changed is that the bases can pull the same stream as RTSP with less latency, that every stream is recorded, and that a control API shows what is being published. Nginx remains the load balancer for the AI services only, see [Nginx](nginx.md).
+MediaMTX replaced the Nginx RTMP module. The `rtmp://` push from the devices is unchanged; what changed is that the bases can pull the same stream as RTSP, that every stream is recorded, and that a control API shows what is being published. Nginx remains the load balancer for the AI services only, see [Nginx](nginx.md).
 
 ## Server: MediaMTX
 
@@ -114,7 +114,7 @@ ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
 
 A base with `source: stream` picks a URL from the pullable `Streams` entries (`read_target`, else `target`; only `rtmp://`, `rtsp://` and `srt://` count) by `source_index`. `rtmp` is still accepted as the old name of that source.
 
-Pull the RTSP URL rather than the RTMP one. RTMP runs over TCP and, on Wi-Fi, packet loss turns into buffering that never drains, so the delay grows over a session; RTSP over TCP from MediaMTX does not accumulate that way. The video bases open network streams with `OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|fflags;nobuffer|flags;low_delay` unless the variable is already exported (override per base with `stream_kwargs.capture_options`), and the ASR base runs its ffmpeg decoder with the same low-latency flags. On a wired base station expect well under a second end to end; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to measure it.
+The device publishes over RTMP (`target`) and the bases usually pull the same path over RTSP (`read_target`): MediaMTX serves whatever is published on a path over every protocol it has switched on. Measured against MediaMTX 1.21 with the bases' own `VideoStream`, both on one machine: the steady delay is the same either way (0.2 to 0.3 s at 15 fps with the options below), but an RTSP pull opens in under two seconds where an RTMP pull takes about six, because FFmpeg's FLV reader waits for an audio track that never comes. How the two behave over a lossy Wi-Fi link was not measured. An empty `read_target` pulls the `target`. The video bases open network streams with `OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|fflags;nobuffer|flags;low_delay` unless the variable is already exported (override per base with `stream_kwargs.capture_options`), and the ASR base runs its ffmpeg decoder with the same low-latency flags. On a wired base station expect well under a second end to end; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to measure it.
 
 Frame timestamps: a managed stream's capture-side start time is recorded when the Streams tab starts it (`real-time/runtime/stream_registry.yml`), and a base that connects while the stream starts stamps frames with that time plus the media PTS, independent of the network delay. A base that joins later, or an external stream, calibrates the PTS against its own clock on the first frame, so the pipeline delay at that moment becomes a constant offset. Start the streams first, then the bases.
 

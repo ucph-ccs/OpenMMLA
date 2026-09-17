@@ -299,7 +299,7 @@ _STREAM_FIELDS_TEMPLATE = [
      "or a full rtmp/rtsp/srt URL, or udp://<base>:<port> for raw audio to an ASR base",
      False),
     ("read_target", "str", "",
-     "where the bases pull it: the same path over RTSP, which has less delay than pulling RTMP. Empty = pull the target",
+     "where the bases pull it: usually the same path over RTSP, which connects faster than RTMP. Empty = pull the target",
      False),
     ("ssh_profile", "str", "",
      "capture host, local or an SSH profile: the console runs ffmpeg there. Empty = external stream, only pulled",
