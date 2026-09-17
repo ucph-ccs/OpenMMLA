@@ -2283,38 +2283,58 @@ def _collection_session_prefix(svc: ServiceDef) -> str:
     return _service_session_name(svc) + "-"
 
 
-def _collection_sessions_local(svc: ServiceDef) -> list[str]:
-    prefix = _collection_session_prefix(svc)
+# what a live recorder looks like in the process table. Recorders run in a
+# terminal window of their own (a local Terminal tab, an ssh session on a
+# remote host), never in tmux, so their processes are the only trace of them:
+# the names below are the ones the stop command signals as well
+_COLLECTION_RECORDER_MARKS = (
+    "openmmla.commands.collect.audio",
+    "openmmla.commands.collect.video",
+    "collection/audio_recording.sh",
+    "collection/video_recording.sh",
+)
+# every process with its full command line, on macOS and Linux alike
+_PS_ALL_COMMANDS = "ps -A -ww -o pid=,args="
+
+
+def _collection_recorders(ps_output: str) -> list[tuple[str, str, str]]:
+    """(role, session id, pid) of the recorders alive in a `ps -o pid=,args=`
+    listing, one entry per recorder (the wrapper script and the python module
+    it runs are the same recorder)."""
+    found: dict[tuple[str, str], str] = {}
+    for line in ps_output.splitlines():
+        if "--session-id" not in line:
+            continue  # an editor open on the script is not a recorder
+        if "pkill" in line or "pgrep" in line or "SESSION_ID=" in line:
+            continue  # the stop command spells the same names out
+        mark = next((m for m in _COLLECTION_RECORDER_MARKS if m in line), None)
+        if mark is None:
+            continue
+        pid, _, args = line.strip().partition(" ")
+        match = re.search(r"--session-id[ =]+(\S+)", args)
+        key = ("audio" if "audio" in mark else "video", match.group(1) if match else "?")
+        # prefer the python process: it is the one that holds ffmpeg
+        if key not in found or mark.startswith("openmmla."):
+            found[key] = pid
+    return [(role, session, pid) for (role, session), pid in found.items()]
+
+
+def _collection_recorders_local() -> list[tuple[str, str, str]]:
     try:
         result = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
+            shlex.split(_PS_ALL_COMMANDS), capture_output=True, text=True, timeout=5,
         )
-        if result.returncode != 0:
-            return []
-        return [
-            line.strip()
-            for line in result.stdout.splitlines()
-            if line.strip().startswith(prefix)
-        ]
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
+    return _collection_recorders(result.stdout) if result.returncode == 0 else []
 
 
-def _collection_sessions_remote(profile, svc: ServiceDef) -> list[str]:
-    """recorder tmux sessions of a collection service on a remote host."""
-    prefix = _collection_session_prefix(svc)
+def _collection_recorders_remote(profile) -> list[tuple[str, str, str]]:
     try:
-        result = ssh_run_sync(
-            profile, "tmux list-sessions -F '#{session_name}' 2>/dev/null || true", timeout=8.0,
-        )
+        result = ssh_run_sync(profile, _PS_ALL_COMMANDS, timeout=8.0)
     except (subprocess.TimeoutExpired, Exception):
         return []
-    return [
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.strip().startswith(prefix)
-    ]
+    return _collection_recorders(result.stdout or "")
 
 
 def _service_requires_config(svc: ServiceDef) -> bool:
@@ -5524,9 +5544,9 @@ class ServicePanel(Widget):
                 return system_service_reachable(self._root, "flask", own_port=own_port)
             return _check_tmux_session(target)
         elif svc.launch_type == "collection":
-            # recorders run as tmux sessions under the service's prefix; any
-            # of them alive means a recording is in progress
-            return bool(_collection_sessions_local(svc))
+            # a recorder process alive on this machine means a recording is
+            # in progress, whichever session it belongs to
+            return bool(_collection_recorders_local())
         return False
 
     def on_service_card_start_requested(self, event: ServiceCard.StartRequested) -> None:
@@ -6494,7 +6514,7 @@ class ServicePanel(Widget):
         elif svc.launch_type == "vllm":
             return ssh_check_port(profile, _mllm_config(self._root)["port"])
         elif svc.launch_type == "collection":
-            return bool(_collection_sessions_remote(profile, svc))
+            return bool(_collection_recorders_remote(profile))
         return False
 
     def on_service_card_action_requested(self, event: ServiceCard.ActionRequested) -> None:
@@ -6686,16 +6706,7 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Compose file not found: {rel}[/yellow]")
             return
         elif svc.launch_type == "collection":
-            self._log(f"[cyan]── Logs for {svc.display_name} ──[/cyan]")
-            sessions = _collection_sessions_local(svc)
-            if not sessions:
-                self._log("(no collection sessions found)")
-            for session_name in sessions:
-                self._log(f"[cyan]── session: {session_name} ──[/cyan]")
-                output = _capture_tmux_pane(session_name)
-                for line in output.splitlines():
-                    self._log(line)
-            self._log(f"[cyan]── End of logs ──[/cyan]")
+            self._log_collection_recorders(svc, _collection_recorders_local(), "this machine")
             return
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
@@ -6708,6 +6719,17 @@ class ServicePanel(Widget):
         for line in output.splitlines():
             self._log(line)
         self._log(f"[cyan]── End of logs ──[/cyan]")
+
+    def _log_collection_recorders(self, svc: ServiceDef, recorders: list, where: str) -> None:
+        """a recorder prints into the terminal window it opened, so the card's
+        Logs can only say which recorders are alive."""
+        self._log(f"[cyan]── {svc.display_name} on {where} ──[/cyan]")
+        if not recorders:
+            self._log("(no recorder is running)")
+            return
+        for role, session, pid in sorted(recorders):
+            self._log(f"  {role} recorder · session {session} · pid {pid}")
+        self._log("  Each recorder prints into the terminal window it was started in.")
 
     def _view_logs_remote(self, svc: ServiceDef, params: dict | None = None) -> None:
         if svc.launch_type == "make":
@@ -6749,13 +6771,9 @@ class ServicePanel(Widget):
             self._cmd.run(cmd)
             return
         elif svc.launch_type == "collection":
-            prefix = shlex.quote(_collection_session_prefix(svc))
-            cmd = (
-                f"for s in $(tmux list-sessions -F '#{{session_name}}' 2>/dev/null | grep '^{prefix}'); do "
-                "echo \"── session: $s ──\"; tmux capture-pane -t \"$s\" -p -S -80; "
-                "done"
-            )
-            self._cmd.run(cmd)
+            profile = get_profile_by_name(self._get_panel_target())
+            if profile is not None:
+                self._log_collection_recorders(svc, _collection_recorders_remote(profile), profile.name)
             return
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
