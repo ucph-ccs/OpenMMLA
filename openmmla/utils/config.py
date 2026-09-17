@@ -150,7 +150,15 @@ def merge_system_services(
 ) -> dict[str, Any]:
     merged = dict(config)
     system_config = load_system_services_config(start_path)
+    # sections the pipeline pins (SystemServicesOverride) stay its own: the TUI
+    # leaves them alone when it syncs, and so does the merge at startup
+    pinned = config.get("SystemServicesOverride") or []
+    if isinstance(pinned, str):
+        pinned = [pinned]
+    pinned = {str(name) for name in pinned} if isinstance(pinned, (list, tuple, set)) else set()
     for section in SYSTEM_SERVICE_SECTIONS:
+        if section in pinned and isinstance(config.get(section), dict):
+            continue
         section_data = system_config.get(section)
         if isinstance(section_data, dict):
             merged[section] = dict(section_data)
