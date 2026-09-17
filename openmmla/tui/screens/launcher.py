@@ -6012,6 +6012,29 @@ class ServicePanel(Widget):
         note = await asyncio.to_thread(self._mark_mongodb_session_ended, session_id, target)
         if note:
             self._log(note)
+        self._release_collection_session(session_id)
+
+    def _release_collection_session(self, session_id: str) -> None:
+        """the recording is over on every host: the cards go back to `Create
+        MongoDB Session`, so the next Start is a new take and not a second
+        helping of this one. Download and Delete Remote do not need the id on
+        the card: they fall back to the session last recorded on their host."""
+        session_id = _safe_session_id(session_id)
+        if not session_id:
+            return
+        if _safe_session_id(self._collection_sticky.get("--session-id")) == session_id:
+            self._collection_sticky["--session-id"] = ""
+        try:
+            cards = list(self.query(ServiceCard))
+        except Exception:
+            return
+        for card in cards:
+            if card.service_def.launch_type != "collection":
+                continue
+            shown = ((card.collection_snapshot() or {}).get("values") or {}).get("--session-id")
+            if _safe_session_id(shown) == session_id:
+                # the card is captured before it is rebuilt: it has to agree
+                card.select_collection_session(_NEW_COLLECTION_SESSION_CHOICE)
 
     async def _collection_stop_on_target(self, target: str, session_id: str) -> tuple[int, str]:
         """run the session-scoped stop command on one host.

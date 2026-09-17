@@ -498,6 +498,18 @@ class SessionsPanel(Widget):
             # nothing connected: retry on the way in, as rebuilding the Host
             # options used to do as a side effect
             self.run_worker(self._async_init(self._target), exclusive=True)
+        elif not self._bootstrapping and self.is_attached:
+            # sessions are created and recorded in the Launcher: coming back
+            # here has to show them without a press on Refresh
+            self.run_worker(self._async_reload(), group="sessions-reload", exclusive=True)
+
+    async def _async_reload(self) -> None:
+        """list what the databases and the disk hold now, with the clients that
+        are already connected; the query stays off the UI thread."""
+        target = self._target
+        rows = await asyncio.to_thread(self._gather_sessions)
+        if target == self._target and not self._bootstrapping:
+            self._render_sessions(rows)
 
     def _start_bootstrap(self) -> None:
         from openmmla.tui.ssh import current_target
@@ -677,16 +689,28 @@ class SessionsPanel(Widget):
     # ---- session listing ----
 
     def _refresh_sessions(self) -> None:
+        self._render_sessions(self._gather_sessions())
+
+    def _gather_sessions(self) -> list[dict]:
+        """the session rows of the current host: MongoDB, plus the artifacts on
+        this machine when the host is Local. Blocking (a database query)."""
         from openmmla.tui.schema.loader import _find_project_root
 
-        mongo_sessions = self._mongo_client.get_all_sessions() if self._mongo_client else []
+        try:
+            mongo_sessions = self._mongo_client.get_all_sessions() if self._mongo_client else []
+        except Exception:
+            mongo_sessions = []  # a connection that went away: the disk is still worth listing
         artifact_sessions = []
         if self._target == "local":
             root = _find_project_root()
             artifact_sessions = _local_artifact_sessions(root) + _local_collection_sessions(root)
         db_host = _db_host_from_config(self._config_source.config) if self._config_source else ""
-        self._sessions = _merge_session_rows(mongo_sessions, artifact_sessions, db_host)
+        return _merge_session_rows(mongo_sessions, artifact_sessions, db_host)
+
+    def _render_sessions(self, sessions: list[dict]) -> None:
+        self._sessions = sessions
         table = self.query_one("#sessions-table", DataTable)
+        selected = self._selected_session_id
         table.clear()
 
         for ses in self._sessions:
@@ -707,6 +731,10 @@ class SessionsPanel(Widget):
         if self._target == "local":
             detail += " + local artifacts"
         self._update_summary(f"Sessions: {len(self._sessions)} found | {detail}")
+        # a reload must not move the cursor off the session the user was on
+        ids = [ses.get("session_id", "") for ses in self._sessions]
+        if selected in ids:
+            table.move_cursor(row=ids.index(selected))
 
     # ---- event handlers ----
 
