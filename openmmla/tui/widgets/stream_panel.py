@@ -547,6 +547,12 @@ class StreamPanel(Widget):
         "capture host and copies it into artifacts/<session>/; without one it copies the whole files."
     )
 
+    # how a stream stops being external
+    _EXTERNAL_HINT = (
+        "To run it from here, set ssh_profile of {name} on the Config tab (Streams) to the machine its "
+        "device is attached to, local or an SSH profile, and Save."
+    )
+
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(self.HELP, id="stream-help")
@@ -654,7 +660,10 @@ class StreamPanel(Widget):
             if stream and stream.ssh_profile:
                 self._start_stream(stream)
             elif stream and not stream.ssh_profile:
-                self._log(f"[yellow]{stream.name} is an external stream (no SSH profile).[/yellow]")
+                self._log(
+                    f"[yellow]{stream.name} is an external stream (no SSH profile): someone else publishes it. "
+                    f"{self._EXTERNAL_HINT.format(name=stream.name)}[/yellow]"
+                )
             else:
                 self._log("[yellow]Select a stream row first.[/yellow]")
         elif btn == "stream-btn-stop":
@@ -662,7 +671,10 @@ class StreamPanel(Widget):
             if stream and stream.ssh_profile:
                 self._stop_stream(stream)
             elif stream and not stream.ssh_profile:
-                self._log(f"[yellow]{stream.name} is an external stream (no SSH profile).[/yellow]")
+                self._log(
+                    f"[yellow]{stream.name} is an external stream (no SSH profile): someone else publishes it. "
+                    f"{self._EXTERNAL_HINT.format(name=stream.name)}[/yellow]"
+                )
             else:
                 self._log("[yellow]Select a stream row first.[/yellow]")
         elif btn == "stream-btn-logs":
@@ -680,7 +692,7 @@ class StreamPanel(Widget):
             elif not stream.ssh_profile:
                 self._log(
                     f"[yellow]{stream.name} is external: the console does not run its ffmpeg, so it "
-                    f"cannot make it record.[/yellow]"
+                    f"cannot make it record. {self._EXTERNAL_HINT.format(name=stream.name)}[/yellow]"
                 )
             elif self._statuses.get(stream.name, False):
                 self._log(f"[yellow]Stop {stream.name} first: its ffmpeg was started without the change.[/yellow]")

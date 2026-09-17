@@ -302,7 +302,11 @@ _STREAM_FIELDS_TEMPLATE = [
      "what the bases pull. Empty: {pull} when target is a path, the target itself when it is a full URL. "
      "A path or a full URL is taken as well",
      False),
-    ("ssh_profile", "str", "", "SSH profile for remote stream management", True),
+    ("ssh_profile", "str", "",
+     "the machine the camera or microphone is attached to: local, or an SSH profile; the console runs the stream's "
+     "ffmpeg there. Empty: an external stream that someone else publishes; it is only pulled, and cannot be started, "
+     "stopped or recorded from here",
+     True),
     ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
     ("record", "bool", False,
      "also record the stream on the capture host, under <record_root>/streams-<date>/collection/<host>/ "

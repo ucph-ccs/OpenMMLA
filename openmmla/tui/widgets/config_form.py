@@ -136,7 +136,14 @@ class FieldRow(Widget):
         if self.field_def.choices:
             options = [(c, c) for c in self.field_def.choices]
             initial = str(self._initial) if self._initial else ""
-            if initial and initial in self.field_def.choices:
+            if initial in ("Select.NULL", "Select.BLANK", "None", "null"):
+                initial = ""  # what an empty Select once left behind in a config
+            if initial and initial not in self.field_def.choices:
+                # a stored value the list does not offer (an SSH profile that was
+                # renamed or deleted): shown and kept. It used to open blank, and
+                # the next Save wrote the blank over it without a word
+                options.append((f"{initial}  (not in the list any more)", initial))
+            if initial:
                 yield Select(
                     options,
                     value=initial,
