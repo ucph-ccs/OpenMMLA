@@ -37,11 +37,11 @@ brew install mediamtx
 # from https://github.com/bluenviron/mediamtx/releases into /usr/local/bin
 
 cd pipelines/uber-server
-make mediamtx          # reads mediamtx/mediamtx.yml, records to pipelines/uber-server/recordings/
+make mediamtx          # reads mediamtx/mediamtx.yml, records to artifacts/recordings/ of the repository
 make stop-mediamtx
 ```
 
-The card's Run mode `native` runs the same targets.
+The card's Run mode `native` runs the same targets. Both run modes record to the same folder, `artifacts/recordings/` of the repository: Docker mounts it, and `make mediamtx` starts MediaMTX from `artifacts/` (`MEDIAMTX_RECORD_ROOT`), where the `./recordings` of `mediamtx.yml` resolves to it. A native MediaMTX started before this change recorded to `pipelines/uber-server/recordings/`; what is there stays there.
 
 ### Configuration
 

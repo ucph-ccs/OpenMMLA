@@ -9,7 +9,10 @@ from pathlib import Path
 
 ARTIFACTS_DIR = "artifacts"
 RUNTIME_ARTIFACTS_DIR = "runtime"
-NON_SESSION_ARTIFACT_DIRS = {RUNTIME_ARTIFACTS_DIR}
+# where the MediaMTX container records every published stream (MEDIAMTX_RECORD_DIR
+# in docker/.env.example); filed by stream path, not by session
+SERVER_RECORDINGS_DIR = "recordings"
+NON_SESSION_ARTIFACT_DIRS = {RUNTIME_ARTIFACTS_DIR, SERVER_RECORDINGS_DIR}
 
 
 def safe_segment(value: str | None, default: str = "item") -> str:

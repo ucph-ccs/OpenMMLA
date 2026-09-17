@@ -47,8 +47,8 @@ authInternalUsers:
 
 pathDefaults:
   # record every published path; segments are fMP4 files named after their
-  # start time. ./recordings is pipelines/uber-server/recordings when started with
-  # make, and the artifacts/recordings bind mount when started with docker compose
+  # start time. ./recordings is artifacts/recordings of the repository either
+  # way: make starts MediaMTX from artifacts/, docker compose mounts the folder
   record: yes
   recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
   recordFormat: fmp4
