@@ -98,6 +98,11 @@ def _is_sensitive_field(path: str) -> bool:
     return last in _SENSITIVE_SUFFIXES
 
 
+# the description stands above the field once: it used to be repeated as the
+# first row of every dropdown and as the placeholder of every empty input
+_EMPTY_CHOICE = "(empty)"
+
+
 class FieldRow(Widget):
     """a single config field with label and input."""
 
@@ -147,7 +152,7 @@ class FieldRow(Widget):
                 yield Select(
                     options,
                     value=initial,
-                    prompt=self.field_def.description or short_name,
+                    prompt=_EMPTY_CHOICE,
                     allow_blank=True,
                     id=widget_id,
                     disabled=ro,
@@ -155,7 +160,7 @@ class FieldRow(Widget):
             else:
                 yield Select(
                     options,
-                    prompt=self.field_def.description or short_name,
+                    prompt=_EMPTY_CHOICE,
                     allow_blank=True,
                     id=widget_id,
                     disabled=ro,
@@ -176,7 +181,7 @@ class FieldRow(Widget):
             else:
                 yield Input(
                     value=display,
-                    placeholder=self.field_def.description or short_name,
+                    placeholder="" if self.field_def.description else short_name,
                     password=sensitive,
                     id=widget_id,
                     classes="field-input",

@@ -291,26 +291,22 @@ def _server_section_note(gateway: str) -> str:
     )
 
 
-# {publish} and {pull} are the stream server's URLs of <app>/<name>, see _make_stream_fields
+# {publish} is the stream server's URL of <app>/<name>, see _make_stream_fields.
+# Kept to a line or two: they stand above every stream of the form
 _STREAM_FIELDS_TEMPLATE = [
     ("target", "str", "",
-     "where the capture device publishes. The path alone (e.g. ips/cam-1) is completed on Save with the Stream Server "
-     "of System Settings: {publish}. Or a full URL (rtmp://, rtsp://, srt://), or udp://<base>:<port> for raw "
-     "audio to an ASR base",
+     "where the device publishes. Just the path (ips/cam-1) becomes {publish} on Save; "
+     "or a full rtmp/rtsp/srt URL, or udp://<base>:<port> for raw audio to an ASR base",
      False),
     ("read_target", "str", "",
-     "what the bases pull. Empty: {pull} when target is a path, the target itself when it is a full URL. "
-     "A path or a full URL is taken as well",
+     "where the bases pull it: the same path over RTSP, which has less delay than pulling RTMP. Empty = pull the target",
      False),
     ("ssh_profile", "str", "",
-     "the machine the camera or microphone is attached to: local, or an SSH profile; the console runs the stream's "
-     "ffmpeg there. Empty: an external stream that someone else publishes; it is only pulled, and cannot be started, "
-     "stopped or recorded from here",
+     "capture host, local or an SSH profile: the console runs ffmpeg there. Empty = external stream, only pulled",
      True),
     ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
     ("record", "bool", False,
-     "also record the stream on the capture host, under <record_root>/streams-<date>/collection/<host>/ "
-     "(filed by day: a stream is shared by the sessions that pull it)", False),
+     "also record on the capture host, under <record_root>/streams-<date>/collection/<host>/", False),
 ]
 
 
@@ -1741,10 +1737,10 @@ def _make_stream_fields(stream_name: str, stream_server: dict | None = None) -> 
     section of System Settings, the help names its real address."""
     section = f"Streams.{stream_name}"
     ssh_profile_names = ["local"] + [p.name for p in load_ssh_profiles()]
-    publish, pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
+    publish, _pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
     fields = []
     for key, ftype, default, desc, is_choices in _STREAM_FIELDS_TEMPLATE:
-        desc = desc.replace("{publish}", publish).replace("{pull}", pull)
+        desc = desc.replace("{publish}", publish)
         choices = ssh_profile_names if is_choices else []
         fields.append(LoaderFieldDef(
             path=f"Streams.{stream_name}.{key}",

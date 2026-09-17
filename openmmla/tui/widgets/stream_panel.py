@@ -532,19 +532,14 @@ class StreamPanel(Widget):
             self.stream_name = stream_name
             self.record = record
 
+    # three lines: it stands above the table every time the tab is opened
     HELP = (
-        "A stream is one entry under Streams in this card's config: a camera or microphone that ffmpeg "
-        "publishes to the Stream Server (target), and that the bases pull from it (read_target). Add one "
-        "with + Add Stream on the Config tab; its URLs come from the Stream Server of System Settings.\n"
-        "Recording has two independent switches. On the capture device: the Record column, which "
-        "Record on/off flips for the selected stream (written next to the stream while it is pushed, so "
-        "it survives a network drop). On the server: MediaMTX records every stream that reaches it, set "
-        "on the Stream Server (MediaMTX) card, Config tab.\n"
-        "A stream is shared: start it once and any number of sessions can pull it, one after another or "
-        "at the same time. Its recording is therefore filed by day (streams-<date>), not under a session; "
-        "the start time in the file name and the session's start and end tell which part belongs to which. "
-        "Download, with a session chosen under Recordings, cuts that part out of every stream here on its "
-        "capture host and copies it into artifacts/<session>/; without one it copies the whole files."
+        "A stream is a Streams entry of this card's config (Config tab, + Add Stream): ffmpeg publishes a camera "
+        "or microphone to the Stream Server, the bases pull it. Started once, it serves any number of sessions.\n"
+        "Record on/off: also record on the capture device. The Stream Server records on its side whatever "
+        "reaches it (its card, Config tab).\n"
+        "Recordings are filed by day, not by session. Download with a session cuts that session's part out "
+        "on the capture host; without one it copies the whole files."
     )
 
     # how a stream stops being external
