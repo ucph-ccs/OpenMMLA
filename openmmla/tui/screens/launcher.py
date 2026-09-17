@@ -2570,6 +2570,15 @@ def _collection_recorders(ps_output: str) -> list[tuple[str, str, str]]:
     return [(role, session, pid) for (role, session), pid in found.items()]
 
 
+def _pid_order(pid: object) -> int:
+    """recorders sorted by pid: the higher one was started later (close enough
+    to tell the current take from one that was left running)."""
+    try:
+        return int(str(pid).strip())
+    except ValueError:
+        return -1
+
+
 def _collection_recorders_local() -> list[tuple[str, str, str]]:
     try:
         result = subprocess.run(
@@ -2799,6 +2808,10 @@ class ServicePanel(Widget):
         # host, so setting up a multi-machine session is one pass, not one
         # full re-entry per host.
         self._collection_sticky: dict[str, object] = {}
+        # host -> sessions its recorders belong to, as the last status probe
+        # found them; and the one the card was last pointed at for that host
+        self._collection_host_sessions: dict[str, list[str]] = {}
+        self._collection_followed: dict[str, str] = {}
         # ...and the ones that are per-machine (output root, host label), kept
         # so a rebuild on the same host does not discard local edits
         self._collection_target_sticky: dict[str, dict[str, object]] = {}
@@ -3866,6 +3879,55 @@ class ServicePanel(Widget):
                     target_values[flag] = value
             break
 
+    def _note_host_recorders(self, target: str, recorders: list) -> bool:
+        """keep which sessions a host is recording (newest recorder first);
+        returns whether it records at all. Called from the status probes."""
+        sessions: list[str] = []
+        for _role, session, _pid in sorted(recorders, key=lambda item: _pid_order(item[2]), reverse=True):
+            session = _safe_session_id(session)
+            if session and session not in sessions:
+                sessions.append(session)
+        self.__dict__.setdefault("_collection_host_sessions", {})[target] = sessions
+        return bool(recorders)
+
+    def _host_recording_session(self, target: str, shown: object = "") -> str:
+        """the session the card of `target` should open on because that host is
+        recording it, or "" when it records nothing. One session id follows the
+        user from host to host (one take, several machines); with two groups
+        recording at once on different hosts that id is the other group's, and
+        Stop would look for it here in vain. What the host records wins."""
+        sessions = self.__dict__.get("_collection_host_sessions", {}).get(target) or []
+        if not sessions:
+            return ""
+        shown = _safe_session_id(shown)
+        return shown if shown in sessions else sessions[0]
+
+    def _follow_host_recording_session(self, target: str) -> None:
+        """after a status probe: point the card on screen at the session its
+        host records. Once per change, so a session the user picks on purpose
+        while the host records (to download an older one) is left alone."""
+        followed = self.__dict__.setdefault("_collection_followed", {})
+        sessions = self.__dict__.get("_collection_host_sessions", {}).get(target) or []
+        if not sessions:
+            followed.pop(target, None)
+            return
+        try:
+            cards = [card for card in self.query(ServiceCard) if card.service_def.launch_type == "collection"]
+        except Exception:
+            return
+        for card in cards:
+            shown = ((card.collection_snapshot() or {}).get("values") or {}).get("--session-id")
+            session = self._host_recording_session(target, shown)
+            if followed.get(target) == session:
+                continue
+            followed[target] = session
+            if _safe_session_id(shown) != session:
+                card.select_collection_session(session)
+                self._log(
+                    f"[cyan]{'This machine' if target == 'local' else target} is recording session "
+                    f"{session}: the card shows it, so Stop and Download act on it.[/cyan]"
+                )
+
     def _remember_collection_session(self, session_id: object) -> None:
         """make the session a launch just resolved the default everywhere.
 
@@ -3906,7 +3968,12 @@ class ServicePanel(Widget):
         target_sticky = self._collection_target_sticky.get(target, {})
         shared_flags = self._collection_session_scoped_flags(svc)
 
-        if "--session-id" in sticky:
+        recording = self._host_recording_session(target, sticky.get("--session-id"))
+        if recording:
+            # this host is in the middle of a take: that is the session its card is about
+            last_session = recording
+            self.__dict__.setdefault("_collection_followed", {})[target] = recording
+        elif "--session-id" in sticky:
             # an explicit pick (or a session a launch just created): always
             # offered, even before the databases list it
             last_session = _safe_session_id(sticky["--session-id"])
@@ -6051,7 +6118,7 @@ class ServicePanel(Widget):
         elif svc.launch_type == "collection":
             # a recorder process alive on this machine means a recording is
             # in progress, whichever session it belongs to
-            return bool(_collection_recorders_local())
+            return self._note_host_recorders("local", _collection_recorders_local())
         return False
 
     def on_service_card_start_requested(self, event: ServiceCard.StartRequested) -> None:
@@ -6698,6 +6765,11 @@ class ServicePanel(Widget):
         """Stop on one host: the session as a whole has only ended when no
         other host is still recording it. It used to be marked ended at the
         first Stop, in the middle of a recording that went on elsewhere."""
+        # the recorders of this session are gone from the host that was stopped:
+        # its card must not open on the session again before the next probe
+        recording = self.__dict__.get("_collection_host_sessions", {}).get(stopped)
+        if recording and session_id in recording:
+            recording.remove(session_id)
         busy = await asyncio.to_thread(self._hosts_still_recording, session_id, stopped)
         if busy:
             self._log(
@@ -7025,6 +7097,8 @@ class ServicePanel(Widget):
                         card.update_stack_status(counts[0], counts[1])
                     else:
                         card.update_status(is_running)
+            if svc.launch_type == "collection":
+                self._follow_host_recording_session(probed_target)
         self._build_tree()
         # the [E] markers need the env states of every host a node sits on
         for target in {node.target for node in self._node_host_cache.values()}:
@@ -7158,7 +7232,7 @@ class ServicePanel(Widget):
         elif svc.launch_type == "vllm":
             return ssh_check_port(profile, _mllm_config(self._root)["port"])
         elif svc.launch_type == "collection":
-            return bool(_collection_recorders_remote(profile))
+            return self._note_host_recorders(profile_name, _collection_recorders_remote(profile))
         return False
 
     def on_service_card_action_requested(self, event: ServiceCard.ActionRequested) -> None:
