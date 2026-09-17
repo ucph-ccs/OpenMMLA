@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -228,23 +229,51 @@ def is_loopback_host(host: object) -> bool:
 
 
 def is_this_machine(host: object) -> bool:
-    """loopback, or this machine's own hostname (bare, .local, or fully qualified)."""
+    """loopback, this machine's own hostname (bare, .local, or fully qualified),
+    or any name or address that resolves to one of its interfaces (a LAN or
+    tailnet IP written into a url is still this machine). May resolve names:
+    call it off the UI thread."""
     if is_loopback_host(host):
         return True
-    name = str(host or "").strip().lower().rstrip(".")
+    name = str(host or "").strip().strip("[]").lower().rstrip(".")
     try:
         me = socket.gethostname().lower().rstrip(".")
     except OSError:
-        return False
+        me = ""
     short = me.split(".")[0]
-    return name in {me, short, f"{short}.local"}
+    if me and name in {me, short, f"{short}.local"}:
+        return True
+    return any(_is_local_address(address) for address in _resolved_addresses(name))
+
+
+def _is_local_address(address: str) -> bool:
+    """whether an IP address belongs to one of this machine's interfaces: only
+    a local address can be bound."""
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.bind((address, 0))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+# host -> (expiry, addresses): bindings and markers are recomputed on every
+# status refresh, and a dead .local name takes seconds to fail each time
+_RESOLVE_TTL_SEC = 30.0
+_RESOLVED_ADDRESSES: dict[str, tuple[float, set[str]]] = {}
 
 
 def _resolved_addresses(host: str) -> set[str]:
+    cached = _RESOLVED_ADDRESSES.get(host)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
     try:
-        return {info[4][0] for info in socket.getaddrinfo(host, None)}
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
     except (OSError, ValueError):
-        return set()
+        addresses = set()
+    _RESOLVED_ADDRESSES[host] = (time.monotonic() + _RESOLVE_TTL_SEC, addresses)
+    return addresses
 
 
 def hosts_match(a: object, b: object) -> bool:
@@ -258,6 +287,21 @@ def hosts_match(a: object, b: object) -> bool:
     if x == y or x.split(".")[0] == y.split(".")[0]:
         return True
     return bool(_resolved_addresses(x) & _resolved_addresses(y))
+
+
+def target_for_service_host(host: object, profiles: list) -> str:
+    """console target that reaches the machine `host` names: "local" for this
+    machine, the name of the saved SSH profile that points at it, or "" when
+    the console has no way onto that machine."""
+    host = str(host or "").strip()
+    if not host:
+        return ""
+    if is_this_machine(host):
+        return "local"
+    for profile in profiles:
+        if hosts_match(host, profile.host) or hosts_match(host, profile.name):
+            return profile.name
+    return ""
 
 
 def _url_host_port(url: object) -> tuple[str, int | None]:
@@ -327,23 +371,97 @@ def check_endpoint(host: str, port: int, timeout: float = 1.5) -> bool:
         return False
 
 
-def system_service_reachable(
+MEDIAMTX_DEFAULT_RTSP_PORT = 8554
+
+
+def system_service_probe_ports(root: str | os.PathLike[str], target: str) -> list[int]:
+    """every port that has to answer before the service counts as running.
+
+    One port for most services. MediaMTX needs its RTSP port next to RTMP: an
+    nginx built with the RTMP module (the gateway before MediaMTX) answers on
+    1935 as well, and would read as a running MediaMTX that Stop never finds."""
+    endpoint = system_service_endpoint(root, target)
+    if endpoint is None:
+        return []
+    ports = [endpoint[1]]
+    if target == "mediamtx":
+        try:
+            gateway = (load_system_services_config(root) or {}).get("Gateway")
+        except Exception:
+            gateway = None
+        rtsp = gateway.get("rtsp_port") if isinstance(gateway, dict) else None
+        try:
+            rtsp = int(rtsp)
+        except (TypeError, ValueError):
+            rtsp = MEDIAMTX_DEFAULT_RTSP_PORT
+        if not 0 < rtsp < 65536:
+            rtsp = MEDIAMTX_DEFAULT_RTSP_PORT
+        if rtsp not in ports:
+            ports.append(rtsp)
+    return ports
+
+
+def system_service_port_states(
     root: str | os.PathLike[str],
     target: str,
     remote_loopback_check: Callable[[int], bool] | None = None,
-) -> bool:
-    """whether the configured endpoint of an Uber system service answers.
+    own_port: bool = False,
+) -> dict[int, bool]:
+    """which of the service's probe ports answer at its configured endpoint.
 
     Probed from this machine at the configured host:port, i.e. the path the
     pipelines actually take. A loopback host names no machine in particular, so
     it is checked on the selected host instead: through remote_loopback_check
-    (an ssh probe of that host's own port) when given, else locally."""
+    (an ssh probe of that host's own port) when given, else locally. own_port
+    asks for that same check of the selected host whatever the address says:
+    a card moved off the configured machine reports the host it is on."""
     endpoint = system_service_endpoint(root, target)
     if endpoint is None:
-        return False
-    host, port = endpoint
-    if is_loopback_host(host):
-        if remote_loopback_check is not None:
-            return bool(remote_loopback_check(port))
-        return check_endpoint("127.0.0.1", port)
-    return check_endpoint(host, port)
+        return {}
+    host = endpoint[0]
+    states: dict[int, bool] = {}
+    for port in system_service_probe_ports(root, target):
+        if not own_port and not is_loopback_host(host):
+            states[port] = check_endpoint(host, port)
+        elif remote_loopback_check is not None:
+            states[port] = bool(remote_loopback_check(port))
+        else:
+            states[port] = check_endpoint("127.0.0.1", port)
+    return states
+
+
+def system_service_reachable(
+    root: str | os.PathLike[str],
+    target: str,
+    remote_loopback_check: Callable[[int], bool] | None = None,
+    own_port: bool = False,
+) -> bool:
+    """whether the configured endpoint of an Uber system service answers, on
+    every port that service is made of (see system_service_port_states)."""
+    states = system_service_port_states(root, target, remote_loopback_check, own_port)
+    return bool(states) and all(states.values())
+
+
+def system_service_port_conflict(
+    root: str | os.PathLike[str],
+    target: str,
+    remote_loopback_check: Callable[[int], bool] | None = None,
+    own_port: bool = False,
+) -> str:
+    """explain a service whose ports answer only in part, or "" when they all
+    agree. Half-open means another program holds one of its ports."""
+    if len(system_service_probe_ports(root, target)) < 2:
+        return ""
+    states = system_service_port_states(root, target, remote_loopback_check, own_port)
+    if all(states.values()) or not any(states.values()):
+        return ""
+    up = ", ".join(str(port) for port, ok in states.items() if ok)
+    down = ", ".join(str(port) for port, ok in states.items() if not ok)
+    message = f"port {up} answers but {down} does not, so another program holds {up}"
+    if target == "mediamtx":
+        message += (
+            ": usually an nginx built with the RTMP module, left over from before MediaMTX. "
+            "Press Start on the Nginx card to render its config again (the current template "
+            "has no rtmp block), or stop Nginx"
+        )
+    return message

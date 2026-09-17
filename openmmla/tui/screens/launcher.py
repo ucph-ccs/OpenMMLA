@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import yaml
 from rich.markup import escape as rich_escape
 from rich.text import Text
+from textual import on
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll, Vertical, Horizontal
 from textual.widget import Widget
@@ -42,7 +43,9 @@ from openmmla.tui.system_services import (
     hosts_match,
     is_loopback_host,
     system_service_endpoint,
+    system_service_port_conflict,
     system_service_reachable,
+    target_for_service_host,
     load_system_service_values,
     load_system_services_config,
     save_system_service_section,
@@ -2014,6 +2017,75 @@ _INFRA_COMPOSE_SERVICES = {
     "mediamtx": "mediamtx",
 }
 
+# System Settings field that names the machine a system service runs on, keyed
+# by make target. The worker has no address of its own: it lives next to Flask
+_SERVICE_HOST_FIELDS: dict[str, str] = {
+    "influxdb": "InfluxDB.url",
+    "mongodb": "MongoDB.url",
+    "redis": "Redis.host",
+    "mosquitto": "MQTT.host",
+    "nginx": "Gateway.host",
+    "mediamtx": "Gateway.host",
+    "flask": "Dashboard.host",
+    "celery": "Dashboard.host",
+}
+
+_SETTINGS_HOST_NOTE = "Local  (System Settings live in this project)"
+_SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
+
+# the host each launcher node was last pointed at, kept across restarts
+_NODE_HOSTS_REL_PATH = os.path.join("config", "launcher_hosts.yml")
+
+
+@dataclass(frozen=True)
+class NodeHost:
+    """where one launcher node opens.
+
+    Every node has its own host. A system service whose System Settings address
+    names a machine opens on that machine, so by default its card, its sidebar
+    marker and its Start/Stop mean the same place; the user may still move the
+    card for a one-off on another host, and it is back on the configured
+    machine the next time it is opened. Anything else opens where the user
+    last pointed it, which is remembered per node."""
+    target: str = "local"
+    # a system service whose address names a machine: the settings field
+    # ("InfluxDB.url"), the machine as written there, and the console target
+    # that reaches it ("" when it is neither this machine nor a usable profile)
+    follows: str = ""
+    machine: str = ""
+    machine_target: str = ""
+    # why `target` is not the host one would expect
+    fallback_from: str = ""
+
+
+def _node_hosts_path(root: str) -> str:
+    return os.path.join(root, _NODE_HOSTS_REL_PATH)
+
+
+def load_node_hosts(root: str) -> dict[str, str]:
+    """node name -> SSH profile name; nodes on Local are simply absent."""
+    try:
+        with open(_node_hosts_path(root), encoding="utf-8") as file:
+            data = yaml.safe_load(file) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(name): str(target) for name, target in data.items()
+        if str(target or "").strip() and str(target) != "local"
+    }
+
+
+def save_node_hosts(root: str, hosts: dict[str, str]) -> None:
+    path = _node_hosts_path(root)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as file:
+            yaml.safe_dump(dict(sorted(hosts.items())), file, default_flow_style=False, allow_unicode=True)
+    except OSError:
+        pass  # a read-only checkout only loses the memory, never the action
+
 
 def _stack_compose_rel_file(svc: ServiceDef) -> str | None:
     return _STACK_COMPOSE_FILES.get(svc.name)
@@ -2300,19 +2372,23 @@ class ServicePanel(Widget):
         color: $text-muted;
         text-style: italic;
     }
-    /* System Settings are always edited on this machine: swap the selector
-       for a "Local" note there instead of showing the remembered host greyed
-       out, keeping the bar's height so the content below does not jump; the
-       chosen host is kept for the next service node */
-    #svc-target-bar.local-only Label {
+    /* nodes whose host is not the user's to pick (System Settings are edited
+       on this machine, a system service runs where System Settings put it,
+       Session Control has no host): swap the selector for a note, keeping the
+       bar's height so the content below does not jump */
+    #svc-target-bar.host-fixed Label {
         color: $text-muted;
     }
-    #svc-target-bar.local-only Select,
-    #svc-target-bar.local-only Button {
+    #svc-target-bar.host-fixed Select,
+    #svc-target-bar.host-fixed Button {
         display: none;
     }
-    #svc-target-bar.local-only #svc-target-local-note {
+    #svc-target-bar.host-fixed #svc-target-local-note {
         display: block;
+    }
+    #svc-target-local-note {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
     /* the bar must stay one row: never let a long "name  (offline ✗)" label
        wrap at narrow terminal widths */
@@ -2371,6 +2447,16 @@ class ServicePanel(Widget):
         margin: 0 1;
         min-width: 18;
     }
+    .sync-note {
+        height: auto;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    /* the note sits right on top of the picker */
+    .sync-bar-noted {
+        margin-top: 0;
+        padding-top: 0;
+    }
     .preflight-warning {
         color: $warning;
         padding: 0 2;
@@ -2420,6 +2506,22 @@ class ServicePanel(Widget):
         # card is rebuilt on every tree/host change and would otherwise fall back
         # to the ParamDef default, silently sending Stop down the other path
         self._infra_mode: dict[tuple[str, str], str] = {}
+        # node name -> SSH profile the user last pointed that node at; every
+        # node keeps its own host, across restarts. System services whose
+        # address names a machine are not in here: see _derive_node_host
+        self._node_hosts: dict[str, str] = load_node_hosts(self._root)
+        # node name -> NodeHost as last resolved off the UI thread; the tree
+        # markers read this rather than resolve names while rendering
+        self._node_host_cache: dict[str, NodeHost] = {}
+        self._current_node_host: NodeHost = NodeHost()
+        # (node name, host) of a system service card the user moved off the
+        # machine System Settings name: it lasts until another node is opened
+        self._host_override: tuple[str, str] | None = None
+        # card and host the next log lines belong to, and the one the log last
+        # drew a divider for (see _log)
+        self._log_context: str = ""
+        self._log_context_shown: str = ""
+        self._fallback_noted: dict[str, str] = {}
         # target -> {conda env: Ready | Partial: ... | Missing}; feeds the tree's
         # [E] markers and is refreshed off the UI thread (conda is slow)
         self._env_statuses: dict[str, dict[str, str]] = {}
@@ -2459,10 +2561,7 @@ class ServicePanel(Widget):
             with Horizontal(id="svc-target-bar"):
                 yield Label("Host:")
                 yield Select(target_options, value="local", id="svc-target-select")
-                yield Static(
-                    "Local  (System Settings live in this project)",
-                    id="svc-target-local-note",
-                )
+                yield Static(_SETTINGS_HOST_NOTE, id="svc-target-local-note")
                 yield Button("↻", variant="primary", compact=True, id="svc-target-refresh")
             with Vertical(id="svc-content-area"):
                 yield Static(
@@ -2483,9 +2582,11 @@ class ServicePanel(Widget):
         self._kick_env_status_refresh("local")
 
     def _kick_env_status_refresh(self, target: str) -> None:
+        # a group per host: nodes sit on different hosts, and one host's check
+        # must not cancel another's
         self.run_worker(
             self._refresh_env_statuses(target),
-            group="launcher-env-status",
+            group=f"launcher-env-status:{target}",
             exclusive=True,
         )
 
@@ -2503,8 +2604,7 @@ class ServicePanel(Widget):
             self._log(f"[yellow]Environment check on {target} failed: {e}[/yellow]")
             return
         self._env_statuses[target] = statuses
-        if target == self._get_panel_target():
-            self._build_tree()
+        self._build_tree()
 
     # ── target reachability ──────────────────────────────────────
 
@@ -2541,11 +2641,35 @@ class ServicePanel(Widget):
                         self._log(f"[{color}]Host '{name}' is now {state}.[/{color}]")
                 self._target_states = states
                 self._refresh_target_options()
+                self._refresh_visible_statuses()
+                # a group of its own: only an actual rebuild may replace the
+                # UI worker, a mere look must not cancel a reload in flight
+                self.run_worker(
+                    self._async_rebind_current_node(),
+                    group="launcher-rebind",
+                    exclusive=True,
+                )
         finally:
             # the re-probe loop must survive any failure above
             if self._target_probe_timer is not None:
                 self._target_probe_timer.stop()
             self._target_probe_timer = self.set_timer(_TARGET_PROBE_INTERVAL_SEC, self._probe_targets)
+
+    async def _async_rebind_current_node(self) -> None:
+        """rebuild the card on screen when its host is no longer the one it
+        was built for (System Settings saved, a host came up or went down)."""
+        name = self._current_service_name
+        svc = self._svc_map.get(name) if name else None
+        if svc is None:
+            return
+        before = self._current_node_host
+        node = await asyncio.to_thread(self._resolve_node_host, svc)
+        if node != before and self._current_service_name == name:
+            self.run_worker(
+                self._reload_current_service_view(),
+                group=_LAUNCHER_UI_WORKER_GROUP,
+                exclusive=True,
+            )
 
     def on_show(self) -> None:
         self._refresh_target_options()
@@ -2556,11 +2680,24 @@ class ServicePanel(Widget):
                 exclusive=True,
             )
 
+    # bound with @on: Textual names this message's handler "on_sshform_...", so
+    # the "on_ssh_form_..." spelling was never called and a saved profile only
+    # reached the Host selector with the next background probe
+    @on(SSHForm.ProfilesChanged)
     def on_ssh_form_profiles_changed(self, event: SSHForm.ProfilesChanged) -> None:
         event.stop()
+        renamed = getattr(event, "renamed", None)
+        if renamed and renamed[0] in self._node_hosts.values():
+            # the cards that were pointed at this profile follow its new name
+            self._node_hosts = {
+                node: (renamed[1] if target == renamed[0] else target)
+                for node, target in self._node_hosts.items()
+            }
+            save_node_hosts(self._root, self._node_hosts)
         self._refresh_target_options()
         self._probe_targets()
 
+    @on(SSHForm.ConnectionTested)
     def on_ssh_form_connection_tested(self, event: SSHForm.ConnectionTested) -> None:
         """a single-host test updated TARGET_STATES; mirror it in the dropdown."""
         event.stop()
@@ -2605,24 +2742,149 @@ class ServicePanel(Widget):
         except Exception:
             return "local"
 
-    def _set_host_bar_enabled(self, enabled: bool) -> None:
-        """swap the Host selector for a "Local" note on nodes that are always
-        edited on this machine.
+    def _show_host_bar(self, note: str | None = None) -> None:
+        """show the Host selector, or `note` in its place on a node whose host
+        is not the user's to pick.
 
-        System Settings (SSH profiles, experiments, tasks and the shared service
-        sections) live in the local project, so the selected host has no effect
-        there. Showing the remembered host greyed out was misleading, so the
-        selector and its refresh button are hidden instead; their value is left
-        alone so the next service node lands on the same host."""
+        System Settings live in the local project, a system service runs where
+        System Settings put it, and Session Control has no host at all. A
+        greyed-out selector was misleading there, so the selector and its
+        refresh button are hidden instead."""
         try:
             bar = self.query_one("#svc-target-bar", Horizontal)
             select = self.query_one("#svc-target-select", Select)
             refresh = self.query_one("#svc-target-refresh", Button)
+            label = self.query_one("#svc-target-local-note", Static)
         except Exception:
             return
-        bar.set_class(not enabled, "local-only")
-        select.disabled = not enabled
-        refresh.disabled = not enabled
+        fixed = note is not None
+        if fixed:
+            label.update(note)
+        bar.set_class(fixed, "host-fixed")
+        select.disabled = fixed
+        refresh.disabled = fixed
+
+    # ── per-node hosts ───────────────────────────────────────────
+
+    def _derive_node_host(self, svc: ServiceDef, profiles: list) -> NodeHost:
+        if svc.launch_type == "make":
+            make_target = _make_target_for(svc.name)
+            endpoint = system_service_endpoint(
+                self._root, "flask" if make_target == "celery" else make_target)
+            host = endpoint[0] if endpoint else ""
+            # a loopback address names no machine: that card is the user's pick
+            if not is_loopback_host(host):
+                field = _SERVICE_HOST_FIELDS.get(make_target, "System Settings")
+                bound = target_for_service_host(host, profiles)
+                if not bound:
+                    return NodeHost(
+                        follows=field, machine=host,
+                        fallback_from=(
+                            f"System Settings put it on {host} ({field}), which is neither this "
+                            f"machine nor a saved SSH profile"))
+                if TARGET_STATES.get(bound) == "offline":
+                    return NodeHost(
+                        follows=field, machine=host,
+                        fallback_from=f"System Settings put it on '{bound}' ({field}), which is offline")
+                return NodeHost(bound, follows=field, machine=host, machine_target=bound)
+
+        saved = self._node_hosts.get(svc.name, "local")
+        if saved == "local":
+            return NodeHost()
+        if not any(profile.name == saved for profile in profiles):
+            return NodeHost(fallback_from=f"'{saved}', where it was last used, is no longer a saved SSH profile")
+        if TARGET_STATES.get(saved) == "offline":
+            return NodeHost(fallback_from=f"'{saved}', where it was last used, is offline")
+        return NodeHost(saved)
+
+    def _resolve_node_host(self, svc: ServiceDef, profiles: list | None = None) -> NodeHost:
+        """where this node's actions run. Reads config files and may resolve
+        names, so it belongs off the UI thread; the tree reads the cached result."""
+        node = self._derive_node_host(svc, load_ssh_profiles() if profiles is None else profiles)
+        self._node_host_cache[svc.name] = node
+        return node
+
+    def _card_target(self, svc: ServiceDef, node: NodeHost) -> str:
+        """the host the card is on: the node's own, unless the user moved this
+        system service card somewhere else for the time being."""
+        override = self._host_override
+        if override is None or override[0] != svc.name:
+            return node.target
+        target = override[1]
+        usable = target == "local" or (
+            TARGET_STATES.get(target) != "offline"
+            and any(value == target for _, value in target_options())
+        )
+        if not usable or target == node.target:
+            self._host_override = None
+            return node.target
+        return target
+
+    def _apply_node_host(self, svc: ServiceDef, node: NodeHost) -> None:
+        """point the Host bar, and everything that follows it, at a node's host."""
+        self._current_node_host = node
+        self._show_host_bar(None)
+        target = self._card_target(svc, node)
+        self._set_log_context(svc, target)
+        # said once per cause: the card is rebuilt often, the reason stays the same
+        if node.fallback_from and self._fallback_noted.get(svc.name) != node.fallback_from:
+            self._log(f"[yellow]{svc.display_name}: {node.fallback_from}. Showing Local.[/yellow]")
+        self._fallback_noted[svc.name] = node.fallback_from
+        try:
+            select = self.query_one("#svc-target-select", Select)
+        except Exception:
+            return
+        changed = target != self._last_target
+        # not a pick by the user: the Select moves without a Changed message,
+        # and its handler would ignore the current target anyway
+        self._last_target = target
+        set_current_target(target)
+        if select.value != target:
+            with select.prevent(Select.Changed):
+                try:
+                    select.value = target
+                except Exception:
+                    # a profile saved after the options were last built
+                    try:
+                        select.set_options(target_options())
+                        select.value = target
+                    except Exception:
+                        target = self._last_target = "local"
+                        set_current_target(target)
+                        select.value = target
+        if changed:
+            try:
+                self.query_one("#svc-cmd-session", CommandSession).set_target(target)
+            except Exception:
+                pass
+            # as on a manual host switch: the [E] markers of that host catch up
+            self._kick_env_status_refresh(target)
+
+    def _remember_node_host(self, target: str) -> None:
+        """file the user's Host pick under the node it was made on."""
+        name = self._current_service_name
+        if not name:
+            return
+        if self._current_node_host.follows:
+            # System Settings stay this card's home: the move is a one-off
+            self._host_override = None if target == self._current_node_host.target else (name, target)
+            return
+        if target == "local":
+            self._node_hosts.pop(name, None)
+        else:
+            self._node_hosts[name] = target
+        node = NodeHost(target)
+        self._node_host_cache[name] = node
+        self._current_node_host = node
+        save_node_hosts(self._root, self._node_hosts)
+
+    def _off_configured_machine(self, svc: ServiceDef, target: str) -> bool:
+        """whether `target` is another machine than the one System Settings
+        name for this system service. The card then reports and controls that
+        host's own port; the sidebar marker keeps following the configured
+        endpoint, which is what the pipelines connect to."""
+        node = self._node_host_cache.get(svc.name)
+        return bool(node and node.follows and target != node.machine_target)
 
     @staticmethod
     def _is_local_only_node(node_str: str) -> bool:
@@ -2671,12 +2933,18 @@ class ServicePanel(Widget):
             self._capture_infra_mode(self._last_target)
             self._last_target = val
             set_current_target(val)
+            self._remember_node_host(val)
+            current = self._svc_map.get(self._current_service_name or "")
+            if current is not None:
+                self._set_log_context(current, val)
             if val != "local":
                 self._log(f"[yellow]Switching host to '{val}' — loading remote state...[/yellow]")
             cmd = self.query_one("#svc-cmd-session", CommandSession)
             cmd.set_target(val)
-            # stale states from the previous target should not linger
-            self._svc_states.clear()
+            # only this node moved: its state from the previous host must not
+            # linger, every other node still sits where it was
+            if self._current_service_name:
+                self._svc_states.pop(self._current_service_name, None)
             self.run_worker(
                 self._reload_current_service_view(capture=False),
                 group=_LAUNCHER_UI_WORKER_GROUP,
@@ -2769,8 +3037,10 @@ class ServicePanel(Widget):
         socket/SSH probes) happens in the _refresh_visible_statuses worker,
         never on the UI thread while rendering the tree."""
         markers = ""
-        if _service_uses_conda_env(svc):
-            statuses = self._env_statuses.get(self._get_panel_target()) or {}
+        node = self._node_host_cache.get(svc.name) or NodeHost(self._node_hosts.get(svc.name, "local"))
+        # no [E] for a machine the console cannot look into
+        if _service_uses_conda_env(svc) and not (node.follows and not node.machine_target):
+            statuses = self._env_statuses.get(node.target) or {}
             color = _env_marker_color(statuses.get(svc.conda_env))
             if color:
                 markers += f" [{color}]\\[E][/{color}]"
@@ -2804,7 +3074,12 @@ class ServicePanel(Widget):
         self._current_config_local_path = None
         self._config_container = None
         self._current_service_name = None
-        self._set_host_bar_enabled(not self._is_local_only_node(node_str))
+        self._current_node_host = NodeHost()
+        self._host_override = None
+        if self._is_local_only_node(node_str):
+            self._show_host_bar(_SETTINGS_HOST_NOTE)
+        elif node_str == "__session_control__":
+            self._show_host_bar(_SESSION_CONTROL_HOST_NOTE)
 
         if node_str.startswith("__shared__"):
             self._set_command_session_visible(False)
@@ -2833,8 +3108,9 @@ class ServicePanel(Widget):
 
         if node_str == "__session_control__":
             self._set_command_session_visible(False)
-            target = self._get_panel_target()
-            choices = await asyncio.to_thread(self._artifact_session_choices_for_target, target)
+            # no host here: the signal is published to the Redis of System
+            # Settings from this machine, whichever machines the bases run on
+            choices = await asyncio.to_thread(self._artifact_session_choices_for_target, "local")
             choices = [c for c in choices if c and c != _NEW_COLLECTION_SESSION_CHOICE]
             from openmmla.tui.system_services import system_services_config_path
             scroll = VerticalScroll(classes="svc-launch-scroll")
@@ -2849,9 +3125,12 @@ class ServicePanel(Widget):
         base_svc = svc
         self._set_command_session_visible(True)
 
+        # every node has its own host: the one System Settings give a system
+        # service, else the one this node was last pointed at
+        node = await asyncio.to_thread(self._resolve_node_host, base_svc)
+        self._apply_node_host(base_svc, node)
         target = self._get_panel_target()
         svc, is_running = await self._service_view_state(base_svc, target)
-        self._svc_states[base_svc.name] = is_running
 
         await self._mount_service_content(content_area, svc, is_running)
 
@@ -2871,9 +3150,15 @@ class ServicePanel(Widget):
         if svc is None:
             self._build_tree()
             return
+        # System Settings or the host states may have changed since the card
+        # was built, so the node's host is worked out again
+        node = await asyncio.to_thread(self._resolve_node_host, svc)
+        if self._current_service_name != svc.name:
+            self._build_tree()
+            return
+        self._apply_node_host(svc, node)
         target = self._get_panel_target()
         display_svc, is_running = await self._service_view_state(svc, target)
-        self._svc_states[svc.name] = is_running
         if self._current_service_name != svc.name:
             # the user moved to another tree node while the (possibly remote)
             # probe ran; that node owns the content area now, so only refresh
@@ -2889,7 +3174,6 @@ class ServicePanel(Widget):
         self._current_config_local_path = None
         self._config_container = None
         self._set_command_session_visible(True)
-        self._set_host_bar_enabled(True)
         await self._mount_service_content(
             content_area,
             display_svc,
@@ -2906,8 +3190,14 @@ class ServicePanel(Widget):
             is_running = self._detect_running(svc)
         else:
             is_running = self._detect_running_remote(svc, target)
-        self._svc_states[svc.name] = is_running
+        self._note_card_state(svc, target, is_running)
         return self._service_for_target(svc, target), is_running
+
+    def _note_card_state(self, svc: ServiceDef, target: str, is_running: bool) -> None:
+        """let the card's state feed the sidebar marker, unless the card was
+        moved off the machine that marker stands for."""
+        if not self._off_configured_machine(svc, target):
+            self._svc_states[svc.name] = is_running
 
     async def _populate_deferred_panes(
         self,
@@ -3317,7 +3607,7 @@ class ServicePanel(Widget):
         svc = self._service_with_collection_defaults(svc, target)
         svc = self._service_with_session_choices(svc, target)
         svc = self._service_with_infra_mode(svc, target)
-        svc = self._service_with_endpoint_note(svc)
+        svc = self._service_with_endpoint_note(svc, target)
         if svc.name != "ASR Server":
             return svc
         config_path = os.path.join(svc.config_dir, "config.yml")
@@ -3329,7 +3619,7 @@ class ServicePanel(Widget):
             description=f"ASR inference services (AudioInferer: {backend})",
         )
 
-    def _service_with_endpoint_note(self, svc: ServiceDef) -> ServiceDef:
+    def _service_with_endpoint_note(self, svc: ServiceDef, target: str = "local") -> ServiceDef:
         """say on the card which address the status probe connects to."""
         if svc.launch_type != "make":
             return svc
@@ -3337,6 +3627,13 @@ class ServicePanel(Widget):
         if endpoint is None:
             return svc
         host, port = endpoint
+        if self._off_configured_machine(svc, target):
+            node = self._node_host_cache[svc.name]
+            here = "this machine" if target == "local" else f"'{target}'"
+            return replace(svc, description=(
+                f"{svc.description}. [yellow]System Settings point the pipelines at {host}:{port} "
+                f"({node.follows}), which is not {here}: this card shows and controls {here}'s own "
+                f"port {port}, the sidebar marker still follows {host}:{port}.[/yellow]"))
         where = (
             f"loopback:{port} on the selected host" if is_loopback_host(host)
             else f"{host}:{port}"
@@ -3732,6 +4029,8 @@ class ServicePanel(Widget):
             self._show_status(
                 f"{section_name} system service saved to {config_path} and {updated} local pipeline config(s)"
             )
+            # the address may now name another machine: move the markers along
+            self._refresh_visible_statuses()
             return
 
         if event.pipeline_name == "MLLM Server":
@@ -3845,8 +4144,12 @@ class ServicePanel(Widget):
         container = self._config_container
         if container is None:
             return
-        for old in container.query(".sync-bar"):
+        for old in container.query(".sync-bar, .sync-note"):
             old.remove()
+        if shared_section == "Sudo":
+            # this machine's own admin password: no pipeline config carries it,
+            # and another machine has no use for it
+            return
         target = self._get_panel_target()
         if target != "local" and shared_section is None:
             # on a remote host, Save on a pipeline config already writes to that
@@ -3876,8 +4179,15 @@ class ServicePanel(Widget):
                 **select_kwargs,
             ),
             Button("Sync to Remote", variant="warning", id="btn-sync-remote"),
-            classes="sync-bar",
+            classes="sync-bar" if shared_section is None else "sync-bar sync-bar-noted",
         )
+        if shared_section is not None:
+            container.mount(Static(
+                f"Save writes this machine's project. Sync to Remote copies the {shared_section} "
+                f"section to another machine (its pipeline configs, and its own system_services.yml "
+                f"if it has one), so what runs there connects to the same service.",
+                classes="sync-note",
+            ))
         container.mount(bar)
 
     def _clone_template_fields(self, pipeline: PipelineDef, new_name: str) -> list[LoaderFieldDef]:
@@ -4410,6 +4720,11 @@ class ServicePanel(Widget):
             cache_key = self._config_cache_key(pipeline.config_path, target)
             entries.append((tmp.name, remote_path, cache_key, remote_config))
 
+        own_store = self._remote_settings_entry(target, profile, {section_name: section_data})
+        if own_store is not None:
+            temp_paths.append(own_store[0])
+            entries.append(own_store)
+
         if not entries:
             for path in temp_paths:
                 try:
@@ -4422,11 +4737,77 @@ class ServicePanel(Widget):
         for key, value in section_data.items():
             self._shared_values[f"{section_name}.{key}"] = value
 
+        loopback = [
+            f"{section_name}.{key}" for key, value in section_data.items()
+            if key in ("host", "url") and is_loopback_host(
+                urlsplit(str(value)).hostname if "://" in str(value) else value)
+        ]
+        success_message = f"Synced {section_name} system service"
+        if loopback:
+            # the log pane is hidden on this node, so the warning rides along
+            success_message = (
+                f"Note: {', '.join(loopback)} is a loopback address, which on '{target}' means "
+                f"'{target}' itself and not this machine; machines that share one service need "
+                f"its real host name. {success_message}"
+            )
         self._show_status(f"Syncing {section_name} system service to {target} ...")
         self.run_worker(
-            self._run_scp_batch(target, entries, cleanup_local=True, success_message=f"Synced {section_name} system service"),
+            self._run_scp_batch(target, entries, cleanup_local=True, success_message=success_message),
             exclusive=True,
         )
+
+    def _remote_settings_path(self) -> str:
+        from openmmla.tui.system_services import system_services_config_path
+        return system_services_config_path(self._root)
+
+    def _remote_settings_entry(self, target: str, profile, sections: dict[str, dict]):
+        """scp entry that writes `sections` into the host's own
+        config/system_services.yml, or None when it has no such file.
+
+        The services read that file on top of their pipeline config, so a copy
+        left behind on a host (by a console that once ran there) silently beats
+        everything this console pushes. It is only ever brought in step, never
+        created: a host without one takes its values from the pipeline configs."""
+        local_path = self._remote_settings_path()
+        remote_store, _ = self._load_config_for_target(local_path, show_status=False, target=target)
+        if not isinstance(remote_store, dict) or not remote_store:
+            return None
+        updated = dict(remote_store)
+        for name, data in sections.items():
+            if name != "Sudo":
+                updated[name] = dict(data)
+        if updated == remote_store:
+            return None
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".yml", prefix="openmmla-remote-settings-", delete=False, encoding="utf-8")
+        with tmp:
+            yaml.safe_dump(updated, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        return (
+            tmp.name,
+            self._remote_config_path(local_path, profile),
+            self._config_cache_key(local_path, target),
+            updated,
+        )
+
+    def _remote_settings_drift(self, target: str, central: dict[str, dict], carried: set[str]) -> list[str]:
+        """connection sections that the host's own config/system_services.yml
+        sets to something else than System Settings here, as "Section → host".
+        Secrets are compared decrypted and never shown."""
+        from openmmla.utils.config import SYSTEM_SERVICE_SECTIONS, decrypt_config_values
+        remote_store, _ = self._load_config_for_target(
+            self._remote_settings_path(), show_status=False, target=target)
+        if not isinstance(remote_store, dict) or not remote_store:
+            return []
+        drifted = []
+        for name in SYSTEM_SERVICE_SECTIONS:
+            if name not in carried or name not in central or not isinstance(remote_store.get(name), dict):
+                continue
+            if decrypt_config_values(remote_store[name]) != decrypt_config_values(central[name]):
+                where = remote_store[name].get("url") or remote_store[name].get("host") or "other values"
+                if "://" in str(where):
+                    where = urlsplit(str(where)).netloc.rsplit("@", 1)[-1]
+                drifted.append(f"{name} → {where}")
+        return drifted
 
     def _shared_section_data(self, section_name: str) -> dict[str, object]:
         info = SHARED_SECTIONS.get(section_name, {})
@@ -4557,6 +4938,15 @@ class ServicePanel(Widget):
             return True  # cannot verify; existing checks already warned
         remote_config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
         overrides = pipeline_section_overrides(remote_config)
+        carried = {name for name in central if name in (remote_config or {}) and name not in overrides}
+        own_drift = self._remote_settings_drift(target, central, carried)
+        if own_drift:
+            self._log(
+                f"[yellow]'{target}' has a config/system_services.yml of its own, and the services read "
+                f"it on top of the pipeline config: {'; '.join(own_drift)}. What runs there connects "
+                f"to those, not to System Settings here. Sync to Remote on those Connections forms "
+                f"brings the file in step.[/yellow]"
+            )
         drifted = shared_section_drift(central, remote_config, overrides=overrides)
         if not drifted:
             return True
@@ -4817,9 +5207,19 @@ class ServicePanel(Widget):
 
     def _log(self, message: str) -> None:
         try:
+            # the log is one transcript for the whole tab (commands keep
+            # streaming after the user moves on), so a divider says which card
+            # and host the lines below belong to. Drawn lazily: browsing the
+            # tree without doing anything leaves no trail of empty headers
+            if self._log_context and self._log_context != self._log_context_shown:
+                self._log_context_shown = self._log_context
+                self._cmd.log(f"[dim]── {self._log_context} ──[/dim]")
             self._cmd.log(message)
         except Exception:
             pass
+
+    def _set_log_context(self, svc: ServiceDef, target: str) -> None:
+        self._log_context = f"{svc.display_name} · {'Local' if target == 'local' else target}"
 
     # the command session is mounted once by compose() and never rebuilt, so a
     # card rebuild mid-download cannot orphan the progress row
@@ -4886,12 +5286,14 @@ class ServicePanel(Widget):
                 return _check_tmux_session("vfa-services")
         elif svc.launch_type == "make":
             target = _make_target_for(svc.name)
+            # a card moved off the configured machine reports this machine's own port
+            own_port = self._off_configured_machine(svc, "local")
             if target in _SYSTEM_SVC_PORTS:
                 # the address every pipeline is configured with, probed from here;
                 # a loopback url means "this machine" and keeps the local check
-                return system_service_reachable(self._root, target)
+                return system_service_reachable(self._root, target, own_port=own_port)
             if target == "flask":
-                return system_service_reachable(self._root, "flask")
+                return system_service_reachable(self._root, "flask", own_port=own_port)
             return _check_tmux_session(target)
         elif svc.launch_type == "collection":
             # recorders run as tmux sessions under the service's prefix; any
@@ -4964,6 +5366,7 @@ class ServicePanel(Widget):
 
         target_label = f"on '{target}'" if is_remote else "locally"
         self._log(f"[green]Starting {svc.name} {target_label}...[/green]")
+        self._note_port_conflict(svc, target)
 
         if is_remote:
             self._launch_remote(svc, launch_params, target)
@@ -4980,6 +5383,7 @@ class ServicePanel(Widget):
         is_remote = target != "local"
         target_label = f"on '{target}'" if is_remote else "locally"
         self._log(f"[red]Stopping {svc.name} {target_label}...[/red]")
+        self._note_port_conflict(svc, target)
 
         if is_remote:
             self._stop_remote(svc, target, event.params)
@@ -5033,6 +5437,34 @@ class ServicePanel(Widget):
             exclusive=False,
         )
 
+    def _port_conflict(self, svc: ServiceDef, target: str) -> str:
+        """explain a system service whose ports answer only in part: another
+        program holds one of them. Probes, so it runs off the UI thread."""
+        if svc.launch_type != "make" or _make_target_for(svc.name) not in _SYSTEM_SVC_PORTS:
+            return ""
+        check = None
+        profile = get_profile_by_name(target) if target != "local" else None
+        if profile is not None:
+            check = lambda port: ssh_check_port(profile, port)
+        return system_service_port_conflict(
+            self._root, _make_target_for(svc.name), check,
+            own_port=self._off_configured_machine(svc, target),
+        )
+
+    async def _async_note_port_conflict(self, svc: ServiceDef, target: str) -> None:
+        conflict = await asyncio.to_thread(self._port_conflict, svc, target)
+        if conflict:
+            self._log(f"[yellow]{svc.display_name}: {conflict}.[/yellow]")
+
+    def _note_port_conflict(self, svc: ServiceDef, target: str) -> None:
+        if svc.launch_type != "make":
+            return
+        self.run_worker(
+            self._async_note_port_conflict(svc, target),
+            group="launcher-port-conflict",
+            exclusive=False,
+        )
+
     async def _async_refresh_single_status(self, svc: ServiceDef, target: str) -> None:
         """probe one service's running state off the UI thread."""
         counts = None
@@ -5045,7 +5477,7 @@ class ServicePanel(Widget):
             is_running = await asyncio.to_thread(self._detect_running_remote, svc, target)
         if target != self._get_panel_target():
             return
-        self._svc_states[svc.name] = is_running
+        self._note_card_state(svc, target, is_running)
         for card in self.query(ServiceCard):
             if card.service_def.name == svc.name:
                 if counts is not None:
@@ -5058,11 +5490,12 @@ class ServicePanel(Widget):
         else:
             status = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
             self._log(f"{svc.name} ({target}): {status}")
+        await self._async_note_port_conflict(svc, target)
 
     def on_session_control_panel_refresh_requested(self, event: SessionControlPanel.RefreshRequested) -> None:
         """↻ on the Session Control panel: re-query the active session list."""
         event.stop()
-        target = self._get_panel_target()
+        target = "local"
         self._invalidate_session_choice_cache(target)
         self._log("Refreshing session list...")
         self.run_worker(
@@ -5074,8 +5507,6 @@ class ServicePanel(Widget):
     async def _async_refresh_session_control_choices(self, target: str) -> None:
         choices = await asyncio.to_thread(self._artifact_session_choices_for_target, target)
         choices = [c for c in choices if c and c != _NEW_COLLECTION_SESSION_CHOICE]
-        if target != self._get_panel_target():
-            return
         for panel in self.query(SessionControlPanel):
             panel.update_session_choices(choices)
         self._log(f"Session list updated ({len(choices)} session(s)).")
@@ -5680,17 +6111,22 @@ class ServicePanel(Widget):
 
     def _refresh_visible_statuses(self) -> None:
         self.run_worker(
-            self._async_refresh_visible_statuses(self._get_panel_target()),
+            self._async_refresh_visible_statuses(),
             group=_LAUNCHER_STATUS_WORKER_GROUP,
             exclusive=True,
         )
 
-    async def _async_refresh_visible_statuses(self, target: str) -> None:
-        states = await asyncio.to_thread(self._detect_visible_statuses, target)
-        if target != self._get_panel_target():
-            return
-        for svc_name, (is_running, counts) in states.items():
+    async def _async_refresh_visible_statuses(self) -> None:
+        states = await asyncio.to_thread(self._detect_visible_statuses)
+        for svc_name, (probed_target, is_running, counts) in states.items():
+            node = self._node_host_cache.get(svc_name)
+            if node is not None and node.target != probed_target:
+                continue  # the node was moved to another host while this ran
             self._svc_states[svc_name] = is_running
+            svc = self._svc_map.get(svc_name)
+            card_target = self._get_panel_target()
+            if svc is None or card_target != probed_target or self._off_configured_machine(svc, card_target):
+                continue  # the card on screen reports another host than the marker
             for card in self.query(ServiceCard):
                 if card.service_def.name == svc_name:
                     if counts is not None:
@@ -5698,19 +6134,40 @@ class ServicePanel(Widget):
                     else:
                         card.update_status(is_running)
         self._build_tree()
+        # the [E] markers need the env states of every host a node sits on
+        for target in {node.target for node in self._node_host_cache.values()}:
+            if target not in self._env_statuses and TARGET_STATES.get(target) != "offline":
+                self._kick_env_status_refresh(target)
 
-    def _detect_visible_statuses(self, target: str) -> dict[str, tuple[bool, tuple[int, int] | None]]:
-        states: dict[str, tuple[bool, tuple[int, int] | None]] = {}
+    def _detect_visible_statuses(self) -> dict[str, tuple[str, bool, tuple[int, int] | None]]:
+        """node name -> (host it was probed on, running, stack counts); every
+        node is probed on its own host. Runs in a worker thread."""
+        states: dict[str, tuple[str, bool, tuple[int, int] | None]] = {}
+        profiles = load_ssh_profiles()
         for svc in self._services:
-            counts = self._stack_running_counts(svc, target)
-            if counts is not None:
-                up, total = counts
-                states[svc.name] = (total > 0 and up == total, counts)
-            elif target == "local":
-                states[svc.name] = (self._detect_running(svc), None)
-            else:
-                states[svc.name] = (self._detect_running_remote(svc, target), None)
+            node = self._resolve_node_host(svc, profiles)
+            is_running, counts = self._detect_node_status(svc, node)
+            states[svc.name] = (node.target, is_running, counts)
         return states
+
+    def _detect_node_status(self, svc: ServiceDef, node: NodeHost) -> tuple[bool, tuple[int, int] | None]:
+        target = node.target
+        if node.follows and not node.machine_target:
+            # a machine the console cannot log into: only the address itself,
+            # probed from here, says anything (a tmux session on this machine
+            # would be someone else's)
+            make_target = _make_target_for(svc.name)
+            port_probed = make_target in _SYSTEM_SVC_PORTS or make_target == "flask"
+            return (system_service_reachable(self._root, make_target) if port_probed else False), None
+        if target != "local" and TARGET_STATES.get(target) == "offline":
+            return False, None  # no ssh timeouts for a host known to be down
+        counts = self._stack_running_counts(svc, target)
+        if counts is not None:
+            up, total = counts
+            return (total > 0 and up == total), counts
+        if target == "local":
+            return self._detect_running(svc), None
+        return self._detect_running_remote(svc, target), None
 
     def _detect_running_remote(self, svc: ServiceDef, profile_name: str) -> bool:
         """check if a service is running on a remote host via SSH."""
@@ -5719,17 +6176,21 @@ class ServicePanel(Widget):
             return False
         if svc.launch_type == "make":
             target = _make_target_for(svc.name)
+            own_port = self._off_configured_machine(svc, profile_name)
             if target in _SYSTEM_SVC_PORTS:
-                # probed from this machine at the configured address; only a
-                # loopback url falls back to asking the host about its own port
+                # probed from this machine at the configured address; a loopback
+                # url, or a card moved off the configured machine, asks the host
+                # about its own port instead
                 return system_service_reachable(
                     self._root, target,
                     remote_loopback_check=lambda port: ssh_check_port(profile, port),
+                    own_port=own_port,
                 )
             if target == "flask":
                 return system_service_reachable(
                     self._root, "flask",
                     remote_loopback_check=lambda port: ssh_check_port(profile, port),
+                    own_port=own_port,
                 )
             return ssh_check_tmux(profile, target)
         elif svc.launch_type == "tmux":

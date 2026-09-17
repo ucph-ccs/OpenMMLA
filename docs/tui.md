@@ -23,6 +23,14 @@ mmla tui
 
 Both the Environment tab and the Launcher have a **Host** selector: `Local`, or one of the SSH profiles defined under **System Settings → Hosts → SSH Profiles**. Every action then runs on that host, and every path is resolved as `<remote_project_path>/<same path relative to the repository root>`, so the remote machine needs a clone at the path the profile names. The `↻` button next to the selector tests every profile; a host that fails the test is shown as `(offline ✗)` and cannot be selected until it answers again. Profiles are re-tested every 30 seconds.
 
+In the Launcher every leaf of the tree has **its own host**, because the parts of a deployment rarely share one machine: the AI servers sit on a GPU server, the bases on the base stations, the databases somewhere else again.
+
+- A **pipeline, collection or MLLM Server** card opens on the host it was last pointed at, `Local` the first time. The choice is kept per card in `config/launcher_hosts.yml`, across restarts. If that host is offline or its profile is gone, the card opens on `Local` and says so in the log; the remembered host is kept for next time.
+- A **System Services** card opens on the machine System Settings put the service on: the address (`InfluxDB.url`, `Gateway.host`, ...) is matched against this machine (its names and its addresses) and against the saved SSH profiles. This is a default, not a lock: pick another host to start or stop the service somewhere else for once. The card then says that the pipelines are configured for another machine and reports the chosen host's own port, and it is back on the configured machine the next time it is opened; to move a service for good, change its address in System Settings. An address that matches no profile, or a profile that is offline, opens the card on `Local` with the reason in the log. A `localhost` address names no machine, so that card remembers its host like a pipeline card.
+- **System Settings** are always this machine's project, and **Session Control** has no host at all; both show a note instead of the selector.
+
+The `[E]` and `(R)` markers in the tree follow the same rule: each leaf is checked on its own host, and a system service at the address the pipelines use, so the sidebar describes the deployment and agrees with every card that sits where it opened.
+
 Once a session has been started, a remote host needs the same things a local one does for the components you launch there:
 
 | You launch | The remote host needs |
@@ -66,7 +74,7 @@ A command console at the bottom shows the output and accepts ad-hoc shell comman
 
 The sidebar is a tree; selecting a leaf shows its form or service card on the right. Leaves that launch something carry markers explained by the legend above the tree, `[E] env  [C] config  (R) running`:
 
-- `[E]`: the conda environment on the selected host. Green `Ready`, yellow `Partial`, red `Missing`. Not shown for services that run in Docker or as native system services.
+- `[E]`: the conda environment on that leaf's host. Green `Ready`, yellow `Partial`, red `Missing`. Not shown for services that run in Docker or as native system services.
 - `[C]`: whether the pipeline's `config.yml` exists on this machine. Green present, red missing.
 - `(R)`: the service is running, according to the last status probe.
 
@@ -92,13 +100,15 @@ OpenMMLA
 
 ### Service cards
 
-Every launchable leaf opens a card with the service name, its conda env and launch type, a status line, its parameters, and the buttons **Start**, **Stop**, **Logs** and **Refresh**. Bases and camera tools open in terminal windows and therefore show `Interactive (runs in its own terminal)` and no Stop button: close them from their own window. Cards for a pipeline also have a **Config** tab that edits `pipelines/<pipeline>/config.yml` on the selected host, with **Save** writing it back (and, on a remote host, copying it there). Output of every action goes to the command console at the bottom of the tab.
+Every launchable leaf opens a card with the service name, its conda env and launch type, a status line, its parameters, and the buttons **Start**, **Stop**, **Logs** and **Refresh**. Bases and camera tools open in terminal windows and therefore show `Interactive (runs in its own terminal)` and no Stop button: close them from their own window. Cards for a pipeline also have a **Config** tab that edits `pipelines/<pipeline>/config.yml` on the selected host, with **Save** writing it back (and, on a remote host, copying it there).
+
+Output of every action goes to the command console at the bottom of the tab. It is one transcript for the whole tab, since a build or a remote stop keeps printing after you move to another card; a divider such as `── MediaMTX · Local ──` is drawn before the first line that belongs to another card or host.
 
 Before a Start the console checks that `config.yml` exists on the target host, that the sections managed by System Settings are up to date, and that the conda environment exists. On a remote host whose config is out of date, the first Start only pushes the current System Settings and prints `Relaunch <service> once the sync above completes.`; press Start again. This is by design.
 
 ### System Settings
 
-These forms always edit this machine's project; the Host selector is disabled while one is open.
+These forms always edit this machine's project; the Host bar shows a note instead of the selector while one is open. The console is the one place that describes the deployment, and what it launches elsewhere gets that description from it: the connections are pushed into the remote pipeline configs before a Start, the participants of a session travel in its MongoDB document, and SSH profiles and the sudo password only matter on the machine the console runs on. There is therefore nothing to edit on a remote host, with one exception to know about: a host that has a `config/system_services.yml` of its own (a console was once run and saved there) reads it **on top of** its pipeline configs when a service starts. A Start on such a host names the sections that disagree; **Sync to Remote** on those Connections forms brings the file in step, and deleting it on the host hands that machine back to the pipeline configs. Write addresses that are true from every machine (a host name, not `localhost`) whenever more than one machine is involved.
 
 **SSH Profiles**: one entry per remote machine, saved to `config/ssh_profiles.yml` (gitignored; `config/ssh_profiles_template.yml` is the tracked example). Fields: `Profile Name`, `Host`, `User`, `Port` (22), `Password` (needs `sshpass` on this machine; leave empty for key auth), `Key Path` (for example `~/.ssh/id_ed25519`), `Remote Project Path` (default `~/OpenMMLA`, must be the repository root on that machine). **Test Connection** checks the login. Passwords are stored encrypted.
 
@@ -106,16 +116,17 @@ These forms always edit this machine's project; the Host selector is disabled wh
 
 **Tasks**: the task definitions in `config/tasks/*.yaml`, edited as raw YAML.
 
-**Connections**: `MongoDB`, `InfluxDB`, `MQTT`, `Redis`, `Gateway (Nginx + MediaMTX)` and `Dashboard (Flask)`. Saving writes `config/system_services.yml` and copies the section into every pipeline `config.yml` that carries it; the pipeline Config tabs then show those fields read-only with a `managed in System Settings` note. **Sync to Remote** under the form pushes the section into the configs on one remote host. A pipeline that must keep its own value lists the section under `SystemServicesOverride:` in its `config.yml`, or presses `Override here` at the bottom of that section in its Config tab. The fields and defaults are listed in [System Services](system_services.md#pointing-the-pipelines-at-the-services).
+**Connections**: `MongoDB`, `InfluxDB`, `MQTT`, `Redis`, `Gateway (Nginx + MediaMTX)` and `Dashboard (Flask)`. Saving writes `config/system_services.yml` and copies the section into every pipeline `config.yml` that carries it; the pipeline Config tabs then show those fields read-only with a `managed in System Settings` note. **Sync to Remote** under the form copies the section to one remote host, so the bases and servers started there connect to the same services: into its pipeline configs, and into its own `config/system_services.yml` when it has one. A Start on a remote host brings the pipeline configs up to date on its own; the host's own settings file is only changed by this button. A `localhost` value is copied as it is and then means the remote machine itself: machines that share one service need its real host name here. A pipeline that must keep its own value lists the section under `SystemServicesOverride:` in its `config.yml`, or presses `Override here` at the bottom of that section in its Config tab. The fields and defaults are listed in [System Services](system_services.md#pointing-the-pipelines-at-the-services).
 
-**Sudo (local admin)**: the sudo password of this machine, stored encrypted. Native Start/Stop of the system services run `make` with `sudo`, and the console types this password when the prompt appears (at most three times per command). Remote sudo prompts use the SSH profile's password instead.
+**Sudo (local admin)**: the sudo password of this machine, stored encrypted and never copied to another host (there is no Sync to Remote on this form). Native Start/Stop of the system services run `make` with `sudo`, and the console types this password when the prompt appears (at most three times per command). Remote sudo prompts use the SSH profile's password instead.
 
 ### System Services
 
 One card per system service: **InfluxDB**, **MongoDB**, **Redis**, **Mosquitto**, **Nginx**, **MediaMTX**, **Dashboard (Flask)** and **Dashboard Worker (Celery)**. Installation is described in [System Services](system_services.md).
 
-- **Status** is a TCP probe from this machine to the address configured under System Settings, which is the path the pipelines take. The card description names the probed address. A `localhost` address names no particular machine, so it is probed on the selected host instead (over SSH for a remote host). The Celery worker is detected by its tmux session.
-- **Start / Stop** on Redis, Mosquitto and Nginx run `make -C pipelines/uber-server <service>` / `stop-<service>` on the selected host; the make targets also rewrite the service's listener config to bind on all interfaces. Dashboard (Flask) runs `make flask DASHBOARD_PORT=<port>`, which opens a tmux session named `flask`; the worker opens one named `celery`.
+- **Host**: opens on the machine the service's address in System Settings names (`InfluxDB.url`, `MongoDB.url`, `Redis.host`, `MQTT.host`, `Gateway.host` for Nginx and MediaMTX, `Dashboard.host` for the dashboard and its worker), see [Hosts](#hosts). To run a service somewhere else for good, change its address in System Settings; the card follows.
+- **Status** is a TCP probe from this machine to the address configured under System Settings, which is the path the pipelines take. The card description names the probed address. A `localhost` address names no particular machine, so it is probed on the card's selected host instead (over SSH for a remote host), and so is a card that was moved off the configured machine: it reports the host it is on, while the sidebar marker keeps following the configured address. The Celery worker is detected by its tmux session. MediaMTX counts as running only when its RTMP **and** RTSP ports answer: an Nginx built with the RTMP module, the gateway of earlier versions, holds 1935 too, and would otherwise read as a MediaMTX that Stop can never find. When only one of the two answers, Refresh, Start and Stop say so in the log.
+- **Start / Stop** on Redis, Mosquitto and Nginx run `make -C pipelines/uber-server <service>` / `stop-<service>` on the card's host; the make targets also rewrite the service's listener config to bind on all interfaces. Dashboard (Flask) runs `make flask DASHBOARD_PORT=<port>`, which opens a tmux session named `flask`; the worker opens one named `celery`.
 - **Run mode** (InfluxDB, MongoDB and MediaMTX): `docker`, the default, runs `docker compose -f docker/docker-compose.infra.yml up -d | stop | logs <service>`; `native` runs the make targets like the other cards. Choose `native` on a machine that still runs brew or systemd databases, otherwise Start brings up a container next to them. The choice is remembered per host for the current console session. MediaMTX in `native` mode runs `make mediamtx`, a tmux session named `mediamtx` around the installed binary.
 - **Fetch Token** (InfluxDB, docker mode): reads the admin token of the compose stack on the selected host, from the running container or from `docker/.env`, and stores it encrypted as `InfluxDB.token`. Only the first and last four characters are shown.
 - **Logs**: compose logs in docker mode; brew or journald logs for native services; the tmux pane for the dashboard.
@@ -159,7 +170,9 @@ The pipeline guides walk through each one end to end: [ASR](pipelines/asr.md), [
 
 ### Session Control
 
-Bases and synchronizers block after start-up until they receive a START signal for their session. This leaf lists the sessions, lets you tick the pipelines, and sends **START** or **STOP** over Redis. STOP also marks the session as ended in MongoDB. The Redis and MongoDB addresses come from System Settings.
+Bases and synchronizers block after start-up until they receive a START signal for their session. This leaf lists the sessions, lets you tick the pipelines, and sends **START** or **STOP** over Redis. STOP also marks the session as ended in MongoDB. The Redis and MongoDB addresses come from System Settings and are shown on the panel.
+
+There is no host to pick here: the signal is published from this machine to that Redis, and every base subscribed to the same Redis hears it, whichever machine it runs on. What matters is therefore that all machines of a session use **one** Redis. With `Redis.host` left at `localhost`, only bases on this machine hear the signal, because a base on another machine reads `localhost` as itself; the panel warns about it. Put the host name of the machine that runs Redis into **System Settings → Redis** for a session that spans machines.
 
 A typical run is therefore: start the AI servers and the system services, start the bases and synchronizers on every base station (each picks its `Bases` entry), then send START from here once every window reports it is waiting, and STOP when the session is over.
 
@@ -187,6 +200,7 @@ The six ASR service rows still expect tmux sessions named after the services. Wi
 |---|---|
 | `config/system_services.yml` | System Settings connections and the sudo password (secrets encrypted); gitignored, template `config/system_services_template.yml` |
 | `config/ssh_profiles.yml` | SSH profiles (gitignored) |
+| `config/launcher_hosts.yml` | the host each Launcher card was last pointed at (gitignored) |
 | `config/experiments.yaml` | experiments and participants (gitignored) |
 | `config/tasks/*.yaml`, `config/vfa/action_schemas.yml`, `config/mllm_server.yml` | task definitions, VFA action schema, MLLM Server settings |
 | `pipelines/*/config.yml` | pipeline configs, with the shared sections mirrored from System Settings (gitignored) |

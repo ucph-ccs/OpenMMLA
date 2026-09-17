@@ -11,12 +11,48 @@ from textual.widgets import Button, Checkbox, Label, Select, Static
 from openmmla.tui.ssh import is_select_sentinel
 
 
+def control_endpoints(config_path: str) -> tuple[str, str]:
+    """(where the signals go, a warning or "") from the System Settings store.
+
+    The panel has no host: it publishes to the configured Redis from this
+    machine, and every base subscribed to that same Redis hears it."""
+    from urllib.parse import urlsplit
+
+    from openmmla.tui.schema.loader import load_existing_config
+    from openmmla.tui.system_services import is_loopback_host
+
+    try:
+        config = load_existing_config(config_path) or {}
+    except Exception:
+        config = {}
+    redis = config.get("Redis") if isinstance(config.get("Redis"), dict) else {}
+    mongo = config.get("MongoDB") if isinstance(config.get("MongoDB"), dict) else {}
+    redis_host = str(redis.get("host") or "localhost").strip()
+    redis_where = f"{redis_host}:{redis.get('port') or 6379} (db {redis.get('db') or 0})"
+    try:
+        parts = urlsplit(str(mongo.get("url") or ""))
+        mongo_where = f"{parts.hostname or 'localhost'}:{parts.port or 27017}"
+    except ValueError:
+        mongo_where = str(mongo.get("url") or "unset")
+    summary = f"Redis {redis_where}  ·  MongoDB {mongo_where}  (from System Settings)"
+    warning = ""
+    if is_loopback_host(redis_host):
+        warning = (
+            f"Redis.host is {redis_host}: only bases on this machine hear the signal, because a "
+            f"base on another machine reads {redis_host} as itself. For a session that spans "
+            f"machines, put this machine's host name into System Settings → Redis."
+        )
+    return summary, warning
+
+
 class SessionControlPanel(Widget):
     """send START/STOP control signals to launched bases and synchronizers.
 
     Bases launched from the Launcher initialize and then block until a START
     signal arrives on the redis channel `<session_id>/<service>/control`
-    (the role of the old control.sh / `mmla ses-ctl`)."""
+    (the role of the old control.sh / `mmla ses-ctl`). There is no host to
+    pick: whichever machines the bases run on, they hear the signal as long
+    as they use the Redis this panel publishes to."""
 
     class RefreshRequested(Message):
         """user clicked the ↻ next to the session Select: the launcher
@@ -33,6 +69,10 @@ class SessionControlPanel(Widget):
     }
     SessionControlPanel .sc-help {
         color: $text-muted;
+        margin-bottom: 1;
+    }
+    SessionControlPanel .sc-warning {
+        color: $warning;
         margin-bottom: 1;
     }
     SessionControlPanel .sc-row {
@@ -90,6 +130,10 @@ class SessionControlPanel(Widget):
             "STOP also marks the session as ended in MongoDB.",
             classes="sc-help",
         )
+        summary, warning = control_endpoints(self._config_path)
+        yield Static(summary, classes="sc-help")
+        if warning:
+            yield Static(warning, classes="sc-warning")
         with Horizontal(classes="sc-row"):
             yield Label("Session:")
             if self._choices:

@@ -192,16 +192,9 @@ def _local_db_config() -> dict:
 def _target_for_db_host(host: str, profiles: list) -> str:
     """target that serves `host`: an SSH profile name, "local" for this
     machine, or "" when no saved profile matches."""
-    from openmmla.tui.system_services import hosts_match, is_this_machine
+    from openmmla.tui.system_services import target_for_service_host
 
-    if not host:
-        return ""
-    if is_this_machine(host):
-        return "local"
-    for profile in profiles:
-        if hosts_match(host, profile.host) or hosts_match(host, profile.name):
-            return profile.name
-    return ""
+    return target_for_service_host(host, profiles)
 
 
 def _resolve_default_target(launcher_target: str = "local") -> str:
