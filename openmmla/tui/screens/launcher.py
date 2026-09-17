@@ -73,6 +73,7 @@ from openmmla.tui.artifacts import (
     safe_segment, update_collection_manifest, update_pipeline_manifest,
 )
 from openmmla.tui import download as dl
+from openmmla.tui import recordings, stream_cuts
 from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -107,7 +108,7 @@ from openmmla.tui.widgets.config_form import ConfigForm
 from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
 from openmmla.tui.widgets.ssh_form import SSHForm
-from openmmla.tui.widgets.stream_panel import StreamPanel
+from openmmla.tui.widgets.stream_panel import StreamPanel, _with_stream_path
 from openmmla.tui.widgets.session_control import SessionControlPanel
 from openmmla.tui.widgets.task_form import TaskForm
 from openmmla.tui.screens.environment import ENV_GROUPS, env_statuses_local, env_statuses_remote
@@ -3623,6 +3624,7 @@ class ServicePanel(Widget):
                     streams,
                     config_path=stream_config_path,
                     project_dir=self._root,
+                    session_choices=self._stream_session_choices(),
                 )
                 await stream_scroll.mount(panel)
 
@@ -6538,6 +6540,174 @@ class ServicePanel(Widget):
         )
         self._log(f"[green]Updated session manifest: {manifest}[/green]")
         return True
+
+    def _stream_session_choices(self) -> list[str]:
+        """the sessions a stream recording can be cut for: the real ones, not
+        the streams-<date> folders the recordings themselves are filed under."""
+        try:
+            sessions = self._artifact_session_choices_for_target(self._get_panel_target())
+        except Exception:
+            return []
+        return [session for session in sessions if session and not session.startswith("streams-")]
+
+    def on_stream_panel_session_choices_requested(self, event: StreamPanel.SessionChoicesRequested) -> None:
+        """Refresh in the Streams tab: read the sessions again, off the UI thread."""
+        event.stop()
+        target = self._get_panel_target()
+
+        async def reload() -> None:
+            self._invalidate_session_choice_cache(target)
+            sessions = await asyncio.to_thread(self._stream_session_choices)
+            for panel in self.query(StreamPanel):
+                panel.set_session_choices(sessions)
+
+        self.run_worker(reload(), group="stream-session-choices", exclusive=True)
+
+    def on_stream_panel_session_download_requested(self, event: StreamPanel.SessionDownloadRequested) -> None:
+        """Download in the Streams tab with a session chosen: that session's
+        part of every managed stream of the card."""
+        event.stop()
+        key = f"stream-session-download:{event.session_id}"
+        if key in self._downloads_in_flight:
+            self._log("[yellow]The recordings of this session are already being fetched.[/yellow]")
+            return
+        self._downloads_in_flight.add(key)
+        self.run_worker(
+            self._run_stream_session_download(event.session_id, list(event.streams), self._get_panel_target(), key),
+            name=key,
+            group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    async def _run_stream_session_download(self, session_id: str, streams: list, target: str, key: str = "") -> None:
+        """a stream is recorded once, by day, and shared by the sessions that
+        pull it: a session's footage is the part of those files between its
+        start and end. It is cut on the capture host (no re-encoding, so a video
+        cut is moved back onto a keyframe and named after that frame), staged
+        there, fetched with the transfer every other download uses, and the
+        staging is removed again. The recordings themselves are never touched."""
+        try:
+            session_id = _safe_session_id(session_id)
+            record = await asyncio.to_thread(self._session_record, session_id, target)
+            start = recordings.parse_time((record or {}).get("start_time"))
+            if start is None:
+                self._log(
+                    f"[yellow]Session '{session_id}' has no start time in MongoDB, so there is no time range to cut "
+                    f"out. Download without a session copies the whole files.[/yellow]"
+                )
+                return
+            ended = recordings.parse_time(record.get("end_time"))
+            end = ended or datetime.now(timezone.utc)
+            self._log(
+                f"[cyan]Session {session_id}: {start:%Y-%m-%d %H:%M:%S} to {end:%H:%M:%S} UTC"
+                f"{'' if ended else ' (still running: up to now)'}. Cutting that out of {len(streams)} stream(s)...[/cyan]"
+            )
+
+            staged: dict[tuple[str, str, str], int] = {}
+            fetched = 0
+            for stream in streams:
+                count = await self._cut_stream_for_session(stream, session_id, start.timestamp(), end.timestamp())
+                if stream.ssh_profile == "local":
+                    fetched += count
+                elif count:
+                    group = (stream.ssh_profile, stream.record_root, stream.host_label)
+                    staged[group] = staged.get(group, 0) + count
+
+            for (profile_name, record_root, host_label), count in staged.items():
+                profile = get_profile_by_name(profile_name)
+                if profile is None:
+                    continue
+                home = await asyncio.to_thread(_remote_home, profile)
+                remote_dir = _expand_remote_home_path(
+                    f"{record_root.rstrip('/')}/{stream_cuts.STAGING_DIR}/{session_id}/collection/{host_label}", home)
+                local_path = Path(collection_artifact_dir(self._root, session_id, host_label))
+                if await self._transfer_collection_tree(
+                        profile, profile_name, session_id, host_label, remote_dir, local_path):
+                    fetched += count
+                    # only what was staged for this session; a transfer that did not
+                    # finish keeps its cuts, so Download again resumes instead of cutting anew
+                    await asyncio.to_thread(
+                        ssh_run_sync, profile, stream_cuts.bash(stream_cuts.cleanup_script(record_root, session_id)), 30.0)
+            if fetched:
+                self._log(
+                    f"[green]{fetched} recording(s) of session {session_id} are under "
+                    f"artifacts/{session_id}/collection/<host>/. Their names carry the time of their first "
+                    f"frame, so a base replays them with source: file.[/green]"
+                )
+            else:
+                self._log(
+                    f"[yellow]No stream here was being recorded on its capture host during session {session_id}. "
+                    f"The Stream Server may still have it: Sessions → Export Recordings.[/yellow]"
+                )
+        except asyncio.CancelledError:
+            self._progress_end()
+            self._log("[yellow]Download cancelled; press Download again to resume.[/yellow]")
+            raise
+        finally:
+            self._downloads_in_flight.discard(key)
+
+    async def _run_stream_script(self, stream, script: str, timeout: float) -> str | None:
+        """run a stream_cuts script where the stream records; its output, or
+        None when the host could not be reached."""
+        command = _with_stream_path(stream_cuts.bash(script))
+        try:
+            if stream.ssh_profile == "local":
+                result = await asyncio.to_thread(
+                    lambda: subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=timeout))
+            else:
+                profile = get_profile_by_name(stream.ssh_profile)
+                if profile is None:
+                    return None
+                result = await asyncio.to_thread(ssh_run_sync, profile, command, timeout)
+        except Exception:
+            return None
+        return (result.stdout or "") + (result.stderr or "")
+
+    async def _cut_stream_for_session(self, stream, session_id: str, start: float, end: float) -> int:
+        """cut one stream's recordings to the window; returns how many cuts were
+        made (staged on the capture host, or written straight into artifacts/
+        for a stream that is captured on this machine)."""
+        where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
+        listing = await self._run_stream_script(
+            stream, stream_cuts.list_script(stream.record_root, stream.host_label, stream.kind, stream.name), 30.0)
+        files = stream_cuts.parse_listing(listing or "")
+        if files is None:
+            self._log(f"  [red]✗ {stream.name}: could not list its recordings on {where}.[/red]")
+            return 0
+        cuts = stream_cuts.cuts_for_window(files, start, end)
+        if not cuts:
+            self._log(f"  [dim]- {stream.name}: nothing recorded on {where} in that time[/dim]")
+            return 0
+
+        if stream.ssh_profile == "local":
+            folder = str(Path(collection_artifact_dir(self._root, session_id, stream.host_label)) / stream.kind)
+            quoted_dir = False
+        else:
+            folder = (f"{stream_cuts.staging_root(stream.record_root, session_id)}/collection/"
+                      f"{shlex.quote(stream.host_label)}/{stream.kind}")
+            quoted_dir = True
+        made = 0
+        for cut in cuts:
+            if stream.kind == "video":
+                probed = await self._run_stream_script(stream, stream_cuts.keyframe_script(cut), 60.0)
+                moved = stream_cuts.on_keyframe(cut, probed or "")
+                if moved is None:
+                    self._log(
+                        f"  [yellow]{stream.name}: ffprobe found no keyframe to start on (is it installed on {where}?); "
+                        f"the cut may begin up to a second before the time in its name.[/yellow]"
+                    )
+                else:
+                    cut = moved
+            output = await self._run_stream_script(
+                stream, stream_cuts.cut_script(cut, folder, stream.name, stream.kind, quoted_dir=quoted_dir), 900.0)
+            name = stream_cuts.cut_name(stream.name, cut, stream.kind)
+            if output is not None and "CUT" in output.split():
+                made += 1
+                self._log(f"  [green]✓[/green] {stream.name}: {cut.duration:.0f}s from {where} -> {name}")
+            else:
+                detail = " ".join((output or "no answer").split())[-200:]
+                self._log(f"  [red]✗ {stream.name}: ffmpeg could not cut {name} on {where}: {rich_escape(detail)}[/red]")
+        return made
 
     def on_stream_panel_download_requested(self, event: StreamPanel.DownloadRequested) -> None:
         """Download in the Streams tab: the stream recordings of one capture host."""

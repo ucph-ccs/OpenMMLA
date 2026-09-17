@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+from dataclasses import dataclass
 import os
 import re
 import shlex
@@ -13,7 +14,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static, Button, DataTable
+from textual.widgets import Static, Button, DataTable, Label, Select
 
 from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, ssh_run_sync
@@ -66,6 +67,20 @@ STREAM_RECORD_ROOT = "$HOME/artifacts"
 # seconds Stop waits for ffmpeg to finalize its files after Ctrl-C before the
 # tmux session is killed
 STREAM_STOP_GRACE_SECONDS = 8
+
+
+# the Recordings select: whole files of one capture host, or a session's part of every stream
+ALL_RECORDINGS = "__everything__"
+
+
+@dataclass(frozen=True)
+class RecordedStream:
+    """where a managed stream keeps its recordings: enough to find them again."""
+    name: str
+    ssh_profile: str   # "local" or an SSH profile
+    record_root: str   # on the capture host; $HOME/... for a remote one
+    host_label: str    # the folder under collection/
+    kind: str          # video | audio
 
 
 def _stream_start_file(session_name: str) -> str:
@@ -372,6 +387,20 @@ class StreamPanel(Widget):
     #stream-table {
         height: 1fr;
     }
+    #stream-recordings {
+        height: 3;
+        padding: 0 1;
+    }
+    #stream-recordings Label {
+        width: 13;
+        padding-top: 1;
+    }
+    #stream-session-select {
+        width: 1fr;
+    }
+    #stream-recordings Button {
+        margin: 0 1;
+    }
     #stream-actions {
         height: auto;
         padding: 1 0;
@@ -386,12 +415,40 @@ class StreamPanel(Widget):
         streams: list[StreamDef],
         config_path: str = "",
         project_dir: str | None = None,
+        session_choices: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
         self._project_dir = project_dir or _project_root_from_config(config_path)
         self._statuses: dict[str, bool] = {}
+        # sessions whose part of the recordings Download can cut out
+        self._session_choices = [s for s in (session_choices or []) if s]
+
+    def _session_options(self) -> list[tuple[str, str]]:
+        return [
+            ("Everything the selected stream's host has recorded (whole files, every day)", ALL_RECORDINGS),
+            *((f"Session {session}: its part of every stream here, cut by its start and end", session)
+              for session in self._session_choices),
+        ]
+
+    def set_session_choices(self, sessions: list[str]) -> None:
+        self._session_choices = [s for s in sessions if s]
+        try:
+            select = self.query_one("#stream-session-select", Select)
+        except Exception:
+            return
+        current = select.value
+        select.set_options(self._session_options())
+        select.value = current if current in self._session_choices else ALL_RECORDINGS
+
+    def recorded_streams(self) -> list[RecordedStream]:
+        """every stream of this card the console runs, and so may hold a recording of."""
+        return [
+            RecordedStream(stream.name, stream.ssh_profile, self._record_root(stream),
+                           self._record_host_label(stream), _stream_kind(stream))
+            for stream in self._streams if stream.ssh_profile
+        ]
 
     @staticmethod
     def _record_session() -> str:
@@ -453,6 +510,19 @@ class StreamPanel(Widget):
             self.record_root = record_root
             self.host_label = host_label
 
+    class SessionChoicesRequested(Message):
+        """Refresh: a session created since the tab was opened belongs in the
+        Recordings select; the launcher knows the sessions."""
+
+    class SessionDownloadRequested(Message):
+        """fetch one session's part of the recordings of every stream here: the
+        launcher knows the session's start and end, and owns the transfer."""
+
+        def __init__(self, session_id: str, streams: list[RecordedStream]) -> None:
+            super().__init__()
+            self.session_id = session_id
+            self.streams = streams
+
     class RecordToggleRequested(Message):
         """flip a stream's capture-side recording; the launcher owns the config
         of the host the card is on and writes it there."""
@@ -473,7 +543,8 @@ class StreamPanel(Widget):
         "A stream is shared: start it once and any number of sessions can pull it, one after another or "
         "at the same time. Its recording is therefore filed by day (streams-<date>), not under a session; "
         "the start time in the file name and the session's start and end tell which part belongs to which. "
-        "Download copies what the selected stream's capture host has recorded into artifacts/ here."
+        "Download, with a session chosen under Recordings, cuts that part out of every stream here on its "
+        "capture host and copies it into artifacts/<session>/; without one it copies the whole files."
     )
 
     def compose(self) -> ComposeResult:
@@ -481,13 +552,19 @@ class StreamPanel(Widget):
             yield Static(self.HELP, id="stream-help")
             yield DataTable(id="stream-table")
             yield Static("", id="stream-empty")
+            # a row of its own: Download is about what was recorded, the row
+            # below about the streams themselves
+            with Horizontal(id="stream-recordings"):
+                yield Label("Recordings:")
+                yield Select(self._session_options(), value=ALL_RECORDINGS, allow_blank=False,
+                             id="stream-session-select")
+                yield Button("Download", variant="warning", id="stream-btn-download")
             with Horizontal(id="stream-actions"):
                 yield Button("Start", variant="success", id="stream-btn-start")
                 yield Button("Stop", variant="error", id="stream-btn-stop")
                 yield Button("Logs", variant="primary", id="stream-btn-logs")
                 yield Button("Probe", variant="warning", id="stream-btn-probe")
                 yield Button("Record on/off", variant="default", id="stream-btn-record")
-                yield Button("Download", variant="warning", id="stream-btn-download")
                 yield Button("Start All", variant="success", id="stream-btn-start-all")
                 yield Button("Stop All", variant="error", id="stream-btn-stop-all")
                 yield Button("Refresh", variant="primary", id="stream-btn-refresh")
@@ -555,7 +632,8 @@ class StreamPanel(Widget):
                 stream.ssh_profile or "-",
                 stream.device or "-",
                 stream.target,
-                "yes" if stream.record else "-",
+                # nobody records an external stream here: the console does not run its ffmpeg
+                ("yes" if stream.ssh_profile else "n/a") if stream.record else "-",
                 status,
             )
 
@@ -609,6 +687,20 @@ class StreamPanel(Widget):
             else:
                 self.post_message(self.RecordToggleRequested(stream.name, not stream.record))
         elif btn == "stream-btn-download":
+            try:
+                choice = self.query_one("#stream-session-select", Select).value
+            except Exception:
+                choice = ALL_RECORDINGS
+            if choice not in (ALL_RECORDINGS, Select.BLANK, None):
+                streams = self.recorded_streams()
+                if streams:
+                    self.post_message(self.SessionDownloadRequested(str(choice), streams))
+                else:
+                    self._log(
+                        "[yellow]Every stream here is external: the console did not start them, so no host "
+                        "it manages holds a recording. The Stream Server may: Sessions → Export Recordings.[/yellow]"
+                    )
+                return
             stream = self._get_selected_stream()
             if stream is None:
                 self._log("[yellow]Select a stream row first.[/yellow]")
@@ -649,6 +741,7 @@ class StreamPanel(Widget):
             self._log(f"[cyan]Reloaded {len(self._streams)} stream(s) from {self._config_path}.[/cyan]")
         else:
             self._log("[cyan]Refreshing stream status from the current target config.[/cyan]")
+        self.post_message(self.SessionChoicesRequested())
         self._refresh_all()
 
     def _start_stream(self, stream: StreamDef) -> None:
