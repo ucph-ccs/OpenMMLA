@@ -46,6 +46,8 @@ from openmmla.tui.system_services import (
     system_service_port_conflict,
     system_service_reachable,
     target_for_service_host,
+    config_to_flat_values,
+    harvest_system_services_from_configs,
     load_system_service_values,
     load_system_services_config,
     save_system_service_section,
@@ -2031,6 +2033,15 @@ _SERVICE_HOST_FIELDS: dict[str, str] = {
 }
 
 _SETTINGS_HOST_NOTE = "Local  (System Settings live in this project)"
+# settings that only mean something on the machine the console runs on; the
+# Connections forms have a Host selector instead (every machine's services read
+# that machine's own settings)
+_LOCAL_SETTINGS_NOTES: dict[str, str] = {
+    "__ssh_profiles__": "Local  (the machines this console can reach)",
+    "__experiments__": "Local  (a session takes its participants to every host through MongoDB)",
+    "__tasks__": "Local  (task definitions are read by this console only)",
+    "__shared__Sudo": "Local  (this machine's admin password; a remote host uses its SSH profile's)",
+}
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
 
 # the host each launcher node was last pointed at, kept across restarts
@@ -2056,6 +2067,16 @@ class NodeHost:
     machine_target: str = ""
     # why `target` is not the host one would expect
     fallback_from: str = ""
+
+
+def _encrypt_secrets(config: dict) -> None:
+    """ENC(...) the token/password values of a config that is about to be
+    written to another machine (what the user just typed is still plaintext)."""
+    try:
+        from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key
+        encrypt_sensitive_values(config, ensure_master_key())
+    except Exception:
+        pass  # crypto unavailable: written as it is, like the local store
 
 
 def _node_hosts_path(root: str) -> str:
@@ -2452,6 +2473,12 @@ class ServicePanel(Widget):
         margin-top: 1;
         color: $text-muted;
     }
+    /* whose settings a Connections form shows when it is not this machine's */
+    .settings-origin {
+        height: auto;
+        margin-bottom: 1;
+        color: $warning;
+    }
     /* the note sits right on top of the picker */
     .sync-bar-noted {
         margin-top: 0;
@@ -2517,11 +2544,18 @@ class ServicePanel(Widget):
         # (node name, host) of a system service card the user moved off the
         # machine System Settings name: it lasts until another node is opened
         self._host_override: tuple[str, str] | None = None
+        # whose System Settings the Connections forms show and save; shared by
+        # those forms so one pick lets the user read through a host's settings,
+        # and back on Local with every new console
+        self._settings_target: str = "local"
         # card and host the next log lines belong to, and the one the log last
         # drew a divider for (see _log)
         self._log_context: str = ""
         self._log_context_shown: str = ""
         self._fallback_noted: dict[str, str] = {}
+        # host -> the differences between its own System Settings and Local's
+        # that a Start has already pointed out
+        self._own_settings_noted: dict[str, list[str]] = {}
         # target -> {conda env: Ready | Partial: ... | Missing}; feeds the tree's
         # [E] markers and is refreshed off the UI thread (conda is slow)
         self._env_statuses: dict[str, dict[str, str]] = {}
@@ -2830,10 +2864,17 @@ class ServicePanel(Widget):
         if node.fallback_from and self._fallback_noted.get(svc.name) != node.fallback_from:
             self._log(f"[yellow]{svc.display_name}: {node.fallback_from}. Showing Local.[/yellow]")
         self._fallback_noted[svc.name] = node.fallback_from
+        if self._point_host_select(target):
+            # as on a manual host switch: the [E] markers of that host catch up
+            self._kick_env_status_refresh(self._last_target)
+
+    def _point_host_select(self, target: str) -> bool:
+        """move the Host selector to `target` on the console's own account (a
+        node was opened); True when that changed the current host."""
         try:
             select = self.query_one("#svc-target-select", Select)
         except Exception:
-            return
+            return False
         changed = target != self._last_target
         # not a pick by the user: the Select moves without a Changed message,
         # and its handler would ignore the current target anyway
@@ -2857,8 +2898,7 @@ class ServicePanel(Widget):
                 self.query_one("#svc-cmd-session", CommandSession).set_target(target)
             except Exception:
                 pass
-            # as on a manual host switch: the [E] markers of that host catch up
-            self._kick_env_status_refresh(target)
+        return changed
 
     def _remember_node_host(self, target: str) -> None:
         """file the user's Host pick under the node it was made on."""
@@ -2933,6 +2973,15 @@ class ServicePanel(Widget):
             self._capture_infra_mode(self._last_target)
             self._last_target = val
             set_current_target(val)
+            if self._current_shared_section:
+                self._settings_target = val
+                self.query_one("#svc-cmd-session", CommandSession).set_target(val)
+                self.run_worker(
+                    self._reload_shared_form(),
+                    group=_LAUNCHER_UI_WORKER_GROUP,
+                    exclusive=True,
+                )
+                return
             self._remember_node_host(val)
             current = self._svc_map.get(self._current_service_name or "")
             if current is not None:
@@ -3076,8 +3125,8 @@ class ServicePanel(Widget):
         self._current_service_name = None
         self._current_node_host = NodeHost()
         self._host_override = None
-        if self._is_local_only_node(node_str):
-            self._show_host_bar(_SETTINGS_HOST_NOTE)
+        if node_str in _LOCAL_SETTINGS_NOTES:
+            self._show_host_bar(_LOCAL_SETTINGS_NOTES[node_str])
         elif node_str == "__session_control__":
             self._show_host_bar(_SESSION_CONTROL_HOST_NOTE)
 
@@ -3088,7 +3137,7 @@ class ServicePanel(Widget):
             await content_area.mount(scroll)
             self._config_container = scroll
             self._current_shared_section = section_name
-            self._show_shared_form(scroll, section_name)
+            await self._mount_shared_form(scroll, section_name)
             return
 
         if node_str == "__experiments__":
@@ -3742,7 +3791,78 @@ class ServicePanel(Widget):
 
     # ── config logic ─────────────────────────────────────────────
 
-    def _show_shared_form(self, container: Vertical, section_name: str) -> None:
+    def _settings_host(self, section_name: str) -> str:
+        """whose settings a System Settings form shows: the Connections forms
+        follow their Host selector, everything else is this machine's."""
+        if f"__shared__{section_name}" in _LOCAL_SETTINGS_NOTES:
+            return "local"
+        target = self._settings_target
+        if target != "local" and (
+            TARGET_STATES.get(target) == "offline"
+            or not any(value == target for _, value in target_options())
+        ):
+            target = self._settings_target = "local"
+        return target
+
+    def _settings_values_for(self, target: str) -> tuple[dict[str, object], str]:
+        """(flat shared values, where they come from) of one machine. A remote
+        machine is read over ssh, so this runs off the UI thread."""
+        if target == "local":
+            return self._shared_values, ""
+        configs = []
+        for rel_path in SYSTEM_SERVICE_SOURCE_CONFIG_RELS:
+            config, _ = self._load_config_for_target(
+                os.path.join(self._root, rel_path), show_status=False, target=target)
+            if config:
+                configs.append(config)
+        values = harvest_system_services_from_configs(configs)
+        store, error = self._load_config_for_target(
+            self._remote_settings_path(), show_status=False, target=target)
+        if isinstance(store, dict) and store:
+            # what its services read at startup; the pipeline configs only fill
+            # in the sections that file does not have
+            values.update(config_to_flat_values(store, include_defaults=False))
+            return values, f"'{target}' has System Settings of its own (config/system_services.yml): its services use these."
+        if error and "No remote config" not in error:
+            return values, f"[red]{rich_escape(error)}[/red]"
+        if configs:
+            return values, (
+                f"'{target}' has no config/system_services.yml: these values are from its pipeline "
+                f"configs, which a Start from this console keeps in step with Local. Save gives it "
+                f"settings of its own."
+            )
+        return values, f"'{target}' has neither settings nor pipeline configs yet: these are the defaults."
+
+    async def _mount_shared_form(self, container: Vertical, section_name: str) -> None:
+        target = self._settings_host(section_name)
+        if f"__shared__{section_name}" not in _LOCAL_SETTINGS_NOTES:
+            self._show_host_bar(None)
+            self._point_host_select(target)
+        values, origin = self._shared_values, ""
+        if target != "local":
+            loading = Static(f" Reading the settings of '{target}' ...", classes="status-saved")
+            await container.mount(loading)
+            values, origin = await asyncio.to_thread(self._settings_values_for, target)
+            if not container.is_attached or self._current_shared_section != section_name:
+                return  # the user moved on while ssh was at work
+            await loading.remove()
+        if origin:
+            await container.mount(Static(origin, classes="settings-origin"))
+        self._show_shared_form(container, section_name, values)
+
+    async def _reload_shared_form(self) -> None:
+        """the Host selector moved while a Connections form is open."""
+        section_name = self._current_shared_section
+        container = self._config_container
+        if not section_name or container is None or not container.is_attached:
+            return
+        await container.remove_children()
+        self._current_form = None
+        await self._mount_shared_form(container, section_name)
+
+    def _show_shared_form(self, container: Vertical, section_name: str,
+                          values: dict[str, object] | None = None) -> None:
+        shared_values = self._shared_values if values is None else values
         sec_info = SHARED_SECTIONS.get(section_name, {})
         fields = []
         for key, fdef in sec_info.get("fields", {}).items():
@@ -3754,7 +3874,7 @@ class ServicePanel(Widget):
                 required=True,
                 section=section_name,
             ))
-        values = {f.path: self._shared_values.get(f.path, f.default) for f in fields}
+        values = {f.path: shared_values.get(f.path, f.default) for f in fields}
         form = ConfigForm(f"shared:{section_name}", fields, values)
         container.mount(form)
         self._current_form = form
@@ -4017,9 +4137,14 @@ class ServicePanel(Widget):
 
     def on_config_form_saved(self, event: ConfigForm.Saved) -> None:
         if event.pipeline_name.startswith("shared:"):
+            section_name = event.pipeline_name.replace("shared:", "", 1)
+            target = self._settings_host(section_name)
+            if target != "local":
+                # that machine's own settings file and its pipeline configs
+                self._sync_shared_section_to_target(section_name, target, save=True)
+                return
             for path, val in event.values.items():
                 self._shared_values[path] = val
-            section_name = event.pipeline_name.replace("shared:", "", 1)
             config_path = save_system_service_section(
                 self._root,
                 section_name,
@@ -4149,6 +4274,9 @@ class ServicePanel(Widget):
         if shared_section == "Sudo":
             # this machine's own admin password: no pipeline config carries it,
             # and another machine has no use for it
+            return
+        if shared_section is not None and self._settings_host(shared_section) != "local":
+            # the form shows that machine's settings and Save writes them there
             return
         target = self._get_panel_target()
         if target != "local" and shared_section is None:
@@ -4679,7 +4807,12 @@ class ServicePanel(Widget):
         self._log(ok_msg if rc == 0 else f"[red]{fail_msg} (exit {rc}).[/red]")
         self._refresh_service_cards()
 
-    def _sync_shared_section_to_target(self, section_name: str, target: str) -> None:
+    def _sync_shared_section_to_target(self, section_name: str, target: str, save: bool = False) -> None:
+        """write the section on screen into `target`: its pipeline configs and
+        its own settings file. `save` is the Save of a form that shows that
+        machine's settings (the file is created when it has none); otherwise
+        this is Sync to Remote, which copies Local's and only ever updates a
+        settings file that is already there."""
         profile = get_profile_by_name(target)
         if profile is None:
             self._show_status(f"SSH profile '{target}' not found.")
@@ -4705,6 +4838,7 @@ class ServicePanel(Widget):
             if section_name in pipeline_section_overrides(remote_config):
                 continue
             remote_config[section_name] = dict(section_data)
+            _encrypt_secrets(remote_config)
 
             tmp = tempfile.NamedTemporaryFile(
                 "w",
@@ -4720,7 +4854,8 @@ class ServicePanel(Widget):
             cache_key = self._config_cache_key(pipeline.config_path, target)
             entries.append((tmp.name, remote_path, cache_key, remote_config))
 
-        own_store = self._remote_settings_entry(target, profile, {section_name: section_data})
+        own_store = self._remote_settings_entry(
+            target, profile, {section_name: section_data}, create=save)
         if own_store is not None:
             temp_paths.append(own_store[0])
             entries.append(own_store)
@@ -4734,23 +4869,24 @@ class ServicePanel(Widget):
             self._show_status(f"No pipeline configs contain {section_name}.")
             return
 
-        for key, value in section_data.items():
-            self._shared_values[f"{section_name}.{key}"] = value
+        if not save:
+            for key, value in section_data.items():
+                self._shared_values[f"{section_name}.{key}"] = value
 
         loopback = [
             f"{section_name}.{key}" for key, value in section_data.items()
             if key in ("host", "url") and is_loopback_host(
                 urlsplit(str(value)).hostname if "://" in str(value) else value)
         ]
-        success_message = f"Synced {section_name} system service"
-        if loopback:
+        success_message = f"{'Saved' if save else 'Synced'} {section_name} system service"
+        if loopback and not save:
             # the log pane is hidden on this node, so the warning rides along
             success_message = (
                 f"Note: {', '.join(loopback)} is a loopback address, which on '{target}' means "
                 f"'{target}' itself and not this machine; machines that share one service need "
                 f"its real host name. {success_message}"
             )
-        self._show_status(f"Syncing {section_name} system service to {target} ...")
+        self._show_status(f"{'Saving' if save else 'Syncing'} {section_name} system service to {target} ...")
         self.run_worker(
             self._run_scp_batch(target, entries, cleanup_local=True, success_message=success_message),
             exclusive=True,
@@ -4760,17 +4896,20 @@ class ServicePanel(Widget):
         from openmmla.tui.system_services import system_services_config_path
         return system_services_config_path(self._root)
 
-    def _remote_settings_entry(self, target: str, profile, sections: dict[str, dict]):
+    def _remote_settings_entry(self, target: str, profile, sections: dict[str, dict], create: bool = False):
         """scp entry that writes `sections` into the host's own
-        config/system_services.yml, or None when it has no such file.
+        config/system_services.yml, or None when there is nothing to write.
 
         The services read that file on top of their pipeline config, so a copy
         left behind on a host (by a console that once ran there) silently beats
-        everything this console pushes. It is only ever brought in step, never
-        created: a host without one takes its values from the pipeline configs."""
+        everything this console pushes. Sync to Remote brings it in step but
+        never creates it: a host without one takes its values from the pipeline
+        configs. `create` is a Save on that host's own settings form."""
         local_path = self._remote_settings_path()
         remote_store, _ = self._load_config_for_target(local_path, show_status=False, target=target)
-        if not isinstance(remote_store, dict) or not remote_store:
+        if not isinstance(remote_store, dict):
+            remote_store = {}
+        if not remote_store and not create:
             return None
         updated = dict(remote_store)
         for name, data in sections.items():
@@ -4778,6 +4917,7 @@ class ServicePanel(Widget):
                 updated[name] = dict(data)
         if updated == remote_store:
             return None
+        _encrypt_secrets(updated)
         tmp = tempfile.NamedTemporaryFile(
             "w", suffix=".yml", prefix="openmmla-remote-settings-", delete=False, encoding="utf-8")
         with tmp:
@@ -4788,6 +4928,19 @@ class ServicePanel(Widget):
             self._config_cache_key(local_path, target),
             updated,
         )
+
+    def _settings_reference_for(self, target: str, central: dict[str, dict]) -> dict[str, dict]:
+        """the shared sections a remote host's pipeline configs should mirror:
+        its own settings where it has them, this console's everywhere else."""
+        reference = dict(central)
+        remote_store, _ = self._load_config_for_target(
+            self._remote_settings_path(), show_status=False, target=target)
+        if isinstance(remote_store, dict):
+            for name in SHARED_SECTION_NAMES:
+                data = remote_store.get(name)
+                if name != "Sudo" and isinstance(data, dict) and data:
+                    reference[name] = data
+        return reference
 
     def _remote_settings_drift(self, target: str, central: dict[str, dict], carried: set[str]) -> list[str]:
         """connection sections that the host's own config/system_services.yml
@@ -4916,7 +5069,10 @@ class ServicePanel(Widget):
         Local: drifted sections are rewritten from the central store in place,
         then launch proceeds. Remote: on drift the latest values are pushed and
         this launch is aborted so the operator relaunches against the now
-        up-to-date remote config (avoids racing the async push).
+        up-to-date remote config (avoids racing the async push). A remote host
+        with System Settings of its own is reconciled with those, section by
+        section: they are what its services read, and what its Connections
+        forms show and save.
         """
         central = self._central_shared_sections()
         if not central:
@@ -4940,21 +5096,24 @@ class ServicePanel(Widget):
         overrides = pipeline_section_overrides(remote_config)
         carried = {name for name in central if name in (remote_config or {}) and name not in overrides}
         own_drift = self._remote_settings_drift(target, central, carried)
-        if own_drift:
+        # said once per host and difference, not at every Start
+        if own_drift and self._own_settings_noted.get(target) != own_drift:
+            self._own_settings_noted[target] = own_drift
             self._log(
-                f"[yellow]'{target}' has a config/system_services.yml of its own, and the services read "
-                f"it on top of the pipeline config: {'; '.join(own_drift)}. What runs there connects "
-                f"to those, not to System Settings here. Sync to Remote on those Connections forms "
-                f"brings the file in step.[/yellow]"
+                f"[yellow]'{target}' has System Settings of its own that differ from this machine's: "
+                f"{'; '.join(own_drift)}. What runs there connects to those. Open the Connections "
+                f"forms with Host = {target} to review them, or press Sync to Remote on the Local "
+                f"forms to replace them.[/yellow]"
             )
-        drifted = shared_section_drift(central, remote_config, overrides=overrides)
+        reference = self._settings_reference_for(target, central)
+        drifted = shared_section_drift(reference, remote_config, overrides=overrides)
         if not drifted:
             return True
         self._log(
             f"[yellow]System-services config on '{target}' is out of date "
             f"({', '.join(drifted)}); pushing latest from System Settings...[/yellow]"
         )
-        self._sync_shared_sections_to_target(drifted, target, central)
+        self._sync_shared_sections_to_target(drifted, target, reference)
         self._log(f"[yellow]Relaunch {svc.name} once the sync above completes.[/yellow]")
         return False
 
@@ -5168,6 +5327,16 @@ class ServicePanel(Widget):
         saved = 0
         failures: list[str] = []
         try:
+            for local_path, _, _, _ in entries:
+                # one key serves them all: push it with the first file that needs it
+                try:
+                    with open(local_path, "r", encoding="utf-8") as fh:
+                        needs_key = "ENC(" in fh.read()
+                except OSError:
+                    needs_key = False
+                if needs_key:
+                    await self._maybe_push_master_key(profile, local_path)
+                    break
             for local_path, remote_path, cache_key, cache_config in entries:
                 remote_dir = remote_path.rsplit("/", 1)[0]
                 mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")

@@ -130,13 +130,22 @@ def load_system_services_config(root: str | os.PathLike[str]) -> dict[str, Any]:
 
 def harvest_system_services_from_pipeline_configs(root: str | os.PathLike[str]) -> dict[str, object]:
     root_path = Path(root)
-    values = get_shared_defaults()
-    seen: set[str] = set()
+    configs = []
     for rel_path in SYSTEM_SERVICE_SOURCE_CONFIG_RELS:
         config_path = root_path / rel_path
-        if not config_path.is_file():
+        if config_path.is_file():
+            configs.append(load_existing_config(str(config_path)))
+    return harvest_system_services_from_configs(configs)
+
+
+def harvest_system_services_from_configs(configs: list[dict]) -> dict[str, object]:
+    """flat shared values taken from pipeline configs, first usable value wins;
+    the configs may have been read on this machine or on another one."""
+    values = get_shared_defaults()
+    seen: set[str] = set()
+    for config in configs:
+        if not isinstance(config, dict):
             continue
-        config = load_existing_config(str(config_path))
         for section_name, info in SHARED_SECTIONS.items():
             section = config.get(section_name)
             if not isinstance(section, dict):
