@@ -387,9 +387,54 @@ def current_target() -> str:
     return _CURRENT_TARGET
 
 
+# profile name -> "linux" | "darwin" | "windows", learnt the first time a host is
+# asked (it costs an ssh round trip) and forgotten when the profile is edited
+TARGET_PLATFORMS: dict[str, str] = {}
+
+# everything the console does on a remote host goes through a POSIX shell
+# (bash -lc, tmux, conda, test/cat/mkdir -p) and the recorders need POSIX file
+# locks and signals, so the cmd.exe or PowerShell of Windows' own OpenSSH server
+# cannot be driven. WSL2 as the machine's ssh shell answers `uname` as Linux
+WINDOWS_HOST_NOTE = (
+    "runs Windows, and the console needs a POSIX shell on a remote host (bash, tmux, conda). "
+    "Use a Linux or macOS machine; with WSL2 as the machine's ssh shell it counts as Linux, "
+    "though cameras and microphones are not visible in there"
+)
+
+
+def remote_platform(profile: SSHProfile, timeout: float = 8.0) -> str:
+    """"linux", "darwin" or "windows"; "" when the host did not say.
+
+    `uname -s` answers wherever there is a POSIX shell. Windows' own OpenSSH
+    server starts cmd.exe or PowerShell, which do not know it; `echo %OS%
+    $env:OS` prints Windows_NT in either of them (and nothing of the kind in
+    sh), which tells such a host from one that simply did not answer."""
+    cached = TARGET_PLATFORMS.get(profile.name)
+    if cached:
+        return cached
+    platform_name = ""
+    try:
+        raw = (ssh_run_sync(profile, "uname -s", timeout=timeout).stdout or "").lower()
+        if "darwin" in raw:
+            platform_name = "darwin"
+        elif "linux" in raw:
+            platform_name = "linux"
+        else:
+            raw = ssh_run_sync(profile, "echo %OS% $env:OS", timeout=timeout).stdout or ""
+            if "windows_nt" in raw.lower():
+                platform_name = "windows"
+    except Exception:
+        return ""
+    if platform_name:
+        TARGET_PLATFORMS[profile.name] = platform_name
+    return platform_name
+
+
 def target_state_label(name: str) -> str:
     """render a profile name with its cached reachability state."""
     state = TARGET_STATES.get(name)
+    if TARGET_PLATFORMS.get(name) == "windows":
+        return f"{name}  (Windows: not supported ✗)"
     if state == "online":
         return f"{name}  (online)"
     if state == "offline":

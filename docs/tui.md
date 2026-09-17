@@ -31,6 +31,8 @@ In the Launcher every leaf of the tree has **its own host**, because the parts o
 
 The `[E]` and `(R)` markers in the tree follow the same rule: each leaf is checked on its own host, and a system service at the address the pipelines use, so the sidebar describes the deployment and agrees with every card that sits where it opened.
 
+A remote host has to offer a **POSIX shell** over SSH: Linux, macOS or a Raspberry Pi. Everything the console does there goes through `bash -lc`, tmux, conda and the usual `test` / `cat` / `mkdir -p`, and the recorders use POSIX file locks and signals. A Windows machine answering with `cmd.exe` or PowerShell (Windows' own OpenSSH server) is recognised the first time it is picked: the selector goes back to where it was, the log says why, and the host is labelled `(Windows: not supported ✗)` from then on. With WSL2 as that machine's SSH shell it answers as Linux and works for server-side services (the AI stacks, the databases); cameras and microphones are not visible inside WSL, so it cannot record a collection session.
+
 Once a session has been started, a remote host needs the same things a local one does for the components you launch there:
 
 | You launch | The remote host needs |

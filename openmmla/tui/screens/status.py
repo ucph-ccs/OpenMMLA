@@ -312,6 +312,10 @@ class StatusPanel(Widget):
                 log.write(f"[yellow]Skipping '{profile.name}' ({profile.host}): SSH port unreachable.[/yellow]")
 
         for profile in reachable:
+            from openmmla.tui.ssh import TARGET_PLATFORMS
+            if TARGET_PLATFORMS.get(profile.name) == "windows":
+                log.write(f"[yellow]Skipping '{profile.name}': it runs Windows, which the console cannot ask.[/yellow]")
+                continue
             log.write(f"Checking services on '{profile.name}'...")
             for svc in KNOWN_SERVICES:
                 port = svc.get("port")

@@ -56,7 +56,7 @@ from openmmla.tui.system_services import (
     shared_section_drift,
 )
 from openmmla.tui.ssh import (
-    REFRESH_TARGETS_OPTION, TARGET_STATES, is_select_sentinel, probe_all_profiles, probe_ssh_endpoint, set_current_target, summarize_states, target_options, target_state_label,
+    REFRESH_TARGETS_OPTION, TARGET_PLATFORMS, TARGET_STATES, WINDOWS_HOST_NOTE, is_select_sentinel, remote_platform, probe_all_profiles, probe_ssh_endpoint, set_current_target, summarize_states, target_options, target_state_label,
     load_ssh_profiles, get_profile_by_name, ssh_run_sync,
     scp_file_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
     ssh_test_connection,
@@ -2803,6 +2803,19 @@ class ServicePanel(Widget):
 
     # ── per-node hosts ───────────────────────────────────────────
 
+    def _unusable_reason(self, target: str, profiles: list) -> str:
+        """why a remote host cannot serve a card right now, or "". Asks a host
+        it has not met for its platform, so it runs off the UI thread."""
+        if TARGET_STATES.get(target) == "offline":
+            return "is offline"
+        if TARGET_PLATFORMS.get(target) is None and TARGET_STATES.get(target) == "online":
+            profile = next((p for p in profiles if p.name == target), None)
+            if profile is not None and hasattr(profile, "base_ssh_args"):
+                remote_platform(profile)
+        if TARGET_PLATFORMS.get(target) == "windows":
+            return WINDOWS_HOST_NOTE
+        return ""
+
     def _derive_node_host(self, svc: ServiceDef, profiles: list) -> NodeHost:
         if svc.launch_type == "make":
             make_target = _make_target_for(svc.name)
@@ -2819,10 +2832,11 @@ class ServicePanel(Widget):
                         fallback_from=(
                             f"System Settings put it on {host} ({field}), which is neither this "
                             f"machine nor a saved SSH profile"))
-                if TARGET_STATES.get(bound) == "offline":
+                reason = self._unusable_reason(bound, profiles) if bound != "local" else ""
+                if reason:
                     return NodeHost(
                         follows=field, machine=host,
-                        fallback_from=f"System Settings put it on '{bound}' ({field}), which is offline")
+                        fallback_from=f"System Settings put it on '{bound}' ({field}), which {reason}")
                 return NodeHost(bound, follows=field, machine=host, machine_target=bound)
 
         saved = self._node_hosts.get(svc.name, "local")
@@ -2830,8 +2844,9 @@ class ServicePanel(Widget):
             return NodeHost()
         if not any(profile.name == saved for profile in profiles):
             return NodeHost(fallback_from=f"'{saved}', where it was last used, is no longer a saved SSH profile")
-        if TARGET_STATES.get(saved) == "offline":
-            return NodeHost(fallback_from=f"'{saved}', where it was last used, is offline")
+        reason = self._unusable_reason(saved, profiles)
+        if reason:
+            return NodeHost(fallback_from=f"'{saved}', where it was last used, {reason}")
         return NodeHost(saved)
 
     def _resolve_node_host(self, svc: ServiceDef, profiles: list | None = None) -> NodeHost:
@@ -2970,40 +2985,80 @@ class ServicePanel(Widget):
                     exclusive=False,
                 )
                 return
-            # snapshot against the host the card still belongs to, so per-host
-            # values (output root, host label) are not filed under the new one
-            self._capture_collection_card_state(self._last_target)
-            self._capture_infra_mode(self._last_target)
-            self._last_target = val
-            set_current_target(val)
-            if self._current_shared_section:
-                self._settings_target = val
-                self.query_one("#svc-cmd-session", CommandSession).set_target(val)
+            if val != "local" and TARGET_PLATFORMS.get(val) is None:
+                # the first visit to this host: find out what it is before any
+                # card starts talking bash to it
+                self._log(f"[yellow]Checking host '{val}'...[/yellow]")
                 self.run_worker(
-                    self._reload_shared_form(),
-                    group=_LAUNCHER_UI_WORKER_GROUP,
+                    self._async_switch_after_platform_check(val),
+                    group="launcher-host-platform",
                     exclusive=True,
                 )
                 return
-            self._remember_node_host(val)
-            current = self._svc_map.get(self._current_service_name or "")
-            if current is not None:
-                self._set_log_context(current, val)
-            if val != "local":
-                self._log(f"[yellow]Switching host to '{val}' — loading remote state...[/yellow]")
-            cmd = self.query_one("#svc-cmd-session", CommandSession)
-            cmd.set_target(val)
-            # only this node moved: its state from the previous host must not
-            # linger, every other node still sits where it was
-            if self._current_service_name:
-                self._svc_states.pop(self._current_service_name, None)
+            if self._refuse_unsupported_host(val):
+                return
+            self._switch_host(val)
+
+    def _refuse_unsupported_host(self, val: str) -> bool:
+        """put the Host selector back when `val` is a machine the console
+        cannot drive, and say why."""
+        if val == "local" or TARGET_PLATFORMS.get(val) != "windows":
+            return False
+        self._log(f"[red]Host '{val}' {WINDOWS_HOST_NOTE}. Staying on '{self._last_target}'.[/red]")
+        try:
+            select = self.query_one("#svc-target-select", Select)
+            with select.prevent(Select.Changed):
+                select.set_options(target_options())  # the label now says so too
+                select.value = self._last_target
+        except Exception:
+            pass
+        return True
+
+    async def _async_switch_after_platform_check(self, val: str) -> None:
+        profile = get_profile_by_name(val)
+        if profile is not None:
+            await asyncio.to_thread(remote_platform, profile)
+        if self._get_panel_target() != val:
+            return  # the user picked something else while ssh was at work
+        if not self._refuse_unsupported_host(val):
+            self._switch_host(val)
+
+    def _switch_host(self, val: str) -> None:
+        """the Host selector moved to `val` by the user's hand."""
+        # snapshot against the host the card still belongs to, so per-host
+        # values (output root, host label) are not filed under the new one
+        self._capture_collection_card_state(self._last_target)
+        self._capture_infra_mode(self._last_target)
+        self._last_target = val
+        set_current_target(val)
+        if self._current_shared_section:
+            self._settings_target = val
+            self.query_one("#svc-cmd-session", CommandSession).set_target(val)
             self.run_worker(
-                self._reload_current_service_view(capture=False),
+                self._reload_shared_form(),
                 group=_LAUNCHER_UI_WORKER_GROUP,
                 exclusive=True,
             )
-            self._refresh_visible_statuses()
-            self._kick_env_status_refresh(val)
+            return
+        self._remember_node_host(val)
+        current = self._svc_map.get(self._current_service_name or "")
+        if current is not None:
+            self._set_log_context(current, val)
+        if val != "local":
+            self._log(f"[yellow]Switching host to '{val}' — loading remote state...[/yellow]")
+        cmd = self.query_one("#svc-cmd-session", CommandSession)
+        cmd.set_target(val)
+        # only this node moved: its state from the previous host must not
+        # linger, every other node still sits where it was
+        if self._current_service_name:
+            self._svc_states.pop(self._current_service_name, None)
+        self.run_worker(
+            self._reload_current_service_view(capture=False),
+            group=_LAUNCHER_UI_WORKER_GROUP,
+            exclusive=True,
+        )
+        self._refresh_visible_statuses()
+        self._kick_env_status_refresh(val)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.tabbed_content.id != "svc-sub-tabs":
@@ -6691,17 +6746,8 @@ class ServicePanel(Widget):
         if profile is None:
             cache[target] = "linux"
             return cache[target]
-        try:
-            result = ssh_run_sync(profile, "uname -s", timeout=2.0)
-            raw = (result.stdout or "").strip().lower()
-        except Exception:
-            raw = ""
-        if "darwin" in raw:
-            platform_name = "darwin"
-        elif "linux" in raw:
-            platform_name = "linux"
-        else:
-            platform_name = "linux"
+        # a host that does not say is taken for linux, as before
+        platform_name = remote_platform(profile, timeout=4.0) or "linux"
         cache[target] = platform_name
         return platform_name
 

@@ -274,8 +274,11 @@ class SSHForm(Widget):
             self._profiles = [profile if p.name == replaced else p for p in self._profiles]
         save_ssh_profiles(self._profiles)
         renamed = (editing, profile.name) if editing and editing != profile.name else None
+        from openmmla.tui.ssh import TARGET_PLATFORMS, TARGET_STATES
+        # the profile may point at another machine now: ask it again
+        TARGET_PLATFORMS.pop(profile.name, None)
         if renamed:
-            from openmmla.tui.ssh import TARGET_STATES
+            TARGET_PLATFORMS.pop(renamed[0], None)
             if renamed[0] in TARGET_STATES:
                 TARGET_STATES[renamed[1]] = TARGET_STATES.pop(renamed[0])
         # the form still shows this profile: further changes are edits of it
