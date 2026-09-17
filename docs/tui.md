@@ -83,12 +83,13 @@ OpenMMLA
 ├── System Settings
 │   ├── Hosts:        SSH Profiles
 │   ├── Study:        Experiments, Tasks
-│   ├── Connections:  MongoDB, InfluxDB, MQTT, Redis, Gateway (Nginx), Dashboard (Flask)
+│   ├── Connections:  InfluxDB, MongoDB, Redis, MQTT (Mosquitto),
+│   │                 Gateway (Nginx + MediaMTX), Dashboard (Flask)
 │   └── Credentials:  Sudo (local admin)
 ├── System Services
-│   ├── InfluxDB, MongoDB, Redis, Mosquitto, Nginx
-│   ├── Dashboard (Flask)
-│   └── Dashboard Worker (Celery)
+│   ├── InfluxDB, MongoDB, Redis, MQTT (Mosquitto)
+│   ├── Gateway (Nginx), Gateway (MediaMTX)
+│   └── Dashboard (Flask), Dashboard (Celery)
 ├── Collection
 │   └── Collection Session
 ├── Pipelines
@@ -98,11 +99,13 @@ OpenMMLA
 └── Session Control
 ```
 
+A system service has one name everywhere the console shows it (its card, the sidebar, the Status tab, the log): `Role (Product)`, where the role is the **Connections** form that holds its address. `Gateway (Nginx)` and `Gateway (MediaMTX)` both take their host from `Gateway (Nginx + MediaMTX)`, `Dashboard (Flask)` and its worker `Dashboard (Celery)` from `Dashboard (Flask)`, and the broker behind the `MQTT` section is `MQTT (Mosquitto)`. The two groups list them in the same order. The rest of this page uses the product name alone where the text is about the program (`make nginx`, the MediaMTX ports).
+
 ### Service cards
 
 Every launchable leaf opens a card with the service name, its conda env and launch type, a status line, its parameters, and the buttons **Start**, **Stop**, **Logs** and **Refresh**. Bases and camera tools open in terminal windows and therefore show `Interactive (runs in its own terminal)` and no Stop button: close them from their own window. Cards for a pipeline also have a **Config** tab that edits `pipelines/<pipeline>/config.yml` on the selected host, with **Save** writing it back (and, on a remote host, copying it there).
 
-Output of every action goes to the command console at the bottom of the tab. It is one transcript for the whole tab, since a build or a remote stop keeps printing after you move to another card; a divider such as `── MediaMTX · Local ──` is drawn before the first line that belongs to another card or host.
+Output of every action goes to the command console at the bottom of the tab. It is one transcript for the whole tab, since a build or a remote stop keeps printing after you move to another card; a divider such as `── Gateway (MediaMTX) · Local ──` is drawn before the first line that belongs to another card or host.
 
 Before a Start the console checks that `config.yml` exists on the target host, that the sections managed by System Settings are up to date, and that the conda environment exists. On a remote host whose config is out of date, the first Start only pushes the current System Settings and prints `Relaunch <service> once the sync above completes.`; press Start again. This is by design.
 
@@ -120,13 +123,13 @@ The remaining forms are this machine's alone, and say why in the Host bar: SSH p
 
 **Tasks**: the task definitions in `config/tasks/*.yaml`, edited as raw YAML.
 
-**Connections**: `MongoDB`, `InfluxDB`, `MQTT`, `Redis`, `Gateway (Nginx + MediaMTX)` and `Dashboard (Flask)`. Saving writes `config/system_services.yml` and copies the section into every pipeline `config.yml` that carries it; the pipeline Config tabs then show those fields read-only with a `managed in System Settings` note. With the selector on `Local`, **Sync to Remote** under the form is the shortcut for "give that host this machine's values": it copies the section into the pipeline configs of one remote host, and into its own `config/system_services.yml` when it has one, without a trip through that host's form. A `localhost` value is copied as it is and then means the remote machine itself: machines that share one service need its real host name here. A pipeline that must keep its own value lists the section under `SystemServicesOverride:` in its `config.yml`, or presses `Override here` at the bottom of that section in its Config tab. The fields and defaults are listed in [System Services](system_services.md#pointing-the-pipelines-at-the-services).
+**Connections**: `InfluxDB`, `MongoDB`, `Redis`, `MQTT (Mosquitto)`, `Gateway (Nginx + MediaMTX)` and `Dashboard (Flask)`. Saving writes `config/system_services.yml` and copies the section into every pipeline `config.yml` that carries it; the pipeline Config tabs then show those fields read-only with a `managed in System Settings` note. With the selector on `Local`, **Sync to Remote** under the form is the shortcut for "give that host this machine's values": it copies the section into the pipeline configs of one remote host, and into its own `config/system_services.yml` when it has one, without a trip through that host's form. A `localhost` value is copied as it is and then means the remote machine itself: machines that share one service need its real host name here. A pipeline that must keep its own value lists the section under `SystemServicesOverride:` in its `config.yml`, or presses `Override here` at the bottom of that section in its Config tab. The fields and defaults are listed in [System Services](system_services.md#pointing-the-pipelines-at-the-services).
 
 **Sudo (local admin)**: the sudo password of this machine, stored encrypted and never copied to another host (there is no Sync to Remote on this form). Native Start/Stop of the system services run `make` with `sudo`, and the console types this password when the prompt appears (at most three times per command). Remote sudo prompts use the SSH profile's password instead.
 
 ### System Services
 
-One card per system service: **InfluxDB**, **MongoDB**, **Redis**, **Mosquitto**, **Nginx**, **MediaMTX**, **Dashboard (Flask)** and **Dashboard Worker (Celery)**. Installation is described in [System Services](system_services.md).
+One card per system service: **InfluxDB**, **MongoDB**, **Redis**, **MQTT (Mosquitto)**, **Gateway (Nginx)**, **Gateway (MediaMTX)**, **Dashboard (Flask)** and its worker **Dashboard (Celery)**. Installation is described in [System Services](system_services.md).
 
 - **Host**: opens on the machine the service's address in System Settings names (`InfluxDB.url`, `MongoDB.url`, `Redis.host`, `MQTT.host`, `Gateway.host` for Nginx and MediaMTX, `Dashboard.host` for the dashboard and its worker), see [Hosts](#hosts). To run a service somewhere else for good, change its address in System Settings; the card follows.
 - **Status** is a TCP probe from this machine to the address configured under System Settings, which is the path the pipelines take. The card description names the probed address. A `localhost` address names no particular machine, so it is probed on the card's selected host instead (over SSH for a remote host), and so is a card that was moved off the configured machine: it reports the host it is on, while the sidebar marker keeps following the configured address. The Celery worker is detected by its tmux session. MediaMTX counts as running only when its RTMP **and** RTSP ports answer: an Nginx built with the RTMP module, the gateway of earlier versions, holds 1935 too, and would otherwise read as a MediaMTX that Stop can never find. When only one of the two answers, Refresh, Start and Stop say so in the log.

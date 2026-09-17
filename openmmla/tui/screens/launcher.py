@@ -40,6 +40,7 @@ from openmmla.tui.schema.definitions import (
 from openmmla.tui.system_services import (
     SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
     SYSTEM_SERVICE_DEFAULT_PORTS,
+    SYSTEM_SERVICE_LABELS,
     hosts_match,
     is_loopback_host,
     system_service_endpoint,
@@ -117,17 +118,14 @@ _STREAM_PIPELINES = {"ASR Base", "IPS Base", "VFA Base"}
 _SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Hosts", ("SSH Profiles",)),
     ("Study", ("Experiments", "Tasks")),
-    ("Connections", ("MongoDB", "InfluxDB", "MQTT", "Redis", "Gateway", "Dashboard")),
+    # the order of the System Services cards below them
+    ("Connections", ("InfluxDB", "MongoDB", "Redis", "MQTT", "Gateway", "Dashboard")),
     ("Credentials", ("Sudo",)),
 )
 _SYSTEM_SERVICES_LABEL = "System Settings"
 
-# tree/card labels for infrastructure cards whose internal "Uber: <name>" key
-# is jargon; the key itself stays, everything else looks it up by name
-_INFRA_LABELS: dict[str, str] = {
-    "Flask": "Dashboard (Flask)",
-    "Celery": "Dashboard Worker (Celery)",
-}
+# the infrastructure cards' internal "Uber: <name>" key is jargon: it stays the
+# key, and everything the user reads shows SYSTEM_SERVICE_LABELS instead
 
 _MLLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 _MLLM_PORT = 8010
@@ -1733,7 +1731,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 description=desc,
                 params=params,
                 extra_actions=extra_actions,
-                label=_INFRA_LABELS.get(svc_name, svc_name),
+                label=SYSTEM_SERVICE_LABELS.get(_make_target_for(name), svc_name),
             ))
 
     return services
@@ -2349,8 +2347,12 @@ class ServicePanel(Widget):
         width: 1fr;
         height: 1fr;
     }
+    /* wide enough for the longest leaf with all three of its markers: at 32 the
+       (R) of "Dashboard (Flask) [E] [C] (R)" and of every longer leaf was cut
+       off. The tree is drawn with 3-column guides for the same reason */
     #svc-sidebar {
-        width: 32;
+        width: 44;
+        max-width: 40%;
         border-right: solid $primary;
         padding: 1;
         background: $panel;
@@ -2589,6 +2591,7 @@ class ServicePanel(Widget):
             yield Static("\\[E] env  \\[C] config  (R) running", classes="svc-legend")
             yield Static("green ok · yellow partial · red missing", classes="svc-legend")
             tree: Tree[str] = Tree("OpenMMLA", id="svc-tree")
+            tree.guide_depth = 3
             tree.root.expand()
             yield tree
         with Vertical(id="svc-main"):
@@ -5114,7 +5117,7 @@ class ServicePanel(Widget):
             f"({', '.join(drifted)}); pushing latest from System Settings...[/yellow]"
         )
         self._sync_shared_sections_to_target(drifted, target, reference)
-        self._log(f"[yellow]Relaunch {svc.name} once the sync above completes.[/yellow]")
+        self._log(f"[yellow]Relaunch {svc.display_name} once the sync above completes.[/yellow]")
         return False
 
     @staticmethod
@@ -5534,7 +5537,7 @@ class ServicePanel(Widget):
             return
 
         target_label = f"on '{target}'" if is_remote else "locally"
-        self._log(f"[green]Starting {svc.name} {target_label}...[/green]")
+        self._log(f"[green]Starting {svc.display_name} {target_label}...[/green]")
         self._note_port_conflict(svc, target)
 
         if is_remote:
@@ -5551,7 +5554,7 @@ class ServicePanel(Widget):
         target = self._get_panel_target()
         is_remote = target != "local"
         target_label = f"on '{target}'" if is_remote else "locally"
-        self._log(f"[red]Stopping {svc.name} {target_label}...[/red]")
+        self._log(f"[red]Stopping {svc.display_name} {target_label}...[/red]")
         self._note_port_conflict(svc, target)
 
         if is_remote:
@@ -5655,10 +5658,10 @@ class ServicePanel(Widget):
                     card.update_status(is_running)
         self._build_tree()
         if counts is not None:
-            self._log(f"{svc.name} ({target}): {counts[0]}/{counts[1]} running")
+            self._log(f"{svc.display_name} ({target}): {counts[0]}/{counts[1]} running")
         else:
             status = "[green]Running[/green]" if is_running else "[red]Stopped[/red]"
-            self._log(f"{svc.name} ({target}): {status}")
+            self._log(f"{svc.display_name} ({target}): {status}")
         await self._async_note_port_conflict(svc, target)
 
     def on_session_control_panel_refresh_requested(self, event: SessionControlPanel.RefreshRequested) -> None:
@@ -6072,7 +6075,7 @@ class ServicePanel(Widget):
             downloaded_paths: list[str] = []
             total = {"copied": 0, "skipped": 0, "conflicted": 0}
             remote_root = self._remote_pipeline_artifact_root(profile, session_id, pipeline_name, artifact_host)
-            self._log(f"[cyan]Downloading {svc.name} artifacts from {profile_name}:{remote_root}[/cyan]")
+            self._log(f"[cyan]Downloading {svc.display_name} artifacts from {profile_name}:{remote_root}[/cyan]")
 
             sources = self._pipeline_artifact_sources()
             for index, (remote_rel, local_rel) in enumerate(sources, start=1):
@@ -6116,7 +6119,7 @@ class ServicePanel(Widget):
                 downloaded_paths=downloaded_paths,
             )
             self._log(
-                f"[green]Downloaded {svc.name} artifacts to {local_root} "
+                f"[green]Downloaded {svc.display_name} artifacts to {local_root} "
                 f"(copied {total['copied']}, skipped {total['skipped']}, conflicts {total['conflicted']}).[/green]"
             )
             self._log(f"[green]Updated session manifest: {manifest}[/green]")
@@ -6480,7 +6483,7 @@ class ServicePanel(Widget):
             is_running = self._detect_running(svc)
 
         if not is_running and not self._logs_available(svc, target):
-            self._log(f"[yellow]{svc.name} is not running ({target}). Start the service first.[/yellow]")
+            self._log(f"[yellow]{svc.display_name} is not running ({target}). Start the service first.[/yellow]")
             return
 
         # the Logs message carries no params, so read the card's controls directly
@@ -6551,7 +6554,7 @@ class ServicePanel(Widget):
                 return
             target = _make_target_for(svc.name)
             if target in _SYSTEM_SVC_PORTS:
-                self._log(f"[cyan]── Logs for {svc.name} ──[/cyan]")
+                self._log(f"[cyan]── Logs for {svc.display_name} ──[/cyan]")
                 output = _get_system_service_log(target)
                 for line in output.splitlines():
                     self._log(line)
@@ -6568,7 +6571,7 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Compose file not found: {rel}[/yellow]")
             return
         elif svc.launch_type == "collection":
-            self._log(f"[cyan]── Logs for {svc.name} ──[/cyan]")
+            self._log(f"[cyan]── Logs for {svc.display_name} ──[/cyan]")
             sessions = _collection_sessions_local(svc)
             if not sessions:
                 self._log("(no collection sessions found)")
@@ -6582,10 +6585,10 @@ class ServicePanel(Widget):
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
         else:
-            self._log(f"[yellow]No logs available for {svc.name}[/yellow]")
+            self._log(f"[yellow]No logs available for {svc.display_name}[/yellow]")
             return
 
-        self._log(f"[cyan]── Logs for {svc.name} (session: {session_name}) ──[/cyan]")
+        self._log(f"[cyan]── Logs for {svc.display_name} (session: {session_name}) ──[/cyan]")
         output = _capture_tmux_pane(session_name)
         for line in output.splitlines():
             self._log(line)
@@ -6642,7 +6645,7 @@ class ServicePanel(Widget):
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
         else:
-            self._log(f"[yellow]No logs available for {svc.name}[/yellow]")
+            self._log(f"[yellow]No logs available for {svc.display_name}[/yellow]")
             return
 
         self._cmd.run(f"tmux capture-pane -t {session_name} -p -S -80")
@@ -6660,7 +6663,7 @@ class ServicePanel(Widget):
             elif svc.launch_type == "collection":
                 self._launch_collection(svc, params)
         except Exception as e:
-            self._log(f"[red]Error launching {svc.name}: {e}[/red]")
+            self._log(f"[red]Error launching {svc.display_name}: {e}[/red]")
 
     def _collection_defaults_for_current_target(self, target: str) -> dict[str, object]:
         return self._collection_defaults_for_target(
@@ -7316,7 +7319,7 @@ class ServicePanel(Widget):
 
     def _launch_collection(self, svc: ServiceDef, params: dict) -> None:
         if not svc.components:
-            self._log(f"[red]No collection components defined for {svc.name}[/red]")
+            self._log(f"[red]No collection components defined for {svc.display_name}[/red]")
             return
 
         prepared = self._collection_launch_params(params, service_name=svc.name)
@@ -7358,7 +7361,7 @@ class ServicePanel(Widget):
 
     def _launch_bash(self, svc: ServiceDef, params: dict) -> None:
         if not svc.components:
-            self._log(f"[red]No components defined for {svc.name}[/red]")
+            self._log(f"[red]No components defined for {svc.display_name}[/red]")
             return
 
         python_path = self._root
@@ -7429,7 +7432,7 @@ class ServicePanel(Widget):
             self._log("[yellow]Unsupported OS for terminal tab launch.[/yellow]")
             return
 
-        self._log(f"[green]{svc.name} launched in new terminal window.[/green]")
+        self._log(f"[green]{svc.display_name} launched in new terminal window.[/green]")
 
     def _open_collection_terminal(self, tab_cmds: list[tuple[str, str]]) -> bool:
         if sys.platform == "darwin":
@@ -7519,7 +7522,7 @@ class ServicePanel(Widget):
         if _is_stack_service(svc):
             self._launch_docker_stack(svc, params)
             return
-        self._log(f"[yellow]No launch method for {svc.name}.[/yellow]")
+        self._log(f"[yellow]No launch method for {svc.display_name}.[/yellow]")
 
     def _launch_docker_stack(self, svc: ServiceDef, params: dict | None = None) -> None:
         """start the selected stack sub-services with docker compose (one
@@ -7563,7 +7566,7 @@ class ServicePanel(Widget):
             cwd=self._root,
         )
         self._log(f"  Command: {vllm_cmd}")
-        self._log(f"[green]{svc.name} tmux session '{session_name}' started on port {config['port']}.[/green]")
+        self._log(f"[green]{svc.display_name} tmux session '{session_name}' started on port {config['port']}.[/green]")
 
     @staticmethod
     def _infra_container_exists(compose_path: str, service: str) -> bool:
@@ -7669,7 +7672,7 @@ class ServicePanel(Widget):
                 for session_name in sessions:
                     subprocess.run(["tmux", "send-keys", "-t", session_name, "C-c"], capture_output=True)
                     subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
-                self._log(f"[red]{svc.name} stopped.[/red]")
+                self._log(f"[red]{svc.display_name} stopped.[/red]")
             elif svc.launch_type == "make":
                 if _infra_docker_mode(svc, params):
                     compose_path = self._infra_compose_path()
@@ -7681,7 +7684,7 @@ class ServicePanel(Widget):
                         # with no container, which otherwise reads as a success
                         self._log(
                             f"[yellow]No container for '{service}' in this compose project. "
-                            f"If {svc.name} is running on its port, it is the native "
+                            f"If {svc.display_name} is running on its port, it is the native "
                             f"service — switch Run mode to native to stop it.[/yellow]"
                         )
                         return
@@ -7702,7 +7705,7 @@ class ServicePanel(Widget):
                         capture_output=True,
                         timeout=15,
                     )
-                    self._log(f"[red]{svc.name} stopped.[/red]")
+                    self._log(f"[red]{svc.display_name} stopped.[/red]")
                     kill_info = _APP_PORT_CMDS.get(make_name)
                     if kill_info:
                         port = kill_info[0]
@@ -7712,7 +7715,7 @@ class ServicePanel(Widget):
             elif svc.launch_type == "bash":
                 self._log(f"[yellow]Bash-launched services must be stopped from their terminal windows.[/yellow]")
         except Exception as e:
-            self._log(f"[red]Error stopping {svc.name}: {e}[/red]")
+            self._log(f"[red]Error stopping {svc.display_name}: {e}[/red]")
 
     def _kill_port(self, port: int, expected_cmd: str) -> None:
         """force-kill processes on a port whose command name matches expected_cmd."""
@@ -7760,7 +7763,7 @@ class ServicePanel(Widget):
                         f"{command.split(' bash -lc ', 1)[-1]}"
                     ))
                 if tab_cmds and self._open_collection_terminal(tab_cmds):
-                    self._log(f"[green]{svc.name} launched in SSH terminal(s).[/green]")
+                    self._log(f"[green]{svc.display_name} launched in SSH terminal(s).[/green]")
                 else:
                     self._log("[yellow]No remote components launched.[/yellow]")
 
@@ -7783,7 +7786,7 @@ class ServicePanel(Widget):
                     return
                 rel = _stack_compose_rel_file(svc)
                 if not rel:
-                    self._log(f"[red]No compose file mapped for {svc.name}.[/red]")
+                    self._log(f"[red]No compose file mapped for {svc.display_name}.[/red]")
                     return
                 services = _compose_service_names(specs, config)
                 profiles = ["nemo"] if "audio-inferer-nemo" in services else []
@@ -7797,9 +7800,9 @@ class ServicePanel(Widget):
                     self._run_remote_streamed(
                         profile_name,
                         run_cmd,
-                        f"[green]{svc.name}: containers started on {profile_name} "
+                        f"[green]{svc.display_name}: containers started on {profile_name} "
                         "(services are loading; click Refresh in a moment).[/green]",
-                        f"{svc.name} remote launch failed",
+                        f"{svc.display_name} remote launch failed",
                     )
                 )
 
@@ -7818,7 +7821,7 @@ class ServicePanel(Widget):
                 self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {vllm_cmd}")
                 if self._open_collection_terminal([(svc.name, ssh_cmd)]):
                     self._log(f"  Command: {vllm_cmd}")
-                    self._log(f"[green]{svc.name} tmux session opened remotely on port {config['port']}.[/green]")
+                    self._log(f"[green]{svc.display_name} tmux session opened remotely on port {config['port']}.[/green]")
                 else:
                     self._log("[yellow]Could not open remote MLLM terminal.[/yellow]")
 
@@ -7853,7 +7856,7 @@ class ServicePanel(Widget):
                         self._log(rich_escape(f"    [{label}] ssh {profile.ssh_destination()} {command}"))
                 if tab_cmds and self._open_collection_terminal(tab_cmds):
                     launched = len(tab_cmds)
-                    self._log(f"[green]{svc.name} launched in SSH terminal(s).[/green]")
+                    self._log(f"[green]{svc.display_name} launched in SSH terminal(s).[/green]")
                     self.run_worker(
                         self._reload_current_service_view(capture=False),
                         group=_LAUNCHER_UI_WORKER_GROUP,
@@ -7878,7 +7881,7 @@ class ServicePanel(Widget):
                 ssh_cmd = self._remote_terminal_command(profile, run_cmd)
                 self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {run_cmd}")
                 if self._open_collection_terminal([(svc.name, ssh_cmd)]):
-                    self._log(f"[green]{svc.name} start opened in SSH terminal.[/green]")
+                    self._log(f"[green]{svc.display_name} start opened in SSH terminal.[/green]")
                 else:
                     self._log("[yellow]Could not open remote make terminal.[/yellow]")
         except Exception as e:
@@ -7915,12 +7918,12 @@ class ServicePanel(Widget):
                         f"tmux send-keys -t {shlex.quote(session)} C-c 2>/dev/null; "
                         f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null"
                     )
-                self._log(f"  Stopping {svc.name} on {profile_name}...")
+                self._log(f"  Stopping {svc.display_name} on {profile_name}...")
                 self.run_worker(
                     self._run_remote_streamed(
                         profile_name, cmd,
-                        f"[green]{svc.name} stopped on {profile_name}.[/green]",
-                        f"{svc.name} remote stop failed",
+                        f"[green]{svc.display_name} stopped on {profile_name}.[/green]",
+                        f"{svc.display_name} remote stop failed",
                     ),
                     group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
                     exclusive=False,
@@ -7940,12 +7943,12 @@ class ServicePanel(Widget):
                     target = "stop-" + _make_target_for(svc.name)
                     remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
                     run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
-                self._log(f"  Stopping {svc.name} on {profile_name}...")
+                self._log(f"  Stopping {svc.display_name} on {profile_name}...")
                 self.run_worker(
                     self._run_remote_streamed(
                         profile_name, run_cmd,
-                        f"[green]{svc.name} stopped on {profile_name}.[/green]",
-                        f"{svc.name} remote stop failed",
+                        f"[green]{svc.display_name} stopped on {profile_name}.[/green]",
+                        f"{svc.display_name} remote stop failed",
                     ),
                     group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
                     exclusive=False,
@@ -7953,12 +7956,12 @@ class ServicePanel(Widget):
 
             elif svc.launch_type == "bash":
                 command = self._remote_bash_stop_command(svc)
-                self._log(f"  Stopping {svc.name} on {profile_name}...")
+                self._log(f"  Stopping {svc.display_name} on {profile_name}...")
                 self.run_worker(
                     self._run_remote_streamed(
                         profile_name, command,
-                        f"[green]{svc.name} stopped on {profile_name}.[/green]",
-                        f"{svc.name} remote stop failed",
+                        f"[green]{svc.display_name} stopped on {profile_name}.[/green]",
+                        f"{svc.display_name} remote stop failed",
                     ),
                     group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
                     exclusive=False,

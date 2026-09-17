@@ -46,7 +46,7 @@ SHARED_SECTIONS = {
         },
     },
     "MQTT": {
-        "label": "MQTT",
+        "label": "MQTT (Mosquitto)",
         "fields": {
             "host": {
                 "description": "MQTT broker hostname (e.g. localhost)",

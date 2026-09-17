@@ -225,6 +225,23 @@ SYSTEM_SERVICE_DEFAULT_PORTS: dict[str, int] = {
     "mediamtx": 1935,
 }
 
+# what a system service is called wherever the console shows it (its card, the
+# sidebar, the Status tab, the log), keyed by make target: "Role (Product)",
+# where the role is the System Settings → Connections section that holds its
+# address. The Connections forms are labelled the same way in
+# schema/definitions.py, so "Gateway (Nginx)" visibly belongs to "Gateway (Nginx
+# + MediaMTX)" and nobody has to know that Mosquitto is the MQTT broker
+SYSTEM_SERVICE_LABELS: dict[str, str] = {
+    "influxdb": "InfluxDB",
+    "mongodb": "MongoDB",
+    "redis": "Redis",
+    "mosquitto": "MQTT (Mosquitto)",
+    "nginx": "Gateway (Nginx)",
+    "mediamtx": "Gateway (MediaMTX)",
+    "flask": "Dashboard (Flask)",
+    "celery": "Dashboard (Celery)",
+}
+
 # the dashboard backend is a make target too, but not a port-probed system
 # service; its port only matters for the Dashboard section and `make flask`
 DASHBOARD_DEFAULT_PORT = 5050
@@ -470,7 +487,7 @@ def system_service_port_conflict(
     if target == "mediamtx":
         message += (
             ": usually an nginx built with the RTMP module, left over from before MediaMTX. "
-            "Press Start on the Nginx card to render its config again (the current template "
+            f"Press Start on the {SYSTEM_SERVICE_LABELS['nginx']} card to render its config again (the current template "
             "has no rtmp block), or stop Nginx"
         )
     return message

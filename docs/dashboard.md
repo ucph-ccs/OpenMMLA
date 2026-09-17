@@ -38,7 +38,7 @@ The backend listens on port 5050 by default. Change it under **System Settings �
 
 ## Running
 
-From the TUI: **Launcher → System Services → Dashboard (Flask)** and **Dashboard Worker (Celery)**, Start on each. From a shell:
+From the TUI: **Launcher → System Services → Dashboard (Flask)** and its worker **Dashboard (Celery)**, Start on each. From a shell:
 
 ```bash
 cd pipelines/uber-server

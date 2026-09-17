@@ -13,6 +13,7 @@ from textual.widgets import Static, DataTable, RichLog, Button
 
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.system_services import (
+    SYSTEM_SERVICE_LABELS,
     hosts_match, is_loopback_host, is_this_machine, system_service_endpoint, system_service_reachable,
 )
 from openmmla.tui.ssh import load_ssh_profiles, probe_ssh_endpoint, ssh_check_port, ssh_check_tmux, ssh_run_sync, get_profile_by_name, SSHProfile
@@ -22,11 +23,11 @@ KNOWN_SERVICES = [
     {"name": "InfluxDB", "port": 8086, "type": "system", "target": "influxdb"},
     {"name": "MongoDB", "port": 27017, "type": "system", "target": "mongodb"},
     {"name": "Redis", "port": 6379, "type": "system", "target": "redis"},
-    {"name": "Mosquitto", "port": 1883, "type": "system", "target": "mosquitto"},
-    {"name": "Nginx", "port": 8080, "type": "system", "target": "nginx"},
-    {"name": "MediaMTX", "port": 1935, "type": "system", "target": "mediamtx"},
-    {"name": "Flask Dashboard", "port": 5050, "type": "tmux", "session": "flask", "target": "flask"},
-    {"name": "Celery Worker", "port": None, "type": "tmux", "session": "celery"},
+    {"name": SYSTEM_SERVICE_LABELS["mosquitto"], "port": 1883, "type": "system", "target": "mosquitto"},
+    {"name": SYSTEM_SERVICE_LABELS["nginx"], "port": 8080, "type": "system", "target": "nginx"},
+    {"name": SYSTEM_SERVICE_LABELS["mediamtx"], "port": 1935, "type": "system", "target": "mediamtx"},
+    {"name": SYSTEM_SERVICE_LABELS["flask"], "port": 5050, "type": "tmux", "session": "flask", "target": "flask"},
+    {"name": SYSTEM_SERVICE_LABELS["celery"], "port": None, "type": "tmux", "session": "celery"},
     {"name": "AudioInferer", "port": 5001, "type": "tmux", "session": "audioinferer"},
     {"name": "AudioResampler", "port": 5002, "type": "tmux", "session": "audioresampler"},
     {"name": "SpeechEnhancer", "port": 5003, "type": "tmux", "session": "speechenhancer"},
@@ -400,7 +401,7 @@ class StatusPanel(Widget):
         log.clear()
         svc_def = next((s for s in KNOWN_SERVICES if s["name"] == name), None)
         svc_type = svc_def["type"] if svc_def else ("tmux" if session else "unknown")
-        svc_key = name.lower().split()[0] if svc_def and svc_type == "system" else ""
+        svc_key = svc_def.get("target", "") if svc_def and svc_type == "system" else ""
 
         if host == "local" or (svc_type == "system" and is_this_machine(host)):
             self._view_logs_local(log, name, svc_type, svc_key, session)
