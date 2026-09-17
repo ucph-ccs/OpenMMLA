@@ -199,7 +199,9 @@ class AudioStream(StreamReceiver):
         }
 
         # Calculate buffer size in frames
-        buffer_frames = int(self.rate * self.buffer_duration / self.chunk_size)
+        # never fewer than two slots: the tail of a one-slot ring never moves,
+        # and read() waits for it to
+        buffer_frames = max(2, int(self.rate * self.buffer_duration / self.chunk_size))
         self.buffer = RingBuffer(buffer_frames)
 
         # Last read position tracking

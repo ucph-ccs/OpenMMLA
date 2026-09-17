@@ -99,7 +99,10 @@ class VideoStream(StreamReceiver):
         }
 
         # Buffer
-        buffer_frames = int(self.fps * self.buffer_duration)
+        # never fewer than two slots: read() waits for the tail to move, and the
+        # tail of a one-slot ring never does (fps 15 with the template's 0.08 s
+        # gave int(1.2) = 1, and a base that timed out on every read)
+        buffer_frames = max(2, int(self.fps * self.buffer_duration))
         self.buffer = RingBuffer(buffer_frames)
         self._last_read_pos = -1
 
