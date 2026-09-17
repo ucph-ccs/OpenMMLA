@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import yaml
 from rich.markup import escape as rich_escape
+from textual.markup import escape as markup_escape
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -247,6 +248,43 @@ _MLLM_FIELDS = [
         section="server",
     ),
 ]
+
+def _gateway_base_url(values: dict) -> str:
+    """scheme://host:port of the Gateway section in the flat values of a form."""
+    scheme = str(values.get("Gateway.scheme") or "").strip() or "http"
+    host = str(values.get("Gateway.host") or "").strip() or "localhost"
+    return f"{scheme}://{host}:{values.get('Gateway.http_port') or 8080}"
+
+
+def _is_server_entry(field: LoaderFieldDef) -> bool:
+    return field.path.startswith("Server.") and field.field_type in ("str", "url")
+
+
+def _server_entry_hint(value: object, gateway: str) -> str:
+    """where the value of a Server entry leads: through the Gateway or straight
+    to a server. It is shown while the value is typed, so a half-written URL must
+    not raise, and what was typed must not be read as markup."""
+    text = str(value or "").strip()
+    if not text or "<" in text:
+        return "a bare name goes through the Gateway, a full URL connects directly"
+    if "://" in text:
+        try:
+            server = urlsplit(text).netloc
+        except ValueError:
+            server = ""
+        return f"direct connection to {markup_escape(server or text)}, without the Gateway"
+    return f"through the Gateway: {markup_escape(gateway)}/{markup_escape(text.lstrip('/'))}"
+
+
+def _server_section_note(gateway: str) -> str:
+    gateway = markup_escape(gateway)
+    return (
+        f"One line per AI service, in either of two forms. A bare name (infer) goes through the "
+        f"Gateway: {gateway}/infer, which Nginx spreads over the servers listed on its card. A "
+        f"full URL (http://gpu-box:5001/infer) is used as it is: a direct connection to that "
+        f"server, without Nginx."
+    )
+
 
 _STREAM_FIELDS_TEMPLATE = [
     ("target", "str", "",
@@ -1482,6 +1520,167 @@ class ActionSchemaPanel(Widget):
                 self._set_status("Saved (restart VFA Server to apply)")
             except OSError as exc:
                 self._set_status(f"Save failed: {exc}")
+
+
+_MEDIAMTX_CONFIG_REL = os.path.join("pipelines", "uber-server", "mediamtx", "mediamtx.yml")
+
+
+def _mediamtx_server_recording(text: str) -> tuple[int, bool] | None:
+    """(line index, on?) of `record:` under `pathDefaults:` in a mediamtx.yml,
+    or None when the file has no such line. The file is mostly comments, so it
+    is edited as text: a yaml round trip would drop every one of them."""
+    lines = text.splitlines()
+    inside = False
+    for index, line in enumerate(lines):
+        if re.match(r"^pathDefaults:\s*(#.*)?$", line):
+            inside = True
+            continue
+        if inside:
+            if line.strip() and not line.startswith((" ", "\t", "#")):
+                break  # the next top-level key
+            match = re.match(r"^\s+record:\s*([A-Za-z]+)", line)
+            if match:
+                return index, match.group(1).lower() in ("yes", "true", "on")
+    return None
+
+
+class StreamServerConfigPanel(Widget):
+    """the MediaMTX config of the host the Stream Server card is on, as text,
+    with the one switch most people come for on top: recording on the server."""
+
+    DEFAULT_CSS = """
+    StreamServerConfigPanel {
+        height: auto;
+        padding: 1 2;
+    }
+    StreamServerConfigPanel .ss-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    StreamServerConfigPanel .ss-muted {
+        color: $text-muted;
+    }
+    StreamServerConfigPanel #mediamtx-editor {
+        height: 24;
+        margin-top: 1;
+    }
+    StreamServerConfigPanel .ss-actions {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    StreamServerConfigPanel .ss-actions Button {
+        min-width: 16;
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, *, config_path: str, target: str = "local", ssh_profile=None,
+                 remote_path: str | None = None) -> None:
+        super().__init__()
+        self.config_path = config_path
+        self.target = target
+        self._ssh_profile = ssh_profile
+        self._remote_path = remote_path
+
+    @property
+    def _is_remote(self) -> bool:
+        return self._ssh_profile is not None and self._remote_path is not None
+
+    def compose(self) -> ComposeResult:
+        where = f"{self.target}: {self._remote_path}" if self._is_remote else f"Local: {self.config_path}"
+        yield Static("[b]Stream Server config (mediamtx.yml)[/b]", classes="ss-title")
+        yield Static(where, classes="ss-muted")
+        yield Static(
+            "MediaMTX records every stream that is published to it while `record` under "
+            "`pathDefaults` is on: ten-minute segments under artifacts/recordings/<app>/<name>/ of the "
+            "project on this host (the same folder for a docker and a native run), "
+            "kept for `recordDeleteAfter` (0s = for ever). This is the server-side copy; recording on "
+            "the capture device is the `record` field of a stream (Streams tab of a base card). The "
+            "two are independent. The ports here have to match System Settings → Stream Server.",
+            classes="ss-muted",
+        )
+        with Horizontal(classes="ss-actions"):
+            yield Button("Server-side recording: ?", id="btn-mediamtx-record")
+        yield TextArea("", id="mediamtx-editor", read_only=True)
+        with Horizontal(classes="ss-actions"):
+            yield Button("Save", variant="primary", id="btn-mediamtx-save")
+            yield Button("Reload", id="btn-mediamtx-reload")
+        yield Static("", id="mediamtx-status", classes="ss-muted")
+
+    def on_mount(self) -> None:
+        self._load()
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#mediamtx-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _show_recording_state(self) -> None:
+        state = _mediamtx_server_recording(self.query_one("#mediamtx-editor", TextArea).text)
+        button = self.query_one("#btn-mediamtx-record", Button)
+        if state is None:
+            button.label, button.variant, button.disabled = "Server-side recording: not set", "default", True
+        else:
+            button.label = f"Server-side recording: {'ON' if state[1] else 'OFF'}"
+            button.variant, button.disabled = ("success" if state[1] else "default"), False
+
+    def _load(self) -> None:
+        editor = self.query_one("#mediamtx-editor", TextArea)
+        if self._is_remote:
+            content = _remote_read_file(self._ssh_profile, self._remote_path)
+        else:
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+            except OSError:
+                content = None
+        if content is None:
+            editor.load_text("")
+            editor.read_only = True
+            self._set_status(f"Could not read {self._remote_path if self._is_remote else self.config_path}")
+        else:
+            editor.load_text(content)
+            editor.read_only = False
+            self._set_status("Loaded.")
+        self._show_recording_state()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        editor = self.query_one("#mediamtx-editor", TextArea)
+        if event.button.id == "btn-mediamtx-reload":
+            self._load()
+        elif event.button.id == "btn-mediamtx-record":
+            state = _mediamtx_server_recording(editor.text)
+            if state is None:
+                return
+            lines = editor.text.splitlines()
+            lines[state[0]] = re.sub(
+                r"(record:\s*)[A-Za-z]+", lambda m: m.group(1) + ("no" if state[1] else "yes"), lines[state[0]], count=1)
+            editor.load_text("\n".join(lines) + "\n")
+            self._show_recording_state()
+            self._set_status("Changed in the editor: press Save to write it.")
+        elif event.button.id == "btn-mediamtx-save":
+            text = editor.text
+            try:
+                yaml.safe_load(text)  # reject invalid YAML before writing
+            except yaml.YAMLError as exc:
+                self._set_status(f"Not saved: invalid YAML: {exc}")
+                return
+            if self._is_remote:
+                ok, err = _remote_write_file(self._ssh_profile, self._remote_path, text)
+            else:
+                try:
+                    with open(self.config_path, "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                    ok, err = True, ""
+                except OSError as exc:
+                    ok, err = False, str(exc)
+            self._set_status(
+                "Saved. MediaMTX reloads the file when it changes; Stop and Start on the Launch tab "
+                "if a change does not show." if ok else f"Save failed: {err}"
+            )
+            self._show_recording_state()
 
 
 def _make_stream_fields(stream_name: str) -> list[LoaderFieldDef]:
@@ -3177,9 +3376,12 @@ class ServicePanel(Widget):
             if color:
                 markers += f" [{color}]\\[E][/{color}]"
         pipeline = self._pipeline_for_service(svc.name)
-        if pipeline:
+        config_file = pipeline.config_path if pipeline else ""
+        if svc.launch_type == "make" and _make_target_for(svc.name) == "mediamtx":
+            config_file = os.path.join(self._root, _MEDIAMTX_CONFIG_REL)
+        if config_file:
             # a config file this service needs: red when it has not been made yet
-            color = "green" if os.path.isfile(pipeline.config_path) else "red"
+            color = "green" if os.path.isfile(config_file) else "red"
             markers += f" [{color}]\\[C][/{color}]"
         if self._svc_states.get(svc.name, False):
             markers += " [green](R)[/green]"
@@ -3414,6 +3616,23 @@ class ServicePanel(Widget):
             # rows; streams/transform/prompts may hit disk or SSH) so the Launch
             # card paints immediately when navigating the tree
             self.call_after_refresh(self._populate_deferred_panes, tabs, svc, pipeline, config_scroll)
+        elif svc.launch_type == "make" and _make_target_for(svc.name) == "mediamtx":
+            tabs = TabbedContent(id="svc-sub-tabs")
+            await content_area.mount(tabs)
+            launch_scroll = VerticalScroll(classes="svc-launch-scroll")
+            await tabs.add_pane(TabPane("Launch", launch_scroll, id="svc-tab-launch"))
+            await launch_scroll.mount(ServiceCard(svc, is_running=is_running))
+
+            # mediamtx.yml of the host the card is on: ports, and recording on the server
+            target = self._get_panel_target()
+            local_path = os.path.join(self._root, _MEDIAMTX_CONFIG_REL)
+            profile = get_profile_by_name(target) if target != "local" else None
+            config_scroll = VerticalScroll(classes="svc-launch-scroll")
+            await tabs.add_pane(TabPane("Config", config_scroll, id="svc-tab-config"))
+            await config_scroll.mount(StreamServerConfigPanel(
+                config_path=local_path, target=target, ssh_profile=profile,
+                remote_path=self._remote_config_path(local_path, profile) if profile is not None else None,
+            ))
         elif svc.launch_type == "vllm":
             tabs = TabbedContent(id="svc-sub-tabs")
             await content_area.mount(tabs)
@@ -4106,6 +4325,9 @@ class ServicePanel(Widget):
         known_sections = {f.path.split(".")[0] for f in pipeline.fields}
         if pipeline.base_section:
             known_sections.add(pipeline.base_section)
+        if pipeline.name in _STREAM_PIPELINES:
+            # drawn below as a group of its own, one entry per stream
+            known_sections.add("Streams")
         for key, value in existing.items():
             if key not in known_sections and isinstance(value, dict):
                 extra_fields = fields_from_config_section(key, value)
@@ -4129,9 +4351,15 @@ class ServicePanel(Widget):
                         val = get_nested_value(existing, f.path)
                         if val is not None:
                             values[f.path] = val
-            fields_to_remove = [f for f in pipeline.fields if f.path.startswith("Streams")]
-            for f in fields_to_remove:
-                pipeline.fields.remove(f)
+        # the template's empty `Streams:` key is not a field of the form: the
+        # streams are the group above. Filtered for this form only; taking it out
+        # of pipeline.fields for good made the section unknown the next time the
+        # tab was opened, and the config's Streams showed up a second time as a
+        # plain section
+        form_fields = [
+            f for f in pipeline.fields
+            if not (pipeline.name in _STREAM_PIPELINES and f.path.startswith("Streams"))
+        ]
 
         group_add_buttons = {}
         if pipeline.base_template and pipeline.base_section:
@@ -4139,19 +4367,119 @@ class ServicePanel(Widget):
         if pipeline.name in _STREAM_PIPELINES:
             group_add_buttons["Streams"] = ("+ Add Stream", "btn-add-stream")
 
-        form = ConfigForm(pipeline.name, pipeline.fields, values, dynamic_sections,
+        section_titles, section_notes = self._pipeline_section_help(form_fields, values)
+        form = ConfigForm(pipeline.name, form_fields, values, dynamic_sections,
                           group_add_buttons=group_add_buttons,
                           base_section=pipeline.base_section or None,
                           sources=sources,
                           readonly_paths=readonly_paths,
                           shared_sections=set(SHARED_SECTION_NAMES),
                           overridden_sections=overrides,
-                          allow_override_toggle=True)
+                          allow_override_toggle=True,
+                          section_titles=section_titles,
+                          section_notes=section_notes)
         container.mount(form)
         self._current_form = form
         if source_message:
             self._show_status(source_message)
         self._show_sync_bar(pipeline)
+
+    @staticmethod
+    def _pipeline_section_help(fields: list[LoaderFieldDef], values: dict) -> tuple[dict[str, str], dict[str, str]]:
+        """what the sections of a pipeline config are called in the form, and a
+        note on the ones that only make sense together: Gateway, Server and
+        Streams. Also says, under each Server entry, where its value leads."""
+        titles = {
+            name: str(info.get("label") or name)
+            for name, info in SHARED_SECTIONS.items() if info.get("label") and info["label"] != name
+        }
+        titles["Server"] = "Server  (the AI services this base calls)"
+        gateway = _gateway_base_url(values)
+        notes = {
+            "Gateway": (
+                "The Nginx load balancer in front of the AI services. Whether a request goes through "
+                "it is decided per service, in the Server section."
+            ),
+            "Server": _server_section_note(gateway),
+            "Streams": (
+                "One entry per camera or microphone stream. target is where the capture device "
+                "publishes (the Stream Server, e.g. rtmp://<stream-server>:1935/<app>/<name>), read_target what "
+                "the bases pull (rtsp://<stream-server>:8554/<app>/<name>; empty = target). record: true also "
+                "records on the capture device; the Stream Server records on its side whatever "
+                "reaches it (its card, Config tab). Its address: System Settings → Stream Server."
+            ),
+        }
+        for field in fields:
+            if _is_server_entry(field):
+                field.description = _server_entry_hint(values.get(field.path), gateway)
+        return titles, notes
+
+    @on(ConfigForm.FieldEdited)
+    def _on_config_form_field_edited(self, event: ConfigForm.FieldEdited) -> None:
+        """the line under a Server entry says where its value leads: it follows
+        the value as it is typed, and every entry follows the Gateway."""
+        form = self._current_form
+        if form is None or event.path.split(".", 1)[0] not in ("Server", "Gateway"):
+            return
+        values = form.collect_values()
+        values[event.path] = event.value
+        gateway = _gateway_base_url(values)
+        if event.path.startswith("Server."):
+            form.set_field_description(event.path, _server_entry_hint(event.value, gateway))
+            return
+        form.set_section_note("Server", _server_section_note(gateway))
+        for field in form.all_fields:
+            if _is_server_entry(field):
+                form.set_field_description(field.path, _server_entry_hint(values.get(field.path), gateway))
+
+    def on_stream_panel_record_toggle_requested(self, event: StreamPanel.RecordToggleRequested) -> None:
+        """Record on/off in the Streams tab: write the stream's `record` into the
+        config of the host the card is on, then show it in both tabs."""
+        event.stop()
+        pipeline = self._current_pipeline
+        if pipeline is None:
+            return
+        target = self._get_panel_target()
+        config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
+        config = copy.deepcopy(config) if isinstance(config, dict) else {}
+        stream = (config.get("Streams") or {}).get(event.stream_name)
+        if not isinstance(stream, dict):
+            self._log(f"[red]Stream '{event.stream_name}' is not in the config of {target}; Save the Config tab first.[/red]")
+            return
+        stream["record"] = bool(event.record)
+        state = "on" if event.record else "off"
+        cache_key = self._config_cache_key(pipeline.config_path, target)
+        if target == "local":
+            with open(pipeline.config_path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(config, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            self._target_config_cache[cache_key] = config
+        else:
+            tmp = tempfile.NamedTemporaryFile(
+                "w", suffix=".yml", prefix="openmmla-stream-record-", delete=False, encoding="utf-8")
+            with tmp:
+                yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            profile = get_profile_by_name(target)
+            if profile is None:
+                self._log(f"[red]SSH profile '{target}' not found; not changed.[/red]")
+                return
+            self._target_config_cache[cache_key] = config
+            self.run_worker(
+                self._run_scp(target, tmp.name, self._remote_config_path(pipeline.config_path, profile),
+                              cleanup_local=True, cache_key=cache_key, cache_config=config),
+                group="stream-record-scp", exclusive=True,
+            )
+        self._log(
+            f"[green]{event.stream_name}: recording on the capture device is {state} "
+            f"(takes effect at its next Start).[/green]"
+        )
+        for panel in self.query(StreamPanel):
+            panel.update_streams(streams_from_config(config))
+        # the Config tab holds the old value: a Save from there would undo this
+        container = self._config_container
+        if container is not None and container.is_attached:
+            container.remove_children()
+            self._current_form = None
+            self.call_after_refresh(self._show_pipeline_form, container, pipeline)
 
     def _show_mllm_form(self, container: Vertical) -> None:
         values = _mllm_form_values(self._root)

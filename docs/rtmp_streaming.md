@@ -135,7 +135,7 @@ After the session, **Collection → Download** with that session and host label 
 
 ### On the server
 
-MediaMTX writes every published path to `recordings/<app>/<name>/<start>.mp4` in ten-minute fMP4 segments (see [Run it](#run-it) for where that folder is). Segment names are the server's clock, so treat them as an archive of what arrived rather than as a capture-side recording. The playback server returns any time range of a path as one file:
+While `record` under `pathDefaults` is on in `mediamtx.yml` (the **Server-side recording** switch on the Stream Server card's Config tab; on by default), MediaMTX writes every published path to `recordings/<app>/<name>/<start>.mp4` in ten-minute fMP4 segments (see [Run it](#run-it) for where that folder is). Segment names are the server's clock, so treat them as an archive of what arrived rather than as a capture-side recording. The server knows nothing of sessions: it records a path from the moment something is published until the publisher stops, whether or not a session runs, and its folder, `artifacts/recordings/`, is not listed as a session by the console. The footage of a session is the time range between its `start_time` and `end_time`, which the playback server returns as one file for any path:
 
 ```bash
 curl -o front.mp4 "http://<stream-server>:9996/get?path=vfa/front&start=2026-09-14T10:00:00Z&duration=600"

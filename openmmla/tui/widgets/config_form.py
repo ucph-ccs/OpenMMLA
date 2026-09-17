@@ -183,6 +183,18 @@ class FieldRow(Widget):
             return ", ".join(str(v) for v in value)
         return str(value)
 
+    def set_description(self, text: str) -> None:
+        """the line under the label, for a description that follows the value."""
+        self.field_def.description = text
+        try:
+            self.query_one(".field-desc", Static).update(text)
+        except Exception:
+            # composed without one: the description was empty then
+            try:
+                self.mount(Static(text, classes="field-desc"), after=self.query_one(".field-label"))
+            except Exception:
+                pass
+
     @property
     def current_value(self):
         """get the current value from the input widget, converted to the expected type."""
@@ -786,6 +798,14 @@ class ConfigForm(Widget):
             super().__init__()
             self.section_name = section_name
 
+    class FieldEdited(Message):
+        """a text field was typed into; nothing is saved yet."""
+
+        def __init__(self, path: str, value: str) -> None:
+            super().__init__()
+            self.path = path
+            self.value = value
+
     DEFAULT_CSS = """
     ConfigForm {
         height: 1fr;
@@ -796,6 +816,11 @@ class ConfigForm(Widget):
     }
     .grp-inner {
         height: auto;
+    }
+    .section-note {
+        height: auto;
+        color: $text-muted;
+        padding: 0 2 1 2;
     }
     .form-actions {
         height: auto;
@@ -816,8 +841,14 @@ class ConfigForm(Widget):
         shared_sections: set | None = None,
         overridden_sections: set | None = None,
         allow_override_toggle: bool = False,
+        section_titles: dict[str, str] | None = None,
+        section_notes: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
+        # what a top-level section is called on screen (its key stays the
+        # config key) and a line or two on what it is for, shown inside it
+        self._section_titles = section_titles or {}
+        self._section_notes = section_notes or {}
         self.pipeline_name = pipeline_name
         self._fields = fields
         self._values = values or {}
@@ -831,6 +862,33 @@ class ConfigForm(Widget):
         # dynamic base group (e.g. ASR "Base") is rendered first, before the
         # static sections, so it sits at the top alongside Bases
         self._base_section = base_section
+
+    def _section_note(self, name: str) -> ComposeResult:
+        note = self._section_notes.get(name)
+        if note:
+            yield Static(note, classes="section-note", id=_safe_id(f"section-note-{name}"))
+
+    def set_section_note(self, name: str, note: str) -> bool:
+        """replace the note of a section that was composed with one."""
+        self._section_notes[name] = note
+        try:
+            self.query_one(f"#{_safe_id(f'section-note-{name}')}", Static).update(note)
+        except Exception:
+            return False
+        return True
+
+    def set_field_description(self, path: str, text: str) -> bool:
+        """replace the line under a field's label."""
+        for row in self.query(FieldRow):
+            if row.field_def.path == path:
+                row.set_description(text)
+                return True
+        return False
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        row = event.input.parent
+        if isinstance(row, FieldRow):
+            self.post_message(self.FieldEdited(row.field_def.path, event.value))
 
     def _yield_field(self, f: FieldDef) -> ComposeResult:
         """yield the appropriate widget for a single field."""
@@ -846,7 +904,8 @@ class ConfigForm(Widget):
         Collapsed by default so the form doesn't open fully expanded."""
         group_coll_id = _safe_id(f"grp-{group_name}")
         inner_id = _safe_id(f"grp-inner-{group_name}")
-        with Collapsible(title=group_name, collapsed=True, id=group_coll_id):
+        with Collapsible(title=self._section_titles.get(group_name, group_name), collapsed=True, id=group_coll_id):
+            yield from self._section_note(group_name)
             with Vertical(id=inner_id, classes="grp-inner"):
                 for section_name in dyn_groups.get(group_name, []):
                     child_name = section_name.split(".", 1)[1]
@@ -899,11 +958,13 @@ class ConfigForm(Widget):
                             svc_name = k.split(".", 1)[1]
                             if svc_name not in services:
                                 services[svc_name] = v
-                    with Collapsible(title=top, collapsed=True):
+                    with Collapsible(title=self._section_titles.get(top, top), collapsed=True):
+                        yield from self._section_note(top)
                         yield UpstreamsEditor(top, services, schema)
                 else:
                     nested_subs = self._nest_subs(subs)
-                    with Collapsible(title=top, collapsed=True):
+                    with Collapsible(title=self._section_titles.get(top, top), collapsed=True):
+                        yield from self._section_note(top)
                         for f in direct:
                             yield from self._yield_field(f)
                         yield from self._render_nested_subs(nested_subs)

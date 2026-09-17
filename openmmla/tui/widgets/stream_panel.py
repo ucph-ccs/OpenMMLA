@@ -429,14 +429,36 @@ class StreamPanel(Widget):
         kind = _stream_kind(stream)
         return f"{root}/{self._record_session()}/collection/{self._record_host_label(stream)}/{kind}"
 
+    class RecordToggleRequested(Message):
+        """flip a stream's capture-side recording; the launcher owns the config
+        of the host the card is on and writes it there."""
+
+        def __init__(self, stream_name: str, record: bool) -> None:
+            super().__init__()
+            self.stream_name = stream_name
+            self.record = record
+
+    HELP = (
+        "A stream is one entry under Streams in this card's config: a camera or microphone that ffmpeg "
+        "publishes to the Stream Server (target), and that the bases pull from it (read_target). Add one "
+        "with + Add Stream on the Config tab.\n"
+        "Recording has two independent switches. On the capture device: the Record column, which "
+        "Record on/off flips for the selected stream (written next to the stream while it is pushed, so "
+        "it survives a network drop). On the server: MediaMTX records every stream that reaches it, set "
+        "on the Stream Server (MediaMTX) card, Config tab."
+    )
+
     def compose(self) -> ComposeResult:
         with Vertical():
+            yield Static(self.HELP, id="stream-help")
             yield DataTable(id="stream-table")
+            yield Static("", id="stream-empty")
             with Horizontal(id="stream-actions"):
                 yield Button("Start", variant="success", id="stream-btn-start")
                 yield Button("Stop", variant="error", id="stream-btn-stop")
                 yield Button("Logs", variant="primary", id="stream-btn-logs")
                 yield Button("Probe", variant="warning", id="stream-btn-probe")
+                yield Button("Record on/off", variant="default", id="stream-btn-record")
                 yield Button("Start All", variant="success", id="stream-btn-start-all")
                 yield Button("Stop All", variant="error", id="stream-btn-stop-all")
                 yield Button("Refresh", variant="primary", id="stream-btn-refresh")
@@ -483,6 +505,13 @@ class StreamPanel(Widget):
         except Exception:
             return
         table.clear()
+        try:
+            self.query_one("#stream-empty", Static).update(
+                "" if self._streams else
+                "No streams yet. Open the Config tab, expand Streams and press + Add Stream, then Save."
+            )
+        except Exception:
+            pass
         if not self._streams:
             return
         for stream in self._streams:
@@ -537,6 +566,19 @@ class StreamPanel(Widget):
                 self._log(f"[yellow]{stream.name} is external; no managed tmux logs.[/yellow]")
             else:
                 self._log("[yellow]Select a stream row first.[/yellow]")
+        elif btn == "stream-btn-record":
+            stream = self._get_selected_stream()
+            if stream is None:
+                self._log("[yellow]Select a stream row first.[/yellow]")
+            elif not stream.ssh_profile:
+                self._log(
+                    f"[yellow]{stream.name} is external: the console does not run its ffmpeg, so it "
+                    f"cannot make it record.[/yellow]"
+                )
+            elif self._statuses.get(stream.name, False):
+                self._log(f"[yellow]Stop {stream.name} first: its ffmpeg was started without the change.[/yellow]")
+            else:
+                self.post_message(self.RecordToggleRequested(stream.name, not stream.record))
         elif btn == "stream-btn-probe":
             stream = self._get_selected_stream()
             if stream:
