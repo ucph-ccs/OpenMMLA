@@ -55,8 +55,10 @@ class TaskForm(Widget):
             domain = data.get("domain", "")
             yield Horizontal(
                 Static(f"{name}  —  domain: {domain}", classes="tf-entry-name"),
-                Button("Edit", id=f"tf-edit-{name}"),
-                Button("Delete", variant="error", id=f"tf-del-{name}"),
+                # the task name rides in `name`: a file called "my.task.yaml"
+                # makes no valid widget id
+                Button("Edit", name=name, classes="tf-row-edit"),
+                Button("Delete", variant="error", name=name, classes="tf-row-del"),
                 classes="tf-entry",
             )
 
@@ -110,12 +112,11 @@ class TaskForm(Widget):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
 
-        if btn_id.startswith("tf-edit-"):
-            name = btn_id[len("tf-edit-"):]
-            await self._show_editor(name)
+        if event.button.has_class("tf-row-edit"):
+            await self._show_editor(event.button.name or "")
 
-        elif btn_id.startswith("tf-del-"):
-            name = btn_id[len("tf-del-"):]
+        elif event.button.has_class("tf-row-del"):
+            name = event.button.name or ""
             delete_task(name)
             self._task_names = list_tasks()
             await self._show_list()

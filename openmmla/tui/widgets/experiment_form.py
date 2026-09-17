@@ -31,6 +31,15 @@ def _format_participant_summary(person: str, info: object) -> str:
     return f"{person}  ->  {group_id}  / tag: {tag_id}  / desc: {description}"
 
 
+def _participant_row_buttons(person: str) -> tuple[Button, Button]:
+    """Edit / Remove of one participant row. The name rides in `name`: a widget
+    id cannot hold "Anna B." or "李雷", and one such participant used to take
+    the whole console down."""
+    return (
+        Button("Edit", name=person, classes="ef-row-edp"),
+        Button("Remove", variant="error", name=person, classes="ef-row-rmp"),
+    )
+
 class ExperimentForm(Widget):
     """experiment management widget with list view and detail view."""
 
@@ -84,16 +93,19 @@ class ExperimentForm(Widget):
             status_markup = "[green]active[/green]" if is_active else "[dim]inactive[/dim]"
             yield Horizontal(
                 Static(
-                    f"{eid}  —  {title}  [{task}]  ({status_markup})  {groups}",
+                    # escaped bracket: "[programming]" alone reads as a markup tag
+                    f"{eid}  —  {title}  \\[{task}]  ({status_markup})  {groups}",
                     classes="ef-entry-name",
                 ),
+                # the experiment id rides in `name`: a widget id cannot hold the
+                # spaces, dots or non-ASCII letters an id typed by a person may have
                 Button(
                     "Deactivate" if is_active else "Activate",
                     variant="default" if is_active else "success",
-                    id=f"ef-toggle-{eid}",
+                    name=eid, classes="ef-row-toggle",
                 ),
-                Button("Edit", id=f"ef-open-{eid}"),
-                Button("Delete", variant="error", id=f"ef-del-{eid}"),
+                Button("Edit", name=eid, classes="ef-row-open"),
+                Button("Delete", variant="error", name=eid, classes="ef-row-del"),
                 classes="ef-entry",
             )
 
@@ -175,8 +187,7 @@ class ExperimentForm(Widget):
             participant_rows.append(
                 Horizontal(
                     Static(_format_participant_summary(person, info), classes="ef-participant-name"),
-                    Button("Edit", id=f"ef-edp-{person}"),
-                    Button("Remove", variant="error", id=f"ef-rmp-{person}"),
+                    *_participant_row_buttons(person),
                     classes="ef-participant",
                 )
             )
@@ -254,8 +265,7 @@ class ExperimentForm(Widget):
         for person, info in sorted(assignments.items()):
             h = Horizontal(
                 Static(_format_participant_summary(person, info), classes="ef-participant-name"),
-                Button("Edit", id=f"ef-edp-{person}"),
-                Button("Remove", variant="error", id=f"ef-rmp-{person}"),
+                *_participant_row_buttons(person),
                 classes="ef-participant",
             )
             await container.mount(h)
@@ -302,10 +312,11 @@ class ExperimentForm(Widget):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
+        row_value = event.button.name or ""
 
         # list view actions
-        if btn_id.startswith("ef-toggle-"):
-            eid = btn_id[len("ef-toggle-"):]
+        if event.button.has_class("ef-row-toggle"):
+            eid = row_value
             exp = next(
                 (e for e in self._data.get("active_experiments", []) if e.get("experiment_id") == eid),
                 None,
@@ -322,12 +333,11 @@ class ExperimentForm(Widget):
             )
             self.post_message(self.DataChanged())
 
-        elif btn_id.startswith("ef-open-"):
-            eid = btn_id[len("ef-open-"):]
-            await self._show_detail(eid)
+        elif event.button.has_class("ef-row-open"):
+            await self._show_detail(row_value)
 
-        elif btn_id.startswith("ef-del-"):
-            eid = btn_id[len("ef-del-"):]
+        elif event.button.has_class("ef-row-del"):
+            eid = row_value
             exps = self._data.get("active_experiments", [])
             self._data["active_experiments"] = [e for e in exps if e.get("experiment_id") != eid]
             self._data.get("assignments", {}).pop(eid, None)
@@ -370,14 +380,12 @@ class ExperimentForm(Widget):
             self._clear_participant_form()
             self._set_status("[yellow]Participant edit cancelled.[/yellow]")
 
-        elif btn_id.startswith("ef-edp-"):
-            person = btn_id[len("ef-edp-"):]
-            self._load_participant_form(person)
-            self._set_status(f"[yellow]Editing participant '{person}'.[/yellow]")
+        elif event.button.has_class("ef-row-edp"):
+            self._load_participant_form(row_value)
+            self._set_status(f"[yellow]Editing participant '{row_value}'.[/yellow]")
 
-        elif btn_id.startswith("ef-rmp-"):
-            person = btn_id[len("ef-rmp-"):]
-            await self._remove_participant(person)
+        elif event.button.has_class("ef-row-rmp"):
+            await self._remove_participant(row_value)
 
     async def _save_detail(self) -> None:
         eid = self._editing_exp

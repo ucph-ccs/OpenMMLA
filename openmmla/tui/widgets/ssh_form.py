@@ -16,11 +16,33 @@ from openmmla.tui.ssh import (
 )
 
 
+def _profile_row_text(profile: SSHProfile) -> str:
+    auth = "password" if profile.password else ("key" if profile.key_path else "default")
+    # the bracket is escaped: "[password]" on its own reads as a markup tag
+    # and was never displayed
+    return f"{profile.name}  ({profile.user}@{profile.host}:{profile.port})  \\[{auth}]"
+
+
+def _profile_row_buttons(profile_name: str) -> tuple[Button, Button, Button]:
+    """the Test / Edit / Delete buttons of one profile row. The profile rides in
+    `name`: a widget id cannot hold the dots of a name like "pi.local", and one
+    such profile used to take the whole form down."""
+    return (
+        Button("Test", variant="warning", name=profile_name, classes="ssh-row-test"),
+        Button("Edit", name=profile_name, classes="ssh-row-edit"),
+        Button("Delete", variant="error", name=profile_name, classes="ssh-row-del"),
+    )
+
 class SSHForm(Widget):
     """form widget for creating / editing / deleting SSH profiles."""
 
     class ProfilesChanged(Message):
-        """posted when the profile list is modified."""
+        """posted when the profile list is modified; `renamed` is (old, new)
+        when a profile changed its name, so what refers to it can follow."""
+
+        def __init__(self, renamed: tuple[str, str] | None = None) -> None:
+            super().__init__()
+            self.renamed = renamed
 
     class ConnectionTested(Message):
         """posted after a successful Test Connection (lets the launcher re-probe targets)."""
@@ -76,7 +98,6 @@ class SSHForm(Widget):
     SSHForm .profile-entry {
         layout: horizontal;
         height: auto;
-        margin-bottom: 1;
     }
     SSHForm .profile-entry-name {
         width: 1fr;
@@ -99,15 +120,9 @@ class SSHForm(Widget):
 
             with VerticalScroll(classes="ssh-profile-list", id="ssh-profile-list"):
                 for p in self._profiles:
-                    auth = "password" if p.password else ("key" if p.key_path else "default")
                     with Horizontal(classes="profile-entry"):
-                        yield Static(
-                            f"{p.name}  ({p.user}@{p.host}:{p.port})  [{auth}]",
-                            classes="profile-entry-name",
-                        )
-                        yield Button("Test", variant="warning", id=f"ssh-testrow-{p.name}")
-                        yield Button("Edit", id=f"ssh-edit-{p.name}")
-                        yield Button("Delete", variant="error", id=f"ssh-del-{p.name}")
+                        yield Static(_profile_row_text(p), classes="profile-entry-name")
+                        yield from _profile_row_buttons(p.name)
 
             with Vertical(classes="ssh-form-section"):
                 yield Static("[b]Add / Edit Profile[/b]", classes="ssh-title")
@@ -229,31 +244,49 @@ class SSHForm(Widget):
             await self._test_connection(event.button)
         elif btn_id == "ssh-clear":
             self._clear_form()
-        elif btn_id.startswith("ssh-testrow-"):
-            name = btn_id[len("ssh-testrow-"):]
-            await self._test_profile_row(name, event.button)
-        elif btn_id.startswith("ssh-edit-"):
-            name = btn_id[len("ssh-edit-"):]
+        elif event.button.has_class("ssh-row-test"):
+            await self._test_profile_row(event.button.name or "", event.button)
+        elif event.button.has_class("ssh-row-edit"):
+            name = event.button.name or ""
             profile = next((p for p in self._profiles if p.name == name), None)
             if profile:
                 self._fill_form(profile)
                 self._set_status(f"Editing profile '{name}'.")
-        elif btn_id.startswith("ssh-del-"):
-            name = btn_id[len("ssh-del-"):]
-            await self._delete_profile(name)
+        elif event.button.has_class("ssh-row-del"):
+            await self._delete_profile(event.button.name or "")
 
     async def _save_profile(self) -> None:
         profile = self._build_profile_from_form()
         if profile is None:
             return
-        self._profiles = [p for p in self._profiles if p.name != profile.name]
-        self._profiles.append(profile)
+        names = [p.name for p in self._profiles]
+        editing = self._editing if self._editing in names else None
+        if editing and profile.name != editing and profile.name in names:
+            self._set_status(f"[red]A profile named '{profile.name}' already exists.[/red]")
+            return
+        # an edit keeps the profile's place in the list, under its new name when
+        # it was renamed (the old name used to stay behind as a second profile);
+        # only a new profile goes to the end
+        replaced = editing or (profile.name if profile.name in names else None)
+        if replaced is None:
+            self._profiles.append(profile)
+        else:
+            self._profiles = [profile if p.name == replaced else p for p in self._profiles]
         save_ssh_profiles(self._profiles)
-        self._editing = None
-        self._set_save_mode(editing=False)
-        self._set_status(f"[green]Profile '{profile.name}' saved.[/green]")
-        await self._rebuild_list()
-        self.post_message(self.ProfilesChanged())
+        renamed = (editing, profile.name) if editing and editing != profile.name else None
+        if renamed:
+            from openmmla.tui.ssh import TARGET_STATES
+            if renamed[0] in TARGET_STATES:
+                TARGET_STATES[renamed[1]] = TARGET_STATES.pop(renamed[0])
+        # the form still shows this profile: further changes are edits of it
+        self._editing = profile.name
+        self._set_save_mode(editing=True)
+        self._set_status(
+            f"[green]Profile '{renamed[0]}' renamed to '{profile.name}' and saved.[/green]" if renamed
+            else f"[green]Profile '{profile.name}' saved.[/green]"
+        )
+        await self._rebuild_list(show=profile.name)
+        self.post_message(self.ProfilesChanged(renamed=renamed))
 
     async def _delete_profile(self, name: str) -> None:
         self._profiles = [p for p in self._profiles if p.name != name]
@@ -306,23 +339,24 @@ class SSHForm(Widget):
             button.disabled = False
             button.label = "Test"
 
-    async def _rebuild_list(self) -> None:
-        """reload the profile list display by re-mounting."""
+    async def _rebuild_list(self, show: str | None = None) -> None:
+        """reload the profile list display by re-mounting; `show` names the
+        profile to bring into view (the list is short, and a saved profile that
+        sits below the fold looks like a save that did nothing)."""
         try:
             container = self.query_one("#ssh-profile-list")
             await container.remove_children()
+            shown = None
             for p in self._profiles:
-                auth = "password" if p.password else ("key" if p.key_path else "default")
                 h = Horizontal(
-                    Static(
-                        f"{p.name}  ({p.user}@{p.host}:{p.port})  [{auth}]",
-                        classes="profile-entry-name",
-                    ),
-                    Button("Test", variant="warning", id=f"ssh-testrow-{p.name}"),
-                    Button("Edit", id=f"ssh-edit-{p.name}"),
-                    Button("Delete", variant="error", id=f"ssh-del-{p.name}"),
+                    Static(_profile_row_text(p), classes="profile-entry-name"),
+                    *_profile_row_buttons(p.name),
                     classes="profile-entry",
                 )
                 await container.mount(h)
+                if p.name == show:
+                    shown = h
+            if shown is not None:
+                self.call_after_refresh(shown.scroll_visible, animate=False)
         except Exception:
             pass

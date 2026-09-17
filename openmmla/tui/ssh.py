@@ -48,7 +48,9 @@ class SSHProfile:
     host: str
     user: str
     port: int = 22
-    password: str = ""
+    # kept out of the repr: a crash prints the locals of every frame, and a
+    # profile in scope would put its password on the terminal
+    password: str = field(default="", repr=False)
     key_path: str = ""
     remote_project_path: str = "~/OpenMMLA"
 
