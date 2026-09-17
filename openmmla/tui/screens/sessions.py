@@ -19,7 +19,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static, DataTable, RichLog, Button, Select, Label
+from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, Input
 
 from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
 
@@ -442,6 +442,16 @@ class SessionsPanel(Widget):
     #sessions-actions Button {
         margin: 0 1;
     }
+    #sessions-recordings-bar {
+        height: 3;
+        padding: 0 1;
+    }
+    #sessions-recordings-bar Button {
+        margin: 0 1;
+    }
+    #ses-recording-paths {
+        width: 1fr;
+    }
     #sessions-log {
         height: 14;
         border-top: solid $primary;
@@ -481,6 +491,15 @@ class SessionsPanel(Widget):
                 yield Button("Export All", variant="warning", id="btn-ses-export-all")
                 yield Button("Delete Session", variant="error", id="btn-ses-delete")
                 yield Button("Delete Artifacts", variant="error", id="btn-ses-delete-artifacts")
+            # the footage of a session is a time range of what the stream server
+            # recorded; the filter sits next to the button it belongs to
+            with Horizontal(id="sessions-recordings-bar"):
+                yield Button("Export Recordings", variant="success", id="btn-ses-export-recordings")
+                yield Input(
+                    placeholder="paths to take from the Stream Server, e.g. ips/*, vfa/front   (empty: every "
+                                "stream recorded while the session ran)",
+                    id="ses-recording-paths",
+                )
             yield RichLog(id="sessions-log", highlight=True, markup=True)
 
     def on_mount(self) -> None:
@@ -811,6 +830,15 @@ class SessionsPanel(Widget):
             self.run_worker(self._run_export(session_id, logs=True, vis=True), exclusive=True)
         elif bid == "btn-ses-export-all":
             self.run_worker(self._run_export(session_id, logs=True, vis=True), exclusive=True)
+        elif bid == "btn-ses-export-recordings":
+            try:
+                patterns = self.query_one("#ses-recording-paths", Input).value
+            except Exception:
+                patterns = ""
+            self.run_worker(
+                self._run_export_recordings(session_id, [p for p in patterns.replace(";", ",").split(",") if p.strip()]),
+                group="sessions-recordings", exclusive=True,
+            )
         elif bid == "btn-ses-delete":
             if self._pending_delete_session_id != session_id:
                 self._pending_delete_session_id = session_id
@@ -842,6 +870,90 @@ class SessionsPanel(Widget):
         import asyncio
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._do_export, session_id, logs, vis)
+
+    async def _run_export_recordings(self, session_id: str, patterns: list[str]) -> None:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._do_export_recordings, session_id, patterns)
+
+    def _do_export_recordings(self, session_id: str, patterns: list[str]) -> None:
+        """the server-side footage of one session: every path the stream server
+        recorded between the session's start and end, cut to that window.
+
+        A stream is shared by the sessions that pull it and is recorded by the
+        server whether or not one runs, so nothing on the server belongs to a
+        session; its start and end (MongoDB) are what select the footage."""
+        from openmmla.tui import recordings
+        from openmmla.tui.artifacts import artifact_session_dir, ensure_session_layout
+        from openmmla.tui.schema.loader import _find_project_root
+        from openmmla.tui.system_services import stream_server_address
+
+        session = self._session_by_id(session_id)
+        start = recordings.parse_time(session.get("start_time"))
+        if start is None or "MongoDB" not in set(session.get("_source_kinds") or []):
+            self._log(
+                f"[yellow]'{session_id}' has no start time in MongoDB (it is known from its artifacts only), "
+                f"so there is no time range to cut out of the recordings.[/yellow]"
+            )
+            return
+        ended = recordings.parse_time(session.get("end_time"))
+        end = ended or datetime.now(timezone.utc)
+
+        root = _find_project_root()
+        server = stream_server_address(root)
+        host = str(server.get("host") or "localhost")
+        api_port = int(server.get("api_port") or recordings.API_PORT)
+        playback_port = int(server.get("playback_port") or recordings.PLAYBACK_PORT)
+
+        self._log(f"[bold]Exporting recordings of session: {session_id}[/bold]")
+        self._log(
+            f"  {start:%Y-%m-%d %H:%M:%S} to {end:%H:%M:%S} UTC"
+            f"{'' if ended else ' (still running: up to now)'}, from the Stream Server {host}"
+        )
+        try:
+            spans = {path: recordings.timespans(host, path, playback_port)
+                     for path in recordings.recorded_paths(host, api_port)}
+        except recordings.RecordingsError as error:
+            self._log(
+                f"  [red]✗ The Stream Server does not answer: {error}[/red]\n"
+                f"  [dim]Its host and its API/playback ports are under Launcher → System Settings → Stream Server; "
+                f"the API and the playback server are switched on in its mediamtx.yml.[/dim]"
+            )
+            return
+        clips = recordings.clips_for_window(spans, start, end, patterns)
+        if not clips:
+            recorded = [path for path in spans if recordings.matches(path, patterns)]
+            self._log(
+                "  [yellow]Nothing was recorded on the server in that time"
+                + (f" for {', '.join(patterns)}" if patterns else "")
+                + (f" (it holds {', '.join(recorded[:6])}{' ...' if len(recorded) > 6 else ''})." if recorded
+                   else " (it holds no recording of such a path).")
+                + " Server-side recording is the switch on the Stream Server card, Config tab.[/yellow]"
+            )
+            return
+
+        ensure_session_layout(root, session_id)
+        out_dir = os.path.join(artifact_session_dir(root, session_id), "recordings")
+        done = 0
+        for clip in clips:
+            destination = os.path.join(out_dir, recordings.clip_relpath(clip))
+            label = f"{clip.path}  {clip.start:%H:%M:%S} +{clip.duration:.0f}s"
+            if ended and os.path.isfile(destination) and os.path.getsize(destination) > 0:
+                self._log(f"  [dim]- {label}: already exported[/dim]")
+                done += 1
+                continue
+            try:
+                size = recordings.download_clip(host, clip, destination, playback_port)
+            except recordings.RecordingsError as error:
+                self._log(f"  [red]✗ {label}: {error}[/red]")
+                continue
+            done += 1
+            self._log(f"  [green]✓[/green] {label} -> {os.path.relpath(destination, out_dir)} ({size / 1e6:.1f} MB)")
+        self._log(
+            f"[green]{done} of {len(clips)} recording(s) are under {out_dir}[/green]\n"
+            f"  [dim]File names carry the start of the cut, so a base replays them with source: file and "
+            f"Base.file_dir on one of these folders.[/dim]"
+        )
 
     async def _run_delete(self, session_id: str) -> None:
         import asyncio

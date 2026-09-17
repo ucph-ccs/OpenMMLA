@@ -148,6 +148,16 @@ SHARED_SECTIONS = {
                 "field_type": "int",
                 "default": 8554,
             },
+            "api_port": {
+                "description": "MediaMTX control API port, asked which paths were recorded (default 9997)",
+                "field_type": "int",
+                "default": 9997,
+            },
+            "playback_port": {
+                "description": "MediaMTX playback port, which hands out the recording of a time range: Sessions → Export Recordings (default 9996)",
+                "field_type": "int",
+                "default": 9996,
+            },
         },
     },
 }

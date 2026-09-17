@@ -145,7 +145,9 @@ While `record` under `pathDefaults` is on in `mediamtx.yml` (the **Server-side r
 curl -o front.mp4 "http://<stream-server>:9996/get?path=vfa/front&start=2026-09-14T10:00:00Z&duration=600"
 ```
 
-To replay such a file through a pipeline, name it `<prefix>_<unix start time>.mp4` and use it as a `file` source.
+**Sessions → Export Recordings** in the TUI does this for a session: it asks the control API which paths were recorded, the playback server for the stretches of each, and downloads the part between the session's start and end into `artifacts/<session>/recordings/<app>/<name>_<start>.mp4`, once per unbroken stretch (a stream that was restarted gives two files). The playback server keeps the file's clock on the requested start, so the name plus a frame's time is the server's wall clock again. Audio paths come out as `.mp4` with an AAC track; convert them (`ffmpeg -i mic1_<start>.mp4 mic1_<start>.wav`) before replaying them through ASR.
+
+To replay a file fetched by hand through a pipeline, name it `<prefix>_<unix start time>.mp4` and use it as a `file` source.
 
 ## Troubleshooting
 

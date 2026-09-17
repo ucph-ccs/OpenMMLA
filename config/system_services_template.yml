@@ -33,5 +33,7 @@ StreamServer:
   host: <uber-server>                 # MediaMTX; may be another machine than the gateway. Read by the console only
   rtmp_port: 1935
   rtsp_port: 8554
+  api_port: 9997                      # control API: which paths were recorded
+  playback_port: 9996                 # playback server: Sessions → Export Recordings cuts a session's time range
 Sudo:
   password: <local-sudo-password>     # only used on this machine for native service starts; encrypted on save

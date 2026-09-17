@@ -237,6 +237,13 @@ def load_system_services_config(root: str | os.PathLike[str]) -> dict[str, Any]:
     return load_existing_config(system_services_config_path(root))
 
 
+def stream_server_address(root: str | os.PathLike[str]) -> dict[str, object]:
+    """host and ports of System Settings → Stream Server on this machine,
+    with the MediaMTX defaults for whatever the store does not say."""
+    values = config_to_flat_values(load_system_services_config(root))
+    return {key: values.get(f"StreamServer.{key}") for key in SHARED_SECTIONS["StreamServer"]["fields"]}
+
+
 def harvest_system_services_from_pipeline_configs(root: str | os.PathLike[str]) -> dict[str, object]:
     root_path = Path(root)
     configs = []

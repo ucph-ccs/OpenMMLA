@@ -198,9 +198,10 @@ The table is read again every time the tab comes into view, so a session created
 
 - **Export Measurements** writes one JSON file per event type (speaker recognition and transcription, IPS translation, rotation and relation, VFA actions) from InfluxDB into `artifacts/<session>/measurements/`, plus a text transcript.
 - **Export Visualizations** and **Export All** additionally render the ASR diarization and speaking-interaction plots and the IPS trajectories, heatmap and physical-interaction network into `artifacts/<session>/analysis/visualizations/`. VFA has no visualizations yet.
+- **Export Recordings** fetches the session's footage from the Stream Server: every path MediaMTX recorded between the session's start and end (MongoDB; up to now while it still runs), each cut to that window, into `artifacts/<session>/recordings/<app>/<name>_<start>.mp4`. A stream is shared by the sessions that pull it and the server records it whether or not one runs, so nothing on the server belongs to a session: the time range selects the footage, and two sessions that overlap each get their own cut of the same camera. The field next to the button narrows it to some paths (`ips/*, vfa/front`), for instance to leave out the microphones of another group; empty takes every path. The file name carries the start of the cut, which is what the `file` source reads, so `Base.file_dir` on one of these folders replays it. The server's address and its API and playback ports are under **System Settings → Stream Server**; this talks HTTP to the server and needs no SSH.
 - **Delete Session** removes the InfluxDB measurements and the MongoDB document, keeping local artifacts. **Delete Artifacts** removes the local directory, keeping the database records. Both need a second press.
 
-The exports need the `uber-base` extra (analytics) in the console's environment.
+The measurement and visualization exports need the `uber-base` extra (analytics) in the console's environment; Export Recordings needs nothing beyond the console.
 
 ## Status tab
 
