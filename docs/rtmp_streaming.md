@@ -6,14 +6,14 @@ MediaMTX replaced the Nginx RTMP module. The `rtmp://` push from the devices is 
 
 ## Server: MediaMTX
 
-All ports are on the host of **System Settings → Connections → Stream Server (MediaMTX)** in the TUI, which need not be the machine that runs Nginx:
+All ports are on the host of **System Settings → Connections → Stream Server (MediaMTX)** in the TUI, which need not be the machine that runs Nginx. `<stream-server>` stands for that host in the URLs below:
 
 | Port | Setting | Used for |
 |---|---|---|
 | 1935 | `rtmp_port` | RTMP publish from cameras and microphones |
 | 8554 | `rtsp_port` | RTSP, what the bases pull |
 | 8890/udp | | SRT publish or read |
-| 9997 | | control API, `http://<gateway>:9997/v3/paths/list` |
+| 9997 | | control API, `http://<stream-server>:9997/v3/paths/list` |
 | 9996 | | playback server for the server-side recordings |
 | 9998 | | Prometheus metrics |
 
@@ -25,7 +25,7 @@ All ports are on the host of **System Settings → Connections → Stream Server
 docker compose -f docker/docker-compose.infra.yml up -d mediamtx
 ```
 
-In the TUI the card is **Launcher → System Services → MediaMTX** with **Run mode** `docker`. Server-side recordings land in `artifacts/recordings/` of the repository (`MEDIAMTX_RECORD_DIR` in `docker/.env`).
+In the TUI the card is **Launcher → System Services → Stream Server (MediaMTX)** with **Run mode** `docker`. Server-side recordings land in `artifacts/recordings/` of the repository (`MEDIAMTX_RECORD_DIR` in `docker/.env`).
 
 **Native**: install the binary, then run the make target, which opens a tmux session named `mediamtx`:
 
@@ -50,11 +50,11 @@ Both ways read `pipelines/uber-server/mediamtx/mediamtx.yml`. Stream paths are c
 ### Check what is published
 
 ```bash
-curl http://<gateway>:9997/v3/paths/list
+curl http://<stream-server>:9997/v3/paths/list
 ```
 
 ```bash
-ffplay -rtsp_transport tcp rtsp://<gateway>:8554/vfa/front
+ffplay -rtsp_transport tcp rtsp://<stream-server>:8554/vfa/front
 ```
 
 ## Devices: pushing a stream
@@ -63,8 +63,8 @@ Streams are declared once per pipeline under `Streams` in `pipelines/<pipeline>-
 
 | Field | Meaning |
 |---|---|
-| `target` | publish URL: `rtmp://<gateway>:1935/<app>/<name>` (also `rtsp://` or `srt://`), or `udp://<base>:<port>` / `tcp://` for raw audio straight to an ASR base |
-| `read_target` | what the bases pull, e.g. `rtsp://<gateway>:8554/<app>/<name>`; empty means `target` |
+| `target` | publish URL: `rtmp://<stream-server>:1935/<app>/<name>` (also `rtsp://` or `srt://`), or `udp://<base>:<port>` / `tcp://` for raw audio straight to an ASR base |
+| `read_target` | what the bases pull, e.g. `rtsp://<stream-server>:8554/<app>/<name>`; empty means `target` |
 | `ssh_profile` | TUI SSH profile of the capture host, or `local` |
 | `device` | `/dev/video0` (v4l2 camera) or `hw:1,0` (ALSA microphone) |
 | `kind` | `audio` or `video`; inferred from the target and the device when omitted |
@@ -82,12 +82,12 @@ ffmpeg -fflags +genpts -use_wallclock_as_timestamps 1 \
   -g 30 -keyint_min 30 -sc_threshold 0 \
   -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
   -b:v 1M -maxrate 2M -bufsize 2M \
-  -f flv rtmp://<gateway>:1935/vfa/front
+  -f flv rtmp://<stream-server>:1935/vfa/front
 ```
 
 ```bash
-# microphone -> MediaMTX (AAC); the ASR base pulls it as rtsp://<gateway>:8554/asr/mic1
-ffmpeg -f alsa -ac 1 -ar 16000 -i hw:1,0 -c:a aac -b:a 128k -f flv rtmp://<gateway>:1935/asr/mic1
+# microphone -> MediaMTX (AAC); the ASR base pulls it as rtsp://<stream-server>:8554/asr/mic1
+ffmpeg -f alsa -ac 1 -ar 16000 -i hw:1,0 -c:a aac -b:a 128k -f flv rtmp://<stream-server>:1935/asr/mic1
 ```
 
 ```bash
@@ -97,13 +97,13 @@ ffmpeg -f alsa -ac 1 -ar 16000 -i hw:1,0 -c:a pcm_s16le -f s16le udp://<base>:50
 
 ```bash
 # SRT instead of RTMP: loss-tolerant on Wi-Fi with a fixed latency budget
-ffmpeg ... -f mpegts "srt://<gateway>:8890?streamid=publish:vfa/front"
+ffmpeg ... -f mpegts "srt://<stream-server>:8890?streamid=publish:vfa/front"
 ```
 
 ```bash
 # macOS capture device (avfoundation) instead of v4l2
 ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
-  -c:v h264_videotoolbox -realtime true -b:v 2M -f flv rtmp://<gateway>:1935/vfa/front
+  -c:v h264_videotoolbox -realtime true -b:v 2M -f flv rtmp://<stream-server>:1935/vfa/front
 ```
 
 `ffmpeg -f v4l2 -list_formats all -i /dev/video0` and `arecord -l` list the devices on a Pi; `ffmpeg -f avfoundation -list_devices true -i ""` on a Mac. SRT needs an FFmpeg built with libsrt (`ffmpeg -protocols | grep srt`; the Debian and Raspberry Pi OS packages have it).
@@ -138,7 +138,7 @@ After the session, **Collection → Download** with that session and host label 
 MediaMTX writes every published path to `recordings/<app>/<name>/<start>.mp4` in ten-minute fMP4 segments (see [Run it](#run-it) for where that folder is). Segment names are the server's clock, so treat them as an archive of what arrived rather than as a capture-side recording. The playback server returns any time range of a path as one file:
 
 ```bash
-curl -o front.mp4 "http://<gateway>:9996/get?path=vfa/front&start=2026-09-14T10:00:00Z&duration=600"
+curl -o front.mp4 "http://<stream-server>:9996/get?path=vfa/front&start=2026-09-14T10:00:00Z&duration=600"
 ```
 
 To replay such a file through a pipeline, name it `<prefix>_<unix start time>.mp4` and use it as a `file` source.

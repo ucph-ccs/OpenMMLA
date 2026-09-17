@@ -133,9 +133,11 @@ Redis:
   port: <port-number>
   db: <database-number>
 
-# Gateway (Nginx + MediaMTX) settings
-# Shared entry point that bases connect to: nginx for the AI services, MediaMTX
-# for the streams. Stream URLs in Streams are used as-is.
+# Gateway (Nginx) settings
+# Shared reverse-proxy/load-balancer endpoint of the AI services. The IPS bases
+# call no AI service, so the section only keeps this config in line with the
+# other pipelines. Streams do not go through it: the URLs in Streams name the
+# stream server (MediaMTX) themselves and are used as-is.
 Gateway:
   host: <gateway-host>      # nginx load balancer host, e.g. uber-server.local
   http_port: 8080           # nginx HTTP reverse-proxy port

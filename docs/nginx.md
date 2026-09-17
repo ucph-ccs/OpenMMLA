@@ -51,7 +51,7 @@ make nginx false    # skip the port check
 make stop-nginx
 ```
 
-From the TUI, the same targets run behind **Launcher → System Services → Nginx**.
+From the TUI, the same targets run behind **Launcher → System Services → Gateway (Nginx)**.
 
 ### macOS firewall
 

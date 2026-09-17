@@ -1,7 +1,7 @@
-# MediaMTX configuration for the OpenMMLA streaming gateway.
+# MediaMTX configuration for the OpenMMLA stream server.
 #
-# cameras and microphones publish with FFmpeg to rtmp://<gateway>:1935/<app>/<name>
-# (or srt:// / rtsp://), the bases pull the same path as rtsp://<gateway>:8554/<app>/<name>,
+# cameras and microphones publish with FFmpeg to rtmp://<stream-server>:1935/<app>/<name>
+# (or srt:// / rtsp://), the bases pull the same path as rtsp://<stream-server>:8554/<app>/<name>,
 # and every published stream is also recorded on the server. Started by
 # `make mediamtx` in pipelines/uber-server (native) or by docker/docker-compose.infra.yml;
 # both read this file. Every key not listed here keeps the MediaMTX default.
@@ -9,14 +9,14 @@
 
 logLevel: info
 
-# control API (curl http://<gateway>:9997/v3/paths/list) and Prometheus metrics
+# control API (curl http://<stream-server>:9997/v3/paths/list) and Prometheus metrics
 api: yes
 apiAddress: :9997
 metrics: yes
 metricsAddress: :9998
 
 # playback server: download a time range of a recording,
-# e.g. http://<gateway>:9996/get?path=vfa/front&start=<RFC3339>&duration=60
+# e.g. http://<stream-server>:9996/get?path=vfa/front&start=<RFC3339>&duration=60
 playback: yes
 playbackAddress: :9996
 

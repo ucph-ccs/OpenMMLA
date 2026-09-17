@@ -10,7 +10,7 @@ OPENMMLA_BIND_ADDRESS ?= 0.0.0.0
 OPENMMLA_MQTT_ALLOW_ANONYMOUS ?= true
 # dashboard backend port; the TUI passes the Dashboard section's value
 DASHBOARD_PORT ?= 5050
-# MediaMTX streaming gateway (native run; the docker run is in docker/docker-compose.infra.yml)
+# MediaMTX stream server (native run; the docker run is in docker/docker-compose.infra.yml)
 MEDIAMTX_BIN ?= mediamtx
 MEDIAMTX_CONFIG ?= mediamtx/mediamtx.yml
 # MediaMTX is started from this folder, so the ./recordings of mediamtx.yml is
