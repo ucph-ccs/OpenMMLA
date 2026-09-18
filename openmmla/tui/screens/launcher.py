@@ -2917,6 +2917,10 @@ class ServicePanel(Widget):
         # [E] markers and is refreshed off the UI thread (conda is slow)
         self._env_statuses: dict[str, dict[str, str]] = {}
         self._env_statuses_at: dict[str, float] = {}  # when each host's were read
+        # remote host -> {config file, as its local path -> whether that host
+        # has it}; feeds the [C] markers of the nodes on it (Local's are
+        # read from disk as the tree is drawn)
+        self._config_presence: dict[str, dict[str, bool]] = {}
         # session id -> hosts this TUI launched it on, so "Stop All Hosts"
         # reaches a machine even when it is currently unreachable
         self._collection_launch_targets: dict[str, set[str]] = {}
@@ -3525,17 +3529,63 @@ class ServicePanel(Widget):
             color = _env_marker_color(statuses.get(svc.conda_env))
             if color:
                 markers += f" [{color}]\\[E][/{color}]"
-        pipeline = self._pipeline_for_service(svc.name)
-        config_file = pipeline.config_path if pipeline else ""
-        if svc.launch_type == "make" and _make_target_for(svc.name) == "mediamtx":
-            config_file = os.path.join(self._root, _MEDIAMTX_CONFIG_REL)
-        if config_file:
-            # a config file this service needs: red when it has not been made yet
-            color = "green" if os.path.isfile(config_file) else "red"
-            markers += f" [{color}]\\[C][/{color}]"
+        config_file = self._svc_config_file(svc)
+        # a config file this service needs, on the host the node sits on: red
+        # when it has not been made there yet, none while that is not known
+        if config_file and not (node.follows and not node.machine_target):
+            if node.target == "local":
+                present: bool | None = os.path.isfile(config_file)
+            else:
+                present = self._config_presence.get(node.target, {}).get(os.path.abspath(config_file))
+            if present is not None:
+                color = "green" if present else "red"
+                markers += f" [{color}]\\[C][/{color}]"
         if self._svc_states.get(svc.name, False):
             markers += " [green](R)[/green]"
         return markers
+
+    def _svc_config_file(self, svc: ServiceDef) -> str:
+        """the config file a node needs, as its local path; "" for none."""
+        if svc.launch_type == "make":
+            make_target = _make_target_for(svc.name)
+            if make_target == "mediamtx":
+                return os.path.join(self._root, _MEDIAMTX_CONFIG_REL)
+            pipeline = self._pipeline_map.get(_MAKE_CONFIG_PIPELINES.get(make_target, ""))
+        else:
+            pipeline = self._pipeline_for_service(svc.name)
+        return pipeline.config_path if pipeline else ""
+
+    def _remote_config_presence(self, profile) -> dict[str, bool] | None:
+        """which of the nodes' config files the host of `profile` has, asked in
+        one ssh round trip; None when it could not be told. Runs in a worker
+        thread."""
+        files = sorted({os.path.abspath(f) for f in map(self._svc_config_file, self._services) if f})
+        if not files:
+            return {}
+        command = "; ".join(
+            f"[ -f {_quote_remote_path(self._remote_config_path(f, profile))} ] && echo Y || echo N"
+            for f in files
+        )
+        try:
+            result = ssh_run_sync(profile, command, timeout=8.0)
+        except Exception:
+            return None
+        answers = (result.stdout or "").split()
+        # a shell that is not sh (Windows) answers something else entirely
+        if result.returncode != 0 or len(answers) != len(files) or not set(answers) <= {"Y", "N"}:
+            return None
+        return {path: answer == "Y" for path, answer in zip(files, answers)}
+
+    def _note_config_presence(self, target: str, local_path: str, exists: bool) -> None:
+        """what a save, a sync or the check before a Start just found out about
+        a config file on `target`: its [C] marker says so at once."""
+        if target == "local":
+            return
+        known = self._config_presence.setdefault(target, {})
+        path = os.path.abspath(local_path)
+        if known.get(path) != exists:
+            known[path] = exists
+            self._build_tree()
 
     # ── tree node selection ──────────────────────────────────────
 
@@ -6023,6 +6073,8 @@ class ServicePanel(Widget):
             exists, where = os.path.isfile(pipeline.config_path), pipeline.config_path
         else:
             exists, where = self._remote_file_exists(pipeline.config_path, target)
+            if exists is not None:
+                self._note_config_presence(target, pipeline.config_path, exists)
         if exists is None:
             self._log(f"[yellow]NOTE: could not verify {where} on '{target}'; launching anyway.[/yellow]")
             return True
@@ -6119,6 +6171,7 @@ class ServicePanel(Widget):
                 if cache_key is not None and cache_config is not None:
                     self._target_config_cache[cache_key] = cache_config
                     self._refresh_service_cards()
+                    self._note_config_presence(*cache_key, True)
                 self._show_status(f"Saved to {profile_name}:{remote_path}{note}")
                 await self._maybe_push_master_key(profile, local_path)
             else:
@@ -6234,6 +6287,7 @@ class ServicePanel(Widget):
                 rc = await proc.wait()
                 if rc == 0:
                     self._target_config_cache[cache_key] = cache_config
+                    self._note_config_presence(*cache_key, True)
                     saved += 1
                 else:
                     failures.append(f"{remote_path}: {output.strip() or f'exit code {rc}'}")
@@ -6375,6 +6429,8 @@ class ServicePanel(Widget):
                     return
             else:
                 exists, remote_path = self._remote_config_exists(svc, target)
+                if exists is not None:
+                    self._note_config_presence(target, os.path.join(svc.config_dir, "config.yml"), exists)
                 if exists is False:
                     self._log(
                         f"[red]WARNING: config.yml not found on '{target}' at {remote_path}[/red]"
@@ -7517,6 +7573,14 @@ class ServicePanel(Widget):
             node = self._resolve_node_host(svc, profiles)
             is_running, counts = self._detect_node_status(svc, node)
             states[svc.name] = (node.target, is_running, counts)
+        # the [C] markers of the nodes on another host read that host's files
+        for target in {state[0] for state in states.values()} - {"local"}:
+            profile = next((p for p in profiles if p.name == target), None)
+            if profile is None or TARGET_STATES.get(target) == "offline":
+                continue
+            presence = self._remote_config_presence(profile)
+            if presence is not None:
+                self._config_presence[target] = presence
         return states
 
     def _detect_node_status(self, svc: ServiceDef, node: NodeHost) -> tuple[bool, tuple[int, int] | None]:
