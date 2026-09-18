@@ -80,6 +80,7 @@ The sidebar is a tree; selecting a leaf shows its form or service card on the ri
 - `[E]`: the conda environment on that leaf's host. Green `Ready`, yellow `Partial`, red `Missing`. Not shown for services that run in Docker or as native system services. A host's envs are read once and kept; the markers catch up when the Environment tab creates, removes or fills an env on that host, and when the Launcher comes back into view a minute or more later.
 - `[C]`: whether the config file the leaf needs exists on that leaf's host: the pipeline's `config.yml`, and for the Gateway, Dashboard and Stream Server cards `nginx/config.yml`, `dashboard/flask-backend/config.yml` and `mediamtx/mediamtx.yml` under `pipelines/uber-server`. Green present, red missing. A remote host's files are looked up over SSH with the status probe (when the Launcher opens, when a host is picked or comes back online, after a Start or Stop), and a Save or Sync to Remote that copies one there turns its marker green at once; until a host has answered, its leaves show no `[C]`.
 - `(R)`: the service is running, according to the last status probe.
+- `@ host`: where the system services run. The **System Services** heading names the host most of them share (`System Services @ server-01`, the machine System Settings put them on), and a service that runs elsewhere names its own on its line (`Redis (R) @ dell-01`); a host that is offline reads `@ server-01 (offline)` in red. It appears once the first status probe has placed them.
 
 ```
 OpenMMLA

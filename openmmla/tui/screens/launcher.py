@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3508,10 +3509,17 @@ class ServicePanel(Widget):
 
         infra_svcs = categories.get("System Services", [])
         if infra_svcs:
-            infra_node = tree.root.add("System Services", data="__cat_System Services")
+            # where they run: the host most of them share goes on the heading
+            # (a label on every leaf would not fit the sidebar), and a service
+            # elsewhere says so on its own line
+            hosts = {svc.name: self._svc_host_label(svc) for svc in infra_svcs}
+            known = [label for label in hosts.values() if label]
+            shared = Counter(known).most_common(1)[0][0] if known else ""
+            infra_node = tree.root.add(f"System Services{shared}", data="__cat_System Services")
             infra_node.expand()
             for svc in infra_svcs:
-                infra_node.add_leaf(f"{svc.display_name}{self._svc_markers(svc)}", data=svc.name)
+                own = hosts[svc.name] if hosts[svc.name] != shared else ""
+                infra_node.add_leaf(f"{svc.display_name}{self._svc_markers(svc)}{own}", data=svc.name)
 
         collection_svcs = categories.get("Collection", [])
         if collection_svcs:
@@ -3563,6 +3571,25 @@ class ServicePanel(Widget):
         if self._svc_states.get(svc.name, False):
             markers += " [green](R)[/green]"
         return markers
+
+    def _svc_host_label(self, svc: ServiceDef) -> str:
+        """" @ server-01": where a system service runs, as the status probe
+        last resolved it (nothing before that, rather than a guess). It is
+        the machine System Settings put it on, offline or not, else the host
+        its card was last pointed at."""
+        node = self._node_host_cache.get(svc.name)
+        if node is None:
+            return ""
+        if node.machine_target:
+            host = "Local" if node.machine_target == "local" else node.machine_target
+        elif node.follows:
+            # a machine the console cannot use: the address says where it runs
+            host = node.machine
+            if "offline" in node.fallback_from:
+                return f" [red]@ {rich_escape(host)} (offline)[/red]"
+        else:
+            host = "Local" if node.target == "local" else node.target
+        return f" [dim]@ {rich_escape(host)}[/dim]"
 
     def _svc_config_file(self, svc: ServiceDef) -> str:
         """the config file a node needs, as its local path; "" for none."""
