@@ -298,21 +298,18 @@ def _server_section_note(gateway: str) -> str:
 
 
 # {publish} is the stream server's URL of <app>/<name>, see _make_stream_fields.
-# Kept to a line or two: they stand above every stream of the form
+# Kept to a line or two: they stand above every stream of the form. The capture
+# host (ssh_profile) is not among them: it is picked in the Streams tab's table
 _STREAM_FIELDS_TEMPLATE = [
     ("target", "str", "",
      "where the device publishes. Just the path (ips/cam-1) becomes {publish} on Save; "
-     "or a full rtmp/rtsp/srt URL, or udp://<base>:<port> for raw audio to an ASR base",
-     False),
+     "or a full rtmp/rtsp/srt URL, or udp://<base>:<port> for raw audio to an ASR base"),
     ("read_target", "str", "",
-     "where the bases pull it: usually the same path over RTSP, which connects faster than RTMP. Empty = pull the target",
-     False),
-    ("ssh_profile", "str", "",
-     "capture host, local or an SSH profile: the console runs ffmpeg there. Empty = external stream, only pulled",
-     True),
-    ("device", "str", "", "device path, e.g. /dev/video0 (video) or hw:1,0 (audio)", False),
+     "where the bases pull it: usually the same path over RTSP, which connects faster than RTMP. Empty = pull the target"),
+    ("device", "str", "",
+     "device path, e.g. /dev/video0 (video) or hw:1,0 (audio), on the machine picked under SSH Profile on the Streams tab"),
     ("record", "bool", False,
-     "also record on the capture host, under <record_root>/streams-<date>/collection/<host>/", False),
+     "also record on the capture host, under <record_root>/streams-<date>/collection/<host>/"),
 ]
 
 
@@ -1948,20 +1945,16 @@ def _make_stream_fields(stream_name: str, stream_server: dict | None = None) -> 
     """create FieldDef list for a single stream entry. With the Stream Server
     section of System Settings, the help names its real address."""
     section = f"Streams.{stream_name}"
-    ssh_profile_names = ["local"] + [p.name for p in load_ssh_profiles()]
     publish, _pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
     fields = []
-    for key, ftype, default, desc, is_choices in _STREAM_FIELDS_TEMPLATE:
-        desc = desc.replace("{publish}", publish)
-        choices = ssh_profile_names if is_choices else []
+    for key, ftype, default, desc in _STREAM_FIELDS_TEMPLATE:
         fields.append(LoaderFieldDef(
             path=f"Streams.{stream_name}.{key}",
             field_type=ftype,
             default=default,
-            description=desc,
+            description=desc.replace("{publish}", publish),
             required=(key == "target"),
             section=section,
-            choices=choices,
         ))
     return fields
 
@@ -4937,7 +4930,8 @@ class ServicePanel(Widget):
                 "publishes, read_target what the bases pull. Write the path alone (ips/cam-1) and Save "
                 f"completes both with the Stream Server of System Settings: {publish} and {pull}. "
                 "A full URL is kept as written. record: true also records on the capture device; the "
-                "Stream Server records on its side whatever reaches it (its card, Config tab)."
+                "Stream Server records on its side whatever reaches it (its card, Config tab). The "
+                "machine that captures a stream is picked on the Streams tab, in its SSH Profile column."
             ),
         }
         for field in fields:
@@ -4963,54 +4957,88 @@ class ServicePanel(Widget):
             if _is_server_entry(field):
                 form.set_field_description(field.path, _server_entry_hint(values.get(field.path), gateway))
 
-    def on_stream_panel_record_toggle_requested(self, event: StreamPanel.RecordToggleRequested) -> None:
-        """Record on/off in the Streams tab: write the stream's `record` into the
-        config of the host the card is on, then show it in both tabs."""
-        event.stop()
+    def _write_stream_entry(self, stream_name: str, key: str, value) -> dict | None:
+        """set one key of a stream from the Streams tab (Record on/off, SSH
+        Profile) in the config of the host the card is on, and show it there.
+        Returns the config written, None when nothing was."""
         pipeline = self._current_pipeline
         if pipeline is None:
-            return
+            return None
         target = self._get_panel_target()
         config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
         config = copy.deepcopy(config) if isinstance(config, dict) else {}
-        stream = (config.get("Streams") or {}).get(event.stream_name)
+        stream = (config.get("Streams") or {}).get(stream_name)
         if not isinstance(stream, dict):
-            self._log(f"[red]Stream '{event.stream_name}' is not in the config of {target}; Save the Config tab first.[/red]")
-            return
-        stream["record"] = bool(event.record)
-        state = "on" if event.record else "off"
+            self._log(f"[red]Stream '{stream_name}' is not in the config of {target}; Save the Config tab first.[/red]")
+            return None
+        stream[key] = value
         cache_key = self._config_cache_key(pipeline.config_path, target)
         if target == "local":
             with open(pipeline.config_path, "w", encoding="utf-8") as fh:
                 yaml.safe_dump(config, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
             self._target_config_cache[cache_key] = config
         else:
-            tmp = tempfile.NamedTemporaryFile(
-                "w", suffix=".yml", prefix="openmmla-stream-record-", delete=False, encoding="utf-8")
-            with tmp:
-                yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
             profile = get_profile_by_name(target)
             if profile is None:
                 self._log(f"[red]SSH profile '{target}' not found; not changed.[/red]")
-                return
+                return None
+            tmp = tempfile.NamedTemporaryFile(
+                "w", suffix=".yml", prefix="openmmla-stream-", delete=False, encoding="utf-8")
+            with tmp:
+                yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
             self._target_config_cache[cache_key] = config
+            # one group for both: each copy carries the whole file, and the last one must win
             self.run_worker(
                 self._run_scp(target, tmp.name, self._remote_config_path(pipeline.config_path, profile),
                               cleanup_local=True, cache_key=cache_key, cache_config=config),
-                group="stream-record-scp", exclusive=True,
+                group="stream-entry-scp", exclusive=True,
             )
+        for panel in self.query(StreamPanel):
+            panel.update_streams(streams_from_config(config))
+        return config
+
+    def on_stream_panel_record_toggle_requested(self, event: StreamPanel.RecordToggleRequested) -> None:
+        """Record on/off in the Streams tab: write the stream's `record` into the
+        config of the host the card is on, then show it in both tabs."""
+        event.stop()
+        if self._write_stream_entry(event.stream_name, "record", bool(event.record)) is None:
+            return
+        state = "on" if event.record else "off"
         self._log(
             f"[green]{event.stream_name}: recording on the capture device is {state} "
             f"(takes effect at its next Start).[/green]"
         )
-        for panel in self.query(StreamPanel):
-            panel.update_streams(streams_from_config(config))
         # the Config tab holds the old value: a Save from there would undo this
         container = self._config_container
         if container is not None and container.is_attached:
             container.remove_children()
             self._current_form = None
-            self.call_after_refresh(self._show_pipeline_form, container, pipeline)
+            self.call_after_refresh(self._show_pipeline_form, container, self._current_pipeline)
+
+    def on_stream_panel_ssh_profile_change_requested(self, event: StreamPanel.SshProfileChangeRequested) -> None:
+        """SSH Profile in the Streams tab: the machine that runs the stream's
+        ffmpeg, written into the config of the host the card is on. The Config
+        tab does not show it, so its form stays as it is, unsaved edits and all."""
+        event.stop()
+        config = self._write_stream_entry(event.stream_name, "ssh_profile", event.ssh_profile)
+        if config is None:
+            return
+        profile = event.ssh_profile
+        if not profile:
+            self._log(f"[green]{event.stream_name} is external now: someone else publishes it, the bases pull it.[/green]")
+            return
+        self._log(
+            f"[green]{event.stream_name}: Start runs its ffmpeg on "
+            f"{'this machine' if profile == 'local' else profile} now.[/green]"
+        )
+        target = str(config["Streams"][event.stream_name].get("target") or "")
+        if profile != "local" and "://" in target and is_loopback_host(urlsplit(target).hostname):
+            # a pick here does not pass through Save, which keeps localhost out of a stream captured elsewhere
+            self._log(
+                f"[yellow]It publishes to {rich_escape(target)}, and on {profile} that address is {profile} "
+                f"itself. Give the Stream Server under System Settings a name {profile} can reach "
+                f"(e.g. {socket.gethostname()}).[/yellow]"
+            )
 
     def _show_mllm_form(self, container: Vertical) -> None:
         values = _mllm_form_values(self._root)
@@ -5124,6 +5152,7 @@ class ServicePanel(Widget):
 
         form = self._current_form
         all_fields = form.all_fields if form else pipeline.fields
+        all_fields = all_fields + self._stored_capture_hosts(pipeline, event.values)
         stream_note = self._complete_stream_targets(pipeline, event.values)
         self._save_pipeline_config_for_target(pipeline, all_fields, event.values, note=stream_note)
 
@@ -5427,6 +5456,33 @@ class ServicePanel(Widget):
             key: self._shared_values.get(f"StreamServer.{key}", fdef.get("default", ""))
             for key, fdef in SHARED_SECTIONS["StreamServer"]["fields"].items()
         }
+
+    def _stored_capture_hosts(self, pipeline: PipelineDef, values: dict) -> list[LoaderFieldDef]:
+        """each stream's ssh_profile is picked on the Streams tab, so the form
+        does not hold it. Save still writes it: the URL completion reads it,
+        and the config of another host is written from the form alone. Adds
+        the stored values and returns the fields that carry them."""
+        if pipeline.name not in _STREAM_PIPELINES:
+            return []
+        target = self._get_panel_target()
+        if target == "local":
+            config = load_existing_config(pipeline.config_path)
+        else:
+            config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
+        streams = config.get("Streams") if isinstance(config, dict) else None
+        if not isinstance(streams, dict):
+            return []
+        fields = []
+        for key in [key for key in values if key.startswith("Streams.") and key.endswith(".target")]:
+            name = key[len("Streams."):-len(".target")]
+            path = f"Streams.{name}.ssh_profile"
+            entry = streams.get(name)
+            if path in values or not isinstance(entry, dict) or entry.get("ssh_profile") is None:
+                continue
+            values[path] = entry["ssh_profile"]
+            fields.append(LoaderFieldDef(path=path, field_type="str", default="", description="",
+                                         required=False, section=f"Streams.{name}"))
+        return fields
 
     def _complete_stream_targets(self, pipeline: PipelineDef, values: dict) -> str:
         """Streams written as a bare path (ips/cam-1) get the Stream Server address

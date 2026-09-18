@@ -39,7 +39,7 @@ A Raspberry Pi can play two roles in OpenMMLA:
 
 ## Streaming device only
 
-Nothing else is needed. Add an SSH profile for the Pi in the TUI (**Launcher → System Settings → Hosts → SSH Profiles**) and reference it from a `Streams` entry with `ssh_profile`, `device` and `target`; the Launcher's Streams tab starts and stops FFmpeg on the Pi.
+Nothing else is needed. Add an SSH profile for the Pi in the TUI (**Launcher → System Settings → Hosts → SSH Profiles**), add a `Streams` entry with `device` and `target` on the pipeline's Config tab, and pick the Pi in that stream's **SSH Profile** column on the Streams tab (it is written as the entry's `ssh_profile`); the Streams tab then starts and stops FFmpeg on the Pi.
 
 ## Base station
 

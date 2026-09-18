@@ -65,7 +65,7 @@ Streams are declared once per pipeline under `Streams` in `pipelines/<pipeline>-
 |---|---|
 | `target` | publish URL: `rtmp://<stream-server>:1935/<app>/<name>` (also `rtsp://` or `srt://`), or `udp://<base>:<port>` / `tcp://` for raw audio straight to an ASR base |
 | `read_target` | what the bases pull, e.g. `rtsp://<stream-server>:8554/<app>/<name>`; empty means `target` |
-| `ssh_profile` | TUI SSH profile of the capture host, or `local` |
+| `ssh_profile` | TUI SSH profile of the capture host, or `local`; picked in the SSH Profile column of the Streams tab |
 | `device` | `/dev/video0` (v4l2 camera) or `hw:1,0` (ALSA microphone) |
 | `kind` | `audio` or `video`; inferred from the target and the device when omitted |
 | `codec`, `resolution`, `fps`, `bitrate` | video encoding (`libx264`, `1920x1080`, `30`, `1M`) |

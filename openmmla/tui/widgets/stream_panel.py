@@ -10,14 +10,20 @@ import socket
 import subprocess
 import time
 
+from rich.cells import cell_len
+from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
+from textual.geometry import Region
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Static, Button, DataTable, Label, Select
+from textual.widgets import Static, Button, DataTable, Label, OptionList, Select
 
 from openmmla.tui.schema.loader import StreamDef, load_streams
-from openmmla.tui.ssh import get_profile_by_name, ssh_run_sync
+from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, ssh_run_sync
 from openmmla.utils.artifact_paths import safe_segment
 from openmmla.utils.constants import STREAM_URL_SCHEMES
 from openmmla.utils.stream_registry import load_stream_registry, register_stream_start, mark_stream_stopped
@@ -371,6 +377,104 @@ def _probe_stream_target(target: str, timeout: float = 10.0) -> tuple[bool, str]
 _probe_rtmp_target = _probe_stream_target
 
 
+# the SSH Profile column of the Streams table, whose cells are dropdowns
+PROFILE_COLUMN = 1
+
+
+class StreamTable(DataTable):
+    """the Streams table. A click on a row's SSH Profile cell, or Enter on a
+    row, asks for the list of machines that can capture the stream."""
+
+    class ProfileMenuRequested(Message):
+        def __init__(self, row: int) -> None:
+            super().__init__()
+            self.row = row
+
+    def on_click(self, event: events.Click) -> None:
+        # runs before DataTable's own handler, which moves the cursor to the row
+        meta = event.style.meta
+        row = meta.get("row")
+        if (meta.get("column") == PROFILE_COLUMN and isinstance(row, int) and row >= 0
+                and not meta.get("out_of_bounds", False)):
+            self.post_message(self.ProfileMenuRequested(row))
+
+    def action_select_cursor(self) -> None:
+        super().action_select_cursor()
+        if self.row_count:
+            self.post_message(self.ProfileMenuRequested(self.cursor_row))
+
+    def profile_cell_region(self, row: int) -> Region:
+        """where a row's SSH Profile cell is on the screen, for the list to open under it."""
+        columns = self.ordered_columns
+        if len(columns) <= PROFILE_COLUMN:
+            return Region(self.content_region.x, self.content_region.y, 0, 1)
+        x = sum(column.get_render_width(self) for column in columns[:PROFILE_COLUMN])
+        y = (self.header_height if self.show_header else 0) + sum(r.height for r in self.ordered_rows[:row])
+        area = self.content_region
+        return Region(area.x + x - round(self.scroll_x), area.y + y - round(self.scroll_y),
+                      columns[PROFILE_COLUMN].get_render_width(self), 1)
+
+
+class StreamProfileMenu(ModalScreen):
+    """the dropdown of an SSH Profile cell: opens under the cell, like the list
+    of a Select. Enter or a click picks a machine; Escape or a click beside the
+    list leaves the row as it was, and the screen returns None."""
+
+    DEFAULT_CSS = """
+    StreamProfileMenu {
+        background: transparent;
+    }
+    StreamProfileMenu > OptionList {
+        border: tall $border;
+        background: $surface;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "close", "Close", show=False)]
+
+    # options shown at once; more scroll
+    VISIBLE_OPTIONS = 10
+
+    def __init__(self, options: list[tuple[str, str]], current: str, anchor: Region) -> None:
+        super().__init__()
+        self._labels = [label for label, _value in options]
+        self._values = [value for _label, value in options]
+        self._current = current
+        self._anchor = anchor
+
+    def compose(self) -> ComposeResult:
+        yield OptionList(*self._labels)
+
+    def on_mount(self) -> None:
+        menu = self.query_one(OptionList)
+        screen_width, screen_height = self.app.size
+        shown = min(len(self._labels), self.VISIBLE_OPTIONS)
+        height = shown + 2
+        # label, the padding of option and list, the border, and a scrollbar when one is needed
+        width = max(cell_len(label) for label in self._labels) + 6 + (2 if shown < len(self._labels) else 0)
+        width = min(max(width, self._anchor.width), screen_width)
+        x = max(0, min(self._anchor.x, screen_width - width))
+        # under the cell, or above it when the screen ends first
+        y = self._anchor.bottom if self._anchor.bottom + height <= screen_height else max(0, self._anchor.y - height)
+        menu.styles.width = width
+        menu.styles.height = height
+        menu.styles.offset = (x, y)
+        if self._current in self._values:
+            menu.highlighted = self._values.index(self._current)
+        menu.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.dismiss(self._values[event.option_index])
+
+    def on_click(self, event: events.Click) -> None:
+        if not self.query_one(OptionList).region.contains(event.screen_x, event.screen_y):
+            self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class StreamPanel(Widget):
     """panel for managing remote streams via SSH (start/stop only)."""
 
@@ -532,26 +636,37 @@ class StreamPanel(Widget):
             self.stream_name = stream_name
             self.record = record
 
+    class SshProfileChangeRequested(Message):
+        """a row's SSH Profile was picked: the machine that runs the stream's
+        ffmpeg, "" for an external stream. The launcher writes it into the
+        config of the host the card is on, as it does for Record on/off."""
+
+        def __init__(self, stream_name: str, ssh_profile: str) -> None:
+            super().__init__()
+            self.stream_name = stream_name
+            self.ssh_profile = ssh_profile
+
     # three lines: it stands above the table every time the tab is opened
     HELP = (
         "A stream is a Streams entry of this card's config (Config tab, + Add Stream): ffmpeg publishes a camera "
         "or microphone to the Stream Server, the bases pull it. Started once, it serves any number of sessions.\n"
-        "Record on/off: also record on the capture device. The Stream Server records on its side whatever "
-        "reaches it (its card, Config tab).\n"
+        "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
+        "else publishes. Record on/off: also record on the capture device. The Stream Server records on its side "
+        "whatever reaches it (its card, Config tab).\n"
         "Recordings are filed by day, not by session. Download with a session cuts that session's part out "
         "on the capture host; without one it copies the whole files."
     )
 
     # how a stream stops being external
     _EXTERNAL_HINT = (
-        "To run it from here, set ssh_profile of {name} on the Config tab (Streams) to the machine its "
-        "device is attached to, local or an SSH profile, and Save."
+        "To run it from here, click its SSH Profile (or press Enter on its row) and pick the machine its "
+        "device is attached to, local or an SSH profile."
     )
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(self.HELP, id="stream-help")
-            yield DataTable(id="stream-table")
+            yield StreamTable(id="stream-table")
             yield Static("", id="stream-empty")
             # a row of its own: Download is about what was recorded, the row
             # below about the streams themselves
@@ -611,16 +726,24 @@ class StreamPanel(Widget):
             table = self.query_one("#stream-table", DataTable)
         except Exception:
             return
+        # clear() puts the cursor back on the first row: it stays on its stream
+        try:
+            selected = str(table.get_row_at(table.cursor_row)[0]) if table.row_count else ""
+        except Exception:
+            selected = ""
         table.clear()
         try:
             self.query_one("#stream-empty", Static).update(
                 "" if self._streams else
-                "No streams yet. Open the Config tab, expand Streams and press + Add Stream, then Save."
+                "No streams yet. Open the Config tab, expand Streams, press + Add Stream and Save; "
+                "then pick its SSH Profile here."
             )
         except Exception:
             pass
         if not self._streams:
             return
+        # the arrows line up at the right edge of the column, under its heading
+        width = max([len("SSH Profile") - 3] + [cell_len(stream.ssh_profile or "-") for stream in self._streams])
         for stream in self._streams:
             if not stream.ssh_profile:
                 status = "External"
@@ -628,15 +751,55 @@ class StreamPanel(Widget):
                 status = "Running"
             else:
                 status = "Stopped"
+            profile = stream.ssh_profile or "-"
             table.add_row(
                 stream.name,
-                stream.ssh_profile or "-",
+                # drawn as the dropdown it is
+                Text.assemble(profile + " " * (width - cell_len(profile)), ("  ▾", "dim")),
                 stream.device or "-",
                 stream.target,
                 # nobody records an external stream here: the console does not run its ffmpeg
                 ("yes" if stream.ssh_profile else "n/a") if stream.record else "-",
                 status,
             )
+        for row, stream in enumerate(self._streams):
+            if stream.name == selected:
+                table.move_cursor(row=row)
+                break
+
+    @staticmethod
+    def _profile_options(current: str) -> list[tuple[str, str]]:
+        """what an SSH Profile cell offers: this machine, every SSH profile, and
+        none, for a stream someone else publishes. (label, value) pairs."""
+        names = ["local"] + [profile.name for profile in load_ssh_profiles()]
+        options = [("local  (this machine)" if name == "local" else name, name) for name in names]
+        if current and current not in names:
+            # renamed or deleted since: shown as what it is, and kept unless another is picked
+            options.append((f"{current}  (not in the list any more)", current))
+        options.append(("-  (external: someone else publishes it)", ""))
+        return options
+
+    def on_stream_table_profile_menu_requested(self, event: StreamTable.ProfileMenuRequested) -> None:
+        event.stop()
+        if not 0 <= event.row < len(self._streams):
+            return
+        stream = self._streams[event.row]
+        if self._statuses.get(stream.name, False):
+            where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
+            self._log(
+                f"[yellow]Stop {stream.name} first: its ffmpeg runs on {where}, and Stop looks for it on "
+                f"the machine its SSH Profile names.[/yellow]"
+            )
+            return
+        table = self.query_one("#stream-table", StreamTable)
+        menu = StreamProfileMenu(self._profile_options(stream.ssh_profile), stream.ssh_profile,
+                                 table.profile_cell_region(event.row))
+
+        def picked(profile: str | None) -> None:
+            if profile is not None and profile != stream.ssh_profile:
+                self.post_message(self.SshProfileChangeRequested(stream.name, profile))
+
+        self.app.push_screen(menu, picked)
 
     def _get_selected_stream(self) -> StreamDef | None:
         try:
@@ -942,10 +1105,14 @@ class StreamPanel(Widget):
             self._log(f"[red]{stream.name}: {message}[/red]")
 
     def update_streams(self, streams: list[StreamDef]) -> None:
-        """replace the stream list and refresh."""
+        """replace the stream list and refresh. Shown at once, a stream whose
+        machine is the same with the status it had, then checked again."""
+        hosts = {stream.name: stream.ssh_profile for stream in self._streams}
         self._streams = list(streams)
-        self._statuses.clear()
+        self._statuses = {
+            stream.name: self._statuses[stream.name] for stream in self._streams
+            if stream.name in self._statuses and hosts.get(stream.name) == stream.ssh_profile
+        }
+        self._rebuild_table()
         if streams:
             self._refresh_all()
-        else:
-            self._rebuild_table()
