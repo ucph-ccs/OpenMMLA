@@ -68,7 +68,7 @@ Bases:
   - id: <base-id>               # base id / identity (string or number; part of base_id {base_type}_{id})
     base_type: <Your_Device_Name>   # which entry under Base
     source: pyaudio             # source type (udp/tcp/pyaudio/stream/lsl/file; rtmp is the old name of stream)
-    source_index: 0             # pyaudio: input device index; stream: index among the pullable Streams entries; file: file name in file_dir; lsl: stream name (udp/tcp use 'port')
+    source_index: 0             # pyaudio: input device index; stream: name of a Streams entry (an index among the pullable ones still works); file: file name in file_dir; lsl: stream name (udp/tcp use 'port')
     channel: 0                  # channel selection (optional, multi-channel devices)
     port: 5001                  # listening port (required only for source udp/tcp; decoupled from id)
  

@@ -367,12 +367,12 @@ class VFABase(Base):
                 cap.release()
 
         elif self.source == 'stream':
-            from openmmla.utils.constants import get_stream_urls
-            stream_urls = get_stream_urls(self.config)
-            if not stream_urls:
+            from openmmla.utils.constants import get_stream_sources
+            stream_sources = get_stream_sources(self.config)
+            if not stream_sources:
                 raise ValueError("No pullable stream (rtmp/rtsp/srt URL) found in the Streams config section.")
-            for url in stream_urls:
-                print(f"{available_source_idx} : Stream {url} is available.")
+            for name, url in stream_sources:
+                print(f"{available_source_idx} : Stream '{name}' ({url}) is available.")
                 available_sources.append(url)
                 available_source_idx += 1
 
@@ -428,9 +428,16 @@ class VFABase(Base):
 
     def _choose_video_source(self, available_sources: list[str | int]) -> str | int | None:
         """Pick the video source for the selected base (source_index is an index
-        for opencv/stream, or a file/stream name for file/lsl)."""
+        for opencv, a Streams entry's name for stream, a file/stream name for
+        file/lsl)."""
         if not available_sources:
             return None
+        if self.source == 'stream':
+            # by name, and an error rather than the first stream when it names none
+            from openmmla.utils.constants import resolve_stream_source
+            name, url = resolve_stream_source(self.config, self._source_index)
+            self.logger.info(f"Using stream '{name}': {url}")
+            return url
         selected_source = select_source_by_index_or_name(self._source_index, available_sources)
         self.logger.info(f"Using video source {selected_source}")
         return selected_source

@@ -100,3 +100,36 @@ def get_stream_sources(config: dict, protocol=None) -> list[tuple[str, str]]:
 def get_stream_urls(config: dict, protocol=None) -> list[str]:
     """the URLs bases can pull, in config order (see get_stream_sources)."""
     return [url for _, url in get_stream_sources(config, protocol)]
+
+
+def resolve_stream_source(config: dict, source_index) -> tuple[str, str]:
+    """(name, url) of the stream a base with source: stream pulls.
+
+    source_index names a Streams entry, which is what the console writes. A
+    number is read as the position among the pullable entries, as older
+    configs have it, and a URL or its last path segment is matched too.
+    Anything else raises ValueError naming the streams there are: a base used
+    to take the first one then, and quietly looked through the wrong camera."""
+    sources = get_stream_sources(config)
+    if not sources:
+        raise ValueError("No pullable stream (rtmp/rtsp/srt URL) found in the Streams config section.")
+    names = ", ".join(name for name, _ in sources)
+    text = "" if source_index is None else str(source_index).strip()
+    if not text:
+        if len(sources) == 1:
+            return sources[0]
+        raise ValueError(
+            f"The base names no stream in source_index, and there are {len(sources)} to pull: {names}.")
+    for name, url in sources:
+        if text == name:
+            return name, url
+    if text.isdigit():
+        position = int(text)
+        if position < len(sources):
+            return sources[position]
+        raise ValueError(
+            f"source_index {position} is past the {len(sources)} pullable stream(s): {names}.")
+    for name, url in sources:
+        if text == url or text == url.rstrip("/").rsplit("/", 1)[-1]:
+            return name, url
+    raise ValueError(f"source_index '{text}' is none of the pullable streams: {names}.")

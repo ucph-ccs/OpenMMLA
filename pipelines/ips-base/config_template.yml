@@ -74,7 +74,7 @@ Bases:
   - id: <base-id>               # base id (identity; appears in MQTT + transform matrix)
     camera: <camera-name>       # calibrated camera profile name (from Cameras)
     source: stream              # source type (opencv/stream/lsl/file; rtmp is the old name of stream)
-    source_index: 0             # opencv: camera index; stream: index among the pullable Streams entries; file: file name in file_dir; lsl: stream name
+    source_index: 0             # opencv: camera index; stream: name of a Streams entry (an index among the pullable ones still works); file: file name in file_dir; lsl: stream name
     main: false                 # mark exactly one base as the main reference for sync
 
 Synchronizer:

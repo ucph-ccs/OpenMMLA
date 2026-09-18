@@ -271,15 +271,21 @@ class ASRBase(Base):
             self.logger.info(f"Selected channel option: {self.stream_kwargs['channel_select']}")
             p.terminate()
 
-        # set url for 'stream': a pullable URL (rtmp/rtsp/srt) from the Streams section
+        # set url for 'stream': the Streams entry the base's source_index names,
+        # as for the IPS and VFA bases. It used to be asked in a menu whatever
+        # the entry said, which a base started from the console waited on
         elif self.source == 'stream':
-            from openmmla.utils.constants import get_stream_urls
+            from openmmla.utils.constants import get_stream_urls, resolve_stream_source
+            source_index = self._base_entry.get('source_index')
             stream_urls = get_stream_urls(self.config)
-            if not stream_urls:
-                raise ValueError("No pullable stream (rtmp/rtsp/srt URL) found in the Streams config section.")
-            self.url = get_stream_url(stream_urls)
+            if source_index in (None, "") and len(stream_urls) > 1:
+                # the entry names none of several: ask, as a base started by hand
+                self.url = get_stream_url(stream_urls)
+                self.logger.info(f"Using stream URL: {self.url}")
+            else:
+                name, self.url = resolve_stream_source(self.config, source_index)
+                self.logger.info(f"Using stream '{name}': {self.url}")
             self.stream_kwargs['url'] = self.url
-            self.logger.info(f"Using stream URL: {self.url}")
 
         # set lsl_name for 'lsl' (the stream is selected by name; the base
         # entry carries it in source_index, matching the unified config form)

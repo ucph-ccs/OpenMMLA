@@ -294,7 +294,7 @@ class DictListField(Widget):
     # and the widget type — see _source_index_widget)
     _SOURCE_INDEX_HINTS = {
         "opencv": "→ which local camera (0-based index)",
-        "stream": "→ which stream of this config's Streams it pulls (a new one is listed once the Streams are saved)",
+        "stream": "→ which stream of this config's Streams it pulls, by name (a new one is listed once the Streams are saved)",
         "file": "→ pick a video file from file_dir",
         "pyaudio": "→ PyAudio input device index",
         "lsl": "→ LSL stream name (resolved by name)",
@@ -368,16 +368,19 @@ class DictListField(Widget):
         (disabled for udp/tcp, which bind via 'port')."""
         s = normalize_source(source)
         if s == "stream":
-            # the pullable Streams entries as (name, url): the base counts
-            # through them in this order, so the index is what is stored
+            # the pullable Streams entries as (name, url); a base finds its
+            # stream by name, so the name is what is stored
             pullable = self._choices.get("source_index:stream") or []
-            streams = [(f"{i} · {name}  ({url})", str(i)) for i, (name, url) in enumerate(pullable)]
+            streams = [(f"{name}  ({url})", name) for name, url in pullable]
             if streams:
                 cur = str(val).strip() if val not in (None, "") else ""
-                by_name = {name: str(i) for i, (name, _url) in enumerate(pullable)}
-                if cur and not any(value == cur for _, value in streams):
-                    if cur in by_name:
-                        cur = by_name[cur]      # a name written by hand
+                names = [name for name, _url in pullable]
+                if cur and cur not in names:
+                    # what a base also reads: an index (older configs), a URL or its last segment
+                    same = [name for i, (name, url) in enumerate(pullable)
+                            if cur in (str(i), url, url.rstrip("/").rsplit("/", 1)[-1])]
+                    if same:
+                        cur = same[0]
                     else:
                         # kept rather than dropped on the next Save
                         streams.append((f"{cur}  (not a pullable stream of this config)", cur))
