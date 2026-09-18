@@ -557,7 +557,7 @@ class CommandSession(Widget):
             return None
 
     async def _maybe_send_password(self, proc, chunk_text: str, password: str | None,
-                                   sends: int) -> int:
+                                   sends: int, source: str = "System Settings") -> int:
         """auto-fill a password prompt; returns the updated send count."""
         if (
             password
@@ -567,9 +567,12 @@ class CommandSession(Widget):
         ):
             proc.stdin.write((password + "\n").encode())
             await proc.stdin.drain()
-            self.log("[dim]> (password auto-filled from System Settings)[/dim]")
+            self.log(f"[dim]> (password auto-filled from {source})[/dim]")
             return sends + 1
         return sends
+
+    # sudo's last word after three wrong answers
+    _SUDO_GAVE_UP = "incorrect password attempt"
 
     # -- local commands --------------------------------------------------------
 
@@ -601,6 +604,7 @@ class CommandSession(Widget):
         assert proc.stdout is not None
         sudo_password = self._stored_sudo_password() if "sudo" in cmd else None
         pw_sends = 0
+        refused = False
         while True:
             chunk = await proc.stdout.read(4096)
             if not chunk:
@@ -610,11 +614,16 @@ class CommandSession(Widget):
             if text:
                 for line in text.splitlines():
                     self.log(rich_escape(line))
-            pw_sends = await self._maybe_send_password(proc, raw, sudo_password, pw_sends)
+            refused = refused or self._SUDO_GAVE_UP in raw
+            pw_sends = await self._maybe_send_password(
+                proc, raw, sudo_password, pw_sends, "System Settings → Sudo (local admin)")
         rc = await proc.wait()
         self._running_proc = None
         if rc != 0:
             self.log(f"[red](exit {rc})[/red]")
+        if refused and sudo_password:
+            self.log("[yellow]sudo refused the password stored under System Settings → Sudo (local admin): "
+                     "check it there.[/yellow]")
         if any(cmd.startswith(p) for p in ("conda create", "conda remove", "conda env remove", "conda env create")):
             self.post_message(self.TargetChanged(self.get_target()))
 
@@ -653,6 +662,7 @@ class CommandSession(Widget):
         # remote sudo prompts are answered with the SSH profile's password
         remote_password = (getattr(profile, "password", "") or None) if "sudo" in cmd else None
         pw_sends = 0
+        refused = False
         while True:
             chunk = await proc.stdout.read(4096)
             if not chunk:
@@ -662,10 +672,20 @@ class CommandSession(Widget):
             if text:
                 for line in text.splitlines():
                     self.log(rich_escape(line))
-            pw_sends = await self._maybe_send_password(proc, raw, remote_password, pw_sends)
+            refused = refused or self._SUDO_GAVE_UP in raw
+            pw_sends = await self._maybe_send_password(
+                proc, raw, remote_password, pw_sends, f"the SSH profile '{profile_name}'")
         rc = await proc.wait()
         self._running_proc = None
         if rc != 0:
             self.log(f"[red](exit {rc})[/red]")
+        if refused and remote_password:
+            # a key logs in whatever the profile's password says, so a placeholder
+            # there passes every connection test and fails here
+            self.log(
+                f"[yellow]sudo on '{profile_name}' refused the SSH profile's password. A key logs you in "
+                f"even when that password is wrong, so check it under System Settings → SSH Profiles "
+                f"(Test Connection verifies it now), or give the account passwordless sudo on that host.[/yellow]"
+            )
         if any(cmd.startswith(p) for p in ("conda create", "conda remove", "conda env remove", "conda env create")):
             self.post_message(self.TargetChanged(self.get_target()))

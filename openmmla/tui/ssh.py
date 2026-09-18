@@ -261,7 +261,8 @@ def ssh_test_connection(profile: SSHProfile) -> tuple[bool, str]:
             timeout=10.0,
         )
         if result.returncode == 0 and "CONNECTION_OK" in result.stdout:
-            return True, "Connection successful"
+            note = verify_stored_password(profile) if profile.password else None
+            return True, "Connection successful" + (f"; {note}" if note else "")
         return False, result.stderr.strip() or f"exit code {result.returncode}"
     except subprocess.TimeoutExpired:
         return False, "Connection timed out"
@@ -269,6 +270,42 @@ def ssh_test_connection(profile: SSHProfile) -> tuple[bool, str]:
         return False, "ssh command not found"
     except Exception as e:
         return False, str(e)
+
+
+def verify_stored_password(profile: SSHProfile, timeout: float = 10.0) -> str | None:
+    """None when the stored password logs in by itself, else why it could not.
+
+    A key in authorized_keys logs in whatever the profile's password says, so
+    a placeholder left there passes every connection test while sudo on that
+    host, which asks for the account's password, refuses it at the first
+    Start. This logs in with the password alone, on a connection of its own:
+    a multiplexed one would ride the key's login."""
+    args = profile._sshpass_prefix() + [
+        _resolve_local_command("ssh"),
+        "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+        "-o", "ControlMaster=no", "-o", "ControlPath=none",
+        "-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password,keyboard-interactive",
+        "-o", "NumberOfPasswordPrompts=1",
+    ]
+    if profile.port != 22:
+        args.extend(["-p", str(profile.port)])
+    args.extend([profile.ssh_destination(), "echo PASSWORD_OK"])
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "the stored password could not be checked (timed out)"
+    except Exception as e:
+        return f"the stored password could not be checked ({e})"
+    if result.returncode == 0 and "PASSWORD_OK" in result.stdout:
+        return None
+    stderr = result.stderr.strip()
+    # sshd names the methods it takes: "Permission denied (publickey,password)"
+    if "Permission denied" in stderr and "password" not in stderr.rsplit("Permission denied", 1)[-1]:
+        return ("the stored password could not be checked: this host's sshd takes keys only "
+                "(sudo there still asks for the account's password)")
+    return ("the stored password is not the account's: a key logged you in, but sudo on this host "
+            "will refuse it. Put the account's real password here, or give the account passwordless "
+            "sudo on that host")
 
 
 async def scp_file_async(
