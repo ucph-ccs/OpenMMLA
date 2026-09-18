@@ -68,6 +68,7 @@ The ASR and VFA server services have no conda environment any more; they run as 
 | **Delete Env** | `conda env remove -n <env> -y`, after a second press to confirm |
 | **Git Clone** | remote hosts only: `git clone <origin url> <remote_project_path>` |
 | **Git Pull** | remote hosts only: `cd <remote_project_path> && git pull` |
+| **Git Pull All** | the same pull on every SSH profile at once, whatever the Host selector says: offline and Windows hosts are skipped, each host's output is shown in one piece as it finishes, and a last line sums up which hosts pulled, were already up to date or failed. This machine is left alone |
 | **Connect** / **Refresh** | test the host and re-read `conda env list` / `conda list` |
 
 A command console at the bottom shows the output and accepts ad-hoc shell commands on the selected host.

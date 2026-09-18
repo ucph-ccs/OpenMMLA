@@ -14,10 +14,14 @@ from textual.widgets import Static, DataTable, Button, Select, Label
 
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.ssh import (
-    load_ssh_profiles, get_profile_by_name, ssh_run_async,
+    TARGET_PLATFORMS, load_ssh_profiles, get_profile_by_name, probe_all_profiles, ssh_run_async,
     git_remote_url, wrap_remote,
 )
 from openmmla.tui.widgets.command_session import CommandSession, _list_conda_envs_sync, _parse_conda_envs
+
+
+# seconds Git Pull All gives one host before it stops that pull
+_GIT_PULL_ALL_TIMEOUT = 120.0
 
 
 # Env/group metadata only. Required packages are read dynamically from the
@@ -375,6 +379,7 @@ class EnvironmentPanel(Widget):
                 yield Button("Refresh", variant="primary", id="btn-env-refresh")
                 yield Button("Git Clone", variant="warning", id="btn-git-clone")
                 yield Button("Git Pull", variant="warning", id="btn-git-pull")
+                yield Button("Git Pull All", variant="warning", id="btn-git-pull-all")
                 yield Button("Create Env", variant="success", id="btn-create-env")
                 yield Button("Install Deps", variant="success", id="btn-install-deps")
                 yield Button("Delete Env", variant="error", id="btn-delete-env")
@@ -613,6 +618,8 @@ class EnvironmentPanel(Widget):
             self._git_clone()
         elif bid == "btn-git-pull":
             self._git_pull()
+        elif bid == "btn-git-pull-all":
+            self._git_pull_all()
 
     # -- git operations -------------------------------------------------------
 
@@ -687,6 +694,74 @@ class EnvironmentPanel(Widget):
             self._log("[green]Git pull completed.[/green]")
         else:
             self._log(f"[red]Git pull failed (exit {rc}).[/red]")
+
+    def _git_pull_all(self) -> None:
+        if not load_ssh_profiles():
+            self._log("[yellow]No SSH profiles yet: add the hosts under System Settings → SSH Profiles.[/yellow]")
+            return
+        self._log("[green]Pulling latest on every SSH host...[/green]")
+        self.run_worker(self._run_git_pull_all(), group="env-git-pull-all", exclusive=True)
+
+    async def _run_git_pull_all(self) -> None:
+        """git pull on every SSH profile at once. Each host's output is logged
+        in one piece as it finishes, so the hosts do not interleave."""
+        # the same look as the ↻ button: an offline host is skipped, not waited on
+        states = await asyncio.to_thread(probe_all_profiles)
+        self._refresh_target_options()
+        pulls: list[str] = []
+        skipped: list[str] = []
+        for profile in load_ssh_profiles():
+            if states.get(profile.name) == "offline":
+                skipped.append(f"{profile.name} (offline)")
+            elif TARGET_PLATFORMS.get(profile.name) == "windows":
+                skipped.append(f"{profile.name} (Windows)")
+            else:
+                pulls.append(profile.name)
+        results: dict[str, str] = {}
+        for task in asyncio.as_completed([self._pull_one_host(name) for name in pulls]):
+            name, rc, output = await task
+            self._log(f"[dim]── {name} ──[/dim]")
+            for line in output.rstrip().splitlines():
+                self._log(rich_escape(line))
+            if rc != 0:
+                results[name] = "failed"
+                self._log(f"[red]{name}: git pull failed (exit {rc}).[/red]")
+            elif "Already up to date" in output:
+                results[name] = "up to date"
+                self._log(f"[green]{name}: already up to date.[/green]")
+            else:
+                results[name] = "pulled"
+                self._log(f"[green]{name}: pulled.[/green]")
+        summary = ", ".join(
+            f"{sum(1 for r in results.values() if r == kind)} {kind}"
+            for kind in ("pulled", "up to date", "failed")
+            if any(r == kind for r in results.values())
+        ) or "no host pulled"
+        failed = [name for name, r in results.items() if r == "failed"]
+        color = "red" if failed else "green"
+        self._log(
+            f"[{color}]Git Pull All: {summary}"
+            + (f" ({', '.join(failed)})" if failed else "")
+            + (f"; skipped {', '.join(skipped)}" if skipped else "")
+            + f".[/{color}]"
+        )
+
+    async def _pull_one_host(self, profile_name: str) -> tuple[str, int, str]:
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            return profile_name, 1, "SSH profile not found."
+        cmd = f"cd {profile.remote_project_path} && git pull"
+        proc = await ssh_run_async(profile, wrap_remote(cmd))
+        assert proc.stdout is not None
+        try:
+            # a pull that waits on a credential prompt must not hold up the rest
+            output = await asyncio.wait_for(proc.stdout.read(), timeout=_GIT_PULL_ALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return profile_name, 124, f"remote$ {cmd}\nno answer after {_GIT_PULL_ALL_TIMEOUT:.0f} s; stopped."
+        rc = await proc.wait()
+        return profile_name, rc, f"remote$ {cmd}\n" + output.decode(errors="replace")
 
     # -- conda operations -----------------------------------------------------
 
