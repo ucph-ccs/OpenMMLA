@@ -912,7 +912,7 @@ class SessionsPanel(Widget):
         server whether or not one runs, so nothing on the server belongs to a
         session; its start and end (MongoDB) are what select the footage."""
         from openmmla.tui import recordings
-        from openmmla.tui.artifacts import artifact_session_dir, ensure_session_layout
+        from openmmla.tui.artifacts import artifact_session_dir, copy_covers, ensure_session_layout
         from openmmla.tui.schema.loader import _find_project_root
         from openmmla.tui.system_services import stream_server_address
 
@@ -975,10 +975,20 @@ class SessionsPanel(Widget):
         for clip in clips:
             destination = os.path.join(out_dir, recordings.clip_relpath(clip))
             label = f"{clip.path}  {clip.start:%H:%M:%S} +{clip.duration:.0f}s"
-            if ended and os.path.isfile(destination) and os.path.getsize(destination) > 0:
-                self._log(f"  [dim]- {label}: already exported[/dim]")
-                done += 1
-                continue
+            if os.path.isfile(destination):
+                # a clip is named after its start only, so a copy exported while
+                # the session was still going looks like the full one: its length
+                # tells. Without ffprobe here, an ended session's clip counts as final
+                covered = copy_covers(destination, clip.duration)
+                if covered or (covered is None and ended and os.path.getsize(destination) > 0):
+                    self._log(f"  [dim]- {label}: already exported[/dim]")
+                    done += 1
+                    continue
+                if covered is False and os.path.getsize(destination) > 0:
+                    self._log(
+                        f"  [cyan]{label}: the copy here stops short (exported while the session was still "
+                        f"going); fetching it in full[/cyan]"
+                    )
             try:
                 size = recordings.download_clip(host, clip, destination, playback_port)
             except recordings.RecordingsError as error:

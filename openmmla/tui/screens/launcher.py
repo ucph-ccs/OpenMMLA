@@ -70,7 +70,7 @@ from openmmla.tui.ssh import (
     wrap_local, wrap_remote,
 )
 from openmmla.tui.artifacts import (
-    METADATA_FILENAMES, collection_artifact_dir, merge_tree, pipeline_artifact_dir, pipeline_slug,
+    METADATA_FILENAMES, collection_artifact_dir, copy_covers, merge_tree, pipeline_artifact_dir, pipeline_slug,
     safe_segment, update_collection_manifest, update_pipeline_manifest,
 )
 from openmmla.tui import download as dl
@@ -6973,8 +6973,11 @@ class ServicePanel(Widget):
 
             staged: dict[tuple[str, str, str], int] = {}
             fetched = 0
+            already = 0
             for stream in streams:
-                count = await self._cut_stream_for_session(stream, session_id, start.timestamp(), end.timestamp())
+                count, present = await self._cut_stream_for_session(
+                    stream, session_id, start.timestamp(), end.timestamp())
+                already += present
                 if stream.ssh_profile == "local":
                     fetched += count
                 elif count:
@@ -6996,11 +6999,13 @@ class ServicePanel(Widget):
                     # finish keeps its cuts, so Download again resumes instead of cutting anew
                     await asyncio.to_thread(
                         ssh_run_sync, profile, stream_cuts.bash(stream_cuts.cleanup_script(record_root, session_id)), 30.0)
-            if fetched:
+            if fetched or already:
                 self._log(
-                    f"[green]{fetched} recording(s) of session {session_id} are under "
-                    f"artifacts/{session_id}/collection/<host>/. Their names carry the time of their first "
-                    f"frame, so a base replays them with source: file.[/green]"
+                    f"[green]{fetched + already} recording(s) of session {session_id} are under "
+                    f"artifacts/{session_id}/collection/<host>/"
+                    + (f" ({already} of them were already here)" if already else "")
+                    + ". Their names carry the time of their first frame, so a base replays them with "
+                    "source: file.[/green]"
                 )
             else:
                 self._log(
@@ -7031,21 +7036,23 @@ class ServicePanel(Widget):
             return None
         return (result.stdout or "") + (result.stderr or "")
 
-    async def _cut_stream_for_session(self, stream, session_id: str, start: float, end: float) -> int:
+    async def _cut_stream_for_session(self, stream, session_id: str, start: float, end: float) -> tuple[int, int]:
         """cut one stream's recordings to the window; returns how many cuts were
         made (staged on the capture host, or written straight into artifacts/
-        for a stream that is captured on this machine)."""
+        for a stream that is captured on this machine) and how many were
+        already here in full and not cut again."""
         where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
         listing = await self._run_stream_script(
             stream, stream_cuts.list_script(stream.record_root, stream.host_label, stream.kind, stream.name), 30.0)
         files = stream_cuts.parse_listing(listing or "")
         if files is None:
             self._log(f"  [red]✗ {stream.name}: could not list its recordings on {where}.[/red]")
-            return 0
+            return 0, 0
         cuts = stream_cuts.cuts_for_window(files, start, end)
         if not cuts:
             self._log(f"  [dim]- {stream.name}: nothing recorded on {where} in that time[/dim]")
-            return 0
+            return 0, 0
+        here_dir = Path(collection_artifact_dir(self._root, session_id, stream.host_label)) / stream.kind
 
         if stream.ssh_profile == "local":
             folder = str(Path(collection_artifact_dir(self._root, session_id, stream.host_label)) / stream.kind)
@@ -7055,6 +7062,7 @@ class ServicePanel(Widget):
                       f"{shlex.quote(stream.host_label)}/{stream.kind}")
             quoted_dir = True
         made = 0
+        present = 0
         for cut in cuts:
             if stream.kind == "video":
                 probed = await self._run_stream_script(stream, stream_cuts.keyframe_script(cut), 60.0)
@@ -7066,16 +7074,30 @@ class ServicePanel(Widget):
                     )
                 else:
                     cut = moved
+            name = stream_cuts.cut_name(stream.name, cut, stream.kind)
+            # a cut is named after its first frame only: a copy made while the
+            # session was still going has this name too, and its length tells
+            here = here_dir / name
+            covered = await asyncio.to_thread(copy_covers, here, cut.duration)
+            if covered:
+                present += 1
+                self._log(f"  [dim]- {stream.name}: {name} is already here in full[/dim]")
+                continue
             output = await self._run_stream_script(
                 stream, stream_cuts.cut_script(cut, folder, stream.name, stream.kind, quoted_dir=quoted_dir), 900.0)
-            name = stream_cuts.cut_name(stream.name, cut, stream.kind)
             if output is not None and "CUT" in output.split():
                 made += 1
+                if covered is False and here.exists() and stream.ssh_profile != "local":
+                    # the shorter copy goes, or the full cut would land beside it
+                    # as a conflict copy whose name no longer says when it starts
+                    # (a local cut is written over it in place)
+                    here.unlink(missing_ok=True)
+                    self._log(f"  [cyan]{stream.name}: the copy of {name} here stopped short; it is replaced.[/cyan]")
                 self._log(f"  [green]✓[/green] {stream.name}: {cut.duration:.0f}s from {where} -> {name}")
             else:
                 detail = " ".join((output or "no answer").split())[-200:]
                 self._log(f"  [red]✗ {stream.name}: ffmpeg could not cut {name} on {where}: {rich_escape(detail)}[/red]")
-        return made
+        return made, present
 
     def on_stream_panel_download_requested(self, event: StreamPanel.DownloadRequested) -> None:
         """Download in the Streams tab: the stream recordings of one capture host."""

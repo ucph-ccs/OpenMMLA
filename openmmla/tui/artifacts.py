@@ -5,11 +5,14 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from openmmla.tui.ssh import _resolve_local_command
 
 
 ARTIFACTS_DIR = "artifacts"
@@ -97,6 +100,40 @@ def _file_digest(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# a copy this much shorter than the part it stands for was taken before the
+# session was over; frame and container rounding stay well below it
+MEDIA_SLACK_SECONDS = 1.5
+
+
+def media_duration(path) -> float | None:
+    """seconds of a local audio or video file, by ffprobe; None when there is
+    no ffprobe here or it cannot read the file."""
+    try:
+        result = subprocess.run(
+            [_resolve_local_command("ffprobe"), "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def copy_covers(path, seconds: float) -> bool | None:
+    """whether the file at `path` already holds `seconds` of footage. False
+    when it is missing, empty or shorter (a copy taken while the session was
+    still going), None when its length cannot be read."""
+    try:
+        if os.path.getsize(path) <= 0:
+            return False
+    except OSError:
+        return False
+    have = media_duration(path)
+    if have is None:
+        return None
+    return have >= seconds - MEDIA_SLACK_SECONDS
 
 
 def _same_file(left: Path, right: Path) -> bool:
