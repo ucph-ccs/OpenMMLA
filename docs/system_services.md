@@ -90,7 +90,7 @@ brew install nginx
 sudo apt install -y nginx
 ```
 
-Configuration (the upstreams) is rendered from `pipelines/uber-server/nginx/config.yml`; see the [Nginx Setup Guide](nginx.md).
+Configuration (the upstreams) is rendered from `pipelines/uber-server/nginx/config.yml`; see the [Nginx Setup Guide](nginx.md). That file is gitignored, so a host that got the project by `git pull` has none until the Gateway card's Config tab saves one there (or **Sync to Remote** copies this machine's); Start stops with a note until then.
 
 ### MediaMTX (optional)
 

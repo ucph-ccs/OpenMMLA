@@ -2661,6 +2661,16 @@ def _service_requires_config(svc: ServiceDef) -> bool:
     return svc.launch_type not in ("make", "vllm", "collection")
 
 
+# make targets that read a config.yml of their own (gitignored, so a pulled
+# checkout has none), by the pipeline whose Config form writes it: nginx
+# renders its upstreams from it, gunicorn and the celery worker load it at import
+_MAKE_CONFIG_PIPELINES: dict[str, str] = {
+    "nginx": "Nginx",
+    "flask": "Flask Backend",
+    "celery": "Flask Backend",
+}
+
+
 def _service_python_hint(svc: ServiceDef) -> str:
     return "3.12" if svc.conda_env == "vfa-vllm" else "3.10"
 
@@ -5978,10 +5988,14 @@ class ServicePanel(Widget):
         could be determined, or None when the check could not run (missing SSH
         profile or SSH error) so the caller does not block the launch.
         """
+        return self._remote_file_exists(os.path.join(svc.config_dir, "config.yml"), target)
+
+    def _remote_file_exists(self, local_path: str, target: str) -> tuple[bool | None, str]:
+        """whether the file at `local_path`'s place in the project exists on
+        `target`, as (exists, remote_path); None when that could not be told."""
         profile = get_profile_by_name(target)
         if profile is None:
-            return None, "config.yml"
-        local_path = os.path.join(svc.config_dir, "config.yml")
+            return None, os.path.basename(local_path)
         remote_path = self._remote_config_path(local_path, profile)
         quoted = _quote_remote_path(remote_path)
         cmd = f"if [ -f {quoted} ]; then printf FOUND; else printf MISSING; fi"
@@ -5997,6 +6011,35 @@ class ServicePanel(Widget):
         if "FOUND" in out:
             return True, remote_path
         return None, remote_path
+
+    def _make_config_ready(self, svc: ServiceDef, target: str) -> bool:
+        """False, having said why, when a make target that reads a config.yml
+        would start on a host that has none: make would get as far as a
+        traceback (nginx) or a tmux session that dies at once (flask, celery)."""
+        pipeline = self._pipeline_map.get(_MAKE_CONFIG_PIPELINES.get(_make_target_for(svc.name), ""))
+        if pipeline is None:
+            return True
+        if target == "local":
+            exists, where = os.path.isfile(pipeline.config_path), pipeline.config_path
+        else:
+            exists, where = self._remote_file_exists(pipeline.config_path, target)
+        if exists is None:
+            self._log(f"[yellow]NOTE: could not verify {where} on '{target}'; launching anyway.[/yellow]")
+            return True
+        if exists:
+            return True
+        on_host = "here" if target == "local" else f"on '{target}'"
+        self._log(f"[red]{svc.display_name}: config.yml not found {on_host} at {where}[/red]")
+        form = SYSTEM_SERVICE_LABELS["nginx" if pipeline.name == "Nginx" else "flask"]
+        hint = (
+            f"Open the Config tab of {form}, set your values, and click Save "
+            f"to write config.yml {on_host} before launching"
+        )
+        if target != "local" and os.path.isfile(pipeline.config_path):
+            # the form on that host starts from defaults; this one is filled in
+            hint += f", or copy this machine's with Host = Local and Sync to Remote to '{target}'"
+        self._log(f"[yellow]{hint}.[/yellow]")
+        return False
 
     def _ips_transform_remote_dir(self, profile) -> str:
         rel_path = os.path.relpath(_ips_transform_local_dir(self._root), self._root)
@@ -6351,6 +6394,8 @@ class ServicePanel(Widget):
             # System Settings store before launching (single source of truth).
             if not self._reconcile_shared_sections_before_launch(svc, target, is_remote):
                 return
+        elif svc.launch_type == "make" and not self._make_config_ready(svc, target):
+            return
 
         if not is_remote and svc.launch_type != "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None

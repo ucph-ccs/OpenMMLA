@@ -268,6 +268,7 @@ endif
 
 nginx: install-nginx
 	@echo "🔁 Rendering and starting NGINX"
+	@test -f nginx/config.yml || { echo "❌ nginx/config.yml is missing: fill in the Config tab of the Gateway card in the console, or copy nginx/config_template.yml to it and edit it"; exit 1; }
 ifeq ($(check_port), 1)
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf --port-check
 else

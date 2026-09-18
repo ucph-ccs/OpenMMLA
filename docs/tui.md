@@ -109,7 +109,7 @@ Every launchable leaf opens a card with the service name, its conda env and laun
 
 Output of every action goes to the command console at the bottom of the tab. It is one transcript for the whole tab, since a build or a remote stop keeps printing after you move to another card; a divider such as `── Stream Server (MediaMTX) · Local ──` is drawn before the first line that belongs to another card or host.
 
-Before a Start the console checks that `config.yml` exists on the target host, that the sections managed by System Settings are up to date, and that the conda environment exists. On a remote host whose config is out of date, the first Start only pushes the current System Settings and prints `Relaunch <service> once the sync above completes.`; press Start again. This is by design.
+Before a Start the console checks that `config.yml` exists on the target host, that the sections managed by System Settings are up to date, and that the conda environment exists. The Gateway (Nginx), Dashboard (Flask) and Dashboard (Celery) cards need a `config.yml` too (`pipelines/uber-server/nginx/` and `pipelines/uber-server/dashboard/flask-backend/`, gitignored like every config, so a freshly pulled host has none): Start stops with a note when the card's host lacks it. Write it there with **Save** on that card's Config tab, or copy this machine's with Host = `Local` and **Sync to Remote**. On a remote host whose config is out of date, the first Start only pushes the current System Settings and prints `Relaunch <service> once the sync above completes.`; press Start again. This is by design.
 
 ### System Settings
 
