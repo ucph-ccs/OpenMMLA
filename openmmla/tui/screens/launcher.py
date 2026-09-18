@@ -8561,7 +8561,9 @@ class ServicePanel(Widget):
                 continue
             args.extend([flag, text])
         command = " ".join(shlex.quote(arg) for arg in args)
-        return f"PYTHONPATH={_REMOTE_COLLECTION_RUNTIME_ENV}:$PYTHONPATH {command}"
+        # the recorders run ffmpeg, which Homebrew installs outside the PATH of
+        # the login bash they start in: on macOS only zsh's profile adds it
+        return _with_stream_path(f"PYTHONPATH={_REMOTE_COLLECTION_RUNTIME_ENV}:$PYTHONPATH {command}")
 
     @staticmethod
     def _interactive_ssh_args(profile) -> list[str]:
