@@ -60,32 +60,43 @@ def _scheme_prefixes(protocol) -> tuple[str, ...]:
     return tuple(f"{scheme}://" for scheme in schemes)
 
 
-def get_stream_urls(config: dict, protocol=None) -> list[str]:
-    """extract the URLs bases can pull from the Streams config section, in config order.
+def get_stream_sources(config: dict, protocol=None) -> list[tuple[str, str]]:
+    """(name, url) of the streams bases can pull from the Streams config
+    section, in config order: what a base's source_index counts through when
+    its source is 'stream'.
 
     An entry is pulled from its read_target (e.g. the RTSP URL MediaMTX serves)
     when set, otherwise from its target. Only rtmp/rtsp/srt URLs qualify;
     ``protocol`` (one scheme or a tuple of schemes) narrows them. Falls back to
-    the legacy RTMP section (audio_streams / video_streams) if Streams is empty.
+    the legacy RTMP section (audio_streams / video_streams) if Streams is empty,
+    whose URLs are named after their last path segment.
     """
     prefixes = _scheme_prefixes(protocol)
     streams = config.get("Streams", {})
     if isinstance(streams, dict) and streams:
-        urls = []
-        for entry in streams.values():
+        found = []
+        for name, entry in streams.items():
             if isinstance(entry, dict):
                 url = stream_read_url(entry)
                 if url.startswith(prefixes):
-                    urls.append(url)
-        if urls:
-            return urls
+                    found.append((str(name), url))
+        if found:
+            return found
 
     rtmp = config.get("RTMP", {})
     if isinstance(rtmp, dict):
         for key in ("audio_streams", "video_streams"):
             val = rtmp.get(key)
             if isinstance(val, list):
-                return [u for u in val if isinstance(u, str) and u.startswith(prefixes)]
-            if isinstance(val, str) and "," in val:
-                return [u.strip() for u in val.split(",") if u.strip().startswith(prefixes)]
+                urls = [u for u in val if isinstance(u, str) and u.startswith(prefixes)]
+            elif isinstance(val, str) and "," in val:
+                urls = [u.strip() for u in val.split(",") if u.strip().startswith(prefixes)]
+            else:
+                continue
+            return [(u.rstrip("/").rsplit("/", 1)[-1], u) for u in urls]
     return []
+
+
+def get_stream_urls(config: dict, protocol=None) -> list[str]:
+    """the URLs bases can pull, in config order (see get_stream_sources)."""
+    return [url for _, url in get_stream_sources(config, protocol)]

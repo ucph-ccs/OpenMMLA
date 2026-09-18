@@ -78,6 +78,7 @@ from openmmla.tui import download as dl
 from openmmla.tui import recordings, stream_cuts
 from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
 from openmmla.utils.yaml_dump import dump_yaml_pretty
+from openmmla.utils.constants import get_stream_sources
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -4652,10 +4653,12 @@ class ServicePanel(Widget):
         if isinstance(existing, dict):
             cameras = sorted((existing.get("Cameras") or {}).keys())
             base_types = sorted((existing.get("Base") or {}).keys())
+            # 'rtmp' is not offered: it is the old name of 'stream' (an entry
+            # that still says it is shown as stream)
             source_types = {
-                "ASR Base": ["udp", "tcp", "pyaudio", "stream", "rtmp", "lsl", "file"],
-                "IPS Base": ["opencv", "stream", "rtmp", "lsl", "file"],
-                "VFA Base": ["opencv", "stream", "rtmp", "lsl", "file"],
+                "ASR Base": ["udp", "tcp", "pyaudio", "stream", "lsl", "file"],
+                "IPS Base": ["opencv", "stream", "lsl", "file"],
+                "VFA Base": ["opencv", "stream", "lsl", "file"],
             }.get(pipeline.name, [])
             source_files = self._list_source_files(existing, self._get_panel_target())
             for f in pipeline.fields:
@@ -4671,6 +4674,9 @@ class ServicePanel(Widget):
                     # _source_index_widget only when that base's source is 'file')
                     if "source_index" in (f.entry_schema or {}):
                         choices["source_index"] = source_files
+                        # the streams a 'stream' base can pull, in the order
+                        # its source_index counts them
+                        choices["source_index:stream"] = get_stream_sources(existing)
                     f.entry_field_choices = choices
 
         _src_target = self._get_panel_target()

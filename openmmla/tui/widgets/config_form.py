@@ -13,6 +13,7 @@ from textual.widgets import (
 from textual.widget import Widget
 
 from openmmla.tui.schema.loader import FieldDef
+from openmmla.utils.constants import normalize_source
 
 # media files the file-browser highlights (others are still shown, greyed)
 _MEDIA_EXTS = (
@@ -293,8 +294,7 @@ class DictListField(Widget):
     # and the widget type — see _source_index_widget)
     _SOURCE_INDEX_HINTS = {
         "opencv": "→ which local camera (0-based index)",
-        "stream": "→ which pullable Streams entry (0-based index among rtmp/rtsp/srt URLs)",
-        "rtmp": "→ same as stream (legacy name)",
+        "stream": "→ which stream of this config's Streams it pulls (a new one is listed once the Streams are saved)",
         "file": "→ pick a video file from file_dir",
         "pyaudio": "→ PyAudio input device index",
         "lsl": "→ LSL stream name (resolved by name)",
@@ -304,7 +304,7 @@ class DictListField(Widget):
 
     @classmethod
     def _source_index_hint(cls, source) -> str:
-        return cls._SOURCE_INDEX_HINTS.get(str(source).strip().lower(), "")
+        return cls._SOURCE_INDEX_HINTS.get(normalize_source(source), "")
 
     @staticmethod
     def _source_unused(source) -> bool:
@@ -366,7 +366,32 @@ class DictListField(Widget):
         adapts: file → a dropdown of video files in file_dir; lsl → a text
         input for the stream name; everything else → a plain index/text input
         (disabled for udp/tcp, which bind via 'port')."""
-        s = str(source).strip().lower()
+        s = normalize_source(source)
+        if s == "stream":
+            # the pullable Streams entries as (name, url): the base counts
+            # through them in this order, so the index is what is stored
+            pullable = self._choices.get("source_index:stream") or []
+            streams = [(f"{i} · {name}  ({url})", str(i)) for i, (name, url) in enumerate(pullable)]
+            if streams:
+                cur = str(val).strip() if val not in (None, "") else ""
+                by_name = {name: str(i) for i, (name, _url) in enumerate(pullable)}
+                if cur and not any(value == cur for _, value in streams):
+                    if cur in by_name:
+                        cur = by_name[cur]      # a name written by hand
+                    else:
+                        # kept rather than dropped on the next Save
+                        streams.append((f"{cur}  (not a pullable stream of this config)", cur))
+                kwargs = {"value": cur} if cur else {}
+                return Select(
+                    streams, prompt="Select stream...", id=widget_id,
+                    classes="dict-entry-input", **kwargs,
+                )
+            w = Input(
+                value=str(val) if val is not None else "",
+                id=widget_id, classes="dict-entry-input",
+            )
+            w.placeholder = "no pullable stream in Streams yet: add one there and Save"
+            return w
         if s == "file":
             files = self._choices.get("source_index") or []
             options = [(str(f), str(f)) for f in files]
@@ -417,6 +442,9 @@ class DictListField(Widget):
         idx = self._next_idx
         self._next_idx += 1
         container_id = _safe_id(f"dle__{self.field_def.path}__{idx}")
+        if "source" in self._schema and str(entry.get("source", "")).strip():
+            # 'rtmp' is the old name of 'stream': shown, and saved, as stream
+            entry = dict(entry, source=normalize_source(entry.get("source")))
         src_val = str(entry.get("source", "")) if "source" in self._schema else ""
         with Vertical(classes="dict-entry", id=container_id):
             yield Static(f"Entry {idx + 1}", classes="dict-entry-header")
