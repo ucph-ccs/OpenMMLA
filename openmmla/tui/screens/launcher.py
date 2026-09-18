@@ -4920,8 +4920,8 @@ class ServicePanel(Widget):
             container.mount(Static(
                 f"Save writes this machine's project. Sync to Remote copies the {shared_section} "
                 f"section to another machine: into its pipeline configs that carry it, and into its own "
-                f"config/system_services.yml (created when no pipeline config carries the section), so "
-                f"what runs there connects to the same service.",
+                f"config/system_services.yml (created when it has none), so what runs there connects to "
+                f"the same service.",
                 classes="sync-note",
             ))
         container.mount(bar)
@@ -5574,10 +5574,11 @@ class ServicePanel(Widget):
             cache_key = self._config_cache_key(pipeline.config_path, target)
             entries.append((tmp.name, remote_path, cache_key, remote_config))
 
-        # a section no pipeline config carries has nowhere else to go on that
-        # machine than its own settings file: a console there reads it from there
+        # the host's own settings file gets the section too, and is created
+        # when the host has none: its services read it at startup, a console
+        # there shows it, and both then say what this one says
         own_store = self._remote_settings_entry(
-            target, profile, {section_name: section_data}, create=save or not carriers)
+            target, profile, {section_name: section_data}, create=True)
         if own_store is not None:
             temp_paths.append(own_store[0])
             entries.append(own_store)
@@ -5589,10 +5590,9 @@ class ServicePanel(Widget):
                 except OSError:
                     pass
             self._show_status(
-                f"'{target}' already has these {section_name} settings (its config/system_services.yml says "
-                f"the same)." if not carriers else
-                f"Nothing to sync for {section_name}: every pipeline config on '{target}' that carries it pins "
-                f"its own, and its config/system_services.yml, if it has one, already says this.")
+                f"'{target}' already has these {section_name} settings: its config/system_services.yml says "
+                f"the same, and every pipeline config there that carries the section says the same or pins "
+                f"its own.")
             return
 
         if not save:
@@ -5621,8 +5621,8 @@ class ServicePanel(Widget):
     def _sync_streams_to_target(self, target: str) -> None:
         """Sync to Remote on the Stream Server form: that machine gets this
         address in its own settings file (no pipeline config carries the
-        section; a console there reads it from the file, which is created when
-        it has none) and the stream URLs the address completed, which are what
+        section; a console there reads it from the file, created when it has
+        none) and the stream URLs the address completed, which are what
         a base there pulls: the Streams entries of the local pipeline configs
         go into that machine's copies, and the rest of each config stays as it
         is there."""
@@ -5684,13 +5684,14 @@ class ServicePanel(Widget):
         """scp entry that writes `sections` into the host's own
         config/system_services.yml, or None when there is nothing to write.
 
-        The services read that file on top of their pipeline config, so a copy
-        left behind on a host (by a console that once ran there) silently beats
-        everything this console pushes. Sync to Remote brings it in step but
-        does not create it for a section the pipeline configs carry: a host
-        without one takes those from its pipeline configs. `create` is a Save
-        on that host's own settings form, or a section no pipeline config
-        carries, which has nowhere else to go there."""
+        The services read that file on top of their pipeline config (a section
+        the pipeline pins stays its own), so a copy left behind on a host, by a
+        console that once ran there, would silently beat everything this
+        console pushes if it were left out: Sync to Remote and a Save on that
+        host's own form both bring it in step, and create it when the host has
+        none, so what its services read and what a console there shows are
+        what this one says. `create` False only looks (nothing is written for
+        a host without the file)."""
         local_path = self._remote_settings_path()
         remote_store, _ = self._load_config_for_target(local_path, show_status=False, target=target)
         if not isinstance(remote_store, dict):
