@@ -62,6 +62,13 @@ sudo-keepalive:
 	@while true; do $(SUDO) -n true; sleep 60; done 2>/dev/null &
 
 # ======= External listener configuration =======
+# the TUI passes SUDO="sudo -S", which reads the password from stdin: text
+# piped into `sudo tee` would be taken for the password, so a root shell
+# writes the text, handed over as an argument. On Linux the config folders
+# (/etc/redis) are closed to the login user, so tests and greps use sudo too
+sudo_append = $(SUDO) sh -c 'printf "$$1" >> "$$2"' sh $(1) $(2)
+sudo_write = $(SUDO) sh -c 'printf "$$1" > "$$2"' sh $(1) $(2)
+
 configure-mongodb-external:
 ifeq ($(IS_MAC), 1)
 	@config="$(MONGO_CONFIG_MAC)"; \
@@ -73,22 +80,22 @@ ifeq ($(IS_MAC), 1)
 		elif grep -qE '^net:[[:space:]]*$$' "$$config"; then \
 			$(SUDO) perl -0pi -e 's/(^net:\n)/$${1}  bindIp: $(OPENMMLA_BIND_ADDRESS)\n/m' "$$config"; \
 		else \
-			printf '\nnet:\n  bindIp: $(OPENMMLA_BIND_ADDRESS)\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'\nnet:\n  bindIp: $(OPENMMLA_BIND_ADDRESS)\n',"$$config"); \
 		fi; \
 	else \
 		echo "MongoDB config not found at $$config; skipping listener config"; \
 	fi
 else
 	@config="$(MONGO_CONFIG_LINUX)"; \
-	if [ -f "$$config" ]; then \
+	if $(SUDO) test -f "$$config"; then \
 		echo "Configuring MongoDB to listen on $(OPENMMLA_BIND_ADDRESS)"; \
 		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
-		if grep -qE '^[[:space:]]*bindIp:' "$$config"; then \
+		if $(SUDO) grep -qE '^[[:space:]]*bindIp:' "$$config"; then \
 			$(SUDO) sed -i -E 's/^[[:space:]]*bindIp:.*/  bindIp: $(OPENMMLA_BIND_ADDRESS)/' "$$config"; \
-		elif grep -qE '^net:[[:space:]]*$$' "$$config"; then \
+		elif $(SUDO) grep -qE '^net:[[:space:]]*$$' "$$config"; then \
 			$(SUDO) perl -0pi -e 's/(^net:\n)/$${1}  bindIp: $(OPENMMLA_BIND_ADDRESS)\n/m' "$$config"; \
 		else \
-			printf '\nnet:\n  bindIp: $(OPENMMLA_BIND_ADDRESS)\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'\nnet:\n  bindIp: $(OPENMMLA_BIND_ADDRESS)\n',"$$config"); \
 		fi; \
 	else \
 		echo "MongoDB config not found at $$config; skipping listener config"; \
@@ -104,30 +111,30 @@ ifeq ($(IS_MAC), 1)
 		if grep -qE '^bind ' "$$config"; then \
 			$(SUDO) sed -i '' -E 's/^bind .*/bind $(OPENMMLA_BIND_ADDRESS) ::/' "$$config"; \
 		else \
-			printf '\nbind $(OPENMMLA_BIND_ADDRESS) ::\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'\nbind $(OPENMMLA_BIND_ADDRESS) ::\n',"$$config"); \
 		fi; \
 		if grep -qE '^protected-mode ' "$$config"; then \
 			$(SUDO) sed -i '' -E 's/^protected-mode .*/protected-mode no/' "$$config"; \
 		else \
-			printf 'protected-mode no\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'protected-mode no\n',"$$config"); \
 		fi; \
 	else \
 		echo "Redis config not found at $$config; skipping listener config"; \
 	fi
 else
 	@config="$(REDIS_CONFIG_LINUX)"; \
-	if [ -f "$$config" ]; then \
+	if $(SUDO) test -f "$$config"; then \
 		echo "Configuring Redis to listen on $(OPENMMLA_BIND_ADDRESS)"; \
 		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
-		if grep -qE '^bind ' "$$config"; then \
+		if $(SUDO) grep -qE '^bind ' "$$config"; then \
 			$(SUDO) sed -i -E 's/^bind .*/bind $(OPENMMLA_BIND_ADDRESS) ::/' "$$config"; \
 		else \
-			printf '\nbind $(OPENMMLA_BIND_ADDRESS) ::\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'\nbind $(OPENMMLA_BIND_ADDRESS) ::\n',"$$config"); \
 		fi; \
-		if grep -qE '^protected-mode ' "$$config"; then \
+		if $(SUDO) grep -qE '^protected-mode ' "$$config"; then \
 			$(SUDO) sed -i -E 's/^protected-mode .*/protected-mode no/' "$$config"; \
 		else \
-			printf 'protected-mode no\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'protected-mode no\n',"$$config"); \
 		fi; \
 	else \
 		echo "Redis config not found at $$config; skipping listener config"; \
@@ -140,19 +147,19 @@ ifeq ($(IS_MAC), 1)
 	if [ -f "$$config" ]; then \
 		echo "Configuring Mosquitto to listen on $(OPENMMLA_BIND_ADDRESS)"; \
 		$(SUDO) mkdir -p "$$conf_dir"; \
-		printf 'listener 1883 $(OPENMMLA_BIND_ADDRESS)\nallow_anonymous $(OPENMMLA_MQTT_ALLOW_ANONYMOUS)\n' | $(SUDO) tee "$$listener_conf" >/dev/null; \
+		$(call sudo_write,'listener 1883 $(OPENMMLA_BIND_ADDRESS)\nallow_anonymous $(OPENMMLA_MQTT_ALLOW_ANONYMOUS)\n',"$$listener_conf"); \
 		if ! grep -qE "^[[:space:]]*include_dir[[:space:]]+$$conf_dir" "$$config"; then \
-			printf '\ninclude_dir %s\n' "$$conf_dir" | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,"\ninclude_dir $$conf_dir\n","$$config"); \
 		fi; \
 	else \
 		echo "Mosquitto config not found at $$config; skipping listener config"; \
 	fi
 else
 	@config="$(MOSQUITTO_CONFIG_LINUX)"; conf_dir="/etc/mosquitto/conf.d"; listener_conf="$$conf_dir/openmmla-listener.conf"; \
-	if [ -f "$$config" ] || [ -d "$$conf_dir" ]; then \
+	if $(SUDO) test -f "$$config" || $(SUDO) test -d "$$conf_dir"; then \
 		echo "Configuring Mosquitto to listen on $(OPENMMLA_BIND_ADDRESS)"; \
 		$(SUDO) mkdir -p "$$conf_dir"; \
-		printf 'listener 1883 $(OPENMMLA_BIND_ADDRESS)\nallow_anonymous $(OPENMMLA_MQTT_ALLOW_ANONYMOUS)\n' | $(SUDO) tee "$$listener_conf" >/dev/null; \
+		$(call sudo_write,'listener 1883 $(OPENMMLA_BIND_ADDRESS)\nallow_anonymous $(OPENMMLA_MQTT_ALLOW_ANONYMOUS)\n',"$$listener_conf"); \
 	else \
 		echo "Mosquitto config not found; skipping listener config"; \
 	fi
@@ -167,20 +174,20 @@ ifeq ($(IS_MAC), 1)
 		if grep -qE '^[#[:space:]]*http-bind-address[[:space:]]*=' "$$config"; then \
 			$(SUDO) sed -i '' -E 's|^[#[:space:]]*http-bind-address[[:space:]]*=.*|http-bind-address = ":8086"|' "$$config"; \
 		else \
-			printf '\nhttp-bind-address = ":8086"\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'\nhttp-bind-address = ":8086"\n',"$$config"); \
 		fi; \
 	else \
 		echo "InfluxDB config not found at $$config; default InfluxDB bind is usually :8086"; \
 	fi
 else
 	@config="$(INFLUX_CONFIG_LINUX)"; \
-	if [ -f "$$config" ]; then \
+	if $(SUDO) test -f "$$config"; then \
 		echo "Configuring InfluxDB to listen on all interfaces"; \
 		$(SUDO) cp "$$config" "$$config.openmmla.bak" || true; \
-		if grep -qE '^[#[:space:]]*http-bind-address[[:space:]]*=' "$$config"; then \
+		if $(SUDO) grep -qE '^[#[:space:]]*http-bind-address[[:space:]]*=' "$$config"; then \
 			$(SUDO) sed -i -E 's|^[#[:space:]]*http-bind-address[[:space:]]*=.*|http-bind-address = ":8086"|' "$$config"; \
 		else \
-			printf '\nhttp-bind-address = ":8086"\n' | $(SUDO) tee -a "$$config" >/dev/null; \
+			$(call sudo_append,'\nhttp-bind-address = ":8086"\n',"$$config"); \
 		fi; \
 	else \
 		echo "InfluxDB config not found at $$config; default InfluxDB bind is usually :8086"; \
