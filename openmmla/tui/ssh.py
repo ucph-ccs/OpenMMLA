@@ -397,6 +397,9 @@ def resolve_ssh_endpoint(host: str, port: int) -> tuple[str, int]:
 # probe loop, read by every screen's target dropdown
 TARGET_STATES: dict[str, str] = {}
 
+# profile name -> failed probes in a row while TARGET_STATES still says online
+_PROBE_MISSES: dict[str, int] = {}
+
 
 # host the Launcher's Host bar is on; other screens open on the same host
 # instead of always falling back to "local"
@@ -495,12 +498,19 @@ def target_options() -> list[tuple[str, str]]:
     )
 
 
-def probe_all_profiles(timeout: float = 1.0, deadline: float = 15.0) -> dict[str, str]:
+def probe_all_profiles(
+    timeout: float = 1.0, deadline: float = 15.0, confirm_offline: int = 1,
+) -> dict[str, str]:
     """probe every SSH profile concurrently and update TARGET_STATES.
 
     The connect timeout does not bound DNS/mDNS resolution (a dead .local
     name can take ~5s to fail), so an overall deadline caps the wall time:
-    anything unresolved by then is reported offline."""
+    anything unresolved by then is reported offline.
+
+    A host that was online goes offline only after `confirm_offline` failed
+    probes in a row. A background loop passes 2, so one blip of this
+    machine's network (every host failing at once) does not move cards to
+    Local; a probe the user asked for passes the default and is definitive."""
     from concurrent.futures import ThreadPoolExecutor, wait
     profiles = load_ssh_profiles()
     if not profiles:
@@ -525,6 +535,14 @@ def probe_all_profiles(timeout: float = 1.0, deadline: float = 15.0) -> dict[str
             # still resolving when the deadline hit (e.g. slow mDNS): we don't
             # know either way — never mislabel a reachable host as offline
             states[name] = "unknown"
+    for name, state in states.items():
+        if state == "offline" and TARGET_STATES.get(name) == "online":
+            misses = _PROBE_MISSES.get(name, 0) + 1
+            if misses < confirm_offline:
+                _PROBE_MISSES[name] = misses
+                states[name] = "online"
+                continue
+        _PROBE_MISSES.pop(name, None)
     # do not wait for stragglers stuck in mDNS resolution
     pool.shutdown(wait=False, cancel_futures=True)
     TARGET_STATES.clear()

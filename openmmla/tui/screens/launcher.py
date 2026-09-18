@@ -3024,7 +3024,8 @@ class ServicePanel(Widget):
 
     async def _async_probe_targets(self) -> None:
         try:
-            states = await asyncio.to_thread(probe_all_profiles)
+            # a host is taken for offline on its second miss in a row
+            states = await asyncio.to_thread(probe_all_profiles, confirm_offline=2)
             if states != self._target_states:
                 for name, state in states.items():
                     previous = self._target_states.get(name)
