@@ -2957,6 +2957,9 @@ class ServicePanel(Widget):
         # press — or the other collection tab's Download — is refused instead of
         # racing the first one into the same staging directory
         self._downloads_in_flight: set[str] = set()
+        # (target, session) of a Delete Remote that is running: a Download of
+        # that folder waits for it, as a Delete waits for a Download
+        self._remote_deletes_in_flight: set[tuple[str, str]] = set()
         self._staging_swept: bool = False
         self._target_config_cache: dict[tuple[str, str], dict] = {}
         self._target_platform_cache: dict[str, str] = {}
@@ -6714,6 +6717,12 @@ class ServicePanel(Widget):
             if not session_id:
                 self._log("[yellow]No valid collection session id. Enter one or start a collection first.[/yellow]")
                 return
+            if (target, session_id) in self._remote_deletes_in_flight:
+                self._log(
+                    f"[yellow]'{session_id}' is being deleted on '{target}' right now; there is nothing "
+                    f"left to download there.[/yellow]"
+                )
+                return
             host_label = safe_segment(params.get("--host-label") or target, "host")
             key = f"collection-download:{target}:{session_id}:{host_label}"
             if key in self._downloads_in_flight:
@@ -6765,7 +6774,17 @@ class ServicePanel(Widget):
         if not session_id:
             self._log("[yellow]No valid collection session id. Enter one or start a collection first.[/yellow]")
             return
+        if self._collection_download_running(target, session_id):
+            self._pending_collection_delete = None
+            self._log(
+                f"[yellow]'{session_id}' is being downloaded from '{target}' right now: Delete Remote waits "
+                f"until that download is done or cancelled.[/yellow]"
+            )
+            return
         delete_key = (target, session_id)
+        if delete_key in self._remote_deletes_in_flight:
+            self._log(f"[yellow]'{session_id}' is already being deleted on '{target}'.[/yellow]")
+            return
         if self._pending_collection_delete != delete_key:
             self._pending_collection_delete = delete_key
             self._log(
@@ -7182,7 +7201,28 @@ class ServicePanel(Widget):
             "press Download again to resume.[/yellow]"
         )
 
+    def _collection_download_running(self, target: str, session_id: str) -> bool:
+        """a Download of this session from this host is running, whatever the
+        host label: with an Output Root of its own, Delete Remote removes the
+        whole session folder."""
+        prefix = f"collection-download:{target}:{session_id}:"
+        return any(key.startswith(prefix) for key in self._downloads_in_flight)
+
     async def _run_collection_remote_delete(self, profile_name: str, params: dict) -> None:
+        session_id = self._collection_session_id(params)
+        key = (profile_name, session_id)
+        # the press checked for a running download; this closes the window
+        # between that press and the worker starting
+        if self._collection_download_running(profile_name, session_id):
+            self._log(f"[yellow]'{session_id}' is being downloaded from '{profile_name}': not deleted.[/yellow]")
+            return
+        self._remote_deletes_in_flight.add(key)
+        try:
+            await self._delete_collection_remote(profile_name, params)
+        finally:
+            self._remote_deletes_in_flight.discard(key)
+
+    async def _delete_collection_remote(self, profile_name: str, params: dict) -> None:
         profile = get_profile_by_name(profile_name)
         if profile is None:
             self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
@@ -7206,11 +7246,17 @@ class ServicePanel(Widget):
         async for line in proc.stdout:
             output += line.decode(errors="replace")
         rc = await proc.wait()
-        for line in output.strip().splitlines():
-            self._log(rich_escape(line))
-        if rc == 0:
-            self._log("[green]Remote collection delete command completed.[/green]")
+        words = output.split()
+        if rc == 0 and "DELETED" in words:
+            self._log(f"[green]Deleted {profile_name}:{remote_delete_path}.[/green]")
+        elif rc == 0 and "MISSING" in words:
+            self._log(
+                f"[yellow]Nothing to delete: {profile_name}:{remote_delete_path} is not there "
+                f"(deleted before, or never recorded on this host).[/yellow]"
+            )
         else:
+            for line in output.strip().splitlines():
+                self._log(rich_escape(line))
             self._log(f"[red]Remote collection delete failed (exit {rc}).[/red]")
 
     async def _mark_session_ended(self, session_id: str, target: str = "local") -> None:
