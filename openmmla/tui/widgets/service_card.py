@@ -326,7 +326,7 @@ class ServiceCard(Widget):
         with Vertical():
             yield Static(f"[b]{self.service_def.display_name}[/b]", classes="card-title")
             yield Static(
-                f"  env: {self.service_def.conda_env}  |  type: {self.service_def.shown_type}",
+                f"  env: {self.service_def.conda_env or 'none needed'}  |  type: {self.service_def.shown_type}",
                 classes="card-meta",
             )
             if self.service_def.description:
@@ -423,7 +423,7 @@ class ServiceCard(Widget):
         with Vertical():
             yield Static(f"[b]{self.service_def.display_name}[/b]", classes="card-title")
             yield Static(
-                f"  env: {self.service_def.conda_env}  |  type: {self.service_def.shown_type}",
+                f"  env: {self.service_def.conda_env or 'none needed'}  |  type: {self.service_def.shown_type}",
                 classes="card-meta",
             )
             if self.service_def.description:
@@ -793,7 +793,7 @@ class ServiceCard(Widget):
             metas = list(self.query(".card-meta"))
             if metas:
                 metas[0].update(
-                    f"  env: {service_def.conda_env}  |  type: {service_def.shown_type}"
+                    f"  env: {service_def.conda_env or 'none needed'}  |  type: {service_def.shown_type}"
                 )
             if len(metas) > 1:
                 metas[1].update(f"  {service_def.description}")

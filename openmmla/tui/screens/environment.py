@@ -8,6 +8,7 @@ import subprocess
 from rich.markup import escape as rich_escape
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
+from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, DataTable, Button, Select, Label
 
@@ -296,6 +297,14 @@ def _format_env_status(
 
 
 class EnvironmentPanel(Widget):
+
+    class EnvsChanged(Message):
+        """a conda env on `target` was created, removed or had packages
+        installed: the Launcher's [E] markers of that host are stale."""
+
+        def __init__(self, target: str) -> None:
+            super().__init__()
+            self.target = target
 
     DEFAULT_CSS = """
     EnvironmentPanel {
@@ -733,6 +742,7 @@ class EnvironmentPanel(Widget):
         else:
             self._log(f"[red]Failed to create env '{env_name}' (exit {rc}).[/red]")
         self._refresh_table()
+        self.post_message(self.EnvsChanged("local"))
 
     async def _run_remote_create(self, profile_name: str, env_name: str, python_ver: str) -> None:
         profile = get_profile_by_name(profile_name)
@@ -756,6 +766,7 @@ class EnvironmentPanel(Widget):
         else:
             self._log(f"[red]Remote env creation failed (exit {rc}).[/red]")
         self._refresh_table()
+        self.post_message(self.EnvsChanged(profile_name))
 
     def _delete_selected_env(self) -> None:
         entry = self._get_selected_entry()
@@ -806,6 +817,7 @@ class EnvironmentPanel(Widget):
         else:
             self._log(f"[red]Failed to delete env '{env_name}' (exit {rc}).[/red]")
         self._refresh_table()
+        self.post_message(self.EnvsChanged("local"))
 
     async def _run_remote_delete(self, profile_name: str, env_name: str) -> None:
         profile = get_profile_by_name(profile_name)
@@ -829,6 +841,7 @@ class EnvironmentPanel(Widget):
         else:
             self._log(f"[red]Remote env deletion failed (exit {rc}).[/red]")
         self._refresh_table()
+        self.post_message(self.EnvsChanged(profile_name))
 
     def _install_selected_deps(self) -> None:
         entry = self._get_selected_entry()
@@ -875,6 +888,7 @@ class EnvironmentPanel(Widget):
         else:
             self._log(f"[red]Installation failed (exit {rc}).[/red]")
         self._refresh_table()
+        self.post_message(self.EnvsChanged("local"))
 
     async def _run_remote_install(self, profile_name: str, env_name: str, group: str) -> None:
         profile = get_profile_by_name(profile_name)
@@ -904,3 +918,4 @@ class EnvironmentPanel(Widget):
         else:
             self._log(f"[red]Remote install failed (exit {rc}).[/red]")
         self._refresh_table()
+        self.post_message(self.EnvsChanged(profile_name))

@@ -361,18 +361,21 @@ class CommandSession(Widget):
 
     def run(self, text: str) -> None:
         """programmatically execute a command as if typed by the user."""
+        self.run_on(self.get_target(), text)
+
+    def run_on(self, target: str, text: str) -> None:
+        """run `text` on `target` (local, or an SSH profile's name) whatever the
+        session's own selector says: a card's Start runs on the card's host."""
         text = text.strip()
         if not text:
             return
-        target = self.get_target()
+        self.log(f"[bold]{self._get_prompt(target)} {rich_escape(text)}[/bold]")
         if target == "local":
-            self.log(f"[bold]{self._get_prompt()} {rich_escape(text)}[/bold]")
             if text.startswith("cd ") or text == "cd":
                 self.run_worker(self._run_local_cd(text), exclusive=True)
             else:
                 self.run_worker(self._run_local_cmd(text), exclusive=True)
         else:
-            self.log(f"[bold]{self._get_prompt()} {rich_escape(text)}[/bold]")
             if text.startswith("cd ") or text == "cd":
                 self.run_worker(self._run_remote_cd(target, text), exclusive=True)
             else:
@@ -392,9 +395,9 @@ class CommandSession(Widget):
 
     # -- prompt ----------------------------------------------------------------
 
-    def _get_prompt(self) -> str:
+    def _get_prompt(self, target: str | None = None) -> str:
         env_prefix = f"({self._active_conda_env}) " if self._active_conda_env else ""
-        target = self.get_target()
+        target = target or self.get_target()
         if target == "local":
             display = self._local_cwd.replace(os.path.expanduser("~"), "~")
             return f"{env_prefix}{display}$"
@@ -535,7 +538,9 @@ class CommandSession(Widget):
 
     # -- sudo password auto-fill -------------------------------------------------
 
-    MAX_AUTO_PASSWORD_SENDS = 3
+    # sudo gives up by itself after three wrong answers, so this only bounds a
+    # run that keeps asking; a make target asks once per recipe line with sudo
+    MAX_AUTO_PASSWORD_SENDS = 8
 
     @staticmethod
     def _looks_like_password_prompt(text: str) -> bool:

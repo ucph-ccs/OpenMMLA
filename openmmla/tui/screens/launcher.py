@@ -2028,7 +2028,10 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             services.append(ServiceDef(
                 name=name,
                 category="System Services",
-                conda_env="uber-server",
+                # nginx renders its config with the env, gunicorn and celery run
+                # in it; a database, a broker or MediaMTX is a systemd, brew or
+                # docker process and needs none
+                conda_env="" if _make_target_for(name) in _INFRA_NO_ENV_TARGETS else "uber-server",
                 config_dir=uber_dir,
                 launch_type="make",
                 description=desc,
@@ -2518,6 +2521,10 @@ def _service_uses_conda_env(svc: ServiceDef) -> bool:
     return not (svc.launch_type == "make" and _make_target_for(svc.name) in _INFRA_NO_ENV_TARGETS)
 
 
+# how old a host's env states may be when the Launcher comes back into view
+_ENV_MARKER_MAX_AGE = 60.0
+
+
 def _env_marker_color(status: str | None) -> str | None:
     if not status or status == "Unknown":
         return None
@@ -2899,6 +2906,7 @@ class ServicePanel(Widget):
         # target -> {conda env: Ready | Partial: ... | Missing}; feeds the tree's
         # [E] markers and is refreshed off the UI thread (conda is slow)
         self._env_statuses: dict[str, dict[str, str]] = {}
+        self._env_statuses_at: dict[str, float] = {}  # when each host's were read
         # session id -> hosts this TUI launched it on, so "Stop All Hosts"
         # reaches a machine even when it is currently unreachable
         self._collection_launch_targets: dict[str, set[str]] = {}
@@ -2959,6 +2967,11 @@ class ServicePanel(Widget):
         self._probe_targets()
         self._kick_env_status_refresh("local")
 
+    def refresh_env_markers(self, target: str) -> None:
+        """the Environment tab created, removed or filled an env on `target`:
+        the [E] markers of the nodes on that host are stale."""
+        self._kick_env_status_refresh(target)
+
     def _kick_env_status_refresh(self, target: str) -> None:
         # a group per host: nodes sit on different hosts, and one host's check
         # must not cancel another's
@@ -2982,6 +2995,7 @@ class ServicePanel(Widget):
             self._log(f"[yellow]Environment check on {target} failed: {e}[/yellow]")
             return
         self._env_statuses[target] = statuses
+        self._env_statuses_at[target] = time.time()
         self._build_tree()
 
     # ── target reachability ──────────────────────────────────────
@@ -3051,6 +3065,14 @@ class ServicePanel(Widget):
 
     def on_show(self) -> None:
         self._refresh_target_options()
+        # an env may have been installed meanwhile, in the Environment tab or by
+        # hand over ssh: the markers of every host a node sits on catch up, but
+        # not on every flip of the tabs
+        now = time.time()
+        for target in list(self._env_statuses):
+            if (now - self._env_statuses_at.get(target, 0.0) > _ENV_MARKER_MAX_AGE
+                    and TARGET_STATES.get(target) != "offline"):
+                self._kick_env_status_refresh(target)
         if self._current_service_name == "Collection Session":
             self.run_worker(
                 self._reload_current_service_view(),
@@ -8434,9 +8456,9 @@ class ServicePanel(Widget):
     @staticmethod
     def _interactive_ssh_args(profile) -> list[str]:
         args = profile.base_ssh_args()
-        try:
-            ssh_index = args.index("ssh")
-        except ValueError:
+        # the ssh binary comes resolved (/usr/bin/ssh): found by its name
+        ssh_index = next((i for i, arg in enumerate(args) if os.path.basename(arg) == "ssh"), None)
+        if ssh_index is None:
             return args
         if "-tt" not in args:
             args.insert(ssh_index + 1, "-tt")
@@ -9184,6 +9206,9 @@ class ServicePanel(Widget):
                     self._log("[yellow]No remote collection components launched.[/yellow]")
 
             elif svc.launch_type == "make":
+                # in the command session, as on Local: its shell has conda (a
+                # login shell over ssh does not reach the conda init of .bashrc),
+                # and a sudo prompt is answered with the SSH profile's password
                 if _infra_docker_mode(svc, params):
                     # the infra compose file lives at the repo root, not in
                     # pipelines/uber-server like the Makefile does
@@ -9196,12 +9221,14 @@ class ServicePanel(Widget):
                     remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
                     extra = "".join(f" {shlex.quote(v)}" for v in _make_extra_vars(self._root, target))
                     run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}{extra}"
-                ssh_cmd = self._remote_terminal_command(profile, run_cmd)
-                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {run_cmd}")
-                if self._open_collection_terminal([(svc.name, ssh_cmd)]):
-                    self._log(f"[green]{svc.display_name} start opened in SSH terminal.[/green]")
-                else:
-                    self._log("[yellow]Could not open remote make terminal.[/yellow]")
+                    if target in _SYSTEM_SVC_PORTS:
+                        run_cmd += ' SUDO="sudo -S"'
+                        self._log(
+                            "  [yellow]If it pauses at a Password: prompt, it is answered with the SSH "
+                            "profile's password (or type it in the command box below and press Enter).[/yellow]"
+                        )
+                self._log(f"  Running on '{profile_name}': {run_cmd}")
+                self._cmd.run_on(profile_name, run_cmd)
         except Exception as e:
             self._log(f"[red]Remote launch error: {e}[/red]")
 
@@ -9258,9 +9285,15 @@ class ServicePanel(Widget):
                     run_cmd = f"cd {_quote_remote_path(remote_root)} && {compose_cmd}"
                     self._log(f"  Running: {run_cmd}")
                 else:
-                    target = "stop-" + _make_target_for(svc.name)
+                    make_name = _make_target_for(svc.name)
                     remote_dir = f"{remote_root}/{os.path.relpath(svc.config_dir, self._root)}"
-                    run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote(target)}"
+                    run_cmd = f"cd {_quote_remote_path(remote_dir)} && make {shlex.quote('stop-' + make_name)}"
+                    if make_name in _SYSTEM_SVC_PORTS:
+                        # systemctl needs sudo: the command session answers the
+                        # prompt with the SSH profile's password, as on Local
+                        self._log(f"  Stopping {svc.display_name} on {profile_name}...")
+                        self._cmd.run_on(profile_name, run_cmd + ' SUDO="sudo -S"')
+                        return
                 self._log(f"  Stopping {svc.display_name} on {profile_name}...")
                 self.run_worker(
                     self._run_remote_streamed(
