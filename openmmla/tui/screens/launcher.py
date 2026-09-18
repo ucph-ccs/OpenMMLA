@@ -6874,6 +6874,8 @@ class ServicePanel(Widget):
                 return
         elif svc.launch_type == "make" and not self._make_config_ready(svc, target):
             return
+        if svc.name == "IPS Camera Sync" and not self._camera_sync_ready(target):
+            return
 
         if not is_remote and svc.launch_type != "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None
@@ -6931,8 +6933,6 @@ class ServicePanel(Widget):
         """stop one collection session's audio and video on every host at once."""
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None or svc.launch_type != "collection":
-            return
-        if svc.name == "IPS Camera Sync" and not self._camera_sync_ready(target):
             return
 
         target = self._get_panel_target()
