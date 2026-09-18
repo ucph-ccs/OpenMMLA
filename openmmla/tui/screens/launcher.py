@@ -7338,16 +7338,33 @@ class ServicePanel(Widget):
             targets.append(profile.name)
         return targets
 
+    async def _stop_all_on_host(self, target: str, session_id: str) -> tuple[int, str] | None:
+        """the stop command on one host of a Stop All Hosts; None for a Windows
+        host. Only a host that has been picked somewhere is known to be one, so
+        the others are asked first (once: the answer is kept)."""
+        if target != "local" and target not in TARGET_PLATFORMS:
+            profile = get_profile_by_name(target)
+            if profile is not None:
+                await asyncio.to_thread(remote_platform, profile)
+        if TARGET_PLATFORMS.get(target) == "windows":
+            return None
+        return await self._collection_stop_on_target(target, session_id)
+
     async def _run_collection_stop_all(self, session_id: str, targets: list[str]) -> None:
         results = await asyncio.gather(
-            *(self._collection_stop_on_target(target, session_id) for target in targets),
+            *(self._stop_all_on_host(target, session_id) for target in targets),
             return_exceptions=True,
         )
         stopped = 0
+        windows: list[str] = []
         for target, result in zip(targets, results):
             label = "local" if target == "local" else f"'{target}'"
             if isinstance(result, BaseException):
                 self._log(f"[red]{label}: stop failed ({result}).[/red]")
+                continue
+            if result is None:
+                # no bash there to stop anything with, and no recorder to stop
+                windows.append(target)
                 continue
             rc, output = result
             for line in output.strip().splitlines():
@@ -7358,14 +7375,18 @@ class ServicePanel(Widget):
                 self._log(f"[green]{label}: stop command completed.[/green]")
             else:
                 self._log(f"[yellow]{label}: stop command finished with warnings (exit {rc}).[/yellow]")
-        if stopped == len(targets):
+        asked = len(targets) - len(windows)
+        skipped = (
+            f"; skipped {', '.join(windows)} (Windows, where no recorder runs)" if windows else ""
+        )
+        if stopped == asked:
             self._log(
-                f"[green]Collection session '{session_id}' stopped on all {len(targets)} host(s).[/green]"
+                f"[green]Collection session '{session_id}' stopped on all {asked} host(s){skipped}.[/green]"
             )
         else:
             self._log(
-                f"[yellow]Collection session '{session_id}': {stopped}/{len(targets)} host(s) "
-                f"stopped cleanly; check the lines above.[/yellow]"
+                f"[yellow]Collection session '{session_id}': {stopped}/{asked} host(s) "
+                f"stopped cleanly; check the lines above{skipped}.[/yellow]"
             )
         await self._mark_session_ended(session_id, "local")
         await self._reload_current_service_view()
