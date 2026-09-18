@@ -162,10 +162,14 @@ SHARED_SECTIONS = {
     },
 }
 
-# sections only the console itself reads: nothing to copy to another machine's
-# pipeline configs (the dashboard's port travels on the make command line; the
-# stream server's address travels as the stream URLs it completed)
-CONSOLE_ONLY_SECTIONS = frozenset({"Sudo", "StreamServer", "Dashboard"})
+# sections only a console reads: no pipeline config carries them and no
+# service reads them at startup. They reach another machine through its own
+# config/system_services.yml, which a console there reads; the stream
+# server's address also travels as the stream URLs it completed
+CONSOLE_ONLY_SECTIONS = frozenset({"Sudo", "StreamServer"})
+
+# never leaves this machine
+PRIVATE_SECTIONS = frozenset({"Sudo"})
 
 
 SHARED_SECTION_NAMES = set(SHARED_SECTIONS.keys())

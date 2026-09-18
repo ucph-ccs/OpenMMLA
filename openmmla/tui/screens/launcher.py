@@ -36,7 +36,7 @@ from openmmla.tui.schema.loader import (
     load_streams, streams_from_config,
 )
 from openmmla.tui.schema.definitions import (
-    CONSOLE_ONLY_SECTIONS, SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
+    CONSOLE_ONLY_SECTIONS, PRIVATE_SECTIONS, SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
 )
 from openmmla.tui.system_services import (
     SYSTEM_SERVICE_SOURCE_CONFIG_RELS,
@@ -2342,10 +2342,8 @@ _LOCAL_SETTINGS_NOTES: dict[str, str] = {
     "__experiments__": "Local  (a session takes its participants to every host through MongoDB)",
     "__tasks__": "Local  (task definitions are read by this console only)",
     "__shared__Sudo": "Local  (this machine's admin password; a remote host uses its SSH profile's)",
-    "__shared__StreamServer": "Local  (read by this console only: where the MediaMTX card runs and what it probes; "
-                              "Sync to Remote takes the stream URLs it completed)",
-    "__shared__Dashboard": "Local  (read by this console only: where the Dashboard cards run and what they probe; "
-                           "make flask gets the port)",
+    "__shared__StreamServer": "Local  (System Settings live in this project; Sync to Remote gives another machine "
+                              "this address and the stream URLs it completed)",
 }
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
 
@@ -4874,13 +4872,8 @@ class ServicePanel(Widget):
             return
         for old in container.query(".sync-bar, .sync-note"):
             old.remove()
-        if shared_section in CONSOLE_ONLY_SECTIONS and shared_section != "StreamServer":
-            # read by this console only (the admin password of this machine,
-            # where the dashboard runs): no pipeline config carries it, and
-            # another machine has no use for it. The Stream Server is read here
-            # only as well, but the stream URLs it completed are what a base on
-            # another machine pulls: its Sync to Remote carries those
-            return
+        if shared_section in PRIVATE_SECTIONS:
+            return  # this machine's admin password never leaves it
         if shared_section is not None and self._settings_host(shared_section) != "local":
             # the form shows that machine's settings and Save writes them there
             return
@@ -4918,16 +4911,17 @@ class ServicePanel(Widget):
         if shared_section == "StreamServer":
             container.mount(Static(
                 "Save writes this machine's project and moves the stream URLs of its pipeline configs "
-                "with the address. Sync to Remote copies those Streams entries (the URLs this address "
-                "completed) into another machine's pipeline configs, so the bases there pull from the "
-                "same server; the section itself is read by this console only.",
+                "with the address. Sync to Remote gives another machine this address (its own "
+                "config/system_services.yml, which a console there reads) and those Streams entries "
+                "(what its bases pull), and leaves the rest of its configs as they are.",
                 classes="sync-note",
             ))
         elif shared_section is not None:
             container.mount(Static(
                 f"Save writes this machine's project. Sync to Remote copies the {shared_section} "
-                f"section to another machine (its pipeline configs, and its own system_services.yml "
-                f"if it has one), so what runs there connects to the same service.",
+                f"section to another machine: into its pipeline configs that carry it, and into its own "
+                f"config/system_services.yml (created when no pipeline config carries the section), so "
+                f"what runs there connects to the same service.",
                 classes="sync-note",
             ))
         container.mount(bar)
@@ -5551,9 +5545,8 @@ class ServicePanel(Widget):
 
         entries: list[tuple[str, str, tuple[str, str], dict]] = []
         temp_paths: list[str] = []
-        for pipeline in self._pipelines:
-            if not self._pipeline_has_section(pipeline, section_name):
-                continue
+        carriers = [pipeline for pipeline in self._pipelines if self._pipeline_has_section(pipeline, section_name)]
+        for pipeline in carriers:
             remote_config, _ = self._load_config_for_target(
                 pipeline.config_path,
                 show_status=False,
@@ -5581,8 +5574,10 @@ class ServicePanel(Widget):
             cache_key = self._config_cache_key(pipeline.config_path, target)
             entries.append((tmp.name, remote_path, cache_key, remote_config))
 
+        # a section no pipeline config carries has nowhere else to go on that
+        # machine than its own settings file: a console there reads it from there
         own_store = self._remote_settings_entry(
-            target, profile, {section_name: section_data}, create=save)
+            target, profile, {section_name: section_data}, create=save or not carriers)
         if own_store is not None:
             temp_paths.append(own_store[0])
             entries.append(own_store)
@@ -5594,9 +5589,10 @@ class ServicePanel(Widget):
                 except OSError:
                     pass
             self._show_status(
-                f"Nothing to sync for {section_name}: no pipeline config on '{target}' takes it (none carries "
-                f"the section, or each pins its own), and its config/system_services.yml, if it has one, "
-                f"already says this.")
+                f"'{target}' already has these {section_name} settings (its config/system_services.yml says "
+                f"the same)." if not carriers else
+                f"Nothing to sync for {section_name}: every pipeline config on '{target}' that carries it pins "
+                f"its own, and its config/system_services.yml, if it has one, already says this.")
             return
 
         if not save:
@@ -5623,11 +5619,13 @@ class ServicePanel(Widget):
         )
 
     def _sync_streams_to_target(self, target: str) -> None:
-        """Sync to Remote on the Stream Server form. The section is read by
-        this console only, but the stream URLs it completed are what a base on
-        another machine pulls: the Streams entries of the local pipeline
-        configs go into that machine's copies, and the rest of each config
-        stays as it is there."""
+        """Sync to Remote on the Stream Server form: that machine gets this
+        address in its own settings file (no pipeline config carries the
+        section; a console there reads it from the file, which is created when
+        it has none) and the stream URLs the address completed, which are what
+        a base there pulls: the Streams entries of the local pipeline configs
+        go into that machine's copies, and the rest of each config stays as it
+        is there."""
         profile = get_profile_by_name(target)
         if profile is None:
             self._show_status(f"SSH profile '{target}' not found.")
@@ -5658,17 +5656,23 @@ class ServicePanel(Widget):
             entries.append((tmp.name, self._remote_config_path(pipeline.config_path, profile),
                             self._config_cache_key(pipeline.config_path, target), remote_config))
             carried.append(pipeline.name)
+        own_store = self._remote_settings_entry(
+            target, profile, {"StreamServer": self._shared_section_data("StreamServer")}, create=True)
+        if own_store is not None:
+            entries.append(own_store)
         if not entries:
             self._show_status(
-                f"Nothing to sync: the Streams entries of {', '.join(same)} on '{target}' already match "
-                f"this machine's." if same
-                else "Nothing to sync: no pipeline config on this machine has Streams entries.")
+                f"Nothing to sync: '{target}' already has this Stream Server address, and "
+                + (f"the Streams entries of {', '.join(same)} there match this machine's." if same
+                   else "no pipeline config on this machine has Streams entries."))
             return
-        names = ", ".join(carried)
-        self._show_status(f"Syncing the stream URLs of {names} to {target} ...")
+        what = ["the Stream Server address"] if own_store is not None else []
+        if carried:
+            what.append(f"the stream URLs of {', '.join(carried)}")
+        what = " and ".join(what)
+        self._show_status(f"Syncing {what} to {target} ...")
         self.run_worker(
-            self._run_scp_batch(target, entries, cleanup_local=True,
-                                success_message=f"Synced the stream URLs of {names}"),
+            self._run_scp_batch(target, entries, cleanup_local=True, success_message=f"Synced {what}"),
             exclusive=True,
         )
 
@@ -5683,8 +5687,10 @@ class ServicePanel(Widget):
         The services read that file on top of their pipeline config, so a copy
         left behind on a host (by a console that once ran there) silently beats
         everything this console pushes. Sync to Remote brings it in step but
-        never creates it: a host without one takes its values from the pipeline
-        configs. `create` is a Save on that host's own settings form."""
+        does not create it for a section the pipeline configs carry: a host
+        without one takes those from its pipeline configs. `create` is a Save
+        on that host's own settings form, or a section no pipeline config
+        carries, which has nowhere else to go there."""
         local_path = self._remote_settings_path()
         remote_store, _ = self._load_config_for_target(local_path, show_status=False, target=target)
         if not isinstance(remote_store, dict):
@@ -5693,7 +5699,7 @@ class ServicePanel(Widget):
             return None
         updated = dict(remote_store)
         for name, data in sections.items():
-            if name not in CONSOLE_ONLY_SECTIONS:
+            if name not in PRIVATE_SECTIONS:
                 updated[name] = dict(data)
         if updated == remote_store:
             return None
