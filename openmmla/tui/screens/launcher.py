@@ -817,6 +817,17 @@ def _remote_write_file(profile, remote_path: str, content: str) -> tuple[bool, s
     return True, ""
 
 
+def _streams_to_carry(local_config: object, remote_config: object) -> dict | None:
+    """the Streams entries of a local pipeline config that a remote copy of it
+    should have: None when the local config has none, or the remote's already
+    match. The rest of the remote config is not looked at."""
+    streams = local_config.get("Streams") if isinstance(local_config, dict) else None
+    if not isinstance(streams, dict) or not streams:
+        return None
+    remote_streams = remote_config.get("Streams") if isinstance(remote_config, dict) else None
+    return None if remote_streams == streams else copy.deepcopy(streams)
+
+
 class TransformMatrixPanel(Widget):
     """IPS transform matrix file overview and sync controls."""
 
@@ -2331,7 +2342,10 @@ _LOCAL_SETTINGS_NOTES: dict[str, str] = {
     "__experiments__": "Local  (a session takes its participants to every host through MongoDB)",
     "__tasks__": "Local  (task definitions are read by this console only)",
     "__shared__Sudo": "Local  (this machine's admin password; a remote host uses its SSH profile's)",
-    "__shared__StreamServer": "Local  (read by this console only: where the MediaMTX card runs and what it probes)",
+    "__shared__StreamServer": "Local  (read by this console only: where the MediaMTX card runs and what it probes; "
+                              "Sync to Remote takes the stream URLs it completed)",
+    "__shared__Dashboard": "Local  (read by this console only: where the Dashboard cards run and what they probe; "
+                           "make flask gets the port)",
 }
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
 
@@ -4860,10 +4874,12 @@ class ServicePanel(Widget):
             return
         for old in container.query(".sync-bar, .sync-note"):
             old.remove()
-        if shared_section in CONSOLE_ONLY_SECTIONS:
+        if shared_section in CONSOLE_ONLY_SECTIONS and shared_section != "StreamServer":
             # read by this console only (the admin password of this machine,
-            # where MediaMTX runs): no pipeline config carries it, and another
-            # machine has no use for it
+            # where the dashboard runs): no pipeline config carries it, and
+            # another machine has no use for it. The Stream Server is read here
+            # only as well, but the stream URLs it completed are what a base on
+            # another machine pulls: its Sync to Remote carries those
             return
         if shared_section is not None and self._settings_host(shared_section) != "local":
             # the form shows that machine's settings and Save writes them there
@@ -4899,7 +4915,15 @@ class ServicePanel(Widget):
             Button("Sync to Remote", variant="warning", id="btn-sync-remote"),
             classes="sync-bar" if shared_section is None else "sync-bar sync-bar-noted",
         )
-        if shared_section is not None:
+        if shared_section == "StreamServer":
+            container.mount(Static(
+                "Save writes this machine's project and moves the stream URLs of its pipeline configs "
+                "with the address. Sync to Remote copies those Streams entries (the URLs this address "
+                "completed) into another machine's pipeline configs, so the bases there pull from the "
+                "same server; the section itself is read by this console only.",
+                classes="sync-note",
+            ))
+        elif shared_section is not None:
             container.mount(Static(
                 f"Save writes this machine's project. Sync to Remote copies the {shared_section} "
                 f"section to another machine (its pipeline configs, and its own system_services.yml "
@@ -5295,6 +5319,9 @@ class ServicePanel(Widget):
 
         # System Settings shared-section view: push just this section to the
         # selected host (respecting any per-pipeline overrides on that host).
+        if self._current_shared_section == "StreamServer":
+            self._sync_streams_to_target(profile_name)
+            return
         if self._current_shared_section:
             self._sync_shared_section_to_target(self._current_shared_section, profile_name)
             return
@@ -5307,6 +5334,9 @@ class ServicePanel(Widget):
     def _sync_local_to_selected_target(self) -> None:
         target = self._get_panel_target()
         if target == "local":
+            return
+        if self._current_shared_section == "StreamServer":
+            self._sync_streams_to_target(target)
             return
         if self._current_shared_section:
             self._sync_shared_section_to_target(self._current_shared_section, target)
@@ -5563,7 +5593,10 @@ class ServicePanel(Widget):
                     os.unlink(path)
                 except OSError:
                     pass
-            self._show_status(f"No pipeline configs contain {section_name}.")
+            self._show_status(
+                f"Nothing to sync for {section_name}: no pipeline config on '{target}' takes it (none carries "
+                f"the section, or each pins its own), and its config/system_services.yml, if it has one, "
+                f"already says this.")
             return
 
         if not save:
@@ -5586,6 +5619,56 @@ class ServicePanel(Widget):
         self._show_status(f"{'Saving' if save else 'Syncing'} {section_name} system service to {target} ...")
         self.run_worker(
             self._run_scp_batch(target, entries, cleanup_local=True, success_message=success_message),
+            exclusive=True,
+        )
+
+    def _sync_streams_to_target(self, target: str) -> None:
+        """Sync to Remote on the Stream Server form. The section is read by
+        this console only, but the stream URLs it completed are what a base on
+        another machine pulls: the Streams entries of the local pipeline
+        configs go into that machine's copies, and the rest of each config
+        stays as it is there."""
+        profile = get_profile_by_name(target)
+        if profile is None:
+            self._show_status(f"SSH profile '{target}' not found.")
+            return
+        if not self._pipelines:
+            self._pipelines = discover_pipelines()
+            self._pipeline_map = {pipeline.name: pipeline for pipeline in self._pipelines}
+        entries: list[tuple[str, str, tuple[str, str], dict]] = []
+        carried: list[str] = []
+        same: list[str] = []
+        for pipeline in self._pipelines:
+            if pipeline.name not in _STREAM_PIPELINES or not os.path.isfile(pipeline.config_path):
+                continue
+            local_config = load_existing_config(pipeline.config_path)
+            remote_config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
+            streams = _streams_to_carry(local_config, remote_config)
+            if streams is None:
+                if isinstance(local_config, dict) and local_config.get("Streams"):
+                    same.append(pipeline.name)
+                continue
+            remote_config = dict(remote_config) if isinstance(remote_config, dict) else {}
+            remote_config["Streams"] = streams
+            _encrypt_secrets(remote_config)
+            tmp = tempfile.NamedTemporaryFile(
+                "w", suffix=".yml", prefix="openmmla-streams-", delete=False, encoding="utf-8")
+            with tmp:
+                yaml.safe_dump(remote_config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            entries.append((tmp.name, self._remote_config_path(pipeline.config_path, profile),
+                            self._config_cache_key(pipeline.config_path, target), remote_config))
+            carried.append(pipeline.name)
+        if not entries:
+            self._show_status(
+                f"Nothing to sync: the Streams entries of {', '.join(same)} on '{target}' already match "
+                f"this machine's." if same
+                else "Nothing to sync: no pipeline config on this machine has Streams entries.")
+            return
+        names = ", ".join(carried)
+        self._show_status(f"Syncing the stream URLs of {names} to {target} ...")
+        self.run_worker(
+            self._run_scp_batch(target, entries, cleanup_local=True,
+                                success_message=f"Synced the stream URLs of {names}"),
             exclusive=True,
         )
 
