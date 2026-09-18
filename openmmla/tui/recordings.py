@@ -266,13 +266,16 @@ RETENTION_CHOICES: list[tuple[str, float]] = [
     ("14 days", 14 * 86400.0), ("30 days", 30 * 86400.0), ("for ever", 0.0),
 ]
 
-_DURATION_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "μs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
-_DURATION_PART = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)")
+# Go's units, plus the days MediaMTX adds: it takes `3d` in the file and
+# reports whole days that way (`72h` in the file reads back as `3d`)
+_DURATION_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "μs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0,
+                   "d": 86400.0}
+_DURATION_PART = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h|d)")
 
 
 def parse_duration(value) -> float | None:
-    """seconds of a Go duration, as mediamtx.yml and the API write them:
-    `72h`, `1h30m`, `0s`, `72h0m0s`. None for anything else, empty included."""
+    """seconds of a duration as mediamtx.yml and the API write them: `72h`,
+    `3d`, `1h30m`, `0s`, `72h0m0s`. None for anything else, empty included."""
     text = str(value or "").strip().strip("'\"")
     if not text:
         return None
