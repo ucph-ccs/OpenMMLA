@@ -14,6 +14,8 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
+from openmmla.utils.config import camera_sync_problem, is_main_base
+
 from .input import get_base_by_id, get_bases, get_function_sync_manager
 from .transform import (
     direct_transform_matrices, average_transform_matrices,
@@ -89,23 +91,12 @@ class CameraSyncManager(Synchronizer):
 
     def _resolve_bases(self, base):
         """Resolve main_id (the base flagged main) and alt_id (-b or picked)."""
+        problem = camera_sync_problem(self.config)
+        if problem:
+            raise ValueError(f"{problem} (config: {self.config_path})")
         bases = get_bases(self.config)
-        if not bases:
-            raise ValueError(
-                "No bases defined. Add entries under 'Bases' in config.yml "
-                "(mark exactly one with main: true).")
-
-        mains = [b for b in bases if str(b.get('main')).lower() in ('true', '1', 'yes')]
-        if not mains:
-            raise ValueError("No main base found. Mark exactly one base with main: true in config 'Bases'.")
-        if len(mains) > 1:
-            raise ValueError(
-                f"Multiple main bases found ({[m.get('id') for m in mains]}); mark exactly one with main: true.")
-        self.main_id = str(mains[0].get('id'))
-
+        self.main_id = str(next(b for b in bases if is_main_base(b)).get('id'))
         alts = [b for b in bases if str(b.get('id')) != self.main_id]
-        if not alts:
-            raise ValueError("No alternative base found; add at least one non-main base under 'Bases'.")
 
         if base is not None:
             alt = get_base_by_id(self.config, base)

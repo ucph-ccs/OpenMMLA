@@ -28,11 +28,16 @@ def main():
 
     print_arguments(args)
 
-    camera_sync_manager = CameraSyncManager(
-        project_dir=args.project_dir,
-        config_path=args.config_path,
-        base=args.base
-    )
+    try:
+        camera_sync_manager = CameraSyncManager(
+            project_dir=args.project_dir,
+            config_path=args.config_path,
+            base=args.base
+        )
+    except ValueError as e:
+        # the Bases of the config cannot be synced: say why, without a traceback
+        print(f"\nCamera sync cannot start: {e}")
+        raise SystemExit(2)
     camera_sync_manager.run()
 
 

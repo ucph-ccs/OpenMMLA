@@ -6256,6 +6256,25 @@ class ServicePanel(Widget):
         self._log(f"[yellow]{hint}.[/yellow]")
         return False
 
+    def _camera_sync_ready(self, target: str) -> bool:
+        """False, having said why, when the IPS base config of the card's host
+        cannot run a camera sync (it takes the main base and at least one
+        other), rather than a terminal that opens only to show a traceback."""
+        from openmmla.utils.config import camera_sync_problem
+        path = self._ips_base_config_path()
+        if target == "local":
+            config, note = load_existing_config(path), ""
+        else:
+            config, note = self._load_config_for_target(path, show_status=False, target=target)
+        if not config and note:
+            return True  # not readable from here: the sync says it itself
+        problem = camera_sync_problem(config)
+        if problem:
+            where = "this machine" if target == "local" else f"'{target}'"
+            self._log(f"[yellow]IPS Camera Sync on {where}: {rich_escape(problem)}[/yellow]")
+            return False
+        return True
+
     def _ips_base_config_path(self) -> str:
         pipeline = self._pipeline_map.get("IPS Base")
         return pipeline.config_path if pipeline else os.path.join(self._root, "pipelines", "ips-base", "config.yml")
@@ -6750,6 +6769,8 @@ class ServicePanel(Widget):
         """stop one collection session's audio and video on every host at once."""
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None or svc.launch_type != "collection":
+            return
+        if svc.name == "IPS Camera Sync" and not self._camera_sync_ready(target):
             return
 
         target = self._get_panel_target()

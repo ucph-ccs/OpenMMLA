@@ -43,6 +43,37 @@ def get_base_by_id(config: dict, base_id) -> dict | None:
     return None
 
 
+def is_main_base(base: dict) -> bool:
+    return str(base.get("main")).lower() in ("true", "1", "yes")
+
+
+def camera_sync_problem(config: dict) -> str:
+    """why IPS camera sync cannot run on this config's 'Bases', or "".
+
+    Sync puts a second camera in the main one's coordinates: the two bases run
+    and both see the same tag, so it takes the base marked main: true (exactly
+    one) and at least one other. The console checks this before it starts the
+    sync, and the sync itself raises with the same words."""
+    bases = get_bases(config)
+    listed = ", ".join(
+        f"{base.get('id')} (camera {base.get('camera') or '?'}{', main' if is_main_base(base) else ''})"
+        for base in bases
+    )
+    mains = [base for base in bases if is_main_base(base)]
+    if not bases:
+        return ("No bases under 'Bases'. Camera sync needs two: the main one (main: true) and the one "
+                "whose camera is synced to it.")
+    if not mains:
+        return f"No base is marked main: true (Bases: {listed}); mark exactly one."
+    if len(mains) > 1:
+        return f"More than one base is marked main: true ({', '.join(str(m.get('id')) for m in mains)}); mark exactly one."
+    if len(bases) < 2:
+        return (f"Only one base is defined (Bases: {listed}). Camera sync puts a second camera in the main "
+                f"one's coordinates: add a base for it under 'Bases' (IPS Base, Config tab, + Add Entry) with its "
+                f"camera and source and main: false, start both bases, then the sync.")
+    return ""
+
+
 def coerce_source_index(value, default: int = 0) -> int:
     """Return an int index for index-based sources (opencv/stream/pyaudio).
 
