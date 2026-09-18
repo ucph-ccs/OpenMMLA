@@ -199,24 +199,20 @@ def _target_for_db_host(host: str, profiles: list) -> str:
     return target_for_service_host(host, profiles)
 
 
-def _resolve_default_target(launcher_target: str = "local") -> str:
+def _resolve_default_target() -> str:
     """host this panel should open on.
 
-    The Launcher's host wins while it is on a remote profile; otherwise the
-    configured MongoDB endpoint decides, so a database that lives on another
-    machine lists its sessions without a manual switch. A host known to be
-    offline is never picked. Blocking: reads config files, resolves names and
-    may probe the derived host."""
+    The sessions live in MongoDB, so the machine its address in System
+    Settings names decides, whichever host the Launcher is on: a database on
+    another machine lists its sessions without a manual switch. A host known
+    to be offline is never picked. Blocking: reads config files, resolves
+    names and may probe the derived host."""
     from openmmla.tui.ssh import (
         TARGET_STATES, get_profile_by_name, load_ssh_profiles, probe_ssh_endpoint,
     )
 
     def usable(name: str) -> bool:
         return bool(name) and name != "local" and TARGET_STATES.get(name) != "offline"
-
-    # the launcher refuses to switch to an offline host, so its value is good
-    if usable(launcher_target):
-        return launcher_target
 
     derived = _target_for_db_host(_db_host_from_config(_local_db_config()), load_ssh_profiles())
     if not usable(derived):
@@ -477,9 +473,6 @@ class SessionsPanel(Widget):
         self._target = "local"
         self._suppress_select = False
         self._bootstrapping = False
-        # launcher host this panel last took its default from; a manual pick
-        # here must survive a trip through the other tabs
-        self._followed_launcher_target = "local"
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -515,10 +508,9 @@ class SessionsPanel(Widget):
 
     def on_show(self) -> None:
         self._refresh_target_options()
-        from openmmla.tui.ssh import current_target
-        if current_target() != self._followed_launcher_target:
-            self._start_bootstrap()
-        elif self._mongo_client is None and not self._bootstrapping:
+        # the host stays where it is: the MongoDB host from the start, or the
+        # one picked here by hand; the Launcher's host has no say in it
+        if self._mongo_client is None and not self._bootstrapping:
             # nothing connected: retry on the way in, as rebuilding the Host
             # options used to do as a side effect
             self.run_worker(self._async_init(self._target), exclusive=True)
@@ -536,18 +528,15 @@ class SessionsPanel(Widget):
             self._render_sessions(rows)
 
     def _start_bootstrap(self) -> None:
-        from openmmla.tui.ssh import current_target
-        self._followed_launcher_target = current_target()
         self._bootstrapping = True
-        self.run_worker(self._async_bootstrap(self._followed_launcher_target), exclusive=True)
+        self.run_worker(self._async_bootstrap(), exclusive=True)
 
-    async def _async_bootstrap(self, launcher_target: str) -> None:
-        """open on the launcher's host, or else on the host serving MongoDB."""
+    async def _async_bootstrap(self) -> None:
+        """open on the host serving MongoDB."""
         try:
-            target = await asyncio.to_thread(_resolve_default_target, launcher_target)
+            target = await asyncio.to_thread(_resolve_default_target)
             if self._apply_target(target):
-                reason = "Launcher" if target == launcher_target else "MongoDB endpoint"
-                self._log(f"[cyan]Host follows the {reason}: '{target}'.[/cyan]")
+                self._log(f"[cyan]Host follows the MongoDB endpoint: '{target}'.[/cyan]")
             await self._async_init(self._target)
         finally:
             self._bootstrapping = False
@@ -835,8 +824,6 @@ class SessionsPanel(Widget):
         if target == self._target:
             return
         self._target = target
-        from openmmla.tui.ssh import current_target
-        self._followed_launcher_target = current_target()
         self._config_path = None
         self._config_source = None
         self.run_worker(self._async_init(target), exclusive=True)

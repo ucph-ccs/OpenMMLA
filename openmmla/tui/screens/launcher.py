@@ -62,7 +62,7 @@ from openmmla.tui.system_services import (
     shared_section_drift,
 )
 from openmmla.tui.ssh import (
-    REFRESH_TARGETS_OPTION, TARGET_PLATFORMS, TARGET_STATES, WINDOWS_HOST_NOTE, is_select_sentinel, remote_platform, probe_all_profiles, probe_ssh_endpoint, set_current_target, summarize_states, target_options, target_state_label,
+    REFRESH_TARGETS_OPTION, TARGET_PLATFORMS, TARGET_STATES, WINDOWS_HOST_NOTE, is_select_sentinel, remote_platform, probe_all_profiles, probe_ssh_endpoint, summarize_states, target_options, target_state_label,
     load_ssh_profiles, get_profile_by_name, ssh_run_sync,
     scp_file_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
     ssh_test_connection,
@@ -3160,7 +3160,6 @@ class ServicePanel(Widget):
                 else:
                     sel.value = "local"
                     self._last_target = "local"
-                    set_current_target("local")
                     self.query_one("#svc-cmd-session", CommandSession).set_target("local")
             finally:
                 self.call_after_refresh(self._clear_target_suppression)
@@ -3299,7 +3298,6 @@ class ServicePanel(Widget):
         # not a pick by the user: the Select moves without a Changed message,
         # and its handler would ignore the current target anyway
         self._last_target = target
-        set_current_target(target)
         if select.value != target:
             with select.prevent(Select.Changed):
                 try:
@@ -3311,7 +3309,6 @@ class ServicePanel(Widget):
                         select.value = target
                     except Exception:
                         target = self._last_target = "local"
-                        set_current_target(target)
                         select.value = target
         if changed:
             try:
@@ -3432,7 +3429,6 @@ class ServicePanel(Widget):
         self._capture_collection_card_state(self._last_target)
         self._capture_infra_mode(self._last_target)
         self._last_target = val
-        set_current_target(val)
         if self._current_shared_section:
             self._settings_target = val
             self.query_one("#svc-cmd-session", CommandSession).set_target(val)

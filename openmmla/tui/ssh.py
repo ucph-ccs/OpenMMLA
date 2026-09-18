@@ -401,33 +401,12 @@ TARGET_STATES: dict[str, str] = {}
 _PROBE_MISSES: dict[str, int] = {}
 
 
-# host the Launcher's Host bar is on; other screens open on the same host
-# instead of always falling back to "local"
-_CURRENT_TARGET = "local"
-
-
 def is_select_sentinel(value) -> bool:
     """True for the placeholder values a Select emits while (re)building its
     options (Select.BLANK / Select.NULL depending on textual version)."""
     if value is None:
         return True
     return str(value) in ("Select.BLANK", "Select.NULL")
-
-
-def set_current_target(name) -> None:
-    """record the host the Launcher's Host bar moved to."""
-    global _CURRENT_TARGET
-    if is_select_sentinel(name):
-        return
-    text = str(name or "").strip()
-    if not text or text == REFRESH_TARGETS_OPTION:
-        return
-    _CURRENT_TARGET = text
-
-
-def current_target() -> str:
-    """host the Launcher's Host bar is on ("local" until it is switched)."""
-    return _CURRENT_TARGET
 
 
 # profile name -> "linux" | "darwin" | "windows", learnt the first time a host is
