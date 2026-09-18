@@ -125,9 +125,36 @@ class RemotePlan:
     # "the directory is not there"
     unreachable: str = ""
     saw_marker: bool = False
+    # files of the remote tree left out of this transfer because a copy is
+    # already here (see leave_out); rsync is told to skip them too
+    already_here: list[str] = field(default_factory=list)
 
     def by_rel(self) -> dict[str, RemoteFile]:
         return {item.rel: item for item in self.files}
+
+
+# a rel that would read as a pattern in an rsync --exclude cannot be left out
+_RSYNC_WILDCARDS = re.compile(r"[*?\[\]\\]")
+
+
+def leave_out(plan: RemotePlan, rels) -> RemotePlan:
+    """the plan without the files in `rels`: a download of only what is not
+    here yet. A name rsync would read as a pattern stays in, to be fetched."""
+    skip = {rel for rel in rels if not _RSYNC_WILDCARDS.search(rel)}
+    kept = [item for item in plan.files if item.rel not in skip]
+    return RemotePlan(
+        exists=plan.exists,
+        has_rsync=plan.has_rsync,
+        files=kept,
+        total_bytes=sum(item.size for item in kept),
+        file_count=len(kept),
+        exact=plan.exact,
+        rejected=list(plan.rejected),
+        excluded=plan.excluded,
+        unreachable=plan.unreachable,
+        saw_marker=plan.saw_marker,
+        already_here=sorted(set(plan.already_here) | (skip & {item.rel for item in plan.files})),
+    )
 
 
 @dataclass
@@ -633,7 +660,9 @@ def local_rsync_path() -> str:
     return "" if resolved == "rsync" else resolved
 
 
-def build_rsync_argv(profile, remote_root: str, staging: Path, *, append: bool) -> list[str] | None:
+def build_rsync_argv(
+    profile, remote_root: str, staging: Path, *, append: bool, skip: tuple[str, ...] = (),
+) -> list[str] | None:
     """return the rsync argv, or None when rsync cannot be used for this pair.
 
     Every flag here is load-bearing against macOS's openrsync: -t is what makes
@@ -654,6 +683,9 @@ def build_rsync_argv(profile, remote_root: str, staging: Path, *, append: bool) 
         argv.append("--append")
     for pattern in RSYNC_EXCLUDES:
         argv.append(f"--exclude={pattern}")
+    # anchored: that one file at the root of the transfer, not every namesake
+    for rel in skip:
+        argv.append(f"--exclude=/{rel}")
     argv.extend(["-e", transport])
     # trailing slashes on both sides: the remote directory's *contents* land in
     # the staging root, so there is no basename guessing afterwards
@@ -776,7 +808,8 @@ async def download_tree(
         )
         if use_rsync:
             tool = "rsync"
-            rc, output = await _rsync_transfer(profile, remote_root, staging, resumable, log)
+            rc, output = await _rsync_transfer(
+                profile, remote_root, staging, resumable, log, tuple(plan.already_here))
             if rc in RSYNC_GIVE_UP_RCS:
                 log(f"  [yellow]rsync unusable here (exit {rc}); falling back to scp.[/yellow]")
                 _NO_RSYNC.add(getattr(profile, "name", ""))
@@ -842,6 +875,7 @@ async def _rsync_transfer(
     staging: Path,
     resumable: int,
     log: OnLog,
+    skip: tuple[str, ...] = (),
 ) -> tuple[int, str]:
     """one rsync pass, or an --append pass followed by a plain verify pass.
 
@@ -849,7 +883,7 @@ async def _rsync_transfer(
     disk is a prefix of the source. It costs almost nothing on a tree rsync has
     just synced, because -t already matched every mtime."""
     if resumable:
-        argv = build_rsync_argv(profile, remote_root, staging, append=True)
+        argv = build_rsync_argv(profile, remote_root, staging, append=True, skip=skip)
         if argv is None:
             return 1, "rsync argv unavailable"
         rc, output = await _run_child(argv)
@@ -858,7 +892,7 @@ async def _rsync_transfer(
         if rc not in RSYNC_OK_RCS:
             return rc, output
         log("  [cyan]Verifying resumed files…[/cyan]")
-    argv = build_rsync_argv(profile, remote_root, staging, append=False)
+    argv = build_rsync_argv(profile, remote_root, staging, append=False, skip=skip)
     if argv is None:
         return 1, "rsync argv unavailable"
     return await _run_child(argv)
@@ -876,7 +910,9 @@ async def _scp_transfer(
         holes = await asyncio.to_thread(missing_files, staging, plan)
         if not holes:
             return 0, ""
-        if len(holes) <= SCP_PER_FILE_LIMIT and len(holes) < plan.file_count:
+        # one file at a time unless that is the whole remote tree, which one
+        # recursive scp fetches with a single connection
+        if len(holes) <= SCP_PER_FILE_LIMIT and len(holes) < plan.file_count + len(plan.already_here):
             log(f"  [cyan]scp: fetching {len(holes)} of {plan.file_count} file(s).[/cyan]")
             for rel in holes:
                 target = staging / rel

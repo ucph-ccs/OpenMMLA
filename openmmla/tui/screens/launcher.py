@@ -69,7 +69,7 @@ from openmmla.tui.ssh import (
     wrap_local, wrap_remote,
 )
 from openmmla.tui.artifacts import (
-    collection_artifact_dir, merge_tree, pipeline_artifact_dir, pipeline_slug,
+    METADATA_FILENAMES, collection_artifact_dir, merge_tree, pipeline_artifact_dir, pipeline_slug,
     safe_segment, update_collection_manifest, update_pipeline_manifest,
 )
 from openmmla.tui import download as dl
@@ -681,16 +681,40 @@ def _remote_stream_recording_days(profile, record_root: str, host_label: str) ->
     return sorted(set(days), reverse=True)
 
 
-def _tree_is_here(local_path: Path, plan) -> bool:
-    """every file of a remote plan is already at its place, at its full size."""
+def _files_already_here(local_path: Path, plan) -> list[str]:
+    """the planned files already at their place here, at the remote size.
+
+    A recording is named after the moment it started and is not written again
+    once it is over, so a copy of that size is that file. The manifests are
+    fetched every time: they are small, and a stop rewrites them in place."""
+    here = []
     for item in plan.files:
-        target = local_path / item.rel
+        if os.path.basename(item.rel) in METADATA_FILENAMES:
+            continue
         try:
-            if not target.is_file() or target.stat().st_size != item.size:
-                return False
+            if (local_path / item.rel).stat().st_size == item.size:
+                here.append(item.rel)
         except OSError:
-            return False
-    return bool(plan.files)
+            continue
+    return here
+
+
+# files a download lists one by one before it starts; the rest are counted
+_DOWNLOAD_LIST_MAX = 12
+
+
+def _describe_files(rels) -> str:
+    """"1 video, 1 audio, 2 manifest(s)" for paths of a collection tree."""
+    counts: dict[str, int] = {}
+    for rel in rels:
+        if os.path.basename(rel) in METADATA_FILENAMES:
+            kind = "manifest(s)"
+        else:
+            head = rel.split("/", 1)[0] if "/" in rel else ""
+            kind = head if head in ("video", "audio") else "other"
+        counts[kind] = counts.get(kind, 0) + 1
+    order = ("video", "audio", "other", "manifest(s)")
+    return ", ".join(f"{counts[kind]} {kind}" for kind in order if kind in counts) or "no files"
 
 
 def _remote_artifact_session_ids(profile) -> list[str]:
@@ -6670,7 +6694,10 @@ class ServicePanel(Widget):
             host_label = safe_segment(params.get("--host-label") or target, "host")
             key = f"collection-download:{target}:{session_id}:{host_label}"
             if key in self._downloads_in_flight:
-                self._log("[yellow]A download for this session and host is already running.[/yellow]")
+                self._log(
+                    "[yellow]A download for this session and host is already running; it takes the "
+                    "audio and the video alike, whichever tab Download was pressed on.[/yellow]"
+                )
                 return
             self._downloads_in_flight.add(key)
             self.run_worker(
@@ -6760,11 +6787,11 @@ class ServicePanel(Widget):
         host_label: str,
         remote_transfer_path: str,
         local_path: Path,
-        skip_if_present: bool = False,
     ) -> bool:
         """scan, download (staged, resumable) and merge one remote
-        <folder>/collection/<host label> tree: a session's recordings, or a day
-        of stream recordings. True when it is here afterwards."""
+        <folder>/collection/<host label> tree: a session's recordings, audio
+        and video alike, or a day of stream recordings. Only what is not here
+        yet is fetched. True when it is all here afterwards."""
         staging = dl.staging_root(self._root, session_id, "collection", host_label)
         self._log(f"[cyan]Downloading {profile_name}:{remote_transfer_path} -> {local_path}[/cyan]")
 
@@ -6786,12 +6813,22 @@ class ServicePanel(Widget):
                 self._log(
                     f"[yellow]Skipping {len(plan.rejected)} remote file(s) with unsupported names.[/yellow]"
                 )
-            if skip_if_present and plan.exact and await asyncio.to_thread(_tree_is_here, local_path, plan):
-                self._log(f"[green]{session_id}: all {plan.file_count} file(s) are already here.[/green]")
-                return True
+            here = await asyncio.to_thread(_files_already_here, local_path, plan) if plan.exact else []
+            self._log_download_files(plan, here)
+            if here:
+                plan = dl.leave_out(plan, here)
+                if not plan.file_count:
+                    self._log(f"[green]{session_id}: all {len(here)} file(s) are already here; nothing to fetch.[/green]")
+                    return True
+                self._log(
+                    f"  [cyan]{len(here)} file(s) are already here at the same size and are not fetched "
+                    f"again; fetching {_describe_files(item.rel for item in plan.files)}.[/cyan]"
+                )
 
             self._progress_start(
-                f"{host_label} · {plan.file_count} file(s)", plan.total_bytes
+                f"{host_label} · {_describe_files(item.rel for item in plan.files)}"
+                if plan.exact else f"{host_label} · {plan.file_count} file(s)",
+                plan.total_bytes,
             )
             result = await dl.download_tree(
                 profile,
@@ -6823,12 +6860,31 @@ class ServicePanel(Widget):
             local_path=local_path,
         )
         await asyncio.to_thread(dl.finalize, staging)
+        fetched = _describe_files(item.rel for item in plan.files) if plan.exact else f"{plan.file_count} file(s)"
         self._log(
-            f"[green]Downloaded collection to {local_path} via {result.tool} "
-            f"(copied {stats['copied']}, skipped {stats['skipped']}, conflicts {stats['conflicted']}).[/green]"
+            f"[green]Downloaded {fetched} to {local_path} via {result.tool} "
+            f"(copied {stats['copied']}, unchanged {stats['skipped']}, conflicts {stats['conflicted']})"
+            + (f"; {len(here)} file(s) were already here" if here else "")
+            + ".[/green]"
         )
         self._log(f"[green]Updated session manifest: {manifest}[/green]")
         return True
+
+    def _log_download_files(self, plan, here: list[str]) -> None:
+        """what a download holds, file by file, before it starts: the session
+        folder of a host brings its audio and its video together."""
+        size = dl.fmt_bytes(plan.total_bytes)
+        if not plan.exact:
+            self._log(f"  {plan.file_count} file(s), {size}")
+            return
+        self._log(f"  {plan.file_count} file(s), {size}: {_describe_files(item.rel for item in plan.files)}")
+        here_set = set(here)
+        media = [item for item in plan.files if os.path.basename(item.rel) not in METADATA_FILENAMES]
+        for item in media[:_DOWNLOAD_LIST_MAX]:
+            note = "  [dim](already here)[/dim]" if item.rel in here_set else ""
+            self._log(f"    {rich_escape(item.rel)}  {dl.fmt_bytes(item.size)}{note}")
+        if len(media) > _DOWNLOAD_LIST_MAX:
+            self._log(f"    … and {len(media) - _DOWNLOAD_LIST_MAX} more")
 
     def _stream_session_choices(self) -> list[str]:
         """the sessions a stream recording can be cut for: the real ones, not
@@ -7041,7 +7097,7 @@ class ServicePanel(Widget):
             for day, remote_dir in days:
                 local_path = Path(collection_artifact_dir(self._root, day, host_label))
                 if await self._transfer_collection_tree(
-                    profile, profile_name, day, host_label, remote_dir, local_path, skip_if_present=True,
+                    profile, profile_name, day, host_label, remote_dir, local_path,
                 ):
                     fetched += 1
             if fetched:
@@ -7506,6 +7562,16 @@ class ServicePanel(Widget):
             if not plan.file_count:
                 self._log(f"  [yellow]Empty remote path: {remote_path}[/yellow]")
                 return None
+            here = await asyncio.to_thread(_files_already_here, destination, plan) if plan.exact else []
+            if here:
+                plan = dl.leave_out(plan, here)
+                if not plan.file_count:
+                    self._log(f"  [green]{label}: all {len(here)} file(s) are already here.[/green]")
+                    return {"copied": 0, "skipped": len(here), "conflicted": 0}
+                self._log(
+                    f"  [cyan]{label}: {len(here)} file(s) already here at the same size; "
+                    f"fetching the other {plan.file_count}.[/cyan]"
+                )
 
             self._progress_start(label, plan.total_bytes)
             result = await dl.download_tree(
@@ -7530,6 +7596,7 @@ class ServicePanel(Widget):
             conflict_label=conflict_label,
         )
         await asyncio.to_thread(dl.finalize, staging)
+        stats["skipped"] += len(here)
         return stats
 
     def _refresh_visible_statuses(self) -> None:
