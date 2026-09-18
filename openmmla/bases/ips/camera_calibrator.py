@@ -200,8 +200,18 @@ class CameraCalibrator(Base):
         print(f"Configuration updated for {camera_name}.")
 
     @staticmethod
+    def next_image_number(directory) -> int:
+        """the number after the highest <n>.jpg already there: a second capture
+        for a camera adds to its images instead of writing over 1.jpg, 2.jpg ..."""
+        try:
+            stems = [os.path.splitext(name)[0] for name in os.listdir(directory)]
+        except OSError:
+            return 1
+        return max((int(stem) for stem in stems if stem.isdigit()), default=0) + 1
+
+    @staticmethod
     def capture_and_save_image(cam, directory):
-        image_number = 1
+        image_number = CameraCalibrator.next_image_number(directory)
         print("Press 'c' to capture the image, or 'q' to quit.")
         while cam.isOpened():
             result, image = cam.read()
