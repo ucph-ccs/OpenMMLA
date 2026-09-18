@@ -9,7 +9,7 @@ import shlex
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
@@ -21,6 +21,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, Input
 
+from openmmla.tui import recordings
 from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
 
 
@@ -391,6 +392,10 @@ def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict
 
 class SessionsPanel(Widget):
 
+    # seconds the Stream Server keeps a recording, as it last said; None while
+    # it has not answered. 0 is for ever
+    _retention: float | None = None
+
     class SessionDeleted(Message):
         """a session's database records were deleted here: the Launcher must
         stop offering its id, or the next recording goes to a session MongoDB
@@ -504,7 +509,7 @@ class SessionsPanel(Widget):
 
     def on_mount(self) -> None:
         table = self.query_one("#sessions-table", DataTable)
-        table.add_columns("Session ID", "Experiment", "Group", "Status", "Started", "Source")
+        table.add_columns("Session ID", "Experiment", "Group", "Status", "Started", "Recordings until", "Source")
         table.cursor_type = "row"
         self._start_bootstrap()
 
@@ -719,12 +724,46 @@ class SessionsPanel(Widget):
             mongo_sessions = self._mongo_client.get_all_sessions() if self._mongo_client else []
         except Exception:
             mongo_sessions = []  # a connection that went away: the disk is still worth listing
+        # how long the Stream Server keeps a recording, from the server itself:
+        # the table says until when each session's footage can still be exported
+        self._retention = self._ask_retention()
         artifact_sessions = []
         if self._target == "local":
             root = _find_project_root()
             artifact_sessions = _local_artifact_sessions(root) + _local_collection_sessions(root)
         db_host = _db_host_from_config(self._config_source.config) if self._config_source else ""
         return _merge_session_rows(mongo_sessions, artifact_sessions, db_host)
+
+    def _ask_retention(self) -> float | None:
+        """`recordDeleteAfter` of the running Stream Server; None when it does
+        not answer. Blocking (HTTP)."""
+        from openmmla.tui.schema.loader import _find_project_root
+        from openmmla.tui.system_services import stream_server_address
+
+        server = stream_server_address(_find_project_root())
+        try:
+            return recordings.retention(str(server.get("host") or "localhost"),
+                                        int(server.get("api_port") or recordings.API_PORT), timeout=2.0)
+        except recordings.RecordingsError:
+            return None
+
+    def _recordings_until(self, session: dict) -> Text | str:
+        """when the Stream Server begins to delete this session's footage: its
+        start plus the retention. `kept` while nothing is deleted, `gone` once
+        it has passed; a session MongoDB does not know has no window to export."""
+        if "MongoDB" not in set(session.get("_source_kinds") or []):
+            return "-"
+        start = recordings.parse_time(session.get("start_time"))
+        if self._retention is None or start is None:
+            return "-"
+        if self._retention <= 0:
+            return "kept"
+        until = recordings.expiry(start, self._retention)
+        now = datetime.now(timezone.utc)
+        if until <= now:
+            return Text("gone", style="dim")
+        text = until.strftime("%Y-%m-%d %H:%M UTC")
+        return Text(text, style="yellow") if until - now < timedelta(hours=24) else text
 
     def _render_sessions(self, sessions: list[dict]) -> None:
         self._sessions = sessions
@@ -739,7 +778,7 @@ class SessionsPanel(Widget):
             status = ses.get("status", "unknown")
             start = ses.get("start_time")
             start_str = _format_start_time(start)
-            table.add_row(sid, exp, grp, status, start_str, ses.get("_source", "-"))
+            table.add_row(sid, exp, grp, status, start_str, self._recordings_until(ses), ses.get("_source", "-"))
 
         source = self._config_source.label if self._config_source else self._target
         detail = f"Config: {source}"
@@ -749,6 +788,8 @@ class SessionsPanel(Widget):
                 detail += f" | {endpoints}"
         if self._target == "local":
             detail += " + local artifacts"
+        if self._retention is not None:
+            detail += f" | recordings kept {recordings.describe_retention(self._retention)}"
         self._update_summary(f"Sessions: {len(self._sessions)} found | {detail}")
         # a reload must not move the cursor off the session the user was on
         ids = [ses.get("session_id", "") for ses in self._sessions]
@@ -922,6 +963,15 @@ class SessionsPanel(Widget):
             return
         clips = recordings.clips_for_window(spans, start, end, patterns)
         if not clips:
+            until = recordings.expiry(start, self._retention)
+            if until is not None and until <= datetime.now(timezone.utc):
+                self._log(
+                    f"  [yellow]Nothing left on the server: it keeps a recording for "
+                    f"{recordings.describe_retention(self._retention)}, and this session's footage was deleted "
+                    f"from {until:%Y-%m-%d %H:%M} UTC on. The retention is set on the Stream Server card, "
+                    f"Config tab; its Recordings tab shows what the server still holds.[/yellow]"
+                )
+                return
             recorded = [path for path in spans if recordings.matches(path, patterns)]
             self._log(
                 "  [yellow]Nothing was recorded on the server in that time"

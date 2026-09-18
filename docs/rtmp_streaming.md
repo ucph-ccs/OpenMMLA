@@ -45,7 +45,7 @@ The card's Run mode `native` runs the same targets. Both run modes record to the
 
 ### Configuration
 
-Both ways read `pipelines/uber-server/mediamtx/mediamtx.yml`. Stream paths are created on the fly (`all_others`), so any `<app>/<name>` in a publish URL works without editing the server. Recording is on for every path (fMP4, ten-minute segments, never deleted), the API, playback and metrics are on, and there is no authentication, which suits a trusted lab network; the file points at the MediaMTX reference for credentials.
+Both ways read `pipelines/uber-server/mediamtx/mediamtx.yml`. Stream paths are created on the fly (`all_others`), so any `<app>/<name>` in a publish URL works without editing the server. Recording is on for every path (fMP4, ten-minute segments, deleted three days after they began: `recordDeleteAfter`), the API, playback and metrics are on, and there is no authentication, which suits a trusted lab network; the file points at the MediaMTX reference for credentials.
 
 ### Check what is published
 
@@ -139,7 +139,7 @@ A recording is filed by day and not under a session, because a stream does not b
 
 ### On the server
 
-While `record` under `pathDefaults` is on in `mediamtx.yml` (the **Server-side recording** switch on the Stream Server card's Config tab; on by default), MediaMTX writes every published path to `recordings/<app>/<name>/<start>.mp4` in ten-minute fMP4 segments (see [Run it](#run-it) for where that folder is). Segment names are the server's clock, so treat them as an archive of what arrived rather than as a capture-side recording. The server knows nothing of sessions: it records a path from the moment something is published until the publisher stops, whether or not a session runs, and its folder, `artifacts/recordings/`, is not listed as a session by the console. The footage of a session is the time range between its `start_time` and `end_time`, which the playback server returns as one file for any path:
+While `record` under `pathDefaults` is on in `mediamtx.yml` (the **Server-side recording** switch on the Stream Server card's Config tab; on by default), MediaMTX writes every published path to `recordings/<app>/<name>/<start>.mp4` in ten-minute fMP4 segments (see [Run it](#run-it) for where that folder is). Segment names are the server's clock, so treat them as an archive of what arrived rather than as a capture-side recording. The server knows nothing of sessions: it records a path from the moment something is published until the publisher stops, whether or not a session runs, and its folder, `artifacts/recordings/`, is not listed as a session by the console. A segment is deleted `recordDeleteAfter` after it began, by MediaMTX itself: three days in the shipped file (**Keep recordings for** on the card's Config tab; `0s` keeps everything), so a session's footage has to be exported before then. The **Sessions** table says until when, in its **Recordings until** column, and the card's **Recordings** tab shows what the server holds, path by path with sizes and free disk, and deletes a path or everything older than a given age through the API. The footage of a session is the time range between its `start_time` and `end_time`, which the playback server returns as one file for any path:
 
 ```bash
 curl -o front.mp4 "http://<stream-server>:9996/get?path=vfa/front&start=2026-09-14T10:00:00Z&duration=600"

@@ -4,7 +4,12 @@ MediaMTX records every published path whether or not a session runs, and its
 playback server returns any time range of a path as one file. A stream is
 shared by the sessions that pull it, so the footage of one session is a query
 and not a folder: the paths that were being recorded between the session's
-start and end, each cut to that window."""
+start and end, each cut to that window.
+
+The server keeps a segment for `recordDeleteAfter` and then deletes it itself,
+so a session's footage has to be exported before then; this module also asks
+the server what it holds and for how long, and removes segments through its
+API, for the Recordings tab of the Stream Server card."""
 
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -94,17 +100,60 @@ def _error_text(error: urllib.error.HTTPError) -> str:
         return ""
 
 
-def recorded_paths(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> list[str]:
-    """every path the stream server holds a recording of (control API)."""
-    names: list[str] = []
+@dataclass(frozen=True)
+class Recorded:
+    """one path's recording on the server: when each of its segments began."""
+    path: str
+    segments: tuple[datetime, ...]  # aware UTC, oldest first
+
+
+def inventory(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> list[Recorded]:
+    """every path the stream server holds a recording of, with the start of
+    each segment (control API)."""
+    found: dict[str, set[datetime]] = {}
     page = 0
     while True:
         data = _get_json(f"{_origin(host, api_port)}/v3/recordings/list?itemsPerPage=100&page={page}", timeout)
-        names.extend(str(item.get("name") or "") for item in data.get("items") or [])
+        for item in data.get("items") or []:
+            name = str(item.get("name") or "")
+            if not name:
+                continue
+            starts = found.setdefault(name, set())
+            for segment in item.get("segments") or []:
+                start = parse_time((segment or {}).get("start"))
+                if start is not None:
+                    starts.add(start)
         page += 1
         if page >= int(data.get("pageCount") or 0):
             break
-    return sorted(name for name in set(names) if name)
+    return [Recorded(name, tuple(sorted(found[name]))) for name in sorted(found)]
+
+
+def recorded_paths(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> list[str]:
+    """every path the stream server holds a recording of (control API)."""
+    return [recorded.path for recorded in inventory(host, api_port, timeout)]
+
+
+def segments_before(recorded: list[Recorded], cutoff: datetime) -> list[tuple[str, datetime]]:
+    """(path, start) of every segment that began before `cutoff`, oldest first."""
+    old = [(item.path, start) for item in recorded for start in item.segments if start < cutoff]
+    return sorted(old, key=lambda pair: (pair[1], pair[0]))
+
+
+def delete_segment(host: str, path: str, start: datetime, api_port: int = API_PORT, timeout: float = 30.0) -> None:
+    """remove one segment on the server (control API): the one that began at
+    `start`, so the time has to be the one the listing gave."""
+    query = urllib.parse.urlencode({"path": path, "start": _rfc3339(start)})
+    request = urllib.request.Request(
+        f"{_origin(host, api_port)}/v3/recordings/deletesegment?{query}", method="DELETE")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):
+            pass
+    except urllib.error.HTTPError as error:
+        raise RecordingsError(
+            f"{path} {start:%Y-%m-%d %H:%M:%S}: HTTP {error.code} {_error_text(error)}") from error
+    except (urllib.error.URLError, OSError) as error:
+        raise RecordingsError(f"{path}: {getattr(error, 'reason', error)}") from error
 
 
 def timespans(host: str, path: str, playback_port: int = PLAYBACK_PORT,
@@ -203,3 +252,155 @@ def _discard(path: str) -> None:
         os.unlink(path)
     except OSError:
         pass
+
+
+# ---- how long the server keeps a recording ----
+
+# MediaMTX deletes a segment `recordDeleteAfter` after it began. Its own
+# default is a day; 0 keeps everything
+DEFAULT_RETENTION = 24 * 3600.0
+
+# what the Stream Server card offers for `recordDeleteAfter`
+RETENTION_CHOICES: list[tuple[str, float]] = [
+    ("1 day", 86400.0), ("3 days", 3 * 86400.0), ("7 days", 7 * 86400.0),
+    ("14 days", 14 * 86400.0), ("30 days", 30 * 86400.0), ("for ever", 0.0),
+]
+
+_DURATION_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "μs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+_DURATION_PART = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)")
+
+
+def parse_duration(value) -> float | None:
+    """seconds of a Go duration, as mediamtx.yml and the API write them:
+    `72h`, `1h30m`, `0s`, `72h0m0s`. None for anything else, empty included."""
+    text = str(value or "").strip().strip("'\"")
+    if not text:
+        return None
+    if text == "0":
+        return 0.0
+    position, total = 0, 0.0
+    while position < len(text):
+        part = _DURATION_PART.match(text, position)
+        if part is None:
+            return None
+        total += float(part.group(1)) * _DURATION_UNITS[part.group(2)]
+        position = part.end()
+    return total
+
+
+def format_duration(seconds: float) -> str:
+    """the shortest Go duration of whole hours, minutes or seconds: 72h, 90m, 0s."""
+    seconds = max(0.0, float(seconds))
+    if seconds and seconds % 3600 == 0:
+        return f"{int(seconds // 3600)}h"
+    if seconds and seconds % 60 == 0:
+        return f"{int(seconds // 60)}m"
+    return f"{seconds:g}s"
+
+
+def describe_retention(seconds: float | None) -> str:
+    """`3 days`, `36 hours`, `for ever`; `unknown` while the server was not asked."""
+    if seconds is None:
+        return "unknown"
+    if seconds <= 0:
+        return "for ever"
+    for unit, name in ((86400.0, "day"), (3600.0, "hour"), (60.0, "minute")):
+        if seconds % unit == 0:
+            count = int(seconds // unit)
+            return f"{count} {name}{'s' if count != 1 else ''}"
+    return format_duration(seconds)
+
+
+def retention(host: str, api_port: int = API_PORT, timeout: float = 5.0) -> float:
+    """seconds the running server keeps a segment for: `recordDeleteAfter` of
+    its path defaults. 0 is for ever, which the API reports as an empty string."""
+    data = _get_json(f"{_origin(host, api_port)}/v3/config/pathdefaults/get", timeout)
+    seconds = parse_duration(data.get("recordDeleteAfter")) if isinstance(data, dict) else None
+    return 0.0 if seconds is None else seconds
+
+
+def expiry(start: datetime | None, retention_seconds: float | None) -> datetime | None:
+    """when the server begins to delete a session's footage: the segment that
+    holds the session's start began at or before it, and goes `retention`
+    after that. None while the retention is unknown, or everything is kept."""
+    if start is None or not retention_seconds or retention_seconds <= 0:
+        return None
+    return start + timedelta(seconds=retention_seconds)
+
+
+def path_default_line(text: str, key: str) -> tuple[int, str] | None:
+    """(line index, value as written) of `key:` under `pathDefaults:` of a
+    mediamtx.yml, or None when it has no such line. The file is mostly
+    comments, so it is edited as text: a yaml round trip would drop every
+    one of them."""
+    inside = False
+    for index, line in enumerate(text.splitlines()):
+        if re.match(r"^pathDefaults:\s*(#.*)?$", line):
+            inside = True
+            continue
+        if inside:
+            if line.strip() and not line.startswith((" ", "\t", "#")):
+                break  # the next top-level key
+            match = re.match(rf"^\s+{re.escape(key)}:\s*([^#]*?)\s*(#.*)?$", line)
+            if match:
+                return index, match.group(1).strip("'\"")
+    return None
+
+
+def with_path_default(text: str, key: str, value: str) -> str | None:
+    """the text with that line's value replaced and its comment kept; None
+    when the line is not there (the file is left alone rather than guessed at)."""
+    found = path_default_line(text, key)
+    if found is None:
+        return None
+    lines = text.splitlines()
+    lines[found[0]] = re.sub(
+        rf"^(\s+{re.escape(key)}:\s*)[^#]*?(\s*#.*)?$",
+        lambda match: match.group(1) + value + (match.group(2) or ""), lines[found[0]], count=1)
+    return "\n".join(lines) + "\n"
+
+
+# ---- what the recordings take on the server's disk ----
+
+def usage_script(quoted_root: str, paths) -> str:
+    """for a shell on the server: `SIZE <kB> <path>` for every recorded path
+    under the record root, `FREE <kB>` of the root's disk, USAGE when done.
+    The root comes quoted for the shell ($HOME stays expandable)."""
+    listed = " ".join(shlex.quote(str(path)) for path in paths)
+    return (
+        f"root={quoted_root}; set -- {listed}; for p in \"$@\"; do "
+        'k=$(du -sk "$root/$p" 2>/dev/null | cut -f1); '
+        '[ -n "$k" ] && printf "SIZE %s %s\\n" "$k" "$p"; done; '
+        'printf "FREE %s\\n" "$(df -Pk "$root" 2>/dev/null | awk \'NR==2{print $4}\')"; echo USAGE'
+    )
+
+
+def parse_usage(text) -> tuple[dict[str, int], int | None] | None:
+    """({path: bytes}, free bytes) from the script's output; None when it
+    never finished (the host could not be asked)."""
+    lines = [line.rstrip() for line in str(text or "").splitlines()]
+    if "USAGE" not in lines:
+        return None
+    sizes: dict[str, int] = {}
+    free = None
+    for line in lines:
+        kind, _, rest = line.partition(" ")
+        if kind == "SIZE":
+            kilobytes, _, path = rest.partition(" ")
+            if kilobytes.isdigit() and path:
+                sizes[path] = int(kilobytes) * 1024
+        elif kind == "FREE" and rest.strip().isdigit():
+            free = int(rest.strip()) * 1024
+    return sizes, free
+
+
+def human_size(size: int | float | None) -> str:
+    """`1.2 GB`; `?` for a size nobody could tell."""
+    if size is None:
+        return "?"
+    amount = float(size)
+    for unit in ("B", "kB", "MB", "GB"):
+        if amount < 1000:
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1000
+    return f"{amount:.1f} TB"

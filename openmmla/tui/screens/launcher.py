@@ -105,6 +105,7 @@ from openmmla.utils.experiments import (
 )
 from openmmla.tui.widgets.command_session import CommandSession
 from openmmla.tui.widgets.config_form import ConfigForm
+from openmmla.tui.widgets.recordings_panel import StreamServerRecordingsPanel
 from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
 from openmmla.tui.widgets.ssh_form import SSHForm
@@ -1576,21 +1577,11 @@ _MEDIAMTX_CONFIG_REL = os.path.join("pipelines", "uber-server", "mediamtx", "med
 
 def _mediamtx_server_recording(text: str) -> tuple[int, bool] | None:
     """(line index, on?) of `record:` under `pathDefaults:` in a mediamtx.yml,
-    or None when the file has no such line. The file is mostly comments, so it
-    is edited as text: a yaml round trip would drop every one of them."""
-    lines = text.splitlines()
-    inside = False
-    for index, line in enumerate(lines):
-        if re.match(r"^pathDefaults:\s*(#.*)?$", line):
-            inside = True
-            continue
-        if inside:
-            if line.strip() and not line.startswith((" ", "\t", "#")):
-                break  # the next top-level key
-            match = re.match(r"^\s+record:\s*([A-Za-z]+)", line)
-            if match:
-                return index, match.group(1).lower() in ("yes", "true", "on")
-    return None
+    or None when the file has no such line."""
+    found = recordings.path_default_line(text, "record")
+    if found is None or not re.fullmatch(r"[A-Za-z]+", found[1]):
+        return None
+    return found[0], found[1].lower() in ("yes", "true", "on")
 
 
 class StreamServerConfigPanel(Widget):
@@ -1622,6 +1613,12 @@ class StreamServerConfigPanel(Widget):
         min-width: 16;
         margin-right: 1;
     }
+    StreamServerConfigPanel .ss-actions Label {
+        padding: 1 1 0 1;
+    }
+    StreamServerConfigPanel .ss-actions Select {
+        width: 34;
+    }
     """
 
     def __init__(self, *, config_path: str, target: str = "local", ssh_profile=None,
@@ -1643,14 +1640,19 @@ class StreamServerConfigPanel(Widget):
         yield Static(
             "MediaMTX records every stream that is published to it while `record` under "
             "`pathDefaults` is on: ten-minute segments under artifacts/recordings/<app>/<name>/ of the "
-            "project on this host (the same folder for a docker and a native run), "
-            "kept for `recordDeleteAfter` (0s = for ever). This is the server-side copy; recording on "
-            "the capture device is the `record` field of a stream (Streams tab of a base card). The "
-            "two are independent. The ports here have to match System Settings → Stream Server.",
+            "project on this host (the same folder for a docker and a native run). A segment is deleted "
+            "`recordDeleteAfter` after it began, by MediaMTX itself, so a session's footage has to be "
+            "exported before then (Sessions → Export Recordings; the Recordings tab shows what is held). "
+            "This is the server-side copy; recording on the capture device is the `record` field of a "
+            "stream (Streams tab of a base card). The two are independent. The ports here have to match "
+            "System Settings → Stream Server.",
             classes="ss-muted",
         )
         with Horizontal(classes="ss-actions"):
             yield Button("Server-side recording: ?", id="btn-mediamtx-record")
+            yield Label("Keep recordings for:")
+            yield Select([(label, seconds) for label, seconds in recordings.RETENTION_CHOICES],
+                         allow_blank=False, id="mediamtx-retention")
         yield TextArea("", id="mediamtx-editor", read_only=True)
         with Horizontal(classes="ss-actions"):
             yield Button("Save", variant="primary", id="btn-mediamtx-save")
@@ -1674,6 +1676,47 @@ class StreamServerConfigPanel(Widget):
         else:
             button.label = f"Server-side recording: {'ON' if state[1] else 'OFF'}"
             button.variant, button.disabled = ("success" if state[1] else "default"), False
+        self._show_retention_state()
+
+    def _show_retention_state(self) -> None:
+        """the choice follows `recordDeleteAfter` in the editor: one of the
+        offered spans, or the value as written when it is none of them."""
+        select = self.query_one("#mediamtx-retention", Select)
+        found = recordings.path_default_line(self.query_one("#mediamtx-editor", TextArea).text, "recordDeleteAfter")
+        options = list(recordings.RETENTION_CHOICES)
+        with select.prevent(Select.Changed):
+            if found is None:
+                select.set_options([("not set: MediaMTX keeps a day", -1.0)])
+                select.value = -1.0
+                select.disabled = True
+                return
+            seconds = recordings.parse_duration(found[1])
+            if seconds is None or seconds not in {value for _label, value in options}:
+                options.append((f"as written: {found[1] or 'empty'}", -1.0))
+                seconds = -1.0
+            select.set_options(options)
+            select.value = seconds
+            select.disabled = False
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "mediamtx-retention" or event.value is Select.BLANK or float(event.value) < 0:
+            return
+        # the Select announces its first option as it mounts, and that message
+        # arrives after the editor was loaded and the choice set to the file's
+        # value: a change that no longer describes the Select is not the user's
+        if event.value != event.select.value:
+            return
+        editor = self.query_one("#mediamtx-editor", TextArea)
+        found = recordings.path_default_line(editor.text, "recordDeleteAfter")
+        if found is not None and recordings.parse_duration(found[1]) == float(event.value):
+            return  # the file already says so
+        text = recordings.with_path_default(
+            editor.text, "recordDeleteAfter", recordings.format_duration(float(event.value)))
+        if text is None:
+            return
+        editor.load_text(text)
+        self._show_retention_state()
+        self._set_status("Changed in the editor: press Save to write it.")
 
     def _load(self) -> None:
         editor = self.query_one("#mediamtx-editor", TextArea)
@@ -1703,10 +1746,7 @@ class StreamServerConfigPanel(Widget):
             state = _mediamtx_server_recording(editor.text)
             if state is None:
                 return
-            lines = editor.text.splitlines()
-            lines[state[0]] = re.sub(
-                r"(record:\s*)[A-Za-z]+", lambda m: m.group(1) + ("no" if state[1] else "yes"), lines[state[0]], count=1)
-            editor.load_text("\n".join(lines) + "\n")
+            editor.load_text(recordings.with_path_default(editor.text, "record", "no" if state[1] else "yes"))
             self._show_recording_state()
             self._set_status("Changed in the editor: press Save to write it.")
         elif event.button.id == "btn-mediamtx-save":
@@ -3698,6 +3738,11 @@ class ServicePanel(Widget):
                 config_path=local_path, target=target, ssh_profile=profile,
                 remote_path=self._remote_config_path(local_path, profile) if profile is not None else None,
             ))
+            # what the server holds and the way to make room: asked over HTTP,
+            # sized over a shell on the card's host
+            recordings_scroll = VerticalScroll(classes="svc-launch-scroll")
+            await tabs.add_pane(TabPane("Recordings", recordings_scroll, id="svc-tab-recordings"))
+            await recordings_scroll.mount(self._stream_server_recordings_panel(profile))
         elif svc.launch_type == "vllm":
             tabs = TabbedContent(id="svc-sub-tabs")
             await content_area.mount(tabs)
@@ -5782,6 +5827,36 @@ class ServicePanel(Widget):
     def _remote_config_path(self, local_path: str, profile) -> str:
         rel_path = os.path.relpath(local_path, self._root)
         return _remote_path_join(profile.remote_project_path, rel_path)
+
+    def _stream_server_recordings_panel(self, profile) -> StreamServerRecordingsPanel:
+        """the server's inventory. Its API is asked on the card's host: the
+        address of System Settings on Local, the SSH host of a remote card
+        (which shows and controls that machine's own MediaMTX). The record
+        folder is artifacts/recordings of the project on that host, which is
+        where both run modes put it."""
+        server = self._stream_server_address()
+        api_port = int(server.get("api_port") or recordings.API_PORT)
+        if profile is None:
+            host = str(server.get("host") or "localhost")
+            quoted_root = shlex.quote(os.path.join(self._root, "artifacts", "recordings"))
+
+            def run_shell(command: str) -> str | None:
+                try:
+                    result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60.0)
+                except Exception:
+                    return None
+                return result.stdout if result.returncode == 0 else None
+        else:
+            host = profile.host
+            quoted_root = _quote_remote_path(_remote_path_join(profile.remote_project_path, "artifacts/recordings"))
+
+            def run_shell(command: str) -> str | None:
+                try:
+                    result = ssh_run_sync(profile, command, timeout=60.0)
+                except Exception:
+                    return None
+                return result.stdout if result.returncode == 0 else None
+        return StreamServerRecordingsPanel(host=host, api_port=api_port, quoted_root=quoted_root, run_shell=run_shell)
 
     def _remote_config_exists(self, svc: ServiceDef, target: str) -> tuple[bool | None, str]:
         """Check over SSH whether the remote config.yml for a service exists.

@@ -149,7 +149,7 @@ SHARED_SECTIONS = {
                 "default": 8554,
             },
             "api_port": {
-                "description": "MediaMTX control API port, asked which paths were recorded (default 9997)",
+                "description": "MediaMTX control API port, asked what was recorded and for how long it is kept, and told what to delete (default 9997)",
                 "field_type": "int",
                 "default": 9997,
             },

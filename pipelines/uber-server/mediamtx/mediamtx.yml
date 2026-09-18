@@ -54,8 +54,11 @@ pathDefaults:
   recordFormat: fmp4
   recordPartDuration: 1s
   recordSegmentDuration: 10m
-  # 0s keeps the recordings; the MediaMTX default deletes them after one day
-  recordDeleteAfter: 0s
+  # a segment is deleted this long after it began, by MediaMTX itself: take a
+  # session's footage (Sessions -> Export Recordings) before then. 0s keeps
+  # everything; the Stream Server card's Config tab sets this, and its
+  # Recordings tab shows what the server holds
+  recordDeleteAfter: 72h
 
 paths:
   # any path name works: the <app>/<name> of the publish URL is created on the fly
