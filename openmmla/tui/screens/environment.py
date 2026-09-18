@@ -24,6 +24,12 @@ from openmmla.tui.widgets.command_session import CommandSession, _list_conda_env
 _GIT_PULL_ALL_TIMEOUT = 120.0
 
 
+def _unbuffered_env() -> dict[str, str]:
+    """the environment for a conda or pip child whose output is shown as it
+    comes: Python block-buffers what it writes into a pipe otherwise."""
+    return {**os.environ, "PYTHONUNBUFFERED": "1"}
+
+
 # Env/group metadata only. Required packages are read dynamically from the
 # project's pyproject.toml ([project.optional-dependencies].<group>), so this
 # table no longer carries a hardcoded package list.
@@ -796,11 +802,12 @@ class EnvironmentPanel(Widget):
 
     async def _run_create(self, env_name: str, python_ver: str) -> None:
         cmd = ["conda", "create", "-n", env_name, f"python={python_ver}", "-y"]
-        self._log(f"  $ {' '.join(cmd)}")
+        self._log(f"  $ {rich_escape(' '.join(cmd))}")
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=_unbuffered_env(),
         )
         assert proc.stdout is not None
         while True:
@@ -871,11 +878,12 @@ class EnvironmentPanel(Widget):
 
     async def _run_delete(self, env_name: str) -> None:
         cmd = ["conda", "env", "remove", "-n", env_name, "-y"]
-        self._log(f"  $ {' '.join(cmd)}")
+        self._log(f"  $ {rich_escape(' '.join(cmd))}")
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=_unbuffered_env(),
         )
         assert proc.stdout is not None
         while True:
@@ -937,16 +945,19 @@ class EnvironmentPanel(Widget):
             self.run_worker(self._run_install(env_name, group), exclusive=True)
 
     async def _run_install(self, env_name: str, group: str) -> None:
+        # --no-capture-output: conda run holds the child's output back until it
+        # exits otherwise, as the remote install below already says
         cmd = [
-            "conda", "run", "-n", env_name,
+            "conda", "run", "--no-capture-output", "-n", env_name,
             "pip", "install", "-e", f".[{group}]",
         ]
-        self._log(f"  $ {' '.join(cmd)}")
+        self._log(f"  $ {rich_escape(' '.join(cmd))}")
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=self._root,
+            env=_unbuffered_env(),
         )
         assert proc.stdout is not None
         while True:
