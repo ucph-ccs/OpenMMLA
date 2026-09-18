@@ -162,6 +162,7 @@ _REMOTE_COLLECTION_FILES = (
     "openmmla/commands/collect/video.py",
     "openmmla/utils/__init__.py",
     "openmmla/utils/artifact_paths.py",
+    "openmmla/utils/mac_desktop.py",
 )
 _NEW_COLLECTION_SESSION_CHOICE = "Create MongoDB Session"
 _COLLECTION_HIDDEN_PRESET_FLAGS = {
@@ -9851,10 +9852,10 @@ class ServicePanel(Widget):
                     return
                 if remote_platform(profile) == "darwin":
                     self._log(
-                        f"  [yellow]{profile_name} is a Mac: its recorders run FFmpeg in a Terminal window on "
-                        "its own screen, as macOS lets nothing started over SSH use the camera or the "
-                        "microphone. Someone has to be logged in there, with Terminal allowed under "
-                        "Privacy & Security (Camera, Microphone).[/yellow]"
+                        f"  [yellow]{profile_name} is a Mac: its recorders start FFmpeg from a Terminal window "
+                        "on its own screen, as macOS lets nothing started over SSH use the camera or the "
+                        "microphone; the window closes by itself once FFmpeg runs. Someone has to be logged "
+                        "in there, with Terminal allowed under Privacy & Security (Camera, Microphone).[/yellow]"
                     )
                 launched = 0
                 tab_cmds: list[tuple[str, str]] = []

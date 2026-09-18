@@ -31,6 +31,7 @@ from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, remote_plat
 from openmmla.tui.system_services import stream_server_path
 from openmmla.utils.artifact_paths import safe_segment
 from openmmla.utils.constants import STREAM_URL_SCHEMES
+from openmmla.utils.mac_desktop import window_script
 from openmmla.utils.stream_registry import load_stream_registry, register_stream_start, mark_stream_stopped
 
 
@@ -276,66 +277,6 @@ def _build_tmux_stream_cmd(
 # seconds a Terminal window on a Mac has to start ffmpeg
 DESKTOP_START_TIMEOUT = 30
 
-# holds ffmpeg for a Terminal window's script, in a session of its own: the
-# window may close (it closes itself) without taking ffmpeg along. It notes
-# ffmpeg's pid, clears the opening mark once ffmpeg runs, and notes its exit
-# status once it has ended. argv: the stream's file prefix, the ffmpeg command
-_DESKTOP_KEEPER = """\
-import os, signal, subprocess, sys
-state, command = sys.argv[1], sys.argv[2]
-try:
-    os.setsid()
-except OSError:
-    pass
-signal.signal(signal.SIGHUP, signal.SIG_IGN)
-ffmpeg = subprocess.Popen(["/bin/bash", "-c", "exec " + command], stdin=subprocess.DEVNULL)
-with open(state + ".pid", "w") as noted:
-    noted.write("%d\\n" % ffmpeg.pid)
-if os.path.exists(state + ".opening"):
-    os.remove(state + ".opening")
-code = ffmpeg.wait()
-with open(state + ".rc", "w") as noted:
-    noted.write("%d\\n" % (code if code >= 0 else 128 - code))
-if os.path.exists(state + ".pid"):
-    os.remove(state + ".pid")
-"""
-
-# closes the Terminal window whose tab has the given tty, when it holds that tab
-# alone and nothing runs in it any more (Terminal would ask first otherwise).
-# Terminal takes this from a process of its own windows, not from an ssh session
-_CLOSE_WINDOW = """\
-on run argv
-    tell application "Terminal"
-        repeat with w in windows
-            if (count of tabs of w) is 1 then
-                if tty of tab 1 of w is item 1 of argv and not busy of tab 1 of w then
-                    close w
-                    return
-                end if
-            end if
-        end repeat
-    end tell
-end run
-"""
-
-# runs _CLOSE_WINDOW a second after the window's script has ended, from a session
-# of its own, so that no process of the window is left when it is closed.
-# argv: the AppleScript, the window's tty
-_WINDOW_CLOSER = """\
-import os, subprocess, sys, time
-try:
-    os.setsid()
-except OSError:
-    pass
-time.sleep(1)
-command = ["osascript"]
-for line in sys.argv[1].splitlines():
-    command += ["-e", line]
-subprocess.run(command + [sys.argv[2]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-               stderr=subprocess.DEVNULL)
-"""
-
-
 def _build_desktop_stream_cmd(
     session: str,
     ffmpeg_cmd: str,
@@ -347,36 +288,26 @@ def _build_desktop_stream_cmd(
     started from a .command script that `open -a Terminal` runs in a window on
     the Mac's own screen, where macOS lets it use the camera. The script notes
     the start time and the recording path as the tmux wrapper does, leaves
-    ffmpeg to a keeper in a session of its own (_DESKTOP_KEEPER) and closes its
-    window once ffmpeg runs: nothing stays on the screen, and no window closed
-    by hand can stop a stream. The tmux session is still what the console
-    manages: its pane follows ffmpeg's output, passes a C-c (Stop) on to that
-    ffmpeg, and says how it ended."""
+    ffmpeg to a keeper in a session of its own (openmmla.utils.mac_desktop)
+    and closes its window once ffmpeg runs: nothing stays on the screen, and
+    no window closed by hand can stop a stream. The tmux session is still
+    what the console manages: its pane follows ffmpeg's output, passes a C-c
+    (Stop) on to that ffmpeg, and says how it ended."""
     if record_dir and record_path:
         record_part = f'mkdir -p "{record_dir}"\nprintf \'%s\\n\' "{record_path}" > "$F.record"\n'
     else:
         record_part = 'rm -f "$F.record"\n'
-    script = (
-        "#!/bin/bash\n"
-        f"# starts ffmpeg for the OpenMMLA stream {name}: macOS lets nothing started over ssh use\n"
-        "# the camera or the microphone, one started from this window it does. ffmpeg runs on\n"
-        "# after this window has closed itself; Stop on the console's Streams tab ends it\n"
-        f"export PATH={STREAM_REMOTE_PATH}:$PATH\n"
-        f'F="$HOME/.openmmla/streams/{session}"\n'
-        "TTY=$(tty)\n"
-        f"close_window() {{ python3 -c {shlex.quote(_WINDOW_CLOSER)} {shlex.quote(_CLOSE_WINDOW)} "
-        '"$TTY" </dev/null >/dev/null 2>&1 & }\n'
-        "trap close_window EXIT\n"
-        # stopped before this window came up
-        '[ -e "$F.opening" ] || exit 0\n'
-        f'echo "Starting ffmpeg for the OpenMMLA stream {name}; this window closes by itself."\n'
-        "START_TIME=$(python3 -c \"import time; print('%.6f' % time.time())\" 2>/dev/null || date +%s)\n"
-        "export START_TIME\n"
-        "printf '%s\\n' \"$START_TIME\" > \"$F.start\"\n"
-        f"{record_part}"
-        f'python3 -c {shlex.quote(_DESKTOP_KEEPER)} "$F" {shlex.quote(ffmpeg_cmd)} </dev/null >"$F.log" 2>&1 &\n'
-        # the window goes once ffmpeg runs, or has already stopped
-        'i=0; while [ -e "$F.opening" ] && [ ! -e "$F.rc" ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); done\n'
+    script = window_script(
+        f'"$HOME/.openmmla/streams/{session}"',
+        ffmpeg_cmd,
+        about=f"ffmpeg for the OpenMMLA stream {name}",
+        setup=(
+            f"export PATH={STREAM_REMOTE_PATH}:$PATH\n"
+            "START_TIME=$(python3 -c \"import time; print('%.6f' % time.time())\" 2>/dev/null || date +%s)\n"
+            "export START_TIME\n"
+            "printf '%s\\n' \"$START_TIME\" > \"$F.start\"\n"
+            f"{record_part}"
+        ),
     )
     follower = (
         f'F="$HOME/.openmmla/streams/{session}"; '

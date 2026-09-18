@@ -358,8 +358,10 @@ def run_recording_process(command: list[str]) -> int:
 # them to, in the desktop session. Anything started over ssh counts as sshd,
 # which is never even asked: its ffmpeg waits for frames forever, or records
 # silence from the microphone, and says nothing. Over ssh the recorder
-# therefore runs ffmpeg in a Terminal window on the Mac's own screen, where
-# Terminal is the app asked, and follows it from the ssh session.
+# therefore starts ffmpeg from a Terminal window on the Mac's own screen, where
+# Terminal is the app asked. The window closes by itself once ffmpeg runs
+# (openmmla.utils.mac_desktop), and the recorder follows ffmpeg from the ssh
+# session.
 _DESKTOP_START_TIMEOUT = 20.0  # seconds for Terminal to open and start ffmpeg
 _DESKTOP_FRAMES_HINT_AFTER = 10.0  # seconds without an output file before the hint
 
@@ -368,20 +370,23 @@ def _recording_needs_desktop_session() -> bool:
     return sys.platform == "darwin" and bool(os.environ.get("SSH_CONNECTION"))
 
 
-def _recording_pids(output_file: str) -> list[int]:
-    """the ffmpeg writing `output_file`, found by its command line."""
+def _noted_pid(pid_path: Path) -> int | None:
     try:
-        listing = subprocess.run(
-            ["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    pids = []
-    for line in listing.splitlines():
-        pid_text, _, command = line.strip().partition(" ")
-        if pid_text.isdigit() and "ffmpeg" in command.split(" ", 1)[0] and output_file in command:
-            pids.append(int(pid_text))
-    return pids
+        return int(pid_path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _running(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _print_log_tail(log_path: Path, offset: int) -> int:
@@ -398,23 +403,30 @@ def _print_log_tail(log_path: Path, offset: int) -> int:
 
 
 def _run_in_desktop_terminal(command: list[str], output_file: str) -> int:
+    try:
+        from openmmla.utils.mac_desktop import window_script
+    except ImportError:
+        print(
+            "This recorder came without openmmla/utils/mac_desktop.py, which it needs on a Mac reached over "
+            "ssh: restart the console, which uploads it with the recorder at the next Start."
+        )
+        return 1
     run_dir = Path(tempfile.mkdtemp(prefix="openmmla-recorder-"))
-    log_path, rc_path, script = run_dir / "ffmpeg.log", run_dir / "rc", run_dir / "record.command"
+    state, script = run_dir / "ffmpeg", run_dir / "record.command"
     # by its full path: the shell of that window has a PATH of its own
     argv = [shutil.which(command[0]) or command[0], *command[1:]]
     script.write_text(
-        "#!/bin/bash\n"
-        "# ffmpeg of an OpenMMLA recorder started over ssh: here macOS lets it use the\n"
-        "# camera and the microphone. Ctrl+C here or in the ssh session stops it\n"
-        "trap : INT\n"
-        f"cd {shlex.quote(os.getcwd())} || exit 1\n"
-        # tee -i: a Ctrl+C in this window must not cut ffmpeg's output short
-        f"{shlex.join(argv)} 2>&1 | /usr/bin/tee -i {shlex.quote(str(log_path))}\n"
-        f'echo "${{PIPESTATUS[0]}}" > {shlex.quote(str(rc_path))}\n'
-        'echo; echo "[OpenMMLA] recording stopped; this window can be closed."\n',
+        window_script(
+            shlex.quote(str(state)),
+            shlex.join(argv),
+            about="the ffmpeg of an OpenMMLA recorder",
+            setup=f"cd {shlex.quote(os.getcwd())} || exit 1\n",
+            python=shlex.quote(sys.executable),
+        ),
         encoding="utf-8",
     )
     script.chmod(0o755)
+    Path(f"{state}.opening").touch()
     try:
         opened = subprocess.run(
             ["open", "-a", "Terminal", str(script)], capture_output=True, text=True, timeout=30,
@@ -430,53 +442,61 @@ def _run_in_desktop_terminal(command: list[str], output_file: str) -> int:
         shutil.rmtree(run_dir, ignore_errors=True)
         return 1
     print(
-        "Recording in a Terminal window on this Mac's own screen: over ssh macOS lets nothing "
-        "use the camera or the microphone."
+        "Recording from a Terminal window on this Mac's own screen, which closes by itself once ffmpeg "
+        "runs: over ssh macOS lets nothing use the camera or the microphone."
     )
     print("Press Ctrl+C to stop.")
     try:
-        return _follow_desktop_recording(log_path, rc_path, output_file)
+        return _follow_desktop_recording(state, output_file)
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def _follow_desktop_recording(log_path: Path, rc_path: Path, output_file: str) -> int:
-    """print the window's ffmpeg output here until it exits. A Ctrl+C here,
-    which is also how the console's Stop arrives, is passed on to that ffmpeg."""
+def _follow_desktop_recording(state: Path, output_file: str) -> int:
+    """print the output of the ffmpeg the window started until it exits. A
+    Ctrl+C here, which is also how the console's Stop arrives, is passed on to
+    that ffmpeg, or keeps a window that has not started it yet from doing so."""
+    log_path, rc_path, pid_path, opening = (Path(f"{state}.{suffix}") for suffix in ("log", "rc", "pid", "opening"))
     started = time.monotonic()
     offset = 0
-    seen = False
     gone_since: float | None = None
     stop_requested = False
-    signalled: set[int] = set()
+    signalled: int | None = None
     hinted = False
     while True:
         try:
             if rc_path.exists():
                 break
             offset = _print_log_tail(log_path, offset)
-            pids = _recording_pids(output_file)
+            pid = _noted_pid(pid_path)
+            running = _running(pid)
             now = time.monotonic()
             if stop_requested:
-                # also an ffmpeg that only started after the Ctrl+C
-                for pid in set(pids) - signalled:
+                # a window that has not started ffmpeg yet no longer will
+                opening.unlink(missing_ok=True)
+                if running and pid != signalled:
                     try:
                         os.kill(pid, signal.SIGINT)
                     except OSError:
                         pass
-                    signalled.add(pid)
-            if pids:
-                seen, gone_since = True, None
-            elif seen or now - started > _DESKTOP_START_TIMEOUT:
-                gone_since = gone_since or now
-                # bash writes the exit status just after ffmpeg is gone
-                if now - gone_since > 3.0 and not rc_path.exists():
-                    print(
-                        "\nffmpeg in the Terminal window is gone without an exit status (was the window closed?)"
-                        if seen else "\nThe Terminal window did not start ffmpeg."
-                    )
+                    signalled = pid
+            if running:
+                gone_since = None
+            elif opening.exists():
+                if now - started > _DESKTOP_START_TIMEOUT:
+                    opening.unlink(missing_ok=True)
+                    print("\nThe Terminal window did not start ffmpeg.")
                     return 1
-            if pids and not hinted and not os.path.exists(output_file) and now - started > _DESKTOP_FRAMES_HINT_AFTER:
+            else:
+                gone_since = gone_since or now
+                # the keeper notes the exit status just after ffmpeg is gone
+                if now - gone_since > 3.0 and not rc_path.exists():
+                    if stop_requested and pid is None:
+                        print("\nStopped before ffmpeg started.")
+                        return 130
+                    print("\nffmpeg is gone without an exit status.")
+                    return 1
+            if running and not hinted and not os.path.exists(output_file) and now - started > _DESKTOP_FRAMES_HINT_AFTER:
                 hinted = True
                 print(
                     "\nNo frames yet. If this Mac asks on its screen whether Terminal may use the camera or the "
