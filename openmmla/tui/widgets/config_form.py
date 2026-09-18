@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Callable
+
+import yaml
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -14,7 +17,7 @@ from textual.widget import Widget
 
 from rich.text import Text
 
-from openmmla.tui.schema.loader import FieldDef
+from openmmla.tui.schema.loader import REMOVED_SECTION, FieldDef
 from openmmla.utils.constants import normalize_source
 
 # media files the file-browser highlights (others are still shown, greyed)
@@ -250,6 +253,16 @@ def _parse_value(raw: str, field_type: str):
         except ValueError:
             return raw
     if field_type == "list":
+        if "[" in raw:
+            # a list of lists, e.g. a camera's K: "[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]".
+            # Split at the commas it used to come back as strings like '[fx' and 'cx]'
+            # (and that is also how a config saved then reads now: joined, it is parsed right)
+            try:
+                nested = yaml.safe_load(f"[{raw}]")
+            except yaml.YAMLError:
+                nested = None
+            if isinstance(nested, list):
+                return nested
         items = [s.strip().strip("'\"") for s in raw.split(",") if s.strip()]
         for i, item in enumerate(items):
             try:
@@ -938,6 +951,7 @@ class ConfigForm(Widget):
         allow_override_toggle: bool = False,
         section_titles: dict[str, str] | None = None,
         section_notes: dict[str, str] | None = None,
+        entry_factories: dict[str, Callable[[str], list[FieldDef]]] | None = None,
     ) -> None:
         super().__init__()
         # what a top-level section is called on screen (its key stays the
@@ -957,6 +971,11 @@ class ConfigForm(Widget):
         # dynamic base group (e.g. ASR "Base") is rendered first, before the
         # static sections, so it sits at the top alongside Bases
         self._base_section = base_section
+        # groups whose add button the form handles itself: a name is asked for
+        # in place, and the factory makes the fields of the new entry
+        self._entry_factories = entry_factories or {}
+        # dynamic sections removed here, to be removed from the file on Save
+        self._removed_sections: set[str] = set()
 
     def _section_note(self, name: str) -> ComposeResult:
         note = self._section_notes.get(name)
@@ -1206,6 +1225,7 @@ class ConfigForm(Widget):
 
     def add_section(self, section_name: str, fields: list[FieldDef], values: dict) -> None:
         """dynamically add a new collapsible section with fields and a remove button."""
+        self._removed_sections.discard(section_name)
         self._dynamic_sections[section_name] = fields
         for f in fields:
             if f.path in values:
@@ -1263,8 +1283,14 @@ class ConfigForm(Widget):
         self._values[path] = value
         return True
 
+    def mark_removed(self, section_name: str) -> None:
+        """a section of the file that the form does not show and that Save is
+        to remove (a leftover of the template, say)."""
+        self._removed_sections.add(section_name)
+
     def remove_section(self, section_name: str) -> None:
-        """remove a dynamic section by name."""
+        """remove a dynamic section by name; Save removes it from the file."""
+        self._removed_sections.add(section_name)
         self._dynamic_sections.pop(section_name, None)
         coll_id = _safe_id(f"dyn-{section_name}")
         try:
@@ -1301,6 +1327,8 @@ class ConfigForm(Widget):
         for ue in self.query(UpstreamsEditor):
             for svc_name, entries in ue.current_value.items():
                 values[f"{ue.section_key}.{svc_name}"] = entries
+        for section_name in self._removed_sections:
+            values[section_name] = REMOVED_SECTION
         return values
 
     def on_dict_list_field_file_dir_chosen(self, event: "DictListField.FileDirChosen") -> None:
@@ -1317,7 +1345,73 @@ class ConfigForm(Widget):
                     pass
                 break
 
+    def _entry_group_of(self, button_id: str) -> str | None:
+        for group, (_label, bid) in self._group_add_buttons.items():
+            if bid == button_id and group in self._entry_factories:
+                return group
+        return None
+
+    def _show_entry_name_bar(self, group: str, button: Button) -> None:
+        button.display = False
+        bar = Horizontal(
+            Input(placeholder=f"name of the new {group[:-1].lower() if group.endswith('s') else group} "
+                              f"(letters, digits, - _ .)",
+                  id=_safe_id(f"entry-name-{group}")),
+            Button("Add", variant="success", id=_safe_id(f"btn-entry-add-{group}")),
+            Button("Cancel", id=_safe_id(f"btn-entry-cancel-{group}")),
+            Static("", id=_safe_id(f"entry-name-note-{group}"), classes="section-note"),
+            classes="entry-name-bar",
+        )
+        button.parent.mount(bar, after=button)
+        self.call_after_refresh(lambda: self.query_one(f"#{_safe_id(f'entry-name-{group}')}", Input).focus())
+
+    def _close_entry_name_bar(self, group: str) -> None:
+        for bar in self.query(".entry-name-bar"):
+            if bar.query(f"#{_safe_id(f'entry-name-{group}')}"):
+                bar.remove()
+        _label, bid = self._group_add_buttons[group]
+        try:
+            self.query_one(f"#{bid}", Button).display = True
+        except Exception:
+            pass
+
+    def _add_named_entry(self, group: str) -> None:
+        try:
+            name = self.query_one(f"#{_safe_id(f'entry-name-{group}')}", Input).value.strip()
+        except Exception:
+            return
+        note = self.query_one(f"#{_safe_id(f'entry-name-note-{group}')}", Static)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+            note.update("A name of letters, digits, - _ and . is needed.")
+            return
+        section_name = f"{group}.{name}"
+        if section_name in self._dynamic_sections:
+            note.update(f"'{name}' is there already.")
+            return
+        self._close_entry_name_bar(group)
+        self.add_section(section_name, self._entry_factories[group](name), {})
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        for group in self._entry_factories:
+            if event.input.id == _safe_id(f"entry-name-{group}"):
+                event.stop()
+                self._add_named_entry(group)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        group = self._entry_group_of(event.button.id or "")
+        if group is not None:
+            event.stop()
+            self._show_entry_name_bar(group, event.button)
+            return
+        for group in self._entry_factories:
+            if event.button.id == _safe_id(f"btn-entry-add-{group}"):
+                event.stop()
+                self._add_named_entry(group)
+                return
+            if event.button.id == _safe_id(f"btn-entry-cancel-{group}"):
+                event.stop()
+                self._close_entry_name_bar(group)
+                return
         if event.button.id == "btn-save":
             values = self.collect_values()
             self.post_message(self.Saved(self.pipeline_name, values))

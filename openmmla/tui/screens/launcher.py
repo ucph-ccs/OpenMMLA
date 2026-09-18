@@ -1057,6 +1057,32 @@ class TransformMatrixPanel(Widget):
                 self._set_status(f"Save failed: {exc}")
 
 
+# the template's example camera, left in configs saved before Cameras came from
+# the config: letters where the calibrator writes numbers
+_TEMPLATE_CAMERA_PARAMS = ["fx", "fy", "cx", "cy"]
+
+
+def _is_template_camera(entry) -> bool:
+    return isinstance(entry, dict) and entry.get("params") == _TEMPLATE_CAMERA_PARAMS
+
+
+def _make_camera_fields(camera: str) -> list[LoaderFieldDef]:
+    """the fields of one Cameras entry of an IPS or VFA base config, as the
+    calibrator writes them."""
+    section = f"Cameras.{camera}"
+    specs = (
+        ("fisheye", "bool", False, "Set to true if the camera uses a fisheye lens"),
+        ("params", "list", [], "intrinsics fx, fy, cx, cy (what the tag detector uses)"),
+        ("K", "list", [], "3x3 intrinsic matrix, one row per bracket: [fx, 0, cx], [0, fy, cy], [0, 0, 1]"),
+        ("D", "list", [], "distortion coefficients in brackets, e.g. [k1, k2, p1, p2, k3]; K and D undistort a fisheye"),
+    )
+    return [
+        LoaderFieldDef(path=f"{section}.{key}", field_type=ftype, default=default,
+                       description=desc, required=False, section=section)
+        for key, ftype, default, desc in specs
+    ]
+
+
 def _calibrated_cameras(config: dict) -> dict[str, dict]:
     """the Cameras entries of an IPS base config that hold parameters: numbers
     under `params` (the template's camera_name placeholder holds letters)."""
@@ -3591,7 +3617,10 @@ class ServicePanel(Widget):
     # ── sidebar tree ─────────────────────────────────────────────
 
     def _build_tree(self) -> None:
-        tree = self.query_one("#svc-tree", Tree)
+        try:
+            tree = self.query_one("#svc-tree", Tree)
+        except Exception:
+            return  # a worker that finished while the console was closing
         tree.clear()
 
         shared_node = tree.root.add(_SYSTEM_SERVICES_LABEL, data="__shared__")
@@ -4652,7 +4681,9 @@ class ServicePanel(Widget):
         # populate Bases entry dropdowns from the config (camera <- Cameras,
         # base_type <- Base) so users pick existing values instead of typing
         if isinstance(existing, dict):
-            cameras = sorted((existing.get("Cameras") or {}).keys())
+            cameras = sorted(
+                name for name, entry in (existing.get("Cameras") or {}).items()
+                if not _is_template_camera(entry))
             base_types = sorted((existing.get("Base") or {}).keys())
             # 'rtmp' is not offered: it is the old name of 'stream' (an entry
             # that still says it is shown as stream)
@@ -4751,7 +4782,12 @@ class ServicePanel(Widget):
                 if svc_name not in template_names and isinstance(entries, list):
                     values[f"upstreams.{svc_name}"] = entries
 
+        # the cameras are the config's, one group each: the calibrator writes
+        # them, Calibration Cameras syncs them, + Add Camera adds one by hand
+        has_cameras = "Cameras" in pipeline.sections
         known_sections = {f.path.split(".")[0] for f in pipeline.fields}
+        if has_cameras:
+            known_sections.add("Cameras")
         if pipeline.base_section:
             known_sections.add(pipeline.base_section)
         if pipeline.name in _STREAM_PIPELINES:
@@ -4780,6 +4816,21 @@ class ServicePanel(Widget):
                         val = get_nested_value(existing, f.path)
                         if val is not None:
                             values[f.path] = val
+        leftover_cameras: list[str] = []
+        if has_cameras and isinstance(existing.get("Cameras"), dict):
+            for camera, entry in existing["Cameras"].items():
+                if _is_template_camera(entry):
+                    # the template's example: not a camera, gone at the next Save
+                    leftover_cameras.append(f"Cameras.{camera}")
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                c_fields = _make_camera_fields(str(camera))
+                dynamic_sections[f"Cameras.{camera}"] = c_fields
+                for f in c_fields:
+                    val = get_nested_value(existing, f.path)
+                    if val is not None:
+                        values[f.path] = val
         # the template's empty `Streams:` key is not a field of the form: the
         # streams are the group above. Filtered for this form only; taking it out
         # of pipeline.fields for good made the section unknown the next time the
@@ -4788,6 +4839,7 @@ class ServicePanel(Widget):
         form_fields = [
             f for f in pipeline.fields
             if not (pipeline.name in _STREAM_PIPELINES and f.path.startswith("Streams"))
+            and not (has_cameras and f.path.startswith("Cameras."))
         ]
 
         group_add_buttons = {}
@@ -4795,9 +4847,15 @@ class ServicePanel(Widget):
             group_add_buttons[pipeline.base_section] = ("+ Add Base", "btn-add-base")
         if pipeline.name in _STREAM_PIPELINES:
             group_add_buttons["Streams"] = ("+ Add Stream", "btn-add-stream")
+        if has_cameras:
+            group_add_buttons["Cameras"] = ("+ Add Camera", "btn-add-camera")
 
         section_titles, section_notes = self._pipeline_section_help(
             form_fields, values, self._stream_server_address())
+        if has_cameras:
+            section_notes["Cameras"] = (
+                "The cameras of this config: written by IPS Camera Calibration (Calibrate), synced from "
+                "another machine (Calibration Cameras, Sync to Remote), or added here with + Add Camera.")
         form = ConfigForm(pipeline.name, form_fields, values, dynamic_sections,
                           group_add_buttons=group_add_buttons,
                           base_section=pipeline.base_section or None,
@@ -4807,7 +4865,10 @@ class ServicePanel(Widget):
                           overridden_sections=overrides,
                           allow_override_toggle=True,
                           section_titles=section_titles,
-                          section_notes=section_notes)
+                          section_notes=section_notes,
+                          entry_factories={"Cameras": _make_camera_fields} if has_cameras else None)
+        for section_name in leftover_cameras:
+            form.mark_removed(section_name)
         container.mount(form)
         self._current_form = form
         if source_message:

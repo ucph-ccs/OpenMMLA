@@ -143,59 +143,17 @@ Gateway:
   http_port: 8080           # nginx HTTP reverse-proxy port
   scheme: http              # http or https
 
-Cameras:
-  # Template for camera calibration parameters
-  # You can either config the camera by editing the parameters manually or use the camera calibration tool,
-  # `openmmla ips-ccal` to calibrate the camera and generate the parameters.
-  camera_name:
-    fisheye: true               # Set to true if the camera uses a fisheye lens
-    params: [fx, fy, cx, cy]    # Camera intrinsic parameters
-    K:
-      - [fx, 0.0, cx]             # Intrinsic matrix row 1
-      - [0.0, fy, cy]             # Intrinsic matrix row 2
-      - [0.0, 0.0, 1.0]           # Intrinsic matrix row 3
-    D:
-      - [k1, k2, p1, p2, k3]      # Distortion coefficients (radial + tangential)
-
-  # Example calibrated camera: logitech C920
-  logitechC920:
-    fisheye: false
-    params: [1379.1460117344336, 1373.8668188142785, 978.7394037412176, 549.2014485300241]
-    K:
-      - [1379.1460117344336, 0.0, 978.7394037412176]
-      - [0.0, 1373.8668188142785, 549.2014485300241]
-      - [0.0, 0.0, 1.0]
-    D:
-      - [0.11384928515083662, -0.278469525889543, -0.0011019316382279247, 0.0008494229367841709,
-        0.19615171889145352]
-
-  # Example calibrated camera: macbook-air
-  macbook-air:
-    fisheye: false
-    params: [1457.358228890706, 1446.1032097123093, 992.9001932429544, 562.024872597483]
-    K:
-      - [1457.358228890706, 0.0, 992.9001932429544]
-      - [0.0, 1446.1032097123093, 562.024872597483]
-      - [0.0, 0.0, 1.0]
-    D:
-      - [0.1498718601497246, -0.27867312817642964, 0.006105669196899129, 0.012452039399984193,
-        0.2779506314756574]
-
-  # Example calibrated camera: iphone
-  iphone:
-    fisheye: false
-    params: [ 1400.0006464122796, 1394.1075948948992, 961.7378885085977, 511.47563254197104 ]
-    K:
-      - [ 1400.0006464122796, 0.0, 961.7378885085977 ]
-      - [ 0.0, 1394.1075948948992, 511.47563254197104 ]
-      - [ 0.0, 0.0, 1.0 ]
-    D:
-      - [ 0.25199391173920305, -1.129316666693021, -0.00023786301206534901, 0.0005621775211187798,
-          1.2069806447431342 ]
-
-  # Add more cameras using the same structure as above
-  # your-camera-id:
-  #   fisheye: true|false
-  #   params: [...]
-  #   K: [...]
-  #   D: [...]
+# Camera intrinsics, one entry per camera, named as a base's `camera` names it.
+# IPS Camera Calibration (Capture, then Calibrate) writes an entry; Launcher →
+# Calibration Cameras → Sync to Remote gives it to another machine; the Config
+# tab adds one by hand (+ Add Camera). An entry looks like this:
+#   your-camera:
+#     fisheye: false                # true for a fisheye lens
+#     params: [fx, fy, cx, cy]      # what the tag detector uses
+#     K:                            # 3x3 intrinsic matrix
+#       - [fx, 0.0, cx]
+#       - [0.0, fy, cy]
+#       - [0.0, 0.0, 1.0]
+#     D:                            # distortion coefficients (k1, k2, p1, p2, k3)
+#       - [k1, k2, p1, p2, k3]
+Cameras: {}

@@ -414,6 +414,34 @@ def _strip_placeholders(data):
             del data[key]
 
 
+class _RemovedSection:
+    """the value of a dynamic section (a camera, a stream) removed in the form:
+    save_config deletes it from the file instead of keeping what was there."""
+
+    def __repr__(self):
+        return "REMOVED_SECTION"
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+REMOVED_SECTION = _RemovedSection()
+
+
+def _delete_nested(data, dot_path):
+    keys = dot_path.split(".")
+    current = data
+    for key in keys[:-1]:
+        current = current.get(key) if isinstance(current, dict) else None
+        if current is None:
+            return
+    if isinstance(current, dict):
+        current.pop(keys[-1], None)
+
+
 def save_config(config_path, fields, values):
     """build a yaml dict from field values and write to config_path.
 
@@ -431,6 +459,11 @@ def save_config(config_path, fields, values):
         val = values.get(f.path, f.default)
         if val is not None:
             set_nested_value(data, f.path, val)
+    # a section removed in the form goes from the file too: the existing config
+    # this starts from would keep it otherwise
+    for path, val in values.items():
+        if val is REMOVED_SECTION:
+            _delete_nested(data, path)
     _strip_placeholders(data)
     try:
         from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key
