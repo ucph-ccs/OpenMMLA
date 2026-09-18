@@ -365,21 +365,22 @@ class CommandSession(Widget):
 
     def run_on(self, target: str, text: str) -> None:
         """run `text` on `target` (local, or an SSH profile's name) whatever the
-        session's own selector says: a card's Start runs on the card's host."""
+        session's own selector says: a card's Start runs on the card's host.
+
+        Always a command, never the prompt's own `cd`. A card's command usually
+        begins with `cd <dir> && ...`, and the cd path is for a typed `cd`: it
+        resolves a directory rather than running a command, gives the process no
+        stdin of its own (so a sudo prompt is never answered, and the process
+        inherits this console's terminal) and prints nothing until it ends. A
+        typed `cd` still gets that path, in on_input_submitted."""
         text = text.strip()
         if not text:
             return
         self.log(f"[bold]{self._get_prompt(target)} {rich_escape(text)}[/bold]")
         if target == "local":
-            if text.startswith("cd ") or text == "cd":
-                self.run_worker(self._run_local_cd(text), exclusive=True)
-            else:
-                self.run_worker(self._run_local_cmd(text), exclusive=True)
+            self.run_worker(self._run_local_cmd(text), exclusive=True)
         else:
-            if text.startswith("cd ") or text == "cd":
-                self.run_worker(self._run_remote_cd(target, text), exclusive=True)
-            else:
-                self.run_worker(self._run_remote_cmd(target, text), exclusive=True)
+            self.run_worker(self._run_remote_cmd(target, text), exclusive=True)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "cmd-target-select":

@@ -217,7 +217,10 @@ async def ssh_run_async(
     args = profile.base_ssh_args() + [command]
     return await asyncio.create_subprocess_exec(
         *args,
-        stdin=asyncio.subprocess.PIPE if pipe_stdin else None,
+        # never inherit: that hands the console's own terminal to the remote
+        # command, which then eats the user's keystrokes, and a prompt on it
+        # (sudo) waits for an answer that cannot arrive
+        stdin=asyncio.subprocess.PIPE if pipe_stdin else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
