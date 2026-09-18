@@ -129,6 +129,22 @@ def inventory(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> lis
     return [Recorded(name, tuple(sorted(found[name]))) for name in sorted(found)]
 
 
+def live_paths(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> set[str]:
+    """the paths being published to the stream server right now (control API:
+    a path is ready while its source sends)."""
+    live: set[str] = set()
+    page = 0
+    while True:
+        data = _get_json(f"{_origin(host, api_port)}/v3/paths/list?itemsPerPage=100&page={page}", timeout)
+        for item in data.get("items") or []:
+            if item.get("ready") and item.get("name"):
+                live.add(str(item["name"]))
+        page += 1
+        if page >= int(data.get("pageCount") or 0):
+            break
+    return live
+
+
 def recorded_paths(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> list[str]:
     """every path the stream server holds a recording of (control API)."""
     return [recorded.path for recorded in inventory(host, api_port, timeout)]

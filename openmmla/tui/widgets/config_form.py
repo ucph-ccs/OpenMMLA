@@ -12,6 +12,8 @@ from textual.widgets import (
 )
 from textual.widget import Widget
 
+from rich.text import Text
+
 from openmmla.tui.schema.loader import FieldDef
 from openmmla.utils.constants import normalize_source
 
@@ -341,6 +343,10 @@ class DictListField(Widget):
         self._next_idx = 0
         # directory last chosen via the file browser (seeds the next browse)
         self._last_file_dir: str | None = None
+        # what the Stream Server says of the pullable streams: name -> "live" |
+        # "idle", and a line for below the stream entries (see set_stream_states)
+        self._stream_states: dict[str, str] = {}
+        self._stream_note = ""
 
     def _entry_widget(self, key: str, val, widget_id: str):
         """build a Switch (bool), Select (choices) or Input for one entry field."""
@@ -368,22 +374,8 @@ class DictListField(Widget):
         (disabled for udp/tcp, which bind via 'port')."""
         s = normalize_source(source)
         if s == "stream":
-            # the pullable Streams entries as (name, url); a base finds its
-            # stream by name, so the name is what is stored
-            pullable = self._choices.get("source_index:stream") or []
-            streams = [(f"{name}  ({url})", name) for name, url in pullable]
+            streams, cur = self._stream_options(str(val).strip() if val not in (None, "") else "")
             if streams:
-                cur = str(val).strip() if val not in (None, "") else ""
-                names = [name for name, _url in pullable]
-                if cur and cur not in names:
-                    # what a base also reads: an index (older configs), a URL or its last segment
-                    same = [name for i, (name, url) in enumerate(pullable)
-                            if cur in (str(i), url, url.rstrip("/").rsplit("/", 1)[-1])]
-                    if same:
-                        cur = same[0]
-                    else:
-                        # kept rather than dropped on the next Save
-                        streams.append((f"{cur}  (not a pullable stream of this config)", cur))
                 kwargs = {"value": cur} if cur else {}
                 return Select(
                     streams, prompt="Select stream...", id=widget_id,
@@ -425,6 +417,66 @@ class DictListField(Widget):
             id=widget_id, classes="dict-entry-input",
         )
         return w
+
+    @property
+    def stream_choices(self) -> list[tuple[str, str]]:
+        """(name, url) of the streams a 'stream' entry can pull."""
+        return list(self._choices.get("source_index:stream") or [])
+
+    def _stream_label(self, name: str, url: str):
+        state = self._stream_states.get(name)
+        if state == "live":
+            return Text.assemble(("● ", "green"), f"{name}  ({url})")
+        if state == "idle":
+            return Text.assemble(("○ ", "dim"), f"{name}  ({url})", ("  not publishing now", "dim"))
+        return f"{name}  ({url})"
+
+    def _stream_options(self, cur: str) -> tuple[list, str]:
+        """the options of a stream dropdown and the value it shows. The
+        pullable Streams entries come as (name, url); a base finds its stream
+        by name, so the name is what is stored."""
+        pullable = self.stream_choices
+        options = [(self._stream_label(name, url), name) for name, url in pullable]
+        names = [name for name, _url in pullable]
+        if cur and cur not in names:
+            # what a base also reads: an index (older configs), a URL or its last segment
+            same = [name for i, (name, url) in enumerate(pullable)
+                    if cur in (str(i), url, url.rstrip("/").rsplit("/", 1)[-1])]
+            if same:
+                cur = same[0]
+            else:
+                # kept rather than dropped on the next Save
+                options.append((f"{cur}  (not a pullable stream of this config)", cur))
+        return options, cur
+
+    def _hint(self, source) -> str:
+        text = self._source_index_hint(source)
+        if normalize_source(source) == "stream" and self._stream_note:
+            text = f"{text}\n{self._stream_note}"
+        return text
+
+    def set_stream_states(self, states: dict[str, str], note: str = "") -> None:
+        """what the Stream Server says, in the dropdowns of the entries that
+        pull a stream (● live, ○ not publishing now) and below them (it does
+        not answer, or has live paths no Streams entry names)."""
+        self._stream_states = dict(states)
+        self._stream_note = note
+        for container in self.query(".dict-entry"):
+            source = self._find_in_container(container, "__source")
+            value = getattr(source, "value", "") if source is not None else ""
+            if value is Select.BLANK or normalize_source(value) != "stream":
+                continue
+            widget = self._find_in_container(container, "__source_index")
+            if isinstance(widget, Select):
+                current = widget.value
+                options, cur = self._stream_options(
+                    "" if current in (None, Select.BLANK) else str(current))
+                widget.set_options(options)
+                if cur:
+                    widget.value = cur
+            for hint in container.query(Static):
+                if hint.id and hint.id.endswith("source_index__hint"):
+                    hint.update(self._hint("stream"))
 
     def compose(self) -> ComposeResult:
         # for a top-level list (path == section, e.g. Bases) the enclosing
@@ -473,7 +525,7 @@ class DictListField(Widget):
                         yield browse
                 if key == "source_index" and "source" in self._schema:
                     yield Static(
-                        self._source_index_hint(src_val),
+                        self._hint(src_val),
                         id=_safe_id(f"{widget_id}__hint"), classes="dict-entry-hint",
                     )
             rm_id = _safe_id(f"dle-rm__{self.field_def.path}__{idx}")
@@ -511,7 +563,7 @@ class DictListField(Widget):
             children.append(row)
             if key == "source_index" and "source" in self._schema:
                 children.append(Static(
-                    self._source_index_hint(src_val),
+                    self._hint(src_val),
                     id=_safe_id(f"{widget_id}__hint"), classes="dict-entry-hint",
                 ))
         rm_id = _safe_id(f"dle-rm__{self.field_def.path}__{idx}")
@@ -587,7 +639,7 @@ class DictListField(Widget):
         # hint line
         for w in container.query(Static):
             if w.id and w.id.endswith("source_index__hint"):
-                w.update(self._source_index_hint(new_source))
+                w.update(self._hint(new_source))
 
         # Browse button is only meaningful for file sources
         for w in container.query(Button):

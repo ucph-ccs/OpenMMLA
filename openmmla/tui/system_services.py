@@ -4,7 +4,7 @@ import re
 import socket
 import time
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import os
 from pathlib import Path
@@ -185,6 +185,40 @@ def complete_stream_urls(values: dict[str, object], stream_server: dict[str, Any
         if changed:
             completed.append(name)
     return completed
+
+
+def stream_server_path(url: object, server: dict[str, Any]) -> str | None:
+    """the path a stream URL names on the stream server of System Settings;
+    None when it points at another server, which that one cannot speak for.
+    An rtmp or rtsp URL carries the path as its own; an SRT URL in its
+    streamid (read:<path>, publish:<path>, or #!::r=<path>,m=...)."""
+    text = str(url or "").strip()
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return None
+    host = str((server or {}).get("host") or "").strip().strip("[]")
+    if not parts.hostname or not host:
+        return None
+    same_host = (
+        parts.hostname.lower() == host.lower()
+        or (is_loopback_host(parts.hostname) and is_loopback_host(host))
+        or hosts_match(parts.hostname, host)
+    )
+    if not same_host:
+        return None
+    if parts.scheme == "srt":
+        streamid = dict(parse_qsl(parts.query)).get("streamid", "")
+        if not streamid and parts.fragment.startswith("!::"):
+            streamid = f"#{parts.fragment}"  # an unescaped # starts the URL's fragment
+        if streamid.startswith("#!::"):
+            fields = dict(item.split("=", 1) for item in streamid[4:].split(",") if "=" in item)
+            path = fields.get("r", "")
+        else:
+            path = streamid.split(":")[1] if streamid.count(":") >= 1 else ""
+    else:
+        path = parts.path
+    return path.strip("/") or None
 
 
 _STREAM_SERVER_URL_PORTS = {"rtmp": ("rtmp_port", 1935), "rtsp": ("rtsp_port", 8554)}

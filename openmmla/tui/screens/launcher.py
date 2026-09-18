@@ -49,6 +49,7 @@ from openmmla.tui.system_services import (
     is_loopback_host,
     is_stream_path,
     repoint_stream_url,
+    stream_server_path,
     stream_server_urls,
     system_service_endpoint,
     system_service_port_conflict,
@@ -108,7 +109,7 @@ from openmmla.utils.experiments import (
     load_experiments,
 )
 from openmmla.tui.widgets.command_session import CommandSession
-from openmmla.tui.widgets.config_form import ConfigForm
+from openmmla.tui.widgets.config_form import ConfigForm, DictListField
 from openmmla.tui.widgets.recordings_panel import StreamServerRecordingsPanel
 from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
@@ -4812,6 +4813,43 @@ class ServicePanel(Widget):
         if source_message:
             self._show_status(source_message)
         self._show_sync_bar(pipeline)
+        if any(f.path == "Bases" and (f.entry_field_choices or {}).get("source_index:stream") for f in form_fields):
+            self.run_worker(self._mark_live_streams(form), group="stream-live-marks", exclusive=True)
+
+    async def _mark_live_streams(self, form) -> None:
+        """which streams of a Bases form the Stream Server has live now, asked
+        off the UI thread once the form is up: the stream dropdowns mark them
+        (● live, ○ not publishing now), and the paths it has live that no
+        Streams entry of this config names are listed below them."""
+        server = self._stream_server_address()
+        host = str(server.get("host") or "").strip()
+        if not host:
+            return
+        try:
+            live = await asyncio.to_thread(
+                recordings.live_paths, host, int(server.get("api_port") or recordings.API_PORT))
+        except recordings.RecordingsError:
+            live = None
+        try:
+            fields = [f for f in form.query(DictListField) if f.field_def.path == "Bases"]
+        except Exception:
+            return  # the form was replaced meanwhile
+        for field in fields:
+            pullable = field.stream_choices
+            paths = await asyncio.to_thread(
+                lambda: {name: stream_server_path(url, server) for name, url in pullable})
+            if live is None:
+                field.set_stream_states(
+                    {}, f"The Stream Server ({host}) does not answer, so whether these streams are live "
+                        f"now is not known.")
+                continue
+            states = {name: ("live" if path in live else "idle") for name, path in paths.items() if path}
+            # the server is shared: only paths under the apps of this config's streams
+            apps = {path.split("/", 1)[0] for path in paths.values() if path}
+            elsewhere = sorted(path for path in live - set(paths.values()) if path.split("/", 1)[0] in apps)
+            field.set_stream_states(states, (
+                f"Live on the Stream Server but in no Streams entry here: {', '.join(elsewhere)}. "
+                f"Add it under Streams to pull it." if elsewhere else ""))
 
     @staticmethod
     def _pipeline_section_help(
