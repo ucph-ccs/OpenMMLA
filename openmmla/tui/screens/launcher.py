@@ -9296,6 +9296,13 @@ class ServicePanel(Widget):
                     return
                 if not self._ensure_remote_collection_runtime(profile):
                     return
+                if remote_platform(profile) == "darwin":
+                    self._log(
+                        f"  [yellow]{profile_name} is a Mac: its recorders run FFmpeg in a Terminal window on "
+                        "its own screen, as macOS lets nothing started over SSH use the camera or the "
+                        "microphone. Someone has to be logged in there, with Terminal allowed under "
+                        "Privacy & Security (Camera, Microphone).[/yellow]"
+                    )
                 launched = 0
                 tab_cmds: list[tuple[str, str]] = []
                 for comp in svc.components:
