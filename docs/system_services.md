@@ -52,6 +52,8 @@ No initial setup is needed; the `openmmla` database and its `sessions` collectio
 
 ### Redis
 
+**Start** on the Redis card (or `make redis` in `pipelines/uber-server`) installs it when the host has none, brew on macOS and apt on Debian or Ubuntu, then configures the listener and starts it. By hand:
+
 ```bash
 # macOS
 brew install redis
@@ -64,6 +66,8 @@ sudo systemctl enable --now redis-server
 
 ### Mosquitto
 
+Installed by **Start** on the MQTT card (`make mosquitto`) the same way when missing. By hand:
+
 ```bash
 # macOS
 brew install mosquitto
@@ -75,6 +79,8 @@ sudo systemctl enable --now mosquitto
 ```
 
 ### Nginx (optional)
+
+Installed by **Start** on the Gateway card (`make nginx`) the same way when missing. By hand:
 
 ```bash
 # macOS

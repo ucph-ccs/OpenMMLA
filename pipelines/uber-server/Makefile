@@ -1,7 +1,8 @@
-.PHONY: all configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx mediamtx flask celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-mediamtx stop-flask stop-celery
+.PHONY: all install-redis install-mosquitto install-nginx configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx mediamtx flask celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-mediamtx stop-flask stop-celery
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
+# the TUI passes SUDO="sudo -S" and answers the password prompt itself
 SUDO ?= sudo
 CONDA_BASE := $(shell conda info --base)
 IS_MAC := $(shell uname | grep -qi 'darwin' && echo 1 || echo 0)
@@ -197,7 +198,38 @@ else
 	$(SUDO) systemctl restart influxdb
 endif
 
-redis: configure-redis-external
+# ======= Install (native) =======
+# `make <service>` (the Start of a card) installs the package first when this
+# host has none: brew on macOS, apt on Debian and Ubuntu. make runs on the
+# card's host, so IS_MAC tells that host's platform. InfluxDB and MongoDB are
+# not installed here: natively they need a vendor apt repository
+# (docs/system_services.md), and by default they run from the docker stack.
+define apt_install
+{ command -v apt-get >/dev/null 2>&1 || { echo "❌ $(1) is not installed and this is not an apt system: install $(2) with the package manager here, then run this again"; exit 1; }; echo "📦 Installing $(1) (apt)"; $(SUDO) apt-get update -qq && $(SUDO) env DEBIAN_FRONTEND=noninteractive apt-get install -y $(2); }
+endef
+
+install-redis:
+ifeq ($(IS_MAC), 1)
+	@command -v redis-server >/dev/null 2>&1 || { echo "📦 Installing Redis (brew)"; brew install redis; }
+else
+	@command -v redis-server >/dev/null 2>&1 || $(call apt_install,Redis,redis-server)
+endif
+
+install-mosquitto:
+ifeq ($(IS_MAC), 1)
+	@command -v mosquitto >/dev/null 2>&1 || { echo "📦 Installing Mosquitto (brew)"; brew install mosquitto; }
+else
+	@command -v mosquitto >/dev/null 2>&1 || $(call apt_install,Mosquitto,mosquitto mosquitto-clients)
+endif
+
+install-nginx:
+ifeq ($(IS_MAC), 1)
+	@command -v nginx >/dev/null 2>&1 || { echo "📦 Installing Nginx (brew)"; brew install nginx; }
+else
+	@command -v nginx >/dev/null 2>&1 || $(call apt_install,Nginx,nginx)
+endif
+
+redis: install-redis configure-redis-external
 ifeq ($(IS_MAC), 1)
 	@echo "🔁 Restarting Redis (macOS)"
 	brew services restart redis
@@ -207,7 +239,7 @@ else
 	$(SUDO) systemctl restart redis-server
 endif
 
-mosquitto: configure-mosquitto-external
+mosquitto: install-mosquitto configure-mosquitto-external
 ifeq ($(IS_MAC), 1)
 	@echo "🔁 Restarting Mosquitto (macOS)"
 	brew services restart mosquitto
@@ -227,7 +259,7 @@ else
 	$(SUDO) systemctl restart mongod
 endif
 
-nginx:
+nginx: install-nginx
 	@echo "🔁 Rendering and starting NGINX"
 ifeq ($(check_port), 1)
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf --port-check
