@@ -61,12 +61,16 @@ ffplay -rtsp_transport tcp rtsp://<stream-server>:8554/vfa/front
 
 Streams are declared once per pipeline under `Streams` in `pipelines/<pipeline>-base/config.yml`. An entry with an `ssh_profile` is *managed*: **Launcher → Pipelines → <pipeline> → Streams** builds the FFmpeg command below and runs it inside a tmux session named `mmla-stream-<name>` on that host over SSH, with **Start**, **Stop**, **Logs** and **Probe**. An entry without an `ssh_profile` is *external*, already running somewhere, and only pulled from.
 
+The tab's **Status** is the stream's FFmpeg, not its tmux session, which outlives it: `Running`, `Starting` while a Mac's Terminal window is still to start it (see below), `Exited` when FFmpeg stopped by itself (the pane keeps what it said: **Logs**; **Start** starts it again), `Stopped`, `No answer` from the host. **Start** waits until FFmpeg has run for three seconds, and otherwise quotes its last lines. The **Stream Server** column says what the server of System Settings receives: `● live`, `○ not live`, `no answer`, or `-` for a stream that goes elsewhere.
+
+A Mac captures through AVFoundation rather than V4L2 and ALSA: `device` is a camera's index or name (`0`, the default, or `FaceTime HD Camera`), a microphone is `:0`. macOS lets nothing started over SSH use the camera or the microphone (the process counts as sshd, which is never asked, and FFmpeg waits for frames forever), so on a Mac reached over SSH the Streams tab starts FFmpeg from a Terminal window on the Mac's own screen, where the Collection recorders run too. The window closes by itself once FFmpeg runs: FFmpeg goes on in a session of its own, so nothing stays on the Mac's screen and no window closed by hand can stop a stream. The tmux session follows FFmpeg's output and passes **Stop** on to it. Someone has to be logged in on the Mac, with Terminal allowed under **System Settings → Privacy & Security → Camera** (and **Microphone**). A stream `local` to a Mac runs directly, as the console already runs in the Mac's desktop session, unless the console itself was reached over SSH.
+
 | Field | Meaning |
 |---|---|
 | `target` | publish URL: `rtmp://<stream-server>:1935/<app>/<name>` (also `rtsp://` or `srt://`), or `udp://<base>:<port>` / `tcp://` for raw audio straight to an ASR base |
 | `read_target` | what the bases pull, e.g. `rtsp://<stream-server>:8554/<app>/<name>`; empty means `target` |
 | `ssh_profile` | TUI SSH profile of the capture host, or `local`; picked in the SSH Profile column of the Streams tab |
-| `device` | `/dev/video0` (v4l2 camera) or `hw:1,0` (ALSA microphone) |
+| `device` | `/dev/video0` (v4l2 camera) or `hw:1,0` (ALSA microphone); on a Mac `0` (camera index or name) or `:0` (microphone) |
 | `kind` | `audio` or `video`; inferred from the target and the device when omitted |
 | `codec`, `resolution`, `fps`, `bitrate` | video encoding (`libx264`, `1920x1080`, `30`, `1M`) |
 | `format`, `rate`, `channels` | audio sample format (`s16le`), rate (`16000`) and channels (`1`) |
@@ -103,12 +107,18 @@ ffmpeg ... -f mpegts "srt://<stream-server>:8890?streamid=publish:vfa/front"
 ```
 
 ```bash
-# macOS capture device (avfoundation) instead of v4l2
-ffmpeg -f avfoundation -framerate 30 -video_size 1920x1080 -i "0:none" \
-  -c:v h264_videotoolbox -realtime true -b:v 2M -f flv rtmp://<stream-server>:1935/vfa/front
+# camera on a Mac (AVFoundation) -> MediaMTX. AVFoundation states no frame rate:
+# without -r, ffmpeg takes the wallclock timestamps for 1000k fps and duplicates frames without end
+ffmpeg -fflags +genpts -use_wallclock_as_timestamps 1 \
+  -f avfoundation -pixel_format nv12 -framerate 30 -video_size 1920x1080 -i 0:none \
+  -c:v libx264 -pix_fmt yuv420p -r 30 -preset ultrafast -tune zerolatency \
+  -g 30 -keyint_min 30 -sc_threshold 0 \
+  -x264-params "keyint=30:min-keyint=30:no-scenecut=1:repeat-headers=1" \
+  -b:v 1M -maxrate 2M -bufsize 2M \
+  -f flv rtmp://<stream-server>:1935/vfa/front
 ```
 
-`ffmpeg -f v4l2 -list_formats all -i /dev/video0` and `arecord -l` list the devices on a Pi; `ffmpeg -f avfoundation -list_devices true -i ""` on a Mac. SRT needs an FFmpeg built with libsrt (`ffmpeg -protocols | grep srt`; the Debian and Raspberry Pi OS packages have it).
+`ffmpeg -f v4l2 -list_formats all -i /dev/video0` and `arecord -l` list the devices on a Pi; `ffmpeg -f avfoundation -list_devices true -i ""` on a Mac, where a size the camera cannot deliver makes FFmpeg list the ones it can (`-video_size 1x1`). SRT needs an FFmpeg built with libsrt (`ffmpeg -protocols | grep srt`; the Debian and Raspberry Pi OS packages have it).
 
 ## Bases: pulling a stream
 
@@ -152,8 +162,9 @@ To replay a file fetched by hand through a pipeline, name it `<prefix>_<unix sta
 ## Troubleshooting
 
 1. **Nothing in `/v3/paths/list`** while the device shows a running ffmpeg: the MediaMTX host or port 1935 is not reachable from the device; check the host in the stream's `target` URL (and `StreamServer.host` in System Settings, which the MediaMTX card uses) and the server firewall (macOS: System Settings → Privacy & Security → Firewall).
-2. **The Streams tab says Running but the base gets no frames**: press **Probe**, which decodes two seconds of the read URL with ffmpeg on this machine; the error text is the server's answer.
+2. **Running, but the base gets no frames**: look at the **Stream Server** column (**Refresh** asks again). `○ not live` while FFmpeg runs means nothing arrives: **Logs** shows what FFmpeg says, and a Mac may be asking on its screen whether Terminal may use the camera. **Probe** decodes two seconds of the read URL with ffmpeg on this machine; the error text is the server's answer, and `404 Not Found` means nobody publishes that path.
 3. **Grey or torn frames**: the reader chose UDP transport; the bases default to TCP, keep `rtsp_transport;tcp` in the capture options.
 4. **Delay grows over the session**: the RTMP push over Wi-Fi is buffering; publish with SRT instead, or move the Pi to Ethernet.
 5. **MediaMTX does not start, or the log says `port 1935 answers but 8554 does not`**: an Nginx from before the move to MediaMTX still has its `rtmp { ... }` block and holds port 1935. Press **Start** on the **Gateway (Nginx)** card, which renders the config again from the current template (no RTMP block) and reloads Nginx, then start MediaMTX.
-6. **ffmpeg on the Pi exits at once**: **Logs** shows the tmux pane; the usual causes are a wrong device name (`v4l2-ctl --list-devices`, `arecord -l`) or a resolution the camera cannot deliver as MJPEG.
+6. **Status says Exited**: FFmpeg stopped by itself; **Start** quoted its last lines and **Logs** shows the whole pane. The usual causes are a wrong device name (`v4l2-ctl --list-devices`, `arecord -l`; on a Mac `ffmpeg -f avfoundation -list_devices true -i ""`) or a resolution or frame rate the camera cannot deliver.
+7. **A Mac's stream never starts** (`Could not open a Terminal window`, or `did not start ffmpeg`): nobody is logged in on the Mac's screen, which is where macOS lets FFmpeg use the camera.

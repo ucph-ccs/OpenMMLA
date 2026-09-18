@@ -3942,6 +3942,7 @@ class ServicePanel(Widget):
                     config_path=stream_config_path,
                     project_dir=self._root,
                     session_choices=self._stream_session_choices(),
+                    stream_server=self._stream_server_address,
                 )
                 await stream_scroll.mount(panel)
 

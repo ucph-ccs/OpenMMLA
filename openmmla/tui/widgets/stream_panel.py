@@ -8,9 +8,12 @@ import re
 import shlex
 import socket
 import subprocess
+import sys
 import time
+from typing import Callable
 
 from rich.cells import cell_len
+from rich.markup import escape as rich_escape
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -22,8 +25,10 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Static, Button, DataTable, Label, OptionList, Select
 
+from openmmla.tui import recordings
 from openmmla.tui.schema.loader import StreamDef, load_streams
-from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, ssh_run_sync
+from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, remote_platform, ssh_run_sync
+from openmmla.tui.system_services import stream_server_path
 from openmmla.utils.artifact_paths import safe_segment
 from openmmla.utils.constants import STREAM_URL_SCHEMES
 from openmmla.utils.stream_registry import load_stream_registry, register_stream_start, mark_stream_stopped
@@ -37,30 +42,143 @@ def _with_stream_path(command: str) -> str:
     return f"export PATH={STREAM_REMOTE_PATH}:$PATH; {command}"
 
 
-def _check_local_tmux(session_name: str) -> bool:
-    try:
-        result = subprocess.run(
-            ["tmux", "has-session", "-t", session_name],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
 def _tmux_session_name(stream_name: str) -> str:
     return f"mmla-stream-{stream_name}"
 
 
-def _check_remote_tmux(profile, session_name: str) -> bool:
+def _tmux_session_target(session: str) -> str:
+    """the -t of a tmux command that takes a session. tmux also takes a bare
+    name as the start of one (mmla-stream-cam-1 finds mmla-stream-cam-10 when
+    cam-1 is not running); "=" asks for that name only. Quoted by hand, as zsh
+    expands a word that starts with "=", and shlex.quote leaves it bare."""
+    return "'=" + session.replace("'", "'\\''") + "'"
+
+
+def _tmux_pane_target(session: str) -> str:
+    """the same for a tmux command that takes a window or a pane: the session's current one."""
+    return "'=" + session.replace("'", "'\\''") + ":'"
+
+
+def _stream_file(session_name: str, suffix: str) -> str:
+    """a file of a managed stream on its host, next to its .start and .record."""
+    return f"$HOME/.openmmla/streams/{session_name}.{suffix}"
+
+
+def _run_on_host(profile, command: str, timeout: float) -> subprocess.CompletedProcess:
+    """run a shell command on a stream's host: this machine when profile is None."""
+    if profile is None:
+        return subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+    return ssh_run_sync(profile, command, timeout=timeout)
+
+
+# what a managed stream's host says of it (_stream_state_cmd), and "unknown"
+# when the host did not answer
+STREAM_RUNNING = "running"
+STREAM_STARTING = "starting"
+STREAM_EXITED = "exited"
+STREAM_STOPPED = "stopped"
+STREAM_UNKNOWN = "unknown"
+
+
+def _noted_ffmpeg_cmd(session: str) -> str:
+    """a shell test: the ffmpeg a Mac's Terminal window started, whose pid was
+    noted, runs; it leaves the pid in $q. A pid noted by a run long gone may
+    belong to another process by now, hence the name check."""
+    return (
+        f'{{ q=$(cat "{_stream_file(session, "pid")}" 2>/dev/null); '
+        f'[ -n "$q" ] && ps -p "$q" -o comm= 2>/dev/null | grep -q ffmpeg; }}'
+    )
+
+
+def _stream_state_cmd(session: str) -> str:
+    """print the state of a managed stream on its host. Its tmux session is no
+    proof of it: the session outlives its ffmpeg, which may have stopped on
+    its first line. RUNNING while ffmpeg runs (a child of the pane, or the one
+    a Mac's Terminal window started, whose pid was noted: that one does not
+    end with the session, so it counts without one), STARTING while that
+    window is still to start it, EXITED when the session is all that is left
+    (the pane keeps what ffmpeg said), STOPPED without a session."""
+    noted = _noted_ffmpeg_cmd(session)
+    return (
+        f"if ! tmux has-session -t {_tmux_session_target(session)} 2>/dev/null; then "
+        f"if {noted}; then echo RUNNING; else echo STOPPED; fi; else "
+        f"p=$(tmux list-panes -t {_tmux_pane_target(session)} -F '#{{pane_pid}}' 2>/dev/null | head -n1); "
+        f'if {{ [ -n "$p" ] && pgrep -P "$p" -x ffmpeg >/dev/null 2>&1; }} || {noted}; then echo RUNNING; '
+        f'elif [ -e "{_stream_file(session, "opening")}" ]; then echo STARTING; '
+        f"else echo EXITED; fi; fi"
+    )
+
+
+def _parse_stream_state(output: str) -> str | None:
+    for word in (output or "").split():
+        if word in ("RUNNING", "STARTING", "EXITED", "STOPPED"):
+            return word.lower()
+    return None
+
+
+def _stream_state(profile, session: str) -> str | None:
+    """the state of a managed stream on its host (profile None: this machine),
+    None when the host did not answer."""
     try:
-        cmd = _with_stream_path(
-            f"tmux has-session -t {shlex.quote(session_name)} 2>/dev/null && echo OK || echo FAIL"
-        )
-        result = ssh_run_sync(profile, cmd, timeout=8.0)
-        return "OK" in result.stdout
+        result = _run_on_host(profile, _with_stream_path(_stream_state_cmd(session)), 8.0)
     except Exception:
-        return False
+        return None
+    return _parse_stream_state(result.stdout)
+
+
+# the last line the wrappers write into a stream's pane: what comes before it
+# is what ffmpeg said last
+_EXIT_MARK = "[OpenMMLA] ffmpeg exited with status"
+# what the pane of a stream started from a Terminal window on a Mac says first
+_DESKTOP_NOTE = (
+    "ffmpeg is started from a Terminal window on this Mac's screen (over ssh macOS lets nothing use the "
+    "camera or the microphone) and runs on when the window has closed; its output follows here, and C-c "
+    "here stops it."
+)
+# what ffmpeg prints of itself on every start, and on a Mac of every camera
+_FFMPEG_NOISE = ("ffmpeg version", "built with", "configuration:", "libav", "libsw", "libpostproc")
+_MAC_CAMERA_WARNING = "NSCameraUseContinuityCameraDeviceType"
+
+
+def _last_words(pane: str, lines: int = 8) -> list[str]:
+    """what ffmpeg said last in a stream's pane, up to the wrapper's exit mark:
+    its banner, the pane's own note, blank lines and the idle shell after it
+    left out."""
+    text = pane.splitlines()
+    marks = [index for index, line in enumerate(text) if _EXIT_MARK in line]
+    if marks:
+        text = text[:marks[-1] + 1]
+    kept = [
+        line.rstrip() for line in text
+        if line.strip() and not line.strip().startswith(_FFMPEG_NOISE)
+        and _MAC_CAMERA_WARNING not in line and line.strip() != _DESKTOP_NOTE
+    ]
+    return kept[-lines:]
+
+
+def _stream_pane(profile, session: str) -> str:
+    """what a stream's pane shows, wrapped lines joined."""
+    command = _with_stream_path(f"tmux capture-pane -t {_tmux_pane_target(session)} -p -J -S -300 2>/dev/null")
+    try:
+        return _run_on_host(profile, command, 10.0).stdout or ""
+    except Exception:
+        return ""
+
+
+def _stream_platform(stream: StreamDef, profile) -> str:
+    """"darwin" or "linux": the capture command the stream's host takes."""
+    if stream.ssh_profile == "local":
+        return "darwin" if sys.platform == "darwin" else "linux"
+    return (remote_platform(profile) if profile is not None else "") or "linux"
+
+
+def _needs_desktop_session(platform: str, is_local: bool) -> bool:
+    """a Mac reached over ssh. macOS gives the camera and the microphone only to
+    an app someone allowed, in the desktop session; anything started over ssh
+    counts as sshd, which is never asked, and its ffmpeg waits for frames
+    forever or records silence. Such a stream is started from a Terminal window
+    on the Mac's own screen, where the Collection recorder runs too."""
+    return platform == "darwin" and (not is_local or bool(os.environ.get("SSH_CONNECTION")))
 
 
 # ALSA-style device names mark an audio stream when no kind is given
@@ -108,6 +226,20 @@ def _project_root_from_config(config_path: str) -> str:
     return os.path.dirname(path)
 
 
+# the pane stays after ffmpeg, for Logs: it says how ffmpeg ended, then a shell
+# waits (the variable keeps macOS's bash from telling of zsh as it starts)
+_AFTER_FFMPEG = f'echo "{_EXIT_MARK} $?"; BASH_SILENCE_DEPRECATION_WARNING=1 exec bash'
+
+
+def _prepare_stream_files(session: str) -> str:
+    """forget what a previous run of the stream left (a start time read back
+    before the new one is written would be the old one), and mark the stream
+    as coming up until its ffmpeg is started: until then no ffmpeg is no sign
+    that it stopped (_stream_state_cmd)."""
+    stale = " ".join(_stream_file(session, suffix) for suffix in ("start", "record", "pid", "rc"))
+    return f'mkdir -p $HOME/.openmmla/streams; rm -f {stale}; touch "{_stream_file(session, "opening")}"'
+
+
 def _build_tmux_stream_cmd(
     session: str,
     ffmpeg_cmd: str,
@@ -131,9 +263,145 @@ def _build_tmux_stream_cmd(
         f"START_TIME=$(python3 -c \"import time; print('%.6f' % time.time())\" 2>/dev/null || date +%s); "
         f"printf '%s\\n' \"$START_TIME\" > {start_file}; "
         f"{record_part}"
-        f"{ffmpeg_cmd}; exec bash"
+        f'rm -f "{_stream_file(session, "opening")}"; '
+        f"{ffmpeg_cmd}; "
+        f"{_AFTER_FFMPEG}"
     )
-    return _with_stream_path(f"tmux new-session -d -s {shlex.quote(session)} {shlex.quote(inner_cmd)}")
+    return _with_stream_path(
+        f"{_prepare_stream_files(session)}; "
+        f"tmux new-session -d -s {shlex.quote(session)} {shlex.quote(inner_cmd)}"
+    )
+
+
+# seconds a Terminal window on a Mac has to start ffmpeg
+DESKTOP_START_TIMEOUT = 30
+
+# holds ffmpeg for a Terminal window's script, in a session of its own: the
+# window may close (it closes itself) without taking ffmpeg along. It notes
+# ffmpeg's pid, clears the opening mark once ffmpeg runs, and notes its exit
+# status once it has ended. argv: the stream's file prefix, the ffmpeg command
+_DESKTOP_KEEPER = """\
+import os, signal, subprocess, sys
+state, command = sys.argv[1], sys.argv[2]
+try:
+    os.setsid()
+except OSError:
+    pass
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+ffmpeg = subprocess.Popen(["/bin/bash", "-c", "exec " + command], stdin=subprocess.DEVNULL)
+with open(state + ".pid", "w") as noted:
+    noted.write("%d\\n" % ffmpeg.pid)
+if os.path.exists(state + ".opening"):
+    os.remove(state + ".opening")
+code = ffmpeg.wait()
+with open(state + ".rc", "w") as noted:
+    noted.write("%d\\n" % (code if code >= 0 else 128 - code))
+if os.path.exists(state + ".pid"):
+    os.remove(state + ".pid")
+"""
+
+# closes the Terminal window whose tab has the given tty, when it holds that tab
+# alone and nothing runs in it any more (Terminal would ask first otherwise).
+# Terminal takes this from a process of its own windows, not from an ssh session
+_CLOSE_WINDOW = """\
+on run argv
+    tell application "Terminal"
+        repeat with w in windows
+            if (count of tabs of w) is 1 then
+                if tty of tab 1 of w is item 1 of argv and not busy of tab 1 of w then
+                    close w
+                    return
+                end if
+            end if
+        end repeat
+    end tell
+end run
+"""
+
+# runs _CLOSE_WINDOW a second after the window's script has ended, from a session
+# of its own, so that no process of the window is left when it is closed.
+# argv: the AppleScript, the window's tty
+_WINDOW_CLOSER = """\
+import os, subprocess, sys, time
+try:
+    os.setsid()
+except OSError:
+    pass
+time.sleep(1)
+command = ["osascript"]
+for line in sys.argv[1].splitlines():
+    command += ["-e", line]
+subprocess.run(command + [sys.argv[2]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+               stderr=subprocess.DEVNULL)
+"""
+
+
+def _build_desktop_stream_cmd(
+    session: str,
+    ffmpeg_cmd: str,
+    record_dir: str | None = None,
+    record_path: str | None = None,
+    name: str = "",
+) -> str:
+    """the stream on a Mac reached over ssh (_needs_desktop_session): ffmpeg is
+    started from a .command script that `open -a Terminal` runs in a window on
+    the Mac's own screen, where macOS lets it use the camera. The script notes
+    the start time and the recording path as the tmux wrapper does, leaves
+    ffmpeg to a keeper in a session of its own (_DESKTOP_KEEPER) and closes its
+    window once ffmpeg runs: nothing stays on the screen, and no window closed
+    by hand can stop a stream. The tmux session is still what the console
+    manages: its pane follows ffmpeg's output, passes a C-c (Stop) on to that
+    ffmpeg, and says how it ended."""
+    if record_dir and record_path:
+        record_part = f'mkdir -p "{record_dir}"\nprintf \'%s\\n\' "{record_path}" > "$F.record"\n'
+    else:
+        record_part = 'rm -f "$F.record"\n'
+    script = (
+        "#!/bin/bash\n"
+        f"# starts ffmpeg for the OpenMMLA stream {name}: macOS lets nothing started over ssh use\n"
+        "# the camera or the microphone, one started from this window it does. ffmpeg runs on\n"
+        "# after this window has closed itself; Stop on the console's Streams tab ends it\n"
+        f"export PATH={STREAM_REMOTE_PATH}:$PATH\n"
+        f'F="$HOME/.openmmla/streams/{session}"\n'
+        "TTY=$(tty)\n"
+        f"close_window() {{ python3 -c {shlex.quote(_WINDOW_CLOSER)} {shlex.quote(_CLOSE_WINDOW)} "
+        '"$TTY" </dev/null >/dev/null 2>&1 & }\n'
+        "trap close_window EXIT\n"
+        # stopped before this window came up
+        '[ -e "$F.opening" ] || exit 0\n'
+        f'echo "Starting ffmpeg for the OpenMMLA stream {name}; this window closes by itself."\n'
+        "START_TIME=$(python3 -c \"import time; print('%.6f' % time.time())\" 2>/dev/null || date +%s)\n"
+        "export START_TIME\n"
+        "printf '%s\\n' \"$START_TIME\" > \"$F.start\"\n"
+        f"{record_part}"
+        f'python3 -c {shlex.quote(_DESKTOP_KEEPER)} "$F" {shlex.quote(ffmpeg_cmd)} </dev/null >"$F.log" 2>&1 &\n'
+        # the window goes once ffmpeg runs, or has already stopped
+        'i=0; while [ -e "$F.opening" ] && [ ! -e "$F.rc" ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); done\n'
+    )
+    follower = (
+        f'F="$HOME/.openmmla/streams/{session}"; '
+        'if open -a Terminal "$F.command"; then '
+        f'echo "{_DESKTOP_NOTE}"; '
+        "trap 'kill -INT \"$(cat \"$F.pid\" 2>/dev/null)\" 2>/dev/null' INT TERM HUP; "
+        f'i=0; while [ -e "$F.opening" ] && [ $i -lt {DESKTOP_START_TIMEOUT * 2} ]; do sleep 0.5; i=$((i+1)); done; '
+        'if [ -e "$F.opening" ]; then rm -f "$F.opening"; '
+        f'echo "The Terminal window did not start ffmpeg within {DESKTOP_START_TIMEOUT} s."; '
+        'tail -n 5 "$F.log" 2>/dev/null; '
+        'else tail -n +1 -f "$F.log" & t=$!; '
+        'while kill -0 "$(cat "$F.pid" 2>/dev/null)" 2>/dev/null; do sleep 0.5; done; '
+        f'sleep 1; kill $t 2>/dev/null; echo "{_EXIT_MARK} $(cat "$F.rc" 2>/dev/null)"; fi; '
+        'else rm -f "$F.opening"; '
+        "echo \"Could not open a Terminal window on this Mac's screen, the only place macOS lets ffmpeg "
+        'use the camera and the microphone: is someone logged in there?"; fi; '
+        "BASH_SILENCE_DEPRECATION_WARNING=1 exec bash"
+    )
+    command_file = _stream_file(session, "command")
+    return _with_stream_path(
+        f"{_prepare_stream_files(session)}; "
+        f"cat > \"{command_file}\" <<'OPENMMLA_STREAM_EOF'\n{script}OPENMMLA_STREAM_EOF\n"
+        f'chmod +x "{command_file}"; '
+        f"tmux new-session -d -s {shlex.quote(session)} {shlex.quote(follower)}"
+    )
 
 
 def _read_local_stream_start_time(session: str) -> float | None:
@@ -181,14 +449,24 @@ def _build_stop_stream_cmd(session: str) -> str:
     """Ctrl-C the ffmpeg in the stream's tmux session, wait until it has exited
     (it finalizes the recording's index and duration on the way out), then close
     the session. ffmpeg is a child of the pane's shell, which is what the wait
-    polls; the shell itself is what tmux reports as the pane's command."""
-    quoted_session = shlex.quote(session)
+    polls; the shell itself is what tmux reports as the pane's command. On a Mac
+    reached over ssh ffmpeg was started from a Terminal window and is no child
+    of the pane: it gets the Ctrl-C by its noted pid (the pane passes one on
+    too, and it is reached so even when its session is gone), the wait polls
+    that pid, and as that ffmpeg does not end with the session, one still there
+    after the wait is killed."""
+    pane = _tmux_pane_target(session)
+    noted = _noted_ffmpeg_cmd(session)
     return (
-        f"tmux send-keys -t {quoted_session} C-c 2>/dev/null; "
-        f"p=$(tmux list-panes -t {quoted_session} -F '#{{pane_pid}}' 2>/dev/null | head -n1); i=0; "
-        f'while [ -n "$p" ] && pgrep -P "$p" -x ffmpeg >/dev/null 2>&1 '
+        f"tmux send-keys -t {pane} C-c 2>/dev/null; "
+        # a Terminal window that has not started its ffmpeg yet no longer will
+        f'rm -f "{_stream_file(session, "opening")}"; '
+        f'{noted} && kill -INT "$q" 2>/dev/null; '
+        f"p=$(tmux list-panes -t {pane} -F '#{{pane_pid}}' 2>/dev/null | head -n1); i=0; "
+        f'while {{ {{ [ -n "$p" ] && pgrep -P "$p" -x ffmpeg >/dev/null 2>&1; }} || {noted}; }} '
         f"&& [ $i -lt {STREAM_STOP_GRACE_SECONDS * 2} ]; do sleep 0.5; i=$((i+1)); done; "
-        f"tmux kill-session -t {quoted_session} 2>/dev/null; "
+        f'{noted} && kill -9 "$q" 2>/dev/null; rm -f "{_stream_file(session, "pid")}"; '
+        f"tmux kill-session -t {_tmux_session_target(session)} 2>/dev/null; "
         f"echo DONE"
     )
 
@@ -242,9 +520,24 @@ def _stream_kind(stream: StreamDef) -> str:
         return kind
     if stream.target.startswith(("udp://", "tcp://")):
         return "audio"
-    if (stream.device or "").strip().lower().startswith(_ALSA_DEVICE_PREFIXES):
+    device = (stream.device or "").strip().lower()
+    # a Mac's microphone alone is ":<index>" to AVFoundation
+    if device.startswith(_ALSA_DEVICE_PREFIXES) or device.startswith((":", "none:")):
         return "audio"
     return "video"
+
+
+# a Mac's first camera and first microphone (ffmpeg -f avfoundation -list_devices true -i "")
+MAC_CAPTURE_DEVICE = "0"
+
+
+def _avfoundation_input(device: str, kind: str) -> str:
+    """the -i of AVFoundation, "<camera>:<microphone>", each an index or a name:
+    a video stream takes no sound, an audio stream no picture."""
+    device = str(device).strip()
+    if ":" in device:
+        return device
+    return f"{device}:none" if kind == "video" else f":{device}"
 
 
 def _publish_muxer(target: str) -> tuple[str, dict[str, str]]:
@@ -287,21 +580,31 @@ def _record_path(stream: StreamDef, record_dir: str) -> str:
     return f"{record_dir.rstrip('/')}/{stream.name}_${{START_TIME}}.{extension}"
 
 
-def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None) -> str:
+def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform: str = "linux") -> str:
     """build the ffmpeg command string from a stream definition.
 
     With record_dir the same capture is also written to a file there, so a
     session keeps its raw recording next to the live stream: one encode with two
     outputs, via the tee muxer for video and a second PCM output for audio.
+    platform is the capture host's: "darwin" captures through AVFoundation, as
+    V4L2 and ALSA are Linux's.
     """
     target = stream.target
     record_to = _record_path(stream, record_dir) if record_dir else None
+    mac = platform == "darwin"
 
     if _stream_kind(stream) == "audio":
         rate = stream.rate or 16000
         channels = stream.channels or 1
-        device = stream.device or "hw:0,0"
-        capture = f"ffmpeg -f alsa -ac {channels} -ar {rate} -i {device} "
+        if mac:
+            device = _avfoundation_input(stream.device or MAC_CAPTURE_DEVICE, "audio")
+            capture = f"ffmpeg -f avfoundation -i {shlex.quote(device)} "
+            # AVFoundation delivers what the microphone gives: each output converts it
+            convert = f"-ac {channels} -ar {rate} "
+        else:
+            device = stream.device or "hw:0,0"
+            capture = f"ffmpeg -f alsa -ac {channels} -ar {rate} -i {device} "
+            convert = ""
         if target.startswith(("udp://", "tcp://")):
             # the ASR base reads a header-less PCM byte stream on udp/tcp (see
             # AudioStream._read_socket_chunk), so send raw samples rather than AAC
@@ -310,27 +613,41 @@ def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None) -> str:
             fmt = _pcm_sample_format(stream.format)
             proto = "udp" if target.startswith("udp://") else "tcp"
             addr = target.split("://", 1)[1]
-            live = f"-c:a pcm_{fmt} -f {fmt} {proto}://{addr}"
+            live = f"{convert}-c:a pcm_{fmt} -f {fmt} {proto}://{addr}"
             file_codec = f"pcm_{fmt}"
         else:
             muxer, options = _publish_muxer(target)
-            live = f"-c:a aac -b:a 128k -f {muxer} {_cli_options(options)}{target}"
+            live = f"{convert}-c:a aac -b:a 128k -f {muxer} {_cli_options(options)}{target}"
             file_codec = "pcm_s16le"
         if not record_to:
             return capture + live
-        return f"{capture}-map 0:a {live} -map 0:a -c:a {file_codec} -f wav {record_to}"
+        return f"{capture}-map 0:a {live} -map 0:a {convert}-c:a {file_codec} -f wav {record_to}"
 
-    device = stream.device or "/dev/video0"
     codec = stream.codec or "libx264"
     resolution = stream.resolution or "1920x1080"
     fps = stream.fps or 30
     bitrate = stream.bitrate or "1M"
     peak = _double_rate(bitrate)
     muxer, options = _publish_muxer(target)
+    if mac:
+        # nv12 is 4:2:0, which Mac cameras deliver (one that does not gets its
+        # own format from ffmpeg, hence the yuv420p the players expect). Unlike
+        # V4L2, AVFoundation states no frame rate: with wallclock timestamps
+        # ffmpeg took 1000k fps and duplicated frames without end, so the
+        # output is held at the camera's
+        device = _avfoundation_input(stream.device or MAC_CAPTURE_DEVICE, "video")
+        capture = (
+            f"-f avfoundation -pixel_format nv12 -framerate {fps} -video_size {resolution} "
+            f"-i {shlex.quote(device)} "
+        )
+        output = f"-pix_fmt yuv420p -r {fps} "
+    else:
+        device = stream.device or "/dev/video0"
+        capture = f"-f v4l2 -input_format mjpeg -framerate {fps} -video_size {resolution} -i {device} "
+        output = ""
     encode = (
-        f"ffmpeg -fflags +genpts -use_wallclock_as_timestamps 1 "
-        f"-f v4l2 -input_format mjpeg -framerate {fps} -video_size {resolution} -i {device} "
-        f"-c:v {codec} -preset ultrafast -tune zerolatency "
+        f"ffmpeg -fflags +genpts -use_wallclock_as_timestamps 1 {capture}"
+        f"-c:v {codec} {output}-preset ultrafast -tune zerolatency "
         f"-g {fps} -keyint_min {fps} -sc_threshold 0 "
         f'-x264-params "keyint={fps}:min-keyint={fps}:no-scenecut=1:repeat-headers=1" '
         f"-b:v {bitrate} -maxrate {peak} -bufsize {peak} "
@@ -520,12 +837,20 @@ class StreamPanel(Widget):
         config_path: str = "",
         project_dir: str | None = None,
         session_choices: list[str] | None = None,
+        stream_server: Callable[[], dict] | None = None,
     ) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
         self._project_dir = project_dir or _project_root_from_config(config_path)
+        # whether a stream's ffmpeg runs (or is coming up), and what its host
+        # said of it in full (STREAM_*)
         self._statuses: dict[str, bool] = {}
+        self._states: dict[str, str] = {}
+        # System Settings -> Stream Server, and what it says of each stream it
+        # carries: "live", "idle" (nobody publishes it) or "unknown" (no answer)
+        self._stream_server = stream_server
+        self._live: dict[str, str] = {}
         # sessions whose part of the recordings Download can cut out
         self._session_choices = [s for s in (session_choices or []) if s]
 
@@ -649,7 +974,8 @@ class StreamPanel(Widget):
     # three lines: it stands above the table every time the tab is opened
     HELP = (
         "A stream is a Streams entry of this card's config (Config tab, + Add Stream): ffmpeg publishes a camera "
-        "or microphone to the Stream Server, the bases pull it. Started once, it serves any number of sessions.\n"
+        "or microphone to the Stream Server, the bases pull it. Started once, it serves any number of sessions. "
+        "Status is its ffmpeg (Exited: it stopped by itself, Logs says why); Stream Server, what the server receives.\n"
         "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
         "else publishes. Record on/off: also record on the capture device. The Stream Server records on its side "
         "whatever reaches it (its card, Config tab).\n"
@@ -687,7 +1013,7 @@ class StreamPanel(Widget):
 
     def on_mount(self) -> None:
         table = self.query_one("#stream-table", DataTable)
-        table.add_columns("Name", "SSH Profile", "Device", "Target", "Record", "Status")
+        table.add_columns("Name", "SSH Profile", "Device", "Target", "Record", "Status", "Stream Server")
         table.cursor_type = "row"
         if self._streams:
             self._refresh_all()
@@ -700,26 +1026,54 @@ class StreamPanel(Widget):
     def _refresh_all(self) -> None:
         self.run_worker(self._async_refresh_all(), exclusive=True)
 
+    def _set_state(self, name: str, state: str | None) -> None:
+        """note what a stream's host said of it; None: it did not answer."""
+        self._states[name] = state or STREAM_UNKNOWN
+        self._statuses[name] = state in (STREAM_RUNNING, STREAM_STARTING)
+
     async def _async_refresh_all(self) -> None:
         loop = asyncio.get_event_loop()
         for stream in self._streams:
             if not stream.ssh_profile:
                 continue
-            session = _tmux_session_name(stream.name)
-            if stream.ssh_profile == "local":
-                is_running = await loop.run_in_executor(
-                    None, _check_local_tmux, session,
-                )
-            else:
+            profile = None
+            if stream.ssh_profile != "local":
                 profile = get_profile_by_name(stream.ssh_profile)
                 if profile is None:
-                    self._statuses[stream.name] = False
+                    self._set_state(stream.name, None)
                     continue
-                is_running = await loop.run_in_executor(
-                    None, _check_remote_tmux, profile, session,
-                )
-            self._statuses[stream.name] = is_running
+            state = await loop.run_in_executor(None, _stream_state, profile, _tmux_session_name(stream.name))
+            self._set_state(stream.name, state)
+        self._live = await self._server_states()
         self._rebuild_table()
+
+    def _server_path(self, stream: StreamDef, server: dict) -> str | None:
+        """the stream's path on the Stream Server of System Settings, None when
+        it goes elsewhere (another server, or udp/tcp to an ASR base)."""
+        return stream_server_path(stream.target, server) or stream_server_path(stream.read_url, server)
+
+    def _server_address(self) -> dict:
+        try:
+            return dict(self._stream_server() or {}) if self._stream_server else {}
+        except Exception:
+            return {}
+
+    async def _server_states(self) -> dict[str, str]:
+        """what the Stream Server says of each stream it carries: "live" while
+        someone publishes it, "idle" when nobody does, "unknown" when it does
+        not answer. A stream that goes elsewhere has no entry."""
+        server = self._server_address()
+        host = str(server.get("host") or "").strip()
+        paths = {stream.name: self._server_path(stream, server) for stream in self._streams} if host else {}
+        paths = {name: path for name, path in paths.items() if path}
+        if not paths:
+            return {}
+        try:
+            api_port = int(server.get("api_port") or recordings.API_PORT)
+            live = await asyncio.to_thread(recordings.live_paths, host, api_port)
+        except (recordings.RecordingsError, ValueError):
+            return {name: "unknown" for name in paths}
+        return {name: "live" if path in live else "idle" for name, path in paths.items()}
 
     def _rebuild_table(self) -> None:
         try:
@@ -745,12 +1099,19 @@ class StreamPanel(Widget):
         # the arrows line up at the right edge of the column, under its heading
         width = max([len("SSH Profile") - 3] + [cell_len(stream.ssh_profile or "-") for stream in self._streams])
         for stream in self._streams:
+            state = self._states.get(stream.name)
             if not stream.ssh_profile:
                 status = "External"
             elif self._statuses.get(stream.name, False):
-                status = "Running"
+                status = "Starting" if state == STREAM_STARTING else "Running"
+            elif state == STREAM_EXITED:
+                # the tmux session outlived its ffmpeg
+                status = "Exited"
+            elif state == STREAM_UNKNOWN:
+                status = "No answer"
             else:
                 status = "Stopped"
+            live = self._live.get(stream.name)
             profile = stream.ssh_profile or "-"
             table.add_row(
                 stream.name,
@@ -761,6 +1122,9 @@ class StreamPanel(Widget):
                 # nobody records an external stream here: the console does not run its ffmpeg
                 ("yes" if stream.ssh_profile else "n/a") if stream.record else "-",
                 status,
+                Text("● live", "green") if live == "live" else
+                Text("○ not live", "dim") if live == "idle" else
+                Text("no answer", "dim") if live == "unknown" else "-",
             )
         for row, stream in enumerate(self._streams):
             if stream.name == selected:
@@ -926,53 +1290,176 @@ class StreamPanel(Widget):
     def _probe_stream(self, stream: StreamDef) -> None:
         self.run_worker(self._async_probe_stream(stream))
 
+    # seconds ffmpeg has to keep running after Start to count as started: a wrong
+    # option, device or size stops it within the first second or two
+    STREAM_SETTLE_SECONDS = 3.0
+    # seconds Start waits for the Stream Server to receive a stream it started
+    SERVER_LIVE_TIMEOUT = 12.0
+
+    async def _await_ffmpeg(self, profile, session: str, desktop: bool) -> str | None:
+        """what became of ffmpeg after Start: STREAM_RUNNING once it has run for
+        STREAM_SETTLE_SECONDS, else the state it ended in (None: the host did
+        not answer). A Terminal window on a Mac has DESKTOP_START_TIMEOUT to
+        start it."""
+        loop = asyncio.get_event_loop()
+        wait = (DESKTOP_START_TIMEOUT + 5 if desktop else 10) + self.STREAM_SETTLE_SECONDS
+        deadline = time.monotonic() + wait
+        running_since = None
+        state = None
+        while time.monotonic() < deadline:
+            state = await loop.run_in_executor(None, _stream_state, profile, session)
+            if state == STREAM_RUNNING:
+                running_since = running_since or time.monotonic()
+                if time.monotonic() - running_since >= self.STREAM_SETTLE_SECONDS:
+                    return state
+            elif state in (STREAM_EXITED, STREAM_STOPPED):
+                return state
+            else:
+                running_since = None
+            await asyncio.sleep(0.5)
+        return state
+
+    async def _report_exit(self, stream: StreamDef, profile, session: str, where: str) -> None:
+        """say that a stream's ffmpeg stopped by itself, and what it said last."""
+        loop = asyncio.get_event_loop()
+        pane = ""
+        for attempt in range(4):
+            pane = await loop.run_in_executor(None, _stream_pane, profile, session)
+            if _EXIT_MARK in pane or attempt == 3:
+                break
+            # the pane follows an ffmpeg a Terminal window started: its last lines may still be on their way
+            await asyncio.sleep(0.5)
+        said = _last_words(pane)
+        self._log(f"[red]{stream.name}: ffmpeg on {where} stopped by itself. What it said last:[/red]")
+        for line in said or ["(nothing)"]:
+            self._log(f"  {rich_escape(line)}")
+        self._log("  [dim]Logs shows all of it; Start runs it again.[/dim]")
+
+    async def _await_server(self, stream: StreamDef) -> str | None:
+        """whether the Stream Server receives a stream just started: "live" once
+        it does, "idle" if it still does not after SERVER_LIVE_TIMEOUT, "unknown"
+        when it does not answer; None for a stream that goes elsewhere."""
+        server = self._server_address()
+        host = str(server.get("host") or "").strip()
+        path = self._server_path(stream, server) if host else None
+        if not path:
+            return None
+        try:
+            api_port = int(server.get("api_port") or recordings.API_PORT)
+        except ValueError:
+            return None
+        deadline = time.monotonic() + self.SERVER_LIVE_TIMEOUT
+        while True:
+            try:
+                live = await asyncio.to_thread(recordings.live_paths, host, api_port)
+            except recordings.RecordingsError:
+                return "unknown"
+            if path in live:
+                return "live"
+            if time.monotonic() >= deadline:
+                return "idle"
+            await asyncio.sleep(1.0)
+
+    async def _check_server_side(self, stream: StreamDef, profile, session: str, desktop: bool, where: str) -> None:
+        """after Start: does what ffmpeg publishes reach the Stream Server?"""
+        seen = await self._await_server(stream)
+        if seen is None:
+            return
+        self._live[stream.name] = seen
+        if seen == "live":
+            self._log(f"[green]{stream.name} is live on the Stream Server.[/green]")
+        elif seen == "unknown":
+            self._log(f"[yellow]The Stream Server does not answer, so whether {stream.name} reaches it is not known.[/yellow]")
+        else:
+            loop = asyncio.get_event_loop()
+            state = await loop.run_in_executor(None, _stream_state, profile, session)
+            if state == STREAM_EXITED:
+                await self._report_exit(stream, profile, session, where)
+                mark_stream_stopped(stream.name, project_dir=self._project_dir)
+                self._set_state(stream.name, state)
+            else:
+                hint = (
+                    " The first time, the Mac may be asking on its screen whether Terminal may use the camera "
+                    "or the microphone." if desktop else ""
+                )
+                self._log(
+                    f"[yellow]{stream.name}: ffmpeg runs on {where}, but nothing has reached the Stream Server "
+                    f"yet. Logs shows what ffmpeg says.{hint}[/yellow]"
+                )
+        self._rebuild_table()
+
     async def _async_start(self, stream: StreamDef) -> None:
         session = _tmux_session_name(stream.name)
         is_local = stream.ssh_profile == "local"
         profile = None
         loop = asyncio.get_event_loop()
 
-        if is_local:
-            already_running = await loop.run_in_executor(None, _check_local_tmux, session)
-        else:
+        if not is_local:
             profile = get_profile_by_name(stream.ssh_profile)
             if profile is None:
                 self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                 return
-            already_running = await loop.run_in_executor(None, _check_remote_tmux, profile, session)
+        where = "this machine" if is_local else stream.ssh_profile
 
-        if already_running:
-            self._log(f"[yellow]{stream.name} is already running.[/yellow]")
-            self._statuses[stream.name] = True
+        state = await loop.run_in_executor(None, _stream_state, profile, session)
+        if state in (STREAM_RUNNING, STREAM_STARTING, None):
+            if state is None:
+                self._log(f"[red]{where} does not answer, so {stream.name} was not started.[/red]")
+            else:
+                self._log(f"[yellow]{stream.name} is already running.[/yellow]")
+            self._set_state(stream.name, state)
             self._rebuild_table()
             return
 
+        platform = await loop.run_in_executor(None, _stream_platform, stream, profile)
+        desktop = _needs_desktop_session(platform, is_local)
         record_dir = self._record_dir(stream)
         try:
-            ffmpeg_cmd = _build_ffmpeg_cmd(stream, record_dir)
+            ffmpeg_cmd = _build_ffmpeg_cmd(stream, record_dir, platform)
         except ValueError as e:
             self._log(f"[red]Cannot start {stream.name}: {e}[/red]")
             return
         record_path = _record_path(stream, record_dir) if record_dir else None
-        tmux_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd, record_dir, record_path)
+        if desktop:
+            launch_cmd = _build_desktop_stream_cmd(session, ffmpeg_cmd, record_dir, record_path, stream.name)
+        else:
+            launch_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd, record_dir, record_path)
+        if state == STREAM_EXITED:
+            # the tmux session outlived its ffmpeg: a new one takes its name
+            self._log(f"[yellow]{stream.name}: its ffmpeg on {where} had stopped by itself; starting it again.[/yellow]")
+            launch_cmd = _with_stream_path(f"tmux kill-session -t {_tmux_session_target(session)} 2>/dev/null; {launch_cmd}")
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[green]Starting {stream.name} {target_label}...[/green]")
-        self._log(f"  {ffmpeg_cmd}")
+        self._log(f"  {rich_escape(ffmpeg_cmd)}")
+        if desktop:
+            self._log(
+                f"  [yellow]{where} is a Mac: ffmpeg is started from a Terminal window on its own screen, as "
+                "macOS lets nothing started over SSH use the camera or the microphone; the window closes by "
+                "itself once ffmpeg runs. Someone has to be logged in there, with Terminal allowed under "
+                "Privacy & Security (Camera, Microphone).[/yellow]"
+            )
         if record_dir:
             self._log(f"  Recording to {record_dir}/ on the streaming host")
 
         try:
-            if is_local:
-                result = await loop.run_in_executor(
-                    None, lambda: subprocess.run(
-                        tmux_cmd, shell=True, capture_output=True, text=True, timeout=15,
-                    ),
-                )
-            else:
-                result = await loop.run_in_executor(
-                    None, ssh_run_sync, profile, tmux_cmd, 15.0,
-                )
+            result = await loop.run_in_executor(None, _run_on_host, profile, launch_cmd, 15.0)
             if result.returncode == 0:
+                self._set_state(stream.name, STREAM_STARTING)
+                self._rebuild_table()
+                # tmux runs, which says nothing of ffmpeg: it may stop on its first line
+                state = await self._await_ffmpeg(profile, session, desktop)
+                if state != STREAM_RUNNING:
+                    if state is None:
+                        self._log(
+                            f"[yellow]{where} does not answer, so whether {stream.name} runs is not known; "
+                            f"Refresh asks again.[/yellow]"
+                        )
+                    else:
+                        await self._report_exit(stream, profile, session, where)
+                    self._set_state(stream.name, state)
+                    self._live = await self._server_states()
+                    self._rebuild_table()
+                    return
                 start_time = await loop.run_in_executor(
                     None,
                     lambda: _read_stream_start_time_with_retry(profile, session, is_local),
@@ -1005,14 +1492,16 @@ class StreamPanel(Widget):
                     self._log(f"  recording={recorded_file}")
                 elif record_dir:
                     self._log("[yellow]Could not read back the recording path; check the stream logs.[/yellow]")
-                self._statuses[stream.name] = True
+                self._set_state(stream.name, STREAM_RUNNING)
+                self._rebuild_table()
+                await self._check_server_side(stream, profile, session, desktop, where)
             else:
                 output = result.stdout.strip() if result.stdout else result.stderr.strip()
-                self._log(f"[red]Failed to start {stream.name}: {output}[/red]")
-                self._statuses[stream.name] = False
+                self._log(f"[red]Failed to start {stream.name}: {rich_escape(output)}[/red]")
+                self._set_state(stream.name, STREAM_STOPPED)
         except Exception as e:
-            self._log(f"[red]Error starting {stream.name}: {e}[/red]")
-            self._statuses[stream.name] = False
+            self._log(f"[red]Error starting {stream.name}: {rich_escape(str(e))}[/red]")
+            self._set_state(stream.name, None)
         self._rebuild_table()
 
     async def _async_stop(self, stream: StreamDef) -> None:
@@ -1025,27 +1514,22 @@ class StreamPanel(Widget):
                 self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                 return
 
-        stop_cmd = _build_stop_stream_cmd(session)
+        stop_cmd = _with_stream_path(_build_stop_stream_cmd(session))
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[red]Stopping {stream.name} {target_label}...[/red]")
 
         loop = asyncio.get_event_loop()
         try:
-            if is_local:
-                result = await loop.run_in_executor(
-                    None, lambda: subprocess.run(
-                        stop_cmd, shell=True, capture_output=True, text=True, timeout=15,
-                    ),
-                )
-            else:
-                result = await loop.run_in_executor(
-                    None, ssh_run_sync, profile, _with_stream_path(stop_cmd), 15.0,
-                )
+            # the grace for ffmpeg to finish its files, and the ssh round trip
+            result = await loop.run_in_executor(
+                None, _run_on_host, None if is_local else profile, stop_cmd, STREAM_STOP_GRACE_SECONDS + 7.0,
+            )
             if "DONE" in (result.stdout or ""):
                 self._log(f"[red]{stream.name} stopped.[/red]")
                 recorded = self._registered_record_path(stream.name)
                 mark_stream_stopped(stream.name, project_dir=self._project_dir)
-                self._statuses[stream.name] = False
+                self._set_state(stream.name, STREAM_STOPPED)
+                self._live = await self._server_states()
                 record_dir = self._record_dir(stream)
                 if recorded:
                     # where Start put it: the card's Session may have changed since,
@@ -1069,7 +1553,7 @@ class StreamPanel(Widget):
                 result = await loop.run_in_executor(
                     None,
                     lambda: subprocess.run(
-                        ["tmux", "capture-pane", "-t", session, "-p", "-S", "-120"],
+                        ["tmux", "capture-pane", "-t", f"={session}:", "-p", "-S", "-120"],
                         capture_output=True,
                         text=True,
                         timeout=10,
@@ -1080,7 +1564,7 @@ class StreamPanel(Widget):
                 if profile is None:
                     self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                     return
-                cmd = _with_stream_path(f"tmux capture-pane -t {shlex.quote(session)} -p -S -120")
+                cmd = _with_stream_path(f"tmux capture-pane -t {_tmux_pane_target(session)} -p -S -120")
                 result = await loop.run_in_executor(None, ssh_run_sync, profile, cmd, 10.0)
             output = (result.stdout or result.stderr or "").strip()
             if result.returncode != 0:
@@ -1089,8 +1573,9 @@ class StreamPanel(Widget):
             if not output:
                 self._log("[yellow]No tmux output captured yet.[/yellow]")
                 return
+            # ffmpeg's lines start with "[in#0 @ 0x...]", which the log would take for markup
             for line in output.splitlines()[-80:]:
-                self._log(line)
+                self._log(rich_escape(line))
         except Exception as e:
             self._log(f"[red]Error reading logs for {stream.name}: {e}[/red]")
 
@@ -1101,8 +1586,17 @@ class StreamPanel(Widget):
         success, message = await loop.run_in_executor(None, _probe_stream_target, url)
         if success:
             self._log(f"[green]{stream.name}: {message}[/green]")
-        else:
-            self._log(f"[red]{stream.name}: {message}[/red]")
+            return
+        self._log(f"[red]{stream.name}: {rich_escape(message)}[/red]")
+        if "404" in message:
+            follow = (
+                "Status says whether its ffmpeg runs, and Logs why it stopped." if stream.ssh_profile
+                else "It is external: whoever publishes it has to start it."
+            )
+            self._log(
+                f"  [yellow]The Stream Server has nothing at that path: nobody is publishing {stream.name} "
+                f"now. {follow}[/yellow]"
+            )
 
     def update_streams(self, streams: list[StreamDef]) -> None:
         """replace the stream list and refresh. Shown at once, a stream whose
@@ -1113,6 +1607,8 @@ class StreamPanel(Widget):
             stream.name: self._statuses[stream.name] for stream in self._streams
             if stream.name in self._statuses and hosts.get(stream.name) == stream.ssh_profile
         }
+        self._states = {name: self._states[name] for name in self._statuses if name in self._states}
+        self._live = {stream.name: self._live[stream.name] for stream in self._streams if stream.name in self._live}
         self._rebuild_table()
         if streams:
             self._refresh_all()
