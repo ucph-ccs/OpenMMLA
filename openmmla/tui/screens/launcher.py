@@ -23,6 +23,7 @@ from rich.markup import escape as rich_escape
 from textual.markup import escape as markup_escape
 from rich.text import Text
 from textual import on
+from textual.message import Message
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll, Vertical, Horizontal
 from textual.widget import Widget
@@ -76,6 +77,7 @@ from openmmla.tui.artifacts import (
 from openmmla.tui import download as dl
 from openmmla.tui import recordings, stream_cuts
 from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
+from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -1053,14 +1055,53 @@ class TransformMatrixPanel(Widget):
                 self._set_status(f"Save failed: {exc}")
 
 
-class CameraManagerPanel(Widget):
-    """Browse and delete camera calibration image folders (local host only).
+def _calibrated_cameras(config: dict) -> dict[str, dict]:
+    """the Cameras entries of an IPS base config that hold parameters: numbers
+    under `params` (the template's camera_name placeholder holds letters)."""
+    cameras = config.get("Cameras") if isinstance(config, dict) else None
+    if not isinstance(cameras, dict):
+        return {}
+    found: dict[str, dict] = {}
+    for name, entry in cameras.items():
+        params = entry.get("params") if isinstance(entry, dict) else None
+        if isinstance(params, list) and params and all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) for value in params):
+            found[str(name)] = entry
+    return found
 
-    Calibration writes captured checkerboard images to
-    camera_calib/cameras/<camera_name>/. This panel lists those folders, shows
-    the images in a chosen camera, and lets the user delete a single image or a
-    whole camera folder without leaving the TUI.
-    """
+
+def _bases_using_camera(config: dict, camera: str) -> list[str]:
+    """ids of the Bases entries of an IPS base config that use `camera`."""
+    bases = config.get("Bases") if isinstance(config, dict) else None
+    if isinstance(bases, dict):
+        entries = [dict(entry, id=entry.get("id", key)) for key, entry in bases.items() if isinstance(entry, dict)]
+    elif isinstance(bases, list):
+        entries = [entry for entry in bases if isinstance(entry, dict)]
+    else:
+        entries = []
+    return [str(entry.get("id")) for entry in entries if str(entry.get("camera")) == camera]
+
+
+class CameraManagerPanel(Widget):
+    """the cameras of the IPS camera calibration on this machine.
+
+    Capture writes a camera's checkerboard images to
+    camera_calib/cameras/<name>/ and Calibrate writes its parameters to
+    Cameras.<name> of the IPS base config. The two are not one to one (a
+    camera captured but not calibrated yet, parameters typed in by hand), so
+    the list holds both. A camera's images open in the file browser, where
+    they can be looked at; a camera is deleted with its parameters (not while
+    a base uses it); and its parameters go to the host that will capture with
+    it, without the rest of this machine's config."""
+
+    class SyncRequested(Message):
+        """Sync to Remote: this camera's parameters into that host's config."""
+
+        def __init__(self, panel: "CameraManagerPanel", camera: str, profile_name: str) -> None:
+            super().__init__()
+            self.panel = panel
+            self.camera = camera
+            self.profile_name = profile_name
 
     DEFAULT_CSS = """
     CameraManagerPanel {
@@ -1083,20 +1124,29 @@ class CameraManagerPanel(Widget):
         min-width: 18;
         margin-right: 1;
     }
-    CameraManagerPanel #cm-images {
-        height: 12;
-        margin-top: 1;
+    CameraManagerPanel #cm-sync-profile {
+        width: 40;
+        margin-right: 1;
     }
     """
 
-    def __init__(self, *, cameras_dir: str, target: str) -> None:
+    def __init__(
+        self, *, cameras_dir: str, target: str, config_path: str = "", ssh_profiles: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.cameras_dir = cameras_dir
         self.target = target
+        self.config_path = config_path
+        self.ssh_profiles = list(ssh_profiles or [])
         self._current_camera: str | None = None
+        # a camera whose Delete Camera has been pressed once
+        self._pending_delete: str | None = None
 
-    # ── filesystem helpers ───────────────────────────────────────
-    def _cameras(self) -> list[str]:
+    # ── what is here ─────────────────────────────────────────────
+    def _config(self) -> dict:
+        return load_existing_config(self.config_path) if self.config_path else {}
+
+    def _folders(self) -> list[str]:
         try:
             return sorted(
                 name for name in os.listdir(self.cameras_dir)
@@ -1108,111 +1158,144 @@ class CameraManagerPanel(Widget):
     def _images(self, camera: str | None) -> list[str]:
         if not camera:
             return []
-        cam_dir = os.path.join(self.cameras_dir, camera)
         try:
             return sorted(
-                name for name in os.listdir(cam_dir)
+                name for name in os.listdir(os.path.join(self.cameras_dir, camera))
                 if name.lower().endswith((".jpg", ".jpeg", ".png"))
             )
         except OSError:
             return []
+
+    def _cameras(self) -> list[str]:
+        return sorted(set(self._folders()) | set(_calibrated_cameras(self._config())))
+
+    def _describe(self, camera: str) -> str:
+        config = self._config()
+        folder = os.path.join(self.cameras_dir, camera)
+        parts = [f"{len(self._images(camera))} image(s)" if os.path.isdir(folder) else "no images here"]
+        params = _calibrated_cameras(config).get(camera)
+        if params:
+            parts.append(f"calibrated (fisheye: {'yes' if params.get('fisheye') else 'no'})")
+        else:
+            parts.append("not calibrated yet (Calibrate in the calibrator writes its parameters)")
+        users = _bases_using_camera(config, camera)
+        if users:
+            parts.append(f"used by base {', '.join(users)}")
+        return f"{camera}: " + " · ".join(parts)
 
     # ── compose ──────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
         yield Static("[b]Calibration Cameras[/b]", classes="cm-title")
         if self.target != "local":
             yield Static(
-                "Camera image management is available on the Local host only.",
+                "The cameras calibrated on this machine are managed with Host = Local.",
                 classes="cm-muted",
             )
             return
-        yield Static(f"Folder: {self.cameras_dir}", classes="cm-muted")
+        yield Static(
+            f"Images: {self.cameras_dir}\nParameters: Cameras in {self.config_path}", classes="cm-muted")
         cameras = self._cameras()
-        if not cameras:
-            yield Static("No captured cameras yet (run a Capture from calibration).", classes="cm-muted")
-            return
         yield Select(
             [(c, c) for c in cameras],
-            prompt="Select a camera...",
+            prompt="Select a camera..." if cameras else "No camera yet: Start, capture, calibrate",
             id="cm-camera-select",
         )
         yield Static("", id="cm-info", classes="cm-muted")
-        yield Select([], prompt="Select an image...", id="cm-image-select")
         with Horizontal(classes="cm-actions"):
-            yield Button("Delete Image", variant="error", id="btn-cm-del-image", disabled=True)
+            yield Button("Open Folder", id="btn-cm-open", disabled=True)
             yield Button("Delete Camera", variant="error", id="btn-cm-del-camera", disabled=True)
             yield Button("Refresh", id="btn-cm-refresh")
+        if self.ssh_profiles:
+            with Horizontal(classes="cm-actions"):
+                yield Select(
+                    [(name, name) for name in self.ssh_profiles],
+                    prompt="Host that captures with it...",
+                    id="cm-sync-profile",
+                )
+                yield Button("Sync to Remote", variant="warning", id="btn-cm-sync", disabled=True)
+        yield Static(
+            "After calibrating, Sync to Remote gives the host that runs the IPS base this camera's "
+            "parameters (only them: the rest of its config stays as it is).",
+            classes="cm-muted",
+        )
         yield Static("", id="cm-status", classes="cm-muted")
 
-    # ── helpers ──────────────────────────────────────────────────
-    def _set_status(self, text: str) -> None:
+    # ── state ────────────────────────────────────────────────────
+    def set_status(self, text: str) -> None:
         try:
             self.query_one("#cm-status", Static).update(text)
         except Exception:
             pass
 
-    def _refresh_cameras(self) -> None:
-        """re-list cameras after a deletion (rebuild the camera dropdown)."""
+    def _sync_profile(self) -> str | None:
         try:
-            sel = self.query_one("#cm-camera-select", Select)
-            sel.set_options([(c, c) for c in self._cameras()])
-            sel.value = Select.BLANK
+            value = self.query_one("#cm-sync-profile", Select).value
         except Exception:
-            pass
-        self._current_camera = None
-        self._refresh_images()
+            return None
+        return None if value in (None, Select.BLANK) else str(value)
+
+    def _update_actions(self) -> None:
+        camera = self._current_camera
+        calibrated = bool(camera) and camera in _calibrated_cameras(self._config())
+        states = {
+            "#btn-cm-open": not (camera and os.path.isdir(os.path.join(self.cameras_dir, camera))),
+            "#btn-cm-del-camera": camera is None,
+            "#btn-cm-sync": not (calibrated and self._sync_profile()),
+        }
+        for selector, disabled in states.items():
+            try:
+                self.query_one(selector, Button).disabled = disabled
+            except Exception:
+                pass
         try:
-            self.query_one("#btn-cm-del-camera", Button).disabled = True
+            self.query_one("#cm-info", Static).update(self._describe(camera) if camera else "")
         except Exception:
             pass
 
-    def _refresh_images(self) -> None:
-        images = self._images(self._current_camera)
+    def _refresh_cameras(self) -> None:
+        """read the folders and the config again, keeping the camera on screen
+        when it is still there."""
+        cameras = self._cameras()
+        keep = self._current_camera if self._current_camera in cameras else None
         try:
-            img_sel = self.query_one("#cm-image-select", Select)
-            img_sel.set_options([(n, n) for n in images])
-            img_sel.value = Select.BLANK
+            sel = self.query_one("#cm-camera-select", Select)
+            sel.set_options([(c, c) for c in cameras])
+            sel.value = keep if keep else Select.BLANK
         except Exception:
             pass
-        try:
-            self.query_one("#cm-info", Static).update(
-                f"{self._current_camera}: {len(images)} image(s)" if self._current_camera else ""
-            )
-        except Exception:
-            pass
-        try:
-            self.query_one("#btn-cm-del-image", Button).disabled = True
-        except Exception:
-            pass
+        self._current_camera = keep
+        self._update_actions()
 
     # ── events ───────────────────────────────────────────────────
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "cm-camera-select":
-            self._current_camera = None if event.value is Select.BLANK else str(event.value)
-            self._refresh_images()
-            try:
-                self.query_one("#btn-cm-del-camera", Button).disabled = self._current_camera is None
-            except Exception:
-                pass
-        elif event.select.id == "cm-image-select":
-            has = event.value not in (None, Select.BLANK)
-            try:
-                self.query_one("#btn-cm-del-image", Button).disabled = not has
-            except Exception:
-                pass
+            event.stop()
+            self._current_camera = None if event.value in (None, Select.BLANK) else str(event.value)
+            self._pending_delete = None
+            self._update_actions()
+        elif event.select.id == "cm-sync-profile":
+            event.stop()
+            self._update_actions()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
         if bid == "btn-cm-refresh":
             event.stop()
+            self._pending_delete = None
             self._refresh_cameras()
-            self._set_status("Refreshed.")
-        elif bid == "btn-cm-del-image":
+            self.set_status("Refreshed.")
+        elif bid == "btn-cm-open":
             event.stop()
-            self._delete_image()
+            self._open_folder()
         elif bid == "btn-cm-del-camera":
             event.stop()
             self._delete_camera()
+        elif bid == "btn-cm-sync":
+            event.stop()
+            profile = self._sync_profile()
+            if self._current_camera and profile:
+                self.set_status(f"Syncing '{self._current_camera}' to {profile} ...")
+                self.post_message(self.SyncRequested(self, self._current_camera, profile))
 
     def _safe_under_cameras(self, path: str) -> bool:
         root = os.path.abspath(self.cameras_dir)
@@ -1222,39 +1305,64 @@ class CameraManagerPanel(Widget):
         except ValueError:
             return False
 
-    def _delete_image(self) -> None:
+    def _open_folder(self) -> None:
+        """the images in the file browser of this machine: the console cannot
+        show a picture, and that is where a bad one is found and removed."""
         if not self._current_camera:
             return
+        folder = os.path.join(self.cameras_dir, self._current_camera)
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
         try:
-            img = self.query_one("#cm-image-select", Select).value
-        except Exception:
-            return
-        if img in (None, Select.BLANK):
-            return
-        path = os.path.join(self.cameras_dir, self._current_camera, str(img))
-        if not self._safe_under_cameras(path):
-            self._set_status("Refusing to delete a path outside the cameras folder.")
-            return
-        try:
-            os.remove(path)
-            self._set_status(f"Deleted image {img}")
-        except OSError as exc:
-            self._set_status(f"Delete failed: {exc}")
-        self._refresh_images()
+            subprocess.Popen([opener, folder], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.set_status(f"Opened {folder}")
+        except OSError:
+            self.set_status(f"No file browser to open it with; the images are in {folder}")
 
     def _delete_camera(self) -> None:
-        if not self._current_camera:
+        camera = self._current_camera
+        if not camera:
             return
-        path = os.path.join(self.cameras_dir, self._current_camera)
-        if not self._safe_under_cameras(path):
-            self._set_status("Refusing to delete a path outside the cameras folder.")
+        config = self._config()
+        users = _bases_using_camera(config, camera)
+        if users:
+            self._pending_delete = None
+            self.set_status(
+                f"Not deleted: base {', '.join(users)} uses '{camera}' (Bases of the IPS Base config). "
+                f"Give it another camera first.")
             return
-        name = self._current_camera
-        try:
-            shutil.rmtree(path)
-            self._set_status(f"Deleted camera folder '{name}'. Note: its entry under config 'Cameras' (if any) is left untouched.")
-        except OSError as exc:
-            self._set_status(f"Delete failed: {exc}")
+        folder = os.path.join(self.cameras_dir, camera)
+        has_folder = os.path.isdir(folder) and self._safe_under_cameras(folder)
+        cameras = config.get("Cameras")
+        has_params = isinstance(cameras, dict) and camera in cameras
+        what = " and ".join(part for part in (
+            f"its {len(self._images(camera))} image(s)" if has_folder else "",
+            "its parameters in config.yml" if has_params else "",
+        ) if part)
+        if not what:
+            self.set_status(f"'{camera}' has nothing left here to delete.")
+            self._refresh_cameras()
+            return
+        if self._pending_delete != camera:
+            self._pending_delete = camera
+            self.set_status(
+                f"Press Delete Camera again to delete '{camera}': {what}. Other hosts keep their copy.")
+            return
+        self._pending_delete = None
+        problems = []
+        if has_folder:
+            try:
+                shutil.rmtree(folder)
+            except OSError as exc:
+                problems.append(f"images: {exc}")
+        if has_params:
+            try:
+                del cameras[camera]
+                dump_yaml_pretty(config, self.config_path)
+            except OSError as exc:
+                problems.append(f"config.yml: {exc}")
+        self.set_status(
+            f"Deleted '{camera}': {what}." if not problems
+            else f"Deleting '{camera}' went wrong: {'; '.join(problems)}")
         self._refresh_cameras()
 
 
@@ -3915,12 +4023,17 @@ class ServicePanel(Widget):
                 is_running=is_running,
                 initial_collection_role=self._collection_role,
             ))
-            # calibration captures per-camera image folders; offer a manager to
-            # browse/delete them without digging into the project on disk
+            # the cameras calibration made on this machine: their images, their
+            # parameters, and the sync of those to the host that captures
             if svc.name == "IPS Camera Calibration":
                 await scroll.mount(CameraManagerPanel(
                     cameras_dir=_ips_cameras_local_dir(self._root),
                     target=self._get_panel_target(),
+                    config_path=self._ips_base_config_path(),
+                    ssh_profiles=[
+                        profile.name for profile in load_ssh_profiles()
+                        if TARGET_PLATFORMS.get(profile.name) != "windows"
+                    ],
                 ))
 
     def _service_with_session_choices(self, svc: ServiceDef, target: str | None = None) -> ServiceDef:
@@ -6142,6 +6255,84 @@ class ServicePanel(Widget):
             hint += f", or copy this machine's with Host = Local and Sync to Remote to '{target}'"
         self._log(f"[yellow]{hint}.[/yellow]")
         return False
+
+    def _ips_base_config_path(self) -> str:
+        pipeline = self._pipeline_map.get("IPS Base")
+        return pipeline.config_path if pipeline else os.path.join(self._root, "pipelines", "ips-base", "config.yml")
+
+    @on(CameraManagerPanel.SyncRequested)
+    def on_camera_sync_requested(self, event: CameraManagerPanel.SyncRequested) -> None:
+        event.stop()
+        self.run_worker(
+            self._sync_camera_to_host(event.panel, event.camera, event.profile_name),
+            group="camera-sync",
+            exclusive=True,
+        )
+
+    async def _sync_camera_to_host(self, panel, camera: str, profile_name: str) -> None:
+        """Sync to Remote on the Calibration Cameras panel: that host's IPS base
+        config gets this camera's parameters, Cameras.<name>, and the rest of
+        it (its Bases and Streams, which belong to that host) stays as it is.
+        The config's own Sync to Remote copies the whole file instead."""
+        def report(text: str, color: str) -> None:
+            panel.set_status(text)
+            self._log(f"[{color}]{rich_escape(text)}[/{color}]")
+
+        local_path = self._ips_base_config_path()
+        params = _calibrated_cameras(load_existing_config(local_path)).get(camera)
+        if not params:
+            report(f"'{camera}' has no calibrated parameters here to sync.", "yellow")
+            return
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            report(f"SSH profile '{profile_name}' not found.", "red")
+            return
+        exists, remote_path = await asyncio.to_thread(self._remote_file_exists, local_path, profile_name)
+        if exists is None:
+            report(f"Could not reach {profile_name} to read {remote_path}.", "red")
+            return
+        if not exists:
+            report(
+                f"{profile_name} has no IPS base config yet ({remote_path}). Save one there first: IPS Base "
+                f"with Host = {profile_name}, Config tab, Save; then sync the camera.", "yellow")
+            return
+        # read afresh rather than from the cache: someone may have saved it since
+        result = await asyncio.to_thread(ssh_run_sync, profile, f"cat {_quote_remote_path(remote_path)}", 15.0)
+        try:
+            config = yaml.safe_load(result.stdout) if result.returncode == 0 else None
+        except yaml.YAMLError:
+            config = None
+        if not isinstance(config, dict):
+            report(f"Could not read {profile_name}:{remote_path}; it was left as it is.", "red")
+            return
+        cameras = config.get("Cameras")
+        if not isinstance(cameras, dict):
+            cameras = config["Cameras"] = {}
+        if cameras.get(camera) == params:
+            report(f"{profile_name} already has the same parameters for '{camera}'.", "green")
+            return
+        existed = camera in cameras
+        cameras[camera] = copy.deepcopy(params)
+        # the calibrator's own writer: the rest of the file is written back as read
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".yml", prefix="openmmla-camera-", delete=False)
+        tmp.close()
+        try:
+            await asyncio.to_thread(dump_yaml_pretty, config, tmp.name)
+            proc = await scp_file_async(profile, tmp.name, remote_path)
+            output = (await proc.stdout.read()).decode(errors="replace") if proc.stdout else ""
+            rc = await proc.wait()
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+        if rc != 0:
+            report(f"Sync of '{camera}' to {profile_name} failed: {output.strip() or f'scp exited {rc}'}", "red")
+            return
+        self._target_config_cache[self._config_cache_key(local_path, profile_name)] = config
+        report(
+            f"'{camera}' synced to {profile_name}: {'updated' if existed else 'added'} Cameras.{camera} in "
+            f"{remote_path}; the rest of that config is as it was.", "green")
 
     def _ips_transform_remote_dir(self, profile) -> str:
         rel_path = os.path.relpath(_ips_transform_local_dir(self._root), self._root)
