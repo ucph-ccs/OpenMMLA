@@ -19,11 +19,10 @@ Base:
     
   # VideoStream settings
   # NOTE: where each base's video comes from ('source' and 'source_index') is in
-  # Bases (below). A base whose source_index is a full path replays that file,
-  # from its own folder; one with a bare name finds it in 'file_dir' (optional,
-  # defaults to the project dir). initial_sync_time is auto-computed at runtime
-  # as the latest file start time in the folder.
-  file_dir: '/path/to/video/directory'              # (optional) folder of the recordings bases with source 'file' replay: the Config tab lists its files, and a bare name in Bases is looked up there. Files replayed together sit in one folder: the replay starts at the latest start among them, read from the names (<prefix>_<timestamp>.<extension>)
+  # Bases (below). A base with source 'file' names its file by its full path
+  # (Browse… on the Config tab). Files replayed together sit in one folder: the
+  # replay starts at the latest start among them, read from the names
+  # (<prefix>_<timestamp>.<extension>), unless initial_sync_time is set.
 
   # Frame processing settings (applies to all video sources)
   keyframe_interval: 30.0                          # Interval between processed frames in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
@@ -79,7 +78,7 @@ Bases:
   - id: <base-id>               # base id / identity (appears in storage paths {camera}_{id})
     camera: <camera-name>       # calibrated camera profile name (from Cameras)
     source: stream              # source type (opencv/stream/lsl/file; rtmp is the old name of stream)
-    source_index: 0             # opencv: camera index; stream: name of a Streams entry; lsl: stream name; file: the file to replay, by full path (Browse… on the Config tab) or by name inside Base.file_dir
+    source_index: 0             # opencv: camera index; stream: name of a Streams entry; lsl: stream name; file: the file to replay, by its full path (Browse… on the Config tab)
     camera_angle: <camera-angle>  # viewing angle label (e.g. front, top, side)
 
 Synchronizer:

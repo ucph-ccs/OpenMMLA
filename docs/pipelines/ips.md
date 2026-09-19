@@ -30,7 +30,7 @@ An alternative input path skips the cameras entirely: a Nicla Vision badge runni
 
 | Section | What it holds |
 |---|---|
-| `Base` | settings shared by every base: `tag_size` and `families` of the AprilTags, `resolution`, `rotate`, `fps`, the file-replay pacing (`keyframe_interval`, `processing_rate`, `enable_timing_sync`), `file_dir` for replay, and `stream_kwargs` |
+| `Base` | settings shared by every base: `tag_size` and `families` of the AprilTags, `resolution`, `rotate`, `fps`, the file-replay pacing (`keyframe_interval`, `processing_rate`, `enable_timing_sync`), and `stream_kwargs` |
 | `Bases` | one entry per camera position: `id`, `camera` (a calibrated profile from `Cameras`), `source`, `source_index`, and `main` (exactly one `true`). Camera sync, the bases and the transform matrices all key on these ids. |
 | `Cameras` | the intrinsic parameters per camera model, written by the calibration tool (or filled in by hand); the template ships profiles for a Logitech C920, a MacBook Air camera and an iPhone |
 | `Synchronizer` | `bucket_duration` |
@@ -42,7 +42,7 @@ Bases:
   - id: cam-front            # base id; appears in MQTT and as the transform matrix key
     camera: logitechC920     # a calibrated profile from Cameras
     source: opencv           # opencv | stream | lsl | file (rtmp is the old name of stream)
-    source_index: 0          # opencv: camera index; stream: index among the pullable Streams entries; file: file name in Base.file_dir; lsl: stream name
+    source_index: 0          # opencv: camera index; stream: index among the pullable Streams entries; file: the file's full path; lsl: stream name
     main: true               # exactly one base is the main reference frame
   - id: cam-side
     camera: logitechC920
@@ -60,7 +60,7 @@ IPS has no capture/analyze/live mode switch: a live source (`opencv`, `stream`, 
 | `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index: the Config tab lists the cameras found on the card's host (`/dev/video<N>` is index N on Linux, a Mac's in AVFoundation's order) to pick from, and the base lists the devices it finds when it starts |
 | `stream` | video pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` is its position among those entries |
 | `lsl` | Lab Streaming Layer | `source_index` is the stream name; needs `pylsl` |
-| `file` | replay of a recorded video | `source_index` is the file to replay: its full path (**Browse…** on the Config tab) or a name inside `Base.file_dir`, the optional folder whose files the Config tab lists. Files replayed together sit in one folder: the replay starts at the latest start among them, read from the names |
+| `file` | replay of a recorded video | `source_index` is the file to replay, by its full path: **Browse…** on the Config tab writes it, and the dropdown lists the other files of its folder (when the card's host is this machine; on another one the path is typed). Files replayed together sit in one folder: the replay starts at the latest start among them, read from the names. A config from before keeps a `file_dir` in `Base`, where a bare file name was looked up: the bases still read it, and the Config tab turns those names into full paths, which the next **Save** writes (the log says what moved). |
 
 ### Streams
 
@@ -136,4 +136,4 @@ With `-sid`, as the console runs them, each command asks nothing: it starts at o
 
 ## Post-time processing
 
-Record with **Collection → Collection Session**, then set each base's `source` to `file`, `Base.file_dir` to the `video/` directory from the collection manifest and `source_index` to the file name. `keyframe_interval` and `processing_rate` control how fast the recording is replayed.
+Record with **Collection → Collection Session**, then set each base's `source` to `file` and its `source_index` to its file in the `video/` directory from the collection manifest, by its full path (**Browse…** picks it). `keyframe_interval` and `processing_rate` control how fast the recording is replayed.

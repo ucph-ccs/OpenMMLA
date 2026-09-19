@@ -1,5 +1,6 @@
 import copy
 import os
+import posixpath
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -454,12 +455,87 @@ def _delete_nested(data, dot_path):
         current.pop(keys[-1], None)
 
 
-def save_config(config_path, fields, values):
+# what a Bases entry carries for its source, and a Base block of an older
+# config held instead: an ASR base type's stream_kwargs.<key>, for its udp/tcp
+# entries; and file_dir (an ASR base type's, or the one Base of IPS and VFA),
+# the folder a file entry's bare name was looked up in
+ENTRY_STREAM_KEYS = ("host", "packet_format")
+_LISTENING_SOURCES = ("udp", "tcp")
+# the file_dir the IPS and VFA templates shipped with: an example, not a folder
+_EXAMPLE_FILE_DIR = "/path/to/video/directory"
+
+
+def _move_file_dir(holder: dict, where: str, entries: list[dict]) -> list[str]:
+    """file_dir out of `holder`, into the source_index of the file entries that
+    name their file without a folder; a relative folder stays relative, as the
+    bases resolve it against their project folder."""
+    from openmmla.utils.constants import normalize_source
+
+    folder = str(holder.pop("file_dir", None) or "").strip()
+    if not folder or folder == _EXAMPLE_FILE_DIR:
+        return []
+    named = [entry for entry in entries if normalize_source(entry.get("source")) == "file"
+             and str(entry.get("source_index") or "").strip()
+             and not posixpath.dirname(str(entry["source_index"]).strip())]
+    for entry in named:
+        entry["source_index"] = posixpath.join(folder, str(entry["source_index"]).strip())
+    if named:
+        return [f"{where}.file_dir ({folder}) is now part of the source_index of base "
+                f"{', '.join(str(entry.get('id')) for entry in named)}"]
+    return [f"{where}.file_dir ({folder}) goes: no file base names a file in it without its folder"]
+
+
+def move_source_settings(config) -> list[str]:
+    """move out of Base what only some sources use, into the Bases entries that
+    use it: an ASR base type's stream_kwargs.host and packet_format go to its
+    udp/tcp entries, and a file_dir goes into the source_index of the file
+    entries that named a bare file. An entry that has its own value keeps it,
+    and the key leaves Base either way, so what no entry uses is dropped.
+    Changes `config` in place; returns what moved, a line each."""
+    from openmmla.utils.constants import normalize_source
+
+    if not isinstance(config, dict) or not isinstance(config.get("Base"), dict):
+        return []
+    base = config["Base"]
+    bases = config.get("Bases")
+    entries = [entry for entry in bases if isinstance(entry, dict)] if isinstance(bases, list) else []
+    notes: list[str] = []
+    if "file_dir" in base:  # IPS and VFA: one Base for every base
+        notes += _move_file_dir(base, "Base", entries)
+    for name, block in base.items():  # ASR: a block per base type, with its stream_kwargs
+        if not isinstance(block, dict) or ("stream_kwargs" not in block and "file_dir" not in block):
+            continue
+        users = [entry for entry in entries if str(entry.get("base_type")) == str(name)]
+        kwargs = block.get("stream_kwargs")
+        for key in ENTRY_STREAM_KEYS:
+            if not isinstance(kwargs, dict) or key not in kwargs:
+                continue
+            value = kwargs.pop(key)
+            if value in (None, ""):
+                continue
+            listening = [entry for entry in users if normalize_source(entry.get("source")) in _LISTENING_SOURCES]
+            taking = [entry for entry in listening if entry.get(key) in (None, "")]
+            for entry in taking:
+                entry[key] = value
+            where = f"Base.{name}.stream_kwargs.{key} ({value})"
+            if taking:
+                notes.append(f"{where} is now in base {', '.join(str(entry.get('id')) for entry in taking)}")
+            else:
+                notes.append(f"{where} goes: " + ("every udp/tcp base of it has its own" if listening
+                                                   else f"no udp/tcp base of {name} uses it"))
+        if "file_dir" in block:
+            notes += _move_file_dir(block, f"Base.{name}", users)
+    return notes
+
+
+def save_config(config_path, fields, values, transform=None):
     """build a yaml dict from field values and write to config_path.
 
     The existing config is used as the base so keys not managed by the form
     (e.g. optional advanced overrides) are preserved; unfilled <...> placeholder
-    values are stripped so they never reach disk.
+    values are stripped so they never reach disk. `transform(data)`, when
+    given, changes what is written last (move_source_settings for a pipeline
+    config).
 
     Sensitive values (api_key, token, password, ...) entered as plaintext are
     encrypted to ENC(...) with the master key before hitting disk; a master
@@ -476,6 +552,8 @@ def save_config(config_path, fields, values):
     for path, val in values.items():
         if val is REMOVED_SECTION:
             _delete_nested(data, path)
+    if transform is not None:
+        transform(data)
     _strip_placeholders(data)
     try:
         from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key

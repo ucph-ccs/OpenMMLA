@@ -34,6 +34,17 @@ def _no_choice(value) -> bool:
     return value is None or value is Select.BLANK or value is getattr(Select, "NULL", None)
 
 
+def _media_files(folder: str) -> list[str]:
+    """the media files of a folder on this machine, by name; none when it
+    cannot be listed."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    return [name for name in names
+            if name.lower().endswith(_MEDIA_EXTS) and os.path.isfile(os.path.join(folder, name))]
+
+
 class FileBrowserModal(ModalScreen):
     """A simple local file browser; dismisses with the chosen file path (or None)."""
 
@@ -338,7 +349,7 @@ class DictListField(Widget):
     _SOURCE_INDEX_HINTS = {
         "opencv": "→ which local camera (0-based index)",
         "stream": "→ which stream of this config's Streams it pulls, by name (a new one is listed once the Streams are saved)",
-        "file": "→ the file to replay: its full path (Browse…), or a name inside Base.file_dir",
+        "file": "→ the file to replay, by its full path (Browse…); the list holds the other files of its folder",
         "pyaudio": "→ the input device, by PyAudio's index of it",
         "lsl": "→ LSL stream name (resolved by name)",
     }
@@ -348,15 +359,24 @@ class DictListField(Widget):
     # the fields of a Bases entry that only some sources use, and which: the
     # row of one the entry's source does not use is hidden, and left out of
     # the saved entry. A field not listed here is for every source. This is
-    # what the bases read: asr_base takes port for udp/tcp, channel for pyaudio
-    # and source_index for the rest; the video bases source_index alone
+    # what the bases read: asr_base takes port, host and packet_format for
+    # udp/tcp, channel_select for pyaudio and source_index for the rest; the
+    # video bases source_index alone
     _FIELDS_BY_SOURCE = {
         "source_index": {"pyaudio", "opencv", "stream", "lsl", "file"},
         "channel_select": {"pyaudio"},
         "port": {"udp", "tcp"},
+        "host": {"udp", "tcp"},
+        "packet_format": {"udp", "tcp"},
     }
+    # what a base takes for a field left empty, shown in its row so the entry
+    # says what runs (and saved with it)
+    _FIELD_DEFAULTS = {"host": "0.0.0.0", "packet_format": "auto"}
     _FIELD_HINTS = {
         "port": "→ the port this base listens on: the badge or FFmpeg stream pushes to it",
+        "host": "→ the address it listens on: 0.0.0.0 is every interface",
+        "packet_format": "→ auto: the first packet tells; timestamped: a badge (18-byte header + PCM); "
+                         "raw: header-less PCM, as an FFmpeg stream sends",
         "channel_select": "→ which channel of a multi-channel device this base keeps; empty: all of them "
                           "(stream_kwargs.channels is how many the device has)",
     }
@@ -420,11 +440,16 @@ class DictListField(Widget):
             id=widget_id, classes="dict-entry-input",
         )
 
+    def _files_here(self) -> bool:
+        """whether the files of the card's host are this machine's, so that a
+        file entry's folder can be listed and browsed from here."""
+        return bool(self._choices.get("source_index:file_here", True))
+
     def _source_index_widget(self, source, val, widget_id: str):
         """source_index means different things per source type, so the widget
-        adapts: file → a dropdown of video files in file_dir; lsl → a text
-        input for the stream name; everything else → a plain index/text input
-        (disabled for udp/tcp, which bind via 'port')."""
+        adapts: file → a dropdown of the files in the folder of the entry's
+        file; lsl → a text input for the stream name; everything else → a
+        plain index/text input (disabled for udp/tcp, which bind via 'port')."""
         s = normalize_source(source)
         if s == "stream":
             streams, cur = self._stream_options(str(val).strip() if val not in (None, "") else "")
@@ -441,26 +466,21 @@ class DictListField(Widget):
             w.placeholder = "no pullable stream in Streams yet: add one there and Save"
             return w
         if s == "file":
-            files = self._choices.get("source_index") or []
-            options = [(str(f), str(f)) for f in files]
             cur = str(val).strip() if val not in (None, "") else ""
-            if cur and not any(ov == cur for _, ov in options):
-                # the full path Browse… picked, or a name the listed folder
-                # does not have: kept as it is rather than dropped
-                label = f"{os.path.basename(cur)}  ({os.path.dirname(cur)})" if os.path.isabs(cur) else cur
-                options.insert(0, (label, cur))
-            if options:
-                kwargs = {"value": cur} if cur else {}
-                return Select(
-                    options, prompt="Select file...", id=widget_id,
-                    classes="dict-entry-input", **kwargs,
-                )
-            # no file to list (file_dir unset, empty or on another host): free text
-            w = Input(
-                value=str(val) if val is not None else "",
-                id=widget_id, classes="dict-entry-input",
-            )
-            w.placeholder = "full path of the file, or a name inside Base.file_dir"
+            if cur and self._files_here():
+                # the entry's file among the other files of its folder; the file
+                # itself is named with its folder, and kept when it is not there
+                folder = os.path.dirname(cur) if os.path.isabs(cur) else ""
+                options = [(f"{name}  ({folder})" if os.path.join(folder, name) == cur else name,
+                            os.path.join(folder, name)) for name in (_media_files(folder) if folder else [])]
+                if not any(value == cur for _, value in options):
+                    options.insert(0, (f"{os.path.basename(cur)}  ({folder})" if folder else cur, cur))
+                return Select(options, prompt="Select file...", id=widget_id,
+                              classes="dict-entry-input", value=cur)
+            # nothing picked yet, or a file on another machine: its path, typed
+            w = Input(value=cur, id=widget_id, classes="dict-entry-input")
+            w.placeholder = ("full path of the file (Browse…)" if self._files_here()
+                             else "full path of the file on the card's host")
             return w
         if s == "lsl":
             w = Input(
@@ -535,6 +555,8 @@ class DictListField(Widget):
 
     def _hint(self, source) -> str:
         text = self._source_index_hint(source)
+        if normalize_source(source) == "file" and not self._files_here():
+            text = "→ the file to replay, by its full path on the card's host"
         if normalize_source(source) == "stream" and self._stream_note:
             text = f"{text}\n{self._stream_note}"
         note = self._device_notes.get(normalize_source(source))
@@ -603,6 +625,9 @@ class DictListField(Widget):
             val = entry.get(key, "")
             if val in ("", None) and key in self._RENAMED_FIELDS:
                 val = entry.get(self._RENAMED_FIELDS[key], "")
+            if val in ("", None) and key in self._FIELD_DEFAULTS and "source" in self._schema:
+                # a Bases entry's; another list's host (an upstream) has no default
+                val = self._FIELD_DEFAULTS[key]
             widget_id = _safe_id(f"dle__{self.field_def.path}__{idx}__{key}")
             if key == "source_index":
                 widget = self._source_index_widget(src_val, val, widget_id)
@@ -615,7 +640,7 @@ class DictListField(Widget):
                     id=_safe_id(f"dle-browse__{self.field_def.path}__{idx}"),
                     classes="dle-browse-btn",
                 )
-                browse.disabled = normalize_source(src_val) != "file"
+                browse.disabled = normalize_source(src_val) != "file" or not self._files_here()
                 row_children.append(browse)
             shown = self._applies(key, src_val)
             row = Horizontal(*row_children, id=_safe_id(f"{widget_id}__row"), classes="dict-entry-row")
@@ -731,10 +756,10 @@ class DictListField(Widget):
             if w.id and w.id.endswith("source_index__hint"):
                 w.update(self._hint(new_source))
 
-        # Browse button is only meaningful for file sources
+        # Browse button is only meaningful for file sources, on this machine
         for w in container.query(Button):
             if w.id and "dle-browse__" in w.id:
-                w.disabled = str(new_source).strip().lower() != "file"
+                w.disabled = str(new_source).strip().lower() != "file" or not self._files_here()
 
         old = self._find_in_container(container, "__source_index")
         if old is None:
@@ -757,12 +782,15 @@ class DictListField(Widget):
 
     def _open_file_browser(self, container) -> None:
         """open the local file browser; on pick, the entry's source_index is
-        the file's full path: the file goes with the base, whatever
-        Base.file_dir says (that is the folder the dropdown lists)."""
+        the file's full path, and the dropdown lists the other files of its
+        folder."""
         start = None
-        files = self._choices.get("source_index") or []
-        # seed the browser at the previously-listed dir if we can infer it
-        if isinstance(self._last_file_dir, str) and os.path.isdir(self._last_file_dir):
+        # open where the entry's file is, else where the last pick was
+        current = self._find_in_container(container, "__source_index")
+        value = str(getattr(current, "value", "") or "")
+        if os.path.isabs(value) and os.path.isdir(os.path.dirname(value)):
+            start = os.path.dirname(value)
+        elif isinstance(self._last_file_dir, str) and os.path.isdir(self._last_file_dir):
             start = self._last_file_dir
 
         def _done(path: str | None) -> None:

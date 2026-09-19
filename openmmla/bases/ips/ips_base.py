@@ -357,9 +357,12 @@ class IPSBase(Base):
             base_config = self.config.get('Base', {})
 
             # the entry names its file by its full path (Browse… on the Config
-            # tab): that file's folder is the one listed and synchronized over;
-            # else file_dir, which is optional and defaults to the project directory
+            # tab), or by a path below the project directory: that file's folder is
+            # the one listed and synchronized over. A bare name is looked up in the
+            # Base.file_dir of an older config, else in the project directory
             named = str(self._source_index or "")
+            if named and not os.path.isabs(named) and os.path.dirname(named):
+                named = self._source_index = os.path.join(self.project_dir, named)
             if os.path.isabs(named):
                 file_dir = os.path.dirname(named)
             else:

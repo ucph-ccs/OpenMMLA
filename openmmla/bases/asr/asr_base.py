@@ -258,7 +258,8 @@ class ASRBase(Base):
         if not self.source:
             raise ValueError(
                 f"Base '{self.id}' has no 'source'. Set 'source' in its Bases entry.")
-        self.stream_kwargs = base_config['stream_kwargs']
+        # a copy: what the source adds below is this base's, not its base type's
+        self.stream_kwargs = dict(base_config.get('stream_kwargs') or {})
 
         from openmmla.utils.constants import normalize_source
         self.source = normalize_source(self.source)
@@ -276,6 +277,12 @@ class ASRBase(Base):
             if not self.registration:  # a registration leaves a base listening there alone
                 free_port(self.port)
             self.stream_kwargs['port'] = self.port
+            # where it listens and how its packets are laid out are the entry's too;
+            # an older config has them in Base.<type>.stream_kwargs
+            self.stream_kwargs['host'] = (self._base_entry.get('host') or self.stream_kwargs.get('host')
+                                          or '0.0.0.0')
+            self.stream_kwargs['packet_format'] = (self._base_entry.get('packet_format')
+                                                   or self.stream_kwargs.get('packet_format') or 'auto')
 
         # set input_device_index for 'pyaudio'
         elif self.source == 'pyaudio':
@@ -373,9 +380,10 @@ class ASRBase(Base):
             if self.registration:
                 raise ValueError(f"base {self.id} reads a file (source: file), so it has no stream to record a "
                                  "speaker from: register from files instead.")
+            # a bare name in source_index is looked up in the Base.<type>.file_dir of an
+            # older config, else in the project directory; a `file_dir:` left empty is none
             file_dir = base_config.get('file_dir')
             if not file_dir:
-                # default to project directory if not specified (a `file_dir:` left empty is not either)
                 file_dir = self.project_dir
                 self.logger.info(f"No file_dir specified in config, using project directory: {file_dir}")
             else:

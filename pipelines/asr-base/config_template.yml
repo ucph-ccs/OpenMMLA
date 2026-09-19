@@ -4,9 +4,10 @@
 # Base: one block per kind of microphone (a table speakerphone, a badge, a
 # laptop mic), named as you like. It says how the audio of that kind of
 # microphone is processed (whether speakers are recognized, recognition
-# thresholds and durations, gain, VAD) and what format it arrives in
-# (stream_kwargs). Which microphones there are, and where each one's audio
-# comes from, is the Bases list below.
+# thresholds and durations, gain, VAD) and the format the base works in
+# (stream_kwargs), whatever the source. Which microphones there are, where
+# each one's audio comes from, and what only that source needs, is the Bases
+# list below.
 Base:
   <Your_Device_Name>:
     asr_scope: individual         # individual = speaker verification + transcription; group = attribute transcript to the session group (no verification)
@@ -23,16 +24,13 @@ Base:
     update_threshold:             # Similarity threshold for incrementally updating speaker profile
     gain:                         # Volume gain multiplier in decibels for audio preprocessing
     score_amplified:              # Whether to amplify the similarity score of the audio signal based on the energy level
-    file_dir:                     # (optional) folder of the recordings a base with source 'file' replays: the Config tab lists its files, and a bare file name in Bases is looked up there. The start time comes from the file name (<prefix>_<timestamp>.<extension>)
-    stream_kwargs:                # the audio as this kind of microphone delivers it
-      channels:                   # how many channels that audio has (default 1): what a badge or FFmpeg stream sends over udp/tcp (must match), what a MediaMTX stream is decoded to; a pyaudio device's count is read from the device itself (Bases.channel_select keeps one of them)
+    stream_kwargs:                # the audio as the base works with it, whatever the source
+      channels:                   # how many channels (default 1): what a badge or FFmpeg stream sends over udp/tcp (must match), what a MediaMTX stream is decoded to and a replayed file converted to; a pyaudio device's count is read from the device itself (Bases.channel_select keeps one of them)
       rate:                       # Sampling rate in Hz (e.g., 16000 for 16kHz)
       format:                     # Audio format, e.g., int16, float32
       chunk_size:                 # Size of each audio chunk in frames (default to 512)
       buffer_duration:            # Buffer duration in seconds for audio stream
       resample_method:            # Resampling method for audio processing
-      host:                       # udp/tcp: the address the base listens on (0.0.0.0 for all interfaces)
-      packet_format:              # udp/tcp packet layout: auto (default, sniffs the first packet), timestamped (badge 18-byte header + PCM) or raw (header-less PCM, e.g. FFmpeg)
   # example 1: external stream (already running; the base pulls read_target, else target)
   # mic-external:
   #   target: rtmp://uber-server.local:1935/asr/mic1
@@ -60,13 +58,15 @@ Base:
 
 # Bases: one entry per microphone, that is per base process you start. An
 # entry says which one it is (id), which kind of microphone it is (base_type,
-# a block of Base) and where its audio comes from: the source, and the one
-# field that source needs (the Config tab shows only that one):
+# a block of Base) and where its audio comes from: the source, and the fields
+# that source needs (the Config tab shows only those):
 #   pyaudio   source_index: the input device index; channel_select: which channel of a multi-channel device to keep (optional; 'channel' is its old name)
 #   udp/tcp   port: the port this base listens on; a badge or an FFmpeg stream of Streams pushes to it
+#             host: the address it listens on (default 0.0.0.0, every interface)
+#             packet_format: auto (default: the first packet tells), timestamped (a badge: 18-byte header + PCM) or raw (header-less PCM: an FFmpeg stream)
 #   stream    source_index: the name of the Streams entry it pulls
 #   lsl       source_index: the LSL stream name
-#   file      source_index: the file to replay, by full path (Browse… on the Config tab) or by name inside Base.file_dir
+#   file      source_index: the file to replay, by its full path (Browse… on the Config tab); the start time comes from its name (<prefix>_<timestamp>.<extension>)
 # The card's Base dropdowns offer these entries, and -b names one; you no
 # longer type the id or pick the base type at startup.
 Bases:
@@ -78,6 +78,8 @@ Bases:
     source_index: 0             # see above; not used by udp/tcp
     channel_select: 0           # pyaudio only, optional
     port: 5001                  # udp/tcp only
+    host: 0.0.0.0               # udp/tcp only: the address this base listens on
+    packet_format: auto         # udp/tcp only: auto, timestamped or raw
  
 # synchronizer settings
 Synchronizer:

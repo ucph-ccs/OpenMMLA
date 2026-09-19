@@ -35,7 +35,7 @@ from openmmla.tui.schema.loader import (
     FieldDef as LoaderFieldDef,
     discover_pipelines, load_existing_config, get_nested_value,
     save_config, PipelineDef, _find_project_root, fields_from_config_section,
-    load_streams, streams_from_config,
+    load_streams, streams_from_config, move_source_settings,
 )
 from openmmla.tui.schema.definitions import (
     CONSOLE_ONLY_SECTIONS, PRIVATE_SECTIONS, SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
@@ -3149,6 +3149,9 @@ class ServicePanel(Widget):
         self._log_context: str = ""
         self._log_context_shown: str = ""
         self._fallback_noted: dict[str, str] = {}
+        # (card, host) whose config keeps in Base what the Bases entries now hold,
+        # said once each (move_source_settings)
+        self._source_moves_noted: set[tuple[str, str]] = set()
         # host -> the differences between its own System Settings and Local's
         # that a Start has already pointed out
         self._own_settings_noted: dict[str, list[str]] = {}
@@ -5261,48 +5264,22 @@ class ServicePanel(Widget):
         self._current_form = form
         self._show_sync_bar(shared_section=section_name)
 
-    # media file extensions used to populate the per-base file dropdown
-    _SOURCE_FILE_EXTS = (
-        ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm",
-        ".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac",
-    )
-
-    def _list_source_files(self, existing: dict, target: str) -> list[str]:
-        """list media filenames in the configured Base.file_dir(s) so the Config
-        form can offer them as a dropdown when a base's source is 'file'. Only
-        resolves local, absolute directories; remote/unknown dirs fall back to a
-        free-text field in the form."""
-        if target != "local" or not isinstance(existing, dict):
-            return []
-        base = existing.get("Base")
-        dirs: list[str] = []
-        if isinstance(base, dict):
-            fd = base.get("file_dir")
-            if isinstance(fd, str):
-                dirs.append(fd)
-            # ASR keeps Base as a map of device -> settings (with file_dir each)
-            for v in base.values():
-                if isinstance(v, dict) and isinstance(v.get("file_dir"), str):
-                    dirs.append(v["file_dir"])
-        files: list[str] = []
-        seen: set[str] = set()
-        for d in dirs:
-            if not d or not os.path.isabs(d) or not os.path.isdir(d):
-                continue
-            try:
-                names = sorted(os.listdir(d))
-            except OSError:
-                continue
-            for fn in names:
-                low = fn.lower()
-                if fn not in seen and any(low.endswith(e) for e in self._SOURCE_FILE_EXTS):
-                    seen.add(fn)
-                    files.append(fn)
-        return files
-
     def _show_pipeline_form(self, container: Vertical, pipeline: PipelineDef) -> None:
         existing, source_message = self._load_config_for_target(pipeline.config_path)
         apply_shared_values(pipeline.fields, self._shared_values)
+        # what only one source uses, and an older config keeps in Base (a udp/tcp
+        # base type's host and packet_format, a file_dir), is shown in the Bases
+        # entries that use it; the next Save writes it there (move_source_settings)
+        if isinstance(existing, dict):
+            existing = copy.deepcopy(existing)
+            moved = move_source_settings(existing)
+            noted = (pipeline.name, self._get_panel_target())
+            if moved and noted not in self._source_moves_noted:
+                self._source_moves_noted.add(noted)
+                self._log(
+                    f"[yellow]{rich_escape(pipeline.name)}: Base holds settings only one source uses; the next "
+                    f"Save moves them into the Bases entries that use them, and drops the others:[/yellow]\n"
+                    + "\n".join(f"  {rich_escape(line)}" for line in moved))
 
         # populate Bases entry dropdowns from the config (camera <- Cameras,
         # base_type <- Base) so users pick existing values instead of typing
@@ -5318,7 +5295,6 @@ class ServicePanel(Widget):
                 "IPS Base": ["opencv", "stream", "lsl", "file"],
                 "VFA Base": ["opencv", "stream", "lsl", "file"],
             }.get(pipeline.name, [])
-            source_files = self._list_source_files(existing, self._get_panel_target())
             for f in pipeline.fields:
                 if f.field_type == "list_of_dicts" and f.path == "Bases":
                     choices = {}
@@ -5328,10 +5304,12 @@ class ServicePanel(Widget):
                         choices["base_type"] = base_types
                     if "source" in (f.entry_schema or {}) and source_types:
                         choices["source"] = source_types
-                    # files for the per-base file dropdown (consumed by
-                    # _source_index_widget only when that base's source is 'file')
+                    if "packet_format" in (f.entry_schema or {}):
+                        choices["packet_format"] = ["auto", "timestamped", "raw"]
                     if "source_index" in (f.entry_schema or {}):
-                        choices["source_index"] = source_files
+                        # a file entry's folder is listed, and Browse… opens, where
+                        # its files are this machine's
+                        choices["source_index:file_here"] = self._get_panel_target() == "local"
                         # the streams a 'stream' base can pull, in the order
                         # its source_index counts them
                         choices["source_index:stream"] = get_stream_sources(existing)
@@ -6452,7 +6430,7 @@ class ServicePanel(Widget):
         written (on another host: what the copy carries), None when nothing was."""
         target = self._get_panel_target()
         if target == "local":
-            save_config(pipeline.config_path, fields, values)
+            save_config(pipeline.config_path, fields, values, transform=move_source_settings)
             saved = load_existing_config(pipeline.config_path)
             self._target_config_cache[self._config_cache_key(pipeline.config_path, "local")] = saved
             self._show_status(f"Saved locally to {pipeline.config_path}{note}")
@@ -6471,7 +6449,7 @@ class ServicePanel(Widget):
         )
         tmp_path = tmp.name
         tmp.close()
-        save_config(tmp_path, fields, values)
+        save_config(tmp_path, fields, values, transform=move_source_settings)
         cache_key = self._config_cache_key(pipeline.config_path, target)
         cache_config = load_existing_config(tmp_path)
 

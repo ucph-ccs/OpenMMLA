@@ -1189,8 +1189,8 @@ class SessionsPanel(Widget):
             self._log(
                 f"[bold green]Streams of {shown} exported: {from_server} file(s) from the Stream Server, "
                 f"{from_capture} from the capture hosts, under {folder}[/bold green]\n"
-                f"  [dim]File names carry the time they start at, so a base replays them with source: file and "
-                f"Base.file_dir on one of these folders.[/dim]"
+                f"  [dim]File names carry the time they start at, so a base replays one with source: file and "
+                f"its full path as source_index.[/dim]"
             )
         else:
             self._log(f"[yellow]Nothing of the streams of {shown} was exported (see above).[/yellow]")
