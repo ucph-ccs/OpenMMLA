@@ -82,7 +82,7 @@ from openmmla.utils.artifact_paths import (
     STREAMS_DIR,
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
-from openmmla.utils.constants import get_stream_sources, normalize_source
+from openmmla.utils.constants import get_stream_sources, normalize_source, stream_kind
 from openmmla.utils.config import get_bases, get_base_by_id
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -113,7 +113,7 @@ from openmmla.utils.experiments import (
     load_experiments,
 )
 from openmmla.tui.widgets.command_session import CommandSession
-from openmmla.tui.widgets.config_form import ConfigForm, DictListField
+from openmmla.tui.widgets.config_form import ConfigForm, DictListField, FieldRow
 from openmmla.tui.widgets.recordings_panel import StreamServerRecordingsPanel
 from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef, host_params
@@ -122,6 +122,7 @@ from openmmla.tui.widgets.stream_panel import StreamPanel, _with_stream_path
 from openmmla.tui.widgets.session_control import SessionControlPanel
 from openmmla.tui.widgets.speaker_profiles import SpeakerProfilesScreen
 from openmmla.tui import speakers as asr_speakers
+from openmmla.tui import devices as capture_devices
 from openmmla.bases.asr.speaker_profiles import join_speakers
 from openmmla.tui.widgets.task_form import TaskForm
 from openmmla.tui.screens.environment import ENV_GROUPS, env_statuses_local, env_statuses_remote
@@ -2011,14 +2012,16 @@ class StreamServerConfigPanel(Widget):
 
 
 def _make_stream_fields(stream_name: str, stream_server: dict | None = None,
-                        default_kind: str = "video") -> list[LoaderFieldDef]:
+                        default_kind: str = "video", device_choices: list | None = None) -> list[LoaderFieldDef]:
     """create FieldDef list for a single stream entry. With the Stream Server
     section of System Settings, the help names its real address; default_kind
-    is what the card takes a stream with an empty kind for."""
+    is what the card takes a stream with an empty kind for; device_choices are
+    the devices its capture host was found to have (a dropdown), when known."""
     section = f"Streams.{stream_name}"
     publish, _pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
     fields = []
     for key, ftype, default, desc in _STREAM_FIELDS_TEMPLATE:
+        choices = list(device_choices or []) if key == "device" else list(_STREAM_FIELD_CHOICES.get(key, []))
         fields.append(LoaderFieldDef(
             path=f"Streams.{stream_name}.{key}",
             field_type=ftype,
@@ -2026,7 +2029,7 @@ def _make_stream_fields(stream_name: str, stream_server: dict | None = None,
             description=desc.replace("{publish}", publish).replace("{kind}", default_kind),
             required=(key == "target"),
             section=section,
-            choices=list(_STREAM_FIELD_CHOICES.get(key, [])),
+            choices=choices,
         ))
     return fields
 
@@ -5338,6 +5341,10 @@ class ServicePanel(Widget):
                         # the streams a 'stream' base can pull, in the order
                         # its source_index counts them
                         choices["source_index:stream"] = get_stream_sources(existing)
+                        # the devices of the card's host, as it said last (a
+                        # text box until it has: _probe_form_devices asks)
+                        for kind in self._device_kinds(pipeline.name):
+                            choices[f"source_index:{kind}"] = self._device_options(self._get_panel_target(), kind)
                     f.entry_field_choices = choices
 
         _src_target = self._get_panel_target()
@@ -5435,12 +5442,18 @@ class ServicePanel(Widget):
         if pipeline.name in _STREAM_PIPELINES:
             streams_data = existing.get("Streams", {})
             if isinstance(streams_data, dict):
+                capture_hosts = capture_devices.stream_hosts(existing)
                 for stream_name, stream_props in streams_data.items():
                     if not isinstance(stream_props, dict):
                         continue
                     section_name = f"Streams.{stream_name}"
+                    # the devices of the stream's capture host, as it said last
+                    host = capture_hosts.get(str(stream_name), "")
+                    device_choices = self._device_options(
+                        host, stream_kind(stream_props, _card_stream_kind(pipeline.name))) if host else []
                     s_fields = _make_stream_fields(
-                        stream_name, self._stream_server_address(), _card_stream_kind(pipeline.name))
+                        stream_name, self._stream_server_address(), _card_stream_kind(pipeline.name),
+                        device_choices=device_choices)
                     dynamic_sections[section_name] = s_fields
                     for f in s_fields:
                         val = get_nested_value(existing, f.path)
@@ -5506,6 +5519,109 @@ class ServicePanel(Widget):
         self._show_sync_bar(pipeline)
         if any(f.path == "Bases" and (f.entry_field_choices or {}).get("source_index:stream") for f in form_fields):
             self.run_worker(self._mark_live_streams(form), group="stream-live-marks", exclusive=True)
+        if isinstance(existing, dict):
+            self.run_worker(self._probe_form_devices(form, pipeline, existing), group="config-devices",
+                            exclusive=True)
+
+    # ── the capture devices of the hosts a form names ────────────
+
+    def _device_answers(self) -> dict[str, capture_devices.Devices]:
+        """what each host said last about its devices (capture_devices), kept
+        until Refresh on a base card."""
+        return self.__dict__.setdefault("_capture_device_answers", {})
+
+    def _device_options(self, host: str, kind: str) -> list[tuple[str, str]]:
+        answer = self._device_answers().get(host)
+        return answer.options(kind) if answer is not None else []
+
+    @staticmethod
+    def _device_kinds(pipeline_name: str) -> set[str]:
+        """the device a Bases entry's source_index names on this card: pyaudio's
+        input devices on ASR Base, opencv's cameras on IPS and VFA Base."""
+        if pipeline_name == "ASR Base":
+            return {"pyaudio"}
+        if pipeline_name in ("IPS Base", "VFA Base"):
+            return {"opencv"}
+        return set()
+
+    def _form_device_hosts(self, pipeline: PipelineDef, existing: dict, target: str) -> dict[str, set[str]]:
+        """which hosts a form's dropdowns ask, and for what: the card's host for
+        the Bases entries, each stream's capture host for its device, by the
+        stream's kind."""
+        wanted: dict[str, set[str]] = {}
+        kinds = self._device_kinds(pipeline.name)
+        if kinds and any(f.path == "Bases" for f in pipeline.fields):
+            wanted.setdefault(target, set()).update(kinds)
+        if pipeline.name in _STREAM_PIPELINES:
+            streams = existing.get("Streams") or {}
+            for name, host in capture_devices.stream_hosts(existing).items():
+                entry = streams.get(name) if isinstance(streams, dict) else None
+                wanted.setdefault(host, set()).add(stream_kind(entry or {}, _card_stream_kind(pipeline.name)))
+        return wanted
+
+    async def _probe_form_devices(self, form, pipeline: PipelineDef, existing: dict, force: bool = False) -> None:
+        """ask the hosts a form names for the devices it has no answer from yet
+        (every one of them with `force`), off the UI thread, and give the
+        form's fields the dropdowns as each answers."""
+        target = self._get_panel_target()
+        answers = self._device_answers()
+        for host, kinds in self._form_device_hosts(pipeline, existing, target).items():
+            known = answers.get(host)
+            if known is not None and not force:
+                kinds = kinds - set(known.found) - set(known.problems)
+            if not kinds:
+                continue
+            answer = await asyncio.to_thread(capture_devices.list_devices, host, kinds, self._root)
+            if known is not None and not force:
+                known.found.update(answer.found)
+                known.problems.update(answer.problems)
+                known.platform = known.platform or answer.platform
+            else:
+                answers[host] = answer
+            # a host that answers at once (this machine) beats the form's mounting:
+            # its fields take the answer once they are there
+            for _ in range(60):
+                if self._current_form is not form:
+                    break
+                if form.is_attached and (form.query(FieldRow) or form.query(DictListField)):
+                    break
+                await asyncio.sleep(0.05)
+            if not form.is_attached or self._current_form is not form:
+                return  # another card, or another tab of it, took the form down meanwhile
+            self._apply_device_choices(form, pipeline, existing, host)
+
+    def _apply_device_choices(self, form, pipeline: PipelineDef, existing: dict, host: str) -> None:
+        """put what `host` said into the form: the Bases dropdowns when it is
+        the card's host, the device of every stream it captures."""
+        answer = self._device_answers().get(host)
+        if answer is None:
+            return
+        where = "this machine" if host == "local" else host
+        if host == self._get_panel_target():
+            for kind in self._device_kinds(pipeline.name):
+                for field in form.query(DictListField):
+                    if field.field_def.path == "Bases":
+                        field.set_source_choices(kind, answer.options(kind), answer.note(kind, where))
+        if pipeline.name in _STREAM_PIPELINES:
+            streams = existing.get("Streams") or {}
+            for name, stream_host in capture_devices.stream_hosts(existing).items():
+                if stream_host != host:
+                    continue
+                entry = streams.get(name) if isinstance(streams, dict) else None
+                kind = stream_kind(entry or {}, _card_stream_kind(pipeline.name))
+                form.set_field_choices(f"Streams.{name}.device", answer.options(kind), answer.note(kind, where))
+
+    def _reprobe_form_devices(self) -> None:
+        """Refresh on a base card: forget what the hosts said about their
+        devices, and ask again for the form on screen, if one is."""
+        self._device_answers().clear()
+        form, pipeline = self._current_form, self._current_pipeline
+        if form is None or pipeline is None or not form.is_attached:
+            return
+        existing, _ = self._load_config_for_target(pipeline.config_path, show_status=False)
+        if isinstance(existing, dict):
+            self.run_worker(self._probe_form_devices(form, pipeline, existing, force=True), group="config-devices",
+                            exclusive=True)
 
     async def _mark_live_streams(self, form) -> None:
         """which streams of a Bases form the Stream Server has live now, asked
@@ -7671,6 +7787,7 @@ class ServicePanel(Widget):
                 group="launcher-base-choices",
                 exclusive=True,
             )
+            self._reprobe_form_devices()
         if svc.name == _ASR_BASE_CARD:
             self._list_speakers(target)
 

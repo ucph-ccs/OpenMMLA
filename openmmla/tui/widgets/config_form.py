@@ -129,6 +129,8 @@ class FieldRow(Widget):
         self._initial = initial_value if initial_value is not None else field_def.default
         self._source = source
         self._read_only = read_only
+        # the description as composed: a note (set_choices) goes under it, and is replaced by the next
+        self._base_description = field_def.description
 
     def compose(self) -> ComposeResult:
         short_name = self.field_def.path.split(".")[-1]
@@ -146,32 +148,7 @@ class FieldRow(Widget):
             )
         ro = self._read_only
         if self.field_def.choices:
-            options = [(c, c) for c in self.field_def.choices]
-            initial = str(self._initial) if self._initial else ""
-            if initial in ("Select.NULL", "Select.BLANK", "None", "null"):
-                initial = ""  # what an empty Select once left behind in a config
-            if initial and initial not in self.field_def.choices:
-                # a stored value the list does not offer (an SSH profile that was
-                # renamed or deleted): shown and kept. It used to open blank, and
-                # the next Save wrote the blank over it without a word
-                options.append((f"{initial}  (not in the list any more)", initial))
-            if initial:
-                yield Select(
-                    options,
-                    value=initial,
-                    prompt=_EMPTY_CHOICE,
-                    allow_blank=True,
-                    id=widget_id,
-                    disabled=ro,
-                )
-            else:
-                yield Select(
-                    options,
-                    prompt=_EMPTY_CHOICE,
-                    allow_blank=True,
-                    id=widget_id,
-                    disabled=ro,
-                )
+            yield self._select(self.field_def.choices, self._initial, widget_id)
         elif self.field_def.field_type == "bool":
             val = self._initial if isinstance(self._initial, bool) else False
             yield Switch(value=val, id=widget_id, disabled=ro)
@@ -201,6 +178,50 @@ class FieldRow(Widget):
         if isinstance(value, list):
             return ", ".join(str(v) for v in value)
         return str(value)
+
+    def _select(self, choices: list, initial, widget_id: str) -> Select:
+        """the dropdown of a field with choices: plain values, or (label, value)
+        pairs. A stored value the list does not offer (an SSH profile that was
+        renamed or deleted, a device not detected now) is shown and kept: it
+        used to open blank, and the next Save wrote the blank over it."""
+        options = [(str(c[0]), str(c[1])) if isinstance(c, (tuple, list)) else (str(c), str(c)) for c in choices]
+        initial = str(initial) if initial not in (None, "") else ""
+        if initial in ("Select.NULL", "Select.BLANK", "None", "null"):
+            initial = ""  # what an empty Select once left behind in a config
+        if initial and not any(value == initial for _, value in options):
+            options.append((f"{initial}  (not in the list now)", initial))
+        kwargs = {"value": initial} if initial else {}
+        return Select(options, prompt=_EMPTY_CHOICE, allow_blank=True, id=widget_id, disabled=self._read_only,
+                      **kwargs)
+
+    def set_choices(self, choices: list, note: str = "") -> None:
+        """give a text field a dropdown (or a dropdown fresh options) once its
+        choices are known, keeping what it shows; `note` goes under the label,
+        after the description."""
+        self.field_def.choices = list(choices)
+        widget_id = _safe_id(f"field__{self.field_def.path}")
+        try:
+            old = self.query_one(f"#{widget_id}")
+        except Exception:
+            return
+        current = self.current_value
+        if not choices and isinstance(old, Input):
+            new = old  # nothing to offer: the text field stays
+        elif not choices:
+            new = Input(value=self._to_display(current), id=widget_id, classes="field-input", disabled=self._read_only)
+        else:
+            new = self._select(choices, current, widget_id)
+        if new is not old:
+            self.run_worker(self._replace_value_widget(old, new), exclusive=False)
+        if note:
+            base = self._base_description
+            self.set_description(f"{base}\n{note}" if base else note)
+
+    async def _replace_value_widget(self, old: Widget, new: Widget) -> None:
+        # the old one goes first, so the id is free for the new one; the value
+        # widget is the row's last child, so mounting at the end keeps the order
+        await old.remove()
+        await self.mount(new)
 
     def set_description(self, text: str) -> None:
         """the line under the label, for a description that follows the value."""
@@ -312,9 +333,12 @@ class DictListField(Widget):
         "opencv": "→ which local camera (0-based index)",
         "stream": "→ which stream of this config's Streams it pulls, by name (a new one is listed once the Streams are saved)",
         "file": "→ the file to replay: its full path (Browse…), or a name inside Base.file_dir",
-        "pyaudio": "→ the input device index (PyAudio)",
+        "pyaudio": "→ the input device, by PyAudio's index of it",
         "lsl": "→ LSL stream name (resolved by name)",
     }
+    # the sources whose source_index is a device of the card's host, offered
+    # in a dropdown once the host has said what it has (set_source_choices)
+    _DEVICE_SOURCES = ("pyaudio", "opencv")
     # the fields of a Bases entry that only some sources use, and which: the
     # row of one the entry's source does not use is hidden, and left out of
     # the saved entry. A field not listed here is for every source. This is
@@ -364,6 +388,8 @@ class DictListField(Widget):
         self._next_idx = 0
         # directory last chosen via the file browser (seeds the next browse)
         self._last_file_dir: str | None = None
+        # what the host said about its devices, under the pyaudio and opencv rows
+        self._device_notes: dict[str, str] = {}
         # what the Stream Server says of the pullable streams: name -> "live" |
         # "idle", and a line for below the stream entries (see set_stream_states)
         self._stream_states: dict[str, str] = {}
@@ -437,11 +463,38 @@ class DictListField(Widget):
             )
             w.placeholder = "LSL stream name"
             return w
+        if s in self._DEVICE_SOURCES:
+            options = [(str(label), str(value)) for label, value in (self._choices.get(f"source_index:{s}") or [])]
+            cur = str(val).strip() if val not in (None, "") else ""
+            if options:
+                if cur and not any(value == cur for _, value in options):
+                    options.append((f"{cur}  (not detected now)", cur))  # kept rather than dropped
+                kwargs = {"value": cur} if cur else {}
+                return Select(options, prompt="Select device...", id=widget_id, classes="dict-entry-input", **kwargs)
         w = Input(
             value=str(val) if val is not None else "",
             id=widget_id, classes="dict-entry-input",
         )
         return w
+
+    def set_source_choices(self, source: str, options: list[tuple[str, str]], note: str = "") -> None:
+        """the devices of the card's host for the entries whose source is
+        `source` (pyaudio, opencv): their source_index becomes a dropdown of
+        them, what it showed kept, with `note` under it."""
+        source = normalize_source(source)
+        self._choices[f"source_index:{source}"] = [(str(label), str(value)) for label, value in options]
+        self._device_notes[source] = note
+        for container in self.query(".dict-entry"):
+            picked = self._find_in_container(container, "__source")
+            value = getattr(picked, "value", "") if picked is not None else ""
+            if value is Select.BLANK or normalize_source(value) != source:
+                continue
+            widget = self._find_in_container(container, "__source_index")
+            current = ""
+            if widget is not None:
+                raw = getattr(widget, "value", "")
+                current = "" if raw in (None, Select.BLANK) else str(raw)
+            self.run_worker(self._rebuild_source_index(container, source, current), exclusive=False)
 
     @property
     def stream_choices(self) -> list[tuple[str, str]]:
@@ -478,6 +531,9 @@ class DictListField(Widget):
         text = self._source_index_hint(source)
         if normalize_source(source) == "stream" and self._stream_note:
             text = f"{text}\n{self._stream_note}"
+        note = self._device_notes.get(normalize_source(source))
+        if note:
+            text = f"{text}\n{note}"
         return text
 
     def set_stream_states(self, states: dict[str, str], note: str = "") -> None:
@@ -1274,6 +1330,15 @@ class ConfigForm(Widget):
             scroll.mount(collapsible)
         except Exception:
             self.mount(collapsible)
+
+    def set_field_choices(self, path: str, choices: list, note: str = "") -> bool:
+        """give the field at `path` a dropdown of `choices`, keeping its value
+        (FieldRow.set_choices); False when the form has no such field."""
+        for row in self.query(FieldRow):
+            if row.field_def.path == path:
+                row.set_choices(choices, note)
+                return True
+        return False
 
     def set_field_value(self, path: str, value) -> bool:
         """show another value in a text field: what Save made of what was typed."""

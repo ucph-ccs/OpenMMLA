@@ -97,7 +97,7 @@ Because the frame analyzer runs in a container, a backend on the same machine is
 
 | Source | Description | Setup |
 |---|---|---|
-| `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index; the base lists the devices it finds |
+| `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index: the Config tab lists the cameras found on the card's host (`/dev/video<N>` is index N on Linux, a Mac's in AVFoundation's order) to pick from, and the base lists the devices it finds when it starts |
 | `stream` | video pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` is its position among those entries |
 | `lsl` | Lab Streaming Layer | `source_index` is the stream name; needs `pylsl` |
 | `file` | replay of a recorded video | `source_index` is the file to replay: its full path (**Browse…** on the Config tab) or a name inside `Base.file_dir`, the optional folder whose files the Config tab lists. Files replayed together sit in one folder: the replay starts at the latest start among them, read from the names |
