@@ -1,6 +1,7 @@
-"""the capture devices of a host, for the dropdowns of the Config tab: what a
-Streams entry's `device` can be on its capture host, and what a Bases entry's
-`source_index` can be for a pyaudio or an opencv source on the card's host.
+"""the capture devices of a host, for the dropdowns that pick them: what a
+Streams entry's `device` can be on its capture host (the Device column of the
+Streams tab), and what a Bases entry's `source_index` can be for a pyaudio or
+an opencv source on the card's host (the Config tab).
 
 Each host is asked with the tools it has, over SSH for another machine (the
 console knows what each host runs, see ssh.remote_platform):
@@ -321,19 +322,6 @@ def _ask_pyaudio(answer: Devices, target: str, kinds: set[str], root: str, where
     else:
         answer.found["pyaudio"] = devices
     return answer
-
-
-def stream_hosts(config: dict) -> dict[str, str]:
-    """the capture host of each Streams entry the console runs ("local" or an
-    SSH profile): what its device dropdown has to ask. External streams have none."""
-    hosts: dict[str, str] = {}
-    for name, entry in ((config or {}).get("Streams") or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        host = str(entry.get("ssh_profile") or "").strip()
-        if host:
-            hosts[str(name)] = host
-    return hosts
 
 
 def device_path(config_dir: str) -> str:

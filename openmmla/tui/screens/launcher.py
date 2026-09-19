@@ -81,7 +81,7 @@ from openmmla.utils.artifact_paths import (
     STREAMS_DIR,
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
-from openmmla.utils.constants import get_stream_sources, normalize_source, stream_kind
+from openmmla.utils.constants import get_stream_sources, normalize_source
 from openmmla.utils.config import get_bases, get_base_by_id
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -307,15 +307,14 @@ def _server_section_note(gateway: str) -> str:
 
 # {publish} is the stream server's URL of <app>/<name>, see _make_stream_fields.
 # Kept to a line or two: they stand above every stream of the form. The capture
-# host (ssh_profile) is not among them: it is picked in the Streams tab's table
+# host (ssh_profile) and its device are not among them: both are picked in the
+# Streams tab's table (_STREAMS_TAB_KEYS)
 _STREAM_FIELDS_TEMPLATE = [
     ("target", "str", "",
      "where the device publishes. Just the path (ips/cam-1) becomes {publish} on Save; "
      "or a full rtmp/rtsp/srt URL, or udp://<base>:<port> for raw audio to an ASR base"),
     ("read_target", "str", "",
      "where the bases pull it: usually the same path over RTSP, which connects faster than RTMP. Empty = pull the target"),
-    ("device", "str", "",
-     "device path, e.g. /dev/video0 (video) or hw:1,0 (audio), on the machine picked under SSH Profile on the Streams tab"),
     ("kind", "str", "",
      "audio or video. Empty = by the device (hw:1,0 or a Mac's :0 is audio) or a udp/tcp target (audio), "
      "else {kind}, as on this card"),
@@ -328,6 +327,8 @@ _STREAM_FIELDS_TEMPLATE = [
 
 # stream fields shown as a dropdown; empty stays a choice (the blank)
 _STREAM_FIELD_CHOICES = {"kind": ["audio", "video"]}
+# what the Streams tab picks for a stream, and a Config tab Save keeps
+_STREAMS_TAB_KEYS = ("ssh_profile", "device")
 
 
 def _card_stream_kind(card_name: str) -> str:
@@ -2006,16 +2007,15 @@ class StreamServerConfigPanel(Widget):
 
 
 def _make_stream_fields(stream_name: str, stream_server: dict | None = None,
-                        default_kind: str = "video", device_choices: list | None = None) -> list[LoaderFieldDef]:
+                        default_kind: str = "video") -> list[LoaderFieldDef]:
     """create FieldDef list for a single stream entry. With the Stream Server
     section of System Settings, the help names its real address; default_kind
-    is what the card takes a stream with an empty kind for; device_choices are
-    the devices its capture host was found to have (a dropdown), when known."""
+    is what the card takes a stream with an empty kind for."""
     section = f"Streams.{stream_name}"
     publish, _pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
     fields = []
     for key, ftype, default, desc in _STREAM_FIELDS_TEMPLATE:
-        choices = list(device_choices or []) if key == "device" else list(_STREAM_FIELD_CHOICES.get(key, []))
+        choices = list(_STREAM_FIELD_CHOICES.get(key, []))
         fields.append(LoaderFieldDef(
             path=f"Streams.{stream_name}.{key}",
             field_type=ftype,
@@ -5414,18 +5414,12 @@ class ServicePanel(Widget):
         if pipeline.name in _STREAM_PIPELINES:
             streams_data = existing.get("Streams", {})
             if isinstance(streams_data, dict):
-                capture_hosts = capture_devices.stream_hosts(existing)
                 for stream_name, stream_props in streams_data.items():
                     if not isinstance(stream_props, dict):
                         continue
                     section_name = f"Streams.{stream_name}"
-                    # the devices of the stream's capture host, as it said last
-                    host = capture_hosts.get(str(stream_name), "")
-                    device_choices = self._device_options(
-                        host, stream_kind(stream_props, _card_stream_kind(pipeline.name))) if host else []
                     s_fields = _make_stream_fields(
-                        stream_name, self._stream_server_address(), _card_stream_kind(pipeline.name),
-                        device_choices=device_choices)
+                        stream_name, self._stream_server_address(), _card_stream_kind(pipeline.name))
                     dynamic_sections[section_name] = s_fields
                     for f in s_fields:
                         val = get_nested_value(existing, f.path)
@@ -5518,18 +5512,12 @@ class ServicePanel(Widget):
 
     def _form_device_hosts(self, pipeline: PipelineDef, existing: dict, target: str) -> dict[str, set[str]]:
         """which hosts a form's dropdowns ask, and for what: the card's host for
-        the Bases entries, each stream's capture host for its device, by the
-        stream's kind."""
-        wanted: dict[str, set[str]] = {}
+        the Bases entries. A stream's device is picked on the Streams tab, which
+        asks its capture host itself."""
         kinds = self._device_kinds(pipeline.name)
         if kinds and any(f.path == "Bases" for f in pipeline.fields):
-            wanted.setdefault(target, set()).update(kinds)
-        if pipeline.name in _STREAM_PIPELINES:
-            streams = existing.get("Streams") or {}
-            for name, host in capture_devices.stream_hosts(existing).items():
-                entry = streams.get(name) if isinstance(streams, dict) else None
-                wanted.setdefault(host, set()).add(stream_kind(entry or {}, _card_stream_kind(pipeline.name)))
-        return wanted
+            return {target: set(kinds)}
+        return {}
 
     async def _probe_form_devices(self, form, pipeline: PipelineDef, existing: dict, force: bool = False) -> None:
         """ask the hosts a form names for the devices it has no answer from yet
@@ -5564,7 +5552,7 @@ class ServicePanel(Widget):
 
     def _apply_device_choices(self, form, pipeline: PipelineDef, existing: dict, host: str) -> None:
         """put what `host` said into the form: the Bases dropdowns when it is
-        the card's host, the device of every stream it captures."""
+        the card's host."""
         answer = self._device_answers().get(host)
         if answer is None:
             return
@@ -5574,14 +5562,6 @@ class ServicePanel(Widget):
                 for field in form.query(DictListField):
                     if field.field_def.path == "Bases":
                         field.set_source_choices(kind, answer.options(kind), answer.note(kind, where))
-        if pipeline.name in _STREAM_PIPELINES:
-            streams = existing.get("Streams") or {}
-            for name, stream_host in capture_devices.stream_hosts(existing).items():
-                if stream_host != host:
-                    continue
-                entry = streams.get(name) if isinstance(streams, dict) else None
-                kind = stream_kind(entry or {}, _card_stream_kind(pipeline.name))
-                form.set_field_choices(f"Streams.{name}.device", answer.options(kind), answer.note(kind, where))
 
     def _reprobe_form_devices(self) -> None:
         """Refresh on a base card: forget what the hosts said about their
@@ -5771,9 +5751,17 @@ class ServicePanel(Widget):
     def on_stream_panel_ssh_profile_change_requested(self, event: StreamPanel.SshProfileChangeRequested) -> None:
         """SSH Profile in the Streams tab: the machine that runs the stream's
         ffmpeg, written into the config of the host the card is on. The Config
-        tab does not show it, so its form stays as it is, unsaved edits and all."""
+        tab does not show it, so its form stays as it is, unsaved edits and all.
+        The device picked on the machine before is none of this one's: it goes."""
         event.stop()
-        config = self._write_stream_entry(event.stream_name, "ssh_profile", event.ssh_profile)
+        changes: dict[str, object] = {"ssh_profile": event.ssh_profile}
+        before = self._stream_entry(event.stream_name)
+        dropped = str(before.get("device") or "").strip()
+        if dropped and str(before.get("ssh_profile") or "") != event.ssh_profile:
+            changes["device"] = ""
+        else:
+            dropped = ""
+        config = self._write_stream_entries({event.stream_name: changes})
         if config is None:
             return
         profile = event.ssh_profile
@@ -5783,6 +5771,8 @@ class ServicePanel(Widget):
         self._log(
             f"[green]{event.stream_name}: Start runs its ffmpeg on "
             f"{'this machine' if profile == 'local' else profile} now.[/green]"
+            + (f" [yellow]Its device ({rich_escape(dropped)}) was the other machine's: pick one in the Device "
+               f"column, or Start takes the first.[/yellow]" if dropped else "")
         )
         target = str(config["Streams"][event.stream_name].get("target") or "")
         if profile != "local" and "://" in target and is_loopback_host(urlsplit(target).hostname):
@@ -5792,6 +5782,28 @@ class ServicePanel(Widget):
                 f"itself. Give the Stream Server under System Settings a name {profile} can reach "
                 f"(e.g. {socket.gethostname()}).[/yellow]"
             )
+
+    def on_stream_panel_device_change_requested(self, event: StreamPanel.DeviceChangeRequested) -> None:
+        """Device in the Streams tab: the camera or microphone the stream's
+        ffmpeg opens on its machine, written into the config of the host the
+        card is on; the Config tab does not show it."""
+        event.stop()
+        if self._write_stream_entry(event.stream_name, "device", event.device) is None:
+            return
+        self._log(f"[green]{event.stream_name}: " + (
+            f"Start opens {rich_escape(event.device)}.[/green]" if event.device else
+            "no device picked: Start takes the first of its machine.[/green]"))
+
+    def _stream_entry(self, name: str) -> dict:
+        """a stream's entry in the config of the host the card is on, as last read."""
+        pipeline = self._current_pipeline
+        if pipeline is None:
+            return {}
+        config, _ = self._load_config_for_target(pipeline.config_path, show_status=False,
+                                                 target=self._get_panel_target())
+        streams = config.get("Streams") if isinstance(config, dict) else None
+        entry = streams.get(name) if isinstance(streams, dict) else None
+        return entry if isinstance(entry, dict) else {}
 
     def _show_mllm_form(self, container: Vertical) -> None:
         values = _mllm_form_values(self._root)
@@ -6220,10 +6232,11 @@ class ServicePanel(Widget):
         }
 
     def _stored_capture_hosts(self, pipeline: PipelineDef, values: dict) -> list[LoaderFieldDef]:
-        """each stream's ssh_profile is picked on the Streams tab, so the form
-        does not hold it. Save still writes it: the URL completion reads it,
-        and the config of another host is written from the form alone. Adds
-        the stored values and returns the fields that carry them."""
+        """each stream's ssh_profile and device are picked on the Streams tab,
+        so the form does not hold them. Save still writes them: the URL
+        completion reads the ssh_profile, and the config of another host is
+        written from the form alone. Adds the stored values and returns the
+        fields that carry them."""
         if pipeline.name not in _STREAM_PIPELINES:
             return []
         target = self._get_panel_target()
@@ -6237,13 +6250,14 @@ class ServicePanel(Widget):
         fields = []
         for key in [key for key in values if key.startswith("Streams.") and key.endswith(".target")]:
             name = key[len("Streams."):-len(".target")]
-            path = f"Streams.{name}.ssh_profile"
             entry = streams.get(name)
-            if path in values or not isinstance(entry, dict) or entry.get("ssh_profile") is None:
-                continue
-            values[path] = entry["ssh_profile"]
-            fields.append(LoaderFieldDef(path=path, field_type="str", default="", description="",
-                                         required=False, section=f"Streams.{name}"))
+            for picked in _STREAMS_TAB_KEYS:
+                path = f"Streams.{name}.{picked}"
+                if path in values or not isinstance(entry, dict) or entry.get(picked) is None:
+                    continue
+                values[path] = entry[picked]
+                fields.append(LoaderFieldDef(path=path, field_type="str", default="", description="",
+                                             required=False, section=f"Streams.{name}"))
         return fields
 
     def _complete_stream_targets(self, pipeline: PipelineDef, values: dict) -> str:

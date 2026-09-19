@@ -77,7 +77,7 @@ A Mac captures through AVFoundation rather than V4L2 and ALSA: `device` is a cam
 | `target` | publish URL: `rtmp://<stream-server>:1935/<app>/<name>` (also `rtsp://` or `srt://`), or `udp://<base>:<port>` / `tcp://` for raw audio straight to an ASR base |
 | `read_target` | what the bases pull, e.g. `rtsp://<stream-server>:8554/<app>/<name>`; empty means `target` |
 | `ssh_profile` | TUI SSH profile of the capture host, or `local`; picked in the SSH Profile column of the Streams tab |
-| `device` | `/dev/video0` (v4l2 camera) or `hw:1,0` (ALSA microphone); on a Mac `0` (camera index or name) or `:0` (microphone) |
+| `device` | `/dev/video0` (v4l2 camera) or `hw:1,0` (ALSA microphone); on a Mac `0` (camera index or name) or `:0` (microphone); picked in the Device column of the Streams tab from what the capture host has, the first one when empty |
 | `kind` | `audio` or `video`, a dropdown on the Config tab. Left empty, a `udp://` or `tcp://` target or a sound device (`hw:1,0`, a Mac's `:0`) makes it audio, and anything else is what the card is for: audio on ASR, video on IPS and VFA. A Mac's first microphone pushed over RTMP names no device, so only the card can tell; **+ Add Stream** on the ASR card writes `kind: audio` |
 | `codec`, `resolution`, `fps`, `bitrate` | video encoding (`libx264`, `1920x1080`, `30`, `1M`) |
 | `format`, `rate`, `channels` | audio sample format (`s16le`), rate (`16000`) and channels (`1`) |

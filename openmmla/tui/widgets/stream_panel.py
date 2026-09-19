@@ -20,9 +20,10 @@ from textual.geometry import Region
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Static, Button, DataTable, Label, OptionList
+from textual.widgets import Static, Button, DataTable, Input, Label, OptionList
 
 from openmmla.tui import capture_recordings, recordings
+from openmmla.tui import devices as capture_devices
 from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, remote_platform, ssh_run_sync
 from openmmla.tui.system_services import stream_server_path
@@ -622,15 +623,23 @@ def _probe_stream_target(target: str, timeout: float = 10.0) -> tuple[bool, str]
 _probe_rtmp_target = _probe_stream_target
 
 
-# the SSH Profile column of the Streams table, whose cells are dropdowns
+# the columns of the Streams table whose cells are dropdowns: the machine that
+# captures the stream, and its device on that machine
 PROFILE_COLUMN = 1
+DEVICE_COLUMN = 2
 
 
 class StreamTable(DataTable):
     """the Streams table. A click on a row's SSH Profile cell, or Enter on a
-    row, asks for the list of machines that can capture the stream."""
+    row, asks for the list of machines that can capture the stream; a click
+    on its Device cell, for the devices of that machine."""
 
     class ProfileMenuRequested(Message):
+        def __init__(self, row: int) -> None:
+            super().__init__()
+            self.row = row
+
+    class DeviceMenuRequested(Message):
         def __init__(self, row: int) -> None:
             super().__init__()
             self.row = row
@@ -639,31 +648,40 @@ class StreamTable(DataTable):
         # runs before DataTable's own handler, which moves the cursor to the row
         meta = event.style.meta
         row = meta.get("row")
-        if (meta.get("column") == PROFILE_COLUMN and isinstance(row, int) and row >= 0
-                and not meta.get("out_of_bounds", False)):
+        if not isinstance(row, int) or row < 0 or meta.get("out_of_bounds", False):
+            return
+        if meta.get("column") == PROFILE_COLUMN:
             self.post_message(self.ProfileMenuRequested(row))
+        elif meta.get("column") == DEVICE_COLUMN:
+            self.post_message(self.DeviceMenuRequested(row))
 
     def action_select_cursor(self) -> None:
         super().action_select_cursor()
         if self.row_count:
             self.post_message(self.ProfileMenuRequested(self.cursor_row))
 
-    def profile_cell_region(self, row: int) -> Region:
-        """where a row's SSH Profile cell is on the screen, for the list to open under it."""
+    def cell_region(self, row: int, column: int) -> Region:
+        """where a cell is on the screen, for a list to open under it."""
         columns = self.ordered_columns
-        if len(columns) <= PROFILE_COLUMN:
+        if len(columns) <= column:
             return Region(self.content_region.x, self.content_region.y, 0, 1)
-        x = sum(column.get_render_width(self) for column in columns[:PROFILE_COLUMN])
+        x = sum(col.get_render_width(self) for col in columns[:column])
         y = (self.header_height if self.show_header else 0) + sum(r.height for r in self.ordered_rows[:row])
         area = self.content_region
         return Region(area.x + x - round(self.scroll_x), area.y + y - round(self.scroll_y),
-                      columns[PROFILE_COLUMN].get_render_width(self), 1)
+                      columns[column].get_render_width(self), 1)
+
+    def profile_cell_region(self, row: int) -> Region:
+        return self.cell_region(row, PROFILE_COLUMN)
+
+    def device_cell_region(self, row: int) -> Region:
+        return self.cell_region(row, DEVICE_COLUMN)
 
 
 class StreamProfileMenu(ModalScreen):
-    """the dropdown of an SSH Profile cell: opens under the cell, like the list
-    of a Select. Enter or a click picks a machine; Escape or a click beside the
-    list leaves the row as it was, and the screen returns None."""
+    """the dropdown of an SSH Profile or a Device cell: opens under the cell,
+    like the list of a Select. Enter or a click picks one; Escape or a click
+    beside the list leaves the row as it was, and the screen returns None."""
 
     DEFAULT_CSS = """
     StreamProfileMenu {
@@ -718,6 +736,56 @@ class StreamProfileMenu(ModalScreen):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class StreamDeviceInput(ModalScreen):
+    """a device the machine did not list, typed in a box under its cell. Enter
+    gives what was typed (empty: none), Escape or a click beside it None."""
+
+    DEFAULT_CSS = """
+    StreamDeviceInput {
+        background: transparent;
+    }
+    StreamDeviceInput > Input {
+        width: 40;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "close", "Close", show=False)]
+
+    def __init__(self, current: str, anchor: Region, placeholder: str = "") -> None:
+        super().__init__()
+        self._current = current
+        self._anchor = anchor
+        self._placeholder = placeholder
+
+    def compose(self) -> ComposeResult:
+        yield Input(value=self._current, placeholder=self._placeholder)
+
+    def on_mount(self) -> None:
+        box = self.query_one(Input)
+        screen_width, screen_height = self.app.size
+        width = min(max(40, self._anchor.width), screen_width)
+        box.styles.width = width
+        box.styles.offset = (max(0, min(self._anchor.x, screen_width - width)),
+                             self._anchor.bottom if self._anchor.bottom + 3 <= screen_height
+                             else max(0, self._anchor.y - 3))
+        box.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.dismiss(event.value.strip())
+
+    def on_click(self, event: events.Click) -> None:
+        if not self.query_one(Input).region.contains(event.screen_x, event.screen_y):
+            self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+# a Device list's last option: type one the machine did not list
+TYPE_DEVICE = "\x00type"
 
 
 class StreamPanel(Widget):
@@ -780,6 +848,8 @@ class StreamPanel(Widget):
         # carries: "live", "idle" (nobody publishes it) or "unknown" (no answer)
         self._stream_server = stream_server
         self._live: dict[str, str] = {}
+        # what each capture host said of its devices, until Refresh
+        self._device_answers: dict[str, capture_devices.Devices] = {}
 
     def capture_streams(self) -> list[capture_recordings.CaptureStream]:
         """every stream of this card the console runs, as Manage and the keep
@@ -884,14 +954,24 @@ class StreamPanel(Widget):
             self.stream_name = stream_name
             self.ssh_profile = ssh_profile
 
+    class DeviceChangeRequested(Message):
+        """a row's Device was picked: the camera or microphone its ffmpeg opens
+        on its machine, "" for none (Start takes the first). The launcher
+        writes it into the config of the host the card is on."""
+
+        def __init__(self, stream_name: str, device: str) -> None:
+            super().__init__()
+            self.stream_name = stream_name
+            self.device = device
+
     # three lines: it stands above the table every time the tab is opened
     HELP = (
         "A stream is a Streams entry of this card's config (Config tab, + Add Stream): ffmpeg publishes a camera "
         "or microphone to the Stream Server, the bases pull it. Started once, it serves any number of sessions. "
         "Status is its ffmpeg (Exited: it stopped by itself, Logs says why); Stream Server, what the server receives.\n"
         "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
-        "else publishes. Record on/off: also record on the capture device. The Stream Server records on its side "
-        "whatever reaches it (its card, Config tab).\n"
+        "else publishes; Device (click it): its camera or microphone there. Record on/off: also record on the "
+        "capture device. The Stream Server records on its side whatever reaches it (its card, Config tab).\n"
         "Recordings are filed by day on the capture device, not by session. Manage lists them there, deletes "
         "them, and sets how long they are kept. A session's part of them (and of the Stream Server's) is "
         "Sessions → Export Streams."
@@ -1002,7 +1082,7 @@ class StreamPanel(Widget):
             self.query_one("#stream-empty", Static).update(
                 "" if self._streams else
                 "No streams yet. Open the Config tab, expand Streams, press + Add Stream and Save; "
-                "then pick its SSH Profile here."
+                "then pick its SSH Profile and Device here."
             )
         except Exception:
             pass
@@ -1010,6 +1090,7 @@ class StreamPanel(Widget):
             return
         # the arrows line up at the right edge of the column, under its heading
         width = max([len("SSH Profile") - 3] + [cell_len(stream.ssh_profile or "-") for stream in self._streams])
+        device_width = max([len("Device") - 3] + [cell_len(stream.device or "-") for stream in self._streams])
         for stream in self._streams:
             state = self._states.get(stream.name)
             if not stream.ssh_profile:
@@ -1029,7 +1110,9 @@ class StreamPanel(Widget):
                 stream.name,
                 # drawn as the dropdown it is
                 Text.assemble(profile + " " * (width - cell_len(profile)), ("  ▾", "dim")),
-                stream.device or "-",
+                # a dropdown of the devices of that machine; an external stream's is its publisher's
+                Text.assemble((stream.device or "-") + " " * (device_width - cell_len(stream.device or "-")),
+                              ("  ▾", "dim")) if stream.ssh_profile else "-",
                 stream.target,
                 # nobody records an external stream here: the console does not run its ffmpeg
                 (self._record_cell(stream) if stream.ssh_profile else "n/a") if stream.record else "-",
@@ -1076,6 +1159,74 @@ class StreamPanel(Widget):
                 self.post_message(self.SshProfileChangeRequested(stream.name, profile))
 
         self.app.push_screen(menu, picked)
+
+    def on_stream_table_device_menu_requested(self, event: StreamTable.DeviceMenuRequested) -> None:
+        """the devices of the machine the row's SSH Profile names, of the
+        stream's kind: asked once and kept until Refresh, then offered under
+        the cell."""
+        event.stop()
+        if not 0 <= event.row < len(self._streams):
+            return
+        stream = self._streams[event.row]
+        if not stream.ssh_profile:
+            self._log(f"[yellow]{stream.name} is external: its device is up to whoever publishes it. "
+                      f"{self._EXTERNAL_HINT}[/yellow]")
+            return
+        kind = self._kind(stream)
+        answer = self._device_answers.get(stream.ssh_profile)
+        if answer is not None and (kind in answer.found or kind in answer.problems):
+            self._open_device_menu(stream, kind, answer)
+            return
+        where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
+        self._log(f"Asking {where} for its {'microphones' if kind == 'audio' else 'cameras'}...")
+        self.run_worker(self._ask_devices(stream, kind), group="stream-devices", exclusive=True)
+
+    async def _ask_devices(self, stream: StreamDef, kind: str) -> None:
+        host = stream.ssh_profile
+        answer = await asyncio.to_thread(capture_devices.list_devices, host, {kind}, self._project_dir or "")
+        known = self._device_answers.setdefault(host, answer)
+        if known is not answer:
+            known.found.update(answer.found)
+            known.problems.update(answer.problems)
+            known.platform = known.platform or answer.platform
+        # the row may have gone, or moved to another machine, while its host was asked
+        current = next((s for s in self._streams if s.name == stream.name), None)
+        if self.is_attached and current is not None and current.ssh_profile == host:
+            self._open_device_menu(current, kind, known)
+
+    def _open_device_menu(self, stream: StreamDef, kind: str, answer: capture_devices.Devices) -> None:
+        where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
+        options = list(answer.options(kind))
+        if not options:
+            # nothing listed: why (the host could not be asked, or has none of that kind)
+            problem = answer.problems.get(kind)
+            self._log(f"[yellow]{rich_escape(where)}: {rich_escape(problem)}[/yellow]" if problem else
+                      f"[yellow]No {kind} device found on {rich_escape(where)}.[/yellow]")
+        current = stream.device or ""
+        if current and not any(value == current for _label, value in options):
+            options.append((f"{current}  (not found on {where})", current))
+        options.append(("-  (none: Start takes the first)", ""))
+        options.append(("type another…", TYPE_DEVICE))
+        row = next((i for i, s in enumerate(self._streams) if s.name == stream.name), 0)
+        table = self.query_one("#stream-table", StreamTable)
+        anchor = table.device_cell_region(row)
+
+        def changed(device: str | None) -> None:
+            if device is None or device == current:
+                return
+            self.post_message(self.DeviceChangeRequested(stream.name, device))
+            if self._statuses.get(stream.name, False):
+                self._log(f"[yellow]{stream.name} runs now: it opens {device or 'its first device'} "
+                          f"at its next Start.[/yellow]")
+
+        def picked(device: str | None) -> None:
+            if device == TYPE_DEVICE:
+                example = "hw:1,0 or :0" if kind == "audio" else "/dev/video0 or 0"
+                self.app.push_screen(StreamDeviceInput(current, anchor, f"a {kind} device, e.g. {example}"), changed)
+                return
+            changed(device)
+
+        self.app.push_screen(StreamProfileMenu(options, current, anchor), picked)
 
     def _get_selected_stream(self) -> StreamDef | None:
         try:
@@ -1149,6 +1300,8 @@ class StreamPanel(Widget):
                 if s.ssh_profile:
                     self._stop_stream(s)
         elif btn == "stream-btn-refresh":
+            # the machines are asked for their devices again, at the next Device list
+            self._device_answers.clear()
             self._reload_and_refresh()
 
     def _reload_and_refresh(self) -> None:

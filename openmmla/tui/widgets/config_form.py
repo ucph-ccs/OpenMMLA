@@ -146,8 +146,6 @@ class FieldRow(Widget):
         self._initial = initial_value if initial_value is not None else field_def.default
         self._source = source
         self._read_only = read_only
-        # the description as composed: a note (set_choices) goes under it, and is replaced by the next
-        self._base_description = field_def.description
 
     def compose(self) -> ComposeResult:
         short_name = self.field_def.path.split(".")[-1]
@@ -210,35 +208,6 @@ class FieldRow(Widget):
         kwargs = {"value": initial} if initial else {}
         return Select(options, prompt=_EMPTY_CHOICE, allow_blank=True, id=widget_id, disabled=self._read_only,
                       **kwargs)
-
-    def set_choices(self, choices: list, note: str = "") -> None:
-        """give a text field a dropdown (or a dropdown fresh options) once its
-        choices are known, keeping what it shows; `note` goes under the label,
-        after the description."""
-        self.field_def.choices = list(choices)
-        widget_id = _safe_id(f"field__{self.field_def.path}")
-        try:
-            old = self.query_one(f"#{widget_id}")
-        except Exception:
-            return
-        current = self.current_value
-        if not choices and isinstance(old, Input):
-            new = old  # nothing to offer: the text field stays
-        elif not choices:
-            new = Input(value=self._to_display(current), id=widget_id, classes="field-input", disabled=self._read_only)
-        else:
-            new = self._select(choices, current, widget_id)
-        if new is not old:
-            self.run_worker(self._replace_value_widget(old, new), exclusive=False)
-        if note:
-            base = self._base_description
-            self.set_description(f"{base}\n{note}" if base else note)
-
-    async def _replace_value_widget(self, old: Widget, new: Widget) -> None:
-        # the old one goes first, so the id is free for the new one; the value
-        # widget is the row's last child, so mounting at the end keeps the order
-        await old.remove()
-        await self.mount(new)
 
     def set_description(self, text: str) -> None:
         """the line under the label, for a description that follows the value."""
@@ -1364,15 +1333,6 @@ class ConfigForm(Widget):
             scroll.mount(collapsible)
         except Exception:
             self.mount(collapsible)
-
-    def set_field_choices(self, path: str, choices: list, note: str = "") -> bool:
-        """give the field at `path` a dropdown of `choices`, keeping its value
-        (FieldRow.set_choices); False when the form has no such field."""
-        for row in self.query(FieldRow):
-            if row.field_def.path == path:
-                row.set_choices(choices, note)
-                return True
-        return False
 
     def set_field_value(self, path: str, value) -> bool:
         """show another value in a text field: what Save made of what was typed."""
