@@ -28,6 +28,12 @@ _MEDIA_EXTS = (
 )
 
 
+def _no_choice(value) -> bool:
+    """a Select with nothing picked: Select.NULL on Textual 8 (where
+    Select.BLANK is False), Select.BLANK before it."""
+    return value is None or value is Select.BLANK or value is getattr(Select, "NULL", None)
+
+
 class FileBrowserModal(ModalScreen):
     """A simple local file browser; dismisses with the chosen file path (or None)."""
 
@@ -671,7 +677,7 @@ class DictListField(Widget):
                         read[key] = bool(w.value)
                     else:
                         raw = w.value
-                        if raw is Select.BLANK or raw is None:
+                        if _no_choice(raw):
                             raw = ""
                         read[key] = _auto_parse(str(raw).strip())
                 except Exception:
@@ -695,7 +701,7 @@ class DictListField(Widget):
             container = container.parent
         if container is None:
             return
-        new_source = "" if event.value is Select.BLANK else str(event.value)
+        new_source = "" if _no_choice(event.value) else str(event.value)
         self._show_fields_for(container, new_source)
 
         # preserve the current source_index value where it still makes sense
@@ -704,7 +710,7 @@ class DictListField(Widget):
             if w.id and w.id.endswith("__source_index"):
                 try:
                     v = w.value
-                    cur = "" if v is Select.BLANK or v is None else str(v)
+                    cur = "" if _no_choice(v) else str(v)
                 except Exception:
                     cur = ""
                 break
