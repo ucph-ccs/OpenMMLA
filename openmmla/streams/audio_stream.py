@@ -146,7 +146,7 @@ class AudioStream(StreamReceiver):
         self.sample_width = SUPPORTED_FORMATS[self.format]['sample_width']
         self.dtype = SUPPORTED_FORMATS[self.format]['dtype']
 
-        self.channels = kwargs.get('channels', 1)
+        self.channels = int(kwargs.get('channels') or 1)  # a 'channels:' left empty in a config is 1 too
         self.channel_select = kwargs.get('channel_select', None)
         self.rate = kwargs.get('rate', 16000)
         self.chunk_size = kwargs.get('chunk_size', 512)

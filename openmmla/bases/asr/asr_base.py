@@ -303,8 +303,10 @@ class ASRBase(Base):
             device_channels = device_info.get('maxInputChannels', 1)
             self.stream_kwargs['channels'] = device_channels
 
-            # channel comes from the base entry if defined, else use full device
-            self.stream_kwargs['channel_select'] = self._base_entry.get('channel')
+            # the one channel of a multi-channel device this base keeps
+            # (Bases.channel_select; 'channel' is its old name), else all of them
+            select = self._base_entry.get('channel_select', self._base_entry.get('channel'))
+            self.stream_kwargs['channel_select'] = None if select in (None, "") else int(select)
             self.logger.info(f"Selected device: {device_info.get('name')} with {device_channels} channels")
             self.logger.info(f"Selected channel option: {self.stream_kwargs['channel_select']}")
             p.terminate()

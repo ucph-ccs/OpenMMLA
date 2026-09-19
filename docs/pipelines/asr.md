@@ -27,8 +27,8 @@ Create the `asr-base` environment from the TUI's Environment tab or by hand (`co
 
 | Section | What it holds |
 |---|---|
-| `Base.<device>` | one block per kind of microphone: recognition thresholds and durations, gain, VAD thresholds, `port_offset` for badge streams, `file_dir` for file replay, and `stream_kwargs` (channels, rate, format, chunk size). Add one with `+ Add Base`. |
-| `Bases` | the list of base nodes. Each entry has an `id`, the `base_type` it uses from `Base`, a `source`, a `source_index`, an optional `channel`, and a `port` for udp/tcp sources. Every base you start picks one of these entries. |
+| `Base.<device>` | one block per **kind** of microphone (a table speakerphone, a badge, a laptop mic), named as you like: how its audio is processed (`asr_scope`, recognition thresholds and durations, gain, VAD thresholds) and the format it arrives in (`stream_kwargs`: `channels`, `rate`, `format`, chunk size, and for badge streams `packet_format` and the listening `host`). `file_dir` is the optional folder of recordings for file replay. Add one with `+ Add Base`. |
+| `Bases` | one entry per **microphone**, that is per base process you start: its `id`, its `base_type` (a block of `Base`), its `source`, and the one field that source needs: `source_index` (a device index, a stream name, a file), `channel_select` (pyaudio) or `port` (udp/tcp); the Config tab shows only that one, see [Input sources](#input-sources). The card's Base dropdowns offer these entries. |
 | `Synchronizer` | `bucket_duration`, `match_tolerance`, `result_expiry_time` |
 | `Streams` | managed and external streams, see below |
 | `Server.asr` | the six service endpoints, either through the gateway (`http://<gateway>:8080/transcribe`) or direct (`http://<server>:5005/transcribe`) |
@@ -40,11 +40,11 @@ Create the `asr-base` environment from the TUI's Environment tab or by hand (`co
 
 | Source | Description | Setup |
 |---|---|---|
-| `pyaudio` | USB or built-in microphone on the base station (Jabra Speak2 75, laptop mic, ...) | `source_index` is the PyAudio device index (required); `channel` picks the input channel of a multi-channel device, all channels when unset. |
+| `pyaudio` | USB or built-in microphone on the base station (Jabra Speak2 75, laptop mic, ...) | `source_index` is the PyAudio device index (required); `channel_select` picks which channel of a multi-channel device the base keeps, all of them when unset (`channel` is its old name, still read). `stream_kwargs.channels` is how many channels the audio has, 1 unless set; for pyaudio it is read from the device itself. |
 | `udp` / `tcp` | Nicla Vision or Portenta H7 badge streaming over Wi-Fi, or a managed FFmpeg stream from a Raspberry Pi (see [Streams](#streams)) | badges: flash the firmware under `pipelines/wearables/nicla-vision/asr/` or `pipelines/wearables/portenta-h7/asr/` with the Wi-Fi credentials and the base's host and `port` in `arduino_secrets.h`. The sender's format must match `stream_kwargs` (16 kHz, mono, 16-bit PCM by default). The `audio_streaming_udp_ms` firmware prefixes every packet with an 18-byte header carrying the badge's clock; the other firmware and FFmpeg send header-less PCM. The base tells the two apart on the first packet (`stream_kwargs.packet_format: auto`); set it to `timestamped` or `raw` to force one. |
 | `stream` | audio pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` names that entry (a number is read as its position among them, as older configs have it). Left empty while there are several, the base asks for it in its window |
 | `lsl` | Lab Streaming Layer | `source_index` is the LSL stream name; needs `pylsl` |
-| `file` | replay of a recorded file | `source_index` is the file name inside `Base.<device>.file_dir`; the start time is read from the file name (`<prefix>_<timestamp>.wav`), so the sync time needs no configuration |
+| `file` | replay of a recorded file | `source_index` is the file to replay: its full path (**Browse…** on the Config tab writes it) or a name inside `Base.<device>.file_dir`, the optional folder whose files the Config tab lists. The start time is read from the file name (`<prefix>_<timestamp>.wav`), so the sync time needs no configuration |
 
 ### Streams
 

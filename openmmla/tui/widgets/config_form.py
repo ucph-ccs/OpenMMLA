@@ -306,46 +306,53 @@ class DictListField(Widget):
     }
     """
 
-    # what source_index means for each source type (drives the dynamic hint
-    # and the widget type — see _source_index_widget)
+    # what source_index is for each source: the hint under its row, which
+    # follows the source dropdown
     _SOURCE_INDEX_HINTS = {
         "opencv": "→ which local camera (0-based index)",
         "stream": "→ which stream of this config's Streams it pulls, by name (a new one is listed once the Streams are saved)",
-        "file": "→ pick a video file from file_dir",
-        "pyaudio": "→ PyAudio input device index",
+        "file": "→ the file to replay: its full path (Browse…), or a name inside Base.file_dir",
+        "pyaudio": "→ the input device index (PyAudio)",
         "lsl": "→ LSL stream name (resolved by name)",
-        "udp": "→ not used for udp (set 'port' instead)",
-        "tcp": "→ not used for tcp (set 'port' instead)",
     }
+    # the fields of a Bases entry that only some sources use, and which: the
+    # row of one the entry's source does not use is hidden, and left out of
+    # the saved entry. A field not listed here is for every source. This is
+    # what the bases read: asr_base takes port for udp/tcp, channel for pyaudio
+    # and source_index for the rest; the video bases source_index alone
+    _FIELDS_BY_SOURCE = {
+        "source_index": {"pyaudio", "opencv", "stream", "lsl", "file"},
+        "channel_select": {"pyaudio"},
+        "port": {"udp", "tcp"},
+    }
+    _FIELD_HINTS = {
+        "port": "→ the port this base listens on: the badge or FFmpeg stream pushes to it",
+        "channel_select": "→ which channel of a multi-channel device this base keeps; empty: all of them "
+                          "(stream_kwargs.channels is how many the device has)",
+    }
+    # a field's earlier name: an entry that still holds it shows its value under
+    # the new name, and Save writes the new name alone
+    _RENAMED_FIELDS = {"channel_select": "channel"}
 
     @classmethod
     def _source_index_hint(cls, source) -> str:
         return cls._SOURCE_INDEX_HINTS.get(normalize_source(source), "")
 
-    @staticmethod
-    def _source_unused(source) -> bool:
-        # udp/tcp carry their binding in 'port', not source_index; lsl now uses
-        # source_index for the stream name and file uses it for the file pick
-        return str(source).strip().lower() in ("udp", "tcp")
+    def _applies(self, key: str, source) -> bool:
+        """whether an entry with `source` uses the field `key` (every field
+        does in a list whose entries have no source)."""
+        if "source" not in self._schema:
+            return True
+        sources = self._FIELDS_BY_SOURCE.get(key)
+        return sources is None or normalize_source(source) in sources
 
-    class FileDirChosen(Message):
-        """bubbled to ConfigForm when the file browser picks a file, so the
-        Base.file_dir field can be updated to the chosen file's directory."""
-
-        def __init__(self, file_dir: str) -> None:
-            super().__init__()
-            self.file_dir = file_dir
-
-    @staticmethod
-    def _list_media_files(dir_path: str) -> list[str]:
-        """list media file names in a local directory (for the file dropdown)."""
-        if not dir_path or not os.path.isdir(dir_path):
-            return []
-        try:
-            names = sorted(os.listdir(dir_path))
-        except OSError:
-            return []
-        return [n for n in names if n.lower().endswith(_MEDIA_EXTS)]
+    def _field_hint(self, key: str, source) -> str | None:
+        """the hint under the row of `key`; None for a row that has none."""
+        if "source" not in self._schema:
+            return None
+        if key == "source_index":
+            return self._hint(source)
+        return self._FIELD_HINTS.get(key)
 
     def __init__(self, field_def: FieldDef, initial_value=None) -> None:
         super().__init__()
@@ -404,20 +411,24 @@ class DictListField(Widget):
         if s == "file":
             files = self._choices.get("source_index") or []
             options = [(str(f), str(f)) for f in files]
+            cur = str(val).strip() if val not in (None, "") else ""
+            if cur and not any(ov == cur for _, ov in options):
+                # the full path Browse… picked, or a name the listed folder
+                # does not have: kept as it is rather than dropped
+                label = f"{os.path.basename(cur)}  ({os.path.dirname(cur)})" if os.path.isabs(cur) else cur
+                options.insert(0, (label, cur))
             if options:
-                cur = str(val) if val not in (None, "") else None
-                valid = cur if cur and any(ov == cur for _, ov in options) else None
-                kwargs = {"value": valid} if valid is not None else {}
+                kwargs = {"value": cur} if cur else {}
                 return Select(
                     options, prompt="Select file...", id=widget_id,
                     classes="dict-entry-input", **kwargs,
                 )
-            # no files discovered (e.g. file_dir unset/empty/remote) → free text
+            # no file to list (file_dir unset, empty or on another host): free text
             w = Input(
                 value=str(val) if val is not None else "",
                 id=widget_id, classes="dict-entry-input",
             )
-            w.placeholder = "filename in file_dir"
+            w.placeholder = "full path of the file, or a name inside Base.file_dir"
             return w
         if s == "lsl":
             w = Input(
@@ -519,63 +530,22 @@ class DictListField(Widget):
         add_id = _safe_id(f"dle-add__{self.field_def.path}")
         yield Button("+ Add Entry", variant="success", id=add_id, classes="dle-add-btn")
 
-    def _build_entry(self, entry: dict) -> ComposeResult:
-        idx = self._next_idx
-        self._next_idx += 1
-        container_id = _safe_id(f"dle__{self.field_def.path}__{idx}")
-        if "source" in self._schema and str(entry.get("source", "")).strip():
-            # 'rtmp' is the old name of 'stream': shown, and saved, as stream
-            entry = dict(entry, source=normalize_source(entry.get("source")))
+    def _entry_children(self, entry: dict, idx: int) -> list[Widget]:
+        """the widgets of one entry: a row per field of the schema, with a
+        hint under source_index, port and channel. A field the entry's source
+        does not use is built hidden, and shown once a source that uses it is
+        picked (_show_fields_for)."""
         src_val = str(entry.get("source", "")) if "source" in self._schema else ""
-        with Vertical(classes="dict-entry", id=container_id):
-            yield Static(f"Entry {idx + 1}", classes="dict-entry-header")
-            for key in self._schema:
-                val = entry.get(key, "")
-                widget_id = _safe_id(f"dle__{self.field_def.path}__{idx}__{key}")
-                with Horizontal(classes="dict-entry-row"):
-                    yield Static(f"{key}:", classes="dict-entry-label")
-                    if key == "source_index":
-                        widget = self._source_index_widget(src_val, val, widget_id)
-                    else:
-                        widget = self._entry_widget(key, val, widget_id)
-                    if key == "source_index" and self._source_unused(src_val):
-                        widget.disabled = True
-                    yield widget
-                    if key == "source_index":
-                        browse = Button(
-                            "Browse…",
-                            id=_safe_id(f"dle-browse__{self.field_def.path}__{idx}"),
-                            classes="dle-browse-btn",
-                        )
-                        browse.disabled = str(src_val).strip().lower() != "file"
-                        yield browse
-                if key == "source_index" and "source" in self._schema:
-                    yield Static(
-                        self._hint(src_val),
-                        id=_safe_id(f"{widget_id}__hint"), classes="dict-entry-hint",
-                    )
-            rm_id = _safe_id(f"dle-rm__{self.field_def.path}__{idx}")
-            yield Button("Remove", variant="error", id=rm_id, classes="dle-rm-btn")
-
-    def add_entry(self) -> None:
-        """mount a new empty entry before the add button."""
-        defaults = {}
-        for key, typ in self._schema.items():
-            defaults[key] = "" if typ == "str" else 0
-        idx = self._next_idx
-        self._next_idx += 1
-        container_id = _safe_id(f"dle__{self.field_def.path}__{idx}")
-        src_val = str(defaults.get("source", "")) if "source" in self._schema else ""
         children: list[Widget] = [Static(f"Entry {idx + 1}", classes="dict-entry-header")]
         for key in self._schema:
-            val = defaults.get(key, "")
+            val = entry.get(key, "")
+            if val in ("", None) and key in self._RENAMED_FIELDS:
+                val = entry.get(self._RENAMED_FIELDS[key], "")
             widget_id = _safe_id(f"dle__{self.field_def.path}__{idx}__{key}")
             if key == "source_index":
                 widget = self._source_index_widget(src_val, val, widget_id)
             else:
                 widget = self._entry_widget(key, val, widget_id)
-            if key == "source_index" and self._source_unused(src_val):
-                widget.disabled = True
             row_children: list[Widget] = [Static(f"{key}:", classes="dict-entry-label"), widget]
             if key == "source_index":
                 browse = Button(
@@ -583,20 +553,51 @@ class DictListField(Widget):
                     id=_safe_id(f"dle-browse__{self.field_def.path}__{idx}"),
                     classes="dle-browse-btn",
                 )
-                browse.disabled = str(src_val).strip().lower() != "file"
+                browse.disabled = normalize_source(src_val) != "file"
                 row_children.append(browse)
-            row = Horizontal(*row_children, classes="dict-entry-row")
+            shown = self._applies(key, src_val)
+            row = Horizontal(*row_children, id=_safe_id(f"{widget_id}__row"), classes="dict-entry-row")
+            row.display = shown
             children.append(row)
-            if key == "source_index" and "source" in self._schema:
-                children.append(Static(
-                    self._hint(src_val),
-                    id=_safe_id(f"{widget_id}__hint"), classes="dict-entry-hint",
-                ))
+            hint = self._field_hint(key, src_val)
+            if hint is not None:
+                hint_widget = Static(hint, id=_safe_id(f"{widget_id}__hint"), classes="dict-entry-hint")
+                hint_widget.display = shown
+                children.append(hint_widget)
         rm_id = _safe_id(f"dle-rm__{self.field_def.path}__{idx}")
         children.append(Button("Remove", variant="error", id=rm_id, classes="dle-rm-btn"))
-        container = Vertical(*children, classes="dict-entry", id=container_id)
+        return children
+
+    def _build_entry(self, entry: dict) -> ComposeResult:
+        idx = self._next_idx
+        self._next_idx += 1
+        if "source" in self._schema and str(entry.get("source", "")).strip():
+            # 'rtmp' is the old name of 'stream': shown, and saved, as stream
+            entry = dict(entry, source=normalize_source(entry.get("source")))
+        yield Vertical(*self._entry_children(entry, idx), classes="dict-entry",
+                       id=_safe_id(f"dle__{self.field_def.path}__{idx}"))
+
+    def add_entry(self) -> None:
+        """mount a new empty entry before the add button."""
+        defaults = {key: ("" if typ == "str" else 0) for key, typ in self._schema.items()}
+        idx = self._next_idx
+        self._next_idx += 1
+        container = Vertical(*self._entry_children(defaults, idx), classes="dict-entry",
+                             id=_safe_id(f"dle__{self.field_def.path}__{idx}"))
         add_btn = self.query_one(f"#{_safe_id(f'dle-add__{self.field_def.path}')}", Button)
         self.mount(container, before=add_btn)
+
+    def _show_fields_for(self, container, source) -> None:
+        """show the rows (with their hints) of the fields `source` uses in
+        one entry, and hide the rest."""
+        for key in self._FIELDS_BY_SOURCE:
+            if key not in self._schema:
+                continue
+            shown = self._applies(key, source)
+            for suffix in (f"__{key}__row", f"__{key}__hint"):
+                widget = self._find_in_container(container, suffix)
+                if widget is not None:
+                    widget.display = shown
 
     @property
     def current_value(self) -> list[dict]:
@@ -606,20 +607,22 @@ class DictListField(Widget):
         for container in self.query(".dict-entry"):
             if not container.id or not container.id.startswith(prefix):
                 continue
-            entry = {}
+            read = {}
             for key in self._schema:
                 try:
                     w = container.query_one(f"#{_safe_id(f'{container.id}__{key}')}")
                     if isinstance(w, Switch):
-                        entry[key] = bool(w.value)
+                        read[key] = bool(w.value)
                     else:
                         raw = w.value
                         if raw is Select.BLANK or raw is None:
                             raw = ""
-                        entry[key] = _auto_parse(str(raw).strip())
+                        read[key] = _auto_parse(str(raw).strip())
                 except Exception:
-                    entry[key] = ""
-            result.append(entry)
+                    read[key] = ""
+            # a field the entry's source does not use stays out of the file
+            source = read.get("source", "")
+            result.append({key: value for key, value in read.items() if self._applies(key, source)})
         return result
 
     async def on_select_changed(self, event: Select.Changed) -> None:
@@ -637,6 +640,7 @@ class DictListField(Widget):
         if container is None:
             return
         new_source = "" if event.value is Select.BLANK else str(event.value)
+        self._show_fields_for(container, new_source)
 
         # preserve the current source_index value where it still makes sense
         cur = ""
@@ -660,8 +664,6 @@ class DictListField(Widget):
     async def _rebuild_source_index(self, container, new_source, value) -> None:
         """rebuild an entry's source_index widget to match its source type,
         refresh the hint, and enable the Browse button only for 'file'."""
-        unused = self._source_unused(new_source)
-
         # hint line
         for w in container.query(Static):
             if w.id and w.id.endswith("source_index__hint"):
@@ -678,8 +680,6 @@ class DictListField(Widget):
         widget_id = old.id
         row = old.parent
         new_widget = self._source_index_widget(new_source, value, widget_id)
-        if unused:
-            new_widget.disabled = True
         try:
             # await removal before mounting so the reused id is free (avoids a
             # duplicate-id error on the new widget)
@@ -694,8 +694,9 @@ class DictListField(Widget):
             pass
 
     def _open_file_browser(self, container) -> None:
-        """open the local file browser; on pick, set the entry's source_index to
-        the file name, re-list the directory, and update Base.file_dir."""
+        """open the local file browser; on pick, the entry's source_index is
+        the file's full path: the file goes with the base, whatever
+        Base.file_dir says (that is the folder the dropdown lists)."""
         start = None
         files = self._choices.get("source_index") or []
         # seed the browser at the previously-listed dir if we can infer it
@@ -705,14 +706,8 @@ class DictListField(Widget):
         def _done(path: str | None) -> None:
             if not path:
                 return
-            file_dir = os.path.dirname(path)
-            filename = os.path.basename(path)
-            self._last_file_dir = file_dir
-            # re-list the chosen directory so the dropdown reflects it
-            self._choices["source_index"] = self._list_media_files(file_dir)
-            self.run_worker(self._rebuild_source_index(container, "file", filename))
-            # ask ConfigForm to update the Base.file_dir field
-            self.post_message(self.FileDirChosen(file_dir))
+            self._last_file_dir = os.path.dirname(path)
+            self.run_worker(self._rebuild_source_index(container, "file", path))
 
         try:
             self.app.push_screen(FileBrowserModal(start), _done)
@@ -1343,20 +1338,6 @@ class ConfigForm(Widget):
         for section_name in self._removed_sections:
             values[section_name] = REMOVED_SECTION
         return values
-
-    def on_dict_list_field_file_dir_chosen(self, event: "DictListField.FileDirChosen") -> None:
-        """the file browser picked a file under event.file_dir — reflect it in the
-        Base.file_dir field so source resolution finds the file at runtime."""
-        event.stop()
-        for row in self.query(FieldRow):
-            if row.field_def.path.endswith(".file_dir"):
-                try:
-                    w = self.query_one(f"#{_safe_id(f'field__{row.field_def.path}')}")
-                    if isinstance(w, Input):
-                        w.value = event.file_dir
-                except Exception:
-                    pass
-                break
 
     def _entry_group_of(self, button_id: str) -> str | None:
         for group, (_label, bid) in self._group_add_buttons.items():

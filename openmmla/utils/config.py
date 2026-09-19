@@ -17,7 +17,7 @@ def get_bases(config: dict) -> list[dict]:
     Shared by ASR and IPS: each base is a dict with an 'id' (base identity;
     numeric for ASR so udp/tcp ports can be derived, string for IPS).
     Modality-specific keys differ — IPS: 'camera'/'source_index'/'main';
-    ASR: 'base_type'/'source_index'/'channel'. This list is the single source
+    ASR: 'base_type'/'source_index'/'channel_select'/'port'. This list is the single source
     of truth for base identity and per-device bindings.
     """
     bases = (config or {}).get("Bases") or []

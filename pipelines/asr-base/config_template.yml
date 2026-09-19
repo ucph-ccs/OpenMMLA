@@ -1,7 +1,12 @@
 # ASR-BASE config_template.yml
 # Template for configuring audio, stream, database and server endpoints for the system
 
-# base settings for your device
+# Base: one block per kind of microphone (a table speakerphone, a badge, a
+# laptop mic), named as you like. It says how the audio of that kind of
+# microphone is processed (whether speakers are recognized, recognition
+# thresholds and durations, gain, VAD) and what format it arrives in
+# (stream_kwargs). Which microphones there are, and where each one's audio
+# comes from, is the Bases list below.
 Base:
   <Your_Device_Name>:
     asr_scope: participant        # participant = speaker verification + transcription; group = attribute transcript to the session group (no verification)
@@ -18,19 +23,15 @@ Base:
     update_threshold:             # Similarity threshold for incrementally updating speaker profile
     gain:                         # Volume gain multiplier in decibels for audio preprocessing
     score_amplified:              # Whether to amplify the similarity score of the audio signal based on the energy level
-    # NOTE: per-base 'source' and 'source_index' live in Bases (below). 'file_dir'
-    # is optional (defaults to the project dir); initial_sync_time is auto-computed
-    # from the audio file name at runtime.
-    file_dir:                     # (optional) directory of audio files for source 'file'; filename format: <prefix>_<timestamp>.<extension>
-    port_offset:                  # Port offset for udp/tcp streams
-    stream_kwargs:                # Additional stream settings
-      channels:                   # Number of audio channels of the input device (if channels >1, channel selection is required)
+    file_dir:                     # (optional) folder of the recordings a base with source 'file' replays: the Config tab lists its files, and a bare file name in Bases is looked up there. The start time comes from the file name (<prefix>_<timestamp>.<extension>)
+    stream_kwargs:                # the audio as this kind of microphone delivers it
+      channels:                   # how many channels that audio has (default 1): what a badge or FFmpeg stream sends over udp/tcp (must match), what a MediaMTX stream is decoded to; a pyaudio device's count is read from the device itself (Bases.channel_select keeps one of them)
       rate:                       # Sampling rate in Hz (e.g., 16000 for 16kHz)
       format:                     # Audio format, e.g., int16, float32
       chunk_size:                 # Size of each audio chunk in frames (default to 512)
       buffer_duration:            # Buffer duration in seconds for audio stream
       resample_method:            # Resampling method for audio processing
-      host:                       # listening address for udp/tcp streams (0.0.0.0 for all interfaces)
+      host:                       # udp/tcp: the address the base listens on (0.0.0.0 for all interfaces)
       packet_format:              # udp/tcp packet layout: auto (default, sniffs the first packet), timestamped (badge 18-byte header + PCM) or raw (header-less PCM, e.g. FFmpeg)
   # example 1: external stream (already running; the base pulls read_target, else target)
   # mic-external:
@@ -57,20 +58,26 @@ Base:
   #   read_target: rtsp://uber-server.local:8554/asr/mic2
   #   record: true
 
-# bases settings
-# Each entry defines one ASR base node (a microphone). A base references a base
-# type (from Base) and carries its per-device binding. This is the single source
-# of truth for base id, type and device — used by interactive and headless/remote
-# runs, so you no longer type the id or pick the base type at startup.
+# Bases: one entry per microphone, that is per base process you start. An
+# entry says which one it is (id), which kind of microphone it is (base_type,
+# a block of Base) and where its audio comes from: the source, and the one
+# field that source needs (the Config tab shows only that one):
+#   pyaudio   source_index: the input device index; channel_select: which channel of a multi-channel device to keep (optional; 'channel' is its old name)
+#   udp/tcp   port: the port this base listens on; a badge or an FFmpeg stream of Streams pushes to it
+#   stream    source_index: the name of the Streams entry it pulls
+#   lsl       source_index: the LSL stream name
+#   file      source_index: the file to replay, by full path (Browse… on the Config tab) or by name inside Base.file_dir
+# The card's Base dropdowns offer these entries, and -b names one; you no
+# longer type the id or pick the base type at startup.
 Bases:
   # one template entry (edit it / use "+ Add Entry" in the TUI). Entries whose
   # id is left as a <...> placeholder are ignored at runtime.
   - id: <base-id>               # base id / identity (string or number; part of base_id {base_type}_{id})
-    base_type: <Your_Device_Name>   # which entry under Base
-    source: pyaudio             # source type (udp/tcp/pyaudio/stream/lsl/file; rtmp is the old name of stream)
-    source_index: 0             # pyaudio: input device index; stream: name of a Streams entry (an index among the pullable ones still works); file: file name in file_dir; lsl: stream name (udp/tcp use 'port')
-    channel: 0                  # channel selection (optional, multi-channel devices)
-    port: 5001                  # listening port (required only for source udp/tcp; decoupled from id)
+    base_type: <Your_Device_Name>   # which block of Base
+    source: pyaudio             # udp / tcp / pyaudio / stream / lsl / file (rtmp is the old name of stream)
+    source_index: 0             # see above; not used by udp/tcp
+    channel_select: 0           # pyaudio only, optional
+    port: 5001                  # udp/tcp only
  
 # synchronizer settings
 Synchronizer:

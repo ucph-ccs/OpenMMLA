@@ -100,7 +100,7 @@ Because the frame analyzer runs in a container, a backend on the same machine is
 | `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index; the base lists the devices it finds |
 | `stream` | video pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` is its position among those entries |
 | `lsl` | Lab Streaming Layer | `source_index` is the stream name; needs `pylsl` |
-| `file` | replay of a recorded video | `source_index` is the file name inside `Base.file_dir`; the start time comes from the file name |
+| `file` | replay of a recorded video | `source_index` is the file to replay: its full path (**Browse…** on the Config tab) or a name inside `Base.file_dir`, the optional folder whose files the Config tab lists. Files replayed together sit in one folder: the replay starts at the latest start among them, read from the names |
 
 ### Streams
 
@@ -139,7 +139,7 @@ A process that cannot start says why in its window. A synchronizer with no numbe
 
 ### What a session records
 
-Each base notes in the session's MongoDB document which `Bases` entry it is and the stream it pulls: the `Streams` entry, its URL and path on the Stream Server, and the machine that captures and records it (the session's `sources`, see the [Database Reference](../../database.md#mongodb)). It writes this when it joins the session and notes when it leaves, first thing on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads it, so it takes that session's own streams, from the Stream Server and from the capture hosts, without being told which. A session recorded before bases did this, or one no base joined, falls back to every path the Stream Server recorded in the session's time and every stream with Record on in this console's pipeline configs, and the log says so. A base that cannot write the note (MongoDB down, or a session the console did not create) warns in its log and runs on.
+Each base notes in the session's MongoDB document which `Bases` entry it is and the stream it pulls: the `Streams` entry, its URL and path on the Stream Server, and the machine that captures and records it (the session's `sources`, see the [Database Reference](../../database.md#mongodb)). It writes this when it joins the session and notes when it leaves, first thing on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads it, so it takes that session's own streams, from the Stream Server and from the capture hosts, without being told which. A session recorded before bases did this, or one no base joined, has nothing to export, and the log says so. A base that cannot write the note (MongoDB down, or a session the console did not create) warns in its log and runs on.
 
 ## Manual CLI
 

@@ -60,7 +60,7 @@ IPS has no capture/analyze/live mode switch: a live source (`opencv`, `stream`, 
 | `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index (0 to 3); the base lists the devices it finds |
 | `stream` | video pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` is its position among those entries |
 | `lsl` | Lab Streaming Layer | `source_index` is the stream name; needs `pylsl` |
-| `file` | replay of a recorded video | `source_index` is the file name inside `Base.file_dir`; the start time comes from the file name |
+| `file` | replay of a recorded video | `source_index` is the file to replay: its full path (**Browse…** on the Config tab) or a name inside `Base.file_dir`, the optional folder whose files the Config tab lists. Files replayed together sit in one folder: the replay starts at the latest start among them, read from the names |
 
 ### Streams
 
@@ -115,7 +115,7 @@ The **Transform Matrix** tab of the IPS Base card shows the exported files as ed
 
 When a choice from the card cannot be used (the synchronizer finds no `camera_sync/transformation_matrices_<id>.json` for its main camera, the visualizer gets a dimension other than 2d or 3d, or a base gets an id that is not in `Bases`), that window says why and what to do, then shows the process's own menu or base prompt, so it can be fixed there, or on the card before the next Start.
 
-Each base notes in the session's MongoDB document which `Bases` entry it is, the stream it pulls (for a `stream` source) and when it joined and left; it notes the leaving first on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads this note, so it takes the session's own streams, from the Stream Server and from the capture hosts, without being told which. Sessions recorded before bases wrote this note fall back to the old behaviour.
+Each base notes in the session's MongoDB document which `Bases` entry it is, the stream it pulls (for a `stream` source) and when it joined and left; it notes the leaving first on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads this note, so it takes the session's own streams, from the Stream Server and from the capture hosts, without being told which. A session without this note (one from before the bases wrote it, or one no base joined) has nothing to export, and the console says so.
 
 ## Manual CLI
 

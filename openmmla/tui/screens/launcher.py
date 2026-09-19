@@ -82,7 +82,7 @@ from openmmla.utils.artifact_paths import (
     STREAMS_DIR,
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
-from openmmla.utils.constants import get_stream_sources
+from openmmla.utils.constants import get_stream_sources, normalize_source
 from openmmla.utils.config import get_bases
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -794,9 +794,11 @@ def _base_choice_label(pipeline: str, base: dict) -> str:
     stream ips-cam-1`: its id, the camera of an IPS or VFA base (the
     base_type of an ASR one), then its source and source_index."""
     what = _shown_base_value(base.get("base_type") if pipeline == "asr" else base.get("camera"))
-    where = " ".join(
-        part for part in (_shown_base_value(base.get("source")), _shown_base_value(base.get("source_index"))) if part
-    )
+    source = _shown_base_value(base.get("source"))
+    index = _shown_base_value(base.get("source_index"))
+    if index and normalize_source(source) == "file":
+        index = os.path.basename(index.rstrip("/")) or index  # the file, not its path
+    where = " ".join(part for part in (source, index) if part)
     return " · ".join(part for part in (str(base.get("id")), what, where) if part)
 
 

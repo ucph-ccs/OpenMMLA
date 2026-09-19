@@ -461,8 +461,14 @@ class VFABase(Base):
         elif self.source == 'file':
             base_config = self.config.get('Base', {})
 
-            # file_dir is optional and defaults to the project directory
-            file_dir = base_config.get('file_dir') or self.project_dir
+            # the entry names its file by its full path (Browse… on the Config
+            # tab): that file's folder is the one listed and synchronized over;
+            # else file_dir, which is optional and defaults to the project directory
+            named = str(self._source_index or "")
+            if os.path.isabs(named):
+                file_dir = os.path.dirname(named)
+            else:
+                file_dir = base_config.get('file_dir') or self.project_dir
             if not os.path.isabs(file_dir):
                 file_dir = os.path.join(self.project_dir, file_dir)
             if not os.path.isdir(file_dir):
