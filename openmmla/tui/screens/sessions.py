@@ -24,7 +24,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, ProgressBar
 
-from openmmla.tui import recordings, stream_export
+from openmmla.tui import base_files, recordings, stream_export
 from openmmla.utils import session_sources
 from openmmla.utils.artifact_paths import (
     NON_SESSION_ARTIFACT_DIRS, capture_host_label, capture_record_root, session_capture_streams_dir,
@@ -496,10 +496,12 @@ class SessionsPanel(Widget):
     _retention: float | None = None
     # the MongoDB client of the host shown; None while none is connected
     _mongo_client = None
-    # the session whose streams are being exported (Export Streams, Export
-    # All), and what Cancel sets to stop it; None while none is
+    # the session whose streams or base files are being exported (Export
+    # Streams, Export Base Files, Export All), what Cancel sets to stop it, and
+    # the button that started it; None while none is
     _streams_export_session: str | None = None
     _streams_cancel: threading.Event | None = None
+    _streams_export_button: str = "Export Streams"
 
     class SessionDeleted(Message):
         """a session's database records were deleted here: the Launcher must
@@ -635,6 +637,8 @@ class SessionsPanel(Widget):
                 yield Button("Refresh", variant="primary", id="btn-ses-refresh")
                 yield Button("Export Measurements", variant="success", id="btn-ses-export-logs")
                 yield Button("Export Visualizations", variant="success", id="btn-ses-export-vis")
+                # what the bases wrote on the machines they ran on (base_files)
+                yield Button("Export Base Files", variant="success", id="btn-ses-export-base-files")
                 yield Button("Export All", variant="warning", id="btn-ses-export-all")
                 yield Button("Delete Session", variant="error", id="btn-ses-delete")
                 yield Button("Delete Artifacts", variant="error", id="btn-ses-delete-artifacts")
@@ -1018,6 +1022,8 @@ class SessionsPanel(Widget):
             self._start_streams_export(session_id, self._run_export_all, "Export All · measurements")
         elif bid == "btn-ses-export-streams":
             self._start_streams_export(session_id, self._run_export_streams, "Export Streams")
+        elif bid == "btn-ses-export-base-files":
+            self._start_streams_export(session_id, self._run_export_base_files, "Export Base Files")
         elif bid == "btn-ses-delete":
             if self._pending_delete_session_id != session_id:
                 self._pending_delete_session_id = session_id
@@ -1051,24 +1057,29 @@ class SessionsPanel(Widget):
         await loop.run_in_executor(None, self._do_export, session_id, logs, vis)
 
     async def _run_export_all(self, session_id: str) -> None:
-        """Export All: the measurements and visualizations, then the streams."""
+        """Export All: the measurements and visualizations, then the streams
+        and the base files."""
         await self._run_export(session_id, logs=True, vis=True)
         await self._run_export_streams(session_id)
+        if self._streams_cancel is not None and self._streams_cancel.is_set():
+            raise asyncio.CancelledError()
+        await self._run_export_base_files(session_id)
 
     # ---- Export Streams ----
 
     def _start_streams_export(self, session_id: str, run, label: str) -> None:
-        """start Export Streams, or Export All, which ends with it, in a worker
-        of its own group with the progress row up, so its Cancel can be reached
-        the whole time; one at a time."""
+        """start Export Streams, Export Base Files, or Export All, which ends
+        with both, in a worker of its own group with the progress row up, so
+        its Cancel can be reached the whole time; one at a time."""
         if self._streams_export_session is not None:
             self._log(
-                f"[yellow]The streams of '{escape(self._streams_export_session)}' are still being exported. Wait "
-                f"for that to finish, or press Cancel next to its progress.[/yellow]"
+                f"[yellow]{self._streams_export_button} of '{escape(self._streams_export_session)}' is still "
+                f"running. Wait for it to finish, or press Cancel next to its progress.[/yellow]"
             )
             return
         self._streams_export_session = session_id
         self._streams_cancel = threading.Event()
+        self._streams_export_button = label.split(" · ")[0]
         self._progress_show(label)
         self.run_worker(self._streams_worker(session_id, run), group=_STREAMS_WORKER_GROUP, exclusive=False)
 
@@ -1078,9 +1089,11 @@ class SessionsPanel(Widget):
         except asyncio.CancelledError:
             if self._streams_cancel is not None:
                 self._streams_cancel.set()  # a clip downloading in a thread stops at its next chunk
+            staged = ("" if self._streams_export_button == "Export Base Files" else
+                      ", and cuts made on a capture host stay there until they are fetched")
             self._log(
-                f"[yellow]The export of '{escape(session_id)}' stopped. What arrived is kept, and cuts made on a "
-                f"capture host stay there until they are fetched: press Export Streams again to go on.[/yellow]"
+                f"[yellow]The export of '{escape(session_id)}' stopped. What arrived is kept{staged}: press "
+                f"{self._streams_export_button} again to go on.[/yellow]"
             )
             raise
         except Exception as error:  # a failure is this export's, not the app's
@@ -1132,7 +1145,7 @@ class SessionsPanel(Widget):
 
     def _progress_end(self) -> None:
         """a transfer is over; the row stays up for as long as the export runs."""
-        self._progress_start("Export Streams", None)
+        self._progress_start(self._streams_export_button, None)
 
     def _progress_hide(self) -> None:
         try:
@@ -1448,6 +1461,61 @@ class SessionsPanel(Widget):
                 "session.[/yellow]"
             )
         return result.here
+
+    # ---- Export Base Files ----
+
+    async def _run_export_base_files(self, session_id: str) -> None:
+        """Export Base Files: what the session's bases, synchronizers and IPS
+        visualizer wrote on the machines they ran on (their logs, the config
+        they ran with, what they recorded), from the host of every SSH profile,
+        into artifacts/<session>/pipelines/<pipeline>/<host>/ (base_files).
+        Those run on this machine wrote there in the first place. Cancel stops
+        it between folders (a transfer at once); what arrived stays, and a
+        transfer cut short resumes at the next press."""
+        from openmmla.tui.schema.loader import _find_project_root
+        from openmmla.tui.ssh import load_ssh_profiles
+
+        cancel = self._streams_cancel or threading.Event()
+        shown = escape(session_id)
+        root = _find_project_root()
+        folder = _shown_path(root, base_files.session_pipelines_dir(root, session_id))
+        self._log(f"[bold]Exporting the base files of session: {shown}[/bold]")
+        self._progress_start("Export Base Files · reading the session", None)
+        record, _stale = await asyncio.to_thread(self._session_record, session_id)
+        profiles = await asyncio.to_thread(load_ssh_profiles)
+        here = await asyncio.to_thread(base_files.local_parts, root, session_id)
+        if here:
+            self._log(f"  [dim]This machine's own are in {folder} already: {escape(', '.join(here))}[/dim]")
+        if not profiles:
+            self._log(
+                "  [yellow]No SSH profile to ask: a base run on another machine keeps its files there. Add that "
+                "machine under System Settings → Hosts → SSH Profiles.[/yellow]"
+            )
+            return
+        self._log(f"[cyan]Asking {len(profiles)} SSH host(s) what they hold of it, into {folder}[/cyan]")
+        callbacks = stream_export.ExportCallbacks(
+            log=self._log,
+            progress_start=self._progress_start,
+            progress_update=self._progress_update,
+            progress_end=self._progress_end,
+            cancelled=cancel.is_set,
+        )
+        result = await base_files.export_session(root, session_id, profiles, callbacks, record=record)
+        for host, keys in result.missing.items():
+            self._log(
+                f"  [yellow]{escape(', '.join(keys))} ran on {escape(host)}, which no SSH profile reached: its "
+                f"files stay there.[/yellow]"
+            )
+        if result.fetched:
+            parts = ", ".join(f"{part} from {profile}" for profile, part in result.fetched)
+            self._log(f"[bold green]Base files of {shown} exported: {escape(parts)}, under {folder}[/bold green]")
+        if result.incomplete:
+            self._log(
+                f"[yellow]Not all of it arrived from {escape(', '.join(result.incomplete))} (see above). What was "
+                f"staged is kept: press Export Base Files again to go on.[/yellow]"
+            )
+        elif not result.fetched:
+            self._log(f"[yellow]No SSH host holds base files of {shown}.[/yellow]")
 
     async def _run_delete(self, session_id: str) -> None:
         import asyncio

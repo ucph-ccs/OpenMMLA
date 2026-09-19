@@ -202,13 +202,14 @@ def files_already_here(local_path: Path, plan) -> list[str]:
     return here
 
 
-def log_plan(log: Callable[[str], None], plan, here: list[str]) -> None:
-    """what a transfer holds, file by file, before it starts."""
+def log_plan(log: Callable[[str], None], plan, here: list[str], describe: Callable = describe_files) -> None:
+    """what a transfer holds, file by file, before it starts. `describe` sorts
+    the files for the first line; "" leaves it at their count."""
     size = dl.fmt_bytes(plan.total_bytes)
+    kinds = describe([item.rel for item in plan.files]) if plan.exact else ""
+    log(f"  {plan.file_count} file(s), {size}" + (f": {kinds}" if kinds else ""))
     if not plan.exact:
-        log(f"  {plan.file_count} file(s), {size}")
         return
-    log(f"  {plan.file_count} file(s), {size}: {describe_files(item.rel for item in plan.files)}")
     here_set = set(here)
     media = [item for item in plan.files if os.path.basename(item.rel) not in METADATA_FILENAMES]
     for item in media[:LIST_MAX]:
@@ -248,6 +249,7 @@ async def fetch_tree(
     what: str | None = None,
     merge: Callable[..., dict] | None = None,
     after_merge: Callable[[], "str | None"] | None = None,
+    describe: Callable = describe_files,
 ) -> bool:
     """scan, download (staged, resumable) and merge one remote tree into
     `local_dir`: only what is not here yet at the remote size is fetched, and
@@ -260,9 +262,16 @@ async def fetch_tree(
     conflict copies, `what` (default: label) names the tree in the log.
     `merge(source, destination, conflict_label=...)` defaults to
     artifacts.merge_tree; `after_merge()`, run between the merge and the removal
-    of the staging (in a thread), may return a line for the log."""
+    of the staging (in a thread), may return a line for the log. `describe(rels)`
+    names a set of files in the log (describe_files: by recording kind); an
+    empty answer names them by their count."""
     merge = merge or merge_tree
     log = callbacks.log
+
+    def named(files) -> str:
+        rels = [item.rel for item in files]
+        return describe(rels) or f"{len(rels)} file(s)"
+
     log(f"[cyan]Downloading {escape(where)}:{escape(remote_dir)} -> {escape(str(local_dir))}[/cyan]")
     # the row goes up before the remote scan, so Cancel is reachable while a
     # large tree is being sized
@@ -281,18 +290,17 @@ async def fetch_tree(
         if plan.rejected:
             log(f"[yellow]Skipping {len(plan.rejected)} remote file(s) with unsupported names.[/yellow]")
         here = await asyncio.to_thread(files_already_here, local_dir, plan) if plan.exact else []
-        log_plan(log, plan, here)
+        log_plan(log, plan, here, describe)
         if here:
             plan = dl.leave_out(plan, here)
             if not plan.file_count:
                 log(f"[green]{escape(what or label)}: all {len(here)} file(s) are already here; nothing to fetch.[/green]")
                 return True
             log(f"  [cyan]{len(here)} file(s) are already here at the same size and are not fetched "
-                f"again; fetching {describe_files(item.rel for item in plan.files)}.[/cyan]")
+                f"again; fetching {named(plan.files)}.[/cyan]")
         _check(callbacks)
         callbacks.progress_start(
-            f"{label} · {describe_files(item.rel for item in plan.files)}"
-            if plan.exact else f"{label} · {plan.file_count} file(s)",
+            f"{label} · {named(plan.files)}" if plan.exact else f"{label} · {plan.file_count} file(s)",
             plan.total_bytes,
         )
         result = await dl.download_tree(
@@ -307,7 +315,7 @@ async def fetch_tree(
     stats = await asyncio.to_thread(merge, result.staged_root, local_dir, conflict_label=where)
     note = await asyncio.to_thread(after_merge) if after_merge is not None else None
     await asyncio.to_thread(dl.finalize, staging)
-    fetched = describe_files(item.rel for item in plan.files) if plan.exact else f"{plan.file_count} file(s)"
+    fetched = named(plan.files) if plan.exact else f"{plan.file_count} file(s)"
     log(
         f"[green]Downloaded {fetched} to {escape(str(local_dir))} via {result.tool} "
         f"(copied {stats['copied']}, unchanged {stats['skipped']}, conflicts {stats['conflicted']})"
@@ -447,11 +455,13 @@ def _note_in_manifest(project_root, session_id: str, host_label: str) -> str | N
     return f"  [dim]Named them in the session manifest: {escape(str(manifest))}[/dim]"
 
 
-def _merge_replacing_shorter(source: Path, destination: Path, *, conflict_label: str) -> dict:
-    """merge fetched cuts; a copy here of the same name but another size (one
-    taken while the session was still going) gives way to the cut, which is the
-    whole one: only a cut this copy did not cover is ever made. Done once every
-    planned file has arrived, so a fetch that fails keeps the copy there was."""
+def merge_replacing(source: Path, destination: Path, *, conflict_label: str) -> dict:
+    """merge a fetched tree whose remote side is the whole file: a copy here of
+    the same name but another size (a cut taken while the session was still
+    going, a log fetched while its base still wrote it) gives way to the fetched
+    one. Only a cut this copy did not cover is ever made, and a base only ever
+    adds to its log. Done once every planned file has arrived, so a fetch that
+    fails keeps the copy there was."""
     for root, _dirs, files in os.walk(source):
         for filename in files:
             if filename.endswith((".part", ".tmp")) or filename in METADATA_FILENAMES:
@@ -505,7 +515,7 @@ async def fetch_session_cuts(
     staging = dl.staging_root(project_root, session_id, STREAMS_DIR, CAPTURE_STREAMS_DIR, host_label)
     fetched = await fetch(
         profile, remote_dir, local_dir, staging=staging, label=host_label, where=ssh_profile, what=session_id,
-        callbacks=callbacks, merge=_merge_replacing_shorter,
+        callbacks=callbacks, merge=merge_replacing,
         after_merge=lambda: _note_in_manifest(project_root, session_id, host_label))
     if fetched:
         # only what was staged for this session and host

@@ -72,8 +72,7 @@ from openmmla.tui.ssh import (
     wrap_local, wrap_remote,
 )
 from openmmla.tui.artifacts import (
-    collection_artifact_dir, merge_tree, pipeline_artifact_dir, pipeline_slug,
-    safe_segment, update_collection_manifest, update_pipeline_manifest,
+    collection_artifact_dir, merge_tree, safe_segment, update_collection_manifest,
 )
 from openmmla.tui import download as dl
 from openmmla.tui import recordings, stream_export
@@ -680,11 +679,6 @@ def _local_collection_session_ids(root: str) -> list[str]:
         ],
         reverse=True,
     )
-
-
-# the planned files already at their place here, at the remote size (a
-# recording is not written again once it is over)
-_files_already_here = stream_export.files_already_here
 
 
 def _remote_artifact_session_ids(profile) -> list[str]:
@@ -7928,28 +7922,6 @@ class ServicePanel(Widget):
                 group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
                 exclusive=False,
             )
-            return
-
-        if not svc.artifact_pipeline:
-            return
-        if target == "local":
-            self._log("[yellow]Artifact download is only available for remote base targets.[/yellow]")
-            return
-        session_id = self._artifact_session_id(event.params)
-        if not session_id:
-            self._log("[yellow]Enter a valid Artifact Session before downloading base artifacts.[/yellow]")
-            return
-        key = f"pipeline-download:{target}:{svc.name}:{session_id}"
-        if key in self._downloads_in_flight:
-            self._log("[yellow]A download for these artifacts is already running.[/yellow]")
-            return
-        self._downloads_in_flight.add(key)
-        self.run_worker(
-            self._run_pipeline_artifacts_download(target, svc, session_id, key),
-            name=key,
-            group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
-            exclusive=False,
-        )
 
     def on_service_card_delete_files_requested(self, event: ServiceCard.DeleteFilesRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
@@ -8057,10 +8029,6 @@ class ServicePanel(Widget):
             merge=merge_tree,
             after_merge=note_in_manifest,
         )
-
-    def _report_incomplete_transfer(self, result) -> None:
-        """explain a transfer that must not be merged, and how to continue."""
-        stream_export.report_incomplete(self._log, result)
 
     def _collection_download_running(self, target: str, session_id: str) -> bool:
         """a Download of this session from this host is running, whatever the
@@ -8319,258 +8287,6 @@ class ServicePanel(Widget):
             )
         await self._mark_session_ended(session_id, "local")
         await self._reload_current_service_view()
-
-    @staticmethod
-    def _artifact_session_id(params: dict) -> str:
-        raw = params.get("--artifact-session-id") or params.get("--session-id") or params.get("-sid")
-        if _is_new_collection_session_choice(raw):
-            return ""
-        return _safe_session_id(raw)
-
-    async def _run_pipeline_artifacts_download(
-        self,
-        profile_name: str,
-        svc: ServiceDef,
-        session_id: str,
-        key: str = "",
-    ) -> None:
-        try:
-            profile = get_profile_by_name(profile_name)
-            if profile is None:
-                self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
-                return
-            pipeline_name = svc.artifact_pipeline or svc.name
-            artifact_host = await self._resolve_remote_pipeline_artifact_host(
-                profile,
-                session_id,
-                pipeline_name,
-                fallback=profile_name,
-            )
-            local_root = pipeline_artifact_dir(
-                self._root,
-                session_id,
-                pipeline_name,
-                artifact_host,
-            )
-            downloaded_paths: list[str] = []
-            total = {"copied": 0, "skipped": 0, "conflicted": 0}
-            remote_root = self._remote_pipeline_artifact_root(profile, session_id, pipeline_name, artifact_host)
-            self._log(f"[cyan]Downloading {svc.display_name} artifacts from {profile_name}:{remote_root}[/cyan]")
-
-            sources = self._pipeline_artifact_sources()
-            for index, (remote_rel, local_rel) in enumerate(sources, start=1):
-                remote_path = f"{remote_root.rstrip('/')}/{remote_rel}"
-                destination = local_root / local_rel
-                # the probe inside _download_remote_item reports a missing path
-                # itself, so this costs the same one ssh round trip as before
-                stats = await self._download_remote_item(
-                    profile,
-                    remote_path,
-                    destination,
-                    conflict_label=profile_name,
-                    staging=dl.staging_root(
-                        self._root,
-                        session_id,
-                        "pipelines",
-                        pipeline_slug(pipeline_name),
-                        artifact_host,
-                        *Path(local_rel).parts,
-                    ),
-                    label=f"{remote_rel} ({index}/{len(sources)})",
-                )
-                if stats is None:
-                    continue
-                downloaded_paths.append(remote_rel)
-                for stat_key, value in stats.items():
-                    total[stat_key] += value
-
-            if not downloaded_paths:
-                self._log(f"[yellow]No artifacts found for session '{session_id}' on {profile_name}.[/yellow]")
-                return
-
-            manifest = await asyncio.to_thread(
-                update_pipeline_manifest,
-                self._root,
-                session_id=session_id,
-                pipeline_name=pipeline_name,
-                host_name=artifact_host,
-                remote_root=remote_root,
-                local_path=local_root,
-                downloaded_paths=downloaded_paths,
-            )
-            self._log(
-                f"[green]Downloaded {svc.display_name} artifacts to {local_root} "
-                f"(copied {total['copied']}, skipped {total['skipped']}, conflicts {total['conflicted']}).[/green]"
-            )
-            self._log(f"[green]Updated session manifest: {manifest}[/green]")
-        except asyncio.CancelledError:
-            self._progress_end()
-            self._log("[yellow]Download cancelled; press Artifacts again to resume.[/yellow]")
-            raise
-        finally:
-            self._downloads_in_flight.discard(key)
-
-    def _remote_pipeline_root(self, profile, svc: ServiceDef) -> str:
-        rel_dir = os.path.relpath(svc.config_dir, self._root)
-        return f"{profile.remote_project_path.rstrip('/')}/{rel_dir}"
-
-    @staticmethod
-    def _remote_pipeline_artifact_base(profile, session_id: str, pipeline_name: str) -> str:
-        return (
-            f"{profile.remote_project_path.rstrip('/')}/artifacts/"
-            f"{safe_segment(session_id, 'session')}/pipelines/"
-            f"{safe_segment(pipeline_name, 'pipeline')}"
-        )
-
-    @classmethod
-    def _remote_pipeline_artifact_root(cls, profile, session_id: str, pipeline_name: str, host_name: str) -> str:
-        return f"{cls._remote_pipeline_artifact_base(profile, session_id, pipeline_name)}/{safe_segment(host_name, 'host')}"
-
-    @staticmethod
-    def _pipeline_artifact_sources() -> list[tuple[str, Path]]:
-        return [
-            ("real-time/runtime", Path("real-time") / "runtime"),
-            ("real-time/profiles", Path("real-time") / "profiles"),
-            ("post-time", Path("post-time")),
-            ("logger", Path("logger")),
-            ("config", Path("config")),
-            ("visualizations", Path("visualizations")),
-        ]
-
-    async def _resolve_remote_pipeline_artifact_host(
-        self,
-        profile,
-        session_id: str,
-        pipeline_name: str,
-        *,
-        fallback: str,
-    ) -> str:
-        base_root = self._remote_pipeline_artifact_base(profile, session_id, pipeline_name)
-        candidates: list[str] = []
-        for candidate in (fallback, await self._remote_short_hostname(profile)):
-            safe = safe_segment(candidate, "")
-            if safe and safe not in candidates:
-                candidates.append(safe)
-
-        for candidate in candidates:
-            if await self._remote_path_exists(profile, f"{base_root.rstrip('/')}/{candidate}"):
-                return candidate
-
-        child_dirs = await self._remote_child_dirs(profile, base_root)
-        if len(child_dirs) == 1:
-            return child_dirs[0]
-        if child_dirs:
-            self._log(
-                f"[yellow]Multiple remote artifact host dirs found under {base_root}; "
-                f"using {child_dirs[0]}.[/yellow]"
-            )
-            return child_dirs[0]
-        return safe_segment(fallback, "host")
-
-    async def _remote_short_hostname(self, profile) -> str:
-        proc = await ssh_run_async(profile, "hostname -s 2>/dev/null || hostname")
-        assert proc.stdout is not None
-        output = ""
-        async for line in proc.stdout:
-            output += line.decode(errors="replace")
-        rc = await proc.wait()
-        if rc != 0:
-            return ""
-        return safe_segment(output.strip().splitlines()[0] if output.strip() else "", "")
-
-    async def _remote_child_dirs(self, profile, remote_path: str) -> list[str]:
-        quoted_path = _quote_remote_path(remote_path)
-        cmd = (
-            f"if [ -d {quoted_path} ]; then "
-            f"find {quoted_path} -mindepth 1 -maxdepth 1 -type d -exec basename {{}} \\; 2>/dev/null; "
-            "fi"
-        )
-        proc = await ssh_run_async(profile, wrap_remote(cmd))
-        assert proc.stdout is not None
-        output = ""
-        async for line in proc.stdout:
-            output += line.decode(errors="replace")
-        rc = await proc.wait()
-        if rc != 0:
-            return []
-        dirs = []
-        for line in output.splitlines():
-            name = safe_segment(line.strip(), "")
-            if name and name not in _NON_SESSION_ARTIFACT_NAMES and name not in dirs:
-                dirs.append(name)
-        return sorted(dirs)
-
-    async def _remote_path_exists(self, profile, remote_path: str) -> bool:
-        cmd = f"if [ -e {_quote_remote_path(remote_path)} ]; then echo EXISTS; else echo MISSING; fi"
-        proc = await ssh_run_async(profile, wrap_remote(cmd))
-        assert proc.stdout is not None
-        output = ""
-        async for line in proc.stdout:
-            output += line.decode(errors="replace")
-        rc = await proc.wait()
-        return rc == 0 and "EXISTS" in output
-
-    async def _download_remote_item(
-        self,
-        profile,
-        remote_path: str,
-        destination: Path,
-        *,
-        conflict_label: str,
-        staging: Path,
-        label: str,
-    ) -> dict[str, int] | None:
-        remote_transfer_path = await asyncio.to_thread(
-            lambda: _expand_remote_home_path(remote_path, _remote_home(profile))
-        )
-        self._progress_start(f"{label} · scanning…", None)
-        try:
-            plan = await dl.probe_remote(profile, remote_transfer_path)
-            if plan.unreachable:
-                self._log(f"  [red]Could not reach the host: {rich_escape(plan.unreachable)}[/red]")
-                return None
-            if not plan.exists:
-                self._log(f"  [yellow]Missing remote path: {remote_path}[/yellow]")
-                return None
-            if not plan.file_count:
-                self._log(f"  [yellow]Empty remote path: {remote_path}[/yellow]")
-                return None
-            here = await asyncio.to_thread(_files_already_here, destination, plan) if plan.exact else []
-            if here:
-                plan = dl.leave_out(plan, here)
-                if not plan.file_count:
-                    self._log(f"  [green]{label}: all {len(here)} file(s) are already here.[/green]")
-                    return {"copied": 0, "skipped": len(here), "conflicted": 0}
-                self._log(
-                    f"  [cyan]{label}: {len(here)} file(s) already here at the same size; "
-                    f"fetching the other {plan.file_count}.[/cyan]"
-                )
-
-            self._progress_start(label, plan.total_bytes)
-            result = await dl.download_tree(
-                profile,
-                remote_transfer_path,
-                staging=staging,
-                plan=plan,
-                on_progress=self._progress_update,
-                log=self._log,
-            )
-        finally:
-            self._progress_end()
-
-        if result.status != "complete":
-            self._report_incomplete_transfer(result)
-            return None
-
-        stats = await asyncio.to_thread(
-            merge_tree,
-            result.staged_root,
-            destination,
-            conflict_label=conflict_label,
-        )
-        await asyncio.to_thread(dl.finalize, staging)
-        stats["skipped"] += len(here)
-        return stats
 
     def _refresh_visible_statuses(self) -> None:
         self.run_worker(
