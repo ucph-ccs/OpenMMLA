@@ -83,8 +83,8 @@ Because the frame analyzer runs in a container, a backend on the same machine is
 
 | Section | What it holds |
 |---|---|
-| `Base` | shared settings: `tag_size` and `families`, `resolution`, `rotate`, `fps`, `keyframe_interval` (seconds between analyzed frames), `angle_config` (a description per camera angle name), the file-replay pacing (`processing_rate`), `stream_kwargs` |
-| `Bases` | one entry per camera angle: `id`, `camera` (a calibrated profile from `Cameras`, shared with IPS), `source`, `source_index`, `camera_angle` (a key of `angle_config`) |
+| `Base` | shared settings: `tag_size` and `families`, `resolution`, `rotate`, `fps`, `keyframe_interval` (seconds between analyzed frames), `angle_config` (the viewing angles: a name and what a camera at that angle sees, added and removed on the Config tab), the file-replay pacing (`processing_rate`), `stream_kwargs` |
+| `Bases` | one entry per camera angle: `id`, `camera` (a calibrated profile from `Cameras`, shared with IPS), `source`, `source_index`, `camera_angle` (picked from the names of `angle_config`) |
 | `Synchronizer` | `result_expiry_time`, `match_tolerance` |
 | `Streams` | managed and external streams |
 | `Server.vfa` | the frame analyzer endpoint, through the gateway (`http://<gateway>:8080/vllm`) or direct (`http://<server>:5007/vllm`) |

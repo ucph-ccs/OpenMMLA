@@ -348,6 +348,8 @@ class DictListField(Widget):
                          "raw: header-less PCM, as an FFmpeg stream sends",
         "channel_select": "→ which channel of a multi-channel device this base keeps; empty: all of them "
                           "(stream_kwargs.channels is how many the device has)",
+        "camera_angle": "→ what this camera sees, by a name of Base.angle_config (a new one is listed once the "
+                        "Base is saved)",
     }
     # a field's earlier name: an entry that still holds it shows its value under
     # the new name, and Save writes the new name alone
@@ -396,8 +398,12 @@ class DictListField(Widget):
         if choices:
             options = [(str(c), str(c)) for c in choices]
             cur = str(val) if val not in (None, "") else None
-            valid = cur if cur and any(ov == cur for _, ov in options) else None
-            kwargs = {"value": valid} if valid is not None else {}
+            if cur and not any(ov == cur for _, ov in options):
+                # a value the list no longer offers (a camera renamed, an angle
+                # taken out of angle_config) is shown and kept: an entry that
+                # opened blank used to be saved blank
+                options.append((f"{cur}  (not in the list now)", cur))
+            kwargs = {"value": cur} if cur else {}
             return Select(
                 options, prompt=f"Select {key}...", id=widget_id,
                 classes="dict-entry-input", **kwargs,
@@ -799,6 +805,92 @@ class DictListField(Widget):
                 pass
 
 
+class MappingField(Widget):
+    """widget for editing a mapping of name -> text (Base.angle_config): a row
+    per pair, each removable, and a button that adds another. The whole mapping
+    is written back, so a name can be added, renamed and removed here."""
+
+    DEFAULT_CSS = """
+    MappingField {
+        height: auto;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+    MappingField .map-row {
+        height: auto;
+        margin-bottom: 0;
+    }
+    MappingField .map-key {
+        width: 24;
+    }
+    MappingField .map-rm-btn {
+        min-width: 12;
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, field_def: FieldDef, initial_value=None) -> None:
+        super().__init__()
+        self.field_def = field_def
+        pairs = initial_value if isinstance(initial_value, dict) else field_def.default
+        self._pairs: dict = dict(pairs or {})
+        self._next_idx = 0
+        self._prefix = _safe_id(f"map__{field_def.path}")
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"[b]{self.field_def.path.split('.')[-1]}[/b]", classes="field-label")
+        if self.field_def.description:
+            yield Static(self.field_def.description, classes="field-desc")
+        for key, val in self._pairs.items():
+            yield self._row(key, val)
+        yield Button("+ Add Entry", variant="success", id=f"{self._prefix}-add", classes="dle-add-btn")
+
+    def _row(self, key, val) -> Widget:
+        idx = self._next_idx
+        self._next_idx += 1
+        row_id = f"{self._prefix}__{idx}"
+        return Horizontal(
+            Input(value=str(key or ""), placeholder="name", id=f"{row_id}__k", classes="map-key"),
+            Input(value="" if val is None else str(val), placeholder="what it means",
+                  id=f"{row_id}__v", classes="dict-entry-input"),
+            Button("Remove", variant="error", id=f"{row_id}__rm", classes="map-rm-btn"),
+            id=row_id, classes="map-row",
+        )
+
+    def add_entry(self) -> None:
+        """mount an empty pair before the add button."""
+        self.mount(self._row("", ""), before=self.query_one(f"#{self._prefix}-add", Button))
+
+    @property
+    def current_value(self) -> dict:
+        """the pairs still on screen, in their order; a row left without a name
+        is not one, and stays out of the file."""
+        result: dict = {}
+        for row in self.query(".map-row"):
+            if not row.id or not row.id.startswith(f"{self._prefix}__"):
+                continue
+            try:
+                key = row.query_one(f"#{row.id}__k", Input).value.strip()
+                val = row.query_one(f"#{row.id}__v", Input).value.strip()
+            except Exception:
+                continue
+            if key:
+                result[key] = val
+        return result
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if btn_id == f"{self._prefix}-add":
+            event.stop()
+            self.add_entry()
+        elif btn_id.startswith(f"{self._prefix}__") and btn_id.endswith("__rm"):
+            event.stop()
+            try:
+                self.query_one(f"#{btn_id[:-len('__rm')]}").remove()
+            except Exception:
+                pass
+
+
 class _UpstreamService(Widget):
     """a single upstream service with editable name, entries, and remove button."""
 
@@ -1076,6 +1168,8 @@ class ConfigForm(Widget):
         initial = self._values.get(f.path, f.default)
         if f.field_type == "list_of_dicts":
             yield DictListField(f, initial_value=initial)
+        elif f.field_type == "mapping":
+            yield MappingField(f, initial_value=initial)
         else:
             yield FieldRow(f, initial_value=initial, source=self._sources.get(f.path),
                            read_only=f.path in self._readonly_paths)
@@ -1287,6 +1381,8 @@ class ConfigForm(Widget):
         initial = self._values.get(f.path, f.default)
         if f.field_type == "list_of_dicts":
             return DictListField(f, initial_value=initial)
+        if f.field_type == "mapping":
+            return MappingField(f, initial_value=initial)
         return FieldRow(f, initial_value=initial, source=self._sources.get(f.path),
                         read_only=f.path in self._readonly_paths)
 
@@ -1391,6 +1487,8 @@ class ConfigForm(Widget):
             values[row.field_def.path] = row.current_value
         for dl in self.query(DictListField):
             values[dl.field_def.path] = dl.current_value
+        for mf in self.query(MappingField):
+            values[mf.field_def.path] = mf.current_value
         for ue in self.query(UpstreamsEditor):
             for svc_name, entries in ue.current_value.items():
                 values[f"{ue.section_key}.{svc_name}"] = entries

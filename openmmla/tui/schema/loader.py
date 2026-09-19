@@ -12,6 +12,11 @@ PLACEHOLDER_RE = re.compile(r'^<.*>$')
 URL_PLACEHOLDER_RE = re.compile(r'https?://.*<.*>')
 INLINE_COMMENT_RE = re.compile(r'^[^#]*#\s*(.*?)\s*$')
 
+# config keys whose value is a mapping the user writes the entries of (a name
+# and a text each), not a block of fixed keys: the form edits one as a whole,
+# a row per pair, so a name can be added, renamed and removed
+MAPPING_FIELDS = frozenset({"Base.angle_config"})
+
 
 @dataclass
 class FieldDef:
@@ -216,7 +221,16 @@ def _walk_yaml(data, path_parts, section, comments, fields, indent_level=0):
         dot_path = ".".join(current_path)
         desc = comments.get(dot_path, "")
 
-        if isinstance(value, dict):
+        if isinstance(value, dict) and dot_path in MAPPING_FIELDS:
+            fields.append(FieldDef(
+                path=dot_path,
+                field_type="mapping",
+                default=value,
+                description=desc,
+                required=False,
+                section=section,
+            ))
+        elif isinstance(value, dict):
             sub_section = f"{section}.{key}"
             _walk_yaml(value, current_path, sub_section, comments, fields, indent_level + 1)
         elif isinstance(value, list) and value and isinstance(value[0], dict):

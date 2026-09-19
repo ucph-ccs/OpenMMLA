@@ -35,7 +35,7 @@ from openmmla.tui.schema.loader import (
     FieldDef as LoaderFieldDef,
     discover_pipelines, load_existing_config, get_nested_value,
     save_config, PipelineDef, _find_project_root, fields_from_config_section,
-    load_streams, streams_from_config, move_source_settings,
+    load_streams, streams_from_config, move_source_settings, PLACEHOLDER_RE,
 )
 from openmmla.tui.schema.definitions import (
     CONSOLE_ONLY_SECTIONS, PRIVATE_SECTIONS, SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
@@ -5410,6 +5410,12 @@ class ServicePanel(Widget):
                         choices["source"] = source_types
                     if "packet_format" in (f.entry_schema or {}):
                         choices["packet_format"] = ["auto", "timestamped", "raw"]
+                    if "camera_angle" in (f.entry_schema or {}):
+                        # the viewing angles of Base.angle_config, named there
+                        # with what a camera at that angle sees
+                        choices["camera_angle"] = [
+                            str(angle) for angle in ((existing.get("Base") or {}).get("angle_config") or {})
+                            if not PLACEHOLDER_RE.match(str(angle))]
                     if "source_index" in (f.entry_schema or {}):
                         # a file entry's folder is listed, and Browse… opens, where
                         # its files are this machine's

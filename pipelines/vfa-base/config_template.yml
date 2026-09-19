@@ -11,8 +11,9 @@ Base:
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
 
-  # camera angle configuration (key: angle_name, value: angle_description)
-  angle_config:
+  # the viewing angles a base is given (Bases[].camera_angle picks one by name);
+  # what a camera at that angle sees travels with its frames to the analyzer
+  angle_config:                                     # angle name: what a camera at that angle sees
     "front": "Direct front view at eye level, showing participants face-on"
     "front-top-45": "View from front but elevated at a 45-degree angle, showing a top-down perspective of the workspace and participants"
     "top": "View from above, showing a top-down perspective of the workspace and participants"
@@ -79,7 +80,7 @@ Bases:
     camera: <camera-name>       # calibrated camera profile name (from Cameras)
     source: stream              # source type (opencv/stream/lsl/file; rtmp is the old name of stream)
     source_index: 0             # opencv: camera index; stream: name of a Streams entry; lsl: stream name; file: the file to replay, by its full path (Browse… on the Config tab)
-    camera_angle: <camera-angle>  # viewing angle label (e.g. front, top, side)
+    camera_angle: <camera-angle>  # the viewing angle of this base, by its name in Base.angle_config (front, top, ...)
 
 Synchronizer:
   result_expiry_time: 30                            # cleanup timeout (seconds)
