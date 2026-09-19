@@ -373,12 +373,12 @@ class ASRBase(Base):
             if self.registration:
                 raise ValueError(f"base {self.id} reads a file (source: file), so it has no stream to record a "
                                  "speaker from: register from files instead.")
-            if 'file_dir' not in base_config:
-                # default to project directory if not specified
+            file_dir = base_config.get('file_dir')
+            if not file_dir:
+                # default to project directory if not specified (a `file_dir:` left empty is not either)
                 file_dir = self.project_dir
                 self.logger.info(f"No file_dir specified in config, using project directory: {file_dir}")
             else:
-                file_dir = base_config['file_dir']
                 if not os.path.isabs(file_dir):
                     file_dir = os.path.join(self.project_dir, file_dir)
 
