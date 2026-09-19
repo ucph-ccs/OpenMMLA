@@ -20,6 +20,7 @@ from openmmla.utils.config import (
 )
 from openmmla.utils.input import select_or_create_session
 from openmmla.utils.logger import get_logger
+from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
 from .input import get_mode
@@ -41,8 +42,13 @@ class VFABase(Base):
             graphics: whether to display graphics (default: True)
             store: whether to store frames locally (default: True)
             verbose: whether to enable verbose logging (default: False)
+            session_id: the session to join; if omitted, choose or create one
+                interactively. The base notes in it which Bases entry it is and
+                the stream it takes, and when it leaves.
             base: which base id from the config 'Bases' list to run; if omitted,
-                pick one interactively (the only interaction).
+                or an id that list does not have, pick one interactively (the
+                only interaction). Launched with a session id and without it,
+                the only entry there is is taken without asking.
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -56,9 +62,8 @@ class VFABase(Base):
 
         # profile-driven: every run loads a base from the config 'Bases' list
         # (single source of truth) — by id if given, else picked interactively.
-        entry = get_base_by_id(self.config, base) if base else self._pick_base_interactively()
-        if entry is None:
-            raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+        entry = self._resolve_base(base)
+        self._base_entry = entry  # what this base notes in its session's sources
         self._camera_name = entry.get('camera')
         # source_index is overloaded by source type (index / file name / stream
         # name); keep it raw and interpret it once the source is known.
@@ -77,6 +82,9 @@ class VFABase(Base):
         self.save_path = None
         self.temp_save_path = None
         self.frame_output_path = None
+        self._stream_name = None  # the Streams entry a stream source resolved to
+        self._stream_url = None
+        self._joined_source = None  # (session id, key) once this base's entry is in its session's sources
 
         # Threading attributes
         self.stop_event = threading.Event()
@@ -143,9 +151,45 @@ class VFABase(Base):
             self.video_stream.stop()
             self.video_stream = None
         if self.graphics:
-            cv2.destroyWindow(f'VFA Base {self.base_id}, Camera {self.selected_source}')
-            cv2.waitKey(1)
+            try:
+                cv2.destroyWindow(f'VFA Base {self.base_id}, Camera {self.selected_source}')
+                cv2.waitKey(1)
+            except cv2.error as e:
+                # no window was opened (STOP before START), or an earlier clean-up closed it
+                self.logger.debug(f"No VFA base window to close: {e}")
         gc.collect()
+
+    def _join_session(self):
+        """Note in the session's MongoDB document which Bases entry this base
+        is and the stream it takes, so the console can find the session's own
+        recordings later. Never stops the base: a failure is a warning."""
+        try:
+            entry = source_entry('vfa', self._base_entry, self.config,
+                                 stream=self._stream_name, url=self._stream_url)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} which stream this base takes: {e}")
+            return
+        if record_joined(self.mongo_client, self.session_id, entry, log=self.logger):
+            self._joined_source = (self.session_id, entry['key'])
+
+    def _leave_session(self):
+        """Note that this base left its session, once, and only if it joined."""
+        if not self._joined_source:
+            return
+        (session_id, key), self._joined_source = self._joined_source, None
+        record_left(self.mongo_client, session_id, key, log=self.logger)
+
+    def _close_clients(self):
+        """Close the broker and database connections on the way out."""
+        for name, close in (('mqtt_client', 'disconnect'), ('redis_client', 'close'),
+                            ('influx_client', 'close'), ('mongo_client', 'close')):
+            client = getattr(self, name, None)
+            if client is None:
+                continue
+            try:
+                getattr(client, close)()
+            except Exception as e:
+                self.logger.debug(f"Closing the {name} failed: {e}")
 
     def _clean_stale_temp_frames(self):
         """Clean stale temporary frames before starting a new non-persistent run."""
@@ -183,7 +227,8 @@ class VFABase(Base):
         session_id = getattr(self, 'launch_session_id', None)
         base = getattr(self, 'launch_base', None)
 
-        # Clean up current state
+        # Clean up current state (the leaving noted first: the clean-up can take seconds)
+        self._leave_session()
         self._clean_up()
 
         # Call __init__ again with the original parameters
@@ -192,6 +237,29 @@ class VFABase(Base):
                      session_id=session_id, base=base)
         
         self.logger.info("VFA base reinitialization completed successfully")
+
+    def _resolve_base(self, base: str | None) -> dict:
+        """The 'Bases' entry this base runs as.
+
+        -b names it. Launched from the console (a session id given) and without -b, the only entry
+        there is, as the IPS and ASR bases do; when -b names no entry, or there are several to
+        choose from, why is printed and the entry is picked here, as a base run by hand does.
+        """
+        if base:
+            entry = get_base_by_id(self.config, base)
+            if entry is not None:
+                return entry
+            known = ', '.join(str(b.get('id')) for b in get_bases(self.config)) or 'none'
+            print(f"Base '{base}' is not in the config's 'Bases' list (ids: {known}). Pick the base below, "
+                  f"or choose one of those ids for this base on the VFA Base card and start it again.")
+        elif self.launch_session_id:
+            bases = get_bases(self.config)
+            if len(bases) == 1:
+                return bases[0]
+            if bases:
+                print(f"No base was given and there are {len(bases)} in the config's 'Bases' list: pick the "
+                      f"base below, or pick it on the VFA Base card and start it again.")
+        return self._pick_base_interactively()
 
     def _pick_base_interactively(self):
         """Pick a base from the config 'Bases' list (the only interaction)."""
@@ -229,7 +297,13 @@ class VFABase(Base):
                 f"{'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}",
                 exc_info=not isinstance(e, KeyboardInterrupt))
         finally:
-            self._clean_up()
+            # noted first: stopping the threads and the stream can take seconds, and a process
+            # killed meanwhile (a closed terminal window) would never note that it left
+            self._leave_session()
+            try:
+                self._clean_up()
+            finally:
+                self._close_clients()
 
     def _start(self):
         """Start the video streaming and MQTT client for the VFA base."""
@@ -239,11 +313,18 @@ class VFABase(Base):
 
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
+        self._join_session()
 
         if self.mode != 'analyze':
             self._configure_video_stream()
-            
-        self._listen_for_start_signal()
+
+        if not self._listen_for_start_signal():
+            # STOP came before START: the run ended before a frame was processed
+            self.logger.info(f"The run of session {self.session_id} was stopped before it started; "
+                             f"VFA base {self.base_id} leaves the session.")
+            self._leave_session()
+            self._clean_up()
+            return
 
         self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
@@ -256,6 +337,7 @@ class VFABase(Base):
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("Interrupted: %s", e)
         finally:
+            self._leave_session()  # before the clean-up, which can take seconds
             self._clean_up()
 
     def _configure_video_stream(self):
@@ -437,6 +519,7 @@ class VFABase(Base):
             from openmmla.utils.constants import resolve_stream_source
             name, url = resolve_stream_source(self.config, self._source_index)
             self.logger.info(f"Using stream '{name}': {url}")
+            self._stream_name, self._stream_url = name, url
             return url
         selected_source = select_source_by_index_or_name(self._source_index, available_sources)
         self.logger.info(f"Using video source {selected_source}")

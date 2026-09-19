@@ -11,7 +11,8 @@ from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
+from openmmla.utils.config import get_bases
+from openmmla.utils.input import select_or_create_session, get_number_of_bases, pause_after_error, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.requests import build_service_url
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
@@ -23,15 +24,23 @@ class VFASynchronizer(Synchronizer):
     """VFASynchronizer class for synchronizing video frames from multiple angles."""
     logger = get_logger('vfa-synchronizer')
 
-    def __init__(self, project_dir: str | None, config_path: str, session_id: str | None = None):
+    def __init__(self, project_dir: str | None, config_path: str, session_id: str | None = None,
+                 num_bases: int | None = None):
         """Initialize the VFASynchronizer class.
         
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
+            session_id: the session to synchronize. Given, the synchronizer was
+                launched from the console: it runs that session at once, with
+                no menu, and returns when the run ends so the process exits.
+            num_bases: how many bases to synchronize; if omitted, it is asked
+                (from the menu) or, launched from the console, the number of
+                entries in the config's 'Bases' list.
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.launch_session_id = session_id
+        self.launch_num_bases = num_bases
 
         # Runtime attributes
         self.threads = []
@@ -91,9 +100,41 @@ class VFASynchronizer(Synchronizer):
         self.vllm_queue = queue.Queue()
         gc.collect()
 
+    def _reinit(self):
+        """Reload the config, keeping the session and the number of bases the
+        synchronizer was launched with (the base class would drop them)."""
+        self.logger.info("Starting synchronizer reinitialization...")
+        project_dir, config_path = self.project_dir, self.config_path
+        session_id, num_bases = self.launch_session_id, self.launch_num_bases
+        self._clean_up()
+        self.__init__(project_dir=project_dir, config_path=config_path, session_id=session_id,
+                      num_bases=num_bases)
+        self.logger.info("Synchronizer reinitialization completed successfully")
+
+    def _close_clients(self):
+        """Close the broker and database connections on the way out."""
+        for name, close in (('mqtt_client', 'disconnect'), ('redis_client', 'close'),
+                            ('influx_client', 'close'), ('mongo_client', 'close')):
+            client = getattr(self, name, None)
+            if client is None:
+                continue
+            try:
+                getattr(client, close)()
+            except Exception as e:
+                self.logger.debug(f"Closing the {name} failed: {e}")
+
     def run(self):
-        """Run the VFA synchronizer."""
+        """Run the VFA synchronizer.
+
+        Launched from the console (with a session id) it runs that session at
+        once and returns when the run ends, so the process exits. When that
+        run cannot start, it says why and falls back to the menu below, where
+        the cause can be fixed and the run started again."""
         print('\033]0;VFA Synchronizer\007')
+        if self.launch_session_id and self._run_from_console():
+            self._close_clients()
+            return
+
         func_map = {1: self._start_synchronization, 2: self._reinit}
 
         while True:
@@ -104,7 +145,12 @@ class VFASynchronizer(Synchronizer):
                     clear_directory(os.path.join(self.temp_dir))
                     self.logger.info("Exiting VFA synchronizer...")
                     break
-                func_map.get(select_fun, lambda: print("Invalid option."))()
+                ended = func_map.get(select_fun, lambda: print("Invalid option."))()
+                if select_fun == 1 and ended is True and self.launch_session_id:
+                    # launched from the console, it came to this menu to fix something: a run
+                    # started from here ends the process on STOP all the same
+                    self.logger.info(f"The run of session {self.launch_session_id} ended; exiting VFA synchronizer.")
+                    break
             except (Exception, KeyboardInterrupt) as e:
                 self.logger.warning(
                     f"\nDuring running synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
@@ -113,16 +159,98 @@ class VFASynchronizer(Synchronizer):
                     show_error_and_pause(e, "return to the VFA Synchronizer menu")
             finally:
                 self._clean_up()
+        self._close_clients()
 
-    def _start_synchronization(self):
-        """Start the synchronization process."""
+    def _run_from_console(self) -> bool:
+        """Run the launch session once, at once, with no menu and no question:
+        the way the console starts the synchronizer.
+
+        Returns:
+            True when the run ended (STOP on the session's control channel,
+            also before START, or Ctrl+C), so the process exits; False when it
+            could not start or ended on an error, after saying why and what to
+            do, so run() falls back to the menu.
+        """
+        session_id = self.launch_session_id
+        try:
+            number_of_bases = self._console_number_of_bases()
+        except ValueError as e:
+            self.logger.error(f"The VFA synchronizer cannot start session {session_id}: {e}")
+            print("Falling back to the VFA Synchronizer menu: fix the above, then choose 1 to start.")
+            return False
+
+        self.logger.info(f"Synchronizing {number_of_bases} base(s) of session {session_id}; "
+                         f"the synchronizer exits when the session is stopped.")
+        try:
+            ended = self._start_synchronization(number_of_bases=number_of_bases)
+        except KeyboardInterrupt:
+            self.logger.info(f"Interrupted; leaving session {session_id}.")
+            ended = True
+        except Exception as e:
+            self.logger.warning(f"The VFA synchronizer could not run session {session_id}: {e}", exc_info=True)
+            print(f"The VFA synchronizer could not run session {session_id}: {e}\n"
+                  f"Check that Redis, MQTT and MongoDB are running (System Services on the console) and that "
+                  f"the config is right, then choose 1 in the menu to start again.")
+            pause_after_error("open the VFA Synchronizer menu")
+            return False
+        finally:
+            self._clean_up()
+
+        if not ended:
+            print(f"The run of session {session_id} stopped on an error (see above), not on STOP.\n"
+                  f"Check that Redis, MQTT and the VFA server are reachable (System Services on the console), "
+                  f"then choose 1 in the menu below to start again.")
+            return False
+
+        print("------------------------------------------------")
+        clear_directory(self.temp_dir)
+        self.logger.info(f"The run of session {session_id} ended; exiting VFA synchronizer.")
+        return True
+
+    def _console_number_of_bases(self) -> int:
+        """How many bases a run launched from the console synchronizes: -nb
+        when it was given, else the number of entries in the config's 'Bases'
+        list.
+
+        Raises:
+            ValueError: in plain words, when neither gives a number to use.
+        """
+        if self.launch_num_bases is not None:
+            if self.launch_num_bases < 1:
+                raise ValueError(
+                    f"-nb/--num_bases is {self.launch_num_bases}, but at least 1 base is needed. "
+                    f"Set Num Bases on the VFA Base card to 1 or more.")
+            return self.launch_num_bases
+        count = len(get_bases(self.config))
+        if not count:
+            raise ValueError(
+                "-nb/--num_bases was not given and the config's 'Bases' list is empty, so the number of bases "
+                "to synchronize is unknown. Add the bases under 'Bases' in config.yml (the Config tab of the "
+                "VFA Base card), or pass -nb.")
+        return count
+
+    def _start_synchronization(self, number_of_bases: int | None = None) -> bool:
+        """Start the synchronization process.
+
+        Args:
+            number_of_bases: how many bases to synchronize; if omitted, -nb
+                when it was given, else asked.
+
+        Returns:
+            True when the run ended with STOP (also STOP before START, when
+            nothing was synchronized) or Ctrl+C; False when it ended on an
+            error, such as the connection to Redis lost.
+        """
         # reset attributes
         self.latest_time = 0
         self.time_bucket_buffer = {}
 
         # bucket selection
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
-        self.number_of_bases = get_number_of_bases()
+        if number_of_bases is None:
+            has_launch_number = self.launch_num_bases is not None and self.launch_num_bases > 0
+            number_of_bases = self.launch_num_bases if has_launch_number else get_number_of_bases()
+        self.number_of_bases = number_of_bases
         real_time_dir = pipeline_section_dir(self.project_dir, self.session_id, 'vfa-base', 'real-time')
         self.temp_dir = os.fspath(real_time_dir / 'temp')
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -152,7 +280,10 @@ class VFASynchronizer(Synchronizer):
         self._create_bucket_logger()
 
         # listen for start signal
-        self._listen_for_start_signal()
+        if not self._listen_for_start_signal():
+            # STOP came before START: nothing was started
+            self._clean_up()
+            return True
 
         # reinitialize mqtt client with a new topic and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/vfa')
@@ -174,6 +305,8 @@ class VFASynchronizer(Synchronizer):
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
+        # Ctrl+C ends the run as STOP does; any other exception is an error
+        return exception_occurred is None or isinstance(exception_occurred, KeyboardInterrupt)
 
     def _create_bucket_logger(self):
         self.bucket_logger_dir = os.fspath(

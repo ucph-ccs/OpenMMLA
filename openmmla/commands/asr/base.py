@@ -20,11 +20,13 @@ def get_parser():
     add_arg('tr', bool, True, 'whether to transcribe speech to text', shortname='-tr')
     add_arg('sp', bool, False, 'whether to do speech separation', shortname='-sp')
     add_arg('hsr', bool, True, 'whether to apply Half-Scaled Recognition at speaker boundaries', shortname='-hsr')
-    add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
-            shortname='-sid')
+    add_arg('session_id', str, None,
+            'session id to use; if set, start recognizing at once without the menu and exit when the run '
+            'ends (STOP); if not set, choose/create one interactively', shortname='-sid')
     add_arg('base', str, None,
             "base name from config 'Bases' (pulls base_type/id/device from that entry); "
-            "if not set, choose from the Bases list interactively", shortname='-b')
+            "if not set, the only entry when started with -sid, else choose from the Bases list interactively",
+            shortname='-b')
     return parser
 
 

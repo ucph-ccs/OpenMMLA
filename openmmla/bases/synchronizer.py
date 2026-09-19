@@ -121,8 +121,13 @@ class Synchronizer(ABC):
                 except Exception as e:
                     self.logger.warning(f"During thread stopping, catch: {e}", exc_info=True)
 
-    def _listen_for_start_signal(self):
-        """Listen on the redis bucket control channel for the START signal."""
+    def _listen_for_start_signal(self) -> bool:
+        """Listen on the redis bucket control channel for the START signal.
+
+        Returns:
+            True on START; False when STOP comes first: the run ended before it started, and the
+            caller starts no work, cleans up and ends the run as it would on STOP.
+        """
         p = self.redis_client.subscribe(f"{self.session_control}")
         self.logger.info(f"Wait for START signal on {self.session_control}...")
 
@@ -130,7 +135,11 @@ class Synchronizer(ABC):
             message = p.get_message(timeout=5)
             if message and message['data'] == b'START':
                 self.logger.info("Received START signal, start synchronizing...")
-                break
+                return True
+            if message and message['data'] == b'STOP':
+                self.logger.info(f"Received STOP on {self.session_control} before START: the run ends "
+                                 f"without synchronizing.")
+                return False
             time.sleep(0.05)
 
     def _listen_for_stop_signal(self):

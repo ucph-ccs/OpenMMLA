@@ -44,6 +44,33 @@ def normalize_source(source) -> str:
     return STREAM_SOURCE_ALIASES.get(text, text)
 
 
+# device names that capture sound: ALSA's, and a Mac's microphone alone
+# (":<index>" to AVFoundation)
+AUDIO_DEVICE_PREFIXES = ("hw:", "plughw:", "default", "sysdefault", "dsnoop", "plug:", "pulse", ":", "none:")
+
+
+def _entry_field(entry, name: str) -> str:
+    value = entry.get(name) if isinstance(entry, dict) else getattr(entry, name, "")
+    return str(value or "").strip()
+
+
+def stream_kind(entry, default: str = "video") -> str:
+    """'audio' or 'video' of a Streams entry (a dict, or anything with kind,
+    target and device): its kind when set; else a udp/tcp target (raw audio to
+    an ASR base) or a device that captures sound; else the default, which is
+    the card's: a microphone pushed over RTMP from a Mac names no device (its
+    first one is ''), so only the pipeline that pulls it can tell. The Streams
+    tab records by this, and a session's sources look the recording up by it."""
+    kind = _entry_field(entry, "kind").lower()
+    if kind in ("audio", "video"):
+        return kind
+    if _entry_field(entry, "target").startswith(("udp://", "tcp://")):
+        return "audio"
+    if _entry_field(entry, "device").lower().startswith(AUDIO_DEVICE_PREFIXES):
+        return "audio"
+    return default if default in ("audio", "video") else "video"
+
+
 def stream_read_url(entry: dict) -> str:
     """the URL a base pulls a Streams entry from: read_target when set, else target."""
     read_target = str(entry.get("read_target") or "").strip()

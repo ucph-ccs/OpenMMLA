@@ -7,11 +7,25 @@ import threading
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.config import is_main_base
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
-from .input import get_function_synchronizer
+from .input import get_bases, get_function_synchronizer
 from .transform import transform_point, transform_rotation
 from .vector import is_tag_looking_at_another_2d
+
+MATRICES_PREFIX = 'transformation_matrices_'
+
+
+def matrices_file_name(main_id) -> str:
+    """The file IPS Camera Sync exports for a main camera: transformation_matrices_<id>.json."""
+    return f'{MATRICES_PREFIX}{main_id}.json'
+
+
+def main_id_of(file_name: str) -> str:
+    """The main camera id of a transformation_matrices_<id>.json file (the id may hold underscores)."""
+    stem = file_name[:-len('.json')] if file_name.endswith('.json') else file_name
+    return stem[len(MATRICES_PREFIX):]
 
 
 class IPSSynchronizer(Synchronizer):
@@ -20,17 +34,22 @@ class IPSSynchronizer(Synchronizer):
     logger = get_logger('ips-synchronizer')
 
     def __init__(self, project_dir: str | None, config_path: str, verbose: bool = False,
-                 session_id: str | None = None):
+                 session_id: str | None = None, main_camera: str | None = None):
         """Initialize the IPSSynchronizer class.
 
         Args:
             project_dir: path to the project directory
             config_path: path to the configuration file
             verbose: whether to enable verbose logging (default: False)
+            session_id: the session to synchronize; given on the command line (as the console does),
+                the synchronizer starts at once and exits when the run ends, instead of showing its menu
+            main_camera: the base id whose camera_sync/transformation_matrices_<id>.json to load;
+                if omitted, the Bases entry marked main: true, else the only exported file
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.verbose = verbose
         self.launch_session_id = session_id
+        self.launch_main_camera = str(main_camera).strip() if main_camera is not None else ''
 
         # Runtime attributes
         self.main_id = None
@@ -81,10 +100,69 @@ class IPSSynchronizer(Synchronizer):
         self.merged_tags = None
         gc.collect()
 
+    def _close_clients(self):
+        """Close the connections before the process exits."""
+        for close in (self.mqtt_client.disconnect, self.influx_client.close, self.mongo_client.close,
+                      self.redis_client.close):
+            try:
+                close()
+            except Exception as e:
+                self.logger.debug(f"While closing a client on exit: {e}")
+
     def run(self):
-        """Run the IPS synchronizer."""
+        """Run the IPS synchronizer.
+
+        Launched from the console (a session id on the command line), it takes its main camera from
+        -mc (or the default), synchronizes at once and exits when the run ends. Run by hand, or when
+        that run cannot start, it shows its menu.
+        """
         print('\033]0;IPS Synchronizer\007')
+        if self.launch_session_id:
+            if self._run_from_console():
+                return
+        elif self.launch_main_camera:
+            problem = self._use_main_camera()
+            if problem:
+                print(f"\n{problem}\n")
+        self._run_menu()
+
+    def _run_from_console(self) -> bool:
+        """Synchronize the session given on the command line at once, then end.
+
+        Returns True once the run has ended (STOP, also before START, or Ctrl+C), and the process
+        exits; False when it could not start or ended on an error: why is printed, and the menu
+        follows so that it can be fixed in this window.
+        """
+        problem = self._use_main_camera()
+        if problem:
+            print(f"\n{problem}\n"
+                  f"The IPS Synchronizer menu follows: choose 2 to pick the main camera, then 1 to start.\n")
+            return False
+        try:
+            ended = self._start_synchronization()
+        except KeyboardInterrupt:
+            self.logger.info("IPS synchronizer stopped with Ctrl+C.")
+            ended = True
+        except Exception as e:
+            self.logger.warning(f"IPS synchronizer could not start session {self.launch_session_id}: {e}",
+                                exc_info=True)
+            show_error_and_pause(e, "open the IPS Synchronizer menu and try again")
+            return False
+        finally:
+            self._clean_up()
+        if not ended:
+            print(f"\nThe synchronization of session {self.launch_session_id} stopped on an error (see above), "
+                  f"not on STOP. Check that Redis and MQTT are running (System Services on the console).\n"
+                  f"The IPS Synchronizer menu follows: choose 1 to start it again.\n")
+            return False
+        self.logger.info(f"Synchronization of session {self.launch_session_id} ended, exiting IPS synchronizer.")
+        self._close_clients()
+        return True
+
+    def _run_menu(self):
+        """Run the IPS synchronizer's interactive menu until the user exits it."""
         func_map = {1: self._start_synchronization, 2: self._set_main_camera, }
+        ended_from_console = False
 
         while True:
             try:
@@ -92,7 +170,14 @@ class IPSSynchronizer(Synchronizer):
                 if select_fun == 0:
                     self.logger.info("Exiting IPS synchronizer...")
                     break
-                func_map.get(select_fun, lambda: print("Invalid option."))()
+                ended = func_map.get(select_fun, lambda: print("Invalid option."))()
+                if select_fun == 1 and ended is True and self.launch_session_id:
+                    # launched from the console, it came to this menu to fix something: a run
+                    # started from here ends the process on STOP all the same
+                    self.logger.info(f"Synchronization of session {self.launch_session_id} ended, "
+                                     f"exiting IPS synchronizer.")
+                    ended_from_console = True
+                    break
             except (Exception, KeyboardInterrupt) as e:
                 self.logger.warning(
                     f"During running the synchronizer, catch: {'KeyboardInterrupt' if isinstance(e, KeyboardInterrupt) else e}, Come back to the main menu.",
@@ -101,9 +186,17 @@ class IPSSynchronizer(Synchronizer):
                     show_error_and_pause(e, "return to the IPS Synchronizer menu")
             finally:
                 self._clean_up()
+        if ended_from_console:
+            self._close_clients()
 
-    def _start_synchronization(self):
-        """Start the synchronization process."""
+    def _start_synchronization(self) -> bool | None:
+        """Start the synchronization process.
+
+        Returns:
+            True when the run ended with STOP (also STOP before START, when nothing was
+            synchronized) or Ctrl+C; False when it ended on an error, such as the connection to
+            Redis lost; None when it did not start (no main camera: it is picked instead).
+        """
         if self.transform_matrices_dict is None:
             self.logger.warning("Main camera id or transformation matrices not set, please set them first.")
             return self._set_main_camera()
@@ -115,7 +208,9 @@ class IPSSynchronizer(Synchronizer):
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
         self._resolve_session_tag_filter()
-        self._listen_for_start_signal()
+        if not self._listen_for_start_signal():
+            self._clean_up()  # STOP came before START: nothing was started
+            return True
 
         # reinitialize mqtt client with new topics and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/ips')
@@ -136,6 +231,8 @@ class IPSSynchronizer(Synchronizer):
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
+        # Ctrl+C ends the run as STOP does; any other exception is an error
+        return exception_occurred is None or isinstance(exception_occurred, KeyboardInterrupt)
 
     def _create_bucket_logger(self):
         """Create logger for the bucket."""
@@ -214,9 +311,76 @@ class IPSSynchronizer(Synchronizer):
             self.logger.info("All threads stopped properly.")
         self._clean_up()
 
-    def _set_main_camera(self):
-        """Set the main camera id and load transformation matrices."""
-        self.transform_matrices_dict = self._load_transform_matrices()
+    def _exported_matrices(self) -> list[str]:
+        """The transformation_matrices_<id>.json files in camera_sync/, sorted by name."""
+        try:
+            names = os.listdir(self.camera_sync_dir)
+        except OSError:
+            return []
+        return sorted(name for name in names
+                      if name.startswith(MATRICES_PREFIX) and name.endswith('.json')
+                      and os.path.isfile(os.path.join(self.camera_sync_dir, name)))
+
+    def _resolve_main_camera(self) -> tuple[str | None, str]:
+        """The main camera a run takes without asking: (id, "") or (None, why there is none).
+
+        -mc names it. Without -mc: the Bases entry marked main: true when its transformation file is
+        there, else the only transformation file in camera_sync/.
+        """
+        exported = self._exported_matrices()
+        listed = ', '.join(exported)
+        if self.launch_main_camera:
+            main_id = self.launch_main_camera
+            if matrices_file_name(main_id) in exported:
+                return main_id, ''
+            there = f"camera_sync holds {listed}" if exported else "camera_sync holds no transformation files"
+            return None, (f"There is no camera_sync/{matrices_file_name(main_id)} for main camera {main_id} in "
+                          f"{self.project_dir} ({there}): run IPS Camera Sync and export the transformations, "
+                          f"or pick another main camera on the IPS Base card.")
+
+        mains = [str(base.get('id')) for base in get_bases(self.config) if is_main_base(base)]
+        for main_id in mains:
+            if matrices_file_name(main_id) in exported:
+                return main_id, ''
+        if len(exported) == 1:
+            return main_id_of(exported[0]), ''
+        wanted = (f"the main base {mains[0]} has no camera_sync/{matrices_file_name(mains[0])}" if mains
+                  else "no Bases entry is marked main: true")
+        if exported:
+            return None, (f"The IPS synchronizer has no main camera: {wanted}, and camera_sync holds "
+                          f"{len(exported)} transformation files ({listed}). Pick the main camera on the "
+                          f"IPS Base card.")
+        return None, (f"The IPS synchronizer has no main camera: {wanted}, and camera_sync in {self.project_dir} "
+                      f"holds no transformation files. Run IPS Camera Sync and export the transformations first.")
+
+    def _use_main_camera(self) -> str:
+        """Load the main camera the process was launched with (-mc, or the default).
+
+        Returns "" once its transformation matrices are loaded, else why they are not, in words the
+        user can act on.
+        """
+        main_id, problem = self._resolve_main_camera()
+        if main_id is None:
+            return problem
+        file_name = matrices_file_name(main_id)
+        try:
+            self._set_main_camera(main_id)
+        except (OSError, ValueError) as e:
+            return (f"camera_sync/{file_name} could not be read ({e}): export the transformations again from "
+                    f"IPS Camera Sync, or pick another main camera on the IPS Base card.")
+        if self.transform_matrices_dict is None:
+            return (f"camera_sync/{file_name} is gone: run IPS Camera Sync and export the transformations "
+                    f"again, or pick another main camera on the IPS Base card.")
+        self.logger.info(f"Main camera {main_id}: loaded camera_sync/{file_name}.")
+        return ''
+
+    def _set_main_camera(self, main_id: str | None = None):
+        """Set the main camera id and load its transformation matrices.
+
+        Args:
+            main_id: the main camera id to load; if None, the user picks a file from camera_sync/
+        """
+        self.transform_matrices_dict = self._load_transform_matrices(main_id)
         if self.transform_matrices_dict is None:
             self.logger.warning("No transformation matrices found, please check your main camera id or do the camera "
                                 "sync first.")
@@ -341,10 +505,24 @@ class IPSSynchronizer(Synchronizer):
         self.merged_relations.clear()
         self.merged_tags.clear()
 
-    def _load_transform_matrices(self):
-        """Load transformation matrices."""
-        transformation_choices = [d for d in os.listdir(self.camera_sync_dir) if
-                                  d.startswith('transformation_matrices_')]
+    def _load_transform_matrices(self, main_id: str | None = None):
+        """Load transformation matrices.
+
+        Args:
+            main_id: the main camera id whose camera_sync/transformation_matrices_<id>.json to load
+                (the result is None when that file is not there); if None, list the files there and
+                ask for one
+        """
+        if main_id is not None:
+            path = os.path.join(self.camera_sync_dir, matrices_file_name(main_id))
+            if not os.path.isfile(path):
+                return None
+            with open(path, 'r') as file:
+                matrices = json.load(file)
+            self.main_id = str(main_id)
+            return matrices
+
+        transformation_choices = self._exported_matrices()
         for idx, choice in enumerate(transformation_choices):
             print(f"{idx}: {choice}")
 
@@ -363,7 +541,7 @@ class IPSSynchronizer(Synchronizer):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
                     chosen_transformation = transformation_choices[selection]
-                    self.main_id = chosen_transformation.split('_')[-1].split('.')[0]
+                    self.main_id = main_id_of(chosen_transformation)
                     break
             except ValueError:
                 self.logger.warning("Please enter a valid number or press Enter for default.")

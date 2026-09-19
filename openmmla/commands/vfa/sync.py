@@ -1,5 +1,6 @@
 import argparse
 import functools
+import sys
 
 
 def get_parser():
@@ -13,8 +14,13 @@ def get_parser():
     add_arg('project_dir', str, None,
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
-    add_arg('session_id', str, None, 'session id to use; if not set, choose/create one interactively',
+    add_arg('session_id', str, None,
+            'session id to use; if not set, choose/create one interactively. Given (as the console does), the '
+            'synchronizer runs that session at once, with no menu, and exits when the session is stopped',
             shortname='-sid')
+    add_arg('num_bases', int, None,
+            "number of bases to synchronize; if not set, asked interactively, or with -sid, the number of entries "
+            "in the config's 'Bases' list", shortname='-nb')
     return parser
 
 
@@ -27,11 +33,19 @@ def main():
 
     print_arguments(args)
 
-    vfa_synchronizer = VFASynchronizer(
-        project_dir=args.project_dir,
-        config_path=args.config_path,
-        session_id=args.session_id,
-    )
+    try:
+        vfa_synchronizer = VFASynchronizer(
+            project_dir=args.project_dir,
+            config_path=args.config_path,
+            session_id=args.session_id,
+            num_bases=args.num_bases,
+        )
+    except Exception as e:
+        # it connects to MQTT and MongoDB as it is made, so there is no menu yet to fall back to
+        print(f"\nThe VFA synchronizer could not start: {type(e).__name__}: {e}\n"
+              f"It connects to MQTT and MongoDB as it starts: check that they are running and reachable "
+              f"(System Services on the console) and that {args.config_path} is right, then start it again.")
+        sys.exit(1)
     vfa_synchronizer.run()
 
 

@@ -20,7 +20,7 @@ def get_parser():
             shortname='-sid')
     add_arg('base', str, None,
             "base id from config 'Bases' (pulls camera/source/id from that entry); "
-            "if omitted, choose interactively", shortname='-b')
+            "if omitted, choose interactively (with -sid, the only entry there is is taken)", shortname='-b')
     return parser
 
 

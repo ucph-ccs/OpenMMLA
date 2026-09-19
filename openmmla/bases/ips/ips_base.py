@@ -17,6 +17,7 @@ from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
+from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
 from .input import get_bases, get_base_by_id, select_source_by_index_or_name, compute_initial_sync_time
@@ -39,8 +40,10 @@ class IPSBase(Base):
             graphics: whether to show graphics (default: True)
             store: whether to store the video frames (default: True)
             verbose: whether to enable verbose logging (default: False)
+            session_id: the session to join; if omitted, choose or create one interactively
             base: which base id from the config 'Bases' list to run; if omitted,
-                pick one interactively.
+                pick one interactively (launched with a session id, the only entry
+                there is is taken without asking).
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -52,9 +55,8 @@ class IPSBase(Base):
         self.max_badge_id = 12
 
         # profile-driven: load this base from the config 'Bases' list
-        entry = get_base_by_id(self.config, base) if base else self._pick_base_interactively()
-        if entry is None:
-            raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+        entry = self._resolve_base(base)
+        self._base_entry = entry  # noted in the session it joins (session_sources)
         self._camera_name = entry.get('camera')
         # source_index is overloaded by source type (index / file name / stream
         # name); keep it raw and interpret it once the source is known.
@@ -72,6 +74,8 @@ class IPSBase(Base):
         self.camera_configured = False
         self.session_id = None
         self.video_stream = None
+        self.stream_name = None  # the Streams entry a 'stream' source pulls
+        self._joined = None  # (session id, source key) once noted in the session, until it leaves
 
         # Threading attributes
         self.stop_event = threading.Event()
@@ -135,6 +139,9 @@ class IPSBase(Base):
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
+        # noted first: stopping the threads and the stream can take seconds, and a process killed
+        # meanwhile (a closed terminal window) would never note that it left
+        self._note_left()
         if self.threads:
             self._stop_threads()
         self._clear_threads()
@@ -143,9 +150,22 @@ class IPSBase(Base):
             self.video_stream.stop()
             self.video_stream = None
         if self.graphics:
-            cv2.destroyWindow(f'AprilTags Detection from camera {self.base_id}')
-            cv2.waitKey(1)
+            try:
+                cv2.destroyWindow(f'AprilTags Detection from camera {self.base_id}')
+                cv2.waitKey(1)
+            except cv2.error as e:
+                # no window was opened (STOP before START), or an earlier clean-up closed it
+                self.logger.debug(f"No detection window to close: {e}")
         gc.collect()
+
+    def _close_clients(self):
+        """Close the connections before the process exits."""
+        for close in (self.mqtt_client.disconnect, self.influx_client.close, self.mongo_client.close,
+                      self.redis_client.close):
+            try:
+                close()
+            except Exception as e:
+                self.logger.debug(f"While closing a client on exit: {e}")
 
     def run(self):
         """Run the IPS base — fully profile-driven (no menus)."""
@@ -162,6 +182,7 @@ class IPSBase(Base):
                 exc_info=not isinstance(e, KeyboardInterrupt))
         finally:
             self._clean_up()
+            self._close_clients()
 
     def _start_detection(self):
         """Start AprilTag detection"""
@@ -172,10 +193,16 @@ class IPSBase(Base):
         # bucket selection
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
+        self._note_joined()
 
         # configure video stream and start it
         self._configure_video_stream()
-        self._listen_for_start_signal()
+        if not self._listen_for_start_signal():
+            # STOP came before START: the run ended before a frame was processed
+            self.logger.info(f"The run of session {self.session_id} was stopped before it started; "
+                             f"IPS base {self.base_id} leaves the session.")
+            self._clean_up()
+            return
 
         # reinitialize mqtt client
         self.mqtt_client.reinitialise()
@@ -204,12 +231,33 @@ class IPSBase(Base):
                                  os.path.join(self.bucket_logger_dir, f'ips_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
 
+    def _note_joined(self):
+        """Note in the session which Bases entry this base is and the stream it takes, so that the
+        console finds the session's own recordings later. A failure is a warning, never a stop."""
+        stream, url = (self.stream_name, self.selected_source) if self.source == 'stream' else (None, None)
+        try:
+            entry = source_entry('ips', self._base_entry, self.config, stream=stream, url=url)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} which stream base "
+                                f"{self.base_id} takes: {e}")
+            return
+        if record_joined(self.mongo_client, self.session_id, entry, log=self.logger):
+            self._joined = (self.session_id, entry['key'])
+
+    def _note_left(self):
+        """Note once, on the way out, that this base left the session it joined."""
+        if not self._joined:
+            return
+        (session_id, key), self._joined = self._joined, None
+        record_left(self.mongo_client, session_id, key, log=self.logger)
+
     def _detection_handler(self, e: Exception | None):
         """Handle exceptions and stop all threads.
 
         Args:
             e: the exception occurred during the detection process
         """
+        self._note_left()  # before the thread joins below, which can take seconds
         if e:
             self._stop_threads()
         else:
@@ -366,10 +414,36 @@ class IPSBase(Base):
             from openmmla.utils.constants import resolve_stream_source
             name, url = resolve_stream_source(self.config, self._source_index)
             self.logger.info(f"Using stream '{name}': {url}")
+            self.stream_name = name  # noted in the session with the url
             return url
         selected_source = select_source_by_index_or_name(self._source_index, available_sources)
         self.logger.info(f"Using video source {selected_source}")
         return selected_source
+
+    def _resolve_base(self, base: str | None) -> dict:
+        """The 'Bases' entry this base runs as.
+
+        -b names it. Launched from the console (a session id given) and without -b, the only entry
+        there is; when -b names no entry, or there are several to choose from, why is printed and
+        the entry is picked here, as a base run by hand does.
+        """
+        if base:
+            entry = get_base_by_id(self.config, base)
+            if entry is not None:
+                return entry
+            if not self.launch_session_id:
+                raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+            ids = ', '.join(str(b.get('id')) for b in get_bases(self.config)) or 'none'
+            print(f"\nBase '{base}' is not in the config's Bases (there are: {ids}): pick another base on "
+                  f"the IPS Base card, or pick one below.\n")
+        elif self.launch_session_id:
+            bases = get_bases(self.config)
+            if len(bases) == 1:
+                return bases[0]
+            if bases:
+                print(f"\nNo base was given and there are {len(bases)} in the config's Bases: pick the base "
+                      f"on the IPS Base card, or pick one below.\n")
+        return self._pick_base_interactively()
 
     def _pick_base_interactively(self):
         """Pick a base from the config 'Bases' list (the only interaction)."""

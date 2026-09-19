@@ -2,7 +2,6 @@ import gc
 import json
 import os
 import threading
-import time
 
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
@@ -12,7 +11,8 @@ from openmmla.utils.input import select_or_create_session, get_number_of_bases, 
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
-from .input import get_function_synchronizer, get_base_type, get_synchronizer_mode
+from .input import get_function_synchronizer, get_base_type, get_synchronizer_mode, get_base_types, \
+    default_base_type, default_number_of_bases, explain_cannot_start
 
 
 def start_asr_synchronizer(
@@ -22,15 +22,20 @@ def start_asr_synchronizer(
     dominant: bool = False,
     sp: bool = False,
     session_id: str | None = None,
+    base_type: str | None = None,
+    num_bases: int | None = None,
 ):
     """Start ASR Synchronizer with restart capability.
-    
+
     Args:
         project_dir: Path to the project directory
         config_path: Path to the configuration file
         mode: Operating mode ('analyze' or 'live')
         dominant: Whether to select the dominant speaker
         sp: Whether the audio bases do speech separation
+        session_id: Session to synchronize; given, the synchronizer starts at once and exits when the run ends
+        base_type: Key of the config's Base section the bases use
+        num_bases: Number of bases to wait for in each time bucket
     """
     # Restart loop - allows restarting the entire process
     while True:
@@ -42,8 +47,11 @@ def start_asr_synchronizer(
                 dominant=dominant,
                 sp=sp,
                 session_id=session_id,
+                base_type=base_type,
+                num_bases=num_bases,
             )
             synchronizer.run()
+            break  # run() returns only once a run launched from the console has ended
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
                 print("\n👋 Goodbye!")
@@ -70,6 +78,8 @@ class ASRSynchronizer(Synchronizer):
         dominant: bool = False,
         sp: bool = False,
         session_id: str | None = None,
+        base_type: str | None = None,
+        num_bases: int | None = None,
     ):
         """Initialize the ASRSynchronizer class.
 
@@ -78,12 +88,20 @@ class ASRSynchronizer(Synchronizer):
             config_path: path to the configuration file
             dominant: whether to select the dominant speaker or not (default: False)
             sp: tag of whether the audio bases do speech separation (default: False)
+            session_id: the session to synchronize; given, the synchronizer was launched from the
+                console: it asks nothing, starts at once and exits when the run ends (default: None)
+            base_type: key of the config's Base section; if omitted, the only key when launched from
+                the console, else picked from a menu (default: None)
+            num_bases: number of bases to wait for; if omitted, the entries of the config's Bases list
+                when launched from the console, else asked at Start (default: None)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.mode = mode
         self.dominant = dominant
         self.sp = sp
         self.launch_session_id = session_id
+        self._base_type_arg = base_type
+        self._num_bases_arg = num_bases
 
         # Runtime attributes
         self.threads = []
@@ -93,11 +111,56 @@ class ASRSynchronizer(Synchronizer):
         self.latest_time = None  # Record start time of the most recent received frame
         self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<speakers>, <similarities>, <durations>, <segment_start_times>}}}
 
-        self.base_type = get_base_type(self.config)
+        self.base_type = self._choose_base_type(base_type)
 
         self._setup_yaml()
         self._setup_directories()
         self._setup_objects()
+
+    def _choose_base_type(self, base_type: str | None) -> str:
+        """The Base section key to take: -bt when it names one; launched from the
+        console without -bt, the only key there is; else picked from the menu,
+        as a synchronizer started by hand always has."""
+        base_types = get_base_types(self.config)
+        if base_type is not None:
+            if str(base_type) in base_types:
+                return str(base_type)
+            explain_cannot_start(
+                "ASR Synchronizer",
+                f"-bt {base_type} is not an entry of the config's Base section "
+                f"({', '.join(base_types) or 'it has none'}).",
+                "Pick the base type below; the entries are the blocks under Base on the ASR Base card's Config tab.",
+                wait=True)  # the base type menu clears the screen
+            return get_base_type(self.config)
+        if not self.launch_session_id:
+            return get_base_type(self.config)
+        chosen, why = default_base_type(self.config)
+        if chosen:
+            self.logger.info(f"Base type: {chosen} (the only entry of the config's Base section).")
+            return chosen
+        explain_cannot_start("ASR Synchronizer", why, "Pick the base type below, or start it with -bt <base type>.",
+                             wait=True)  # the base type menu clears the screen
+        return get_base_type(self.config)
+
+    def _choose_number_of_bases(self) -> int:
+        """The number of bases to wait for: -nb when it is positive; launched from
+        the console without -nb, the entries of the config's Bases list; else
+        asked, as a synchronizer started by hand always has."""
+        num_bases = self._num_bases_arg
+        if num_bases is not None:
+            if int(num_bases) > 0:
+                return int(num_bases)
+            explain_cannot_start("ASR Synchronizer", f"-nb {num_bases} is not a positive number of bases.",
+                                 "Enter the number of bases below.")
+            return get_number_of_bases()
+        if not self.launch_session_id:
+            return get_number_of_bases()
+        count, why = default_number_of_bases(self.config)
+        if count:
+            self.logger.info(f"Number of bases: {count} (the entries of the config's Bases list).")
+            return count
+        explain_cannot_start("ASR Synchronizer", why, "Enter the number of bases below, or start it with -nb <number>.")
+        return get_number_of_bases()
 
     def _setup_yaml(self):
         """Set up attributes from YAML configuration."""
@@ -134,15 +197,43 @@ class ASRSynchronizer(Synchronizer):
         self.time_bucket_buffer = {}
         gc.collect()
 
+    def _close_clients(self):
+        """Close the connections to MQTT, Redis, InfluxDB and MongoDB before the process exits."""
+        for close in (getattr(self.mqtt_client, 'disconnect', None), getattr(self.redis_client, 'close', None),
+                      getattr(self.influx_client, 'close', None), getattr(self.mongo_client, 'close', None)):
+            try:
+                if close:
+                    close()
+            except Exception as e:
+                self.logger.debug(f"Closing a client on exit: {e}")
+
     def run(self):
-        """Run the ASR synchronizer."""
+        """Run the ASR synchronizer.
+
+        Launched from the console (with a session id) it starts synchronizing at
+        once, without the menu, and returns when that run ends with STOP, so the
+        process exits. A run that ends with an error, or a choice it could not
+        make, leaves it at the menu in the same window, as a synchronizer started
+        by hand always is.
+        """
         print(f'\033]0;ASR Synchronizer for {self.base_type}\007')
         func_map = {1: self._start_synchronization, 2: self._switch_mode, 3: self._reset}
+        start_at_once = bool(self.launch_session_id)
+        ended = False
 
         while True:
             try:
-                select_fun = get_function_synchronizer(self.mode)
-                func_map.get(select_fun, lambda: print("Invalid option."))()
+                if start_at_once:
+                    start_at_once = False
+                    select_fun = 1
+                else:
+                    select_fun = get_function_synchronizer(self.mode)
+                outcome = func_map.get(select_fun, lambda: print("Invalid option."))()
+                if select_fun == 1 and self.launch_session_id:
+                    if outcome is True:
+                        ended = True
+                        break
+                    print("The run did not end with STOP (see above). Choose Start below to synchronize again.")
             except KeyboardInterrupt as e:
                 if "Exit" in str(e):
                     # 'q' was pressed in top-level menu - re-raise to be caught by outer restart loop
@@ -156,11 +247,20 @@ class ASRSynchronizer(Synchronizer):
             finally:
                 self._clean_up()
 
-    def _start_synchronization(self):
-        """Start the synchronization process."""
+        if ended:
+            self._close_clients()
+            print(f"The run of session {self.launch_session_id} ended with STOP: the ASR Synchronizer exits.")
+
+    def _start_synchronization(self) -> bool:
+        """Start the synchronization process.
+
+        Returns:
+            True when the run ended with STOP (also STOP before START, when nothing was
+            synchronized), False when it ended with an error.
+        """
         # bucket selection
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
-        self.number_of_bases = get_number_of_bases()
+        self.number_of_bases = self._choose_number_of_bases()
         self._create_bucket_logger()
 
         # reset attributes
@@ -168,7 +268,10 @@ class ASRSynchronizer(Synchronizer):
         self.time_bucket_buffer = {}
 
         # listen for start signal
-        self._listen_for_start_signal()
+        if not self._listen_for_start_signal():
+            # STOP came before START: the run ended with nothing synchronized
+            self._clean_up()
+            return True
 
         # reinitialize mqtt client with a new topic and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/asr')
@@ -190,6 +293,7 @@ class ASRSynchronizer(Synchronizer):
             exception_occurred = e
         finally:
             self._synchronization_handler(exception_occurred)
+        return exception_occurred is None
 
     def _switch_mode(self):
         """Switch the operating mode between 'analyze' and 'live'."""
@@ -205,10 +309,14 @@ class ASRSynchronizer(Synchronizer):
         """Reset the ASR synchronizer.
         
         Reinitialize the ASR synchronizer by calling the constructor with the current configuration,
-        logs the reset status, and performs garbage collection.
+        logs the reset status, and performs garbage collection. It keeps the session, base type and
+        number of bases it was started with; without them it asks again, as before.
         """
+        keep_base_type = self.launch_session_id or self._base_type_arg is not None
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
-                      dominant=self.dominant, sp=self.sp)
+                      dominant=self.dominant, sp=self.sp, session_id=self.launch_session_id,
+                      base_type=self.base_type if keep_base_type else None,
+                      num_bases=self._num_bases_arg)
         self.logger.info(f"ASR Synchronizer reset successfully.")
         gc.collect()
 
@@ -325,7 +433,8 @@ class ASRSynchronizer(Synchronizer):
         """
         while not self.stop_event.is_set():
             self.redis_client.publish(f"{self.session_id}/asr/control", 'START')
-            time.sleep(self.bucket_duration)
+            # wakes as soon as STOP sets the event, so the run ends without waiting a whole bucket
+            self.stop_event.wait(self.bucket_duration)
 
     def _update_time_bucket_buffer(self, time_bucket_key: float, latest_base_result: dict):
         """Update the time bucket buffer with the latest base recognition result.

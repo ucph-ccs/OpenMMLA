@@ -30,9 +30,10 @@ from openmmla.utils.input import select_or_create_session, get_id, get_interacti
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url, build_service_url
+from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from .audio_recognizer import AudioRecognizer
 from .enums import BLUE, ENDC, GREEN, PURPLE, GREY, RED
-from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion
+from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion, explain_cannot_start
 from openmmla.utils.config import get_bases, get_base_by_id
 
 
@@ -66,6 +67,8 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
         tr: Whether to transcribe speech to text
         sp: Whether to do speech separation for overlapped segments
         hsr: Whether to apply Half-Scaled Recognition at speaker boundaries
+        session_id: Session to join; given, the base starts at once and exits when the run ends with STOP
+        base: Id of the config 'Bases' entry this base is
     """
     # restart loop - allows restarting the entire process
     while True:
@@ -74,6 +77,7 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
                               vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr,
                               session_id=session_id, base=base)
             asr_base.run()
+            break  # run() returns only once a run launched from the console has ended with STOP
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
                 print("\n👋 Goodbye!")
@@ -107,6 +111,10 @@ class ASRBase(Base):
             tr: whether to transcribe speech to text (default: True)
             sp: whether to perform speech separation (default: False)
             hsr: whether to apply Half-Scaled Recognition at speaker boundaries (default: True)
+            session_id: the session to join; given, the base was launched from the console: it
+                asks nothing, starts at once and exits when the run ends with STOP (default: None)
+            base: id of the config 'Bases' entry this base is; if omitted, the only entry when
+                launched from the console, else picked interactively (default: None)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -133,13 +141,24 @@ class ASRBase(Base):
         self.asr_scope = "participant"
         self.speaker_verification = True
         self.group_speaker_id = "group"
+        self.stream_name = None  # the Streams entry a 'stream' source pulls
+        self.url = None
+        self._joined_session = None  # (session id, source key) this base noted itself in (session sources)
 
         # base identity/type/device come from the config 'Bases' list (single
         # source of truth) instead of typing the id / picking the type at startup
         if base:
             base_entry = get_base_by_id(self.config, base)
             if base_entry is None:
-                raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+                if not self.launch_session_id:
+                    raise ValueError(f"Base '{base}' not found in config 'Bases'.")
+                explain_cannot_start(
+                    "ASR Base", f"-b {base} is not an id in the config's Bases list.",
+                    "Pick this base's entry below; the ids are the entries under Bases on the ASR Base card's "
+                    "Config tab.")
+                base_entry = self._choose_base_from_config()
+        elif self.launch_session_id:
+            base_entry = self._default_base()
         else:
             base_entry = self._choose_base_from_config()
         self._base_entry = base_entry
@@ -170,6 +189,25 @@ class ASRBase(Base):
             if 0 <= index < len(bases):
                 return bases[index]
             print("Invalid selection. Please enter a valid base number.")
+
+    def _default_base(self):
+        """The Bases entry a base launched from the console without -b takes: the
+        only one there is. With several it says so and asks, as by hand."""
+        bases = get_bases(self.config)
+        if len(bases) == 1:
+            return bases[0]
+        if bases:
+            explain_cannot_start(
+                "ASR Base", f"the config's Bases list has {len(bases)} entries and no -b names this base's.",
+                "Pick this base's entry below, or start it with -b <base id>.")
+        return self._choose_base_from_config()
+
+    @staticmethod
+    def _pick_stream(stream_sources: list[tuple[str, str]]) -> tuple[str, str]:
+        """(name, url) of the stream picked in the stream menu."""
+        url = get_stream_url([stream_url for _, stream_url in stream_sources])
+        name = next((name for name, stream_url in stream_sources if stream_url == url), None)
+        return name, url
 
     def _setup_yaml(self):
         """Load and assign configuration parameters from the YAML configuration file.
@@ -275,16 +313,33 @@ class ASRBase(Base):
         # as for the IPS and VFA bases. It used to be asked in a menu whatever
         # the entry said, which a base started from the console waited on
         elif self.source == 'stream':
-            from openmmla.utils.constants import get_stream_urls, resolve_stream_source
+            from openmmla.utils.constants import get_stream_sources, resolve_stream_source
             source_index = self._base_entry.get('source_index')
-            stream_urls = get_stream_urls(self.config)
-            if source_index in (None, "") and len(stream_urls) > 1:
+            stream_sources = get_stream_sources(self.config)
+            if source_index in (None, "") and len(stream_sources) > 1:
                 # the entry names none of several: ask, as a base started by hand
-                self.url = get_stream_url(stream_urls)
+                if self.launch_session_id:
+                    explain_cannot_start(
+                        "ASR Base",
+                        f"base {self.id} names no stream in its Bases entry (source_index), and there are "
+                        f"{len(stream_sources)} to pull: {', '.join(name for name, _ in stream_sources)}.",
+                        "Pick its stream below; set it on the ASR Base card's Config tab to skip this next time.",
+                        wait=True)  # the stream menu clears the screen
+                self.stream_name, self.url = self._pick_stream(stream_sources)
                 self.logger.info(f"Using stream URL: {self.url}")
             else:
-                name, self.url = resolve_stream_source(self.config, source_index)
-                self.logger.info(f"Using stream '{name}': {self.url}")
+                try:
+                    self.stream_name, self.url = resolve_stream_source(self.config, source_index)
+                except ValueError as e:
+                    # launched from the console, a stream it cannot find is picked in the menu instead
+                    if not self.launch_session_id or not stream_sources:
+                        raise
+                    explain_cannot_start(
+                        "ASR Base", f"base {self.id}: {e}",
+                        "Pick its stream below; fix its source_index on the ASR Base card's Config tab to skip "
+                        "this next time.", wait=True)  # the stream menu clears the screen
+                    self.stream_name, self.url = self._pick_stream(stream_sources)
+                self.logger.info(f"Using stream '{self.stream_name}': {self.url}")
             self.stream_kwargs['url'] = self.url
 
         # set lsl_name for 'lsl' (the stream is selected by name; the base
@@ -317,14 +372,28 @@ class ASRBase(Base):
 
             audio_extensions = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wma')
             sel = self._base_entry.get('source_index')
+            cand = None
             if sel:
-                # profile-driven: the base entry names the file (source_index) —
-                # resolve it and derive initial_sync_time without prompting
                 cand = str(sel) if os.path.isabs(str(sel)) else os.path.join(file_dir, str(sel))
                 if not os.path.exists(cand):
-                    raise ValueError(
-                        f"Base '{self.id}' source 'file' references '{sel}' but it was "
-                        f"not found in {file_dir}.")
+                    if not self.launch_session_id:
+                        raise ValueError(
+                            f"Base '{self.id}' source 'file' references '{sel}' but it was "
+                            f"not found in {file_dir}.")
+                    # launched from the console: say so and browse for the file below
+                    explain_cannot_start(
+                        "ASR Base", f"base {self.id} reads the file '{sel}', which is not in {file_dir}.",
+                        "Pick the audio file below; fix its source_index on the ASR Base card's Config tab to "
+                        "skip this next time.")
+                    cand = None
+            elif self.launch_session_id:
+                explain_cannot_start(
+                    "ASR Base", f"base {self.id} reads a file (source: file) but names none in source_index.",
+                    "Pick the audio file below; set its source_index on the ASR Base card's Config tab to skip "
+                    "this next time.")
+            if cand:
+                # profile-driven: the base entry names the file (source_index) —
+                # resolve it and derive initial_sync_time without prompting
                 file_path = cand
                 ist = base_config.get('initial_sync_time')
                 if ist is None:
@@ -389,16 +458,63 @@ class ASRBase(Base):
         self.speaker_frames_dict = None
         gc.collect()
 
+    def _close_clients(self):
+        """Close the connections to MQTT, Redis, InfluxDB and MongoDB before the process exits."""
+        for close in (getattr(self.mqtt_client, 'disconnect', None), getattr(self.redis_client, 'close', None),
+                      getattr(self.influx_client, 'close', None), getattr(self.mongo_client, 'close', None)):
+            try:
+                if close:
+                    close()
+            except Exception as e:
+                self.logger.debug(f"Closing a client on exit: {e}")
+
+    def _available_speakers(self) -> list[str]:
+        """The speakers registered in the profiles directory."""
+        if not os.path.exists(self.profiles_dir):
+            return []
+        return [d for d in os.listdir(self.profiles_dir)
+                if os.path.isdir(os.path.join(self.profiles_dir, d)) and not d.startswith('.')]
+
     def run(self):
         """Run the ASR base.
 
-        Continuously prompts the user for input until termination.
+        Launched from the console (with a session id) it starts recognizing at
+        once, without the menu, with every registered speaker profile selected,
+        and returns when that run ends with STOP, so the process exits. When it
+        cannot start (participant scope without speaker profiles) it says why and
+        shows its menu, where Edit Speaker Profiles fixes it; a run that ends with
+        an error also comes back to the menu. Started by hand, it prompts with the
+        menu until termination.
         """
         func_map = {1: self._edit_speakers, 2: self._start_recognition, 3: self._switch_mode, 4: self._reset}
+        start_at_once = bool(self.launch_session_id)
+        ended = False
         while True:
             try:
-                select_fun = get_function_base(self.id, self.mode)
-                func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
+                if start_at_once:
+                    start_at_once = False
+                    select_fun = 2
+                    if self.speaker_verification and self.selected_speakers is None:
+                        # the selection Edit Speaker Profiles starts from: every registered profile
+                        self.selected_speakers = self._available_speakers()
+                else:
+                    select_fun = get_function_base(self.id, self.mode)
+                outcome = func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
+                if select_fun == 2 and self.launch_session_id:
+                    if outcome is True:
+                        ended = True
+                        break
+                    if outcome is None:
+                        explain_cannot_start(
+                            "ASR Base",
+                            f"base {self.id} verifies speakers (asr_scope: {self.asr_scope}), and {self.mode} mode "
+                            "needs at least one registered speaker profile selected.",
+                            "Register and select speakers with Edit Speaker Profiles below, then choose Start. "
+                            f"Or switch to capture mode, or set asr_scope: group for base type {self.base_type} "
+                            "on the ASR Base card's Config tab.")
+                    else:
+                        print(f"The run of base {self.id} did not end with STOP (see above). "
+                              "Choose Start below to run it again.")
             except KeyboardInterrupt as e:
                 if "Exit" in str(e):
                     # 'q' was pressed in top-level menu - re-raise to be caught by outer restart loop
@@ -410,7 +526,12 @@ class ASRBase(Base):
                 self.logger.warning(f"During running the ASR base, catch: {e}, Come back to the main menu.", exc_info=True)
                 show_error_and_pause(e, "return to the ASR Base menu")
             finally:
+                self._leave_session()
                 self._clean_up()
+
+        if ended:
+            self._close_clients()
+            print(f"The run of session {self.launch_session_id} ended with STOP: ASR Base {self.id} exits.")
 
     def _edit_speakers(self):
         """Edit speaker profiles - register, select/deselect, or delete speakers."""
@@ -604,19 +725,23 @@ class ASRBase(Base):
 
         Args:
             session_id: The bucket name for storing recognition results. If not provided, it is obtained interactively.
+
+        Returns:
+            True when the run ended with STOP, False when it ended with an error, and None when it
+            could not start (speaker verification without a selected speaker profile).
         """
         # check if any speakers are selected for participant-level recognition
         if self.speaker_verification and (not self.selected_speakers or len(self.selected_speakers) == 0):
             print("------------------------------------------------")
             if self.mode in ['live', 'analyze']:
                 self.logger.info("No speakers selected for recognition. Please register and select speaker profiles or switch to 'capture' mode.")
-                return
+                return None
             elif self.mode == 'capture':
                 self.logger.warning("No speakers selected. Recording will continue without speaker recognition.")
         elif self.speaker_verification and self.mode in ['live', 'analyze'] and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.info("Audio database is empty, please register speaker profiles or either switch the mode to 'capture'.")
-            return
+            return None
         elif self.speaker_verification and self.mode == 'capture' and len(self.audio_recognizer.speaker_names) == 0:
             print("------------------------------------------------")
             self.logger.warning("Audio database is empty. Recording will continue without speaker recognition.")
@@ -638,6 +763,7 @@ class ASRBase(Base):
         # select or create bucket
         launch_session_id = session_id or self.launch_session_id
         self.session_id = select_or_create_session(self.mongo_client) if not launch_session_id else launch_session_id
+        self._join_session()
         self._resolve_group_speaker_id()
         self._create_bucket_logger()
         self._create_speaker_profile_snapshot()
@@ -649,7 +775,13 @@ class ASRBase(Base):
         self.speaker_frames_dict = {}
 
         self._prepare_directories()
-        self._listen_for_start_signal()
+        if not self._listen_for_start_signal():
+            # STOP came before START: the run ended before anything was recorded
+            self.logger.info(f"The run of session {self.session_id} was stopped before it started; "
+                             f"ASR base {self.id} leaves the session.")
+            self._leave_session()
+            self._clean_up()
+            return True
 
         # reinitialize mqtt client
         self.mqtt_client.reinitialise()
@@ -672,6 +804,7 @@ class ASRBase(Base):
 
         # start and join threads, handling exceptions if they occur
         exception_occurred = None
+        ended_with_stop = False
         try:
             self._start_threads()
             self._join_threads()
@@ -681,7 +814,33 @@ class ASRBase(Base):
                 exc_info=True)
             exception_occurred = e
         finally:
-            self._recognition_handler(exception_occurred)
+            ended_with_stop = self._recognition_handler(exception_occurred)
+        return ended_with_stop
+
+    def _join_session(self):
+        """Note in the session which Bases entry this base is and which stream it
+        takes (openmmla.utils.session_sources), once per run: a run restarted after
+        a recording error is still in."""
+        if not self.session_id or (self._joined_session and self._joined_session[0] == self.session_id):
+            return
+        # a 'stream' source resolved its stream itself, possibly in the stream menu
+        stream, url = (self.stream_name, self.url) if self.source == 'stream' else (None, None)
+        try:
+            entry = source_entry('asr', self._base_entry, self.config, stream=stream, url=url)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} which stream base {self.id} "
+                                f"takes: {e}")
+            return
+        if record_joined(self.mongo_client, self.session_id, entry, log=self.logger):
+            # the key it joined with (it names the stream), which its leaving must name too
+            self._joined_session = (self.session_id, entry['key'])
+
+    def _leave_session(self):
+        """Note that this base left the session it joined; once."""
+        if not self._joined_session:
+            return
+        (session_id, key), self._joined_session = self._joined_session, None
+        record_left(self.mongo_client, session_id, key, log=self.logger)
 
     def _resolve_group_speaker_id(self):
         """Prefer the selected session group id for group-level ASR attribution."""
@@ -748,7 +907,16 @@ class ASRBase(Base):
 
         Args:
             e: The exception that occurred during recognition, if any.
+
+        Returns:
+            True when the run ended with STOP, False when it ended with an error.
         """
+        restart = isinstance(e, RecordingError)
+        if not restart:
+            # noted first: the thread joins and the last chunks' HTTP calls below can take long, and
+            # a process killed meanwhile (a closed terminal window) would never note that it left
+            self._leave_session()
+
         if e:
             self._stop_threads()
         else:
@@ -756,21 +924,25 @@ class ASRBase(Base):
 
         # process any remaining audio chunks before cleanup
         self._process_final_chunks()
-        
+
         current_bucket = self.session_id  # assign bucket name before cleaning up
         self._clean_up()
-        if isinstance(e, RecordingError):
+        if restart:
             self.logger.info("Restarting recognizing service.")
-            self._start_recognition(current_bucket)
+            return self._start_recognition(current_bucket) is True
+        return e is None
 
     def _reset(self):
         """Reset the ASR base.
 
         Reinitialize the ASR base by calling the constructor with the current configuration,
-        logs the reset status, and performs garbage collection.
+        logs the reset status, and performs garbage collection. One launched from the console
+        keeps its session and Bases entry.
         """
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
-                      vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store, hsr=self.hsr)
+                      vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store, hsr=self.hsr,
+                      session_id=self.launch_session_id,
+                      base=str(self.id) if self.launch_session_id else None)
         self.logger.info(f"Profiles directory reset to {self.profiles_dir}")
         gc.collect()
 

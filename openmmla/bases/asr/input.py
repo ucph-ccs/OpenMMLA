@@ -1,5 +1,7 @@
 from openmmla.utils.clean import flush_input
-from openmmla.utils.input import interactive_menu, multi_interactive_menu, LIGHT_BLUE, ENDC, PURPLE, GREY
+from openmmla.utils.config import get_bases
+from openmmla.utils.input import interactive_menu, multi_interactive_menu, pause_after_error, LIGHT_BLUE, ENDC, \
+    PURPLE, GREY, RED
 
 
 def get_function_base(id: int, mode: str):
@@ -94,6 +96,54 @@ def get_base_type(config: dict) -> str:
 
     selected_index = interactive_menu("Select Base Type", base_types, prompt_enter=False)
     return base_types[selected_index]
+
+
+def get_base_types(config: dict) -> list[str]:
+    """The keys of the config's Base section: one block per kind of microphone."""
+    base_section = (config or {}).get('Base') or {}
+    return [str(key) for key in base_section] if isinstance(base_section, dict) else []
+
+
+def default_base_type(config: dict) -> tuple[str | None, str]:
+    """The base type an ASR synchronizer launched from the console takes when
+    -bt/--base_type is not given: the only key of the Base section.
+
+    Returns (base type, "") or, when there is no single one, (None, why).
+    """
+    base_types = get_base_types(config)
+    if len(base_types) == 1:
+        return base_types[0], ""
+    if not base_types:
+        return None, "the config's Base section has no entry (one block per kind of microphone)."
+    return None, (f"the config's Base section has {len(base_types)} entries ({', '.join(base_types)}) "
+                  "and no base type was given with -bt.")
+
+
+def default_number_of_bases(config: dict) -> tuple[int | None, str]:
+    """The number of bases an ASR synchronizer launched from the console waits
+    for when -nb/--num_bases is not given: the entries of the config's Bases list.
+
+    Returns (number, "") or, when the list is empty, (None, why).
+    """
+    count = len(get_bases(config))
+    if count:
+        return count, ""
+    return None, "the config's Bases list is empty, so there is no number of bases to wait for."
+
+
+def explain_cannot_start(component: str, why: str, fix: str, wait: bool = False):
+    """Say why a process launched from the console cannot start on its own, and
+    what to do in the menu or prompt that follows in the same window.
+
+    wait: the menu that follows clears the screen as it opens (one opened with
+    prompt_enter=False), which would wipe this before anyone reads it, so wait
+    for Enter first. A plain prompt, or a menu that asks for Enter itself,
+    leaves it on the screen and needs no wait."""
+    print("------------------------------------------------")
+    print(f"{RED}{component} cannot start on its own: {why}{ENDC}")
+    print(fix)
+    if wait:
+        pause_after_error("open the menu")
 
 
 def get_input_device_index(available_indexes: list[int], device_info_list: list[dict] = None) -> int:

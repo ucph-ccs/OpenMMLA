@@ -30,6 +30,8 @@ class IPSVisualizer(Base):
             project_dir: path to the project directory
             store: whether to store the visualization plots (default: True)
             use_3d: if True, run the 3D visualization; otherwise use 2D visualization
+            session_id: the session to visualize; given on the command line (as the console does), the
+                visualizer starts at once and exits when the run ends, instead of showing its menu
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.store = store
@@ -38,6 +40,9 @@ class IPSVisualizer(Base):
 
         # Runtime attribute
         self.session_id = None
+        self.figure = None
+        self.ani = None
+        self.close_on_stop = False  # on STOP, close the plot window (console launch) instead of pausing it
 
         # Threading attribute
         self.stop_event = threading.Event()
@@ -61,9 +66,66 @@ class IPSVisualizer(Base):
         self.influx_client_main = InfluxDBClientWrapper(self.config_path)
         self.mongo_client = MongoDBClientWrapper(self.config_path)
 
-    def run(self):
-        """Run the IPS visualizer."""
+    def _clean_up(self):
+        """Stop the STOP listener and close the plot window."""
+        if self.threads:
+            self._stop_threads()
+        self._clear_threads()
+        if self.figure is not None:
+            plt.close(self.figure)
+            self.figure = None
+        self.ani = None
+
+    def _close_clients(self):
+        """Close the connections before the process exits."""
+        for close in (self.influx_client_main.close, self.mongo_client.close, self.redis_client.close):
+            try:
+                close()
+            except Exception as e:
+                self.logger.debug(f"While closing a client on exit: {e}")
+
+    def run(self, launch_problem: str = ''):
+        """Run the IPS visualizer.
+
+        Launched from the console (a session id on the command line), it plots at once and exits when
+        the run ends. Run by hand, or when the choices it was launched with cannot be used, it shows
+        its menu.
+
+        Args:
+            launch_problem: why the command line's choices cannot be used (printed before the menu)
+        """
         print('\033]0;IPS Visualizer\007')
+        if launch_problem:
+            print(f"\n{launch_problem}\n")
+        elif self.launch_session_id and self._run_from_console():
+            return
+        self._run_menu()
+
+    def _run_from_console(self) -> bool:
+        """Visualize the session given on the command line at once, then end.
+
+        Returns True once the run has ended (STOP closes the plot window, as does closing it by hand),
+        and the process exits; False when it could not start: why is shown, and the menu follows so
+        that it can be fixed in this window.
+        """
+        self.close_on_stop = True
+        try:
+            self._start_visualization()
+        except KeyboardInterrupt:
+            self.logger.info("IPS visualizer stopped with Ctrl+C.")
+        except Exception as e:
+            self.logger.warning(f"IPS visualizer could not start session {self.launch_session_id}: {e}",
+                                exc_info=True)
+            show_error_and_pause(e, "open the IPS Visualizer menu and try again")
+            return False
+        finally:
+            self.close_on_stop = False
+        self.logger.info(f"Visualization of session {self.launch_session_id} ended, exiting IPS visualizer.")
+        self._close_clients()
+        return True
+
+    def _run_menu(self):
+        """Run the IPS visualizer's interactive menu until the user exits it."""
         func_map = {1: self._start_visualization, 2: self._switch_dimension}
 
         while True:
@@ -92,18 +154,23 @@ class IPSVisualizer(Base):
             dir_path = os.path.join(self.visualizations_dir, 'real-time')
             os.makedirs(dir_path, exist_ok=True)
 
-        self._listen_for_start_signal()
-        self._create_thread(self._listen_for_stop_signal)
-        self._start_threads()
-
+        if not self._listen_for_start_signal():
+            # STOP came before START: the run ended before a plot was opened
+            self._clean_up()
+            self.session_id = None
+            return
         try:
+            self._create_thread(self._listen_for_stop_signal)
+            self._start_threads()
             if self.use_3d:
                 self._start_3d_plot()
             else:
                 self._start_2d_plot()
         except (Exception, KeyboardInterrupt) as e:
-            self.logger.warning("%s, returning to main menu.", e, exc_info=True)
+            self.logger.warning("The plot stopped: %s", e, exc_info=not isinstance(e, KeyboardInterrupt))
         finally:
+            # the listener would otherwise outlive the plot, and a second start could not restart it
+            self._clean_up()
             self.session_id = None
 
     def _create_bucket_logger(self):
@@ -117,19 +184,41 @@ class IPSVisualizer(Base):
 
     def _start_2d_plot(self):
         influx_client = InfluxDBClientWrapper(self.config_path)
-        fig = plt.figure()
+        fig = self.figure = plt.figure()
         self.ani = FuncAnimation(fig, self._animate, fargs=(influx_client,), interval=50, cache_frame_data=False)
-        plt.show()
+        try:
+            plt.show()
+        finally:
+            influx_client.close()
 
     def _start_3d_plot(self):
         influx_client = InfluxDBClientWrapper(self.config_path)
-        fig = plt.figure()
+        fig = self.figure = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
         self.ani = FuncAnimation(fig, self._animate_3d, fargs=(fig, ax, influx_client,), interval=50,
                                  cache_frame_data=False)
-        plt.show()
+        try:
+            plt.show()
+        finally:
+            influx_client.close()
+
+    def _stop_when_asked(self) -> bool:
+        """Whether STOP has come; if so, end the plot from the animation's own (main) thread.
+
+        The animation pauses. Launched from the console, the plot window then closes, so that
+        plt.show() returns and the process exits; on the menu path the user closes the window.
+        """
+        if not self.stop_event.is_set():
+            return False
+        if self.ani is not None:
+            self.ani.pause()
+        if self.close_on_stop and self.figure is not None:
+            plt.close(self.figure)
+        return True
 
     def _animate(self, i, influx_client: InfluxDBClientWrapper):
+        if self._stop_when_asked():
+            return
         plt.cla()
         # Get node relations and positions
         graph_dict, timestamp = self._get_node_relations(influx_client)
@@ -160,6 +249,8 @@ class IPSVisualizer(Base):
         self.use_3d = not self.use_3d
 
     def _animate_3d(self, i, fig, ax, influx_client: InfluxDBClientWrapper):
+        if self._stop_when_asked():
+            return
         plt.cla()
         # Get node relations and positions
         graph_dict, timestamp = self._get_node_relations(influx_client)
@@ -224,10 +315,6 @@ class IPSVisualizer(Base):
                             dimension: str = '2d') -> dict:
         from openmmla.utils.querys import get_node_positions
         return get_node_positions(self.session_id, influx_client, int(timestamp), dimension)
-
-    def _stop_threads(self):
-        super()._stop_threads()
-        self.ani.pause()
 
     @staticmethod
     def draw_arrow(ax, x1, y1, z1, x2, y2, z2, node_radius=0.04):

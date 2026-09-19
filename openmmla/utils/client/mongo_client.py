@@ -110,6 +110,38 @@ class MongoDBClientWrapper:
             logger.warning("end_session failed: %s", e)
             return False
 
+    def add_session_source(self, session_id: str, entry: dict[str, Any]) -> bool:
+        """note what a base of the session takes (openmmla.utils.session_sources):
+        one entry per key. A base that joins again gets its entry back, open again,
+        with its first joined_at. False when the session is not there."""
+        try:
+            pushed = self.sessions.update_one(
+                {"session_id": session_id, "sources.key": {"$ne": entry["key"]}},
+                {"$push": {"sources": entry}},
+            )
+            if pushed.modified_count:
+                return True
+            again = {f"sources.$.{field}": value for field, value in entry.items() if field != "joined_at"}
+            again["sources.$.left_at"] = None
+            result = self.sessions.update_one(
+                {"session_id": session_id, "sources.key": entry["key"]}, {"$set": again})
+            return bool(result.matched_count)
+        except Exception as e:
+            logger.warning("add_session_source failed: %s", e)
+            return False
+
+    def mark_session_source_left(self, session_id: str, key: str, when: datetime | None = None) -> bool:
+        """note when a base left the session."""
+        try:
+            result = self.sessions.update_one(
+                {"session_id": session_id, "sources.key": key},
+                {"$set": {"sources.$.left_at": when or datetime.now(timezone.utc)}},
+            )
+            return bool(result.matched_count)
+        except Exception as e:
+            logger.warning("mark_session_source_left failed: %s", e)
+            return False
+
     def delete_session(self, session_id: str) -> bool:
         try:
             result = self.sessions.delete_one({"session_id": session_id})

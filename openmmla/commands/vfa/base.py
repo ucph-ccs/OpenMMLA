@@ -21,7 +21,8 @@ def get_parser():
             shortname='-sid')
     add_arg('base', str, None,
             "base id from config 'Bases' (pulls camera/source/source_index/camera_angle from that entry); "
-            "if omitted, choose interactively", shortname='-b')
+            "if omitted, the only entry when started with -sid, else choose interactively; an id that list "
+            "does not have is chosen interactively too", shortname='-b')
     return parser
 
 
