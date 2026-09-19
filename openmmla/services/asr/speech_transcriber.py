@@ -14,12 +14,17 @@ from http import HTTPStatus
 from openmmla.services.server import Server
 from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.io import write_bytes_to_wav
+from openmmla.utils.audio.languages import azure_locale, language_code
 from openmmla.utils.audio.transcriber import get_transcriber
 
 
 class SpeechTranscriber(Server):
     """SpeechTranscriber transcribes the audio signal. It receives audio signal from base station and sends back the
-    transcribed text. Supports local model, Azure, and DashScope (Paraformer / Qwen3-ASR) backends."""
+    transcribed text. Supports local model, Azure, and DashScope (Paraformer / Qwen3-ASR) backends.
+
+    A request may name the language to transcribe it in (a base's -lang), which holds for that
+    request alone; without one it is the language of this service's config. The answer says which
+    language was used."""
 
     def __init__(self, project_dir: str | None, config_path: str):
         """Initialize the speech transcriber.
@@ -163,6 +168,8 @@ class SpeechTranscriber(Server):
                         language_hints=self.language_hints,
                         callback=None
                     )
+                    # one more per language a request asks for that the hints do not hold
+                    self.recognitions = {}
                     self.logger.info("DashScope Paraformer Recognition initialized successfully")
 
                 elif self._is_qwen_asr:
@@ -200,26 +207,33 @@ class SpeechTranscriber(Server):
                 with self.transcriber_lock:  # acquire lock
                     base_id = request.values.get('base_id')
                     fr = int(request.values.get('fr', 16000))
+                    # the language this request is to be transcribed in, for this request alone
+                    language = (request.values.get('language') or '').strip() or None
                     audio_file = request.files['audio']
                     audio_file_path = self._get_temp_file_path('transcribe_audio', base_id, 'wav')
                     write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
 
                     # route to appropriate transcription method
-                    self.logger.info(f"Starting transcription for {base_id}...")
+                    used = self._language_used(language)
+                    self.logger.info(f"Starting transcription for {base_id}"
+                                     f"{f' in {used}' if used else ''}...")
                     if self.backend == 'azure':
                         self._apply_nr(audio_file_path)
                         normalize_decibel(infile=audio_file_path, rms_level=-20)
-                        response = self._transcribe_with_azure(audio_file_path)
+                        response = self._transcribe_with_azure(audio_file_path, language)
                     elif self.backend == 'dashscope':
                         if self._is_paraformer:
-                            response = self._transcribe_with_paraformer(audio_file_path)
+                            response = self._transcribe_with_paraformer(audio_file_path, language)
                         else:
-                            response = self._transcribe_with_qwen_asr(audio_file_path)
+                            response = self._transcribe_with_qwen_asr(audio_file_path, language)
                     else:
                         self._apply_nr(audio_file_path)
                         normalize_decibel(infile=audio_file_path, rms_level=-20)
-                        response = self._transcribe_with_local_model(audio_file_path)
+                        response = self._transcribe_with_local_model(audio_file_path, language)
 
+                    # what it was transcribed in, so that a base sees whether its -lang was taken
+                    if used:
+                        response.setdefault("language", used)
                     self.logger.info(f"Finished transcription for {base_id}")
                     return jsonify(response), 200
 
@@ -240,29 +254,42 @@ class SpeechTranscriber(Server):
         else:
             return jsonify({"error": "No audio file provided"}), 400
 
-    def _transcribe_with_local_model(self, audio_file_path):
+    def _language_used(self, language: str | None) -> str | None:
+        """the language the backend is asked to transcribe in: the request's, else this service's
+        own. Each backend in its own form (Azure a locale, the others a code)."""
+        if self.backend == 'azure':
+            return azure_locale(language) or self.language
+        if self.backend == 'dashscope' and self._is_paraformer:
+            return language_code(language) or (self.language_hints[0] if self.language_hints else None)
+        return language_code(language) or language_code(getattr(self, 'language', None))
+
+    def _transcribe_with_local_model(self, audio_file_path, language=None):
         """Transcribe audio using local model.
         
         Args:
             audio_file_path: Path to the audio file
+            language: the language to transcribe this file in; None takes the configured one
             
         Returns:
-            Transcribed text
+            Dict with the transcribed text, and its words when word_level
         """
-        result = self.transcriber.transcribe(audio_file_path)
+        result = self.transcriber.transcribe(audio_file_path, language=language_code(language))
+        # WhisperX answers (text, words), the other transcribers the text alone
+        text, words = result if isinstance(result, tuple) else (result, [])
         if self.word_level:
             return {
-                "text": result[0],
-                "words": result[1]
+                "text": text,
+                "words": words
             }
         else:
-            return {"text": result[0]}
+            return {"text": text}
 
-    def _transcribe_with_azure(self, audio_file_path):
+    def _transcribe_with_azure(self, audio_file_path, language=None):
         """Transcribe audio using Azure Speech-to-Text service.
         
         Args:
             audio_file_path: Path to the audio file
+            language: the language to transcribe this file in; None takes the configured one
             
         Returns:
             Dict containing transcribed text and optionally word-level timestamps if word_level=True
@@ -270,7 +297,9 @@ class SpeechTranscriber(Server):
         audio_config = self.speechsdk.audio.AudioConfig(filename=audio_file_path)
         speech_recognizer = self.speechsdk.SpeechRecognizer(
             speech_config=self.speech_config,
-            audio_config=audio_config
+            audio_config=audio_config,
+            # the recognizer's own language, where speech_config carries the configured one
+            language=azure_locale(language)
         )
         result = speech_recognizer.recognize_once_async().get()
 
@@ -311,7 +340,7 @@ class SpeechTranscriber(Server):
             error_msg = f"Azure recognition failed with reason: {result.reason}"
             raise RuntimeError(error_msg)
 
-    def _transcribe_with_paraformer(self, audio_file_path):
+    def _transcribe_with_paraformer(self, audio_file_path, language=None):
         """Transcribe audio using Paraformer (DashScope) service with synchronous call.
         
         NOTE: Paraformer Recognition instances are single-use only (cannot be reused like Azure's speech_config).
@@ -319,13 +348,14 @@ class SpeechTranscriber(Server):
         
         Args:
             audio_file_path: Path to the audio file
+            language: the language to transcribe this file in; None takes the configured hints
             
         Returns:
             Dict containing transcribed text and optionally word-level timestamps if word_level=True
         """
         try:
             # perform recognition
-            result = self.recognition.call(audio_file_path)
+            result = self._paraformer(language).call(audio_file_path)
             
             # check if recognition was successful
             if result.status_code != HTTPStatus.OK:
@@ -376,11 +406,24 @@ class SpeechTranscriber(Server):
         finally:
             gc.collect()
 
-    def _transcribe_with_qwen_asr(self, audio_file_path):
+    def _paraformer(self, language=None):
+        """the Recognition that hears `language` (one per language asked for, as the hints are
+        given when it is made); the configured one for None."""
+        code = language_code(language)
+        if not code or code in self.language_hints:
+            return self.recognition
+        if code not in self.recognitions:
+            import dashscope
+            self.recognitions[code] = dashscope.audio.asr.Recognition(
+                model=self.model, format='wav', sample_rate=16000, language_hints=[code], callback=None)
+        return self.recognitions[code]
+
+    def _transcribe_with_qwen_asr(self, audio_file_path, language=None):
         """Transcribe audio using DashScope Qwen-ASR model via MultiModalConversation API.
         
         Args:
             audio_file_path: Path to the audio file
+            language: the language to transcribe this file in; None takes the configured one
             
         Returns:
             Dict containing transcribed text and optional language/emotion metadata
@@ -393,8 +436,9 @@ class SpeechTranscriber(Server):
             ]
 
             asr_options = {}
-            if self.language:
-                asr_options["language"] = self.language
+            asked = language_code(language) or self.language
+            if asked:
+                asr_options["language"] = asked
             if self.enable_itn:
                 asr_options["enable_itn"] = self.enable_itn
 

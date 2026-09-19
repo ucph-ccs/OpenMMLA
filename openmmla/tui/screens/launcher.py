@@ -773,6 +773,31 @@ _SYNC_WAIT_CARDS = ("ASR Base", "VFA Base")
 # Bases entry it is (for a config whose Bases list has no entry for it)
 _ASK_BASE_LABEL = "ask in its window"
 
+# what the ASR Base card's Language offers (-lang): the language each of its
+# bases has its speech transcribed in, sent with every request, which leaves
+# the speech transcriber's own configured language for the first option. The
+# common ones; -lang itself takes any code (yue) or locale (en-GB) the
+# service's backend knows
+_ASR_LANGUAGES = [
+    ("the server's own language", ""),
+    ("English (en)", "en"),
+    ("Danish (da)", "da"),
+    ("Chinese (zh)", "zh"),
+    ("Japanese (ja)", "ja"),
+    ("Korean (ko)", "ko"),
+    ("German (de)", "de"),
+    ("French (fr)", "fr"),
+    ("Spanish (es)", "es"),
+    ("Italian (it)", "it"),
+    ("Portuguese (pt)", "pt"),
+    ("Dutch (nl)", "nl"),
+    ("Swedish (sv)", "sv"),
+    ("Norwegian (nb)", "nb"),
+    ("Finnish (fi)", "fi"),
+    ("Russian (ru)", "ru"),
+    ("Arabic (ar)", "ar"),
+]
+
 # transformation_matrices_<id>.json: camera sync's matrices into base <id>'s
 # coordinates, the one the IPS synchronizer takes as its main camera
 _MATRIX_FILE_PREFIX = "transformation_matrices_"
@@ -2060,13 +2085,14 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-vad", "VAD", "bool", True),
             ParamDef("-nr", "Noise Reduce", "bool", True),
             ParamDef("-tr", "Transcribe", "bool", True),
+            ParamDef("-lang", "Language", "str", "", _ASR_LANGUAGES),
             ParamDef("-sp", "Speech Separate", "bool", False),
             ParamDef("-d", "Dominant Speaker", "bool", False),
             ParamDef("-hsr", "Half-Scaled Recognition", "bool", True),
         ],
         components=[
             ComponentDef("base", "mmla asr-base", "-nb",
-                         ["-sid", "-b", "--speakers", "-m", "-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
+                         ["-sid", "-b", "--speakers", "-m", "-s", "-vad", "-nr", "-tr", "-lang", "-sp", "-hsr"]),
             ComponentDef("synchronizer", "mmla asr-sync", "-ns",
                          ["-sid", _SYNC_WAIT_FLAG, "-bt", "-d", "-sp"]),
         ],

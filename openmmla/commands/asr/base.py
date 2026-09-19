@@ -30,6 +30,10 @@ def get_parser():
     add_arg('speakers', str, None,
             "comma-separated speaker profiles to recognize (see mmla asr-speakers --list); if not set, every "
             "registered one", shortname='-spk')
+    add_arg('language', str, None,
+            "language to transcribe this base's speech in ('en', 'da', 'zh-CN'): sent with every request and "
+            "taken for it alone, whatever the speech transcriber is configured for; if not set, that "
+            "configured language", shortname='-lang')
     return parser
 
 
@@ -57,7 +61,8 @@ def main():
         hsr=args.hsr,
         session_id=args.session_id,
         base=args.base,
-        speakers=args.speakers
+        speakers=args.speakers,
+        language=args.language
     )
 
 

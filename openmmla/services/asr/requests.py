@@ -79,14 +79,18 @@ def request_speech_transcription(
         frame_rate: int,
         base_id: str,
         url: str,
-        timeout: int = 60
+        timeout: int = 60,
+        language: str | None = None,
 ) -> dict | None:
     def process_response(response):
-        response_dict = response.json() # {text: str, words: list[dict]}, words is optional
+        response_dict = response.json() # {text: str, words: list[dict], language: str}, the last two optional
         return response_dict
 
     files = {'audio': ('audio.wav', frames, 'audio/wav')}
     data = {'base_id': base_id, 'fr': frame_rate}
+    if language:
+        # this file is to be transcribed in that language, whatever the service is configured for
+        data['language'] = language
 
     return send_request_with_retry(url, files, data, timeout=timeout, process_response=process_response)
 

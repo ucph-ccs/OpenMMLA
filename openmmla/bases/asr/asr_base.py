@@ -41,7 +41,7 @@ from openmmla.utils.config import get_bases, get_base_by_id
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = True,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                    hsr: bool = True, session_id: str | None = None, base: str | None = None,
-                   speakers: str | None = None):
+                   speakers: str | None = None, language: str | None = None):
     """Start ASR Base with restart capability.
     
     Args:
@@ -57,13 +57,14 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
         session_id: Session to join; given, the base starts at once and exits when the run ends with STOP
         base: Id of the config 'Bases' entry this base is
         speakers: Comma-separated speaker profiles to recognize; if omitted, every registered one
+        language: Language to transcribe in, whatever the speech transcriber is configured for
     """
     # restart loop - allows restarting the entire process
     while True:
         try:
             asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode,
                               vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr,
-                              session_id=session_id, base=base, speakers=speakers)
+                              session_id=session_id, base=base, speakers=speakers, language=language)
             asr_base.run()
             break  # run() returns only once a run launched from the console has ended with STOP
         except KeyboardInterrupt as e:
@@ -87,7 +88,8 @@ class ASRBase(Base):
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'capture', store: bool = True,
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                  hsr: bool = True, session_id: str | None = None, base: str | None = None,
-                 speakers: str | list[str] | None = None, registration: str | None = None):
+                 speakers: str | list[str] | None = None, registration: str | None = None,
+                 language: str | None = None):
         """Initialize the ASRBase class.
 
         Args:
@@ -109,6 +111,9 @@ class ASRBase(Base):
             registration: 'stream' or 'files' builds a base that only registers speaker profiles
                 (mmla asr-speakers): it needs `base`, asks nothing, connects to no database or broker,
                 frees no port, and for 'files' leaves its source alone (default: None)
+            language: the language this base's speech is transcribed in ('en', 'da', 'zh-CN'), sent
+                with every request and taken for it alone, whatever the speech transcriber is
+                configured for; if omitted, that configured language (default: None)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -123,6 +128,7 @@ class ASRBase(Base):
         self.launch_session_id = session_id
         self.launch_speakers = parse_speakers(speakers)
         self.registration = registration
+        self.language = str(language).strip() if language and str(language).strip() else None
 
         # runtime attributes
         self.session_id = None
@@ -138,6 +144,7 @@ class ASRBase(Base):
         self.speaker_verification = True
         self.group_speaker_id = "group"
         self.stream_name = None  # the Streams entry a 'stream' source pulls
+        self._language_told = False  # whether a transcriber that did not take our language was named
         self.url = None
         self._joined_session = None  # (session id, source key) this base noted itself in (session sources)
 
@@ -1591,8 +1598,28 @@ class ASRBase(Base):
             The transcription result as a dictionary. Empty dictionary if transcription failed.
         """
         response = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
-                                            self.speech_transcriber_url)
-        return response if response is not None else {}
+                                            self.speech_transcriber_url, language=self.language)
+        if response is None:
+            return {}
+        self._check_language(response)
+        return response
+
+    def _check_language(self, response: dict) -> None:
+        """say once, when this base asked for a language, that the speech transcriber did not
+        transcribe in it: its service answers without one when it runs code from before a request
+        could name a language."""
+        if not self.language or self._language_told:
+            return
+        said = str(response.get("language") or "")
+        if said.split("-")[0].lower() == self.language.split("-")[0].lower():
+            self._language_told = True
+            return
+        self._language_told = True
+        self.logger.warning(
+            f"This base asked the speech transcriber for '{self.language}', and it "
+            f"{f'transcribed in {said}' if said else 'did not say which language it used'}: its service "
+            f"may run code from before a request could name a language. Start the ASR Server card again, "
+            f"which builds the speech transcriber anew.")
 
     def _upload_transcription(self, speaker: str, transcribe_result: dict, chunk_start_time: float, chunk_end_time: float):
         """Upload the transcribed speech chunk to the database.
