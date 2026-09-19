@@ -29,7 +29,7 @@ from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, M
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
 from openmmla.utils.logger import get_logger
 from openmmla.utils.ports import free_port
-from openmmla.utils.requests import resolve_url, build_service_url
+from openmmla.utils.requests import resolve_url, build_service_url, service_problems
 from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from .audio_recognizer import AudioRecognizer
 from .speaker_profiles import REGISTRATION_SENTENCES, name_problem, parse_speakers, profiles_dir as speaker_profiles_dir
@@ -705,9 +705,25 @@ class ASRBase(Base):
         return self._audio_preprocessing(output_path, 1)
 
     def _no_speech_message(self) -> str:
-        return ("Audio pre-processing failed: no speech detected or the VAD/NR service is unreachable "
-                f"(vad={self.vad}, nr={self.nr}). Please check the ASR server and record again, "
-                "or restart with -vad False -nr False to skip pre-processing.")
+        """why a recording left nothing to register. The pre-processing services are asked
+        again, so that a failure names its cause; when they answer, the recording held no speech."""
+        problems = self._service_problems(*self._preprocessing_services())
+        if problems:
+            return (f"Audio pre-processing failed: {problems}. Register again once that is fixed, or skip "
+                    f"pre-processing (-vad False -nr False; on the console, the card's VAD and noise reduction).")
+        return (f"No speech was found in the recording. Record again, closer to the microphone, or check that "
+                f"base {self.id} records the right microphone.")
+
+    def _preprocessing_services(self) -> list[str]:
+        """the keys of Server.asr that pre-processing calls: noise reduction and VAD, when on."""
+        return [key for on, key in ((self.nr, 'speech_enhancer'), (self.vad, 'voice_activity_detector')) if on]
+
+    def _service_problems(self, *keys: str) -> str:
+        """why the ASR server's services under these keys of Server.asr cannot serve, asked
+        again now (service_problems); empty when every one answers."""
+        endpoints = self.config['Server']['asr']
+        return "; ".join(service_problems(
+            [build_service_url(self.config, endpoints[key], resolve=False) for key in keys if endpoints.get(key)]))
 
     def register_speaker_from_stream(self, name: str, duration: float | None = None) -> int:
         """Register speaker `name` (or add to that profile) from `duration` seconds of the base's
@@ -737,8 +753,9 @@ class ASRBase(Base):
         after = self._embedding_count(name)
         if not used or after <= before:
             self._drop_if_empty(name)
-            raise RuntimeError("No voice features could be made from these files: no speech found in them, or the "
-                               "ASR server (VAD, noise reduction, audio inferer) is unreachable.")
+            problems = self._service_problems(*self._preprocessing_services(), 'audio_inferer')
+            raise RuntimeError(f"No voice features could be made from these files: "
+                               f"{problems or 'no speech was found in them'}.")
         return used, after
 
     def _register_checked(self, audio_path: str, name: str) -> int:
@@ -749,8 +766,9 @@ class ASRBase(Base):
         after = self._embedding_count(name)
         if after <= before:
             self._drop_if_empty(name)
-            raise RuntimeError("No voice features could be made from the recording: is the ASR server's audio "
-                               "inferer reachable?")
+            problems = self._service_problems('audio_inferer')
+            raise RuntimeError(f"No voice features could be made from the recording: "
+                               f"{problems or 'the audio inferer answers, but made none (see its Logs)'}.")
         return after
 
     def _embedding_count(self, name: str) -> int:
