@@ -100,7 +100,7 @@ Define the `Bases` entries first (one per camera position, exactly one `main: tr
 
 ### Distribute the matrices
 
-The **Transform Matrix** tab of the IPS Base card shows the exported files as editable JSON. With Host set to `Local`, **Sync to Remote** copies them into `pipelines/ips-base/camera_sync/` on the chosen base station; with a remote host selected, the tab edits that host's copy directly. Every base station that runs an IPS base needs the exported file.
+The **Transform Matrix** tab of the IPS Base card shows the exported files as editable JSON. With Host set to `Local`, **Sync to Remote** copies them into `pipelines/ips-base/camera_sync/` on the chosen base station; with a remote host selected, the tab edits that host's copy directly. **Delete** removes the file on screen from the host the tab edits, after a second press (the other hosts keep theirs). Every base station that runs an IPS base needs the exported file.
 
 ## Run from the TUI
 

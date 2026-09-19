@@ -916,6 +916,17 @@ def _remote_read_file(profile, remote_path: str) -> str | None:
     return out
 
 
+def _remote_delete_file(profile, remote_path: str) -> tuple[bool, str]:
+    """delete a remote file; one that is not there counts as deleted. Returns (ok, error)."""
+    try:
+        result = ssh_run_sync(profile, f"rm -f {_quote_remote_path(remote_path)}", timeout=10.0)
+    except Exception as exc:
+        return False, str(exc)
+    if result.returncode != 0:
+        return False, (result.stderr or "").strip() or f"exit code {result.returncode}"
+    return True, ""
+
+
 def _remote_write_file(profile, remote_path: str, content: str) -> tuple[bool, str]:
     """write content to a remote file (creating parent dirs). Returns (ok, error)."""
     quoted = _quote_remote_path(remote_path)
@@ -1002,6 +1013,8 @@ class TransformMatrixPanel(Widget):
         # files on the selected remote host instead of the local disk
         self._ssh_profile = ssh_profile
         self._current_file: str | None = None
+        # the file whose Delete has been pressed once
+        self._pending_delete: str | None = None
 
     @property
     def _is_remote(self) -> bool:
@@ -1048,6 +1061,7 @@ class TransformMatrixPanel(Widget):
             with Horizontal(classes="tm-actions"):
                 yield Button("Save", variant="primary", id="btn-tm-save", disabled=True)
                 yield Button("Reload", id="btn-tm-reload", disabled=True)
+                yield Button("Delete", variant="error", id="btn-tm-delete", disabled=True)
             yield Static("", id="tm-status", classes="tm-muted")
         else:
             where = host_label
@@ -1107,16 +1121,20 @@ class TransformMatrixPanel(Widget):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "tm-file-select":
             return
-        value = event.value
-        self._current_file = None if value in (None, Select.BLANK) else str(value)
+        # a Select rebuilding its options (a file deleted) emits its placeholder,
+        # which is Select.BLANK or Select.NULL by textual version
+        self._current_file = None if is_select_sentinel(event.value) else str(event.value)
+        self._pending_delete = None
         has_file = self._current_file is not None
-        self.query_one("#btn-tm-save", Button).disabled = not has_file
-        self.query_one("#btn-tm-reload", Button).disabled = not has_file
+        for button in ("#btn-tm-save", "#btn-tm-reload", "#btn-tm-delete"):
+            self.query_one(button, Button).disabled = not has_file
         self._load_current()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-tm-reload":
             self._load_current()
+        elif event.button.id == "btn-tm-delete":
+            self._delete_current()
         elif event.button.id == "btn-tm-save":
             if not self._current_file:
                 return
@@ -1142,6 +1160,60 @@ class TransformMatrixPanel(Widget):
                 self._set_status(f"Saved {self._current_file} to {host_label}")
             except OSError as exc:
                 self._set_status(f"Save failed: {exc}")
+
+    def _delete_current(self) -> None:
+        """delete the file on screen, on the host the tab edits, at the second
+        press: camera sync writes these, and a base station that loses its own
+        has no matrices until they are made or synced again."""
+        name = self._current_file
+        if not name or not _is_transform_matrix_file(name):
+            return
+        host_label = self.target if self._is_remote else "Local"
+        if self._pending_delete != name:
+            self._pending_delete = name
+            base_id = name[len(_MATRIX_FILE_PREFIX):-len(".json")] if name.startswith(_MATRIX_FILE_PREFIX) else ""
+            who = f"base {base_id} there" if base_id else "the IPS bases there"
+            self._set_status(
+                f"Press Delete again to delete {name} on {host_label}: {who} then has no matrices until "
+                f"camera sync writes them again. The other hosts keep their copy.")
+            return
+        self._pending_delete = None
+        if self._is_remote:
+            ok, err = _remote_delete_file(self._ssh_profile, self._file_path(name))
+        else:
+            try:
+                os.remove(self._file_path(name))
+                ok, err = True, ""
+            except FileNotFoundError:
+                ok, err = True, ""  # gone already
+            except OSError as exc:
+                ok, err = False, str(exc)
+        if not ok:
+            self._set_status(f"Delete failed on {host_label}: {err}")
+            return
+        self._forget_file(name)
+        left = self._tm_files()
+        self._set_status(f"Deleted {name} on {host_label}." if left
+                         else f"Deleted {name} on {host_label}: no transform matrix file left there.")
+
+    def _forget_file(self, name: str) -> None:
+        """take a deleted file off the list, leaving none picked."""
+        files = self._tm_files()
+        if name in files:
+            files.remove(name)
+        try:
+            self.query_one("#tm-file-select", Select).set_options([(item, item) for item in files])
+        except Exception:
+            pass
+        self._current_file = None
+        try:
+            editor = self.query_one("#tm-editor", TextArea)
+            editor.load_text("")
+            editor.read_only = True
+            for button in ("#btn-tm-save", "#btn-tm-reload", "#btn-tm-delete"):
+                self.query_one(button, Button).disabled = True
+        except Exception:
+            pass
 
 
 # the template's example camera, left in configs saved before Cameras came from
