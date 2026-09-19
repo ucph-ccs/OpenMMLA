@@ -23,7 +23,7 @@ from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
-from openmmla.utils.asr_scope import normalize_asr_scope
+from openmmla.utils.asr_scope import normalize_asr_scope, resolve_speaker_verification as _resolve_speaker_verification
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
@@ -32,29 +32,16 @@ from openmmla.utils.ports import free_port
 from openmmla.utils.requests import resolve_url, build_service_url
 from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from .audio_recognizer import AudioRecognizer
+from .speaker_profiles import REGISTRATION_SENTENCES, name_problem, parse_speakers, profiles_dir as speaker_profiles_dir
 from .enums import BLUE, ENDC, GREEN, PURPLE, GREY, RED
 from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion, explain_cannot_start
 from openmmla.utils.config import get_bases, get_base_by_id
 
 
-def _resolve_speaker_verification(value, asr_scope: str) -> bool:
-    """resolve the speaker verifier setting from config.
-
-    auto follows the ASR attribution scope: participant-level ASR verifies speakers,
-    group-level ASR skips speaker profile verification by default.
-    """
-    if value is None or str(value).strip().lower() in {"", "auto"}:
-        return asr_scope == "participant"
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
-
-
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = True,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
-                   hsr: bool = True, session_id: str | None = None, base: str | None = None):
+                   hsr: bool = True, session_id: str | None = None, base: str | None = None,
+                   speakers: str | None = None):
     """Start ASR Base with restart capability.
     
     Args:
@@ -69,13 +56,14 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
         hsr: Whether to apply Half-Scaled Recognition at speaker boundaries
         session_id: Session to join; given, the base starts at once and exits when the run ends with STOP
         base: Id of the config 'Bases' entry this base is
+        speakers: Comma-separated speaker profiles to recognize; if omitted, every registered one
     """
     # restart loop - allows restarting the entire process
     while True:
         try:
             asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode,
                               vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr,
-                              session_id=session_id, base=base)
+                              session_id=session_id, base=base, speakers=speakers)
             asr_base.run()
             break  # run() returns only once a run launched from the console has ended with STOP
         except KeyboardInterrupt as e:
@@ -98,7 +86,8 @@ class ASRBase(Base):
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'capture', store: bool = True,
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
-                 hsr: bool = True, session_id: str | None = None, base: str | None = None):
+                 hsr: bool = True, session_id: str | None = None, base: str | None = None,
+                 speakers: str | list[str] | None = None, registration: str | None = None):
         """Initialize the ASRBase class.
 
         Args:
@@ -115,6 +104,11 @@ class ASRBase(Base):
                 asks nothing, starts at once and exits when the run ends with STOP (default: None)
             base: id of the config 'Bases' entry this base is; if omitted, the only entry when
                 launched from the console, else picked interactively (default: None)
+            speakers: the speaker profiles a base launched from the console recognizes, comma-separated
+                or a list; if omitted, every registered one (default: None)
+            registration: 'stream' or 'files' builds a base that only registers speaker profiles
+                (mmla asr-speakers): it needs `base`, asks nothing, connects to no database or broker,
+                frees no port, and for 'files' leaves its source alone (default: None)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -127,6 +121,8 @@ class ASRBase(Base):
         self.sp = sp
         self.hsr = hsr
         self.launch_session_id = session_id
+        self.launch_speakers = parse_speakers(speakers)
+        self.registration = registration
 
         # runtime attributes
         self.session_id = None
@@ -138,7 +134,7 @@ class ASRBase(Base):
         self.stop_event = threading.Event()
         self.threads = []
         self.selected_speakers = None
-        self.asr_scope = "participant"
+        self.asr_scope = "individual"
         self.speaker_verification = True
         self.group_speaker_id = "group"
         self.stream_name = None  # the Streams entry a 'stream' source pulls
@@ -150,13 +146,15 @@ class ASRBase(Base):
         if base:
             base_entry = get_base_by_id(self.config, base)
             if base_entry is None:
-                if not self.launch_session_id:
+                if not self.launch_session_id or self.registration:
                     raise ValueError(f"Base '{base}' not found in config 'Bases'.")
                 explain_cannot_start(
                     "ASR Base", f"-b {base} is not an id in the config's Bases list.",
                     "Pick this base's entry below; the ids are the entries under Bases on the ASR Base card's "
                     "Config tab.")
                 base_entry = self._choose_base_from_config()
+        elif self.registration:
+            raise ValueError("Registering a speaker needs the base whose settings it takes (-b).")
         elif self.launch_session_id:
             base_entry = self._default_base()
         else:
@@ -164,7 +162,8 @@ class ASRBase(Base):
         self._base_entry = base_entry
         self.base_type = str(base_entry['base_type'])
         self.id = base_entry['id']  # identity (string or number); port is separate
-        print(f"\033]0;ASR Base {self.base_type} {self.id} \007")
+        if not self.registration:
+            print(f"\033]0;ASR Base {self.base_type} {self.id} \007")
 
         self._setup_yaml()
         self._setup_directories()
@@ -219,7 +218,7 @@ class ASRBase(Base):
 
         # recognition scope is a per-device setting: a room microphone profile
         # is typically group-scope (transcription only), a personal badge
-        # profile participant-scope (speaker verification + transcription).
+        # profile individual-scope (speaker verification + transcription).
         # the actual group id is resolved from the session at runtime.
         self.asr_scope = normalize_asr_scope(base_config.get('asr_scope'))
         self.speaker_verification = _resolve_speaker_verification(
@@ -240,6 +239,19 @@ class ASRBase(Base):
         self.gain = float(base_config['gain'])
         self.score_amplified = bool(base_config.get('score_amplified', False))
 
+        self.speech_transcriber_url = build_service_url(self.config, asr_server_config['speech_transcriber'])
+        self.speech_separator_url = build_service_url(self.config, asr_server_config['speech_separator'])
+        self.speech_enhancer_url = build_service_url(self.config, asr_server_config['speech_enhancer'])
+        self.vad_url = build_service_url(self.config, asr_server_config['voice_activity_detector'])
+
+        self.source = None
+        self.stream_kwargs = {}
+        if self.registration != 'files':  # a registration from files records nothing
+            self._setup_source(base_config)
+
+    def _setup_source(self, base_config: dict):
+        """Resolve where the base takes its audio from: its Bases entry's source and
+        source_index, into self.source and self.stream_kwargs."""
         # source comes from the per-base Bases entry (single source of truth);
         # Base.<device>.source has been removed, so the base must define its source
         self.source = self._base_entry.get('source') or base_config.get('source')
@@ -247,11 +259,6 @@ class ASRBase(Base):
             raise ValueError(
                 f"Base '{self.id}' has no 'source'. Set 'source' in its Bases entry.")
         self.stream_kwargs = base_config['stream_kwargs']
-
-        self.speech_transcriber_url = build_service_url(self.config, asr_server_config['speech_transcriber'])
-        self.speech_separator_url = build_service_url(self.config, asr_server_config['speech_separator'])
-        self.speech_enhancer_url = build_service_url(self.config, asr_server_config['speech_enhancer'])
-        self.vad_url = build_service_url(self.config, asr_server_config['voice_activity_detector'])
 
         from openmmla.utils.constants import normalize_source
         self.source = normalize_source(self.source)
@@ -266,7 +273,8 @@ class ASRBase(Base):
                     f"Base '{self.id}' uses source '{self.source}' but has no 'port' "
                     "in its Bases entry. Add a 'port' to that base.")
             self.port = int(self._base_entry['port'])
-            free_port(self.port)
+            if not self.registration:  # a registration leaves a base listening there alone
+                free_port(self.port)
             self.stream_kwargs['port'] = self.port
 
         # set input_device_index for 'pyaudio'
@@ -319,6 +327,11 @@ class ASRBase(Base):
             source_index = self._base_entry.get('source_index')
             stream_sources = get_stream_sources(self.config)
             if source_index in (None, "") and len(stream_sources) > 1:
+                if self.registration:
+                    raise ValueError(
+                        f"base {self.id} names no stream in its Bases entry (source_index), and there are "
+                        f"{len(stream_sources)} to pull: {', '.join(name for name, _ in stream_sources)}. "
+                        "Set its source_index on the ASR Base card's Config tab.")
                 # the entry names none of several: ask, as a base started by hand
                 if self.launch_session_id:
                     explain_cannot_start(
@@ -357,6 +370,9 @@ class ASRBase(Base):
 
         # set file_path for 'file'
         elif self.source == 'file':
+            if self.registration:
+                raise ValueError(f"base {self.id} reads a file (source: file), so it has no stream to record a "
+                                 "speaker from: register from files instead.")
             if 'file_dir' not in base_config:
                 # default to project directory if not specified
                 file_dir = self.project_dir
@@ -423,7 +439,7 @@ class ASRBase(Base):
         self.logger_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'logger'))
         self.runtime_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'real-time', 'runtime'))
         self.temp_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'temp'))
-        self.profiles_dir = os.fspath(runtime_pipeline_artifact_dir(self.project_dir, 'asr-base', 'profiles'))
+        self.profiles_dir = speaker_profiles_dir(self.project_dir)
 
         os.makedirs(self.logger_dir, exist_ok=True)
         os.makedirs(self.runtime_dir, exist_ok=True)
@@ -436,6 +452,12 @@ class ASRBase(Base):
         Set up the clients for InfluxDB, Redis, and MQTT, warms up the audio resampler, and initializes the
         AudioRecognizer and AudioStream.
         """
+        if self.registration:
+            self.influx_client = self.mongo_client = self.redis_client = self.mqtt_client = None
+            self.audio_stream = None  # a registration from the stream opens its own
+            self.audio_recognizer = AudioRecognizer(config_path=self.config_path, profiles_dir=self.profiles_dir,
+                                                    store=self.store, selected_speakers=self.selected_speakers)
+            return
         self.influx_client = InfluxDBClientWrapper(self.config_path)
         self.mongo_client = MongoDBClientWrapper(self.config_path)
         self.redis_client = RedisClientWrapper(self.config_path)
@@ -483,7 +505,7 @@ class ASRBase(Base):
         Launched from the console (with a session id) it starts recognizing at
         once, without the menu, with every registered speaker profile selected,
         and returns when that run ends with STOP, so the process exits. When it
-        cannot start (participant scope without speaker profiles) it says why and
+        cannot start (individual scope without speaker profiles) it says why and
         shows its menu, where Edit Speaker Profiles fixes it; a run that ends with
         an error also comes back to the menu. Started by hand, it prompts with the
         menu until termination.
@@ -497,8 +519,8 @@ class ASRBase(Base):
                     start_at_once = False
                     select_fun = 2
                     if self.speaker_verification and self.selected_speakers is None:
-                        # the selection Edit Speaker Profiles starts from: every registered profile
-                        self.selected_speakers = self._available_speakers()
+                        # the selection Edit Speaker Profiles starts from
+                        self.selected_speakers = self._launch_selection()
                 else:
                     select_fun = get_function_base(self.id, self.mode)
                 outcome = func_map.get(select_fun, lambda: self.logger.warning("Invalid option"))()
@@ -511,7 +533,8 @@ class ASRBase(Base):
                             "ASR Base",
                             f"base {self.id} verifies speakers (asr_scope: {self.asr_scope}), and {self.mode} mode "
                             "needs at least one registered speaker profile selected.",
-                            "Register and select speakers with Edit Speaker Profiles below, then choose Start. "
+                            "Register and select speakers with Edit Speaker Profiles below, then choose Start "
+                            "(next time, register and pick them before Start with Speakers on the ASR Base card). "
                             f"Or switch to capture mode, or set asr_scope: group for base type {self.base_type} "
                             "on the ASR Base card's Config tab.")
                     else:
@@ -534,6 +557,20 @@ class ASRBase(Base):
         if ended:
             self._close_clients()
             print(f"The run of session {self.launch_session_id} ended with STOP: ASR Base {self.id} exits.")
+
+    def _launch_selection(self) -> list[str]:
+        """The speakers a base launched from the console starts with: the -spk names
+        registered on this host, in that order, else every registered profile. The
+        recognizer is left with those only."""
+        available = self._available_speakers()
+        if self.launch_speakers is None:
+            return available
+        missing = [name for name in self.launch_speakers if name not in available]
+        if missing:
+            print(f"{RED}Not registered on this host, so not recognized: {', '.join(missing)}{ENDC}")
+        chosen = [name for name in self.launch_speakers if name in available]
+        self.audio_recognizer.reset_profiles(self.profiles_dir, chosen)
+        return chosen
 
     def _edit_speakers(self):
         """Edit speaker profiles - register, select/deselect, or delete speakers."""
@@ -621,22 +658,11 @@ class ASRBase(Base):
             self.logger.info("Cannot register from stream when source is 'file'. Please use 'Register from Files' option.")
             return
 
-        output_path = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_register.wav')
-        self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
         self.recording_prompt(self.register_duration)
-        
-        self.audio_stream.start()
-        audio_frame = self.audio_stream.read(duration=self.register_duration, latest=True)
-        self.audio_stream.stop()
-        write_frame_to_wav(output_path, audio_frame)
-
-        apply_gain(output_path, self.gain)
-        audio_path = self._audio_preprocessing(output_path, 1)
+        audio_path = self._record_for_registration()
 
         if audio_path is None:
-            msg = ("Audio pre-processing failed: no speech detected or the VAD/NR service is unreachable "
-                   f"(vad={self.vad}, nr={self.nr}). Please check the ASR server and record again, "
-                   "or restart with -vad False -nr False to skip pre-processing.")
+            msg = self._no_speech_message()
             self.logger.info(msg)
             print(f"\n{RED}❌ {msg}{ENDC}")
             pause_after_error("return to the menu")
@@ -646,9 +672,95 @@ class ASRBase(Base):
         if name == '':
             self.logger.info('Empty name, skip the registering process.')
             return
+        problem = name_problem(name)
+        if problem:
+            print(f"{RED}'{name}': {problem}. The recording is not registered.{ENDC}")
+            return
 
         self.audio_recognizer.register(audio_path, name)
         self.logger.info(f"Speaker '{name}' has been successfully registered from stream!")
+
+    def _record_for_registration(self, duration: float | None = None) -> str | None:
+        """Record `duration` seconds (register_duration if not given) from the base's source and
+        prepare them for registration (gain, noise reduction, VAD): the wav to register, or None
+        when no speech was found in it."""
+        output_path = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_register.wav')
+        self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
+        self.audio_stream.start()
+        try:
+            audio_frame = self.audio_stream.read(duration=duration or self.register_duration, latest=True)
+        finally:
+            self.audio_stream.stop()
+        write_frame_to_wav(output_path, audio_frame)
+
+        apply_gain(output_path, self.gain)
+        return self._audio_preprocessing(output_path, 1)
+
+    def _no_speech_message(self) -> str:
+        return ("Audio pre-processing failed: no speech detected or the VAD/NR service is unreachable "
+                f"(vad={self.vad}, nr={self.nr}). Please check the ASR server and record again, "
+                "or restart with -vad False -nr False to skip pre-processing.")
+
+    def register_speaker_from_stream(self, name: str, duration: float | None = None) -> int:
+        """Register speaker `name` (or add to that profile) from `duration` seconds of the base's
+        source, asking nothing (mmla asr-speakers). Returns how many embeddings the profile holds."""
+        problem = name_problem(name)
+        if problem:
+            raise ValueError(f"'{name}': {problem}.")
+        seconds = duration or self.register_duration
+        print(f"Recording {seconds:g} s from base {self.id} ({self.source}): read the sentences aloud now.", flush=True)
+        audio_path = self._record_for_registration(seconds)
+        if audio_path is None:
+            raise RuntimeError(self._no_speech_message())
+        print("Recorded; making the voice features...", flush=True)
+        return self._register_checked(audio_path, name)
+
+    def register_speaker_from_files(self, name: str, files: list[str]) -> tuple[int, int]:
+        """Register speaker `name` (or add to that profile) from reference audio files on this host,
+        asking nothing (mmla asr-speakers). Returns (the files used, the embeddings the profile holds)."""
+        problem = name_problem(name)
+        if problem:
+            raise ValueError(f"'{name}': {problem}.")
+        missing = [path for path in files if not os.path.isfile(path)]
+        if missing:
+            raise FileNotFoundError(f"Not on this host: {', '.join(missing)}")
+        before = self._embedding_count(name)
+        used = self._register_files(name, files)
+        after = self._embedding_count(name)
+        if not used or after <= before:
+            self._drop_if_empty(name)
+            raise RuntimeError("No voice features could be made from these files: no speech found in them, or the "
+                               "ASR server (VAD, noise reduction, audio inferer) is unreachable.")
+        return used, after
+
+    def _register_checked(self, audio_path: str, name: str) -> int:
+        """Register `audio_path` as `name` and make sure it added embeddings; a profile folder
+        the attempt left empty is removed."""
+        before = self._embedding_count(name)
+        self.audio_recognizer.register(audio_path, name)
+        after = self._embedding_count(name)
+        if after <= before:
+            self._drop_if_empty(name)
+            raise RuntimeError("No voice features could be made from the recording: is the ASR server's audio "
+                               "inferer reachable?")
+        return after
+
+    def _embedding_count(self, name: str) -> int:
+        folder = os.path.join(self.profiles_dir, name)
+        try:
+            return sum(1 for file_name in os.listdir(folder) if file_name.endswith('.pkl'))
+        except OSError:
+            return 0
+
+    def _drop_if_empty(self, name: str):
+        """Remove the profile folder of `name` when it holds nothing (a first registration
+        that made no embedding), so it is not listed as a speaker."""
+        folder = os.path.join(self.profiles_dir, name)
+        try:
+            if os.path.isdir(folder) and not os.listdir(folder):
+                os.rmdir(folder)
+        except OSError:
+            pass
 
     def _register_speaker_from_files(self):
         """Register a new speaker profile from reference audio files."""
@@ -669,51 +781,54 @@ class ASRBase(Base):
             if name == '':
                 self.logger.info('Empty name, skip the registering process.')
                 return
-            
-            # process each reference file
-            processed_files = []
-            for i, file_path in enumerate(reference_files):
-                try:
-                    temp_file = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_ref_{i}.wav')
-                    formatted_file = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_formatted_{i}.wav')
-                    format_wav(file_path, formatted_file)
-                    
-                    # apply gain and preprocessing
-                    processed_path = self._audio_preprocessing(formatted_file, 1)
-                    
-                    if processed_path is None:
-                        self.logger.warning(f"Preprocessing failed for {os.path.basename(file_path)}, skipping.")
-                        continue
-                    
-                    # copy processed file to temp location
-                    shutil.copy2(processed_path, temp_file)
-                    processed_files.append(temp_file)
-                    
-                except Exception as e:
-                    self.logger.warning(f"Error processing {os.path.basename(file_path)}: {e}")
-                    continue
-            
-            if not processed_files:
+            problem = name_problem(name)
+            if problem:
+                print(f"{RED}'{name}': {problem}. Nothing is registered.{ENDC}")
+                return
+
+            used = self._register_files(name, reference_files)
+            if not used:
                 self.logger.error("No files could be processed successfully.")
                 return
-            
-            # register speaker using the first processed file (AudioRecognizer will handle multiple files internally)
-            # for now, we'll register each file separately - this could be enhanced to batch process
-            for i, processed_file in enumerate(processed_files):
-                try:
-                    if i == 0:
-                        # first file - register as new speaker
-                        self.audio_recognizer.register(processed_file, name)
-                    else:
-                        # additional files - add to existing speaker profile
-                        self.audio_recognizer.register(processed_file, name)
-                except Exception as e:
-                    self.logger.warning(f"Error registering file {i+1}: {e}")
-            
-            self.logger.info(f"Speaker '{name}' has been successfully registered from {len(processed_files)} reference files!")
-            
+            self.logger.info(f"Speaker '{name}' has been successfully registered from {used} reference files!")
+
         except Exception as e:
             self.logger.error(f"Error in file-based registration: {e}")
+
+    def _register_files(self, name: str, reference_files: list[str]) -> int:
+        """Prepare each reference file (format, noise reduction, VAD) and register it as `name`;
+        returns how many were registered. A file that fails is logged and skipped."""
+        processed_files = []
+        for i, file_path in enumerate(reference_files):
+            try:
+                temp_file = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_ref_{i}.wav')
+                formatted_file = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_formatted_{i}.wav')
+                format_wav(file_path, formatted_file)
+
+                # apply gain and preprocessing
+                processed_path = self._audio_preprocessing(formatted_file, 1)
+
+                if processed_path is None:
+                    self.logger.warning(f"Preprocessing failed for {os.path.basename(file_path)}, skipping.")
+                    continue
+
+                # copy processed file to temp location
+                shutil.copy2(processed_path, temp_file)
+                processed_files.append(temp_file)
+
+            except Exception as e:
+                self.logger.warning(f"Error processing {os.path.basename(file_path)}: {e}")
+                continue
+
+        # each file adds its embeddings to the profile; the first makes it
+        registered = 0
+        for i, processed_file in enumerate(processed_files):
+            try:
+                self.audio_recognizer.register(processed_file, name)
+                registered += 1
+            except Exception as e:
+                self.logger.warning(f"Error registering file {i+1}: {e}")
+        return registered
 
     def _start_recognition(self, session_id: str | None = None):
         """Start the real-time voice recognition process.
@@ -732,7 +847,7 @@ class ASRBase(Base):
             True when the run ended with STOP, False when it ended with an error, and None when it
             could not start (speaker verification without a selected speaker profile).
         """
-        # check if any speakers are selected for participant-level recognition
+        # check if any speakers are selected for individual-level recognition
         if self.speaker_verification and (not self.selected_speakers or len(self.selected_speakers) == 0):
             print("------------------------------------------------")
             if self.mode in ['live', 'analyze']:
@@ -944,7 +1059,8 @@ class ASRBase(Base):
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
                       vad=self.vad, nr=self.nr, tr=self.tr, sp=self.sp, store=self.store, hsr=self.hsr,
                       session_id=self.launch_session_id,
-                      base=str(self.id) if self.launch_session_id else None)
+                      base=str(self.id) if self.launch_session_id else None,
+                      speakers=self.launch_speakers)
         self.logger.info(f"Profiles directory reset to {self.profiles_dir}")
         gc.collect()
 
@@ -1628,18 +1744,9 @@ class ASRBase(Base):
         Args:
             seconds: duration allowed for recording the prompt sentences.
         """
+        sentences = "\n".join(f"{i}. {sentence}" for i, sentence in enumerate(REGISTRATION_SENTENCES, 1))
         input(f"Press the Enter key to start recording, and read the following sentence in {seconds} seconds:\n"
-              "1. The boy was there when the sun rose.\n"
-              "2. A rod is used to catch pink salmon.\n"
-              "3. The source of the huge river is the clear spring.\n"
-              "4. Kick the ball straight and follow through.\n"
-              "5. Help the woman get back to her feet.\n"
-              "6. A pot of tea helps to pass the evening.\n"
-              "7. Smoky fires lack flame and heat.\n"
-              "8. The soft cushion broke the man's fall.\n"
-              "9. The salt breeze came across from the sea.\n"
-              "10. The girl at the booth sold fifty bonds."
-              )
+              f"{sentences}")
         print("------------------------------------------------")
 
     @property

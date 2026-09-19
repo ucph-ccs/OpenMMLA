@@ -9,8 +9,8 @@
 # comes from, is the Bases list below.
 Base:
   <Your_Device_Name>:
-    asr_scope: participant        # participant = speaker verification + transcription; group = attribute transcript to the session group (no verification)
-    speaker_verification: auto    # auto = participant:true, group:false; set true/false to override
+    asr_scope: individual         # individual = speaker verification + transcription; group = attribute transcript to the session group (no verification)
+    speaker_verification: auto    # auto = individual:true, group:false; set true/false to override
     register_duration:            # Seconds to record for registration
     recognize_duration:           # Seconds to record for recognition
     recognize_sp_duration:        # Seconds to record for recognition (with speech separation)

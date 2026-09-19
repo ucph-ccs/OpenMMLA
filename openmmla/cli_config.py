@@ -25,6 +25,7 @@ HIDDEN_COMMANDS = {
 OPTIONAL_DEP_MAP = {
     "asr-base": "asr-base",
     "asr-sync": "asr-base",
+    "asr-speakers": "asr-base",
     "asr-infer": "asr-server-nemo",
     "asr-resample": "asr-server-nemo",
     "asr-enhance": "asr-server-nemo",
@@ -58,6 +59,10 @@ COMMANDS = {
     "asr-sync": (
         "openmmla.commands.asr.sync:main",
         "Run ASR synchronizer of real-time audio analyzer."
+    ),
+    "asr-speakers": (
+        "openmmla.commands.asr.speakers:main",
+        "List, register and delete the speaker profiles ASR bases recognize."
     ),
     "asr-infer": (
         "openmmla.commands.asr.infer:main",

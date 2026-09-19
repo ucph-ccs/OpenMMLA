@@ -83,7 +83,7 @@ from openmmla.utils.artifact_paths import (
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources, normalize_source
-from openmmla.utils.config import get_bases
+from openmmla.utils.config import get_bases, get_base_by_id
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -120,6 +120,9 @@ from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef,
 from openmmla.tui.widgets.ssh_form import SSHForm
 from openmmla.tui.widgets.stream_panel import StreamPanel, _with_stream_path
 from openmmla.tui.widgets.session_control import SessionControlPanel
+from openmmla.tui.widgets.speaker_profiles import SpeakerProfilesScreen
+from openmmla.tui import speakers as asr_speakers
+from openmmla.bases.asr.speaker_profiles import join_speakers
 from openmmla.tui.widgets.task_form import TaskForm
 from openmmla.tui.screens.environment import ENV_GROUPS, env_statuses_local, env_statuses_remote
 
@@ -758,6 +761,9 @@ def _remote_transform_matrix_listing(profile, remote_dir: str) -> list[str] | No
 
 # the base cards, and the pipeline their bases note in a session's sources
 _BASE_CARD_PIPELINES = {"ASR Base": "asr", "VFA Base": "vfa", "IPS Base": "ips"}
+
+# the card whose bases recognize speakers from the profiles of its host (Speakers)
+_ASR_BASE_CARD = "ASR Base"
 
 # the synchronizer's own count of the bases it merges each time slice from
 # (the long form of -nb of mmla asr-sync and vfa-sync): Sync Waits For on the
@@ -2048,6 +2054,9 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             # choices, defaults and follow_values come from the card host's
             # config (_service_with_base_choices)
             ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
+            # the speaker profiles each base recognizes (-spk): a line per base,
+            # which the launcher writes and Manage changes (_put_speakers)
+            ParamDef("--speakers", "Speakers", "speakers", None, per_instance="-nb"),
             ParamDef("-bt", "Synchronizer Base Type", "choice", "", follows="-b"),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-s", "Store Audio", "bool", True),
@@ -2060,7 +2069,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         ],
         components=[
             ComponentDef("base", "mmla asr-base", "-nb",
-                         ["-sid", "-b", "-m", "-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
+                         ["-sid", "-b", "--speakers", "-m", "-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
             ComponentDef("synchronizer", "mmla asr-sync", "-ns",
                          ["-sid", _SYNC_WAIT_FLAG, "-bt", "-d", "-sp"]),
         ],
@@ -3563,6 +3572,12 @@ class ServicePanel(Widget):
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "svc-target-select" and any(
+                isinstance(node, ServiceCard) and node.service_def.name == _ASR_BASE_CARD
+                for node in event.select.ancestors):
+            # the Session, the Bases and the Mode decide the card's Speakers line
+            self.call_after_refresh(self._show_speakers_summary)
+            return
         if event.select.id == "svc-target-select":
             if self._suppress_target_change:
                 return
@@ -4075,6 +4090,8 @@ class ServicePanel(Widget):
             launch_pane = TabPane("Launch", launch_scroll, id="svc-tab-launch")
             await tabs.add_pane(launch_pane)
             await launch_scroll.mount(card)
+            if svc.name == _ASR_BASE_CARD:
+                self._list_speakers(self._get_panel_target())
 
             config_scroll = Vertical(classes="svc-config-scroll")
             config_pane = TabPane("Config", config_scroll, id="svc-tab-config")
@@ -4645,6 +4662,291 @@ class ServicePanel(Widget):
                 values.append(str(value))
         return values
 
+    # ── ASR Base: the speakers its bases recognize ───────────────
+
+    def _speaker_answers(self) -> dict[str, asr_speakers.Answer]:
+        """what each host said last about its speaker profiles."""
+        return self.__dict__.setdefault("_asr_speaker_answers", {})
+
+    def _speaker_picks(self) -> dict[tuple[str, str], list[str] | None]:
+        """the speakers ticked under Manage, per host and base (_speaker_key);
+        None or absent: nobody ticked any, and the session's group decides."""
+        return self.__dict__.setdefault("_asr_speaker_picks", {})
+
+    def _list_speakers(self, target: str) -> None:
+        """ask the card's host which speaker profiles it has, off the UI thread;
+        the card's Speakers lines say what is known meanwhile."""
+        self.call_after_refresh(self._show_speakers_summary)
+        self.run_worker(self._async_list_speakers(target), group="launcher-asr-speakers", exclusive=True)
+
+    async def _async_list_speakers(self, target: str) -> None:
+        answer = await asyncio.to_thread(asr_speakers.list_profiles, asr_speakers.SpeakerHost(target, self._root))
+        answers = self._speaker_answers()
+        before = answers.get(target)
+        if answer.listing is None and before is not None and before.listing is not None:
+            # silent now: keep the profiles it named before
+            self._log(f"[yellow]Speakers: {rich_escape(answer.problem)}[/yellow]")
+        else:
+            answers[target] = answer
+        if target == self._get_panel_target():
+            self._show_speakers_summary()
+
+    def _asr_card_config(self, target: str, svc: ServiceDef | None = None) -> dict:
+        """the ASR Base config of the card's host: read here for this machine,
+        from the config cache for another (filled when the card was built)."""
+        svc = svc or getattr(self, "_svc_map", {}).get(_ASR_BASE_CARD)
+        if svc is None:
+            return {}
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        try:
+            if target == "local":
+                config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+            else:
+                config = self._target_config_cache.get(self._config_cache_key(config_path, target))
+        except Exception:
+            config = None
+        return config if isinstance(config, dict) else {}
+
+    @staticmethod
+    def _base_ids(params: dict) -> list[str]:
+        """the Bases entry each base of the card is, row by row ("" for one
+        left on 'ask in its window')."""
+        count = _coerce_int(params.get("-nb"), 0)
+        picked = [str(value or "") for value in (params.get("-b") if isinstance(params.get("-b"), list) else [])]
+        return (picked + [""] * count)[:count]
+
+    def _base_entry_id(self, params: dict, target: str, index: int) -> str:
+        """the Bases entry base `index` runs as: the row's pick, else the
+        config's only entry (what a base given no -b takes); "" when it asks."""
+        ids = self._base_ids(params)
+        entry = ids[index] if index < len(ids) else ""
+        if not entry:
+            entries = get_bases(self._asr_card_config(target))
+            if len(entries) == 1:
+                entry = str(entries[0].get("id"))
+        return entry
+
+    def _speaker_key(self, params: dict, target: str, index: int) -> tuple[str, str]:
+        """what base `index`'s pick is kept under: its Bases entry (a pick goes
+        with the microphone, whichever row it is on), else its row."""
+        entry = self._base_entry_id(params, target, index)
+        return (target, f"id:{entry}" if entry else f"row:{index}")
+
+    def _base_label(self, params: dict, target: str, index: int) -> str:
+        """'Base 1 · voice_badge_0 (Nicla)': a base of the card, for the Manage
+        screen and the log."""
+        entry_id = self._base_entry_id(params, target, index)
+        entry = get_base_by_id(self._asr_card_config(target), entry_id) if entry_id else None
+        label = f"Base {index + 1}"
+        if entry_id:
+            label += f" · {entry_id}"
+        if entry is not None and str(entry.get("base_type") or ""):
+            label += f" ({entry.get('base_type')})"
+        return label
+
+    def _speaker_frame(self, params: dict, target: str) -> asr_speakers.Context:
+        """the card's session group, its participants and the host's profiles:
+        what every base's Speakers line starts from (its choice: the group's)."""
+        session = params.get("-sid")
+        found = asr_speakers.session_group(
+            _is_new_collection_session_choice(session), session, params.get("--experiment-group"),
+            self._collection_experiment_group_choices())
+        participants: list[dict] = []
+        if found:
+            try:
+                participants = list(get_participant_aliases(found[0], found[1], load_experiments(self._root)).values())
+            except Exception:
+                participants = []
+        answer = self._speaker_answers().get(target)
+        listing = answer.listing if answer else None
+        return asr_speakers.Context(
+            group="/".join(found) if found else "",
+            participants=participants,
+            listing=listing,
+            problem=(answer.problem if answer and listing is None else ""),
+            choice=asr_speakers.choose(None, listing, participants),
+        )
+
+    def _speaker_context(self, params: dict, target: str, index: int,
+                         frame: asr_speakers.Context | None = None) -> asr_speakers.Context:
+        """what a Start would pass base `index`: its own ticks, else the frame's group choice."""
+        frame = frame or self._speaker_frame(params, target)
+        picked = self._speaker_picks().get(self._speaker_key(params, target, index))
+        return replace(frame, choice=asr_speakers.choose(picked, frame.listing, frame.participants))
+
+    def _base_verifies(self, params: dict, target: str, index: int, svc: ServiceDef | None = None) -> bool | None:
+        """whether base `index` recognizes speakers (its base type is asr_scope
+        individual); None when the host's config is not known."""
+        config = self._asr_card_config(target, svc)
+        if not config:
+            return None
+        ids = self._base_ids(params)
+        return asr_speakers.verifies_speakers(config, ids[index] if index < len(ids) else "")
+
+    def _speakers_unused(self, params: dict, target: str, index: int) -> str:
+        """why base `index` would recognize nobody; "" when it would."""
+        if str(params.get("-m") or "live") == "capture":
+            return "capture mode records only"
+        if self._base_verifies(params, target, index) is False:
+            return "this base is asr_scope group"
+        return ""
+
+    def _show_speakers_summary(self) -> None:
+        """write the Speakers line of every base of the ASR Base card."""
+        card = next((card for card in self.query(ServiceCard) if card.service_def.name == _ASR_BASE_CARD), None)
+        if card is None:
+            return
+        target = self._get_panel_target()
+        params = card.collect_params()
+        where = "this machine" if target == "local" else target
+        frame = self._speaker_frame(params, target)
+        for index in range(_coerce_int(params.get("-nb"), 0)):
+            context = self._speaker_context(params, target, index, frame)
+            card.show_speakers(index, asr_speakers.summary(context, where, self._speakers_unused(params, target, index)))
+
+    def on_service_card_speakers_requested(self, event: ServiceCard.SpeakersRequested) -> None:
+        """Manage on a Speakers row of the ASR Base card: the speaker profiles
+        of its host, and which of them that base recognizes."""
+        svc = self._svc_map.get(event.service_name)
+        if svc is None:
+            return
+        target = self._get_panel_target()
+        index = event.index
+        frame = self._speaker_frame(event.params, target)
+        shown = self._service_with_base_choices(svc, target)
+        base_param = next((param for param in shown.params if param.flag == "-b" and param.per_instance), None)
+        bases = [
+            (str(choice[0]), str(choice[1])) for choice in (base_param.choices if base_param else [])
+            if isinstance(choice, (tuple, list)) and len(choice) == 2 and str(choice[1] or "")
+        ]
+        key = self._speaker_key(event.params, target, index)
+
+        def done(result) -> None:
+            if not isinstance(result, dict):
+                return
+            self._speaker_picks()[key] = result.get("picked")
+            if isinstance(result.get("answer"), asr_speakers.Answer):
+                self._speaker_answers()[target] = result["answer"]
+            if result.get("start_dir"):
+                self.__dict__["_asr_speaker_files_dir"] = result["start_dir"]
+            self._show_speakers_summary()
+
+        self.app.push_screen(SpeakerProfilesScreen(
+            asr_speakers.SpeakerHost(target, self._root),
+            answer=self._speaker_answers().get(target),
+            picked=self._speaker_picks().get(key),
+            participants=frame.participants,
+            group=frame.group,
+            bases=bases,
+            base=self._base_entry_id(event.params, target, index),
+            base_label=self._base_label(event.params, target, index),
+            vad=bool(event.params.get("-vad", True)),
+            nr=bool(event.params.get("-nr", True)),
+            store=bool(event.params.get("-s", True)),
+            start_dir=self.__dict__.get("_asr_speaker_files_dir"),
+        ), done)
+
+    def _put_speakers(self, params: dict, target: str) -> None:
+        """the -spk a Start of the ASR Base card passes each of its bases (a
+        list, one entry per base): the speakers ticked for it under Manage,
+        else the participants of the session's group that have a profile on
+        the host; none ("": the base takes every profile) when neither names
+        anyone.
+
+        This machine's profiles are read again first (one registered from a
+        base's own menu since counts). Another host's are what it said last;
+        one that never answered `mmla asr-speakers` gets no -spk, since a
+        checkout from before it has a `mmla asr-base` that would refuse it."""
+        count = _coerce_int(params.get("-nb"), 0)
+        if target == "local":
+            self._speaker_answers()["local"] = asr_speakers.list_profiles(asr_speakers.SpeakerHost("local", self._root))
+        answer = self._speaker_answers().get(target)
+        if target != "local" and (answer is None or answer.listing is None):
+            params["--speakers"] = [""] * count
+            return
+        frame = self._speaker_frame(params, target)
+        speakers = []
+        for index in range(count):
+            choice = self._speaker_context(params, target, index, frame).choice
+            speakers.append(join_speakers(choice.names) if choice.names else "")
+        params["--speakers"] = speakers
+
+    def _speakers_start_problem(self, params: dict, target: str, svc: ServiceDef | None = None) -> str:
+        """why a base of the ASR Base card would stop at its menu for want of
+        speakers (asr_scope individual in live or analyze mode); "" when none would."""
+        mode = str(params.get("-m") or "live")
+        count = _coerce_int(params.get("-nb"), 0)
+        if count <= 0 or mode == "capture":
+            return ""
+        config = self._asr_card_config(target, svc)
+        if not config:
+            return ""
+        frame = self._speaker_frame(params, target)
+        listing = frame.listing
+        where = "this machine" if target == "local" else f"'{target}'"
+        ids = self._base_ids(params)
+        for index in range(count):
+            if not asr_speakers.verifies_speakers(config, ids[index]):
+                continue
+            base = f"base {index + 1}" + (f" ({ids[index]})" if ids[index] else "")
+            choice = self._speaker_context(params, target, index, frame).choice
+            if choice.names == []:
+                return (f"[yellow]No speaker is ticked under Speakers {index + 1} → Manage, and {base} recognizes "
+                        f"speakers (asr_scope: individual) in {mode} mode. Tick them there, or press Use Group there "
+                        f"to let the session's group decide, or switch Mode to capture.[/yellow]")
+            if listing is None:
+                return ""   # the host did not say: the bases decide, and ask in their window if they must
+            if not listing.names:
+                return (f"[yellow]No speaker profile is registered on {where}, and {base} recognizes speakers "
+                        f"(asr_scope: individual) in {mode} mode. Register them under Speakers → Manage; or switch "
+                        f"Mode to capture, or set asr_scope: group for its base type on the Config tab.[/yellow]")
+            if choice.names and not any(name in listing.names for name in choice.names):
+                return (f"[yellow]None of the speakers ticked under Speakers {index + 1} → Manage "
+                        f"({rich_escape(', '.join(choice.names))}) is registered on {where}. Tick others there, "
+                        f"or register them.[/yellow]")
+        return ""
+
+    def _speakers_start_notes(self, params: dict, target: str) -> list[str]:
+        """what a Start of the ASR Base card says about the speakers it passes each base."""
+        count = _coerce_int(params.get("-nb"), 0)
+        if count <= 0 or str(params.get("-m") or "live") == "capture":
+            return []
+        frame = self._speaker_frame(params, target)
+        listing = frame.listing
+        where = "this machine" if target == "local" else target
+        if listing is None and target != "local":
+            answer = self._speaker_answers().get(target)
+            why = f" ({answer.problem})" if answer and answer.problem else ""
+            return [f"  [yellow]Speakers: {rich_escape(where)} did not say which profiles it has{rich_escape(why)}, so "
+                    f"no -spk is passed and each base takes every profile there.[/yellow]"]
+        notes = []
+        followed_group = False
+        for index in range(count):
+            if self._base_verifies(params, target, index) is False:
+                continue
+            choice = self._speaker_context(params, target, index, frame).choice
+            label = self._base_label(params, target, index)
+            if choice.names:
+                why = {"picked": "ticked under Manage",
+                       "group": f"the participants of {frame.group}"}.get(choice.how, "")
+                notes.append(f"  {rich_escape(label)} speakers: {rich_escape(', '.join(choice.names))}"
+                             + (f" ({rich_escape(why)})" if why else ""))
+                followed_group = followed_group or choice.how == "group"
+                if listing is not None:
+                    missing = [name for name in choice.names if name not in listing.names]
+                    if missing:
+                        notes.append(f"  [yellow]Not registered on {rich_escape(where)}, so not recognized: "
+                                     f"{rich_escape(', '.join(missing))}[/yellow]")
+            else:
+                notes.append(f"  {rich_escape(label)} speakers: every profile on {rich_escape(where)}")
+        if listing is not None and followed_group:
+            absent = asr_speakers.unregistered(listing.names, frame.participants)
+            if absent:
+                notes.append(f"  [yellow]Participants of {rich_escape(frame.group)} with no profile on "
+                             f"{rich_escape(where)}: {rich_escape(', '.join(absent))} (Speakers → Manage "
+                             f"registers them)[/yellow]")
+        return notes
+
     def _base_card_start_notes(self, svc: ServiceDef, params: dict) -> list[str]:
         """what a Start of the ASR or VFA base card should say about the
         bases it does not start: those the config lists and the synchronizer
@@ -4720,6 +5022,10 @@ class ServicePanel(Widget):
                     f"Sync Waits For to {num_bases} or more (with the bases of this session on other hosts), or "
                     f"lower Num Bases.[/yellow]"
                 )
+        if svc.name == _ASR_BASE_CARD:
+            problem = self._speakers_start_problem(params, target, svc)
+            if problem:
+                return problem
         if svc.name != "IPS Base" or _coerce_int(params.get("-ns"), 0) <= 0 or str(params.get("-mc") or "").strip():
             return ""
         where = "this machine" if target == "local" else f"'{target}'"
@@ -4756,6 +5062,7 @@ class ServicePanel(Widget):
                 continue
             fresh = self._service_with_base_choices(service, target)
             card.update_param_choices(host_params(fresh.params))
+        self._show_speakers_summary()
 
     async def _async_refresh_base_choices(self, svc: ServiceDef, target: str) -> None:
         """Refresh on a base card: read its host's config and matrix files
@@ -7248,12 +7555,17 @@ class ServicePanel(Widget):
             return
         if svc.name == "IPS Camera Sync" and not self._camera_sync_ready(target):
             return
+        if svc.name == _ASR_BASE_CARD:
+            self._put_speakers(event.params, target)
         problem = self._base_card_start_problem(svc, event.params, target)
         if problem:
             self._log(problem)
             return
         for note in self._base_card_start_notes(svc, event.params):
             self._log(note)
+        if svc.name == _ASR_BASE_CARD:
+            for note in self._speakers_start_notes(event.params, target):
+                self._log(note)
 
         if not is_remote and svc.launch_type != "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None
@@ -7359,6 +7671,8 @@ class ServicePanel(Widget):
                 group="launcher-base-choices",
                 exclusive=True,
             )
+        if svc.name == _ASR_BASE_CARD:
+            self._list_speakers(target)
 
     def _port_conflict(self, svc: ServiceDef, target: str) -> str:
         """explain a system service whose ports answer only in part: another

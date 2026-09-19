@@ -27,6 +27,9 @@ def get_parser():
             "base name from config 'Bases' (pulls base_type/id/device from that entry); "
             "if not set, the only entry when started with -sid, else choose from the Bases list interactively",
             shortname='-b')
+    add_arg('speakers', str, None,
+            "comma-separated speaker profiles to recognize (see mmla asr-speakers --list); if not set, every "
+            "registered one", shortname='-spk')
     return parser
 
 
@@ -53,7 +56,8 @@ def main():
         sp=args.sp,
         hsr=args.hsr,
         session_id=args.session_id,
-        base=args.base
+        base=args.base,
+        speakers=args.speakers
     )
 
 

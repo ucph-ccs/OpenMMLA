@@ -172,6 +172,16 @@ class ServiceCard(Widget):
             self.service_name = service_name
             self.params = params
 
+    class SpeakersRequested(Message):
+        """Manage on the Speakers row of base `index`: the speaker profiles of
+        the card's host, and which of them that base recognizes."""
+
+        def __init__(self, service_name: str, index: int, params: dict) -> None:
+            super().__init__()
+            self.service_name = service_name
+            self.index = index
+            self.params = params
+
     DEFAULT_CSS = """
     ServiceCard {
         height: auto;
@@ -262,6 +272,17 @@ class ServiceCard(Widget):
         min-width: 5;
         height: 3;
         margin-left: 1;
+    }
+    ServiceCard .param-summary {
+        width: 1fr;
+        height: auto;
+        min-height: 3;
+        padding: 1 1 0 1;
+    }
+    ServiceCard .param-manage {
+        width: 12;
+        min-width: 12;
+        height: 3;
     }
     /* action buttons wrap to the next row when the card is too narrow (grid
        column count is recomputed on resize in on_resize) */
@@ -453,13 +474,6 @@ class ServiceCard(Widget):
                         variant="warning",
                         compact=True,
                         id=self._action_id(action),
-                    )
-                if self.service_def.launch_type == "collection" or self.service_def.artifact_pipeline:
-                    yield Button(
-                        "Download" if self.service_def.launch_type == "collection" else "Artifacts",
-                        variant="warning",
-                        compact=True,
-                        id=_safe_id(f"download__{self.service_def.name}"),
                     )
                 if self.service_def.launch_type == "collection":
                     yield Button(
@@ -692,6 +706,18 @@ class ServiceCard(Widget):
         return self._param_id(f"instance{index}", flag)
 
     def _instance_row(self, param: ParamDef, index: int) -> Horizontal:
+        if param.param_type == "speakers":
+            # who base `index` recognizes: the launcher writes the line
+            # (show_speakers) and keeps the pick, which Manage changes
+            return Horizontal(
+                Static(f"{param.label} {index + 1}:", classes="param-label"),
+                Button("Manage", variant="primary", compact=True,
+                       id=self._param_id(f"speakers{index}", param.flag), classes="param-manage"),
+                Static("[dim]asking the host...[/dim]", id=self._param_id(f"summary{index}", param.flag),
+                       classes="param-summary"),
+                id=self._instance_row_id(param.flag, index),
+                classes="param-row",
+            )
         options = _choice_options(param.choices)
         values = self._param_values.get(param.flag) or []
         value = values[index] if index < len(values) else self._instance_default(param, index)
@@ -777,6 +803,26 @@ class ServiceCard(Widget):
         except Exception:
             pass
         self._sync_instances(flag)
+
+    def _speakers_button(self, btn_id: str) -> int | None:
+        """the base whose Speakers → Manage button `btn_id` is; None for another."""
+        for param in self.service_def.params:
+            if param.param_type != "speakers":
+                continue
+            for index in range(len(self._param_values.get(param.flag) or [])):
+                if btn_id == self._param_id(f"speakers{index}", param.flag):
+                    return index
+        return None
+
+    def show_speakers(self, index: int, markup: str) -> None:
+        """put the Speakers line of base `index`: who it recognizes, and why."""
+        for param in self.service_def.params:
+            if param.param_type != "speakers":
+                continue
+            try:
+                self.query_one(f"#{self._param_id(f'summary{index}', param.flag)}", Static).update(markup)
+            except Exception:
+                pass
 
     def _action_id(self, action: str) -> str:
         return _safe_id(f"action__{action}__{self.service_def.name}")
@@ -1243,12 +1289,12 @@ class ServiceCard(Widget):
                         self.ActionRequested(self.service_def.name, action, self.collect_params())
                     )
                     return
-        elif btn_id.startswith("download__"):
-            params = self.collect_params()
-            self.post_message(self.DownloadRequested(self.service_def.name, params))
         elif btn_id.startswith("delete_files__"):
             params = self.collect_params()
             self.post_message(self.DeleteFilesRequested(self.service_def.name, params))
+        elif self._speakers_button(btn_id) is not None:
+            index = self._speakers_button(btn_id)
+            self.post_message(self.SpeakersRequested(self.service_def.name, index, self.collect_params()))
         else:
             for param in self.service_def.params:
                 if btn_id == self._param_id("inc", param.flag):
