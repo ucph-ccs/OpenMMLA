@@ -22,12 +22,18 @@ def fetch_latest_entry(session_id: str, event_type: str, influx_client: "InfluxD
     return deep_parse_json(event) if event else None
 
 
-def get_node_positions(session_id: str, influx_client: "InfluxDBClientWrapper", timestamp: int, dimension: str = '2d') -> dict:
-    """Retrieve badge positions from InfluxDB filtered by window_start_time."""
-    from openmmla.utils.client.influx_client import _to_flux_time
-    from datetime import datetime, timedelta, timezone
+def get_node_positions(session_id: str, influx_client: "InfluxDBClientWrapper", timestamp: float, dimension: str = '2d') -> dict:
+    """Retrieve badge positions from InfluxDB filtered by window_start_time.
 
-    start_dt = datetime.fromtimestamp(int(timestamp) - 20, tz=timezone.utc)
+    The window key is the synchronizer's bucket start, a float epoch with sub-second precision, and
+    it is stored as a float field; the literal is written out in full so the equality holds. Returns
+    an empty dict when no translation was recorded for that window.
+    """
+    from openmmla.utils.client.influx_client import _to_flux_time
+    from datetime import datetime, timezone
+
+    window_start = float(timestamp)
+    start_dt = datetime.fromtimestamp(window_start - 20, tz=timezone.utc)
     query = f'''
         from(bucket: "{influx_client.bucket}")
         |> range(start: {_to_flux_time(start_dt)})
@@ -35,10 +41,12 @@ def get_node_positions(session_id: str, influx_client: "InfluxDBClientWrapper", 
         |> filter(fn: (r) => r.session_id == "{session_id}")
         |> filter(fn: (r) => r.event_type == "{EVENT_TYPE_IPS_TRANSLATION}")
         |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-        |> filter(fn: (r) => r.window_start_time == {timestamp})
+        |> filter(fn: (r) => r.window_start_time == {window_start!r})
     '''
     events = influx_client._execute_query(query)
     data = [deep_parse_json(e) for e in events]
+    if not data:
+        return {}
     translate_dict = data[0]["translations"]
 
     positions = {'B': (0, 0)} if dimension == '2d' else {'B': (0, 0, 0)}

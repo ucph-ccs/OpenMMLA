@@ -225,6 +225,8 @@ class IPSVisualizer(Base):
         if graph_dict is None:
             return
         pos = self._get_node_positions(influx_client, timestamp=timestamp, dimension='2d')
+        if not pos:
+            return
         G = self._build_graph(graph_dict, pos)
 
         options = {
@@ -257,6 +259,8 @@ class IPSVisualizer(Base):
         if graph_dict is None:
             return
         pos_3d = self._get_node_positions(timestamp=timestamp, dimension='3d', influx_client=influx_client)
+        if not pos_3d:
+            return
         G = self._build_graph(graph_dict, pos_3d)
 
         # Draw the 3D graph
@@ -313,8 +317,13 @@ class IPSVisualizer(Base):
 
     def _get_node_positions(self, influx_client: InfluxDBClientWrapper, timestamp: float,
                             dimension: str = '2d') -> dict:
+        """Positions for the window the relations came from; empty when that window holds none.
+
+        The window key keeps its sub-second part: the synchronizer's buckets do not start on whole
+        seconds, and the query matches the key exactly.
+        """
         from openmmla.utils.querys import get_node_positions
-        return get_node_positions(self.session_id, influx_client, int(timestamp), dimension)
+        return get_node_positions(self.session_id, influx_client, timestamp, dimension)
 
     @staticmethod
     def draw_arrow(ax, x1, y1, z1, x2, y2, z2, node_radius=0.04):

@@ -58,6 +58,7 @@ class IPSSynchronizer(Synchronizer):
         self.merged_relations = None
         self.session_id = None
         self.allowed_tag_ids = None
+        self.unregistered_tag_ids = set()  # detected tags this session has no individual for, logged once each
         self.time_bucket_key = None  # start timestamp of time bucket
         self.time_bucket_end = None
         self.alive = False
@@ -96,6 +97,7 @@ class IPSSynchronizer(Synchronizer):
         self.mqtt_client.loop_stop()
         self.session_id = None
         self.allowed_tag_ids = None
+        self.unregistered_tag_ids = set()
         self.merged_relations = None
         self.merged_tags = None
         gc.collect()
@@ -248,6 +250,7 @@ class IPSSynchronizer(Synchronizer):
     def _resolve_session_tag_filter(self):
         """Limit IPS aggregation to tag ids assigned to the selected session group."""
         self.allowed_tag_ids = None
+        self.unregistered_tag_ids = set()
         try:
             session_doc = self.mongo_client.get_session(self.session_id)
         except Exception as e:
@@ -275,7 +278,20 @@ class IPSSynchronizer(Synchronizer):
             self.logger.warning(f"No participant tag ids found for {self.session_id}; IPS will not filter tags by group.")
 
     def _tag_allowed(self, tag_id) -> bool:
-        return self.allowed_tag_ids is None or str(tag_id) in self.allowed_tag_ids
+        if self.allowed_tag_ids is None:
+            return True
+        text = str(tag_id)
+        if text in self.allowed_tag_ids:
+            return True
+        if text not in self.unregistered_tag_ids:
+            # a tag the cameras see but no individual carries is dropped; say so once, or the
+            # session looks like it detected nothing at all
+            self.unregistered_tag_ids.add(text)
+            self.logger.warning(
+                "Tag %s is not carried by any individual of this session (tags %s), so it is left out "
+                "of the aggregation; give an individual this tag id to include it.",
+                text, sorted(self.allowed_tag_ids))
+        return False
 
     def _filter_tags(self, tags: dict) -> dict:
         if self.allowed_tag_ids is None:
