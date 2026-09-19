@@ -25,21 +25,18 @@ def resolve_hostname(hostname):
         return None
 
 
-def is_host_alive(ip_or_hostname, timeout=5):
-    try:
-        for port in [22]:  # check SSH port
-            with socket.create_connection((ip_or_hostname, port), timeout=timeout):
-                return True
-    except Exception:
-        return False
-
-
-def is_ip_port_open(ip, port, timeout=5):
+def probe_port(ip, port, timeout=3):
+    """how a connect to `port` on the machine at `ip` goes: "open" (a server
+    listens), "refused" (the machine answers, nothing listens there yet) or
+    "silent" (no answer at all: the machine is off or out of reach, or a
+    firewall drops it)."""
     try:
         with socket.create_connection((ip, port), timeout=timeout):
-            return True
-    except Exception:
-        return False
+            return "open"
+    except ConnectionRefusedError:
+        return "refused"
+    except OSError:
+        return "silent"
 
 
 def load_config(yaml_path):
@@ -79,21 +76,30 @@ def resolve_and_check_one(server, check_port):
         ip = resolve_hostname(host)
 
     if not ip:
-        server['ip'] = None
-        server['reachable'] = False
+        server['ip'], server['state'], server['routed'] = None, "unresolved", False
         return
 
-    # Step 2: check port if needed
-    if check_port:
-        reachable = is_ip_port_open(ip, port)
-    else:
-        reachable = is_host_alive(ip)
-
-    server['ip'] = ip if reachable else None
-    server['reachable'] = reachable
+    # Step 2: how its port answers. nginx notices by itself a server that
+    # starts or stops (one that fails is skipped for fail_timeout, then tried
+    # again), so a machine that refuses the port now is listed too, and its
+    # server is used once it starts. A machine that does not answer at all is
+    # left out: nginx would wait proxy_connect_timeout on it at every try
+    server['ip'] = ip
+    server['state'] = probe_port(ip, port) if check_port else "unchecked"
+    server['routed'] = server['state'] != "silent"
 
 
 # ========== 渲染 Jinja 模板 ==========
+
+# the summary line of a server, by how its port answered (resolve_and_check_one)
+_STATES = {
+    "open": "✅ {ip}",
+    "refused": "⏳ {ip}: nothing on port {port} yet, nginx sends to it once it answers",
+    "silent": "💤 {ip} does not answer: left out, Start the Gateway again once it is on",
+    "unresolved": "❌ the name does not resolve: left out",
+    "unchecked": "➖ {ip} (not checked)",
+}
+
 
 def render_nginx_template(config, template_path, output_path):
     env = Environment(loader=FileSystemLoader(os.path.dirname(template_path)))
@@ -115,13 +121,12 @@ def render_nginx_template(config, template_path, output_path):
         print("ℹ️ No upstream servers defined in config.")
     else:
         for service, servers in config.get("upstreams", {}).items():
-            reachable_servers = [s for s in servers if s.get("reachable")]
-            if not reachable_servers:
-                print(f"⚠️  Skipped upstream '{service}': no reachable servers.")
-            else:
-                for s in servers:
-                    status = f"✅ {s['ip']}" if s.get("reachable") else "❌ Not reachable"
-                    print(f"{s['host']} ({service}) → {status}")
+            if not any(s.get("routed") for s in servers):
+                print(f"⚠️  Skipped upstream '{service}': none of its machines answers, so /{service} "
+                      f"answers 404 until the Gateway is started again with one on.")
+            for s in servers:
+                status = _STATES[s["state"]].format(ip=s["ip"], port=s.get("port", 80))
+                print(f"{s['host']} ({service}) → {status}")
 
     if config.get("rtmp_apps"):
         print("ℹ️ rtmp_apps is ignored: streams go through MediaMTX now (docs/rtmp_streaming.md).")

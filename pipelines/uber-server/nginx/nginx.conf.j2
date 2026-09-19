@@ -12,10 +12,14 @@ http {
     keepalive_timeout  65;
     client_max_body_size 50M;
 
-    {# Only render the upstream having at least one reachable server #}
-    {% for name, servers in config.upstreams.items() if servers | selectattr('reachable') | list | length > 0 %}
+    {# the servers whose machine answered at render time (render_nginx.py); nginx itself
+       skips one that fails for fail_timeout and then tries it again, so a server
+       that starts later is used without a new render. The zone shares what the
+       workers learn of them (256k: 64k is too small where pages are 16 KB) #}
+    {% for name, servers in config.upstreams.items() if servers | selectattr('routed') | list | length > 0 %}
     upstream {{ name }} {
-        {% for s in servers if s.reachable %}
+        zone {{ name }} 256k;
+        {% for s in servers if s.routed %}
         server {{ s.ip }}:{{ s.port }} weight={{ s.weight }} max_fails=1 fail_timeout=30s;
         {% endfor %}
         keepalive 40;
@@ -31,18 +35,17 @@ http {
             index index.html index.htm;
         }
 
-        error_page 500 502 503 504 /50x.html;
-        location = /50x.html {
-            root html;
-        }
+        {# no error_page for 5xx: Ubuntu's nginx ships no 50x.html, and a missing page turned
+           a server that does not answer (502) into a 404, which the bases do not retry #}
 
-        {# Only render location for valid streams #}
-        {% for name, servers in config.upstreams.items() if servers | selectattr('reachable') | list | length > 0 %}
+        {# a location for every upstream rendered above #}
+        {% for name, servers in config.upstreams.items() if servers | selectattr('routed') | list | length > 0 %}
         location /{{ name }} {
             proxy_pass http://{{ name }};
             proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
             proxy_next_upstream_tries 3;
-            proxy_connect_timeout 10s;
+            {# a machine gone off since the render holds a request this long, once per fail_timeout #}
+            proxy_connect_timeout 3s;
             proxy_send_timeout 350s;
             proxy_read_timeout 350s;
         }
