@@ -62,7 +62,6 @@ class SessionStreams:
     # (someone else runs its ffmpeg) or "not recorded" (Record was off for it);
     # only the Stream Server may have those
     skipped: list[tuple[str, str]] = field(default_factory=list)
-    noted: bool = True   # False: the record says nothing of its streams (it predates that, or no base joined)
 
 
 def session_streams(record: dict | None, project_root) -> SessionStreams:
@@ -70,7 +69,7 @@ def session_streams(record: dict | None, project_root) -> SessionStreams:
     record_root with ~ spelled $HOME, empty meaning artifacts/ of the project for
     'local' and $HOME/artifacts on any other host; the host label of 'local' is
     this machine's short name, else the SSH profile."""
-    found = SessionStreams(noted=bool(session_sources.session_sources(record)))
+    found = SessionStreams()
     for entry in session_sources.captured_streams(record):
         name, profile = entry["name"], entry["ssh_profile"]
         if not profile:

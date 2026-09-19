@@ -188,7 +188,7 @@ The playback server keeps the file's clock on the requested start, so the start 
 
 A file already here in full is not fetched or cut again. One exported while the session was still going has the same name (the name only says where it starts) but is shorter, so its length is checked with `ffprobe` and it is replaced by the full one (without `ffprobe` on this machine, a Stream Server clip of an ended session counts as final). While the export runs, a progress row under the button shows what it is doing; its **Cancel** stops it between steps, and a clip being downloaded at once. What arrived stays, and cuts made on a capture host stay there until the next press fetches them. **Export All** ends with Export Streams, after the measurements and visualizations.
 
-A session with no record of its streams (one begun before the bases noted them, or one no base could note its stream in) takes every path the Stream Server recorded while it ran, and every stream with Record on in this machine's ASR, IPS and VFA configs (`pipelines/<asr|ips|vfa>-base/config.yml`), and the log says so. File names carry the time the file starts at, so a base replays either copy with `source: file` and `Base.file_dir` on one of these folders.
+A session with no record of its streams (one begun before the bases noted them, or one no base joined) has nothing to export, and the log says so. It takes nothing on a guess: the Stream Server and the capture hosts record whatever runs, other groups' streams too, so what was recorded while the session ran is nothing it is known to have used. File names carry the time the file starts at, so a base replays either copy with `source: file` and `Base.file_dir` on one of these folders.
 
 ## Troubleshooting
 

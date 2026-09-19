@@ -164,11 +164,6 @@ def live_paths(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> set
     return live
 
 
-def recorded_paths(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> list[str]:
-    """every path the stream server holds a recording of (control API)."""
-    return [recorded.path for recorded in inventory(host, api_port, timeout)]
-
-
 def segments_before(recorded: list[Recorded], cutoff: datetime) -> list[tuple[str, datetime]]:
     """(path, start) of every segment that began before `cutoff`, oldest first."""
     old = [(item.path, start) for item in recorded for start in item.segments if start < cutoff]

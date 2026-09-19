@@ -27,10 +27,8 @@ from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, P
 from openmmla.tui import base_files, recordings, stream_export
 from openmmla.utils import session_sources
 from openmmla.utils.artifact_paths import (
-    NON_SESSION_ARTIFACT_DIRS, capture_host_label, capture_record_root, session_capture_streams_dir,
-    session_server_streams_dir,
+    NON_SESSION_ARTIFACT_DIRS, session_capture_streams_dir, session_server_streams_dir,
 )
-from openmmla.utils.constants import stream_kind
 
 
 @dataclass
@@ -400,10 +398,6 @@ def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict
 # group of its own, so Refresh does not stop it and Cancel stops nothing else
 _STREAMS_WORKER_GROUP = "sessions-streams"
 
-# the pipelines whose Streams a session that noted none may have taken, and the
-# kind a stream of theirs is when it does not say (the card's)
-_CAPTURE_PIPELINES = (("pipelines/asr-base", "audio"), ("pipelines/ips-base", "video"), ("pipelines/vfa-base", "video"))
-
 # what the end of a session's window is (recordings.session_end), as the log says it
 _WINDOW_REASONS = {
     "ended": "when it was ended",
@@ -461,31 +455,6 @@ def _server_sources(record: dict | None, server: dict) -> _ServerSources:
         found.by_stream.setdefault(name, path)
         if path not in found.paths:
             found.paths.append(path)
-    return found
-
-
-def _configured_recorded_streams(project_root) -> list[stream_export.RecordedStream]:
-    """the streams with Record on that the console runs (an SSH Profile set) in
-    this machine's ASR, IPS and VFA configs: what a session that noted no
-    streams may have taken. A stream in two configs (one camera for IPS and
-    VFA) is taken once."""
-    from openmmla.tui.schema.loader import load_streams
-
-    found: list[stream_export.RecordedStream] = []
-    for rel_dir, default_kind in _CAPTURE_PIPELINES:
-        try:
-            streams = load_streams(os.path.join(str(project_root), rel_dir, "config.yml"))
-        except (TypeError, ValueError):  # a config a hand edit broke: its streams are not known
-            continue
-        for stream in streams:
-            if not stream.ssh_profile or not stream.record:
-                continue
-            recorded = stream_export.RecordedStream(
-                stream.name, stream.ssh_profile,
-                capture_record_root(stream.ssh_profile, stream.record_root, project_root),
-                capture_host_label(stream.ssh_profile), stream_kind(stream, default_kind))
-            if recorded not in found:
-                found.append(recorded)
     return found
 
 
@@ -1170,10 +1139,10 @@ class SessionsPanel(Widget):
           - the capture copy, over SSH: each noted stream's recording, cut on
             its capture host and fetched (stream_export), into
             artifacts/<session>/streams/capture/<host label>/<video|audio>/.
-        A session without that note (one begun before the bases wrote it) takes
-        every path the server recorded while it ran and every stream with Record
-        on in this machine's pipeline configs, and says so. Cancel stops it
-        between steps (a clip being downloaded at once); what arrived stays."""
+        A session without that note (one begun before the bases wrote it, or
+        one no base joined) has nothing to export, and says so: whatever was
+        recorded while it ran is nothing it is known to have used. Cancel stops
+        it between steps (a clip being downloaded at once); what arrived stays."""
         from openmmla.tui.schema.loader import _find_project_root
         from openmmla.tui.system_services import stream_server_address
 
@@ -1195,21 +1164,22 @@ class SessionsPanel(Widget):
                 f"is no time range to cut out of the streams.[/yellow]"
             )
             return
+        if not session_sources.session_sources(record):
+            # the conclusion first: the log does not wrap
+            self._log(
+                f"  [yellow]Nothing to export: '{shown}' names no stream (it began before the bases noted theirs, "
+                f"or no base joined it).[/yellow]"
+            )
+            return
         end, why = recordings.session_end(record)
         until = f"{end:%H:%M:%S}" if end.date() == start.date() else f"{end:%Y-%m-%d %H:%M:%S}"
         self._log(f"  {start:%Y-%m-%d %H:%M:%S} to {until} UTC ({_WINDOW_REASONS[why]})")
-        if not session_sources.session_sources(record):
-            self._log(
-                f"  [yellow]'{shown}' does not say which streams its bases took (it began before the console noted "
-                f"them, or no base noted its stream in it), so this takes every path the Stream Server recorded "
-                f"while it ran, and every stream with Record on in this machine's ASR, IPS and VFA configs.[/yellow]"
-            )
 
         root = _find_project_root()
         server = await asyncio.to_thread(stream_server_address, root)
         sources = await asyncio.to_thread(_server_sources, record, server)
         from_server = await self._export_server_copy(
-            root, session_id, record, server, sources, (start, end), why == "ended", cancel)
+            root, session_id, server, sources, (start, end), why == "ended", cancel)
         if cancel.is_set():
             raise asyncio.CancelledError()
         from_capture = await self._export_capture_copy(root, session_id, record, sources, (start, end), cancel)
@@ -1226,7 +1196,7 @@ class SessionsPanel(Widget):
             self._log(f"[yellow]Nothing of the streams of {shown} was exported (see above).[/yellow]")
 
     async def _export_server_copy(
-        self, root, session_id: str, record: dict, server: dict, sources: _ServerSources,
+        self, root, session_id: str, server: dict, sources: _ServerSources,
         window: tuple[datetime, datetime], ended: bool, cancel: threading.Event,
     ) -> int:
         """the server copy: each unbroken stretch of the session's paths on the
@@ -1238,10 +1208,8 @@ class SessionsPanel(Widget):
         start, end = window
         shown = escape(session_id)
         host = str(server.get("host") or "localhost")
-        api_port = int(server.get("api_port") or recordings.API_PORT)
         playback_port = int(server.get("playback_port") or recordings.PLAYBACK_PORT)
         out_dir = session_server_streams_dir(root, session_id)
-        noted = bool(session_sources.session_sources(record))
         self._log(f"[cyan]From the Stream Server {escape(host)} into {_shown_path(root, out_dir)}[/cyan]")
         for name, url in sources.elsewhere:
             self._log(
@@ -1249,21 +1217,19 @@ class SessionsPanel(Widget):
                 f"Server of System Settings, so it is skipped here.[/yellow]"
             )
         paths = list(sources.paths)
-        if noted:
-            if not paths:
-                if not sources.elsewhere:
-                    self._log(
-                        f"  [yellow]None of the bases of '{shown}' took a stream through the Stream Server "
-                        f"({escape(', '.join(sources.direct))}), so it holds nothing of this session.[/yellow]"
-                    )
-                return 0
-            self._log(f"  Its streams, as its bases noted them: {escape(', '.join(paths))}")
+        if not paths:
+            if not sources.elsewhere:
+                self._log(
+                    f"  [yellow]None of the bases of '{shown}' took a stream through the Stream Server "
+                    f"({escape(', '.join(sources.direct))}), so it holds nothing of this session.[/yellow]"
+                )
+            return 0
+        self._log(f"  Its streams, as its bases noted them: {escape(', '.join(paths))}")
 
         def ask() -> dict:
             # the session's own paths need no listing: the playback server is
-            # asked for those, as they are named; without them, for everything
-            listed = paths if noted else recordings.recorded_paths(host, api_port)
-            return {path: recordings.timespans(host, path, playback_port) for path in listed}
+            # asked for those, as they are named
+            return {path: recordings.timespans(host, path, playback_port) for path in paths}
 
         self._progress_start(f"Stream Server · asking {host}", None)
         try:
@@ -1288,16 +1254,10 @@ class SessionsPanel(Widget):
                     f"Config tab; its Recordings tab shows what the server still holds.[/yellow]"
                 )
                 return 0
-            if noted:
-                held = [path for path in paths if spans.get(path)]
-                found = ("Nothing of its streams was recorded on the server in that time"
-                         + (f" (it holds {', '.join(held)} from other times)." if held
-                            else " (it holds no recording of them)."))
-            else:
-                held = list(spans)
-                found = ("Nothing was recorded on the server in that time"
-                         + (f" (it holds {', '.join(held[:6])}{' ...' if len(held) > 6 else ''})." if held
-                            else " (it holds no recording at all)."))
+            held = [path for path in paths if spans.get(path)]
+            found = ("Nothing of its streams was recorded on the server in that time"
+                     + (f" (it holds {', '.join(held)} from other times)." if held
+                        else " (it holds no recording of them)."))
             self._log(
                 f"  [yellow]{escape(found)} Server-side recording is the switch on the Stream Server card, "
                 f"Config tab.[/yellow]"
@@ -1379,37 +1339,27 @@ class SessionsPanel(Widget):
         folder = session_capture_streams_dir(root, session_id)
         self._log(f"[cyan]From the capture hosts into {_shown_path(root, folder)}[/cyan]")
         found = stream_export.session_streams(record, root)
-        if found.noted:
-            for name, why in found.skipped:
-                reason = ("someone else publishes it (it has no SSH Profile), so no capture host of this console "
-                          "records it" if why == "external" else
-                          "Record was off for it, so its capture host holds no recording of it")
-                path = sources.by_stream.get(name)
-                other = next((url for stream, url in sources.elsewhere if stream == name), None)
-                if path:
-                    where = f"on the Stream Server ({escape(path)}, above)"
-                elif other:
-                    where = f"on the server it was published to ({escape(other)})"
-                else:
-                    where = "on the Stream Server, if it went through one"
-                self._log(f"  [dim]- {escape(name)}: {reason}; its only copy is {where}[/dim]")
-            streams = found.streams
-            if not streams:
-                if not found.skipped:
-                    self._log(
-                        "  [dim]- Its bases took no stream the console captures (a camera or microphone of their "
-                        "own, or a file), so there is nothing to cut.[/dim]"
-                    )
-                return 0
-        else:
-            streams = await asyncio.to_thread(_configured_recorded_streams, root)
-            if not streams:
+        for name, why in found.skipped:
+            reason = ("someone else publishes it (it has no SSH Profile), so no capture host of this console "
+                      "records it" if why == "external" else
+                      "Record was off for it, so its capture host holds no recording of it")
+            path = sources.by_stream.get(name)
+            other = next((url for stream, url in sources.elsewhere if stream == name), None)
+            if path:
+                where = f"on the Stream Server ({escape(path)}, above)"
+            elif other:
+                where = f"on the server it was published to ({escape(other)})"
+            else:
+                where = "on the Stream Server, if it went through one"
+            self._log(f"  [dim]- {escape(name)}: {reason}; its only copy is {where}[/dim]")
+        streams = found.streams
+        if not streams:
+            if not found.skipped:
                 self._log(
-                    "  [dim]- No stream in this machine's ASR, IPS or VFA config records on its capture host "
-                    "(Record on), so there is nothing to cut.[/dim]"
+                    "  [dim]- Its bases took no stream the console captures (a camera or microphone of their "
+                    "own, or a file), so there is nothing to cut.[/dim]"
                 )
-                return 0
-            self._log(f"  Streams with Record on here: {escape(', '.join(stream.name for stream in streams))}")
+            return 0
 
         callbacks = stream_export.ExportCallbacks(
             log=self._log,
