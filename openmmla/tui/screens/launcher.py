@@ -2204,7 +2204,8 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
     services.append(ServiceDef(
         name="ASR Server",
         category="ASR",
-        conda_env="docker",
+        # its services run in docker containers: no conda env to check for or activate
+        conda_env="",
         config_dir=os.path.join(root, "pipelines", "asr-server"),
         launch_type="tmux",
         display_type="docker",
@@ -2217,7 +2218,8 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
     services.append(ServiceDef(
         name="VFA Server",
         category="VFA",
-        conda_env="docker",
+        # its services run in docker containers: no conda env to check for or activate
+        conda_env="",
         config_dir=os.path.join(root, "pipelines", "vfa-server"),
         launch_type="tmux",
         display_type="docker",
