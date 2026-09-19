@@ -47,10 +47,11 @@ authInternalUsers:
 
 pathDefaults:
   # record every published path; segments are fMP4 files named after their
-  # start time. ./recordings is artifacts/recordings of the repository either
-  # way: make starts MediaMTX from artifacts/, docker compose mounts the folder
+  # start time. ./streams/server is artifacts/streams/server of the repository
+  # either way: make starts MediaMTX from artifacts/, and docker compose mounts
+  # that folder at /streams/server of the container, whose ./ is /
   record: yes
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordPath: ./streams/server/%path/%Y-%m-%d_%H-%M-%S-%f
   recordFormat: fmp4
   recordPartDuration: 1s
   recordSegmentDuration: 10m

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
-from dataclasses import dataclass
 import os
 import re
 import shlex
-import socket
 import subprocess
 import sys
 import time
@@ -23,15 +20,17 @@ from textual.geometry import Region
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Static, Button, DataTable, Label, OptionList, Select
+from textual.widgets import Static, Button, DataTable, Label, OptionList
 
 from openmmla.tui import capture_recordings, recordings
 from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, remote_platform, ssh_run_sync
 from openmmla.tui.system_services import stream_server_path
 from openmmla.tui.widgets.stream_recordings import StreamRecordingsScreen
-from openmmla.utils.artifact_paths import safe_segment
-from openmmla.utils.constants import STREAM_URL_SCHEMES
+from openmmla.utils.artifact_paths import (
+    REMOTE_RECORD_ROOT, capture_day, capture_host_label, capture_record_dir, capture_record_root,
+)
+from openmmla.utils.constants import STREAM_URL_SCHEMES, stream_kind
 from openmmla.utils.mac_desktop import window_script
 from openmmla.utils.stream_registry import load_stream_registry, register_stream_start, mark_stream_stopped
 
@@ -183,30 +182,29 @@ def _needs_desktop_session(platform: str, is_local: bool) -> bool:
     return platform == "darwin" and (not is_local or bool(os.environ.get("SSH_CONNECTION")))
 
 
-# ALSA-style device names mark an audio stream when no kind is given
-_ALSA_DEVICE_PREFIXES = ("hw:", "plughw:", "default", "sysdefault", "dsnoop", "plug:", "pulse")
-
-# recording root on a remote streaming host when record_root is unset; the same
-# root the Collection card records under, so Collection -> Download fetches both
-STREAM_RECORD_ROOT = "$HOME/artifacts"
+# recording root on a remote streaming host when record_root is unset: the one
+# the Collection card records under too (its recordings go to <session>/collection/,
+# a stream's to streams/capture/<day>/)
+STREAM_RECORD_ROOT = REMOTE_RECORD_ROOT
 
 # seconds Stop waits for ffmpeg to finalize its files after Ctrl-C before the
 # tmux session is killed
 STREAM_STOP_GRACE_SECONDS = 8
 
 
-# the Recordings select: whole files of one capture host, or a session's part of every stream
-ALL_RECORDINGS = "__everything__"
+def stream_record_root(ssh_profile: str, record_root: str, project_dir: str) -> str:
+    """the folder on a stream's capture host that holds its streams/capture/
+    tree: its record_root (~ spelled $HOME, which the remote shell expands),
+    else artifacts/ of the project here for a stream captured on this machine,
+    $HOME/artifacts on any other."""
+    return capture_record_root(ssh_profile, record_root, project_dir)
 
 
-@dataclass(frozen=True)
-class RecordedStream:
-    """where a managed stream keeps its recordings: enough to find them again."""
-    name: str
-    ssh_profile: str   # "local" or an SSH profile
-    record_root: str   # on the capture host; $HOME/... for a remote one
-    host_label: str    # the folder under collection/
-    kind: str          # video | audio
+def stream_host_label(ssh_profile: str) -> str:
+    """the host folder a stream's recordings are filed under, below
+    streams/capture/<day>/: this machine's short name for 'local', else the
+    SSH profile (the one the Collection card uses)."""
+    return capture_host_label(ssh_profile)
 
 
 def _stream_start_file(session_name: str) -> str:
@@ -445,18 +443,12 @@ def _pcm_sample_format(value: str) -> str:
     return _PCM_SAMPLE_FORMATS[key]
 
 
-def _stream_kind(stream: StreamDef) -> str:
-    """'audio' or 'video': the explicit kind, else inferred from target and device."""
-    kind = (stream.kind or "").strip().lower()
-    if kind in ("audio", "video"):
-        return kind
-    if stream.target.startswith(("udp://", "tcp://")):
-        return "audio"
-    device = (stream.device or "").strip().lower()
-    # a Mac's microphone alone is ":<index>" to AVFoundation
-    if device.startswith(_ALSA_DEVICE_PREFIXES) or device.startswith((":", "none:")):
-        return "audio"
-    return "video"
+def _stream_kind(stream: StreamDef, default: str = "video") -> str:
+    """'audio' or 'video': its kind, else a udp/tcp target or a device that
+    captures sound, else `default`, the card's (constants.stream_kind, the rule
+    a session's sources go by too). A Mac's microphone pushed over RTMP names
+    no device, so only the card that pulls it can tell: audio on ASR."""
+    return stream_kind(stream, default)
 
 
 # a Mac's first camera and first microphone (ffmpeg -f avfoundation -list_devices true -i "")
@@ -505,27 +497,31 @@ def _double_rate(rate: str) -> str:
     return f"{float(match.group(1)) * 2:g}{match.group(2)}"
 
 
-def _record_path(stream: StreamDef, record_dir: str) -> str:
+def _record_path(stream: StreamDef, record_dir: str, kind: str = "") -> str:
     """the recording file on the streaming host; ${START_TIME} expands in the tmux
-    wrapper so the name carries the capture-side start time the file source expects."""
-    extension = "wav" if _stream_kind(stream) == "audio" else "mkv"
+    wrapper so the name carries the capture-side start time the file source expects.
+    `kind`: the stream's as its card tells it (_stream_kind with the card's default)."""
+    extension = "wav" if (kind or _stream_kind(stream)) == "audio" else "mkv"
     return f"{record_dir.rstrip('/')}/{stream.name}_${{START_TIME}}.{extension}"
 
 
-def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform: str = "linux") -> str:
+def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform: str = "linux",
+                      kind: str = "") -> str:
     """build the ffmpeg command string from a stream definition.
 
     With record_dir the same capture is also written to a file there, so a
     session keeps its raw recording next to the live stream: one encode with two
     outputs, via the tee muxer for video and a second PCM output for audio.
     platform is the capture host's: "darwin" captures through AVFoundation, as
-    V4L2 and ALSA are Linux's.
+    V4L2 and ALSA are Linux's. kind is the stream's as its card tells it
+    (_stream_kind with the card's default); empty, the rule without a card.
     """
+    kind = kind or _stream_kind(stream)
     target = stream.target
-    record_to = _record_path(stream, record_dir) if record_dir else None
+    record_to = _record_path(stream, record_dir, kind) if record_dir else None
     mac = platform == "darwin"
 
-    if _stream_kind(stream) == "audio":
+    if kind == "audio":
         rate = stream.rate or 16000
         channels = stream.channels or 1
         if mac:
@@ -748,8 +744,10 @@ class StreamPanel(Widget):
         width: 13;
         padding-top: 1;
     }
-    #stream-session-select {
+    #stream-recordings-note {
         width: 1fr;
+        padding-top: 1;
+        color: $text-muted;
     }
     #stream-recordings Button {
         margin: 0 1;
@@ -768,12 +766,16 @@ class StreamPanel(Widget):
         streams: list[StreamDef],
         config_path: str = "",
         project_dir: str | None = None,
-        session_choices: list[str] | None = None,
         stream_server: Callable[[], dict] | None = None,
+        default_kind: str = "video",
     ) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
+        # what a stream with no kind that neither its target nor its device
+        # tells is: the card's ("audio" on ASR, whose Mac microphone pushed
+        # over RTMP names no device; "video" on IPS and VFA)
+        self._default_kind = default_kind if default_kind in ("audio", "video") else "video"
         self._project_dir = project_dir or _project_root_from_config(config_path)
         # whether a stream's ffmpeg runs (or is coming up), and what its host
         # said of it in full (STREAM_*)
@@ -783,45 +785,25 @@ class StreamPanel(Widget):
         # carries: "live", "idle" (nobody publishes it) or "unknown" (no answer)
         self._stream_server = stream_server
         self._live: dict[str, str] = {}
-        # sessions whose part of the recordings Download can cut out
-        self._session_choices = [s for s in (session_choices or []) if s]
-
-    def _session_options(self) -> list[tuple[str, str]]:
-        return [
-            ("Everything the selected stream's host has recorded (whole files, every day)", ALL_RECORDINGS),
-            *((f"Session {session}: its part of every stream here, cut by its start and end", session)
-              for session in self._session_choices),
-        ]
-
-    def set_session_choices(self, sessions: list[str]) -> None:
-        self._session_choices = [s for s in sessions if s]
-        try:
-            select = self.query_one("#stream-session-select", Select)
-        except Exception:
-            return
-        current = select.value
-        select.set_options(self._session_options())
-        select.value = current if current in self._session_choices else ALL_RECORDINGS
-
-    def recorded_streams(self) -> list[RecordedStream]:
-        """every stream of this card the console runs, and so may hold a recording of."""
-        return [
-            RecordedStream(stream.name, stream.ssh_profile, self._record_root(stream),
-                           self._record_host_label(stream), _stream_kind(stream))
-            for stream in self._streams if stream.ssh_profile
-        ]
 
     def capture_streams(self) -> list[capture_recordings.CaptureStream]:
-        """the same streams as Manage and the keep time see them: where they
-        record, and for how long their recordings stay there."""
+        """every stream of this card the console runs, as Manage and the keep
+        time see them: where they record, and for how long their recordings
+        stay there."""
         return [
             capture_recordings.CaptureStream(
                 stream.name,
                 capture_recordings.CaptureFolder(
                     stream.ssh_profile, self._record_root(stream), self._record_host_label(stream)),
-                _stream_kind(stream), stream.record_keep_days)
+                self._kind(stream), stream.record_keep_days)
             for stream in self._streams if stream.ssh_profile
         ]
+
+    def _kind(self, stream: StreamDef) -> str:
+        """'audio' or 'video' of a stream of this card: everything here that
+        depends on it (the capture, the recording's file and folder, Manage
+        and the copies it makes) goes by this."""
+        return _stream_kind(stream, self._default_kind)
 
     def _live_record_paths(self) -> set[str]:
         """the files the streams started from here are writing, as their Start noted them."""
@@ -835,44 +817,37 @@ class StreamPanel(Widget):
         }
 
     @staticmethod
-    def _record_session() -> str:
-        """the folder a stream's recording is filed under: the day, never a
-        session. A stream outlives sessions and is shared by them (several groups
-        in one room pull the same camera), so its recording belongs to none of
-        them; the start time in the file name is what ties it to a session."""
-        return f"streams-{datetime.date.today():%Y%m%d}"
+    def _record_day() -> str:
+        """the folder a stream's recording is filed under: the day (the console's
+        date, YYYY-MM-DD), never a session. A stream outlives sessions and is
+        shared by them (several groups in one room pull the same camera), so its
+        recording belongs to none of them; the start time in the file name is
+        what ties it to a session."""
+        return capture_day()
 
     @staticmethod
     def _record_host_label(stream: StreamDef) -> str:
-        """host folder under <session>/collection/, the same the Collection card uses."""
-        if stream.ssh_profile == "local":
-            return safe_segment(socket.gethostname().split(".", 1)[0], "host")
-        return safe_segment(stream.ssh_profile, "host")
+        """host folder under streams/capture/<day>/, the same label the Collection card uses."""
+        return stream_host_label(stream.ssh_profile)
 
     def _record_root(self, stream: StreamDef) -> str:
-        """the folder on the capture host that holds the streams-<date> folders."""
-        if stream.record_root:
-            root = stream.record_root.rstrip("/")
-            if root == "~" or root.startswith("~/"):
-                root = "$HOME" + root[1:]
-            return root
-        if stream.ssh_profile == "local":
-            return os.path.join(self._project_dir, "artifacts")
-        return STREAM_RECORD_ROOT
+        """the folder on the capture host that holds streams/capture/<day>/."""
+        return stream_record_root(stream.ssh_profile, stream.record_root, self._project_dir)
 
     def _record_dir(self, stream: StreamDef) -> str | None:
-        """recording folder on the streaming host, or None when the stream does not record."""
+        """recording folder on the streaming host,
+        <record_root>/streams/capture/<day>/<host label>/<video|audio>, or None
+        when the stream does not record."""
         if not stream.record:
             return None
-        kind = _stream_kind(stream)
-        return (
-            f"{self._record_root(stream)}/{self._record_session()}/collection/"
-            f"{self._record_host_label(stream)}/{kind}"
-        )
+        return capture_record_dir(
+            self._record_root(stream), self._record_day(), self._record_host_label(stream), self._kind(stream))
 
     @staticmethod
     def _fetch_hint(stream: StreamDef) -> str:
-        return "." if stream.ssh_profile == "local" else f" on {stream.ssh_profile}; Download on this tab copies it here."
+        if stream.ssh_profile == "local":
+            return "."
+        return f" on {stream.ssh_profile}; Manage copies it here (Download File, Download Day)."
 
     def _registered_record_path(self, stream_name: str) -> str:
         """the recording file noted when the stream was started, if it records."""
@@ -883,29 +858,6 @@ class StreamPanel(Widget):
         if not isinstance(entry, dict) or entry.get("status") != "running":
             return ""
         return str(entry.get("record_path") or "").strip()
-
-    class DownloadRequested(Message):
-        """fetch the recordings a capture host holds; the launcher owns the
-        transfer (progress row, staging, resume), as it does for Collection."""
-
-        def __init__(self, ssh_profile: str, record_root: str, host_label: str) -> None:
-            super().__init__()
-            self.ssh_profile = ssh_profile
-            self.record_root = record_root
-            self.host_label = host_label
-
-    class SessionChoicesRequested(Message):
-        """Refresh: a session created since the tab was opened belongs in the
-        Recordings select; the launcher knows the sessions."""
-
-    class SessionDownloadRequested(Message):
-        """fetch one session's part of the recordings of every stream here: the
-        launcher knows the session's start and end, and owns the transfer."""
-
-        def __init__(self, session_id: str, streams: list[RecordedStream]) -> None:
-            super().__init__()
-            self.session_id = session_id
-            self.streams = streams
 
     class RecordToggleRequested(Message):
         """flip a stream's capture-side recording; the launcher owns the config
@@ -943,9 +895,15 @@ class StreamPanel(Widget):
         "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
         "else publishes. Record on/off: also record on the capture device. The Stream Server records on its side "
         "whatever reaches it (its card, Config tab).\n"
-        "Recordings are filed by day, not by session. Download with a session cuts that session's part out "
-        "on the capture host; without one it copies the whole files. Manage lists and deletes them there, "
-        "and sets how long they are kept."
+        "Recordings are filed by day on the capture device, not by session. Manage lists them there, copies a "
+        "file or a day to this machine, deletes them, and sets how long they are kept. A session's part of them "
+        "(and of the Stream Server's) is Sessions → Export Streams."
+    )
+
+    # beside Manage: what it does, and where a session's part of the recordings is
+    RECORDINGS_NOTE = (
+        "on the capture hosts: copy a file or a day here, delete, keep time. "
+        "A session's part: Sessions → Export Streams."
     )
 
     # how a stream stops being external
@@ -959,14 +917,12 @@ class StreamPanel(Widget):
             yield Static(self.HELP, id="stream-help")
             yield StreamTable(id="stream-table")
             yield Static("", id="stream-empty")
-            # a row of its own: Download is about what was recorded, the row
+            # a row of its own: Manage is about what was recorded, the row
             # below about the streams themselves
             with Horizontal(id="stream-recordings"):
                 yield Label("Recordings:")
-                yield Select(self._session_options(), value=ALL_RECORDINGS, allow_blank=False,
-                             id="stream-session-select")
-                yield Button("Download", variant="warning", id="stream-btn-download")
                 yield Button("Manage", variant="primary", id="stream-btn-manage")
+                yield Static(self.RECORDINGS_NOTE, id="stream-recordings-note")
             with Horizontal(id="stream-actions"):
                 yield Button("Start", variant="success", id="stream-btn-start")
                 yield Button("Stop", variant="error", id="stream-btn-stop")
@@ -1186,37 +1142,6 @@ class StreamPanel(Widget):
                 self._log(f"[yellow]Stop {stream.name} first: its ffmpeg was started without the change.[/yellow]")
             else:
                 self.post_message(self.RecordToggleRequested(stream.name, not stream.record))
-        elif btn == "stream-btn-download":
-            try:
-                choice = self.query_one("#stream-session-select", Select).value
-            except Exception:
-                choice = ALL_RECORDINGS
-            if choice not in (ALL_RECORDINGS, Select.BLANK, None):
-                streams = self.recorded_streams()
-                if streams:
-                    self.post_message(self.SessionDownloadRequested(str(choice), streams))
-                else:
-                    self._log(
-                        "[yellow]Every stream here is external: the console did not start them, so no host "
-                        "it manages holds a recording. The Stream Server may: Sessions → Export Recordings.[/yellow]"
-                    )
-                return
-            stream = self._get_selected_stream()
-            if stream is None:
-                self._log("[yellow]Select a stream row first.[/yellow]")
-            elif not stream.ssh_profile:
-                self._log(
-                    f"[yellow]{stream.name} is external: the console did not start it, so no host "
-                    f"it manages holds a recording of it.[/yellow]"
-                )
-            elif stream.ssh_profile == "local":
-                self._log(
-                    f"[cyan]{stream.name} is captured on this machine: its recordings are already here, under "
-                    f"{self._record_root(stream)}/streams-<date>/collection/{self._record_host_label(stream)}/.[/cyan]"
-                )
-            else:
-                self.post_message(self.DownloadRequested(
-                    stream.ssh_profile, self._record_root(stream), self._record_host_label(stream)))
         elif btn == "stream-btn-manage":
             self._open_recordings_manager()
         elif btn == "stream-btn-probe":
@@ -1243,7 +1168,6 @@ class StreamPanel(Widget):
             self._log(f"[cyan]Reloaded {len(self._streams)} stream(s) from {self._config_path}.[/cyan]")
         else:
             self._log("[cyan]Refreshing stream status from the current target config.[/cyan]")
-        self.post_message(self.SessionChoicesRequested())
         self.run_worker(self._prune_recordings(), group="stream-prune", exclusive=True)
         self._refresh_all()
 
@@ -1261,7 +1185,7 @@ class StreamPanel(Widget):
             )
             return
         self.app.push_screen(StreamRecordingsScreen(
-            self.capture_streams, self._live_record_paths, self._request_keep_days))
+            self.capture_streams, self._live_record_paths, self._request_keep_days, project_root=self._project_dir))
 
     def _request_keep_days(self, days: int) -> None:
         self.post_message(self.KeepDaysChangeRequested(
@@ -1418,11 +1342,11 @@ class StreamPanel(Widget):
         desktop = _needs_desktop_session(platform, is_local)
         record_dir = self._record_dir(stream)
         try:
-            ffmpeg_cmd = _build_ffmpeg_cmd(stream, record_dir, platform)
+            ffmpeg_cmd = _build_ffmpeg_cmd(stream, record_dir, platform, self._kind(stream))
         except ValueError as e:
             self._log(f"[red]Cannot start {stream.name}: {e}[/red]")
             return
-        record_path = _record_path(stream, record_dir) if record_dir else None
+        record_path = _record_path(stream, record_dir, self._kind(stream)) if record_dir else None
         if desktop:
             launch_cmd = _build_desktop_stream_cmd(session, ffmpeg_cmd, record_dir, record_path, stream.name)
         else:

@@ -3,8 +3,9 @@
 MediaMTX records every published path whether or not a session runs, and its
 playback server returns any time range of a path as one file. A stream is
 shared by the sessions that pull it, so the footage of one session is a query
-and not a folder: the paths that were being recorded between the session's
-start and end, each cut to that window.
+and not a folder: the paths its bases pulled (they note them in the session's
+document, openmmla.utils.session_sources), each cut to the window between the
+session's start and end.
 
 The server keeps a segment for `recordDeleteAfter` and then deletes it itself,
 so a session's footage has to be exported before then; this module also asks
@@ -13,7 +14,6 @@ API, for the Recordings tab of the Stream Server card."""
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import re
@@ -23,6 +23,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+
+from openmmla.utils.session_sources import last_left
 
 # MediaMTX defaults; System Settings → Stream Server holds the ones in use
 API_PORT = 9997
@@ -70,6 +72,23 @@ def parse_time(value) -> datetime | None:
         except (TypeError, ValueError, OverflowError, OSError):
             return None
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def session_end(record: dict | None, now: datetime | None = None) -> tuple[datetime, str]:
+    """where a session's footage ends, and why: its end_time (`ended`); for a
+    session that was never ended, the moment its last base left, once every
+    base that joined it has (`left`, from the session's sources); otherwise
+    now, as it is still running (`running`)."""
+    ended = parse_time((record or {}).get("end_time"))
+    if ended is not None:
+        return ended, "ended"
+    try:
+        left = parse_time(last_left(record))
+    except (TypeError, ValueError):  # left_at of kinds that do not compare: no end to go by
+        left = None
+    if left is not None:
+        return left, "left"
+    return now or datetime.now(timezone.utc), "running"
 
 
 def _rfc3339(moment: datetime) -> str:
@@ -196,20 +215,12 @@ def timespans(host: str, path: str, playback_port: int = PLAYBACK_PORT,
     return sorted(spans)
 
 
-def matches(path: str, patterns) -> bool:
-    """no pattern takes every path; `ips/*` takes the streams of one pipeline."""
-    wanted = [str(p).strip().strip("/") for p in (patterns or []) if str(p).strip()]
-    return not wanted or any(fnmatch.fnmatchcase(path, pattern) for pattern in wanted)
-
-
 def clips_for_window(spans_by_path: dict[str, list[tuple[datetime, float]]],
-                     start: datetime, end: datetime, patterns=()) -> list[Clip]:
+                     start: datetime, end: datetime) -> list[Clip]:
     """what was recorded between start and end: one clip per unbroken stretch
     of a path, cut to the window. A stream that was restarted gives two."""
     clips = []
     for path in sorted(spans_by_path):
-        if not matches(path, patterns):
-            continue
         for span_start, duration in spans_by_path[path]:
             clip_start = max(start, span_start)
             clip_end = min(end, span_start + timedelta(seconds=duration))
@@ -238,7 +249,9 @@ def clip_relpath(clip: Clip) -> str:
 def download_clip(host: str, clip: Clip, destination: str, playback_port: int = PLAYBACK_PORT,
                   progress=None, timeout: float = 60.0) -> int:
     """write one clip to `destination`; returns its size. The file appears under
-    its name only when it is complete."""
+    its name only when it is complete: an error, or one raised by `progress`
+    (called with the bytes written so far, which is how a download is
+    stopped), leaves nothing behind."""
     os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
     partial = destination + ".part"
     written = 0
@@ -260,6 +273,9 @@ def download_clip(host: str, clip: Clip, destination: str, playback_port: int = 
     except (urllib.error.URLError, OSError) as error:
         _discard(partial)
         raise RecordingsError(f"{clip.path}: {getattr(error, 'reason', error)}") from error
+    except BaseException:
+        _discard(partial)
+        raise
     return written
 
 

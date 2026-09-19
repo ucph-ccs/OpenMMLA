@@ -94,7 +94,7 @@ class StreamServerRecordingsPanel(Widget):
         yield Static(
             "What MediaMTX holds on its disk, path by path: every stream published to it while server-side "
             "recording is on, in ten-minute segments, whether or not a session ran. A session's footage is "
-            "exported under Sessions → Export Recordings; this is what there is to export from, and the way "
+            "exported under Sessions → Export Streams; this is what there is to export from, and the way "
             "to make room before the retention of the Config tab does. A deletion goes through the server's "
             "API, so it works for a docker and a native run alike.",
             classes="rp-muted",

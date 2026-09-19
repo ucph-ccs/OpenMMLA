@@ -57,14 +57,58 @@ class ServiceDef:
 class ParamDef:
     flag: str
     label: str
+    # "int" (a counter), "bool" (a toggle), "str" (a Select when it has
+    # choices, else a text box) or "choice" (always a Select, even while its
+    # choices are empty: they come from the card's host and may be none yet)
     param_type: str
     default: Any
-    choices: list[str] = field(default_factory=list)
+    # a Select's options: plain values, or (label, value) pairs when what the
+    # Select shows is not what it passes
+    choices: list = field(default_factory=list)
+    # the count flag of a component (e.g. "-nb"): the card shows one Select per
+    # instance ("Base 1", "Base 2", ...) and follows that counter's + and -;
+    # collect_params gives a list with one value per instance, "" passing
+    # nothing for that instance. A list default seeds the instances in turn,
+    # the rest take the options with a value in order.
+    per_instance: str = ""
+    # a per-instance flag whose first instance this Select follows: picking
+    # Base 1 sets it to follow_values[<Base 1's value>], when that is an option.
+    # On an "int" counter, the counter it goes along with while it has no
+    # default of its own (None): the synchronizer's Sync Waits For is Num Bases
+    # then. Either way, a counter nobody has set moves to a fresh default.
+    follows: str = ""
+    follow_values: dict = field(default_factory=dict)
 
 
 # flags whose Select lists artifact/collection sessions; these get an inline
 # "↻" button so the list can be re-queried on demand (bypassing the cache)
 _SESSION_PARAM_FLAGS = {"-sid", "--session-id", "--artifact-session-id"}
+
+
+def _choice_options(choices: list) -> list[tuple[str, str]]:
+    """a param's choices as Select options: (label, value) pairs, a plain
+    choice being its own label."""
+    options = []
+    for choice in choices:
+        if isinstance(choice, (tuple, list)) and len(choice) == 2:
+            options.append((str(choice[0]), str(choice[1])))
+        else:
+            options.append((str(choice), str(choice)))
+    return options
+
+
+def _is_select_param(param: ParamDef) -> bool:
+    return bool(param.choices) or param.param_type == "choice"
+
+
+def host_params(params: list[ParamDef]) -> list[ParamDef]:
+    """the params whose options or default come from the card's host (its
+    config, its files), which a Refresh or a config Save renews: what
+    ServiceCard.update_param_choices takes."""
+    return [
+        param for param in params
+        if param.param_type == "choice" or param.per_instance or (param.param_type == "int" and param.follows)
+    ]
 
 
 class ServiceCard(Widget):
@@ -284,6 +328,22 @@ class ServiceCard(Widget):
             param.flag: self._initial_param_value(param)
             for param in self.service_def.params
         }
+        # what the card itself put on each per-instance Select (by flag, then
+        # instance index), and the instances whose Select the user picked:
+        # only a row the card chose moves when fresh choices come
+        self._card_shown: dict[str, dict[int, str]] = {}
+        self._picked_instances: dict[str, set[int]] = {}
+        # the counters the user has set with - or +: the others follow their default
+        self._counts_set: set[str] = set()
+        # a per-instance param starts with one value per instance of its counter
+        for param in self.service_def.params:
+            if param.per_instance:
+                self._param_values[param.flag] = [
+                    self._instance_default(param, index)
+                    for index in range(self._instance_count(param))
+                ]
+            elif param.param_type == "int" and param.follows:
+                self._param_values[param.flag] = self._count_default(param)
         # sub-services of a stack service (e.g. AudioInferer, SpeechTranscriber);
         # each gets a launch toggle, all enabled by default.
         self.stack_components = list(stack_components or [])
@@ -414,6 +474,13 @@ class ServiceCard(Widget):
                 if option_params:
                     with Vertical(classes="card-params"):
                         for p in option_params:
+                            if p.per_instance:
+                                # one row per instance; + and - of its counter
+                                # show, hide or add rows (_sync_instances)
+                                with Vertical(id=self._param_id("instances", p.flag), classes="param-instances"):
+                                    for index in range(len(self._param_values[p.flag])):
+                                        yield self._instance_row(p, index)
+                                continue
                             with Horizontal(classes="param-row"):
                                 for widget in self._param_widgets(p):
                                     yield widget
@@ -542,8 +609,8 @@ class ServiceCard(Widget):
                     ),
                 ]
             )
-        elif param.choices:
-            options = [(str(choice), str(choice)) for choice in param.choices]
+        elif _is_select_param(param):
+            options = _choice_options(param.choices)
             value = self._param_values[param.flag]
             if not any(option_value == value for _, option_value in options):
                 value = Select.NULL
@@ -577,12 +644,17 @@ class ServiceCard(Widget):
         return widgets
 
     def collect_params(self) -> dict:
-        """gather current launch parameter values."""
+        """gather current launch parameter values; a per-instance param gives
+        a list with one value per instance its counter now asks for."""
+        values: dict[str, Any] = {}
         for param in self.service_def.params:
+            if param.per_instance:
+                values[param.flag] = self._collect_instances(param)
+                continue
             if param.param_type in ("bool", "int"):
                 continue
             try:
-                if param.choices:
+                if _is_select_param(param):
                     sel = self.query_one(f"#{self._param_id('select', param.flag)}", Select)
                     self._param_values[param.flag] = "" if sel.value is Select.NULL else str(sel.value)
                 else:
@@ -590,7 +662,90 @@ class ServiceCard(Widget):
                     self._param_values[param.flag] = inp.value
             except Exception:
                 pass
-        return dict(self._param_values)
+        return {**self._param_values, **values}
+
+    # ── per-instance Selects ─────────────────────────────────────
+
+    def _instance_count(self, param: ParamDef) -> int:
+        try:
+            return max(0, int(self._param_values.get(param.per_instance, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _instance_default(param: ParamDef, index: int) -> str:
+        """what instance `index` starts on: the list default's entry for it,
+        else the index-th option that has a value, else "" (none)."""
+        options = _choice_options(param.choices)
+        legal = {value for _, value in options}
+        if isinstance(param.default, (list, tuple)) and index < len(param.default):
+            wanted = str(param.default[index] if param.default[index] is not None else "")
+            if wanted in legal:
+                return wanted
+        valued = [value for _, value in options if value]
+        return valued[index] if index < len(valued) else ""
+
+    def _instance_select_id(self, flag: str, index: int) -> str:
+        return self._param_id(f"select{index}", flag)
+
+    def _instance_row_id(self, flag: str, index: int) -> str:
+        return self._param_id(f"instance{index}", flag)
+
+    def _instance_row(self, param: ParamDef, index: int) -> Horizontal:
+        options = _choice_options(param.choices)
+        values = self._param_values.get(param.flag) or []
+        value = values[index] if index < len(values) else self._instance_default(param, index)
+        if not any(option_value == value for _, option_value in options):
+            value = Select.NULL
+        self._card_shown.setdefault(param.flag, {})[index] = "" if value is Select.NULL else str(value)
+        return Horizontal(
+            Static(f"{param.label} {index + 1}:", classes="param-label"),
+            Select(
+                options,
+                value=value,
+                prompt=f"Select {param.label.lower()} {index + 1}...",
+                id=self._instance_select_id(param.flag, index),
+                classes="param-select",
+            ),
+            id=self._instance_row_id(param.flag, index),
+            classes="param-row",
+        )
+
+    def _collect_instances(self, param: ParamDef) -> list[str]:
+        """the values of the instances the counter asks for; what a Select
+        on screen says wins over what was noted."""
+        count = self._instance_count(param)
+        values = list(self._param_values.get(param.flag) or [])
+        while len(values) < count:
+            values.append(self._instance_default(param, len(values)))
+        for index in range(count):
+            try:
+                sel = self.query_one(f"#{self._instance_select_id(param.flag, index)}", Select)
+            except Exception:
+                continue
+            values[index] = "" if sel.value is Select.NULL else str(sel.value)
+        self._param_values[param.flag] = values
+        return values[:count]
+
+    def _sync_instances(self, count_flag: str) -> None:
+        """the counter `count_flag` changed: one row per instance it asks for.
+        Rows above the count are hidden, not removed, so a choice survives a
+        - followed by a +; a new instance gets a row of its own."""
+        for param in self.service_def.params:
+            if param.per_instance != count_flag:
+                continue
+            count = self._instance_count(param)
+            # notes a default for every new instance, which its row starts on
+            self._collect_instances(param)
+            try:
+                container = self.query_one(f"#{self._param_id('instances', param.flag)}", Vertical)
+            except Exception:
+                continue
+            rows = list(container.children)
+            for index, row in enumerate(rows):
+                row.display = index < count
+            for index in range(len(rows), count):
+                container.mount(self._instance_row(param, index))
 
     def _initial_param_value(self, param: ParamDef) -> Any:
         if param.param_type == "bool":
@@ -601,6 +756,27 @@ class ServiceCard(Widget):
             except (TypeError, ValueError):
                 return 0
         return param.default
+
+    def _count_default(self, param: ParamDef) -> int:
+        """what a counter that follows another starts on, and goes back to
+        while nobody has set it: its default, else (None) the value of the
+        counter it follows."""
+        default = param.default
+        if (default is None or str(default).strip() == "") and param.follows:
+            default = self._param_values.get(param.follows, 0)
+        try:
+            return max(0, int(default))
+        except (TypeError, ValueError):
+            return 0
+
+    def _show_count(self, flag: str, value: int) -> None:
+        """put a counter on `value`, on screen too, with the rows that follow it."""
+        self._param_values[flag] = max(0, int(value))
+        try:
+            self.query_one(f"#{self._param_id('value', flag)}", Static).update(str(self._param_values[flag]))
+        except Exception:
+            pass
+        self._sync_instances(flag)
 
     def _action_id(self, action: str) -> str:
         return _safe_id(f"action__{action}__{self.service_def.name}")
@@ -685,11 +861,13 @@ class ServiceCard(Widget):
         return "success" if value else "default"
 
     def _change_int_param(self, flag: str, delta: int) -> None:
-        self._param_values[flag] = max(0, int(self._param_values.get(flag, 0)) + delta)
-        try:
-            self.query_one(f"#{self._param_id('value', flag)}", Static).update(str(self._param_values[flag]))
-        except Exception:
-            pass
+        """- or + on a counter: the user set it, so it stays as set; a counter
+        that follows it and was never set goes along."""
+        self._counts_set.add(flag)
+        self._show_count(flag, int(self._param_values.get(flag, 0)) + delta)
+        for follower in self.service_def.params:
+            if follower.param_type == "int" and follower.follows == flag and follower.flag not in self._counts_set:
+                self._show_count(follower.flag, self._count_default(follower))
 
     def _change_collection_int_param(self, role: str, flag: str, delta: int) -> None:
         self._param_values[flag] = max(0, int(self._param_values.get(flag, 0)) + delta)
@@ -727,7 +905,7 @@ class ServiceCard(Widget):
                 values[param.flag] = self._param_values[param.flag]
                 continue
             try:
-                if param.choices:
+                if _is_select_param(param):
                     sel = self.query_one(f"#{param_id('select', param.flag)}", Select)
                     values[param.flag] = "" if sel.value is Select.NULL else str(sel.value)
                 else:
@@ -784,11 +962,14 @@ class ServiceCard(Widget):
         params = []
         for param in service_def.params:
             existing = existing_params.get(param.flag)
-            if existing and existing.choices and not param.choices:
+            # a "choice" param's options come from the card's host: none now
+            # means none there, not that they were left out
+            if existing and existing.choices and not param.choices and param.param_type != "choice":
                 params.append(replace(param, choices=existing.choices, default=existing.default))
             else:
                 params.append(param)
         self.service_def = replace(service_def, params=params)
+        self.update_param_choices(host_params(params))
         try:
             metas = list(self.query(".card-meta"))
             if metas:
@@ -799,6 +980,143 @@ class ServiceCard(Widget):
                 metas[1].update(f"  {service_def.description}")
         except Exception:
             pass
+
+    def update_param_choices(self, params: list[ParamDef]) -> None:
+        """take fresh options for Selects whose choices come from the card's
+        host (the Bases of its config, its matrix files) without rebuilding
+        the card: each Select keeps what it shows while that is still an
+        option, else it moves to the new default. A Base row on "ask in its
+        window" keeps it only when the user picked that: one that fell to it
+        because the config had no entry for it takes its entry once there is
+        one. A counter nobody has set takes its fresh default."""
+        if self.service_def.launch_type == "collection":
+            return
+        fresh = {param.flag: param for param in params}
+        updated = []
+        for param in self.service_def.params:
+            new = fresh.get(param.flag)
+            if new is None:
+                updated.append(param)
+                continue
+            updated.append(replace(
+                param, choices=list(new.choices), default=new.default, follow_values=dict(new.follow_values)))
+        self.service_def = replace(self.service_def, params=updated)
+        moved_first: list[tuple[str, str]] = []
+        for param in updated:
+            if param.flag not in fresh:
+                continue
+            if param.param_type == "int":
+                if param.flag not in self._counts_set:
+                    self._show_count(param.flag, self._count_default(param))
+                continue
+            options = _choice_options(param.choices)
+            legal = {value for _, value in options}
+            if param.per_instance:
+                values = list(self._param_values.get(param.flag) or [])
+                picked = self._picked_instances.setdefault(param.flag, set())
+                card_shown = self._card_shown.setdefault(param.flag, {})
+                selects: list[Select | None] = []
+                shown: list[str | None] = []
+                for index in range(len(values)):
+                    try:
+                        sel = self.query_one(f"#{self._instance_select_id(param.flag, index)}", Select)
+                    except Exception:
+                        sel = None
+                    selects.append(sel)
+                    # what the row shows now (not what the last collect noted)
+                    value = values[index] if sel is None else (None if sel.value is Select.NULL else str(sel.value))
+                    if value == "" and index not in picked:
+                        value = None  # on "ask" for want of an entry, not by the user's pick
+                    shown.append(value if value is not None and value in legal else None)
+                # a row whose pick is gone (or that shows nothing) takes its
+                # default, else the first entry no other instance holds
+                taken = {value for value in shown[:self._instance_count(param)] if value}
+                valued = [value for _, value in options if value]
+                for index, sel in enumerate(selects):
+                    keep = shown[index]
+                    if keep is None:
+                        # the card chooses for this row again (a pick that is
+                        # gone is no longer the user's)
+                        picked.discard(index)
+                        keep = self._instance_default(param, index)
+                        if keep and keep in taken:
+                            keep = next((value for value in valued if value not in taken), "")
+                        if keep and index < self._instance_count(param):
+                            taken.add(keep)
+                        if index == 0 and keep:
+                            # Base 1 moved: what follows it moves along, once
+                            # every Select has its new options (the Select
+                            # itself says nothing while they change)
+                            moved_first.append((param.flag, keep))
+                    if keep not in legal:
+                        keep = ""
+                    values[index] = keep
+                    if shown[index] is None:
+                        card_shown[index] = keep
+                    if sel is not None:
+                        with sel.prevent(Select.Changed):
+                            sel.set_options(options)
+                            sel.value = keep if keep in legal else Select.NULL
+                self._param_values[param.flag] = values
+                continue
+            try:
+                sel = self.query_one(f"#{self._param_id('select', param.flag)}", Select)
+            except Exception:
+                sel = None
+            if sel is None:
+                current = str(self._param_values.get(param.flag) or "")
+            else:
+                current = None if sel.value is Select.NULL else str(sel.value)
+            default = str(param.default or "")
+            keep = current if current is not None and current in legal else (default if default in legal else "")
+            self._param_values[param.flag] = keep
+            if sel is not None:
+                with sel.prevent(Select.Changed):
+                    sel.set_options(options)
+                    sel.value = keep if keep in legal else Select.NULL
+        for flag, value in moved_first:
+            self._follow_first_instance(flag, value)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """a Base row was picked: the card notes that the user chose it (so
+        fresh choices leave it alone, "ask in its window" included), and for
+        Base 1 a Select that follows it (the ASR synchronizer's base type)
+        moves along. The event goes on up to the launcher."""
+        value = "" if event.value is Select.NULL else str(event.value)
+        now = "" if event.select.value is Select.NULL else str(event.select.value)
+        if value != now:
+            return  # the Select has moved on since (fresh choices): not a pick
+        for param in self.service_def.params:
+            if not param.per_instance:
+                continue
+            for index in range(len(self._param_values.get(param.flag) or [])):
+                if event.select.id != self._instance_select_id(param.flag, index):
+                    continue
+                card_shown = self._card_shown.get(param.flag, {})
+                picked = self._picked_instances.setdefault(param.flag, set())
+                # a Select says it changed when it is mounted too, on what the card gave it
+                if index in card_shown and value != card_shown[index]:
+                    picked.add(index)
+                else:
+                    picked.discard(index)
+                if index == 0:
+                    self._follow_first_instance(param.flag, value)
+                return
+
+    def _follow_first_instance(self, flag: str, picked: str) -> None:
+        """set every Select that follows the first instance of `flag` to what
+        goes with `picked`, when that is one of its options."""
+        for follower in self.service_def.params:
+            if follower.follows != flag:
+                continue
+            wanted = str(follower.follow_values.get(picked) or "")
+            if not wanted or wanted not in {value for _, value in _choice_options(follower.choices)}:
+                continue
+            self._param_values[follower.flag] = wanted
+            try:
+                self.query_one(f"#{self._param_id('select', follower.flag)}", Select).value = wanted
+            except Exception:
+                pass
 
     def update_session_choices(self, choices: list[str]) -> None:
         """replace the session Select options in place, keeping the current

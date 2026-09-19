@@ -72,14 +72,18 @@ from openmmla.tui.ssh import (
     wrap_local, wrap_remote,
 )
 from openmmla.tui.artifacts import (
-    METADATA_FILENAMES, collection_artifact_dir, copy_covers, merge_tree, pipeline_artifact_dir, pipeline_slug,
+    collection_artifact_dir, merge_tree, pipeline_artifact_dir, pipeline_slug,
     safe_segment, update_collection_manifest, update_pipeline_manifest,
 )
 from openmmla.tui import download as dl
-from openmmla.tui import recordings, stream_cuts
-from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
+from openmmla.tui import recordings, stream_export
+from openmmla.utils.artifact_paths import (
+    ARTIFACTS_DIR, CAPTURE_STREAMS_DIR, NON_SESSION_ARTIFACT_DIRS, SERVER_RECORD_REL, SERVER_STREAMS_DIR,
+    STREAMS_DIR,
+)
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources
+from openmmla.utils.config import get_bases
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -112,7 +116,7 @@ from openmmla.tui.widgets.command_session import CommandSession
 from openmmla.tui.widgets.config_form import ConfigForm, DictListField
 from openmmla.tui.widgets.recordings_panel import StreamServerRecordingsPanel
 from openmmla.tui.widgets.experiment_form import ExperimentForm
-from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef
+from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef, host_params
 from openmmla.tui.widgets.ssh_form import SSHForm
 from openmmla.tui.widgets.stream_panel import StreamPanel, _with_stream_path
 from openmmla.tui.widgets.session_control import SessionControlPanel
@@ -309,12 +313,25 @@ _STREAM_FIELDS_TEMPLATE = [
      "where the bases pull it: usually the same path over RTSP, which connects faster than RTMP. Empty = pull the target"),
     ("device", "str", "",
      "device path, e.g. /dev/video0 (video) or hw:1,0 (audio), on the machine picked under SSH Profile on the Streams tab"),
+    ("kind", "str", "",
+     "audio or video. Empty = by the device (hw:1,0 or a Mac's :0 is audio) or a udp/tcp target (audio), "
+     "else {kind}, as on this card"),
     ("record", "bool", False,
-     "also record on the capture host, under <record_root>/streams-<date>/collection/<host>/"),
+     "also record on the capture host, under <record_root>/streams/capture/<date>/<host>/"),
     ("record_keep_days", "int", 0,
      "days the capture host keeps those recordings: older ones are deleted at the stream's Start and at "
      "Refresh on the Streams tab, whose Manage lists them. 0 = until deleted"),
 ]
+
+# stream fields shown as a dropdown; empty stays a choice (the blank)
+_STREAM_FIELD_CHOICES = {"kind": ["audio", "video"]}
+
+
+def _card_stream_kind(card_name: str) -> str:
+    """what a stream of a pipeline card is when neither its kind, its device nor
+    its target tells: audio on ASR (a Mac's microphone pushed over RTMP names no
+    device), video on IPS and VFA."""
+    return "audio" if card_name == "ASR Base" else "video"
 
 
 def _mllm_config_path(root: str) -> str:
@@ -661,66 +678,9 @@ def _local_collection_session_ids(root: str) -> list[str]:
     )
 
 
-def _remote_stream_recording_days(profile, record_root: str, host_label: str) -> list[tuple[str, str]] | None:
-    """(streams-<date>, absolute path of its collection/<host label> tree) for
-    every day a capture host holds stream recordings, newest first. None when
-    the host could not be asked, which is not the same as having none."""
-    root = _quote_remote_path(str(record_root or "").rstrip("/") or "$HOME/artifacts")
-    script = (
-        f"for d in {root}/streams-*/collection/{shlex.quote(host_label)}; do "
-        'if [ -d "$d" ]; then (cd "$d" && pwd -P); fi; done; echo LISTED'
-    )
-    # bash, whatever the login shell is: zsh stops at a glob that matches nothing
-    cmd = f"bash -c {shlex.quote(script)}"
-    try:
-        result = ssh_run_sync(profile, cmd, timeout=15.0)
-    except Exception:
-        return None
-    lines = [line.strip() for line in (result.stdout or "").splitlines()]
-    if "LISTED" not in lines:
-        return None
-    days = []
-    for line in lines:
-        parts = line.rstrip("/").split("/")
-        if line.startswith("/") and len(parts) >= 4 and parts[-2] == "collection" and parts[-3].startswith("streams-"):
-            days.append((parts[-3], line))
-    return sorted(set(days), reverse=True)
-
-
-def _files_already_here(local_path: Path, plan) -> list[str]:
-    """the planned files already at their place here, at the remote size.
-
-    A recording is named after the moment it started and is not written again
-    once it is over, so a copy of that size is that file. The manifests are
-    fetched every time: they are small, and a stop rewrites them in place."""
-    here = []
-    for item in plan.files:
-        if os.path.basename(item.rel) in METADATA_FILENAMES:
-            continue
-        try:
-            if (local_path / item.rel).stat().st_size == item.size:
-                here.append(item.rel)
-        except OSError:
-            continue
-    return here
-
-
-# files a download lists one by one before it starts; the rest are counted
-_DOWNLOAD_LIST_MAX = 12
-
-
-def _describe_files(rels) -> str:
-    """"1 video, 1 audio, 2 manifest(s)" for paths of a collection tree."""
-    counts: dict[str, int] = {}
-    for rel in rels:
-        if os.path.basename(rel) in METADATA_FILENAMES:
-            kind = "manifest(s)"
-        else:
-            head = rel.split("/", 1)[0] if "/" in rel else ""
-            kind = head if head in ("video", "audio") else "other"
-        counts[kind] = counts.get(kind, 0) + 1
-    order = ("video", "audio", "other", "manifest(s)")
-    return ", ".join(f"{counts[kind]} {kind}" for kind in order if kind in counts) or "no files"
+# the planned files already at their place here, at the remote size (a
+# recording is not written again once it is over)
+_files_already_here = stream_export.files_already_here
 
 
 def _remote_artifact_session_ids(profile) -> list[str]:
@@ -771,6 +731,12 @@ def _local_transform_matrix_files(local_dir: str) -> list[str]:
 
 
 def _remote_transform_matrix_files(profile, remote_dir: str) -> list[str]:
+    return _remote_transform_matrix_listing(profile, remote_dir) or []
+
+
+def _remote_transform_matrix_listing(profile, remote_dir: str) -> list[str] | None:
+    """the transformation_matrices*.json files of a remote folder; None when
+    the host could not be asked (a missing folder is an empty list)."""
     quoted_dir = _quote_remote_path(remote_dir)
     cmd = (
         f"if [ -d {quoted_dir} ]; then "
@@ -780,14 +746,105 @@ def _remote_transform_matrix_files(profile, remote_dir: str) -> list[str]:
     try:
         result = ssh_run_sync(profile, cmd, timeout=8.0)
     except Exception:
-        return []
+        return None
     if result.returncode != 0:
-        return []
+        return None
     return sorted(
         line.strip()
         for line in (result.stdout or "").splitlines()
         if line.strip()
     )
+
+
+# the base cards, and the pipeline their bases note in a session's sources
+_BASE_CARD_PIPELINES = {"ASR Base": "asr", "VFA Base": "vfa", "IPS Base": "ips"}
+
+# the synchronizer's own count of the bases it merges each time slice from
+# (the long form of -nb of mmla asr-sync and vfa-sync): Sync Waits For on the
+# card, apart from the card's Num Bases, since bases of the session may run on
+# other hosts. Too high, a slice waits for bases that never report and is
+# merged only when it expires; too low, it is merged before the rest report.
+_SYNC_WAIT_FLAG = "--num_bases"
+_SYNC_WAIT_CARDS = ("ASR Base", "VFA Base")
+
+# the Base option that passes no -b: that base asks in its own window which
+# Bases entry it is (for a config whose Bases list has no entry for it)
+_ASK_BASE_LABEL = "ask in its window"
+
+# transformation_matrices_<id>.json: camera sync's matrices into base <id>'s
+# coordinates, the one the IPS synchronizer takes as its main camera
+_MATRIX_FILE_PREFIX = "transformation_matrices_"
+
+
+def _shown_base_value(value) -> str:
+    """a Bases value worth showing on a dropdown: not empty, not a <placeholder>
+    and not a dropdown left unset."""
+    text = str(value if value is not None else "").strip()
+    if not text or text == "Select.NULL" or (text.startswith("<") and text.endswith(">")):
+        return ""
+    return text
+
+
+def _is_main_base(base: dict) -> bool:
+    return str(base.get("main")).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _base_choice_label(pipeline: str, base: dict) -> str:
+    """what a Base dropdown shows for one Bases entry, `0 · macbook-air ·
+    stream ips-cam-1`: its id, the camera of an IPS or VFA base (the
+    base_type of an ASR one), then its source and source_index."""
+    what = _shown_base_value(base.get("base_type") if pipeline == "asr" else base.get("camera"))
+    where = " ".join(
+        part for part in (_shown_base_value(base.get("source")), _shown_base_value(base.get("source_index"))) if part
+    )
+    return " · ".join(part for part in (str(base.get("id")), what, where) if part)
+
+
+def _base_choices(pipeline: str, config: dict) -> list[tuple[str, str]]:
+    """the options of a Base dropdown: every Bases entry of the config in its
+    order (value: the id, as -b takes it), then asking in the base's window."""
+    options = [(_base_choice_label(pipeline, base), str(base.get("id"))) for base in get_bases(config)]
+    return options + [(_ASK_BASE_LABEL, "")]
+
+
+def _asr_base_types(config: dict) -> list[str]:
+    """the device types of an ASR config: the keys of its Base section."""
+    section = (config or {}).get("Base")
+    if not isinstance(section, dict):
+        return []
+    return [str(key) for key, value in section.items() if isinstance(value, dict) and _shown_base_value(key)]
+
+
+def _matrix_file_ids(names: list[str]) -> list[str]:
+    """the base ids that have a transformation_matrices_<id>.json: the id is
+    all that stands between the prefix and .json (camera sync's raw
+    transformation_matrices.json has none and is left out)."""
+    ids: list[str] = []
+    for name in names:
+        if name.startswith(_MATRIX_FILE_PREFIX) and name.endswith(".json"):
+            base_id = name[len(_MATRIX_FILE_PREFIX):-len(".json")]
+            if base_id and base_id not in ids:
+                ids.append(base_id)
+    return sorted(ids, key=lambda value: (0, int(value), "") if value.isdigit() else (1, 0, value))
+
+
+def _main_camera_choices(ids: list[str], config: dict) -> tuple[list[tuple[str, str]], str]:
+    """the Main Camera dropdown of the IPS synchronizer: one option per matrix
+    file on the card's host, and the default, the Bases entry with main: true
+    when it has a file, else the first there is ("" with none)."""
+    bases = {str(base.get("id")): base for base in get_bases(config)}
+    options = []
+    for base_id in ids:
+        base = bases.get(base_id)
+        if base is None:
+            label = f"{base_id} · no Bases entry"
+        else:
+            camera = _shown_base_value(base.get("camera"))
+            label = " · ".join(part for part in (base_id, camera, "main" if _is_main_base(base) else "") if part)
+        options.append((label, base_id))
+    main = next((base_id for base_id, base in bases.items() if _is_main_base(base)), None)
+    default = main if main in ids else (ids[0] if ids else "")
+    return options, default
 
 
 _FILE_MISSING_SENTINEL = "__OPENMMLA_FILE_MISSING__"
@@ -1812,10 +1869,10 @@ class StreamServerConfigPanel(Widget):
         yield Static(where, classes="ss-muted")
         yield Static(
             "MediaMTX records every stream that is published to it while `record` under "
-            "`pathDefaults` is on: ten-minute segments under artifacts/recordings/<app>/<name>/ of the "
+            "`pathDefaults` is on: ten-minute segments under artifacts/streams/server/<app>/<name>/ of the "
             "project on this host (the same folder for a docker and a native run). A segment is deleted "
             "`recordDeleteAfter` after it began, by MediaMTX itself, so a session's footage has to be "
-            "exported before then (Sessions → Export Recordings; the Recordings tab shows what is held). "
+            "exported before then (Sessions → Export Streams; the Recordings tab shows what is held). "
             "This is the server-side copy; recording on the capture device is the `record` field of a "
             "stream (Streams tab of a base card). The two are independent. The ports here have to match "
             "System Settings → Stream Server.",
@@ -1945,9 +2002,11 @@ class StreamServerConfigPanel(Widget):
             self._show_recording_state()
 
 
-def _make_stream_fields(stream_name: str, stream_server: dict | None = None) -> list[LoaderFieldDef]:
+def _make_stream_fields(stream_name: str, stream_server: dict | None = None,
+                        default_kind: str = "video") -> list[LoaderFieldDef]:
     """create FieldDef list for a single stream entry. With the Stream Server
-    section of System Settings, the help names its real address."""
+    section of System Settings, the help names its real address; default_kind
+    is what the card takes a stream with an empty kind for."""
     section = f"Streams.{stream_name}"
     publish, _pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
     fields = []
@@ -1956,9 +2015,10 @@ def _make_stream_fields(stream_name: str, stream_server: dict | None = None) -> 
             path=f"Streams.{stream_name}.{key}",
             field_type=ftype,
             default=default,
-            description=desc.replace("{publish}", publish),
+            description=desc.replace("{publish}", publish).replace("{kind}", default_kind),
             required=(key == "target"),
             section=section,
+            choices=list(_STREAM_FIELD_CHOICES.get(key, [])),
         ))
     return fields
 
@@ -1977,8 +2037,16 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         params=[
             ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
+            # how many bases the synchronizer merges each time slice from, on
+            # every host: the Bases entries of the card host's config
+            # (_service_with_base_choices), else (None) Num Bases
+            ParamDef(_SYNC_WAIT_FLAG, "Sync Waits For", "int", None, follows="-nb"),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
+            # choices, defaults and follow_values come from the card host's
+            # config (_service_with_base_choices)
+            ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
+            ParamDef("-bt", "Synchronizer Base Type", "choice", "", follows="-b"),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-s", "Store Audio", "bool", True),
             ParamDef("-vad", "VAD", "bool", True),
@@ -1990,9 +2058,9 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         ],
         components=[
             ComponentDef("base", "mmla asr-base", "-nb",
-                         ["-sid", "-m", "-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
+                         ["-sid", "-b", "-m", "-s", "-vad", "-nr", "-tr", "-sp", "-hsr"]),
             ComponentDef("synchronizer", "mmla asr-sync", "-ns",
-                         ["-sid", "-d", "-sp"]),
+                         ["-sid", _SYNC_WAIT_FLAG, "-bt", "-d", "-sp"]),
         ],
         artifact_pipeline="asr-base",
     ))
@@ -2007,8 +2075,10 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         params=[
             ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
+            ParamDef(_SYNC_WAIT_FLAG, "Sync Waits For", "int", None, follows="-nb"),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
+            ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-g", "Graphics", "bool", True),
             ParamDef("-s", "Store Frames", "bool", True),
@@ -2016,8 +2086,8 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         ],
         components=[
             ComponentDef("base", "mmla vfa-base", "-nb",
-                         ["-sid", "-m", "-g", "-s", "-v"]),
-            ComponentDef("synchronizer", "mmla vfa-sync", "-ns", ["-sid"]),
+                         ["-sid", "-b", "-m", "-g", "-s", "-v"]),
+            ComponentDef("synchronizer", "mmla vfa-sync", "-ns", ["-sid", _SYNC_WAIT_FLAG]),
         ],
         artifact_pipeline="vfa-base",
     ))
@@ -2035,17 +2105,20 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-nv", "Num Visualizers", "int", 1),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
+            ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
+            ParamDef("-mc", "Main Camera", "choice", ""),
+            ParamDef("-d", "Visualizer View", "str", "2d", ["2d", "3d"]),
             ParamDef("-g", "Graphics", "bool", True),
             ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
         ],
         components=[
             ComponentDef("base", "mmla ips-base", "-nb",
-                         ["-sid", "-g", "-s", "-v"]),
+                         ["-sid", "-b", "-g", "-s", "-v"]),
             ComponentDef("synchronizer", "mmla ips-sync", "-ns",
-                         ["-sid", "-v"]),
+                         ["-sid", "-mc", "-v"]),
             ComponentDef("visualizer", "mmla ips-vis", "-nv",
-                         ["-sid", "-s"]),
+                         ["-sid", "-d", "-s"]),
         ],
         artifact_pipeline="ips-base",
     ))
@@ -3911,6 +3984,13 @@ class ServicePanel(Widget):
         else:
             is_running = self._detect_running_remote(svc, target)
         self._note_card_state(svc, target, is_running)
+        if svc.name in _BASE_CARD_PIPELINES and target != "local":
+            # the Bases the dropdowns offer: read here, off the UI thread, and
+            # kept for the Start and the redraws that follow
+            self._load_config_for_target(os.path.join(svc.config_dir, "config.yml"), show_status=False, target=target)
+        if svc.name == "IPS Base":
+            # the Main Camera choices, likewise
+            self._transform_matrix_ids(target, refresh=True)
         return self._service_for_target(svc, target), is_running
 
     def _note_card_state(self, svc: ServiceDef, target: str, is_running: bool) -> None:
@@ -3945,8 +4025,8 @@ class ServicePanel(Widget):
                     streams,
                     config_path=stream_config_path,
                     project_dir=self._root,
-                    session_choices=self._stream_session_choices(),
                     stream_server=self._stream_server_address,
+                    default_kind=_card_stream_kind(svc.name),
                 )
                 await stream_scroll.mount(panel)
 
@@ -4410,6 +4490,7 @@ class ServicePanel(Widget):
         svc = self._service_with_session_choices(svc, target)
         svc = self._service_with_infra_mode(svc, target)
         svc = self._service_with_endpoint_note(svc, target)
+        svc = self._service_with_base_choices(svc, target)
         if svc.name != "ASR Server":
             return svc
         config_path = os.path.join(svc.config_dir, "config.yml")
@@ -4456,6 +4537,247 @@ class ServicePanel(Widget):
                 for p in svc.params
             ],
         )
+
+    def _service_with_base_choices(self, svc: ServiceDef, target: str) -> ServiceDef:
+        """what a base card's dropdowns offer on the card's host: its config's
+        Bases entries for each Base (-b), the matrix files for the IPS
+        synchronizer's Main Camera (-mc), the Base keys for the ASR
+        synchronizer's base type (-bt), which follows Base 1.
+
+        The ASR and VFA synchronizers' Sync Waits For starts on the number of
+        Bases entries.
+
+        A remote host is asked nothing from here: this also runs on the UI
+        thread (Start, a config Save). Its config comes from the config cache
+        and its matrix files from _transform_matrix_ids, both read when the
+        card was built (_service_view_state_sync) or refreshed, off it."""
+        pipeline = _BASE_CARD_PIPELINES.get(svc.name)
+        if pipeline is None:
+            return svc
+        config_path = os.path.join(svc.config_dir, "config.yml")
+        try:
+            if target == "local":
+                config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+            else:
+                config = self._target_config_cache.get(self._config_cache_key(config_path, target))
+        except Exception:
+            config = None  # an unreadable config offers nothing but asking in the window
+        config = config if isinstance(config, dict) else {}
+        bases = get_bases(config)
+        base_options = _base_choices(pipeline, config)
+        params = []
+        for param in svc.params:
+            if param.flag == "-b" and param.per_instance:
+                params.append(replace(param, choices=base_options, default=[value for _, value in base_options if value]))
+            elif param.flag == "-bt" and pipeline == "asr":
+                types = _asr_base_types(config)
+                follow = {
+                    str(base.get("id")): str(base.get("base_type"))
+                    for base in bases if str(base.get("base_type") or "") in types
+                }
+                first = str(bases[0].get("id")) if bases else ""
+                default = follow.get(first) or (types[0] if len(types) == 1 else "")
+                params.append(replace(param, choices=[(name, name) for name in types], default=default,
+                                      follow_values=follow))
+            elif param.flag == "-mc" and pipeline == "ips":
+                options, default = _main_camera_choices(self._transform_matrix_ids(target) or [], config)
+                params.append(replace(param, choices=options, default=default))
+            elif param.flag == _SYNC_WAIT_FLAG:
+                # every base of the session, wherever it runs, is a Bases
+                # entry; with none listed, the card's Num Bases (None)
+                params.append(replace(param, default=len(bases) or None))
+            else:
+                params.append(param)
+        return replace(svc, params=params)
+
+    def _transform_matrix_ids(self, target: str, refresh: bool = False) -> list[str] | None:
+        """the base ids with a transformation_matrices_<id>.json in camera_sync/
+        on the card's host; None when that host's folder could not be listed.
+        This machine's folder is read each time; a remote one only with
+        `refresh` (off the UI thread: a card being built, its Refresh), and
+        what it said is kept for the Start and the redraws that follow. A
+        host that does not answer a refresh keeps the list it gave before, as
+        its config does, and is noted in _matrix_ids_stale."""
+        if target == "local":
+            return _matrix_file_ids(_local_transform_matrix_files(_ips_transform_local_dir(self._root)))
+        cache: dict[str, list[str] | None] | None = getattr(self, "_matrix_ids_cache", None)
+        if cache is None:
+            cache = self._matrix_ids_cache = {}
+        stale: set[str] | None = getattr(self, "_matrix_ids_stale", None)
+        if stale is None:
+            stale = self._matrix_ids_stale = set()
+        if refresh:
+            profile = get_profile_by_name(target)
+            listing = (
+                _remote_transform_matrix_listing(profile, self._ips_transform_remote_dir(profile))
+                if profile is not None else None
+            )
+            if listing is not None:
+                cache[target] = _matrix_file_ids(listing)
+                stale.discard(target)
+            elif cache.get(target) is not None:
+                # not answering now: the Main Camera keeps the list and the pick it had
+                stale.add(target)
+            else:
+                cache[target] = None
+        return cache.get(target)
+
+    def _matrix_folder(self, target: str) -> str:
+        """camera_sync/ of the card's host, as the log names it."""
+        if target == "local":
+            return _ips_transform_local_dir(self._root)
+        profile = get_profile_by_name(target)
+        return self._ips_transform_remote_dir(profile) if profile is not None else "pipelines/ips-base/camera_sync"
+
+    @staticmethod
+    def _base_entry_ids(svc: ServiceDef) -> list[str]:
+        """the Bases entries of the card host's config, as its Base dropdowns
+        offer them (_service_with_base_choices)."""
+        param = next((param for param in svc.params if param.flag == "-b" and param.per_instance), None)
+        if param is None:
+            return []
+        values = []
+        for choice in param.choices:
+            value = choice[1] if isinstance(choice, (tuple, list)) and len(choice) == 2 else choice
+            if str(value or ""):
+                values.append(str(value))
+        return values
+
+    def _base_card_start_notes(self, svc: ServiceDef, params: dict) -> list[str]:
+        """what a Start of the ASR or VFA base card should say about the
+        bases it does not start: those the config lists and the synchronizer
+        waits for have to run on other hosts, in this session."""
+        if svc.name not in _SYNC_WAIT_CARDS:
+            return []
+        num_bases = _coerce_int(params.get("-nb"), 0)
+        syncs = _coerce_int(params.get("-ns"), 0)
+        if num_bases <= 0 and syncs <= 0:
+            return []
+        listed = len(self._base_entry_ids(svc))
+        waits = (_coerce_int(params.get(_SYNC_WAIT_FLAG), 0) or listed) if syncs > 0 else 0
+        notes = []
+        if listed > num_bases:
+            notes.append(
+                f"  The config lists {listed} Bases entries and this card starts {num_bases} base(s): the other "
+                f"{listed - num_bases} must run elsewhere (the base card of another host, in this session)."
+            )
+        if waits > num_bases:
+            notes.append(
+                f"  The synchronizer waits for {waits} bases (Sync Waits For) and this card starts {num_bases}: "
+                f"the other {waits - num_bases} have to report from other hosts, or each time slice is merged "
+                f"only when it expires, late and without them."
+            )
+        return notes
+
+    def _base_card_start_problem(self, svc: ServiceDef, params: dict, target: str) -> str:
+        """why a base card cannot start as it stands, said plainly; "" when it
+        can. Every process the card opens takes its choices from the card and
+        asks nothing, so what it would have asked must be answerable here."""
+        if svc.name not in _BASE_CARD_PIPELINES:
+            return ""
+        num_bases = _coerce_int(params.get("-nb"), 0)
+        picked = [str(value or "") for value in (params.get("-b") if isinstance(params.get("-b"), list) else [])]
+        picked = (picked + [""] * num_bases)[:num_bases]
+        entries = self._base_entry_ids(svc)
+        # a base given no -b takes the config's only Bases entry, when it has
+        # exactly one (it asks in its window only when there are several)
+        only = entries[0] if len(entries) == 1 else ""
+        seen: dict[str, int] = {}
+        for index, value in enumerate(picked):
+            entry = value or only
+            if not entry:
+                continue
+            if entry in seen:
+                first = seen[entry]
+                if picked[first] and value:
+                    return (
+                        f"[yellow]Base {first + 1} and Base {index + 1} are both Bases entry {entry}: each base "
+                        f"needs an entry of its own. Pick another one for either, or lower Num Bases.[/yellow]"
+                    )
+                return (
+                    f"[yellow]Base {first + 1} and Base {index + 1} would both be Bases entry {entry}: the config "
+                    f"lists that one entry only, and a base left on '{_ASK_BASE_LABEL}' takes the only entry there "
+                    f"is. Add a Bases entry for the other base on the Config tab and Save, or lower Num Bases to "
+                    f"1.[/yellow]"
+                )
+            seen[entry] = index
+        if svc.name in _SYNC_WAIT_CARDS and _coerce_int(params.get("-ns"), 0) > 0:
+            waits = _coerce_int(params.get(_SYNC_WAIT_FLAG), 0)
+            counted = waits or len(entries)
+            if not counted:
+                return (
+                    "[yellow]Sync Waits For is 0, so the synchronizer would count the Bases entries of its config, "
+                    "and the config lists none. Set Sync Waits For to the number of bases in this session, on "
+                    "every host, or set Num Synchronizers to 0.[/yellow]"
+                )
+            if num_bases > counted:
+                why = "" if waits else " (the Bases entries of its config, as Sync Waits For is 0)"
+                return (
+                    f"[yellow]This card starts {num_bases} bases, but the synchronizer waits for {counted}{why}: it "
+                    f"would merge each time slice as soon as {counted} of them report, before the others do. Set "
+                    f"Sync Waits For to {num_bases} or more (with the bases of this session on other hosts), or "
+                    f"lower Num Bases.[/yellow]"
+                )
+        if svc.name != "IPS Base" or _coerce_int(params.get("-ns"), 0) <= 0 or str(params.get("-mc") or "").strip():
+            return ""
+        where = "this machine" if target == "local" else f"'{target}'"
+        folder = self._matrix_folder(target)
+        ids = self._transform_matrix_ids(target)
+        if ids is None:
+            return (
+                f"[red]The IPS synchronizer has no Main Camera: the matrix files in {folder} on {where} could not "
+                f"be listed. Press Refresh on this card once {where} answers.[/red]"
+            )
+        if not ids:
+            fetch = (
+                "" if target == "local"
+                else f", then copy them to {where} with Sync to Remote on the Transform Matrix tab (Host: Local)"
+            )
+            return (
+                f"[red]No transformation_matrices_<id>.json in {folder} on {where}: the IPS synchronizer takes its "
+                f"Main Camera from one, and every base needs its own file there too. Make them with IPS Camera "
+                f"Sync{fetch}, and press Refresh on this card. To start the bases alone, set Num Synchronizers "
+                f"to 0.[/red]"
+            )
+        return (
+            "[yellow]Pick the synchronizer's Main Camera first (press Refresh on this card when its list "
+            "is out of date), or set Num Synchronizers to 0.[/yellow]"
+        )
+
+    def _refresh_base_card_choices(self) -> None:
+        """a mounted base card's dropdowns follow a config just saved; they
+        read it from the config cache, which the save has filled."""
+        target = self._get_panel_target()
+        for card in self.query(ServiceCard):
+            service = self._svc_map.get(card.service_def.name)
+            if service is None or service.name not in _BASE_CARD_PIPELINES:
+                continue
+            fresh = self._service_with_base_choices(service, target)
+            card.update_param_choices(host_params(fresh.params))
+
+    async def _async_refresh_base_choices(self, svc: ServiceDef, target: str) -> None:
+        """Refresh on a base card: read its host's config and matrix files
+        again, off the UI thread, and give its dropdowns the fresh options."""
+        config_path = os.path.join(svc.config_dir, "config.yml")
+
+        def fetch() -> None:
+            key = self._config_cache_key(config_path, target)
+            old = self._target_config_cache.pop(key, None)
+            self._load_config_for_target(config_path, show_status=False, target=target)
+            if key not in self._target_config_cache and old is not None:
+                self._target_config_cache[key] = old  # not readable now: keep what it said last
+            if svc.name == "IPS Base":
+                self._transform_matrix_ids(target, refresh=True)
+
+        await asyncio.to_thread(fetch)
+        if svc.name == "IPS Base" and target in getattr(self, "_matrix_ids_stale", set()):
+            self._log(
+                f"[yellow]The matrix files in {self._matrix_folder(target)} on '{target}' could not be listed "
+                f"just now: the Main Camera list is the one read before, and may be out of date. Press Refresh "
+                f"again once '{target}' answers.[/yellow]"
+            )
+        if self._get_panel_target() == target:
+            self._refresh_base_card_choices()
 
     def _streams_for_pipeline_target(self, pipeline: PipelineDef) -> list:
         target = self._get_panel_target()
@@ -4808,7 +5130,8 @@ class ServicePanel(Widget):
                     if not isinstance(stream_props, dict):
                         continue
                     section_name = f"Streams.{stream_name}"
-                    s_fields = _make_stream_fields(stream_name, self._stream_server_address())
+                    s_fields = _make_stream_fields(
+                        stream_name, self._stream_server_address(), _card_stream_kind(pipeline.name))
                     dynamic_sections[section_name] = s_fields
                     for f in s_fields:
                         val = get_nested_value(existing, f.path)
@@ -5193,6 +5516,10 @@ class ServicePanel(Widget):
             self._services = _build_service_registry(self._root)
             self._svc_map = {s.name: s for s in self._services}
             self._refresh_service_cards()
+        elif pipeline.name in _BASE_CARD_PIPELINES and saved is not None and self._get_panel_target() == "local":
+            # the Base dropdowns list the Bases just saved; a save to another
+            # host refreshes the cards once its copy has landed (_run_scp)
+            self._refresh_base_card_choices()
 
         # the Streams tab prunes by what it holds (record_keep_days): it gets
         # what was saved, on another host as well as here
@@ -5482,7 +5809,9 @@ class ServicePanel(Widget):
             return
 
         section_name = f"Streams.{name}"
-        fields = _make_stream_fields(name, self._stream_server_address())
+        pipeline = self._current_pipeline
+        fields = _make_stream_fields(
+            name, self._stream_server_address(), _card_stream_kind(pipeline.name if pipeline is not None else ""))
         form.add_section(section_name, fields, self._new_stream_values(name))
         self._restore_add_stream_button()
 
@@ -5608,15 +5937,18 @@ class ServicePanel(Widget):
         """a new stream opens on the Stream Server's URLs of <pipeline>/<name>, so
         the address typed once under System Settings is not typed again. With a
         loopback address there, only the path is filled in: whether localhost is
-        right depends on the capture host, which Save looks at."""
+        right depends on the capture host, which Save looks at. A stream added
+        on the ASR card says kind: audio, so a microphone that names no device
+        (a Mac's first) is captured as one wherever the entry is read."""
         pipeline = self._current_pipeline
         app = pipeline.name.split()[0].lower() if pipeline is not None else "stream"
         path = f"{app}/{safe_segment(name, 'stream')}"
+        kind = {f"Streams.{name}.kind": "audio"} if pipeline is not None and pipeline.name == "ASR Base" else {}
         server = self._stream_server_address()
         if is_loopback_host(server.get("host")):
-            return {f"Streams.{name}.target": path}
+            return {f"Streams.{name}.target": path, **kind}
         publish, pull = stream_server_urls(server, path)
-        return {f"Streams.{name}.target": publish, f"Streams.{name}.read_target": pull}
+        return {f"Streams.{name}.target": publish, f"Streams.{name}.read_target": pull, **kind}
 
     def _cancel_add_stream(self) -> None:
         self._restore_add_stream_button()
@@ -6367,13 +6699,13 @@ class ServicePanel(Widget):
         """the server's inventory. Its API is asked on the card's host: the
         address of System Settings on Local, the SSH host of a remote card
         (which shows and controls that machine's own MediaMTX). The record
-        folder is artifacts/recordings of the project on that host, which is
-        where both run modes put it."""
+        folder is artifacts/streams/server of the project on that host, which
+        is where both run modes put it."""
         server = self._stream_server_address()
         api_port = int(server.get("api_port") or recordings.API_PORT)
         if profile is None:
             host = str(server.get("host") or "localhost")
-            quoted_root = shlex.quote(os.path.join(self._root, "artifacts", "recordings"))
+            quoted_root = shlex.quote(os.path.join(self._root, ARTIFACTS_DIR, SERVER_RECORD_REL))
 
             def run_shell(command: str) -> str | None:
                 try:
@@ -6383,7 +6715,8 @@ class ServicePanel(Widget):
                 return result.stdout if result.returncode == 0 else None
         else:
             host = profile.host
-            quoted_root = _quote_remote_path(_remote_path_join(profile.remote_project_path, "artifacts/recordings"))
+            quoted_root = _quote_remote_path(
+                _remote_path_join(profile.remote_project_path, ARTIFACTS_DIR, SERVER_RECORD_REL))
 
             def run_shell(command: str) -> str | None:
                 try:
@@ -6913,6 +7246,12 @@ class ServicePanel(Widget):
             return
         if svc.name == "IPS Camera Sync" and not self._camera_sync_ready(target):
             return
+        problem = self._base_card_start_problem(svc, event.params, target)
+        if problem:
+            self._log(problem)
+            return
+        for note in self._base_card_start_notes(svc, event.params):
+            self._log(note)
 
         if not is_remote and svc.launch_type != "make" and svc.conda_env:
             has_conda = shutil.which("conda") is not None
@@ -7011,6 +7350,13 @@ class ServicePanel(Widget):
             group=_LAUNCHER_STATUS_WORKER_GROUP,
             exclusive=False,
         )
+        if svc.name in _BASE_CARD_PIPELINES:
+            # the Bases of its host's config and, for IPS, its matrix files
+            self.run_worker(
+                self._async_refresh_base_choices(svc, target),
+                group="launcher-base-choices",
+                exclusive=True,
+            )
 
     def _port_conflict(self, svc: ServiceDef, target: str) -> str:
         """explain a system service whose ports answer only in part: another
@@ -7232,6 +7578,16 @@ class ServicePanel(Widget):
         finally:
             self._downloads_in_flight.discard(key)
 
+    def _export_callbacks(self) -> stream_export.ExportCallbacks:
+        """a transfer's log lines and progress go to this panel's log and its
+        progress row; Cancel there cancels the download worker."""
+        return stream_export.ExportCallbacks(
+            log=self._log,
+            progress_start=self._progress_start,
+            progress_update=self._progress_update,
+            progress_end=self._progress_end,
+        )
+
     async def _transfer_collection_tree(
         self,
         profile,
@@ -7243,374 +7599,35 @@ class ServicePanel(Widget):
     ) -> bool:
         """scan, download (staged, resumable) and merge one remote
         <folder>/collection/<host label> tree: a session's recordings, audio
-        and video alike, or a day of stream recordings. Only what is not here
-        yet is fetched. True when it is all here afterwards."""
-        staging = dl.staging_root(self._root, session_id, "collection", host_label)
-        self._log(f"[cyan]Downloading {profile_name}:{remote_transfer_path} -> {local_path}[/cyan]")
+        and video alike, then note them in the session's manifest. Only what is
+        not here yet is fetched. True when it is all here afterwards."""
 
-        # the row goes up before the remote scan, so Cancel is reachable
-        # while a large tree is being sized
-        self._progress_start(f"{host_label} · scanning…", None)
-        try:
-            plan = await dl.probe_remote(profile, remote_transfer_path)
-            if plan.unreachable:
-                self._log(f"[red]Could not reach {profile_name}: {rich_escape(plan.unreachable)}[/red]")
-                return False
-            if not plan.exists:
-                self._log(f"[red]Remote collection directory not found: {remote_transfer_path}[/red]")
-                return False
-            if not plan.file_count:
-                self._log("[yellow]Remote collection is empty; nothing to download.[/yellow]")
-                return False
-            if plan.rejected:
-                self._log(
-                    f"[yellow]Skipping {len(plan.rejected)} remote file(s) with unsupported names.[/yellow]"
-                )
-            here = await asyncio.to_thread(_files_already_here, local_path, plan) if plan.exact else []
-            self._log_download_files(plan, here)
-            if here:
-                plan = dl.leave_out(plan, here)
-                if not plan.file_count:
-                    self._log(f"[green]{session_id}: all {len(here)} file(s) are already here; nothing to fetch.[/green]")
-                    return True
-                self._log(
-                    f"  [cyan]{len(here)} file(s) are already here at the same size and are not fetched "
-                    f"again; fetching {_describe_files(item.rel for item in plan.files)}.[/cyan]"
-                )
-
-            self._progress_start(
-                f"{host_label} · {_describe_files(item.rel for item in plan.files)}"
-                if plan.exact else f"{host_label} · {plan.file_count} file(s)",
-                plan.total_bytes,
+        def note_in_manifest() -> str:
+            manifest = update_collection_manifest(
+                self._root,
+                session_id=session_id,
+                host_name=host_label,
+                remote_path=remote_transfer_path,
+                local_path=local_path,
             )
-            result = await dl.download_tree(
-                profile,
-                remote_transfer_path,
-                staging=staging,
-                plan=plan,
-                on_progress=self._progress_update,
-                log=self._log,
-            )
-        finally:
-            self._progress_end()
+            return f"[green]Updated session manifest: {manifest}[/green]"
 
-        if result.status != "complete":
-            self._report_incomplete_transfer(result)
-            return False
-
-        stats = await asyncio.to_thread(
-            merge_tree,
-            result.staged_root,
+        return await stream_export.fetch_tree(
+            profile,
+            remote_transfer_path,
             local_path,
-            conflict_label=profile_name,
+            staging=dl.staging_root(self._root, session_id, "collection", host_label),
+            label=host_label,
+            where=profile_name,
+            what=session_id,
+            callbacks=self._export_callbacks(),
+            merge=merge_tree,
+            after_merge=note_in_manifest,
         )
-        manifest = await asyncio.to_thread(
-            update_collection_manifest,
-            self._root,
-            session_id=session_id,
-            host_name=host_label,
-            remote_path=remote_transfer_path,
-            local_path=local_path,
-        )
-        await asyncio.to_thread(dl.finalize, staging)
-        fetched = _describe_files(item.rel for item in plan.files) if plan.exact else f"{plan.file_count} file(s)"
-        self._log(
-            f"[green]Downloaded {fetched} to {local_path} via {result.tool} "
-            f"(copied {stats['copied']}, unchanged {stats['skipped']}, conflicts {stats['conflicted']})"
-            + (f"; {len(here)} file(s) were already here" if here else "")
-            + ".[/green]"
-        )
-        self._log(f"[green]Updated session manifest: {manifest}[/green]")
-        return True
-
-    def _log_download_files(self, plan, here: list[str]) -> None:
-        """what a download holds, file by file, before it starts: the session
-        folder of a host brings its audio and its video together."""
-        size = dl.fmt_bytes(plan.total_bytes)
-        if not plan.exact:
-            self._log(f"  {plan.file_count} file(s), {size}")
-            return
-        self._log(f"  {plan.file_count} file(s), {size}: {_describe_files(item.rel for item in plan.files)}")
-        here_set = set(here)
-        media = [item for item in plan.files if os.path.basename(item.rel) not in METADATA_FILENAMES]
-        for item in media[:_DOWNLOAD_LIST_MAX]:
-            note = "  [dim](already here)[/dim]" if item.rel in here_set else ""
-            self._log(f"    {rich_escape(item.rel)}  {dl.fmt_bytes(item.size)}{note}")
-        if len(media) > _DOWNLOAD_LIST_MAX:
-            self._log(f"    … and {len(media) - _DOWNLOAD_LIST_MAX} more")
-
-    def _stream_session_choices(self) -> list[str]:
-        """the sessions a stream recording can be cut for: the real ones, not
-        the streams-<date> folders the recordings themselves are filed under."""
-        try:
-            sessions = self._artifact_session_choices_for_target(self._get_panel_target())
-        except Exception:
-            return []
-        return [session for session in sessions if session and not session.startswith("streams-")]
-
-    def on_stream_panel_session_choices_requested(self, event: StreamPanel.SessionChoicesRequested) -> None:
-        """Refresh in the Streams tab: read the sessions again, off the UI thread."""
-        event.stop()
-        target = self._get_panel_target()
-
-        async def reload() -> None:
-            self._invalidate_session_choice_cache(target)
-            sessions = await asyncio.to_thread(self._stream_session_choices)
-            for panel in self.query(StreamPanel):
-                panel.set_session_choices(sessions)
-
-        self.run_worker(reload(), group="stream-session-choices", exclusive=True)
-
-    def on_stream_panel_session_download_requested(self, event: StreamPanel.SessionDownloadRequested) -> None:
-        """Download in the Streams tab with a session chosen: that session's
-        part of every managed stream of the card."""
-        event.stop()
-        key = f"stream-session-download:{event.session_id}"
-        if key in self._downloads_in_flight:
-            self._log("[yellow]The recordings of this session are already being fetched.[/yellow]")
-            return
-        self._downloads_in_flight.add(key)
-        self.run_worker(
-            self._run_stream_session_download(event.session_id, list(event.streams), self._get_panel_target(), key),
-            name=key,
-            group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
-            exclusive=False,
-        )
-
-    async def _run_stream_session_download(self, session_id: str, streams: list, target: str, key: str = "") -> None:
-        """a stream is recorded once, by day, and shared by the sessions that
-        pull it: a session's footage is the part of those files between its
-        start and end. It is cut on the capture host (no re-encoding, so a video
-        cut is moved back onto a keyframe and named after that frame), staged
-        there, fetched with the transfer every other download uses, and the
-        staging is removed again. The recordings themselves are never touched."""
-        try:
-            session_id = _safe_session_id(session_id)
-            record = await asyncio.to_thread(self._session_record, session_id, target)
-            start = recordings.parse_time((record or {}).get("start_time"))
-            if start is None:
-                self._log(
-                    f"[yellow]Session '{session_id}' has no start time in MongoDB, so there is no time range to cut "
-                    f"out. Download without a session copies the whole files.[/yellow]"
-                )
-                return
-            ended = recordings.parse_time(record.get("end_time"))
-            end = ended or datetime.now(timezone.utc)
-            self._log(
-                f"[cyan]Session {session_id}: {start:%Y-%m-%d %H:%M:%S} to {end:%H:%M:%S} UTC"
-                f"{'' if ended else ' (still running: up to now)'}. Cutting that out of {len(streams)} stream(s)...[/cyan]"
-            )
-
-            staged: dict[tuple[str, str, str], int] = {}
-            fetched = 0
-            already = 0
-            for stream in streams:
-                count, present = await self._cut_stream_for_session(
-                    stream, session_id, start.timestamp(), end.timestamp())
-                already += present
-                if stream.ssh_profile == "local":
-                    fetched += count
-                elif count:
-                    group = (stream.ssh_profile, stream.record_root, stream.host_label)
-                    staged[group] = staged.get(group, 0) + count
-
-            for (profile_name, record_root, host_label), count in staged.items():
-                profile = get_profile_by_name(profile_name)
-                if profile is None:
-                    continue
-                home = await asyncio.to_thread(_remote_home, profile)
-                remote_dir = _expand_remote_home_path(
-                    f"{record_root.rstrip('/')}/{stream_cuts.STAGING_DIR}/{session_id}/collection/{host_label}", home)
-                local_path = Path(collection_artifact_dir(self._root, session_id, host_label))
-                if await self._transfer_collection_tree(
-                        profile, profile_name, session_id, host_label, remote_dir, local_path):
-                    fetched += count
-                    # only what was staged for this session; a transfer that did not
-                    # finish keeps its cuts, so Download again resumes instead of cutting anew
-                    await asyncio.to_thread(
-                        ssh_run_sync, profile, stream_cuts.bash(stream_cuts.cleanup_script(record_root, session_id)), 30.0)
-            if fetched or already:
-                self._log(
-                    f"[green]{fetched + already} recording(s) of session {session_id} are under "
-                    f"artifacts/{session_id}/collection/<host>/"
-                    + (f" ({already} of them were already here)" if already else "")
-                    + ". Their names carry the time of their first frame, so a base replays them with "
-                    "source: file.[/green]"
-                )
-            else:
-                self._log(
-                    f"[yellow]No stream here was being recorded on its capture host during session {session_id}. "
-                    f"The Stream Server may still have it: Sessions → Export Recordings.[/yellow]"
-                )
-        except asyncio.CancelledError:
-            self._progress_end()
-            self._log("[yellow]Download cancelled; press Download again to resume.[/yellow]")
-            raise
-        finally:
-            self._downloads_in_flight.discard(key)
-
-    async def _run_stream_script(self, stream, script: str, timeout: float) -> str | None:
-        """run a stream_cuts script where the stream records; its output, or
-        None when the host could not be reached."""
-        command = _with_stream_path(stream_cuts.bash(script))
-        try:
-            if stream.ssh_profile == "local":
-                result = await asyncio.to_thread(
-                    lambda: subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=timeout))
-            else:
-                profile = get_profile_by_name(stream.ssh_profile)
-                if profile is None:
-                    return None
-                result = await asyncio.to_thread(ssh_run_sync, profile, command, timeout)
-        except Exception:
-            return None
-        return (result.stdout or "") + (result.stderr or "")
-
-    async def _cut_stream_for_session(self, stream, session_id: str, start: float, end: float) -> tuple[int, int]:
-        """cut one stream's recordings to the window; returns how many cuts were
-        made (staged on the capture host, or written straight into artifacts/
-        for a stream that is captured on this machine) and how many were
-        already here in full and not cut again."""
-        where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
-        listing = await self._run_stream_script(
-            stream, stream_cuts.list_script(stream.record_root, stream.host_label, stream.kind, stream.name), 30.0)
-        files = stream_cuts.parse_listing(listing or "")
-        if files is None:
-            self._log(f"  [red]✗ {stream.name}: could not list its recordings on {where}.[/red]")
-            return 0, 0
-        cuts = stream_cuts.cuts_for_window(files, start, end)
-        if not cuts:
-            self._log(f"  [dim]- {stream.name}: nothing recorded on {where} in that time[/dim]")
-            return 0, 0
-        here_dir = Path(collection_artifact_dir(self._root, session_id, stream.host_label)) / stream.kind
-
-        if stream.ssh_profile == "local":
-            folder = str(Path(collection_artifact_dir(self._root, session_id, stream.host_label)) / stream.kind)
-            quoted_dir = False
-        else:
-            folder = (f"{stream_cuts.staging_root(stream.record_root, session_id)}/collection/"
-                      f"{shlex.quote(stream.host_label)}/{stream.kind}")
-            quoted_dir = True
-        made = 0
-        present = 0
-        for cut in cuts:
-            if stream.kind == "video":
-                probed = await self._run_stream_script(stream, stream_cuts.keyframe_script(cut), 60.0)
-                moved = stream_cuts.on_keyframe(cut, probed or "")
-                if moved is None:
-                    self._log(
-                        f"  [yellow]{stream.name}: ffprobe found no keyframe to start on (is it installed on {where}?); "
-                        f"the cut may begin up to a second before the time in its name.[/yellow]"
-                    )
-                else:
-                    cut = moved
-            name = stream_cuts.cut_name(stream.name, cut, stream.kind)
-            # a cut is named after its first frame only: a copy made while the
-            # session was still going has this name too, and its length tells
-            here = here_dir / name
-            covered = await asyncio.to_thread(copy_covers, here, cut.duration)
-            if covered:
-                present += 1
-                self._log(f"  [dim]- {stream.name}: {name} is already here in full[/dim]")
-                continue
-            output = await self._run_stream_script(
-                stream, stream_cuts.cut_script(cut, folder, stream.name, stream.kind, quoted_dir=quoted_dir), 900.0)
-            if output is not None and "CUT" in output.split():
-                made += 1
-                if covered is False and here.exists() and stream.ssh_profile != "local":
-                    # the shorter copy goes, or the full cut would land beside it
-                    # as a conflict copy whose name no longer says when it starts
-                    # (a local cut is written over it in place)
-                    here.unlink(missing_ok=True)
-                    self._log(f"  [cyan]{stream.name}: the copy of {name} here stopped short; it is replaced.[/cyan]")
-                self._log(f"  [green]✓[/green] {stream.name}: {cut.duration:.0f}s from {where} -> {name}")
-            else:
-                detail = " ".join((output or "no answer").split())[-200:]
-                self._log(f"  [red]✗ {stream.name}: ffmpeg could not cut {name} on {where}: {rich_escape(detail)}[/red]")
-        return made, present
-
-    def on_stream_panel_download_requested(self, event: StreamPanel.DownloadRequested) -> None:
-        """Download in the Streams tab: the stream recordings of one capture host."""
-        event.stop()
-        key = f"stream-download:{event.ssh_profile}:{event.host_label}"
-        if key in self._downloads_in_flight:
-            self._log("[yellow]A download of this host's stream recordings is already running.[/yellow]")
-            return
-        self._downloads_in_flight.add(key)
-        self.run_worker(
-            self._run_stream_recordings_download(event.ssh_profile, event.record_root, event.host_label, key),
-            name=key,
-            group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
-            exclusive=False,
-        )
-
-    async def _run_stream_recordings_download(
-        self, profile_name: str, record_root: str, host_label: str, key: str = "",
-    ) -> None:
-        """a stream's recordings are filed by day on its capture host, outside
-        any session, so the Collection card (one session at a time) does not
-        reach them: fetch every day that host holds, newest first, into the same
-        local layout, artifacts/streams-<date>/collection/<host label>/."""
-        try:
-            profile = get_profile_by_name(profile_name)
-            if profile is None:
-                self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
-                return
-            self._log(f"[cyan]Looking for stream recordings on '{profile_name}'...[/cyan]")
-            days = await asyncio.to_thread(_remote_stream_recording_days, profile, record_root, host_label)
-            if days is None:
-                self._log(f"[red]Could not reach {profile_name} to list its stream recordings.[/red]")
-                return
-            if not days:
-                self._log(
-                    f"[yellow]No stream recordings on '{profile_name}' under "
-                    f"{record_root}/streams-<date>/collection/{host_label}/. A stream records while its "
-                    f"Record column says yes (Record on/off, then Start).[/yellow]"
-                )
-                return
-            fetched = 0
-            for day, remote_dir in days:
-                local_path = Path(collection_artifact_dir(self._root, day, host_label))
-                if await self._transfer_collection_tree(
-                    profile, profile_name, day, host_label, remote_dir, local_path,
-                ):
-                    fetched += 1
-            if fetched:
-                self._log(
-                    f"[green]{fetched} of {len(days)} day(s) of stream recordings from '{profile_name}' are under "
-                    f"artifacts/streams-<date>/collection/{host_label}/. Replay one with source: file and "
-                    f"Base.file_dir on its video/ or audio/ folder.[/green]"
-                )
-        except asyncio.CancelledError:
-            self._progress_end()
-            self._log("[yellow]Download cancelled; press Download again to resume.[/yellow]")
-            raise
-        finally:
-            self._downloads_in_flight.discard(key)
 
     def _report_incomplete_transfer(self, result) -> None:
         """explain a transfer that must not be merged, and how to continue."""
-        if result.status == "growing":
-            names = ", ".join(result.grew[:3])
-            more = f" (+{len(result.grew) - 3} more)" if len(result.grew) > 3 else ""
-            self._log(
-                f"[yellow]{len(result.grew)} file(s) are still being written on the remote host: "
-                f"{rich_escape(names)}{more}.[/yellow]"
-            )
-            self._log("[yellow]Stop the recorders, then download again.[/yellow]")
-        elif result.status == "incomplete":
-            self._log(
-                f"[red]Download incomplete via {result.tool}: "
-                f"{len(result.missing)} file(s) did not arrive in full.[/red]"
-            )
-        else:
-            self._log(f"[red]Download failed via {result.tool} (exit {result.rc}).[/red]")
-        for line in str(result.output or "").strip().splitlines()[-20:]:
-            self._log(rich_escape(line))
-        self._log(
-            "[yellow]Nothing was merged into artifacts/. The data already fetched is kept — "
-            "press Download again to resume.[/yellow]"
-        )
+        stream_export.report_incomplete(self._log, result)
 
     def _collection_download_running(self, target: str, session_id: str) -> bool:
         """a Download of this session from this host is running, whatever the
@@ -9200,7 +9217,9 @@ class ServicePanel(Widget):
             flag_parts = []
             for flag in comp.flags:
                 value = params.get(flag)
-                if value is None:
+                if value is None or isinstance(value, (list, tuple)):
+                    continue  # a per-instance value goes to its own instance below
+                if self._count_left_out(svc, comp, flag, value):
                     continue
                 if isinstance(value, bool):
                     flag_parts.extend([flag, "true" if value else "false"])
@@ -9216,18 +9235,48 @@ class ServicePanel(Widget):
             )
             if flag_parts:
                 command += " " + " ".join(shlex.quote(part) for part in flag_parts)
-            run_cmd = (
-                f"cd {_quote_remote_path(remote_config_dir)} && "
-                f"export PYTHONPATH={_quote_remote_path(remote_root)}:$PYTHONPATH && "
-                f"{command}"
-            )
-            wrapped_cmd = wrap_remote(run_cmd, svc.conda_env)
 
             for index in range(count):
+                instance_parts = self._instance_flag_parts(comp, params, index)
+                instance_command = command
+                if instance_parts:
+                    instance_command += " " + " ".join(shlex.quote(part) for part in instance_parts)
+                run_cmd = (
+                    f"cd {_quote_remote_path(remote_config_dir)} && "
+                    f"export PYTHONPATH={_quote_remote_path(remote_root)}:$PYTHONPATH && "
+                    f"{instance_command}"
+                )
+                wrapped_cmd = wrap_remote(run_cmd, svc.conda_env)
                 label = f"{comp.role} {index + 1}" if count > 1 else comp.role
                 tab_cmds.append((label, self._remote_terminal_command(profile, wrapped_cmd)))
 
         return tab_cmds
+
+    @staticmethod
+    def _instance_flag_parts(comp: ComponentDef, params: dict, index: int) -> list[str]:
+        """the flags one instance of a component gets for itself: a card's
+        per-instance value (a list, one entry per instance, such as the Bases
+        entry of each base: -b 0, -b 1), when that instance has one."""
+        parts: list[str] = []
+        for flag in comp.flags:
+            values = params.get(flag)
+            if not isinstance(values, (list, tuple)) or index >= len(values):
+                continue
+            text = str(values[index] if values[index] is not None else "").strip()
+            if text:
+                parts.extend([flag, text])
+        return parts
+
+    @staticmethod
+    def _count_left_out(svc: ServiceDef, comp: ComponentDef, flag: str, value) -> bool:
+        """True for a count at 0 that a component is better without: the
+        synchronizer's --num_bases (Sync Waits For) at 0, or another
+        component's count at 0. The synchronizer then counts the bases from
+        its config's Bases, rather than wait for none."""
+        if flag != _SYNC_WAIT_FLAG and not any(
+                other.count_flag == flag for other in svc.components if other is not comp):
+            return False
+        return _coerce_int(value, 0) <= 0
 
     @staticmethod
     def _remote_bash_stop_command(svc: ServiceDef) -> str:
@@ -9431,7 +9480,9 @@ class ServicePanel(Widget):
             flag_parts = []
             for f in comp.flags:
                 val = params.get(f)
-                if val is None:
+                if val is None or isinstance(val, (list, tuple)):
+                    continue  # a per-instance value goes to its own instance below
+                if self._count_left_out(svc, comp, f, val):
                     continue
                 if isinstance(val, bool):
                     flag_parts.append(f"{f} {'true' if val else 'false'}")
@@ -9450,11 +9501,13 @@ class ServicePanel(Widget):
             if flag_str:
                 py_cmd += f" {flag_str}"
 
-            full_cmd = f"{preamble} && {py_cmd}"
-
             for i in range(count):
+                instance_parts = self._instance_flag_parts(comp, params, i)
+                instance_cmd = py_cmd
+                if instance_parts:
+                    instance_cmd += " " + " ".join(shlex.quote(part) for part in instance_parts)
                 label = f"{comp.role} {i + 1}" if count > 1 else comp.role
-                tab_cmds.append((label, full_cmd))
+                tab_cmds.append((label, f"{preamble} && {instance_cmd}"))
 
         if not tab_cmds:
             self._log("[yellow]No components to launch (all counts are 0).[/yellow]")
@@ -9636,6 +9689,11 @@ class ServicePanel(Widget):
             compose_path = self._infra_compose_path()
             if compose_path is None:
                 return
+            if _infra_compose_service(svc) == "mediamtx":
+                # made as this user: a missing bind source is made by docker, as root,
+                # and so would artifacts/streams/, where captures and copies go too
+                for sub in (SERVER_STREAMS_DIR, CAPTURE_STREAMS_DIR):
+                    os.makedirs(os.path.join(self._root, ARTIFACTS_DIR, STREAMS_DIR, sub), exist_ok=True)
             # absolute -f path: CommandSession treats "cd ..."-prefixed input as a
             # plain directory change and would swallow the command output
             cmd = _compose_command(compose_path, f"up -d {_infra_compose_service(svc)}")
@@ -9675,8 +9733,8 @@ class ServicePanel(Widget):
         parts = []
         for flag in ordered_flags:
             value = params.get(flag)
-            if value is None:
-                continue
+            if value is None or isinstance(value, (list, tuple)):
+                continue  # per instance: no single value stands for them all
             if isinstance(value, bool):
                 parts.extend([flag, "true" if value else "false"])
                 continue
@@ -9924,6 +9982,11 @@ class ServicePanel(Widget):
                     compose_cmd = _compose_command(
                         _INFRA_COMPOSE_FILE, f"up -d {_infra_compose_service(svc)}"
                     )
+                    if _infra_compose_service(svc) == "mediamtx":
+                        # as the SSH user, before docker would make it as root
+                        streams = f"{ARTIFACTS_DIR}/{STREAMS_DIR}"
+                        compose_cmd = (f"mkdir -p {streams}/{SERVER_STREAMS_DIR} {streams}/{CAPTURE_STREAMS_DIR} "
+                                       f"&& {compose_cmd}")
                     run_cmd = f"cd {_quote_remote_path(remote_root)} && {compose_cmd}"
                 else:
                     target = _make_target_for(svc.name)

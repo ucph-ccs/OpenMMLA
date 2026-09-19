@@ -8,21 +8,29 @@ import os
 import shlex
 import shutil
 import tempfile
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import yaml
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, Input
+from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, ProgressBar
 
-from openmmla.tui import recordings
-from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS
+from openmmla.tui import recordings, stream_export
+from openmmla.utils import session_sources
+from openmmla.utils.artifact_paths import (
+    NON_SESSION_ARTIFACT_DIRS, capture_host_label, capture_record_root, session_capture_streams_dir,
+    session_server_streams_dir,
+)
+from openmmla.utils.constants import stream_kind
 
 
 @dataclass
@@ -386,11 +394,112 @@ def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict
     return sorted(rows, key=lambda row: _coerce_start_timestamp(row.get("start_time")), reverse=True)
 
 
+# ---- Export Streams ----
+
+# the worker group of Export Streams, and of Export All, which ends with it: a
+# group of its own, so Refresh does not stop it and Cancel stops nothing else
+_STREAMS_WORKER_GROUP = "sessions-streams"
+
+# the pipelines whose Streams a session that noted none may have taken, and the
+# kind a stream of theirs is when it does not say (the card's)
+_CAPTURE_PIPELINES = (("pipelines/asr-base", "audio"), ("pipelines/ips-base", "video"), ("pipelines/vfa-base", "video"))
+
+# what the end of a session's window is (recordings.session_end), as the log says it
+_WINDOW_REASONS = {
+    "ended": "when it was ended",
+    "left": "never ended: when its last base left",
+    "running": "still running: up to now",
+}
+
+
+class _ExportStopped(Exception):
+    """Cancel was pressed while a clip was being downloaded."""
+
+
+def _shown_path(project_root, path) -> str:
+    """a folder of the project as the log names it, artifacts/<session>/...,
+    escaped for markup."""
+    from openmmla.tui.artifacts import relative_to_root
+
+    return escape(relative_to_root(project_root, path))
+
+
+@dataclass
+class _ServerSources:
+    """the sources of a session as the Stream Server of System Settings sees them."""
+    paths: list[str] = field(default_factory=list)                  # its paths there, each once, in the order noted
+    elsewhere: list[tuple[str, str]] = field(default_factory=list)  # (stream, URL) published to another server
+    by_stream: dict[str, str] = field(default_factory=dict)         # stream name -> its path there
+    direct: list[str] = field(default_factory=list)                 # `asr:0 mic-1`: taken through no server at all
+
+
+def _server_sources(record: dict | None, server: dict) -> _ServerSources:
+    """sort the sources of a session record by where their streams went: the
+    URL each base pulled is looked up on the Stream Server of System Settings
+    (system_services.stream_server_path, which checks the host). Blocking: a
+    host name may be resolved."""
+    from openmmla.tui.system_services import hosts_match, is_loopback_host, stream_server_path
+
+    server_host = str((server or {}).get("host") or "").strip().strip("[]")
+    found = _ServerSources()
+    for entry in session_sources.session_sources(record):
+        name = str(entry.get("stream") or entry.get("key") or "?")
+        url = str(entry.get("url") or "").strip()
+        # only what a stream server serves (rtmp, rtsp, srt): udp and tcp go straight to a base
+        served = session_sources.stream_url_path(url) if url else None
+        if served is None:
+            found.direct.append(f"{entry.get('key')} {entry.get('stream') or entry.get('source') or '?'}")
+            continue
+        path = stream_server_path(url, server)
+        if path is None and is_loopback_host(urlsplit(url).hostname) and hosts_match(entry.get("host"), server_host):
+            # localhost in the URL of a base that runs on the Stream Server's host is that server
+            path = served
+        if path is None:
+            if (name, url) not in found.elsewhere:
+                found.elsewhere.append((name, url))
+            continue
+        found.by_stream.setdefault(name, path)
+        if path not in found.paths:
+            found.paths.append(path)
+    return found
+
+
+def _configured_recorded_streams(project_root) -> list[stream_export.RecordedStream]:
+    """the streams with Record on that the console runs (an SSH Profile set) in
+    this machine's ASR, IPS and VFA configs: what a session that noted no
+    streams may have taken. A stream in two configs (one camera for IPS and
+    VFA) is taken once."""
+    from openmmla.tui.schema.loader import load_streams
+
+    found: list[stream_export.RecordedStream] = []
+    for rel_dir, default_kind in _CAPTURE_PIPELINES:
+        try:
+            streams = load_streams(os.path.join(str(project_root), rel_dir, "config.yml"))
+        except (TypeError, ValueError):  # a config a hand edit broke: its streams are not known
+            continue
+        for stream in streams:
+            if not stream.ssh_profile or not stream.record:
+                continue
+            recorded = stream_export.RecordedStream(
+                stream.name, stream.ssh_profile,
+                capture_record_root(stream.ssh_profile, stream.record_root, project_root),
+                capture_host_label(stream.ssh_profile), stream_kind(stream, default_kind))
+            if recorded not in found:
+                found.append(recorded)
+    return found
+
+
 class SessionsPanel(Widget):
 
     # seconds the Stream Server keeps a recording, as it last said; None while
     # it has not answered. 0 is for ever
     _retention: float | None = None
+    # the MongoDB client of the host shown; None while none is connected
+    _mongo_client = None
+    # the session whose streams are being exported (Export Streams, Export
+    # All), and what Cancel sets to stop it; None while none is
+    _streams_export_session: str | None = None
+    _streams_cancel: threading.Event | None = None
 
     class SessionDeleted(Message):
         """a session's database records were deleted here: the Launcher must
@@ -443,15 +552,55 @@ class SessionsPanel(Widget):
     #sessions-actions Button {
         margin: 0 1;
     }
-    #sessions-recordings-bar {
+    #sessions-streams-bar {
         height: 3;
         padding: 0 1;
     }
-    #sessions-recordings-bar Button {
+    #sessions-streams-bar Button {
         margin: 0 1;
     }
-    #ses-recording-paths {
+    #ses-streams-hint {
         width: 1fr;
+        height: 3;
+        content-align: left middle;
+        color: $text-muted;
+    }
+    /* the progress of Export Streams, up while it runs; height auto because a
+       bare Horizontal defaults to 1fr */
+    #sessions-progress {
+        layout: horizontal;
+        height: auto;
+        min-height: 1;
+        padding: 0 1;
+        display: none;
+    }
+    #sessions-progress.active {
+        display: block;
+    }
+    #ses-progress-label {
+        width: 34;
+        height: auto;
+        color: $text-muted;
+    }
+    #sessions-progress ProgressBar {
+        width: 1fr;
+        height: auto;
+    }
+    #sessions-progress Bar {
+        width: 1fr;
+    }
+    #ses-progress-detail {
+        width: 40;
+        height: auto;
+        color: $text-muted;
+        text-align: right;
+    }
+    #btn-ses-export-cancel {
+        width: 9;
+        min-width: 9;
+        height: auto;
+        min-height: 1;
+        margin-left: 1;
     }
     #sessions-log {
         height: 14;
@@ -489,15 +638,21 @@ class SessionsPanel(Widget):
                 yield Button("Export All", variant="warning", id="btn-ses-export-all")
                 yield Button("Delete Session", variant="error", id="btn-ses-delete")
                 yield Button("Delete Artifacts", variant="error", id="btn-ses-delete-artifacts")
-            # the footage of a session is a time range of what the stream server
-            # recorded; the filter sits next to the button it belongs to
-            with Horizontal(id="sessions-recordings-bar"):
-                yield Button("Export Recordings", variant="success", id="btn-ses-export-recordings")
-                yield Input(
-                    placeholder="paths to take from the Stream Server, e.g. ips/*, vfa/front   (empty: every "
-                                "stream recorded while the session ran)",
-                    id="ses-recording-paths",
+            # the footage of a session is a time range of the streams its bases
+            # noted in its record, as the Stream Server and their capture hosts
+            # recorded them
+            with Horizontal(id="sessions-streams-bar"):
+                yield Button("Export Streams", variant="success", id="btn-ses-export-streams")
+                yield Static(
+                    "Copies the session's part of each stream it used, from the Stream Server and from the "
+                    "machine that captured it, into artifacts/<session>/streams/",
+                    id="ses-streams-hint",
                 )
+            with Horizontal(id="sessions-progress"):
+                yield Static("", id="ses-progress-label")
+                yield ProgressBar(total=None, show_eta=False, id="ses-progress-bar")
+                yield Static("", id="ses-progress-detail")
+                yield Button("Cancel", variant="error", compact=True, id="btn-ses-export-cancel")
             yield RichLog(id="sessions-log", highlight=True, markup=True)
 
     def on_mount(self) -> None:
@@ -845,6 +1000,9 @@ class SessionsPanel(Widget):
         if bid == "btn-ses-refresh":
             self.run_worker(self._async_init(self._target), exclusive=True)
             return
+        if bid == "btn-ses-export-cancel":
+            self._cancel_streams_export()
+            return
 
         if not self._selected_session_id:
             self._log("[yellow]Select a session row first.[/yellow]")
@@ -857,16 +1015,9 @@ class SessionsPanel(Widget):
         elif bid == "btn-ses-export-vis":
             self.run_worker(self._run_export(session_id, logs=True, vis=True), exclusive=True)
         elif bid == "btn-ses-export-all":
-            self.run_worker(self._run_export(session_id, logs=True, vis=True), exclusive=True)
-        elif bid == "btn-ses-export-recordings":
-            try:
-                patterns = self.query_one("#ses-recording-paths", Input).value
-            except Exception:
-                patterns = ""
-            self.run_worker(
-                self._run_export_recordings(session_id, [p for p in patterns.replace(";", ",").split(",") if p.strip()]),
-                group="sessions-recordings", exclusive=True,
-            )
+            self._start_streams_export(session_id, self._run_export_all, "Export All · measurements")
+        elif bid == "btn-ses-export-streams":
+            self._start_streams_export(session_id, self._run_export_streams, "Export Streams")
         elif bid == "btn-ses-delete":
             if self._pending_delete_session_id != session_id:
                 self._pending_delete_session_id = session_id
@@ -899,108 +1050,404 @@ class SessionsPanel(Widget):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._do_export, session_id, logs, vis)
 
-    async def _run_export_recordings(self, session_id: str, patterns: list[str]) -> None:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._do_export_recordings, session_id, patterns)
+    async def _run_export_all(self, session_id: str) -> None:
+        """Export All: the measurements and visualizations, then the streams."""
+        await self._run_export(session_id, logs=True, vis=True)
+        await self._run_export_streams(session_id)
 
-    def _do_export_recordings(self, session_id: str, patterns: list[str]) -> None:
-        """the server-side footage of one session: every path the stream server
-        recorded between the session's start and end, cut to that window.
+    # ---- Export Streams ----
 
-        A stream is shared by the sessions that pull it and is recorded by the
-        server whether or not one runs, so nothing on the server belongs to a
-        session; its start and end (MongoDB) are what select the footage."""
-        from openmmla.tui import recordings
-        from openmmla.tui.artifacts import artifact_session_dir, copy_covers, ensure_session_layout
+    def _start_streams_export(self, session_id: str, run, label: str) -> None:
+        """start Export Streams, or Export All, which ends with it, in a worker
+        of its own group with the progress row up, so its Cancel can be reached
+        the whole time; one at a time."""
+        if self._streams_export_session is not None:
+            self._log(
+                f"[yellow]The streams of '{escape(self._streams_export_session)}' are still being exported. Wait "
+                f"for that to finish, or press Cancel next to its progress.[/yellow]"
+            )
+            return
+        self._streams_export_session = session_id
+        self._streams_cancel = threading.Event()
+        self._progress_show(label)
+        self.run_worker(self._streams_worker(session_id, run), group=_STREAMS_WORKER_GROUP, exclusive=False)
+
+    async def _streams_worker(self, session_id: str, run) -> None:
+        try:
+            await run(session_id)
+        except asyncio.CancelledError:
+            if self._streams_cancel is not None:
+                self._streams_cancel.set()  # a clip downloading in a thread stops at its next chunk
+            self._log(
+                f"[yellow]The export of '{escape(session_id)}' stopped. What arrived is kept, and cuts made on a "
+                f"capture host stay there until they are fetched: press Export Streams again to go on.[/yellow]"
+            )
+            raise
+        except Exception as error:  # a failure is this export's, not the app's
+            self._log(f"[red]✗ The export of '{escape(session_id)}' failed: {escape(str(error))}[/red]")
+        finally:
+            self._progress_hide()
+            self._streams_export_session = None
+            self._streams_cancel = None
+
+    def _cancel_streams_export(self) -> None:
+        """Cancel next to the progress: stop the export of streams that runs."""
+        if self._streams_export_session is None:
+            return
+        if self._streams_cancel is not None:
+            self._streams_cancel.set()
+        self._log("[yellow]Stopping the export...[/yellow]")
+        self.workers.cancel_group(self, _STREAMS_WORKER_GROUP)
+
+    def _progress_show(self, label: str) -> None:
+        """put the progress row up, its bar busy until a transfer gives a size."""
+        try:
+            self._progress_start(label, None)
+            self.query_one("#sessions-progress", Horizontal).add_class("active")
+        except Exception:
+            pass
+
+    def _progress_start(self, label: str, total: int | None) -> None:
+        try:
+            bar = self.query_one("#ses-progress-bar", ProgressBar)
+            bar.update(total=None)
+            bar.update(total=float(total) if total else None, progress=0)
+            self.query_one("#ses-progress-label", Static).update(Text(label))
+            self.query_one("#ses-progress-detail", Static).update("")
+        except Exception:
+            pass
+
+    def _progress_update(self, done: int, total: int, detail: str) -> None:
+        """bytes so far of a transfer of `total` bytes (0: a size nobody knows,
+        the bar stays busy), and a `12.1 MB · 3.2 MB/s` detail."""
+        try:
+            if total:
+                bar = self.query_one("#ses-progress-bar", ProgressBar)
+                if bar.total != float(total):
+                    bar.update(total=float(total))
+                bar.update(progress=min(max(0, int(done)), int(total)))
+            self.query_one("#ses-progress-detail", Static).update(Text(detail))
+        except Exception:
+            pass
+
+    def _progress_end(self) -> None:
+        """a transfer is over; the row stays up for as long as the export runs."""
+        self._progress_start("Export Streams", None)
+
+    def _progress_hide(self) -> None:
+        try:
+            self.query_one("#sessions-progress", Horizontal).remove_class("active")
+            self.query_one("#ses-progress-bar", ProgressBar).update(total=None, progress=0)
+            self.query_one("#ses-progress-detail", Static).update("")
+        except Exception:
+            pass
+
+    def _session_record(self, session_id: str) -> tuple[dict, bool]:
+        """the session's document as MongoDB holds it now, and whether it is the
+        table's row instead. A base notes the stream it takes when it joins,
+        which can be after the table was listed, so the row may not have it
+        yet: it stands in only when MongoDB does not give the document back
+        (True). Empty for a session MongoDB never knew. Blocking (a query)."""
+        row = self._session_by_id(session_id)
+        if self._mongo_client is not None:
+            try:
+                record = self._mongo_client.get_session(session_id)
+            except Exception:
+                record = None
+            if isinstance(record, dict) and record:
+                return record, False
+        if "MongoDB" in set(row.get("_source_kinds") or []):
+            return row, True
+        return {}, False
+
+    async def _run_export_streams(self, session_id: str) -> None:
+        """Export Streams: both copies of the session's part of every stream it
+        used, from its `sources` (read again from MongoDB at the press).
+
+        A stream is shared by the sessions that pull it and is recorded whether
+        or not one runs: by the Stream Server (every path published to it) and,
+        with Record on, by the machine that captures it. Nothing of either
+        belongs to a session; each base notes in the session's document the
+        stream it takes (openmmla.utils.session_sources), and the session's
+        start and end (recordings.session_end) pick the part of it:
+          - the server copy, over HTTP: each noted path on the Stream Server of
+            System Settings, one file per unbroken stretch, into
+            artifacts/<session>/streams/server/<app>/<name>_<start>.mp4;
+          - the capture copy, over SSH: each noted stream's recording, cut on
+            its capture host and fetched (stream_export), into
+            artifacts/<session>/streams/capture/<host label>/<video|audio>/.
+        A session without that note (one begun before the bases wrote it) takes
+        every path the server recorded while it ran and every stream with Record
+        on in this machine's pipeline configs, and says so. Cancel stops it
+        between steps (a clip being downloaded at once); what arrived stays."""
         from openmmla.tui.schema.loader import _find_project_root
         from openmmla.tui.system_services import stream_server_address
 
-        session = self._session_by_id(session_id)
-        start = recordings.parse_time(session.get("start_time"))
-        if start is None or "MongoDB" not in set(session.get("_source_kinds") or []):
+        cancel = self._streams_cancel or threading.Event()
+        shown = escape(session_id)
+        self._log(f"[bold]Exporting the streams of session: {shown}[/bold]")
+        self._progress_start("Export Streams · reading the session", None)
+        record, stale = await asyncio.to_thread(self._session_record, session_id)
+        if stale:
             self._log(
-                f"[yellow]'{session_id}' has no start time in MongoDB (it is known from its artifacts only), "
-                f"so there is no time range to cut out of the recordings.[/yellow]"
+                f"  [dim]Could not read '{shown}' from MongoDB again, so this goes by the table as it was last "
+                f"listed, which may not have the streams its bases noted since. Refresh and export again to be "
+                f"sure.[/dim]"
+            )
+        start = recordings.parse_time(record.get("start_time"))
+        if start is None:
+            self._log(
+                f"  [yellow]'{shown}' has no start time in MongoDB (it is known from its artifacts only), so there "
+                f"is no time range to cut out of the streams.[/yellow]"
             )
             return
-        ended = recordings.parse_time(session.get("end_time"))
-        end = ended or datetime.now(timezone.utc)
+        end, why = recordings.session_end(record)
+        until = f"{end:%H:%M:%S}" if end.date() == start.date() else f"{end:%Y-%m-%d %H:%M:%S}"
+        self._log(f"  {start:%Y-%m-%d %H:%M:%S} to {until} UTC ({_WINDOW_REASONS[why]})")
+        if not session_sources.session_sources(record):
+            self._log(
+                f"  [yellow]'{shown}' does not say which streams its bases took (it began before the console noted "
+                f"them, or no base noted its stream in it), so this takes every path the Stream Server recorded "
+                f"while it ran, and every stream with Record on in this machine's ASR, IPS and VFA configs.[/yellow]"
+            )
 
         root = _find_project_root()
-        server = stream_server_address(root)
+        server = await asyncio.to_thread(stream_server_address, root)
+        sources = await asyncio.to_thread(_server_sources, record, server)
+        from_server = await self._export_server_copy(
+            root, session_id, record, server, sources, (start, end), why == "ended", cancel)
+        if cancel.is_set():
+            raise asyncio.CancelledError()
+        from_capture = await self._export_capture_copy(root, session_id, record, sources, (start, end), cancel)
+
+        folder = _shown_path(root, session_server_streams_dir(root, session_id).parent)
+        if from_server or from_capture:
+            self._log(
+                f"[bold green]Streams of {shown} exported: {from_server} file(s) from the Stream Server, "
+                f"{from_capture} from the capture hosts, under {folder}[/bold green]\n"
+                f"  [dim]File names carry the time they start at, so a base replays them with source: file and "
+                f"Base.file_dir on one of these folders.[/dim]"
+            )
+        else:
+            self._log(f"[yellow]Nothing of the streams of {shown} was exported (see above).[/yellow]")
+
+    async def _export_server_copy(
+        self, root, session_id: str, record: dict, server: dict, sources: _ServerSources,
+        window: tuple[datetime, datetime], ended: bool, cancel: threading.Event,
+    ) -> int:
+        """the server copy: each unbroken stretch of the session's paths on the
+        Stream Server within its window, asked of the playback server over HTTP
+        (no SSH). A clip already here in full is not fetched again. How many
+        clips are here afterwards."""
+        from openmmla.tui.artifacts import copy_covers, ensure_session_layout
+
+        start, end = window
+        shown = escape(session_id)
         host = str(server.get("host") or "localhost")
         api_port = int(server.get("api_port") or recordings.API_PORT)
         playback_port = int(server.get("playback_port") or recordings.PLAYBACK_PORT)
+        out_dir = session_server_streams_dir(root, session_id)
+        noted = bool(session_sources.session_sources(record))
+        self._log(f"[cyan]From the Stream Server {escape(host)} into {_shown_path(root, out_dir)}[/cyan]")
+        for name, url in sources.elsewhere:
+            self._log(
+                f"  [yellow]- {escape(name)}: published to another server ({escape(url)}), not to the Stream "
+                f"Server of System Settings, so it is skipped here.[/yellow]"
+            )
+        paths = list(sources.paths)
+        if noted:
+            if not paths:
+                if not sources.elsewhere:
+                    self._log(
+                        f"  [yellow]None of the bases of '{shown}' took a stream through the Stream Server "
+                        f"({escape(', '.join(sources.direct))}), so it holds nothing of this session.[/yellow]"
+                    )
+                return 0
+            self._log(f"  Its streams, as its bases noted them: {escape(', '.join(paths))}")
 
-        self._log(f"[bold]Exporting recordings of session: {session_id}[/bold]")
-        self._log(
-            f"  {start:%Y-%m-%d %H:%M:%S} to {end:%H:%M:%S} UTC"
-            f"{'' if ended else ' (still running: up to now)'}, from the Stream Server {host}"
-        )
+        def ask() -> dict:
+            # the session's own paths need no listing: the playback server is
+            # asked for those, as they are named; without them, for everything
+            listed = paths if noted else recordings.recorded_paths(host, api_port)
+            return {path: recordings.timespans(host, path, playback_port) for path in listed}
+
+        self._progress_start(f"Stream Server · asking {host}", None)
         try:
-            spans = {path: recordings.timespans(host, path, playback_port)
-                     for path in recordings.recorded_paths(host, api_port)}
+            spans = await asyncio.to_thread(ask)
         except recordings.RecordingsError as error:
             self._log(
-                f"  [red]✗ The Stream Server does not answer: {error}[/red]\n"
+                f"  [red]✗ The Stream Server does not answer: {escape(str(error))}[/red]\n"
                 f"  [dim]Its host and its API/playback ports are under Launcher → System Settings → Stream Server; "
                 f"the API and the playback server are switched on in its mediamtx.yml.[/dim]"
             )
-            return
-        clips = recordings.clips_for_window(spans, start, end, patterns)
+            return 0
+        finally:
+            self._progress_end()
+        clips = recordings.clips_for_window(spans, start, end)
         if not clips:
-            until = recordings.expiry(start, self._retention)
-            if until is not None and until <= datetime.now(timezone.utc):
+            expired = recordings.expiry(start, self._retention)
+            if expired is not None and expired <= datetime.now(timezone.utc):
                 self._log(
                     f"  [yellow]Nothing left on the server: it keeps a recording for "
                     f"{recordings.describe_retention(self._retention)}, and this session's footage was deleted "
-                    f"from {until:%Y-%m-%d %H:%M} UTC on. The retention is set on the Stream Server card, "
+                    f"from {expired:%Y-%m-%d %H:%M} UTC on. The retention is set on the Stream Server card, "
                     f"Config tab; its Recordings tab shows what the server still holds.[/yellow]"
                 )
-                return
-            recorded = [path for path in spans if recordings.matches(path, patterns)]
+                return 0
+            if noted:
+                held = [path for path in paths if spans.get(path)]
+                found = ("Nothing of its streams was recorded on the server in that time"
+                         + (f" (it holds {', '.join(held)} from other times)." if held
+                            else " (it holds no recording of them)."))
+            else:
+                held = list(spans)
+                found = ("Nothing was recorded on the server in that time"
+                         + (f" (it holds {', '.join(held[:6])}{' ...' if len(held) > 6 else ''})." if held
+                            else " (it holds no recording at all)."))
             self._log(
-                "  [yellow]Nothing was recorded on the server in that time"
-                + (f" for {', '.join(patterns)}" if patterns else "")
-                + (f" (it holds {', '.join(recorded[:6])}{' ...' if len(recorded) > 6 else ''})." if recorded
-                   else " (it holds no recording of such a path).")
-                + " Server-side recording is the switch on the Stream Server card, Config tab.[/yellow]"
+                f"  [yellow]{escape(found)} Server-side recording is the switch on the Stream Server card, "
+                f"Config tab.[/yellow]"
             )
-            return
+            return 0
 
-        ensure_session_layout(root, session_id)
-        out_dir = os.path.join(artifact_session_dir(root, session_id), "recordings")
+        await asyncio.to_thread(ensure_session_layout, root, session_id)
+        loop = asyncio.get_running_loop()
         done = 0
-        for clip in clips:
-            destination = os.path.join(out_dir, recordings.clip_relpath(clip))
-            label = f"{clip.path}  {clip.start:%H:%M:%S} +{clip.duration:.0f}s"
-            if os.path.isfile(destination):
+        for index, clip in enumerate(clips, 1):
+            if cancel.is_set():
+                raise asyncio.CancelledError()
+            destination = out_dir / recordings.clip_relpath(clip)
+            label = escape(f"{clip.path}  {clip.start:%H:%M:%S} +{clip.duration:.0f}s")
+            size_here = destination.stat().st_size if destination.is_file() else 0
+            if size_here:
                 # a clip is named after its start only, so a copy exported while
                 # the session was still going looks like the full one: its length
                 # tells. Without ffprobe here, an ended session's clip counts as final
-                covered = copy_covers(destination, clip.duration)
-                if covered or (covered is None and ended and os.path.getsize(destination) > 0):
+                covered = await asyncio.to_thread(copy_covers, destination, clip.duration)
+                if covered or (covered is None and ended):
                     self._log(f"  [dim]- {label}: already exported[/dim]")
                     done += 1
                     continue
-                if covered is False and os.path.getsize(destination) > 0:
+                if covered is False:
                     self._log(
                         f"  [cyan]{label}: the copy here stops short (exported while the session was still "
                         f"going); fetching it in full[/cyan]"
                     )
+            self._progress_start(f"Stream Server · {index} of {len(clips)}", None)
             try:
-                size = recordings.download_clip(host, clip, destination, playback_port)
+                size = await asyncio.to_thread(
+                    recordings.download_clip, host, clip, str(destination), playback_port,
+                    progress=self._clip_progress(loop, clip, cancel))
             except recordings.RecordingsError as error:
-                self._log(f"  [red]✗ {label}: {error}[/red]")
+                self._log(f"  [red]✗ {label}: {escape(str(error))}[/red]")
                 continue
+            except _ExportStopped:
+                raise asyncio.CancelledError() from None
+            finally:
+                self._progress_end()
             done += 1
-            self._log(f"  [green]✓[/green] {label} -> {os.path.relpath(destination, out_dir)} ({size / 1e6:.1f} MB)")
-        self._log(
-            f"[green]{done} of {len(clips)} recording(s) are under {out_dir}[/green]\n"
-            f"  [dim]File names carry the start of the cut, so a base replays them with source: file and "
-            f"Base.file_dir on one of these folders.[/dim]"
+            self._log(f"  [green]✓[/green] {label} -> {escape(recordings.clip_relpath(clip))} ({size / 1e6:.1f} MB)")
+        self._log(f"  [green]{done} of {len(clips)} clip(s) are under {_shown_path(root, out_dir)}[/green]")
+        return done
+
+    def _clip_progress(self, loop, clip: recordings.Clip, cancel: threading.Event):
+        """the progress callback of one clip's download, which runs in its
+        thread: it stops the download once Cancel was pressed, and moves the
+        progress row on the app's loop a few times a second."""
+        began = time.monotonic()
+        shown = [0.0]
+
+        def progress(written: int) -> None:
+            if cancel.is_set():
+                raise _ExportStopped()
+            now = time.monotonic()
+            if now - shown[0] < 0.25:
+                return
+            shown[0] = now
+            rate = written / max(now - began, 1e-3)
+            detail = f"{clip.path} · {recordings.human_size(written)} · {recordings.human_size(rate)}/s"
+            try:
+                loop.call_soon_threadsafe(self._progress_update, written, 0, detail)
+            except RuntimeError:  # the app's loop is closed
+                pass
+
+        return progress
+
+    async def _export_capture_copy(
+        self, root, session_id: str, record: dict, sources: _ServerSources,
+        window: tuple[datetime, datetime], cancel: threading.Event,
+    ) -> int:
+        """the capture copy: each noted stream's recording on the machine that
+        captured it, cut there to the window without re-encoding and fetched
+        (stream_export.export_session, which says what it does line by line).
+        How many cuts are here afterwards."""
+        start, end = window
+        folder = session_capture_streams_dir(root, session_id)
+        self._log(f"[cyan]From the capture hosts into {_shown_path(root, folder)}[/cyan]")
+        found = stream_export.session_streams(record, root)
+        if found.noted:
+            for name, why in found.skipped:
+                reason = ("someone else publishes it (it has no SSH Profile), so no capture host of this console "
+                          "records it" if why == "external" else
+                          "Record was off for it, so its capture host holds no recording of it")
+                path = sources.by_stream.get(name)
+                other = next((url for stream, url in sources.elsewhere if stream == name), None)
+                if path:
+                    where = f"on the Stream Server ({escape(path)}, above)"
+                elif other:
+                    where = f"on the server it was published to ({escape(other)})"
+                else:
+                    where = "on the Stream Server, if it went through one"
+                self._log(f"  [dim]- {escape(name)}: {reason}; its only copy is {where}[/dim]")
+            streams = found.streams
+            if not streams:
+                if not found.skipped:
+                    self._log(
+                        "  [dim]- Its bases took no stream the console captures (a camera or microphone of their "
+                        "own, or a file), so there is nothing to cut.[/dim]"
+                    )
+                return 0
+        else:
+            streams = await asyncio.to_thread(_configured_recorded_streams, root)
+            if not streams:
+                self._log(
+                    "  [dim]- No stream in this machine's ASR, IPS or VFA config records on its capture host "
+                    "(Record on), so there is nothing to cut.[/dim]"
+                )
+                return 0
+            self._log(f"  Streams with Record on here: {escape(', '.join(stream.name for stream in streams))}")
+
+        callbacks = stream_export.ExportCallbacks(
+            log=self._log,
+            progress_start=self._progress_start,
+            progress_update=self._progress_update,
+            progress_end=self._progress_end,
+            cancelled=cancel.is_set,
         )
+        self._progress_start("Capture hosts · cutting", None)
+        try:
+            result = await stream_export.export_session(
+                root, session_id, streams, start.timestamp(), end.timestamp(), callbacks)
+        finally:
+            self._progress_end()
+        if result.here:
+            self._log(
+                f"  [green]{result.here} cut(s) are under {_shown_path(root, result.folder)}"
+                + (f" ({result.present} of them were already here)" if result.present else "")
+                + "[/green]"
+            )
+        if result.unfetched:
+            hosts = ", ".join(dict.fromkeys(result.unfetched))
+            self._log(
+                f"  [yellow]The cuts made on {escape(hosts)} did not all arrive. They stay there: press Export "
+                f"Streams again to fetch them.[/yellow]"
+            )
+        elif not result.here and all(cut.listed and not cut.failed for cut in result.cuts):
+            self._log(
+                "  [yellow]None of these streams was being recorded on its capture host during the "
+                "session.[/yellow]"
+            )
+        return result.here
 
     async def _run_delete(self, session_id: str) -> None:
         import asyncio

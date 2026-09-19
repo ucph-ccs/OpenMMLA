@@ -130,18 +130,26 @@ Managed streams are started and stopped from the **Streams** tab; see the [Strea
 
 1. **VFA Server**: `Launcher → Pipelines → VFA → VFA Server`, Host set to the GPU server. Set the backend, models, `end_to_end` and `prompt_profile` on the Config tab, review the Prompts and Action Schema tabs, then **Start**: the card runs `docker compose -f docker/docker-compose.vfa.yml up -d --build frame-analyzer`. Start the **MLLM Server** card first if you use a local vLLM model.
 2. **System services** running, and `Server.vfa` pointing at the server or the gateway.
-3. **VFA Base**: Host set to the base station. Choose the number of bases and synchronizers, the **Session**, the **Mode** and the toggles (`Graphics`, `Store Frames`, `Verbose`). **Start** opens one terminal window per instance; each base asks which `Bases` entry it is.
-4. **Session Control**: send **START**, and **STOP** at the end.
+3. **VFA Base**: Host set to the base station. Choose the number of bases and synchronizers, which `Bases` entry each base is (one dropdown per base, as many as the base count), the **Session**, the **Mode** and the toggles (`Graphics`, `Store Frames`, `Verbose`). The synchronizer waits for as many bases as **Sync Waits For** says (`--num_bases`): it starts on the number of `Bases` entries, and is set by hand when bases of the session run on other hosts or fewer run than the list has. **Start** opens one terminal window per instance, and nothing in them asks anything: each base runs as its `Bases` entry, and the synchronizer starts on the session at once and waits for START.
+4. **Session Control**: send **START**, and **STOP** at the end. STOP ends the run of every base and synchronizer of the session, and each of them exits, also when STOP comes before START; start them again from the card for the next session.
 
 Modes: `live` analyzes frames as they are captured (the TUI default); `capture` only stores frames, which is how frames for human coding are collected; `analyze` re-runs the analysis on the frames this session stored earlier.
+
+A process that cannot start says why in its window. A synchronizer with no number of bases to use (`-nb 0`, or no `-nb` and an empty `Bases` list), one that cannot reach Redis, or one whose run ends on an error rather than STOP, prints the reason and falls back to its menu (`1: start`, `2: reinitialize` to reload the config, `0: exit`), which keeps the session it was started for. MQTT and MongoDB are connected to as the synchronizer starts, before there is a menu: when either cannot be reached it says so in plain words, names what to check, and exits; start them from **System Services** and press **Start** on the card again. A base launched without an id takes the only `Bases` entry there is; given an id that the `Bases` list does not have, or no id while there are several entries, it lists the ids there are and asks which one it is.
+
+### What a session records
+
+Each base notes in the session's MongoDB document which `Bases` entry it is and the stream it pulls: the `Streams` entry, its URL and path on the Stream Server, and the machine that captures and records it (the session's `sources`, see the [Database Reference](../../database.md#mongodb)). It writes this when it joins the session and notes when it leaves, first thing on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads it, so it takes that session's own streams, from the Stream Server and from the capture hosts, without being told which. A session recorded before bases did this, or one no base joined, falls back to every path the Stream Server recorded in the session's time and every stream with Record on in this console's pipeline configs, and the log says so. A base that cannot write the note (MongoDB down, or a session the console did not create) warns in its log and runs on.
 
 ## Manual CLI
 
 ```bash
 conda activate vfa-base
 mmla vfa-base -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -m live -sid <session-id> -b <base-id>
-mmla vfa-sync -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -sid <session-id>
+mmla vfa-sync -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -sid <session-id> -nb <number-of-bases>
 ```
+
+With `-sid`, as the card runs them, both start at once and exit when the session is stopped; `-nb` (`--num_bases`) defaults to the number of entries in `Bases`, and `vfa-base` without `-b` takes the only `Bases` entry there is (with several it asks). Without `-sid` the synchronizer opens its menu, where `1: start` asks for the session and, unless `-nb` is given, the number of bases; the base asks for the session, and without `-b` for its `Bases` entry.
 
 To run the server without Docker (`pip install -e '.[vfa-server]'`):
 

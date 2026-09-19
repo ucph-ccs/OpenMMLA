@@ -46,13 +46,13 @@ Base:
   #   format: s16le                   # PCM sample format (s16le, s32le, f32le); must match stream_kwargs.format (int16, int32, float32)
   #   rate: 16000                     # sample rate in Hz; must match stream_kwargs.rate
   #   channels: 1                     # number of audio channels; must match stream_kwargs.channels
-  #   record: true                    # also keep a wav on the Pi under ~/artifacts/streams-<date>/collection/<profile>/audio/
+  #   record: true                    # also keep a wav on the Pi under ~/artifacts/streams/capture/<date>/<profile>/audio/
   #
   # example 3: managed microphone published to MediaMTX (AAC); the base pulls it as RTSP
   # rpi-mic-2:
   #   ssh_profile: rpi-table-2
   #   device: hw:1,0
-  #   kind: audio                     # audio or video; inferred from target and device when omitted
+  #   kind: audio                     # audio or video; when omitted: a udp/tcp target or an audio device (hw:, :0) is audio, else the card's default, which on ASR Base is audio
   #   target: rtmp://uber-server.local:1935/asr/mic2
   #   read_target: rtsp://uber-server.local:8554/asr/mic2
   #   record: true

@@ -3,7 +3,7 @@
 OpenMMLA stores data in two databases. Installation and start/stop are covered in [System Services](system_services.md); this page documents what is stored where and how to inspect, reset or migrate it.
 
 - **InfluxDB 2.x** (time series): every measurement event produced by the pipelines and the analytics, tagged by session.
-- **MongoDB** (documents): session metadata written when a session starts and ends.
+- **MongoDB** (documents): session metadata written when a session starts and ends, and the streams its bases took.
 
 ## InfluxDB
 
@@ -115,11 +115,28 @@ Database: openmmla
           session_id, experiment_id, group_id,
           participants: [{...}],
           start_time, end_time, status: active | ended,
-          metadata: {...}
+          metadata: {...},
+          sources: [{                          # one per base that joined the session
+            key,                               # <pipeline>:<base id>@<stream>, e.g. ips:0@ips-cam-1 (ips:0 when it
+                                               # takes no stream); a base on another stream gets a second entry
+            pipeline,                          # ips | vfa | asr
+            base_id,                           # the id of its Bases entry, as text
+            source, source_index,              # the Bases entry's source (stream, opencv, udp, file ...) and source_index
+            stream,                            # the Streams entry it takes, or null
+            url,                               # what it pulls (rtsp://..., srt://..., udp://...), or null
+            server_path,                       # that stream's path on the Stream Server (ips/cam-1), or null
+            capture: {ssh_profile, record, record_root, kind} | null,
+            host,                              # the machine the base runs on
+            joined_at, left_at                 # UTC; left_at is null while the base is in
+          }]
         }
 ```
 
 A document is inserted when a session is started (from the TUI or `mmla ses-ctl`) and its `end_time`/`status` are updated when it stops. Experiments and participant assignments are not stored here; they live in `config/experiments.yaml` and are edited from the TUI.
+
+`sources` is written by the bases, not by the console: every IPS, VFA and ASR base adds its entry as soon as it knows its session (the id the console launched it with, or the session picked in its menu) and sets its `left_at` once, on its way out. A base that joins the same session again gets its entry back, open again, with its first `joined_at`. `stream` and `url` are what the base resolved (an ASR base picks its stream from a menu when its `source_index` is empty), otherwise what its Bases entry names; `capture` is null for a base that takes no stream, and otherwise holds what the console needs to find the capture-side recording again: the Streams entry's `ssh_profile`, whether it has `record` on, its `record_root`, and `kind` (`audio` or `video`). Synchronizers and visualizers write nothing here. Writing never stops a base: when MongoDB is down, or the session is not in it, the base logs a warning and runs on. The helpers are in `openmmla/utils/session_sources.py`.
+
+The console reads it back with **Sessions → Export Streams**, which fetches both copies of every stream the session used into `artifacts/<session>/streams/`: the Stream Server's, by the `url` of each entry (its path on the Stream Server of System Settings, the host checked, so a stream published to another server is named in the log and skipped), into `streams/server/<app>/<name>_<start>.mp4`; and the capture host's, by `capture` (the streams the console runs with `record` on, cut on their capture host), into `streams/capture/<host label>/<video|audio>/`. A session that was never ended runs until the last `left_at`, once every base has left. A document without `sources` (a session from before the bases wrote them, or one no base could note its stream in) takes every path the Stream Server recorded while it ran, and every stream with Record on in the console's own ASR, IPS and VFA configs, and the log says so. See [Streaming](rtmp_streaming.md#a-sessions-part-sessions-export-streams).
 
 ### mongosh
 
@@ -132,6 +149,7 @@ use openmmla
 show collections
 db.sessions.find().sort({start_time: -1}).pretty()
 db.sessions.countDocuments({status: "active"})
+db.sessions.find({session_id: "<session-id>"}, {_id: 0, sources: 1})   # the streams its bases took
 ```
 
 ### Reset MongoDB

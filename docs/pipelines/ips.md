@@ -105,8 +105,17 @@ The **Transform Matrix** tab of the IPS Base card shows the exported files as ed
 ## Run from the TUI
 
 1. **System services** running and reachable, and the setup above done: calibrated `Cameras`, `Bases` with one `main: true`, and the exported transform matrices on every base station.
-2. **IPS Base**: `Launcher → Pipelines → IPS → IPS Base`, Host set to the base station. Choose the number of bases, synchronizers and visualizers, the **Session** (or `Create MongoDB Session` from an experiment group), and the toggles (`Graphics` shows the annotated frames, `Store` saves frames, `Verbose` prints debug output). **Start** opens one terminal window per instance; each base asks which `Bases` entry it is.
-3. **Session Control**: once every window reports that it is waiting, send **START** for the session; send **STOP** at the end.
+2. **IPS Base**: `Launcher → Pipelines → IPS → IPS Base`, Host set to the base station. Choose the number of bases, synchronizers and visualizers, the **Session** (or `Create MongoDB Session` from an experiment group), and the toggles (`Graphics` shows the annotated frames, `Store` saves frames, `Verbose` prints debug output). Everything the windows used to ask is chosen on the card:
+    - which `Bases` entry each base is, one dropdown per base (their number follows **Num Bases**);
+    - the synchronizer's **main camera**, the base whose `camera_sync/transformation_matrices_<id>.json` it loads. The dropdown lists the files exported on the card's host and starts on the `Bases` entry with `main: true` when its file is there, else on the first file; **Start** refuses to launch a synchronizer until one is picked (press Refresh on the card once the files are there);
+    - the visualizer's **2d** or **3d** plot.
+
+    **Start** opens one terminal window per instance. Each process starts at once with those choices and waits for START; nothing is asked in the windows.
+3. **Session Control**: once every window reports that it is waiting, send **START** for the session; send **STOP** at the end. On STOP every base, synchronizer and visualizer ends its run and exits (the visualizer closes its plot window), also when STOP comes before START; start the card again for the next session. A synchronizer whose run ends on an error instead of STOP (the connection to Redis lost, say) says so and shows its menu, where `1` starts it again.
+
+When a choice from the card cannot be used (the synchronizer finds no `camera_sync/transformation_matrices_<id>.json` for its main camera, the visualizer gets a dimension other than 2d or 3d, or a base gets an id that is not in `Bases`), that window says why and what to do, then shows the process's own menu or base prompt, so it can be fixed there, or on the card before the next Start.
+
+Each base notes in the session's MongoDB document which `Bases` entry it is, the stream it pulls (for a `stream` source) and when it joined and left; it notes the leaving first on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads this note, so it takes the session's own streams, from the Stream Server and from the capture hosts, without being told which. Sessions recorded before bases wrote this note fall back to the old behaviour.
 
 ## Manual CLI
 
@@ -119,11 +128,11 @@ mmla ips-ctag  -p $P -c $C -b <base-id>    # one tag detector per camera (-hl tr
 mmla ips-csync -p $P -c $C                 # sync manager; pairs each alternative base with the main one
 
 mmla ips-base  -p $P -c $C -sid <session-id> -b <base-id>
-mmla ips-sync  -p $P -c $C -sid <session-id>
-mmla ips-vis   -p $P -c $C -sid <session-id>
+mmla ips-sync  -p $P -c $C -sid <session-id> -mc <main-base-id>   # -mc/--main_camera
+mmla ips-vis   -p $P -c $C -sid <session-id> -d 3d                # -d/--dimension: 2d (default) or 3d
 ```
 
-`-b` and `-sid` are asked interactively when omitted. `pipelines/ips-base/apriltag/` contains printable tag36h11 tags and a resize script; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to check the timing of recordings.
+With `-sid`, as the console runs them, each command asks nothing: it starts at once, waits for START and exits when the run ends on STOP. `ips-sync` without `-mc` takes the `Bases` entry marked `main: true` when its transformation file is there, else the only `transformation_matrices_<id>.json` in `camera_sync/`; `ips-base` without `-b` takes the only `Bases` entry there is. Without `-sid` the commands ask for the session, and `ips-base` for its base when `-b` is omitted; `ips-sync` and `ips-vis` show their menus as before (start, set main camera or switch 2d/3d, exit) and go back to them after each run. `pipelines/ips-base/apriltag/` contains printable tag36h11 tags and a resize script; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to check the timing of recordings.
 
 ## Post-time processing
 

@@ -14,8 +14,8 @@ DASHBOARD_PORT ?= 5050
 # MediaMTX stream server (native run; the docker run is in docker/docker-compose.infra.yml)
 MEDIAMTX_BIN ?= mediamtx
 MEDIAMTX_CONFIG ?= mediamtx/mediamtx.yml
-# MediaMTX is started from this folder, so the ./recordings of mediamtx.yml is
-# artifacts/recordings of the repository: the folder the docker run mounts too
+# MediaMTX is started from this folder, so the ./streams/server of mediamtx.yml
+# is artifacts/streams/server of the repository: the folder the docker run mounts too
 MEDIAMTX_RECORD_ROOT ?= ../../artifacts
 
 MONGO_CONFIG_MAC ?= $(BREW_PREFIX)/etc/mongod.conf
@@ -304,7 +304,7 @@ celery:
 mediamtx:
 	@echo "🔁 Starting MediaMTX"
 	@command -v $(MEDIAMTX_BIN) >/dev/null 2>&1 || { echo "❌ $(MEDIAMTX_BIN) not found: brew install mediamtx, or unpack a release into /usr/local/bin (docs/rtmp_streaming.md)"; exit 1; }
-	@mkdir -p '$(abspath $(MEDIAMTX_RECORD_ROOT))/recordings'
+	@mkdir -p '$(abspath $(MEDIAMTX_RECORD_ROOT))/streams/server'
 	tmux new-session -d -s mediamtx -n mediamtx -c '$(abspath $(MEDIAMTX_RECORD_ROOT))' bash
 	tmux send-keys -t mediamtx '$(MEDIAMTX_BIN) $(abspath $(MEDIAMTX_CONFIG))' C-m
 

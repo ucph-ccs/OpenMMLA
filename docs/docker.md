@@ -79,7 +79,7 @@ This is separate from the TUI's **MLLM Server** card, which runs vLLM natively i
 |---|---|---|---|---|
 | InfluxDB | `influxdb:2.7.12` | 8086 | — | official image, v2 API (org/bucket/token + Flux) |
 | MongoDB | `mongo:7.0.40-jammy` | 27017 | — | official image, no authentication by default |
-| MediaMTX | `bluenviron/mediamtx:1.21.0` | 1935 RTMP, 8554 RTSP, 8890/udp SRT, 9997 API, 9996 playback | — | official image; config from `pipelines/uber-server/mediamtx/mediamtx.yml`, recordings bind-mounted to `artifacts/recordings/` (`MEDIAMTX_RECORD_DIR`), see the [Streaming guide](rtmp_streaming.md) |
+| MediaMTX | `bluenviron/mediamtx:1.21.0` | 1935 RTMP, 8554 RTSP, 8890/udp SRT, 9997 API, 9996 playback | — | official image; config from `pipelines/uber-server/mediamtx/mediamtx.yml`, recordings bind-mounted to `artifacts/streams/server/` (`MEDIAMTX_STREAMS_DIR`), see the [Streaming guide](rtmp_streaming.md) |
 
 The image tags are pinned on purpose; do not switch them to `latest`. From 2026-09-15 `influxdb:latest` points at InfluxDB 3 Core, which has no org/bucket/token semantics and breaks `influxdb-client==1.44.0` outright, and `mongo:latest` drifts across major versions. Both pinned tags are published for linux/amd64 and linux/arm64.
 
@@ -220,7 +220,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
 - `~/.openmmla` is mounted read-only so the containers can decrypt `ENC(...)` secrets.
 - The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.
 - The database containers do **not** mount `~/.openmmla`: the official influxdb / mongo images contain no OpenMMLA code, never read `config.yml`, and have nothing to decrypt.
-- MediaMTX mounts its config read-only and writes its recordings to a bind mount, `artifacts/recordings/` of the repository by default, so the files are plain fMP4 segments on the host.
+- MediaMTX mounts its config read-only and writes its recordings to a bind mount, `artifacts/streams/server/` of the repository by default, so the files are plain fMP4 segments on the host.
 
 ## How the TUI uses these stacks
 

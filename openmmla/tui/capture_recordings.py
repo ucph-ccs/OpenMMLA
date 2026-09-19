@@ -2,7 +2,7 @@
 there, and making room.
 
 A managed stream with `record: true` writes one file per run on its capture
-host, <record_root>/streams-<date>/collection/<host label>/{video,audio}/
+host, <record_root>/streams/capture/<YYYY-MM-DD>/<host label>/{video,audio}/
 <name>_<start>.<ext> (StreamPanel._record_dir), and nothing there removes it:
 Download copies it here and leaves it where it is. This lists those files per
 capture host with the room left on its disk, deletes the ones picked, and
@@ -23,16 +23,22 @@ from __future__ import annotations
 import shlex
 import subprocess
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import datetime
 
 from rich.markup import escape
 
 from openmmla.tui.recordings import human_size
 from openmmla.tui.ssh import get_profile_by_name, ssh_run_sync
 from openmmla.tui.stream_cuts import _quote_root, bash
+from openmmla.utils.artifact_paths import (
+    CAPTURE_DAY_GLOB, CAPTURE_KINDS, CAPTURE_RECORD_REL, CAPTURE_STREAMS_DIR, STREAMS_DIR, capture_day, is_capture_day,
+)
 
-# a file written this recently is being recorded, whatever ps says
-LIVE_SECONDS = 120
+# a file written this recently is being recorded, whatever ps says (the check
+# by ffmpeg's command line comes first; this is for when it misses): ffmpeg 7
+# writes in 256 KiB blocks, about every 2 s for 1 Mbps video and every 8 s for
+# 16 kHz mono audio, 16 s at 8 kHz; a stopped stream's file is free a minute after
+LIVE_SECONDS = 60
 
 DAY_SECONDS = 86400
 
@@ -44,7 +50,7 @@ KEEP_CHOICES: list[tuple[str, int]] = [
 
 @dataclass(frozen=True)
 class CaptureFolder:
-    """where one capture host files stream recordings: <record_root>/streams-*/collection/<host_label>/."""
+    """where one capture host files stream recordings: <record_root>/streams/capture/<day>/<host_label>/."""
     ssh_profile: str   # "local" or an SSH profile
     record_root: str   # on that host; $HOME/... for a remote one
     host_label: str
@@ -67,13 +73,14 @@ class CaptureStream:
 class CaptureFile:
     folder: CaptureFolder
     path: str             # absolute, on the capture host
-    day: str              # streams-<YYYYMMDD>
+    day: str              # YYYY-MM-DD, the day folder
     kind: str             # video | audio
     stream: str           # the name before _<start>
     start: float | None   # unix time in the file name; None when it has none
     written: float        # last write (mtime), on the host's clock
     size: int             # bytes
     live: bool            # a running ffmpeg writes it, or it was written moments ago
+    writing: bool = False  # a running ffmpeg names it on its command line
 
 
 @dataclass
@@ -118,6 +125,7 @@ def by_folder(streams: list[CaptureStream]) -> dict[CaptureFolder, list[CaptureS
 def _prelude(folder: CaptureFolder) -> str:
     return (
         f"root={_quote_root(folder.record_root)}; label={shlex.quote(folder.host_label)}; "
+        f'cap="$root"/{CAPTURE_RECORD_REL}; '
         "now=$(date +%s); "
         "running() { for p in $(pgrep -x ffmpeg 2>/dev/null); do ps -ww -o args= -p \"$p\" 2>/dev/null; done; }; "
         "procs=$(running); "
@@ -131,7 +139,7 @@ def inventory_script(folder: CaptureFolder) -> str:
     for every recording in the folder, `FREE <kB>` of the disk it is on, LISTED when done."""
     return _prelude(folder) + (
         'echo "NOW $now"; '
-        'for f in "$root"/streams-*/collection/"$label"/video/* "$root"/streams-*/collection/"$label"/audio/*; do '
+        f'for f in "$cap"/{CAPTURE_DAY_GLOB}/"$label"/video/* "$cap"/{CAPTURE_DAY_GLOB}/"$label"/audio/*; do '
         '[ -f "$f" ] || continue; s=$(st "$f"); [ -n "$s" ] || continue; w=0; '
         'case "$procs" in *"$f"*) w=1;; esac; '
         'printf "FILE %s %s %s\\n" "$s" "$w" "$f"; done; '
@@ -144,30 +152,34 @@ def inventory_script(folder: CaptureFolder) -> str:
 
 # folders left empty go, day by day, bottom up: never today's, which a stream
 # starting now may just have made (by the host's date and by the console's,
-# which names the folder), and never one a running ffmpeg writes into
+# which names the folder), and never one a running ffmpeg writes into.
+# streams/capture/ itself stays: a Start's mkdir -p may be making a day in it
 def _tidy(console_day: str) -> str:
     return (
-        f"procs=$(running); today=streams-$(date +%Y%m%d); here={shlex.quote(console_day)}; "
-        'for d in "$root"/streams-*; do [ -d "$d" ] || continue; '
+        f"procs=$(running); today=$(date +%Y-%m-%d); here={shlex.quote(console_day)}; "
+        f'for d in "$cap"/{CAPTURE_DAY_GLOB}; do [ -d "$d" ] || continue; '
         'case "$d" in */"$today"|*/"$here") continue;; esac; '
         'case "$procs" in *"$d/"*) continue;; esac; '
-        'c="$d/collection/$label"; rmdir "$c/video" "$c/audio" 2>/dev/null; '
-        'rmdir "$c" 2>/dev/null && rmdir "$d/collection" 2>/dev/null && rmdir "$d" 2>/dev/null; done; '
+        'c="$d/$label"; rmdir "$c/video" "$c/audio" 2>/dev/null; '
+        'rmdir "$c" 2>/dev/null && rmdir "$d" 2>/dev/null; done; '
     )
 
 
 def delete_script(folder: CaptureFolder, paths: list[str], console_day: str | None = None) -> str:
     """delete these recordings of the folder, each checked again on the host:
     `REMOVED <bytes> <path>`, or LIVE / GONE / REFUSED / FAILED `<path>`; then
-    the folders left empty, and DELETED when done. A path has to lie in the
-    folder with no . or .. below the root (the root itself may have them)."""
+    the folders left empty, and DELETED when done. A path has to be a file
+    right in <root>/streams/capture/<day>/<label>/video or audio, with no . or
+    .. below the root (the root itself may have them)."""
     listed = " ".join(shlex.quote(path) for path in paths)
-    console_day = console_day or f"streams-{date.today():%Y%m%d}"
+    console_day = console_day or capture_day()
     return _prelude(folder) + (
         f"for f in {listed}; do "
-        'case "$f" in "$root"/streams-*/collection/"$label"/video/*|"$root"/streams-*/collection/"$label"/audio/*) ;; '
+        f'case "$f" in "$cap"/{CAPTURE_DAY_GLOB}/"$label"/video/*|"$cap"/{CAPTURE_DAY_GLOB}/"$label"/audio/*) ;; '
         '*) echo "REFUSED $f"; continue;; esac; '
         'rest=${f#"$root"/}; case "/$rest/" in */../*|*/./*) echo "REFUSED $f"; continue;; esac; '
+        # the day glob is one folder, the label has no /: one more / is a file in a folder below video/ or audio/
+        'rest=${f#"$cap"/}; case "$rest" in */*/*/*/*) echo "REFUSED $f"; continue;; esac; '
         'if [ ! -f "$f" ]; then echo "GONE $f"; continue; fi; '
         's=$(st "$f"); m=${s##* }; '
         'case "$procs" in *"$f"*) echo "LIVE $f"; continue;; esac; '
@@ -180,13 +192,14 @@ def delete_script(folder: CaptureFolder, paths: list[str], console_day: str | No
 # ---- what the host said ----
 
 def _day_folder(path: str) -> tuple[str, str] | None:
-    """(streams-<date>, video|audio) of a recording's path, None for anything else."""
+    """(YYYY-MM-DD, video|audio) of a recording's path,
+    .../streams/capture/<day>/<label>/<kind>/<file>; None for anything else."""
     parts = path.split("/")
-    if len(parts) < 6 or parts[-4] != "collection" or not parts[-5].startswith("streams-"):
+    if len(parts) < 7 or parts[-6:-4] != [STREAMS_DIR, CAPTURE_STREAMS_DIR] or not is_capture_day(parts[-4]):
         return None
-    if parts[-2] not in ("video", "audio"):
+    if parts[-2] not in CAPTURE_KINDS:
         return None
-    return parts[-5], parts[-2]
+    return parts[-4], parts[-2]
 
 
 def _stream_and_start(path: str) -> tuple[str, float | None]:
@@ -222,7 +235,7 @@ def parse_listing(text: str | None, folder: CaptureFolder) -> Listing | None:
                 continue
             stream, start = _stream_and_start(path)
             files.append(CaptureFile(folder, path, where[0], where[1], stream, start, float(written), int(size),
-                                     live == "1"))
+                                     live == "1", writing=live == "1"))
     if now is None:
         now = max([f.written for f in files], default=0.0)
     listing = Listing(folder, files, free, now)
@@ -376,11 +389,8 @@ def prune_report(results: list[Pruned], streams: list[CaptureStream]) -> list[st
 # ---- telling it ----
 
 def day_label(day: str) -> str:
-    """streams-20260919 -> 2026-09-19."""
-    digits = day[len("streams-"):] if day.startswith("streams-") else day
-    if len(digits) == 8 and digits.isdigit():
-        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
-    return day
+    """the day of a row: its folder's name, 2026-09-19."""
+    return str(day or "-")
 
 
 def stamp(moment: float | None) -> str:

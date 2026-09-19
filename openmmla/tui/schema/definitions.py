@@ -154,7 +154,7 @@ SHARED_SECTIONS = {
                 "default": 9997,
             },
             "playback_port": {
-                "description": "MediaMTX playback port, which hands out the recording of a time range: Sessions → Export Recordings (default 9996)",
+                "description": "MediaMTX playback port, which hands out the recording of a time range: Sessions → Export Streams (default 9996)",
                 "field_type": "int",
                 "default": 9996,
             },

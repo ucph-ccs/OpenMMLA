@@ -23,8 +23,8 @@
 # containerized too; today they stay bare-metal via pipelines/uber-server/Makefile.
 #
 # MediaMTX reads pipelines/uber-server/mediamtx/mediamtx.yml and records every
-# published stream under MEDIAMTX_RECORD_DIR (default artifacts/recordings in the
-# repository); see docs/rtmp_streaming.md.
+# published stream under MEDIAMTX_STREAMS_DIR (default artifacts/streams/server in
+# the repository); see docs/rtmp_streaming.md.
 
 name: openmmla-infra
 
@@ -112,8 +112,9 @@ services:
     restart: unless-stopped
     volumes:
       - ../pipelines/uber-server/mediamtx/mediamtx.yml:/mediamtx.yml:ro
-      # recordings land on the host, next to the other session artifacts
-      - "${MEDIAMTX_RECORD_DIR:-../artifacts/recordings}:/recordings"
+      # recordings land on the host, next to the other session artifacts; the
+      # container's working directory is /, so ./streams/server of mediamtx.yml is here
+      - "${MEDIAMTX_STREAMS_DIR:-../artifacts/streams/server}:/streams/server"
     ports:
       - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_RTMP_PORT:-1935}:1935"
       - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_RTSP_PORT:-8554}:8554"
