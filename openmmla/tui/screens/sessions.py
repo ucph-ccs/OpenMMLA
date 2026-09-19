@@ -554,19 +554,6 @@ class SessionsPanel(Widget):
     #sessions-actions Button {
         margin: 0 1;
     }
-    #sessions-streams-bar {
-        height: 3;
-        padding: 0 1;
-    }
-    #sessions-streams-bar Button {
-        margin: 0 1;
-    }
-    #ses-streams-hint {
-        width: 1fr;
-        height: 3;
-        content-align: left middle;
-        color: $text-muted;
-    }
     /* the progress of Export Streams, up while it runs; height auto because a
        bare Horizontal defaults to 1fr */
     #sessions-progress {
@@ -637,21 +624,15 @@ class SessionsPanel(Widget):
                 yield Button("Refresh", variant="primary", id="btn-ses-refresh")
                 yield Button("Export Measurements", variant="success", id="btn-ses-export-logs")
                 yield Button("Export Visualizations", variant="success", id="btn-ses-export-vis")
+                # the footage of a session is a time range of the streams its bases
+                # noted in its record, as the Stream Server and their capture hosts
+                # recorded them
+                yield Button("Export Streams", variant="success", id="btn-ses-export-streams")
                 # what the bases wrote on the machines they ran on (base_files)
                 yield Button("Export Base Files", variant="success", id="btn-ses-export-base-files")
                 yield Button("Export All", variant="warning", id="btn-ses-export-all")
                 yield Button("Delete Session", variant="error", id="btn-ses-delete")
                 yield Button("Delete Artifacts", variant="error", id="btn-ses-delete-artifacts")
-            # the footage of a session is a time range of the streams its bases
-            # noted in its record, as the Stream Server and their capture hosts
-            # recorded them
-            with Horizontal(id="sessions-streams-bar"):
-                yield Button("Export Streams", variant="success", id="btn-ses-export-streams")
-                yield Static(
-                    "Copies the session's part of each stream it used, from the Stream Server and from the "
-                    "machine that captured it, into artifacts/<session>/streams/",
-                    id="ses-streams-hint",
-                )
             with Horizontal(id="sessions-progress"):
                 yield Static("", id="ses-progress-label")
                 yield ProgressBar(total=None, show_eta=False, id="ses-progress-bar")
