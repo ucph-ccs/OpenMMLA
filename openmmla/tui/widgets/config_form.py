@@ -8,6 +8,7 @@ import yaml
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -481,15 +482,27 @@ class DictListField(Widget):
                 continue
             widget = self._find_in_container(container, "__source_index")
             if isinstance(widget, Select):
-                current = widget.value
-                options, cur = self._stream_options(
-                    "" if current in (None, Select.BLANK) else str(current))
-                widget.set_options(options)
-                if cur:
-                    widget.value = cur
+                self._show_stream_states_in(widget)
             for hint in container.query(Static):
                 if hint.id and hint.id.endswith("source_index__hint"):
                     hint.update(self._hint("stream"))
+
+    def _show_stream_states_in(self, widget: Select, current: str | None = None, tries: int = 5) -> None:
+        """the live marks in one stream dropdown. The Server's answer can come
+        while the dropdown is mounted but not yet drawn (a card just opened, or
+        another one picked), when it has no label to set: it gets them on the
+        next refresh instead, keeping the stream it showed."""
+        if current is None:
+            value = widget.value
+            current = "" if value in (None, Select.BLANK, getattr(Select, "NULL", None)) else str(value)
+        options, cur = self._stream_options(current)
+        try:
+            widget.set_options(options)
+            if cur:
+                widget.value = cur
+        except NoMatches:
+            if tries > 0 and widget.is_attached:
+                self.call_after_refresh(self._show_stream_states_in, widget, current, tries - 1)
 
     def compose(self) -> ComposeResult:
         # for a top-level list (path == section, e.g. Bases) the enclosing
