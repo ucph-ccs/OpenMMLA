@@ -311,6 +311,9 @@ _STREAM_FIELDS_TEMPLATE = [
      "device path, e.g. /dev/video0 (video) or hw:1,0 (audio), on the machine picked under SSH Profile on the Streams tab"),
     ("record", "bool", False,
      "also record on the capture host, under <record_root>/streams-<date>/collection/<host>/"),
+    ("record_keep_days", "int", 0,
+     "days the capture host keeps those recordings: older ones are deleted at the stream's Start and at "
+     "Refresh on the Streams tab, whose Manage lists them. 0 = until deleted"),
 ]
 
 
@@ -4963,17 +4966,24 @@ class ServicePanel(Widget):
         """set one key of a stream from the Streams tab (Record on/off, SSH
         Profile) in the config of the host the card is on, and show it there.
         Returns the config written, None when nothing was."""
+        return self._write_stream_entries({stream_name: {key: value}})
+
+    def _write_stream_entries(self, changes: dict[str, dict]) -> dict | None:
+        """the same for several streams in one write (Manage's keep time)."""
         pipeline = self._current_pipeline
         if pipeline is None:
             return None
         target = self._get_panel_target()
         config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
         config = copy.deepcopy(config) if isinstance(config, dict) else {}
-        stream = (config.get("Streams") or {}).get(stream_name)
-        if not isinstance(stream, dict):
-            self._log(f"[red]Stream '{stream_name}' is not in the config of {target}; Save the Config tab first.[/red]")
+        streams = config.get("Streams") or {}
+        missing = [f"'{name}'" for name in changes if not isinstance(streams.get(name), dict)]
+        if missing:
+            which = f"Stream {missing[0]} is" if len(missing) == 1 else f"Streams {', '.join(missing)} are"
+            self._log(f"[red]{which} not in the config of {target}; Save the Config tab first.[/red]")
             return None
-        stream[key] = value
+        for name, values in changes.items():
+            streams[name].update(values)
         cache_key = self._config_cache_key(pipeline.config_path, target)
         if target == "local":
             with open(pipeline.config_path, "w", encoding="utf-8") as fh:
@@ -5010,12 +5020,33 @@ class ServicePanel(Widget):
             f"[green]{event.stream_name}: recording on the capture device is {state} "
             f"(takes effect at its next Start).[/green]"
         )
-        # the Config tab holds the old value: a Save from there would undo this
+        self._reshow_config_form()
+
+    def _reshow_config_form(self) -> None:
+        """the Config tab holds the old value of what the Streams tab just
+        wrote: a Save from there would undo it, so it is drawn again."""
         container = self._config_container
         if container is not None and container.is_attached:
             container.remove_children()
             self._current_form = None
             self.call_after_refresh(self._show_pipeline_form, container, self._current_pipeline)
+
+    def on_stream_panel_keep_days_change_requested(self, event: StreamPanel.KeepDaysChangeRequested) -> None:
+        """Keep recordings for, in Manage on the Streams tab: `record_keep_days`
+        of every stream there, written into the config of the host the card is on."""
+        event.stop()
+        if not event.keep_days:
+            return
+        changes = {name: {"record_keep_days": max(int(days), 0)} for name, days in event.keep_days.items()}
+        if self._write_stream_entries(changes) is None:
+            return
+        days = max(int(value) for value in event.keep_days.values())
+        self._log(
+            f"[green]{', '.join(event.keep_days)}: kept on the capture host until deleted.[/green]" if not days else
+            f"[green]{', '.join(event.keep_days)}: recordings on the capture host are kept {days} day(s); "
+            f"older ones are deleted at a stream's Start and at Refresh on the Streams tab.[/green]"
+        )
+        self._reshow_config_form()
 
     def on_stream_panel_ssh_profile_change_requested(self, event: StreamPanel.SshProfileChangeRequested) -> None:
         """SSH Profile in the Streams tab: the machine that runs the stream's
@@ -5156,15 +5187,17 @@ class ServicePanel(Widget):
         all_fields = form.all_fields if form else pipeline.fields
         all_fields = all_fields + self._stored_capture_hosts(pipeline, event.values)
         stream_note = self._complete_stream_targets(pipeline, event.values)
-        self._save_pipeline_config_for_target(pipeline, all_fields, event.values, note=stream_note)
+        saved = self._save_pipeline_config_for_target(pipeline, all_fields, event.values, note=stream_note)
 
         if pipeline.name == "ASR Server":
             self._services = _build_service_registry(self._root)
             self._svc_map = {s.name: s for s in self._services}
             self._refresh_service_cards()
 
-        if self._get_panel_target() == "local":
-            self._refresh_stream_panels(pipeline)
+        # the Streams tab prunes by what it holds (record_keep_days): it gets
+        # what was saved, on another host as well as here
+        if saved is not None:
+            self._refresh_stream_panels(pipeline, saved)
         self._refresh_vfa_prompts(pipeline)
         self._show_sync_bar(pipeline)
         self._build_tree()
@@ -5189,11 +5222,12 @@ class ServicePanel(Widget):
         for panel in self.query(PromptsPanel):
             panel.refresh_active(active, profile, end_to_end)
 
-    def _refresh_stream_panels(self, pipeline: PipelineDef) -> None:
-        """refresh stream tabs after a pipeline config save."""
+    def _refresh_stream_panels(self, pipeline: PipelineDef, config: dict | None = None) -> None:
+        """refresh stream tabs after a pipeline config save, from the config
+        that was saved (another host's), else from this machine's file."""
         if pipeline.name not in _STREAM_PIPELINES:
             return
-        streams = load_streams(pipeline.config_path)
+        streams = streams_from_config(config) if config is not None else load_streams(pipeline.config_path)
         for panel in self.query(StreamPanel):
             panel.update_streams(streams)
 
@@ -5662,20 +5696,21 @@ class ServicePanel(Widget):
         fields: list[LoaderFieldDef],
         values: dict,
         note: str = "",
-    ) -> None:
+    ) -> dict | None:
+        """write the pipeline config on the card's host; returns what was
+        written (on another host: what the copy carries), None when nothing was."""
         target = self._get_panel_target()
         if target == "local":
             save_config(pipeline.config_path, fields, values)
-            self._target_config_cache[self._config_cache_key(pipeline.config_path, "local")] = (
-                load_existing_config(pipeline.config_path)
-            )
+            saved = load_existing_config(pipeline.config_path)
+            self._target_config_cache[self._config_cache_key(pipeline.config_path, "local")] = saved
             self._show_status(f"Saved locally to {pipeline.config_path}{note}")
-            return
+            return saved
 
         profile = get_profile_by_name(target)
         if profile is None:
             self._show_status(f"SSH profile '{target}' not found; config was not saved.")
-            return
+            return None
 
         tmp = tempfile.NamedTemporaryFile(
             "w",
@@ -5703,6 +5738,7 @@ class ServicePanel(Widget):
             ),
             exclusive=True,
         )
+        return cache_config
 
     def _sync_to_remote(self) -> None:
         try:

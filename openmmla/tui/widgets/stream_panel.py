@@ -25,10 +25,11 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Static, Button, DataTable, Label, OptionList, Select
 
-from openmmla.tui import recordings
+from openmmla.tui import capture_recordings, recordings
 from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, remote_platform, ssh_run_sync
 from openmmla.tui.system_services import stream_server_path
+from openmmla.tui.widgets.stream_recordings import StreamRecordingsScreen
 from openmmla.utils.artifact_paths import safe_segment
 from openmmla.utils.constants import STREAM_URL_SCHEMES
 from openmmla.utils.mac_desktop import window_script
@@ -810,6 +811,29 @@ class StreamPanel(Widget):
             for stream in self._streams if stream.ssh_profile
         ]
 
+    def capture_streams(self) -> list[capture_recordings.CaptureStream]:
+        """the same streams as Manage and the keep time see them: where they
+        record, and for how long their recordings stay there."""
+        return [
+            capture_recordings.CaptureStream(
+                stream.name,
+                capture_recordings.CaptureFolder(
+                    stream.ssh_profile, self._record_root(stream), self._record_host_label(stream)),
+                _stream_kind(stream), stream.record_keep_days)
+            for stream in self._streams if stream.ssh_profile
+        ]
+
+    def _live_record_paths(self) -> set[str]:
+        """the files the streams started from here are writing, as their Start noted them."""
+        try:
+            entries = load_stream_registry(self._project_dir).get("streams", {})
+        except Exception:
+            return set()
+        return {
+            str(entry["record_path"]).strip() for entry in entries.values()
+            if isinstance(entry, dict) and entry.get("status") == "running" and entry.get("record_path")
+        }
+
     @staticmethod
     def _record_session() -> str:
         """the folder a stream's recording is filed under: the day, never a
@@ -892,6 +916,15 @@ class StreamPanel(Widget):
             self.stream_name = stream_name
             self.record = record
 
+    class KeepDaysChangeRequested(Message):
+        """Manage set how long the recordings of the streams here stay on their
+        capture hosts; the launcher writes it into the config of the host the
+        card is on, as it does for Record on/off."""
+
+        def __init__(self, keep_days: dict[str, int]) -> None:
+            super().__init__()
+            self.keep_days = keep_days
+
     class SshProfileChangeRequested(Message):
         """a row's SSH Profile was picked: the machine that runs the stream's
         ffmpeg, "" for an external stream. The launcher writes it into the
@@ -911,7 +944,8 @@ class StreamPanel(Widget):
         "else publishes. Record on/off: also record on the capture device. The Stream Server records on its side "
         "whatever reaches it (its card, Config tab).\n"
         "Recordings are filed by day, not by session. Download with a session cuts that session's part out "
-        "on the capture host; without one it copies the whole files."
+        "on the capture host; without one it copies the whole files. Manage lists and deletes them there, "
+        "and sets how long they are kept."
     )
 
     # how a stream stops being external
@@ -932,6 +966,7 @@ class StreamPanel(Widget):
                 yield Select(self._session_options(), value=ALL_RECORDINGS, allow_blank=False,
                              id="stream-session-select")
                 yield Button("Download", variant="warning", id="stream-btn-download")
+                yield Button("Manage", variant="primary", id="stream-btn-manage")
             with Horizontal(id="stream-actions"):
                 yield Button("Start", variant="success", id="stream-btn-start")
                 yield Button("Stop", variant="error", id="stream-btn-stop")
@@ -1051,7 +1086,7 @@ class StreamPanel(Widget):
                 stream.device or "-",
                 stream.target,
                 # nobody records an external stream here: the console does not run its ffmpeg
-                ("yes" if stream.ssh_profile else "n/a") if stream.record else "-",
+                (self._record_cell(stream) if stream.ssh_profile else "n/a") if stream.record else "-",
                 status,
                 Text("● live", "green") if live == "live" else
                 Text("○ not live", "dim") if live == "idle" else
@@ -1182,6 +1217,8 @@ class StreamPanel(Widget):
             else:
                 self.post_message(self.DownloadRequested(
                     stream.ssh_profile, self._record_root(stream), self._record_host_label(stream)))
+        elif btn == "stream-btn-manage":
+            self._open_recordings_manager()
         elif btn == "stream-btn-probe":
             stream = self._get_selected_stream()
             if stream:
@@ -1207,7 +1244,39 @@ class StreamPanel(Widget):
         else:
             self._log("[cyan]Refreshing stream status from the current target config.[/cyan]")
         self.post_message(self.SessionChoicesRequested())
+        self.run_worker(self._prune_recordings(), group="stream-prune", exclusive=True)
         self._refresh_all()
+
+    @staticmethod
+    def _record_cell(stream: StreamDef) -> str:
+        """the Record column of a stream that records: yes, and how long its recordings stay."""
+        return f"yes, {stream.record_keep_days} d" if stream.record_keep_days > 0 else "yes"
+
+    def _open_recordings_manager(self) -> None:
+        """Manage: what the streams here recorded on the machines that capture them."""
+        if not self.capture_streams():
+            self._log(
+                "[yellow]Every stream here is external: the console did not start them, so no host it "
+                "manages holds a recording. The Stream Server's own are on its card, Recordings tab.[/yellow]"
+            )
+            return
+        self.app.push_screen(StreamRecordingsScreen(
+            self.capture_streams, self._live_record_paths, self._request_keep_days))
+
+    def _request_keep_days(self, days: int) -> None:
+        self.post_message(self.KeepDaysChangeRequested(
+            {stream.name: days for stream in self._streams if stream.ssh_profile}))
+
+    async def _prune_recordings(self, names: set[str] | None = None) -> None:
+        """delete what a stream recorded longer ago than its record_keep_days,
+        on its capture host; the file a stream is writing stays. Nothing on
+        the host does it by itself: it happens at a stream's Start and at Refresh."""
+        streams = [s for s in self.capture_streams() if s.keep_days > 0 and (names is None or s.name in names)]
+        if not streams:
+            return
+        results = await asyncio.to_thread(capture_recordings.prune, streams, self._live_record_paths())
+        for line in capture_recordings.prune_report(results, streams):
+            self._log(line)
 
     def _start_stream(self, stream: StreamDef) -> None:
         self.run_worker(self._async_start(stream))
@@ -1342,6 +1411,9 @@ class StreamPanel(Widget):
             self._rebuild_table()
             return
 
+        if stream.record_keep_days > 0:
+            # room first: what it recorded before and kept long enough goes
+            await self._prune_recordings({stream.name})
         platform = await loop.run_in_executor(None, _stream_platform, stream, profile)
         desktop = _needs_desktop_session(platform, is_local)
         record_dir = self._record_dir(stream)

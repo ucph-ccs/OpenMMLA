@@ -61,6 +61,9 @@ class StreamDef:
     record_root: str = ""
     # video bitrate shared by the stream and its recording; empty = 1M
     bitrate: str = ""
+    # days the capture host keeps the stream's recordings: older ones are
+    # deleted at its Start and at Refresh on the Streams tab; 0 keeps them
+    record_keep_days: int = 0
 
     @property
     def read_url(self) -> str:
@@ -71,6 +74,14 @@ def _stream_bool(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _stream_days(value) -> int:
+    """a whole number of days; 0 for none, or for anything that is not one."""
+    try:
+        return max(int(float(str(value).strip())), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _clean_stream_optional(value) -> str:
@@ -112,6 +123,7 @@ def streams_from_config(data: dict) -> list[StreamDef]:
             record=_stream_bool(props.get("record")),
             record_root=_clean_stream_optional(props.get("record_root")),
             bitrate=_clean_stream_optional(props.get("bitrate")),
+            record_keep_days=_stream_days(props.get("record_keep_days")),
         ))
     return streams
 
