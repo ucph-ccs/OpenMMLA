@@ -3691,6 +3691,10 @@ class ServicePanel(Widget):
         if event.tabbed_content.id != "svc-sub-tabs":
             return
         self._set_command_session_visible(event.pane.id != "svc-tab-config")
+        if event.pane.id == "svc-tab-config":
+            # a stream started or stopped on the Streams tab since the form was
+            # built: its dropdown says what the Stream Server says now
+            self._remark_live_streams()
 
     def _set_command_session_visible(self, visible: bool) -> None:
         try:
@@ -5576,6 +5580,15 @@ class ServicePanel(Widget):
         if isinstance(existing, dict):
             self.run_worker(self._probe_form_devices(form, pipeline, existing, force=True), group="config-devices",
                             exclusive=True)
+
+    def _remark_live_streams(self) -> None:
+        """ask the Stream Server again which streams of the Bases form on
+        screen are live, as when the form was built."""
+        form = self._current_form
+        if form is None or not form.is_attached:
+            return
+        if any(field.field_def.path == "Bases" and field.stream_choices for field in form.query(DictListField)):
+            self.run_worker(self._mark_live_streams(form), group="stream-live-marks", exclusive=True)
 
     async def _mark_live_streams(self, form) -> None:
         """which streams of a Bases form the Stream Server has live now, asked
