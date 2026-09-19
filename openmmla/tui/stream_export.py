@@ -1,5 +1,5 @@
 """capture-side stream recordings, taken off the machines that capture them: a
-session's part of the streams it used, or the whole files of a capture host.
+session's part of the streams it used.
 
 A managed stream with `record: true` writes one file per run on its capture
 host, <record_root>/streams/capture/<YYYY-MM-DD>/<host label>/<video|audio>/
@@ -10,9 +10,7 @@ staged under <record_root>/streams/.session-cuts/<session>/<host label>/,
 fetched with the resumable staged transfer (download), and lands in
 artifacts/<session>/streams/capture/<host label>/<video|audio>/; the staging is
 removed once it has arrived. A stream captured on this machine is cut straight
-into place. The whole files of a host's days are copied into
-artifacts/streams/capture/<YYYY-MM-DD>/<host label>/. The recordings
-themselves are never touched.
+into place. The recordings themselves are never touched.
 
 Nothing here draws. Whoever runs it hands in ExportCallbacks for its log lines
 (Rich markup) and its progress row, and cancels by cancelling the task that
@@ -26,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import shlex
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,8 +37,8 @@ from openmmla.tui.artifacts import METADATA_FILENAMES, copy_covers, merge_tree, 
 from openmmla.tui.ssh import get_profile_by_name
 from openmmla.utils import session_sources
 from openmmla.utils.artifact_paths import (
-    CAPTURE_DAY_GLOB, CAPTURE_KINDS, CAPTURE_RECORD_REL, CAPTURE_STREAMS_DIR, STREAMS_DIR, capture_copy_dir,
-    capture_host_label, capture_record_root, is_capture_day, safe_segment, session_capture_streams_dir,
+    CAPTURE_KINDS, CAPTURE_STREAMS_DIR, STREAMS_DIR, capture_host_label, capture_record_root, safe_segment,
+    session_capture_streams_dir,
 )
 
 
@@ -573,70 +570,4 @@ async def export_session(
         else:
             result.unfetched.append(ssh_profile)
     return result
-
-
-# ---- the whole files of a capture host ----
-
-def capture_days_script(record_root: str, host_label: str) -> str:
-    """print the absolute path of <record_root>/streams/capture/<day>/<host label>
-    for every day the host holds; LISTED when done."""
-    return (
-        f"for d in {stream_cuts._quote_root(record_root)}/{CAPTURE_RECORD_REL}/{CAPTURE_DAY_GLOB}/"
-        f"{shlex.quote(host_label)}; do "
-        'if [ -d "$d" ]; then (cd "$d" && pwd -P); fi; done; echo LISTED'
-    )
-
-
-def parse_capture_days(text: str | None, host_label: str) -> list[tuple[str, str]] | None:
-    """(YYYY-MM-DD, absolute path) of every day the script printed, newest
-    first; None when it never finished (the host could not be asked, which is
-    not the same as holding nothing)."""
-    lines = [line.strip() for line in str(text or "").splitlines()]
-    if "LISTED" not in lines:
-        return None
-    days = set()
-    for line in lines:
-        parts = line.rstrip("/").split("/")
-        # pwd -P may resolve a link above the day, never the day and the label themselves
-        if line.startswith("/") and len(parts) >= 3 and is_capture_day(parts[-2]) and parts[-1] == host_label:
-            days.add((parts[-2], line.rstrip("/")))
-    return sorted(days, reverse=True)
-
-
-async def list_capture_days(
-    ssh_profile: str, record_root: str, host_label: str, *, run: HostRunner | None = None,
-) -> list[tuple[str, str]] | None:
-    """the days a capture host holds stream recordings of this host label, newest first."""
-    run = run or run_on_host
-    return parse_capture_days(await run(ssh_profile, capture_days_script(record_root, host_label), 30.0), host_label)
-
-
-async def copy_capture_days(
-    project_root,
-    ssh_profile: str,
-    host_label: str,
-    days: list[tuple[str, str]],
-    callbacks: ExportCallbacks | None = None,
-    *,
-    fetch: Callable[..., Awaitable[bool]] | None = None,
-) -> int:
-    """copy the whole files of these days (from list_capture_days) of one
-    capture host into artifacts/streams/capture/<day>/<host label>/, tied to no
-    session; how many days are here in full afterwards. A day already here in
-    full is not fetched again, and an interrupted one resumes."""
-    callbacks = callbacks or ExportCallbacks()
-    fetch = fetch or fetch_tree
-    profile = get_profile_by_name(ssh_profile)
-    if profile is None:
-        callbacks.log(f"[red]SSH profile '{escape(ssh_profile)}' not found.[/red]")
-        return 0
-    here = 0
-    for day, remote_dir in days:
-        _check(callbacks)
-        local_dir = capture_copy_dir(project_root, day, host_label)
-        staging = dl.staging_root(project_root, STREAMS_DIR, CAPTURE_STREAMS_DIR, day, host_label)
-        if await fetch(profile, remote_dir, local_dir, staging=staging, label=host_label, where=ssh_profile, what=day,
-                       callbacks=callbacks):
-            here += 1
-    return here
 

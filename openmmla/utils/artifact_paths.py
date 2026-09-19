@@ -21,8 +21,6 @@ RUNTIME_ARTIFACTS_DIR = "runtime"
 #   artifacts/streams/server/<app>/<name>/<YYYY-MM-DD_HH-MM-SS-ffffff>.mp4
 #       MediaMTX, on the Stream Server's host (mediamtx.yml recordPath; the docker
 #       bind is MEDIAMTX_STREAMS_DIR in docker/.env.example)
-#   artifacts/streams/capture/<YYYY-MM-DD>/<host label>/<video|audio>/...
-#       whole-file copies of the capture side on the console, tied to no session
 #   artifacts/<session>/streams/server/<app>/<name>_<start>.mp4
 #   artifacts/<session>/streams/capture/<host label>/<video|audio>/<stream>_<start>.<mkv|wav>
 STREAMS_DIR = "streams"
@@ -118,13 +116,6 @@ def streams_artifact_dir(project_root) -> Path:
 def server_record_dir(project_root) -> Path:
     """artifacts/streams/server/: where MediaMTX records on the Stream Server's host."""
     return streams_artifact_dir(project_root) / SERVER_STREAMS_DIR
-
-
-def capture_copy_dir(project_root, day: str, host_label: str) -> Path:
-    """artifacts/streams/capture/<day>/<host label>/: the whole files of one
-    capture host's day, copied here (tied to no session)."""
-    return (streams_artifact_dir(project_root) / CAPTURE_STREAMS_DIR / safe_segment(day, "day")
-            / safe_segment(host_label, "host"))
 
 
 def session_streams_dir(project_root, session_id: str) -> Path:

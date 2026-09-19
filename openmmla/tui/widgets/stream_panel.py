@@ -744,11 +744,6 @@ class StreamPanel(Widget):
         width: 13;
         padding-top: 1;
     }
-    #stream-recordings-note {
-        width: 1fr;
-        padding-top: 1;
-        color: $text-muted;
-    }
     #stream-recordings Button {
         margin: 0 1;
     }
@@ -844,10 +839,12 @@ class StreamPanel(Widget):
             self._record_root(stream), self._record_day(), self._record_host_label(stream), self._kind(stream))
 
     @staticmethod
-    def _fetch_hint(stream: StreamDef) -> str:
+    def _on_host(stream: StreamDef) -> str:
+        """the end of the line naming a stopped stream's recording: the host it is
+        on, unless that is this machine."""
         if stream.ssh_profile == "local":
             return "."
-        return f" on {stream.ssh_profile}; Manage copies it here (Download File, Download Day)."
+        return f" on {stream.ssh_profile}."
 
     def _registered_record_path(self, stream_name: str) -> str:
         """the recording file noted when the stream was started, if it records."""
@@ -895,15 +892,9 @@ class StreamPanel(Widget):
         "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
         "else publishes. Record on/off: also record on the capture device. The Stream Server records on its side "
         "whatever reaches it (its card, Config tab).\n"
-        "Recordings are filed by day on the capture device, not by session. Manage lists them there, copies a "
-        "file or a day to this machine, deletes them, and sets how long they are kept. A session's part of them "
-        "(and of the Stream Server's) is Sessions → Export Streams."
-    )
-
-    # beside Manage: what it does, and where a session's part of the recordings is
-    RECORDINGS_NOTE = (
-        "on the capture hosts: copy a file or a day here, delete, keep time. "
-        "A session's part: Sessions → Export Streams."
+        "Recordings are filed by day on the capture device, not by session. Manage lists them there, deletes "
+        "them, and sets how long they are kept. A session's part of them (and of the Stream Server's) is "
+        "Sessions → Export Streams."
     )
 
     # how a stream stops being external
@@ -922,7 +913,6 @@ class StreamPanel(Widget):
             with Horizontal(id="stream-recordings"):
                 yield Label("Recordings:")
                 yield Button("Manage", variant="primary", id="stream-btn-manage")
-                yield Static(self.RECORDINGS_NOTE, id="stream-recordings-note")
             with Horizontal(id="stream-actions"):
                 yield Button("Start", variant="success", id="stream-btn-start")
                 yield Button("Stop", variant="error", id="stream-btn-stop")
@@ -1184,8 +1174,8 @@ class StreamPanel(Widget):
                 "manages holds a recording. The Stream Server's own are on its card, Recordings tab.[/yellow]"
             )
             return
-        self.app.push_screen(StreamRecordingsScreen(
-            self.capture_streams, self._live_record_paths, self._request_keep_days, project_root=self._project_dir))
+        self.app.push_screen(
+            StreamRecordingsScreen(self.capture_streams, self._live_record_paths, self._request_keep_days))
 
     def _request_keep_days(self, days: int) -> None:
         self.post_message(self.KeepDaysChangeRequested(
@@ -1461,9 +1451,9 @@ class StreamPanel(Widget):
                 if recorded:
                     # where Start put it: the card's Session may have changed since,
                     # and the file did not move with it
-                    self._log(f"  Recording kept at {recorded}{self._fetch_hint(stream)}")
+                    self._log(f"  Recording kept at {recorded}{self._on_host(stream)}")
                 elif record_dir:
-                    self._log(f"  Recording kept under {record_dir}/{self._fetch_hint(stream)}")
+                    self._log(f"  Recording kept under {record_dir}/{self._on_host(stream)}")
             else:
                 self._log(f"[yellow]{stream.name} may still be running.[/yellow]")
         except Exception as e:
