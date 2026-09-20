@@ -5782,8 +5782,8 @@ class ServicePanel(Widget):
                 form.set_field_description(field.path, _server_entry_hint(values.get(field.path), gateway))
 
     def _write_stream_entry(self, stream_name: str, key: str, value) -> dict | None:
-        """set one key of a stream from the Streams tab (Record on/off, SSH
-        Profile) in the config of the host the card is on, and show it there.
+        """set one key of a stream from the Streams tab (Record, SSH Profile)
+        in the config of the host the card is on, and show it there.
         Returns the config written, None when nothing was."""
         return self._write_stream_entries({stream_name: {key: value}})
 
@@ -5829,8 +5829,8 @@ class ServicePanel(Widget):
         return config
 
     def on_stream_panel_record_toggle_requested(self, event: StreamPanel.RecordToggleRequested) -> None:
-        """Record on/off in the Streams tab: write the stream's `record` into the
-        config of the host the card is on, then show it in both tabs."""
+        """the Record column of the Streams tab: write the stream's `record` into
+        the config of the host the card is on, then show it in both tabs."""
         event.stop()
         if self._write_stream_entry(event.stream_name, "record", bool(event.record)) is None:
             return

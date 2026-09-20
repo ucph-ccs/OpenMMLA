@@ -30,7 +30,7 @@ from openmmla.tui.widgets.recordings_panel import AGE_CHOICES
 MIXED = -1
 
 HELP = (
-    "What the streams of this card recorded on the machines that capture them (Record on/off): one file per "
+    "What the streams of this card recorded on the machines that capture them (Record: yes): one file per "
     "Start, filed under the day it started. A dim name is a stream that is not in this card's Streams (another "
     "card's, or one removed since).\n"
     "The file a stream is writing now is never deleted: Stop it first. A session's part of the streams is "

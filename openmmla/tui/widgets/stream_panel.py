@@ -15,7 +15,7 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, Horizontal
+from textual.containers import ItemGrid, Vertical, Horizontal
 from textual.geometry import Region
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -624,15 +624,17 @@ _probe_rtmp_target = _probe_stream_target
 
 
 # the columns of the Streams table whose cells are dropdowns: the machine that
-# captures the stream, and its device on that machine
+# captures the stream, its device on that machine, and whether it records there
 PROFILE_COLUMN = 1
 DEVICE_COLUMN = 2
+RECORD_COLUMN = 4
 
 
 class StreamTable(DataTable):
     """the Streams table. A click on a row's SSH Profile cell, or Enter on a
     row, asks for the list of machines that can capture the stream; a click
-    on its Device cell, for the devices of that machine."""
+    on its Device cell, for the devices of that machine; on its Record cell,
+    for whether it records there."""
 
     class ProfileMenuRequested(Message):
         def __init__(self, row: int) -> None:
@@ -640,6 +642,11 @@ class StreamTable(DataTable):
             self.row = row
 
     class DeviceMenuRequested(Message):
+        def __init__(self, row: int) -> None:
+            super().__init__()
+            self.row = row
+
+    class RecordMenuRequested(Message):
         def __init__(self, row: int) -> None:
             super().__init__()
             self.row = row
@@ -654,6 +661,8 @@ class StreamTable(DataTable):
             self.post_message(self.ProfileMenuRequested(row))
         elif meta.get("column") == DEVICE_COLUMN:
             self.post_message(self.DeviceMenuRequested(row))
+        elif meta.get("column") == RECORD_COLUMN:
+            self.post_message(self.RecordMenuRequested(row))
 
     def action_select_cursor(self) -> None:
         super().action_select_cursor()
@@ -676,6 +685,9 @@ class StreamTable(DataTable):
 
     def device_cell_region(self, row: int) -> Region:
         return self.cell_region(row, DEVICE_COLUMN)
+
+    def record_cell_region(self, row: int) -> Region:
+        return self.cell_region(row, RECORD_COLUMN)
 
 
 class StreamProfileMenu(ModalScreen):
@@ -815,12 +827,17 @@ class StreamPanel(Widget):
     #stream-recordings Button {
         margin: 0 1;
     }
+    /* the buttons wrap onto another line instead of running off the right
+       edge when the pane is narrow: ItemGrid fits as many columns as there
+       is room for, and gives up one at a time as it shrinks */
     #stream-actions {
         height: auto;
-        padding: 1 0;
+        padding: 1 1;
+        grid-gutter: 1 2;
     }
     #stream-actions Button {
-        margin: 0 1;
+        width: 1fr;
+        height: 3;
     }
     """
 
@@ -927,8 +944,9 @@ class StreamPanel(Widget):
         return str(entry.get("record_path") or "").strip()
 
     class RecordToggleRequested(Message):
-        """flip a stream's capture-side recording; the launcher owns the config
-        of the host the card is on and writes it there."""
+        """a row's Record was picked: whether the stream also records on the
+        machine that captures it. The launcher owns the config of the host the
+        card is on and writes it there."""
 
         def __init__(self, stream_name: str, record: bool) -> None:
             super().__init__()
@@ -938,7 +956,7 @@ class StreamPanel(Widget):
     class KeepDaysChangeRequested(Message):
         """Manage set how long the recordings of the streams here stay on their
         capture hosts; the launcher writes it into the config of the host the
-        card is on, as it does for Record on/off."""
+        card is on, as it does for the Record column."""
 
         def __init__(self, keep_days: dict[str, int]) -> None:
             super().__init__()
@@ -947,7 +965,7 @@ class StreamPanel(Widget):
     class SshProfileChangeRequested(Message):
         """a row's SSH Profile was picked: the machine that runs the stream's
         ffmpeg, "" for an external stream. The launcher writes it into the
-        config of the host the card is on, as it does for Record on/off."""
+        config of the host the card is on, as it does for the Record column."""
 
         def __init__(self, stream_name: str, ssh_profile: str) -> None:
             super().__init__()
@@ -970,12 +988,18 @@ class StreamPanel(Widget):
         "or microphone to the Stream Server, the bases pull it. Started once, it serves any number of sessions. "
         "Status is its ffmpeg (Exited: it stopped by itself, Logs says why); Stream Server, what the server receives.\n"
         "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
-        "else publishes; Device (click it): its camera or microphone there. Record on/off: also record on the "
-        "capture device. The Stream Server records on its side whatever reaches it (its card, Config tab).\n"
+        "else publishes; Device (click it): its camera or microphone there; Record (click it): whether it also "
+        "records there. The Stream Server records on its side whatever reaches it (its card, Config tab).\n"
         "Recordings are filed by day on the capture device, not by session. Manage lists them there, deletes "
         "them, and sets how long they are kept. A session's part of them (and of the Stream Server's) is "
         "Sessions → Export Streams."
     )
+
+    # what a Record cell offers: record on the capture device next to the push, or not
+    _RECORD_OPTIONS = [
+        ("yes  (also record on the capture device)", "yes"),
+        ("no  (publish only)", "no"),
+    ]
 
     # how a stream stops being external
     _EXTERNAL_HINT = (
@@ -993,12 +1017,11 @@ class StreamPanel(Widget):
             with Horizontal(id="stream-recordings"):
                 yield Label("Recordings:")
                 yield Button("Manage", variant="primary", id="stream-btn-manage")
-            with Horizontal(id="stream-actions"):
+            with ItemGrid(id="stream-actions", min_column_width=13, max_column_width=16):
                 yield Button("Start", variant="success", id="stream-btn-start")
                 yield Button("Stop", variant="error", id="stream-btn-stop")
                 yield Button("Logs", variant="primary", id="stream-btn-logs")
                 yield Button("Probe", variant="warning", id="stream-btn-probe")
-                yield Button("Record on/off", variant="default", id="stream-btn-record")
                 yield Button("Start All", variant="success", id="stream-btn-start-all")
                 yield Button("Stop All", variant="error", id="stream-btn-stop-all")
                 yield Button("Refresh", variant="primary", id="stream-btn-refresh")
@@ -1091,7 +1114,9 @@ class StreamPanel(Widget):
         # the arrows line up at the right edge of the column, under its heading
         width = max([len("SSH Profile") - 3] + [cell_len(stream.ssh_profile or "-") for stream in self._streams])
         device_width = max([len("Device") - 3] + [cell_len(stream.device or "-") for stream in self._streams])
+        record_width = max([len("Record") - 3] + [cell_len(self._record_cell(stream)) for stream in self._streams])
         for stream in self._streams:
+            record = self._record_cell(stream)
             state = self._states.get(stream.name)
             if not stream.ssh_profile:
                 status = "External"
@@ -1114,8 +1139,10 @@ class StreamPanel(Widget):
                 Text.assemble((stream.device or "-") + " " * (device_width - cell_len(stream.device or "-")),
                               ("  ▾", "dim")) if stream.ssh_profile else "-",
                 stream.target,
-                # nobody records an external stream here: the console does not run its ffmpeg
-                (self._record_cell(stream) if stream.ssh_profile else "n/a") if stream.record else "-",
+                # a dropdown too; nobody records an external stream here, as the
+                # console does not run its ffmpeg
+                Text.assemble(record + " " * (record_width - cell_len(record)),
+                              ("  ▾", "dim")) if stream.ssh_profile else "n/a",
                 status,
                 Text("● live", "green") if live == "live" else
                 Text("○ not live", "dim") if live == "idle" else
@@ -1228,6 +1255,33 @@ class StreamPanel(Widget):
 
         self.app.push_screen(StreamProfileMenu(options, current, anchor), picked)
 
+    def on_stream_table_record_menu_requested(self, event: StreamTable.RecordMenuRequested) -> None:
+        """a Record cell was clicked: whether the stream also records on the
+        machine that captures it, next to the push. The keep time of those
+        recordings stays Manage's, for every stream of the card at once."""
+        event.stop()
+        if not 0 <= event.row < len(self._streams):
+            return
+        stream = self._streams[event.row]
+        if not stream.ssh_profile:
+            self._log(
+                f"[yellow]{stream.name} is external: the console does not run its ffmpeg, so it cannot "
+                f"make it record. {self._EXTERNAL_HINT}[/yellow]"
+            )
+            return
+        if self._statuses.get(stream.name, False):
+            self._log(f"[yellow]Stop {stream.name} first: its ffmpeg was started without the change.[/yellow]")
+            return
+        table = self.query_one("#stream-table", StreamTable)
+        menu = StreamProfileMenu(self._RECORD_OPTIONS, "yes" if stream.record else "no",
+                                 table.record_cell_region(event.row))
+
+        def picked(choice: str | None) -> None:
+            if choice is not None and (choice == "yes") != bool(stream.record):
+                self.post_message(self.RecordToggleRequested(stream.name, choice == "yes"))
+
+        self.app.push_screen(menu, picked)
+
     def _get_selected_stream(self) -> StreamDef | None:
         try:
             table = self.query_one("#stream-table", DataTable)
@@ -1270,19 +1324,6 @@ class StreamPanel(Widget):
                 self._log(f"[yellow]{stream.name} is external; no managed tmux logs.[/yellow]")
             else:
                 self._log("[yellow]Select a stream row first.[/yellow]")
-        elif btn == "stream-btn-record":
-            stream = self._get_selected_stream()
-            if stream is None:
-                self._log("[yellow]Select a stream row first.[/yellow]")
-            elif not stream.ssh_profile:
-                self._log(
-                    f"[yellow]{stream.name} is external: the console does not run its ffmpeg, so it "
-                    f"cannot make it record. {self._EXTERNAL_HINT.format(name=stream.name)}[/yellow]"
-                )
-            elif self._statuses.get(stream.name, False):
-                self._log(f"[yellow]Stop {stream.name} first: its ffmpeg was started without the change.[/yellow]")
-            else:
-                self.post_message(self.RecordToggleRequested(stream.name, not stream.record))
         elif btn == "stream-btn-manage":
             self._open_recordings_manager()
         elif btn == "stream-btn-probe":
@@ -1316,7 +1357,10 @@ class StreamPanel(Widget):
 
     @staticmethod
     def _record_cell(stream: StreamDef) -> str:
-        """the Record column of a stream that records: yes, and how long its recordings stay."""
+        """the Record column of a stream the console runs: whether it also records
+        on the machine that captures it, and how long those recordings stay there."""
+        if not stream.record:
+            return "no"
         return f"yes, {stream.record_keep_days} d" if stream.record_keep_days > 0 else "yes"
 
     def _open_recordings_manager(self) -> None:
