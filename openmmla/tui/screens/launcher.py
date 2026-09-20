@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -3082,6 +3083,153 @@ def _vllm_serve_command(config: dict | None = None) -> str:
         "--api-key", cfg["api_key"],
     ]
     return " ".join(shlex.quote(arg) for arg in args)
+
+
+# one Terminal window per component on a Mac, told what to run once its shell
+# is ready for it. Terminal has no AppleScript call for a new tab, so each
+# component after the first asks for one with a Cmd-T keystroke; what comes
+# back is a tab on some Macs and a window of its own on others, and either is
+# fine as long as it is that new shell the command goes to. The command is
+# typed into the shell found by its tty, never into "the front window", which
+# is how a component's command used to land in the window of the component
+# before it, where its program was already running: the command was read as
+# that program's input and the component never started, while the log said it
+# had launched. A shell still reading its startup files (conda, oh-my-zsh)
+# drops what is typed into it, so each one is given until it is idle. When no
+# new shell comes -- no new tab, or System Events not allowed to press Cmd-T
+# -- the component gets a window of its own instead of a busy tab, and the
+# commands that got nowhere are named in the log.
+# argv: one shell command per component. Returns one line each: tab, window,
+# or failed.
+_MAC_TABS_SCRIPT = r"""
+on run argv
+	set outcomes to {}
+	try
+		tell application "Terminal"
+			activate
+			do script (item 1 of argv)
+		end tell
+		set end of outcomes to "window"
+	on error
+		set end of outcomes to "failed"
+	end try
+	set canKeystroke to false
+	if (count of argv) > 1 then set canKeystroke to my waitUntilFront()
+	repeat with i from 2 to (count of argv)
+		set shellTab to missing value
+		if canKeystroke then set shellTab to my openShell()
+		try
+			if shellTab is missing value then
+				tell application "Terminal" to do script (item i of argv)
+				set end of outcomes to "window"
+			else
+				my waitUntilReady(shellTab)
+				tell application "Terminal" to do script (item i of argv) in shellTab
+				set end of outcomes to "tab"
+			end if
+		on error
+			set end of outcomes to "failed"
+		end try
+	end repeat
+	return my joinText(outcomes)
+end run
+
+-- Cmd-T goes wherever the keyboard is: false when Terminal will not take it,
+-- and every component then gets a window of its own
+on waitUntilFront()
+	repeat 30 times
+		try
+			tell application "System Events"
+				if frontmost of process "Terminal" then return true
+				set frontmost of process "Terminal" to true
+			end tell
+		on error
+			return false
+		end try
+		delay 0.1
+	end repeat
+	return false
+end waitUntilFront
+
+on ttysNow()
+	set found to {}
+	tell application "Terminal"
+		repeat with w in windows
+			try
+				repeat with t in tabs of w
+					try
+						set end of found to tty of t
+					end try
+				end repeat
+			end try
+		end repeat
+	end tell
+	return found
+end ttysNow
+
+-- the shell a Cmd-T made, wherever Terminal put it: the one tab whose tty was
+-- not open before. Missing value when the keystroke made none
+on openShell()
+	try
+		set before_ to my ttysNow()
+	on error
+		return missing value
+	end try
+	try
+		tell application "System Events" to tell process "Terminal"
+			set frontmost to true
+			keystroke "t" using command down
+		end tell
+	on error
+		return missing value
+	end try
+	repeat 60 times
+		delay 0.05
+		try
+			tell application "Terminal"
+				repeat with w in windows
+					repeat with t in tabs of w
+						set thisTty to ""
+						try
+							set thisTty to tty of t
+						end try
+						if thisTty is not "" and before_ does not contain thisTty then
+							return contents of t
+						end if
+					end repeat
+				end repeat
+			end tell
+		end try
+	end repeat
+	return missing value
+end openShell
+
+-- idle means the startup files are read and the prompt is up: what is typed
+-- before that is lost
+on waitUntilReady(theTab)
+	repeat 60 times
+		try
+			tell application "Terminal"
+				if (count of processes of theTab) > 0 and not busy of theTab then return true
+			end tell
+		end try
+		delay 0.1
+	end repeat
+	return false
+end waitUntilReady
+
+on joinText(theList)
+	set saved to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to linefeed
+	set out to theList as text
+	set AppleScript's text item delimiters to saved
+	return out
+end joinText
+"""
+
+# two cards started at once would trade keystrokes and new shells, so their
+# windows are opened one launch at a time
+_MAC_TABS_LOCK = threading.Lock()
 
 
 class ServicePanel(Widget):
@@ -9896,28 +10044,58 @@ class ServicePanel(Widget):
         return False
 
     def _open_tabs_mac(self, tab_cmds: list[tuple[str, str]]) -> None:
-        """open one Terminal.app window with N tabs on macOS."""
-        script_lines = []
-        _, first_cmd = tab_cmds[0]
-        escaped = first_cmd.replace("\\", "\\\\").replace('"', '\\"')
-        script_lines.append(f'tell application "Terminal" to do script "{escaped}"')
-        script_lines.append('tell application "Terminal" to activate')
+        """open a Terminal.app tab or window per component on macOS.
 
-        for _, cmd in tab_cmds[1:]:
-            escaped = cmd.replace("\\", "\\\\").replace('"', '\\"')
-            script_lines.append("delay 0.5")
-            script_lines.append(
-                'tell application "System Events" to keystroke "t" using command down'
-            )
-            script_lines.append("delay 0.3")
-            script_lines.append(
-                f'tell application "Terminal" to do script "{escaped}" in the front window'
-            )
+        The commands go to osascript as arguments (_MAC_TABS_SCRIPT), never
+        quoted into the script itself, and the launch runs in a thread of its
+        own: what it opens takes a few seconds, as a new shell is given the
+        time its startup files need before it is typed into, and the launcher
+        stays live meanwhile."""
+        if not tab_cmds:
+            return
+        app = None
+        try:
+            app = self.app
+        except Exception:
+            pass
+        threading.Thread(
+            target=self._run_mac_tabs,
+            args=([label for label, _ in tab_cmds], [cmd for _, cmd in tab_cmds], app),
+            daemon=True,
+        ).start()
 
-        args = ["osascript"]
-        for line in script_lines:
-            args.extend(["-e", line])
-        subprocess.Popen(args)
+    def _run_mac_tabs(self, labels: list[str], cmds: list[str], app) -> None:
+        """run the window opener and say in the log what got nowhere."""
+        def report(message: str) -> None:
+            try:
+                app.call_from_thread(self._log, message)
+            except Exception:
+                pass
+
+        with _MAC_TABS_LOCK:
+            try:
+                done = subprocess.run(
+                    ["osascript", "-", *cmds],
+                    input=_MAC_TABS_SCRIPT, capture_output=True, text=True,
+                    timeout=60 + 20 * len(cmds),
+                )
+            except Exception as e:
+                report(f"[red]Could not open Terminal windows: {e}[/red]")
+                return
+
+        places = [line.strip() for line in (done.stdout or "").splitlines() if line.strip()]
+        if done.returncode != 0:
+            detail = (done.stderr or "").strip().splitlines()
+            report(f"[red]Terminal could not be told to run these: "
+                   f"{detail[-1] if detail else 'osascript failed'}[/red]")
+        lost = [label for i, label in enumerate(labels)
+                if i >= len(places) or places[i] == "failed"]
+        if lost:
+            report(f"[red]No window ran: {', '.join(lost)} — start them again.[/red]")
+        elif places[1:].count("window") == len(places) - 1 and len(places) > 1:
+            # Terminal made no tab: allow the app running the launcher under
+            # Privacy & Security > Accessibility to keep them in one window
+            report("[dim]No new tabs: each component got a window of its own.[/dim]")
 
     def _open_tabs_gnome(self, tab_cmds: list[tuple[str, str]]) -> None:
         """open one gnome-terminal window with N tabs."""
