@@ -68,8 +68,8 @@ services:
       - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${INFLUXDB_PORT:-8086}:8086"
       # the same port on a second address, for processes on this machine. pinning
       # INFRA_BIND_ADDRESS to one interface leaves the host unable to reach its own
-      # databases: its name resolves to 127.0.1.1 and nothing listens there. left
-      # unset this line repeats the one above and compose collapses the duplicate,
+      # databases by name: the name resolves to 127.0.1.1 there and nothing listens.
+      # left unset this line repeats the one above and compose collapses the duplicate,
       # so the default stays a single mapping — see INFRA_LOOPBACK_ADDRESS in .env.example
       - "${INFRA_LOOPBACK_ADDRESS:-${INFRA_BIND_ADDRESS:-0.0.0.0}}:${INFLUXDB_PORT:-8086}:8086"
     healthcheck:

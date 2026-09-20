@@ -173,43 +173,40 @@ Do not go the other way and reuse the other project's instance: it is usually bo
 
 `INFRA_BIND_ADDRESS` pinned to one interface — a tailnet or VPN address, say — leaves that
 machine unable to dial its own databases by name. On Debian and Ubuntu the host's own name
-resolves to `127.0.1.1` (it is in `/etc/hosts`), nothing is published there, and anything
-running locally gets `Connection refused` from a URL that works perfectly from every other
-machine. The dashboard backend is the one that runs on the database host, so this shows up
-as an empty Session Explorer.
+resolves to `127.0.1.1` on the host itself (it is in `/etc/hosts`), nothing is published there,
+and anything running locally gets `Connection refused` from a URL that works perfectly from
+every other machine. The dashboard backend is the one that runs on the database host, so this
+shows up as a Session Explorer that could not reach the database.
 
-Publish the same ports on loopback as well:
+Publish the same ports on that address as well:
+
+```bash
+getent hosts "$(hostname)"           # on the database host: 127.0.1.1 on Debian/Ubuntu
+```
 
 ```bash
 # docker/.env, on the database host only
-INFRA_BIND_ADDRESS=100.x.x.x      # tailnet interface, as before
-INFRA_LOOPBACK_ADDRESS=127.0.0.1  # plus loopback, for this machine's own processes
+INFRA_BIND_ADDRESS=100.x.x.x         # tailnet interface, as before
+INFRA_LOOPBACK_ADDRESS=127.0.1.1     # what the host's own name resolves to there
 ```
 
 ```bash
 docker compose -f docker/docker-compose.infra.yml up -d influxdb mongodb
 ```
 
+Every config keeps the host name — `http://server-01:8087` resolves to the tailnet address on
+the other machines and to `127.0.1.1` on server-01, and both are published — so System Settings
+syncs the same value everywhere, and the dashboard can move to another machine without a config
+change. Prefer this over `localhost`: a `localhost` URL is only right on the database host, so it
+has to be pinned there with `SystemServicesOverride`, which also stops token rotations from
+reaching that file.
+
 A ports change needs a **recreate**, which `up -d` does and `restart` does not; naming the two
 services keeps MediaMTX and any recording it is writing untouched. The named volumes are not
 affected. Leave `INFRA_LOOPBACK_ADDRESS` empty while `INFRA_BIND_ADDRESS` is `0.0.0.0` — a
-wildcard bind and a `127.0.0.1` bind on one port is refused by the kernel and the container
-will not start at all.
-
-Then let that machine's own config say `localhost`, and pin the section so a later sync from
-the console does not put the host name back:
-
-```yaml
-# pipelines/uber-server/dashboard/flask-backend/config.yml, on the database host
-SystemServicesOverride:
-  - InfluxDB
-InfluxDB:
-  url: http://localhost:8087
-```
-
-A pinned section is the pipeline's own: System Settings stops writing it, so a rotated token
-has to be pasted here too. Exposure is unchanged by the extra publish — loopback is reachable
-only from the machine itself, and its own processes could already dial the bind address.
+wildcard bind and a specific bind on one port is refused by the kernel and the container will
+not start at all. Exposure is unchanged: a `127.x` address is reachable only from the machine
+itself, and its own processes could already dial the bind address.
 
 ### Pointing OpenMMLA at the stack
 
