@@ -18,6 +18,32 @@ from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze
 from openmmla.utils.video.image import encode_image_base64
 
+SUPPORTED_BACKENDS = (
+    'ollama', 'vllm', 'openai', 'qwen', 'gemini',
+    'deepseek', 'llamacpp', 'grok', 'zhipuai', 'intern',
+)
+
+# what the console tells the user to do about a config field it cannot supply
+_FILL_IN_HINT = (
+    "Fill it in the management console (Launcher -> VFA Server -> Config, with Host set to the "
+    "machine that runs the service), then start VFA Server again. The console strips unfilled "
+    "<...> placeholders when it saves, so a field nobody filled leaves no line in the file."
+)
+
+
+def _mask_secret(value) -> str:
+    """what a secret may look like in a log: docker logs of this container are
+    shown in the console's log pane, where the whole key would be readable."""
+    text = str(value or "")
+    return f"{text[:4]}...{text[-4:]}" if len(text) >= 12 else "(set)" if text else "(unset)"
+
+
+def _is_unfilled(value) -> bool:
+    """an <...> placeholder the user never replaced counts as no value at all."""
+    text = str(value or "").strip()
+    return text.startswith("<") and text.endswith(">")
+
+
 class MultiAngleVLLMFrameAnalyzer(Server):
     """Multi-angle VLLM frame analyzer that processes multiple images captured simultaneously from different angles.
     It combines information from different views for more comprehensive analysis of individuals' activities,
@@ -36,6 +62,22 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self._setup_objects()
         self._load_prompt_templates()
 
+    def _config_where(self, *keys) -> str:
+        """name a config field the way the user sees it: its path and its file."""
+        path = ".".join(("VLLMFrameAnalyzer",) + tuple(str(k) for k in keys))
+        return f"{path} in {self.config_path}"
+
+    def _required_backend_value(self, backend_config: dict, key: str):
+        """a backend field the analyzer cannot start without.
+
+        Missing and unfilled are the same thing here, and both stop the start
+        with a message naming the field: retrying cannot fix a config, so the
+        container must fail on its own terms rather than die of a KeyError."""
+        value = backend_config.get(key)
+        if value is None or str(value).strip() == "" or _is_unfilled(value):
+            raise ValueError(f"{self._config_where(self.backend, key)} is not set. {_FILL_IN_HINT}")
+        return value
+
     def _setup_yaml(self):
         analyzer_config = self.config['VLLMFrameAnalyzer']  # type: ignore
 
@@ -51,7 +93,10 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         else:
             self.families = None
             
-        self.backend = analyzer_config['backend']
+        backend = analyzer_config.get('backend')
+        if backend is None or _is_unfilled(backend):
+            raise ValueError(f"{self._config_where('backend')} is not set. {_FILL_IN_HINT}")
+        self.backend = str(backend).strip()
         self.end_to_end = analyzer_config.get('end_to_end', False)
         
         # Image detail setting for vision models (low/high/auto)
@@ -74,14 +119,21 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"Prompt profile: {self.prompt_profile}")
 
 
-        if self.backend in ['ollama', 'vllm', 'openai', 'qwen', 'gemini', 'deepseek', 'llamacpp', 'grok', 'zhipuai', 'intern']:
-            backend_config = analyzer_config[self.backend]
-        else:
-            raise ValueError(f"Unsupported backend: {self.backend}")
+        if self.backend not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"Unsupported backend '{self.backend}' in {self.config_path}. "
+                f"Use one of: {', '.join(SUPPORTED_BACKENDS)}."
+            )
+        backend_config = analyzer_config.get(self.backend)
+        if not isinstance(backend_config, dict):
+            raise ValueError(
+                f"{self._config_where(self.backend)} has no settings. "
+                f"{_FILL_IN_HINT}"
+            )
 
-        self.api_key = backend_config['api_key']
-        self.vlm_model = backend_config['vlm_model']
-        self.llm_model = backend_config['llm_model']
+        self.api_key = self._required_backend_value(backend_config, 'api_key')
+        self.vlm_model = self._required_backend_value(backend_config, 'vlm_model')
+        self.llm_model = self._required_backend_value(backend_config, 'llm_model')
         self.vlm_base_url = backend_config.get('vlm_base_url', None)
         self.llm_base_url = backend_config.get('llm_base_url', None)
 
@@ -102,7 +154,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.temperature = float(self.temperature) if self.temperature is not None else None
         self.top_p = float(self.top_p) if self.top_p is not None else None
 
-        self.logger.info(f"API Key: {self.api_key}")
+        self.logger.info(f"API Key: {_mask_secret(self.api_key)}")
         self.logger.info(f"VLM Model: {self.vlm_model}")
         self.logger.info(f"LLM Model: {self.llm_model}")
         self.logger.info(f"Temperature: {self.temperature if self.temperature is not None else 'not configured'}")

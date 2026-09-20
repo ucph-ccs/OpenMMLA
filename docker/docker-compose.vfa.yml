@@ -21,7 +21,9 @@ x-gpu: &gpu
 services:
   frame-analyzer:
     <<: *gpu
-    restart: unless-stopped
+    # bounded on purpose: a bad config is not fixed by trying again, and an
+    # endless loop only makes the console's status blink as the port comes and goes
+    restart: on-failure:3
     build:
       context: ..
       dockerfile: docker/vfa-frame-analyzer/Dockerfile
@@ -48,7 +50,9 @@ services:
     <<: *gpu
     profiles: ["mllm"]
     image: vllm/vllm-openai:latest
-    restart: unless-stopped
+    # bounded on purpose: a bad config is not fixed by trying again, and an
+    # endless loop only makes the console's status blink as the port comes and goes
+    restart: on-failure:3
     command: ["--model", "${VLLM_VLM_MODEL:-openbmb/MiniCPM-V-2_6}", "--trust-remote-code"]
     environment:
       HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}

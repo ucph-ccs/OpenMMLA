@@ -11,7 +11,9 @@
 name: openmmla-asr
 
 x-common: &common
-  restart: unless-stopped
+  # bounded on purpose: a bad config is not fixed by trying again, and an
+  # endless loop only makes the console's status blink as the port comes and goes
+  restart: on-failure:3
   environment: &common-env
     PROJECT_DIR: /project
     CONFIG_PATH: /project/config.yml
