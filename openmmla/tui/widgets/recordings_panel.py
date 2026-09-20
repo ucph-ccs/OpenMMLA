@@ -86,7 +86,8 @@ class StreamServerRecordingsPanel(Widget):
         self._recorded: list[recordings.Recorded] = []
         self._sizes: dict[str, int] = {}
         self._free: int | None = None
-        self._retention: float | None = None
+        self._recorder: recordings.Recorder | None = None
+        self._live: dict[str, datetime | None] = {}  # what is publishing, and since when
         self._pending: tuple | None = None  # a deletion waiting for its second press
 
     def compose(self) -> ComposeResult:
@@ -124,9 +125,9 @@ class StreamServerRecordingsPanel(Widget):
 
     async def _load(self) -> None:
         try:
-            recorded, kept = await asyncio.to_thread(self._ask_server)
+            recorded, state, live = await asyncio.to_thread(self._ask_server)
         except recordings.RecordingsError as error:
-            self._recorded, self._retention = [], None
+            self._recorded, self._recorder, self._live = [], None, {}
             self._sizes, self._free = {}, None
             self._show_inventory()
             self._set_log(
@@ -135,10 +136,10 @@ class StreamServerRecordingsPanel(Widget):
                 "in mediamtx.yml (Config tab)."
             )
             return
-        self._recorded, self._retention = recorded, kept
+        self._recorded, self._recorder, self._live = recorded, state, live
         self._sizes, self._free = {}, None
         self._show_inventory()
-        self._set_log("" if recorded else "The server holds no recording.")
+        self._set_log(self._diagnosis())
         if self._run_shell is None or not self._quoted_root or not recorded:
             return
         usage = await asyncio.to_thread(self._ask_disk, [item.path for item in recorded])
@@ -149,9 +150,19 @@ class StreamServerRecordingsPanel(Widget):
         self._sizes, self._free = usage
         self._show_inventory()
 
-    def _ask_server(self) -> tuple[list[recordings.Recorded], float]:
-        return (recordings.inventory(self._host, self._api_port),
-                recordings.retention(self._host, self._api_port))
+    def _ask_server(self) -> tuple[list[recordings.Recorded], recordings.Recorder,
+                                   dict[str, datetime | None]]:
+        """the inventory and the settings it has to be read against. What is
+        publishing comes last and may fail on its own: it sharpens the reading
+        of an empty inventory, and a tab that works without it is worth more
+        than one that goes red when that one call does not answer."""
+        held = recordings.inventory(self._host, self._api_port)
+        state = recordings.recorder(self._host, self._api_port)
+        try:
+            live = recordings.publishing(self._host, self._api_port)
+        except recordings.RecordingsError:
+            live = {}
+        return held, state, live
 
     def _ask_disk(self, paths: list[str]) -> tuple[dict[str, int], int | None] | None:
         output = self._run_shell(bash(recordings.usage_script(self._quoted_root, paths)))
@@ -169,7 +180,10 @@ class StreamServerRecordingsPanel(Widget):
             size = recordings.human_size(self._sizes.get(item.path)) if self._sizes else ""
             table.add_row(item.path, str(len(item.segments)), _stamp(first), _stamp(last), size)
         segments = sum(len(item.segments) for item in self._recorded)
-        parts = [f"{self._host}:{self._api_port}", f"kept {recordings.describe_retention(self._retention)}",
+        kept = self._recorder.retention if self._recorder is not None else None
+        parts = [f"{self._host}:{self._api_port}",
+                 "recording off" if self._recorder is not None and not self._recorder.record
+                 else f"kept {recordings.describe_retention(kept)}",
                  f"{len(self._recorded)} path(s), {segments} segment(s)"]
         if self._sizes:
             parts[-1] += f", {recordings.human_size(sum(self._sizes.values()))}"
@@ -186,6 +200,37 @@ class StreamServerRecordingsPanel(Widget):
         if table.row_count == 0 or row is None or not 0 <= row < len(self._recorded):
             return None
         return self._recorded[row].path
+
+    def _diagnosis(self) -> str:
+        """why the table holds what it holds. An empty one has three readings,
+        and the server knows which: it is not recording, it is recording and
+        cannot write, or nothing has been published to it."""
+        state = self._recorder
+        if state is not None and not state.record:
+            return (
+                "[yellow]The server is not recording: the mediamtx.yml it started with has record: no under "
+                "pathDefaults, so nothing published to it reaches the disk. The Config tab switches it back "
+                "on, and the server reads that file only at startup — Stop and Start it afterwards.[/yellow]"
+            )
+        late = recordings.unrecorded(self._live, self._recorded)
+        if late:
+            shown = ", ".join(escape(path) for path in late[:4])
+            if len(late) > 4:
+                shown += f" and {len(late) - 4} more"
+            where = f" It records to {escape(state.folder)}." if state is not None and state.folder else ""
+            return (
+                f"[red]{shown} {'is' if len(late) == 1 else 'are'} publishing right now, and the server has "
+                f"written nothing for {'it' if len(late) == 1 else 'them'}: the recorder is being handed the "
+                f"stream and nothing is landing.{where} A container whose record folder was renamed or removed "
+                "under it keeps the old one open and can create nothing in it, and only a new container picks "
+                "the folder up again. The server says which it is: `docker compose -f "
+                "docker/docker-compose.infra.yml logs --tail 50 mediamtx` on its host, or the tmux window of "
+                "a native run.[/red]"
+            )
+        if not self._recorded:
+            return ("The server holds no recording, and nothing is publishing to it right now."
+                    if not self._live else "The server holds no recording.")
+        return ""
 
     def _set_log(self, text: str) -> None:
         try:
@@ -253,7 +298,7 @@ class StreamServerRecordingsPanel(Widget):
             note += ("; ..." if len(failures) > 3 else "") + "[/red]"
         self._set_log(note)
         try:
-            self._recorded, self._retention = await asyncio.to_thread(self._ask_server)
+            self._recorded, self._recorder, self._live = await asyncio.to_thread(self._ask_server)
         except recordings.RecordingsError:
             return
         self._sizes, self._free = {}, None

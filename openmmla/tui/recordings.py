@@ -10,7 +10,10 @@ session's start and end.
 The server keeps a segment for `recordDeleteAfter` and then deletes it itself,
 so a session's footage has to be exported before then; this module also asks
 the server what it holds and for how long, and removes segments through its
-API, for the Recordings tab of the Stream Server card."""
+API, for the Recordings tab of the Stream Server card. It asks what the server
+is set to record and what it is being handed as well: an empty disk because
+nothing was published reads like an empty disk because the recorder cannot
+write, and only the server can say which of the two it is."""
 
 from __future__ import annotations
 
@@ -148,20 +151,47 @@ def inventory(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> lis
     return [Recorded(name, tuple(sorted(found[name]))) for name in sorted(found)]
 
 
-def live_paths(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> set[str]:
-    """the paths being published to the stream server right now (control API:
-    a path is ready while its source sends)."""
-    live: set[str] = set()
+def publishing(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> dict[str, datetime | None]:
+    """the paths being published to the stream server right now, each with the
+    moment it became ready (control API: a path is ready while its source
+    sends). The time is None when the server does not report one."""
+    live: dict[str, datetime | None] = {}
     page = 0
     while True:
         data = _get_json(f"{_origin(host, api_port)}/v3/paths/list?itemsPerPage=100&page={page}", timeout)
         for item in data.get("items") or []:
             if item.get("ready") and item.get("name"):
-                live.add(str(item["name"]))
+                live[str(item["name"])] = parse_time(item.get("readyTime"))
         page += 1
         if page >= int(data.get("pageCount") or 0):
             break
     return live
+
+
+def live_paths(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> set[str]:
+    """the names alone of what is being published right now."""
+    return set(publishing(host, api_port, timeout))
+
+
+# a path that has only just gone live has not had the time to land a segment yet
+RECORD_GRACE_SECONDS = 15.0
+
+
+def unrecorded(live: dict[str, datetime | None], recorded: list[Recorded],
+               now: datetime | None = None) -> list[str]:
+    """the paths being published that the server holds nothing of, although
+    they have been up long enough for a segment to exist: the recorder is
+    handed them and keeps none of it. A folder it cannot write to reads this
+    way, and so does a path that recording is switched off for."""
+    now = now or datetime.now(timezone.utc)
+    held = {item.path for item in recorded if item.segments}
+    late = []
+    for path in sorted(live):
+        since = live[path]
+        if path in held or (since is not None and (now - since).total_seconds() < RECORD_GRACE_SECONDS):
+            continue
+        late.append(path)
+    return late
 
 
 def segments_before(recorded: list[Recorded], cutoff: datetime) -> list[tuple[str, datetime]]:
@@ -341,12 +371,31 @@ def describe_retention(seconds: float | None) -> str:
     return format_duration(seconds)
 
 
+@dataclass(frozen=True)
+class Recorder:
+    """what the running server does with what is published to it. It is the
+    mediamtx.yml the server read when it started and not the one on disk now,
+    which is the difference a restart makes."""
+    record: bool      # off: nothing published is written at all
+    folder: str       # recordPath, as written: relative to the directory the
+                      # server was started in, which for the container is /
+    retention: float  # recordDeleteAfter in seconds, 0 for ever
+
+
+def recorder(host: str, api_port: int = API_PORT, timeout: float = 5.0) -> Recorder:
+    """the recording settings the server is running with (control API)."""
+    data = _get_json(f"{_origin(host, api_port)}/v3/config/pathdefaults/get", timeout)
+    data = data if isinstance(data, dict) else {}
+    seconds = parse_duration(data.get("recordDeleteAfter"))
+    return Recorder(record=bool(data.get("record", True)),
+                    folder=str(data.get("recordPath") or "").strip(),
+                    retention=0.0 if seconds is None else seconds)
+
+
 def retention(host: str, api_port: int = API_PORT, timeout: float = 5.0) -> float:
     """seconds the running server keeps a segment for: `recordDeleteAfter` of
     its path defaults. 0 is for ever, which the API reports as an empty string."""
-    data = _get_json(f"{_origin(host, api_port)}/v3/config/pathdefaults/get", timeout)
-    seconds = parse_duration(data.get("recordDeleteAfter")) if isinstance(data, dict) else None
-    return 0.0 if seconds is None else seconds
+    return recorder(host, api_port, timeout).retention
 
 
 def expiry(start: datetime | None, retention_seconds: float | None) -> datetime | None:
