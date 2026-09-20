@@ -79,14 +79,17 @@ def resolve_and_check_one(server, check_port):
         server['ip'], server['state'], server['routed'] = None, "unresolved", False
         return
 
-    # Step 2: how its port answers. nginx notices by itself a server that
-    # starts or stops (one that fails is skipped for fail_timeout, then tried
-    # again), so a machine that refuses the port now is listed too, and its
-    # server is used once it starts. A machine that does not answer at all is
-    # left out: nginx would wait proxy_connect_timeout on it at every try
+    # Step 2: every server whose name resolves is routed, whatever its port
+    # answers right now. nginx takes up by itself a server that starts later (one
+    # that fails is skipped for fail_timeout and then tried again with a real
+    # request), so what the render finds running must not decide what the config
+    # holds: that is what made the Gateway need a new start after the ASR or VFA
+    # server. The probe only tells the summary below what is up. A machine that
+    # does not answer costs one request per fail_timeout up to
+    # proxy_connect_timeout, which nginx then sends on to the next server
     server['ip'] = ip
     server['state'] = probe_port(ip, port) if check_port else "unchecked"
-    server['routed'] = server['state'] != "silent"
+    server['routed'] = True
 
 
 # ========== 渲染 Jinja 模板 ==========
@@ -95,8 +98,9 @@ def resolve_and_check_one(server, check_port):
 _STATES = {
     "open": "✅ {ip}",
     "refused": "⏳ {ip}: nothing on port {port} yet, nginx sends to it once it answers",
-    "silent": "💤 {ip} does not answer: left out, Start the Gateway again once it is on",
-    "unresolved": "❌ the name does not resolve: left out",
+    "silent": "💤 {ip} does not answer (off, out of reach, or a firewall drops it): routed all the "
+              "same, nginx skips it while it fails",
+    "unresolved": "❌ the name does not resolve: left out, nginx would not start with it",
     "unchecked": "➖ {ip} (not checked)",
 }
 
@@ -122,8 +126,8 @@ def render_nginx_template(config, template_path, output_path):
     else:
         for service, servers in config.get("upstreams", {}).items():
             if not any(s.get("routed") for s in servers):
-                print(f"⚠️  Skipped upstream '{service}': none of its machines answers, so /{service} "
-                      f"answers 404 until the Gateway is started again with one on.")
+                print(f"⚠️  Upstream '{service}': not one of its names resolves, so /{service} answers "
+                      f"503 (which the bases retry) until one does.")
             for s in servers:
                 status = _STATES[s["state"]].format(ip=s["ip"], port=s.get("port", 80))
                 print(f"{s['host']} ({service}) → {status}")

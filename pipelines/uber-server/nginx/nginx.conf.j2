@@ -12,9 +12,10 @@ http {
     keepalive_timeout  65;
     client_max_body_size 50M;
 
-    {# the servers whose machine answered at render time (render_nginx.py); nginx itself
+    {# every server whose name resolves (render_nginx.py), running or not: nginx itself
        skips one that fails for fail_timeout and then tries it again, so a server
-       that starts later is used without a new render. The zone shares what the
+       that starts later is used without a new render, and the config does not
+       depend on what was up when it was rendered. The zone shares what the
        workers learn of them (256k: 64k is too small where pages are 16 KB) #}
     {% for name, servers in config.upstreams.items() if servers | selectattr('routed') | list | length > 0 %}
     upstream {{ name }} {
@@ -44,10 +45,20 @@ http {
             proxy_pass http://{{ name }};
             proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
             proxy_next_upstream_tries 3;
-            {# a machine gone off since the render holds a request this long, once per fail_timeout #}
-            proxy_connect_timeout 3s;
+            {# a machine that is off holds a request this long, once per fail_timeout, before
+               proxy_next_upstream sends it on; a base waits 10 s for its answer #}
+            proxy_connect_timeout 2s;
             proxy_send_timeout 350s;
             proxy_read_timeout 350s;
+        }
+        {% endfor %}
+
+        {# a service not one of whose names resolves has no upstream to send to, and gets
+           a route all the same: 503 says "no server answers" and the bases retry it,
+           where a missing route (404) reads as a missing service and is not retried #}
+        {% for name, servers in config.upstreams.items() if servers | selectattr('routed') | list | length == 0 %}
+        location /{{ name }} {
+            return 503;
         }
         {% endfor %}
     }

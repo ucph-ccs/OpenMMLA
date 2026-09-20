@@ -60,6 +60,7 @@ from openmmla.tui.system_services import (
     harvest_system_services_from_configs,
     load_system_service_values,
     load_system_services_config,
+    get_sudo_password,
     save_system_service_section,
     pipeline_section_overrides,
     shared_section_drift,
@@ -67,7 +68,7 @@ from openmmla.tui.system_services import (
 from openmmla.tui.ssh import (
     REFRESH_TARGETS_OPTION, TARGET_PLATFORMS, TARGET_STATES, WINDOWS_HOST_NOTE, is_select_sentinel, remote_platform, probe_all_profiles, probe_ssh_endpoint, summarize_states, target_options, target_state_label,
     load_ssh_profiles, get_profile_by_name, ssh_run_sync,
-    scp_file_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
+    scp_file_async, scp_from_remote_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
     ssh_test_connection,
     wrap_local, wrap_remote,
 )
@@ -380,6 +381,34 @@ def _quote_remote_path(path: str) -> str:
 
 def _remote_path_join(root: str, *parts: str) -> str:
     return "/".join([root.rstrip("/"), *[part.strip("/") for part in parts if part]])
+
+
+def _host_label(host: str) -> str:
+    """how a host reads on screen; 'local' is this machine."""
+    return "Local" if host == "local" else host
+
+
+async def _process_output(proc) -> str:
+    """everything an scp or ssh child wrote, read in chunks: a long line with
+    no newline in it would overrun the stream reader's limit."""
+    assert proc.stdout is not None
+    chunks = []
+    while True:
+        chunk = await proc.stdout.read(4096)
+        if not chunk:
+            break
+        chunks.append(chunk.decode(errors="replace"))
+    return "".join(chunks)
+
+
+def _sync_destination_options(source: str, ssh_profiles: list[str]) -> list[tuple[str, str]]:
+    """the hosts the files shown for `source` can be copied to: every other
+    machine, and this one whenever the files on screen are another host's. What
+    was edited on a server comes back the way it went out."""
+    options = [(name, name) for name in ssh_profiles if name != source]
+    if source != "local":
+        options.insert(0, (_host_label("local"), "local"))
+    return options
 
 
 def _replace_loopback_url(url: object, host: str) -> object:
@@ -1070,24 +1099,31 @@ class TransformMatrixPanel(Widget):
                 classes="tm-muted",
             )
 
-        # Sync is only offered from the local host (push local -> remote).
-        if self.target == "local":
-            if self.ssh_profiles:
-                with Horizontal(classes="tm-actions"):
-                    yield Select(
-                        [(name, name) for name in self.ssh_profiles],
-                        prompt="Select SSH profile...",
-                        id="transform-sync-profile-select",
-                    )
-                    yield Button("Sync to Remote", variant="warning", id="btn-sync-transform-remote")
-            else:
-                yield Static("No SSH profiles configured for sync.", classes="tm-muted")
+        # the files of the host on screen go to any other machine, this one
+        # included: a matrix made on a base station is brought back here the
+        # same way this machine's are sent out.
+        destinations = _sync_destination_options(self.target, self.ssh_profiles)
+        if destinations:
+            with Horizontal(classes="tm-actions"):
+                yield Select(
+                    destinations,
+                    prompt="Select destination host...",
+                    id="transform-sync-host-select",
+                )
+                yield Button("Sync to Host", variant="warning", id="btn-sync-transform-host")
+        else:
+            yield Static("No SSH profiles configured for sync.", classes="tm-muted")
 
     def _set_status(self, text: str) -> None:
         try:
             self.query_one("#tm-status", Static).update(text)
         except Exception:
             pass
+
+    def set_status(self, text: str) -> None:
+        """what a sync started from this tab has to say, said on this tab: the
+        status line of the Config tab is not on screen while this one is."""
+        self._set_status(text)
 
     def _load_current(self) -> None:
         editor = self.query_one("#tm-editor", TextArea)
@@ -1282,7 +1318,7 @@ class CameraManagerPanel(Widget):
     it, without the rest of this machine's config."""
 
     class SyncRequested(Message):
-        """Sync to Remote: this camera's parameters into that host's config."""
+        """Sync to Host: this camera's parameters into that host's config."""
 
         def __init__(self, panel: "CameraManagerPanel", camera: str, profile_name: str) -> None:
             super().__init__()
@@ -1399,9 +1435,9 @@ class CameraManagerPanel(Widget):
                     prompt="Host that captures with it...",
                     id="cm-sync-profile",
                 )
-                yield Button("Sync to Remote", variant="warning", id="btn-cm-sync", disabled=True)
+                yield Button("Sync to Host", variant="warning", id="btn-cm-sync", disabled=True)
         yield Static(
-            "After calibrating, Sync to Remote gives the host that runs the IPS base this camera's "
+            "After calibrating, Sync to Host gives the host that runs the IPS base this camera's "
             "parameters (only them: the rest of its config stays as it is).",
             classes="cm-muted",
         )
@@ -1651,16 +1687,17 @@ class PromptsPanel(Widget):
             yield Button("Save", variant="primary", id="btn-prompt-save", disabled=True)
             yield Button("Reload", id="btn-prompt-reload", disabled=True)
         yield Static("", id="prompt-status", classes="pp-muted")
-        # Sync is only offered from the local host (push local prompt files ->
-        # remote). On a remote host no sync button is shown.
-        if self.target == "local" and self.ssh_profiles:
+        # the prompt files of the host on screen go to any other machine, this
+        # one included: what was edited on a server comes back here.
+        destinations = _sync_destination_options(self.target, self.ssh_profiles)
+        if destinations:
             with Horizontal(classes="pp-actions"):
                 yield Select(
-                    [(name, name) for name in self.ssh_profiles],
-                    prompt="Select SSH profile...",
-                    id="prompts-sync-profile-select",
+                    destinations,
+                    prompt="Select destination host...",
+                    id="prompts-sync-host-select",
                 )
-                yield Button("Sync to Remote", variant="warning", id="btn-sync-prompts-remote")
+                yield Button("Sync to Host", variant="warning", id="btn-sync-prompts-host")
 
     def _profile_line(self) -> str:
         mode = "end-to-end" if self.end_to_end else "two-step (VLM + LLM)"
@@ -1698,6 +1735,11 @@ class PromptsPanel(Widget):
             self.query_one("#prompt-status", Static).update(text)
         except Exception:
             pass
+
+    def set_status(self, text: str) -> None:
+        """what a sync started from this tab has to say, said on this tab: the
+        status line of the Config tab is not on screen while this one is."""
+        self._set_status(text)
 
     def _load_current(self) -> None:
         editor = self.query_one("#prompt-editor", TextArea)
@@ -1833,16 +1875,17 @@ class ActionSchemaPanel(Widget):
             yield Button("Save", variant="primary", id="btn-aschema-save")
             yield Button("Reload", id="btn-aschema-reload")
         yield Static("", id="aschema-status", classes="as-muted")
-        # Sync is only offered from the local host (push local schema file ->
-        # remote). On a remote host no sync button is shown.
-        if self.target == "local" and self.ssh_profiles:
+        # the schema of the host on screen goes to any other machine, this one
+        # included: what was edited on a server comes back here.
+        destinations = _sync_destination_options(self.target, self.ssh_profiles)
+        if destinations:
             with Horizontal(classes="as-actions"):
                 yield Select(
-                    [(name, name) for name in self.ssh_profiles],
-                    prompt="Select SSH profile...",
-                    id="aschema-sync-profile-select",
+                    destinations,
+                    prompt="Select destination host...",
+                    id="aschema-sync-host-select",
                 )
-                yield Button("Sync to Remote", variant="warning", id="btn-sync-aschema-remote")
+                yield Button("Sync to Host", variant="warning", id="btn-sync-aschema-host")
 
     def on_mount(self) -> None:
         self._load()
@@ -1852,6 +1895,11 @@ class ActionSchemaPanel(Widget):
             self.query_one("#aschema-status", Static).update(text)
         except Exception:
             pass
+
+    def set_status(self, text: str) -> None:
+        """what a sync started from this tab has to say, said on this tab: the
+        status line of the Config tab is not on screen while this one is."""
+        self._set_status(text)
 
     def _load(self) -> None:
         editor = self.query_one("#action-schema-editor", TextArea)
@@ -2619,6 +2667,13 @@ _STACK_COMPOSE_FILES = {
     "VFA Server": "docker/docker-compose.vfa.yml",
 }
 
+# cards whose services the Gateway routes: starting one renders the Gateway's
+# config again and reloads it, so a machine it could not reach when it last
+# rendered gets a route without anyone pressing Start on the Gateway card. Not
+# the MLLM Server: the frame analyzer calls that one straight, not through the
+# Gateway
+_GATEWAY_ROUTED_CARDS = frozenset({"ASR Server", "VFA Server"})
+
 # config section name -> docker compose service name
 _STACK_COMPOSE_SERVICES = {
     "AudioInferer": "audio-inferer",
@@ -2684,7 +2739,7 @@ _LOCAL_SETTINGS_NOTES: dict[str, str] = {
     "__experiments__": "Local  (a session takes its participants to every host through MongoDB)",
     "__tasks__": "Local  (task definitions are read by this console only)",
     "__shared__Sudo": "Local  (this machine's admin password; a remote host uses its SSH profile's)",
-    "__shared__StreamServer": "Local  (System Settings live in this project; Sync to Remote gives another machine "
+    "__shared__StreamServer": "Local  (System Settings live in this project; Sync to Host gives another machine "
                               "this address and the stream URLs it completed)",
 }
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
@@ -5143,7 +5198,7 @@ class ServicePanel(Widget):
         if not ids:
             fetch = (
                 "" if target == "local"
-                else f", then copy them to {where} with Sync to Remote on the Transform Matrix tab (Host: Local)"
+                else f", then copy them to {where} with Sync to Host on the Transform Matrix tab (Host: Local)"
             )
             return (
                 f"[red]No transformation_matrices_<id>.json in {folder} on {where}: the IPS synchronizer takes its "
@@ -5227,7 +5282,7 @@ class ServicePanel(Widget):
             profile=profile,
             end_to_end=end_to_end,
             target=target,
-            ssh_profiles=[p.name for p in load_ssh_profiles()] if target == "local" else [],
+            ssh_profiles=self._ssh_profile_names,
             ssh_profile=ssh_profile,
             remote_dir=remote_dir,
         )
@@ -5251,7 +5306,7 @@ class ServicePanel(Widget):
         return ActionSchemaPanel(
             schema_path=schema_path,
             target=target,
-            ssh_profiles=[p.name for p in load_ssh_profiles()] if target == "local" else [],
+            ssh_profiles=self._ssh_profile_names,
             ssh_profile=ssh_profile,
             remote_path=remote_path,
         )
@@ -5574,7 +5629,7 @@ class ServicePanel(Widget):
         if has_cameras:
             section_notes["Cameras"] = (
                 "The cameras of this config: written by IPS Camera Calibration (Calibrate), synced from "
-                "another machine (Calibration Cameras, Sync to Remote), or added here with + Add Camera.")
+                "another machine (Calibration Cameras, Sync to Host), or added here with + Add Camera.")
         form = ConfigForm(pipeline.name, form_fields, values, dynamic_sections,
                           group_add_buttons=group_add_buttons,
                           base_section=pipeline.base_section or None,
@@ -6013,7 +6068,7 @@ class ServicePanel(Widget):
                 if moved:
                     message += (
                         f"; {moved} stream URL(s) in {configs} local pipeline config(s) followed it to "
-                        f"{self._stream_server_address().get('host')} (Sync to Remote on a pipeline's Config tab "
+                        f"{self._stream_server_address().get('host')} (Sync to Host on a pipeline's Config tab "
                         f"takes them to another host)"
                     )
             self._show_status(message)
@@ -6149,47 +6204,43 @@ class ServicePanel(Widget):
             # the form shows that machine's settings and Save writes them there
             return
         target = self._get_panel_target()
-        if target != "local" and shared_section is None:
-            # on a remote host, Save on a pipeline config already writes to that
-            # host, so a separate sync button would be redundant. To push a
-            # locally-edited config to a remote, switch Host to local and use
-            # the SSH-profile picker + "Sync to Remote" below.
-            # System Settings are different: Save always writes the local store
-            # whatever the Host selector says, so the picker stays and defaults
-            # to the selected host.
-            return
-
         if pipeline is None and local_path is None and shared_section is None:
             return
-        profiles = load_ssh_profiles()
-        if not profiles:
+        # a pipeline config is synced from the host it was read on, so the Host
+        # selector picks the source and the picker below the destination: what
+        # was edited on server-01 goes back to this machine, or on to another
+        # host. System Settings and the MLLM launch config are different: their
+        # Save writes this machine's project whatever the Host selector says,
+        # so their source is this machine and the picker defaults to the
+        # selected host.
+        source = target if pipeline is not None else "local"
+        options = _sync_destination_options(source, [p.name for p in load_ssh_profiles()])
+        if not options:
             return
-        options = [(p.name, p.name) for p in profiles]
-        selected_profile = target if any(p.name == target for p in profiles) else None
-        select_kwargs = {}
-        if selected_profile is not None:
-            select_kwargs["value"] = selected_profile
+        preselect = target if shared_section is not None and any(
+            name == target for _, name in options) else None
+        select_kwargs = {"value": preselect} if preselect is not None else {}
         bar = Horizontal(
             Select(
                 options,
-                prompt="Select SSH profile...",
-                id="sync-profile-select",
+                prompt="Select destination host...",
+                id="sync-host-select",
                 **select_kwargs,
             ),
-            Button("Sync to Remote", variant="warning", id="btn-sync-remote"),
+            Button("Sync to Host", variant="warning", id="btn-sync-host"),
             classes="sync-bar" if shared_section is None else "sync-bar sync-bar-noted",
         )
         if shared_section == "StreamServer":
             container.mount(Static(
                 "Save writes this machine's project and moves the stream URLs of its pipeline configs "
-                "with the address. Sync to Remote gives another machine this address (its own "
+                "with the address. Sync to Host gives another machine this address (its own "
                 "config/system_services.yml, which a console there reads) and those Streams entries "
                 "(what its bases pull), and leaves the rest of its configs as they are.",
                 classes="sync-note",
             ))
         elif shared_section is not None:
             container.mount(Static(
-                f"Save writes this machine's project. Sync to Remote copies the {shared_section} "
+                f"Save writes this machine's project. Sync to Host copies the {shared_section} "
                 f"section to another machine: into its pipeline configs that carry it, and into its own "
                 f"config/system_services.yml (created when it has none), so what runs there connects to "
                 f"the same service.",
@@ -6224,18 +6275,14 @@ class ServicePanel(Widget):
                 exclusive=True,
             )
             return
-        if event.button.id == "btn-sync-remote":
-            self._sync_to_remote()
-        elif event.button.id == "btn-sync-local-target":
-            self._sync_local_to_selected_target()
-        elif event.button.id == "btn-sync-transform-remote":
-            self._sync_transform_to_remote()
-        elif event.button.id == "btn-sync-transform-local-target":
-            self._sync_transform_local_to_selected_target()
-        elif event.button.id == "btn-sync-prompts-remote":
-            self._sync_prompts_to_remote()
-        elif event.button.id == "btn-sync-aschema-remote":
-            self._sync_action_schema_to_remote()
+        if event.button.id == "btn-sync-host":
+            self._sync_to_host()
+        elif event.button.id == "btn-sync-transform-host":
+            self._sync_transform_to_host()
+        elif event.button.id == "btn-sync-prompts-host":
+            self._sync_prompts_to_host()
+        elif event.button.id == "btn-sync-aschema-host":
+            self._sync_action_schema_to_host()
         elif event.button.id == "btn-add-base":
             self._show_add_base_input()
         elif event.button.id == "btn-confirm-add-base":
@@ -6602,212 +6649,289 @@ class ServicePanel(Widget):
         )
         return cache_config
 
-    def _sync_to_remote(self) -> None:
-        try:
-            sel = self.query_one("#sync-profile-select", Select)
-            val = sel.value
-            if val is Select.BLANK or val is None:
-                self._show_status("Select an SSH profile first.")
-                return
-            profile_name = str(val)
-        except Exception:
-            return
+    # ── sync between hosts ───────────────────────────────────────
+    #
+    # Every file the console edits — a pipeline config, the prompt templates,
+    # the action schema, the transform matrices — belongs to the host the Host
+    # selector names, and a Sync to Host copies it from there to another
+    # machine. Either end may be this one: what was edited on server-01 comes
+    # back here, or goes on to another host (through this machine, the one
+    # place both are reachable).
 
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._show_status(f"SSH profile '{profile_name}' not found.")
+    def _host_profile(self, host: str):
+        """the SSH profile of a host; None is this machine."""
+        return None if host == "local" else get_profile_by_name(host)
+
+    def _host_path(self, local_path: str, host: str) -> str:
+        """where a file of this project lives on `host`."""
+        profile = self._host_profile(host)
+        return local_path if profile is None else self._remote_config_path(local_path, profile)
+
+    def _host_join(self, host: str, directory: str, name: str) -> str:
+        return os.path.join(directory, name) if host == "local" else _remote_path_join(directory, name)
+
+    def _host_files(self, host: str, local_dir: str, suffix: str) -> list[str]:
+        """the files of one directory of this project on `host`."""
+        if self._host_profile(host) is None:
+            try:
+                return sorted(
+                    name for name in os.listdir(local_dir)
+                    if name.endswith(suffix) and not name.startswith(".")
+                )
+            except OSError:
+                return []
+        return _remote_list_files(self._host_profile(host), self._host_path(local_dir, host), suffix)
+
+    def _source_is_reachable(self, source: str, say=None) -> bool:
+        """a host whose profile has gone since the card was drawn has nothing
+        to send: copying this machine's file under its name would be a lie."""
+        if source == "local" or self._host_profile(source) is not None:
+            return True
+        (say or self._show_status)(f"SSH profile '{source}' not found; nothing was synced.")
+        return False
+
+    def _sync_selection(self, selector: str, say=None) -> str | None:
+        """the host picked next to a Sync to Host button, or None with a note
+        in the status line when there is nothing usable to sync to."""
+        say = say or self._show_status
+        try:
+            value = self.query_one(selector, Select).value
+        except Exception:
+            return None
+        if is_select_sentinel(value):
+            say("Select a destination host first.")
+            return None
+        host = str(value)
+        if host != "local" and get_profile_by_name(host) is None:
+            say(f"SSH profile '{host}' not found.")
+            return None
+        return host
+
+    def _sync_to_host(self) -> None:
+        dest = self._sync_selection("#sync-host-select")
+        if dest is None:
             return
 
         # System Settings shared-section view: push just this section to the
         # selected host (respecting any per-pipeline overrides on that host).
         if self._current_shared_section == "StreamServer":
-            self._sync_streams_to_target(profile_name)
+            self._sync_streams_to_target(dest)
             return
         if self._current_shared_section:
-            self._sync_shared_section_to_target(self._current_shared_section, profile_name)
+            self._sync_shared_section_to_target(self._current_shared_section, dest)
             return
 
-        local_path = self._current_pipeline.config_path if self._current_pipeline is not None else self._current_config_local_path
-        if not local_path:
-            return
-        self._sync_local_config_path_to_profile(local_path, profile_name)
+        if self._current_pipeline is not None:
+            self._sync_config_between_hosts(
+                self._current_pipeline.config_path, self._get_panel_target(), dest)
+        elif self._current_config_local_path:
+            # a config this machine keeps for every host (the MLLM launch
+            # config): its form reads and writes the local file, so that is
+            # what goes out whatever the Host selector says
+            self._sync_config_between_hosts(self._current_config_local_path, "local", dest)
 
-    def _sync_local_to_selected_target(self) -> None:
-        target = self._get_panel_target()
-        if target == "local":
+    def _sync_config_between_hosts(self, local_path: str, source: str, dest: str) -> None:
+        """copy one config file from the host it was read on to another."""
+        if source == dest or not self._source_is_reachable(source):
             return
-        if self._current_shared_section == "StreamServer":
-            self._sync_streams_to_target(target)
-            return
-        if self._current_shared_section:
-            self._sync_shared_section_to_target(self._current_shared_section, target)
-            return
-        local_path = self._current_pipeline.config_path if self._current_pipeline is not None else self._current_config_local_path
-        if not local_path:
-            self._show_status("No local config is selected for syncing.")
-            return
-        self._sync_local_config_path_to_profile(local_path, target)
-
-    def _sync_local_config_path_to_profile(self, local_path: str, profile_name: str) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._show_status(f"SSH profile '{profile_name}' not found.")
-            return
-        if not os.path.isfile(local_path):
+        if source == "local" and not os.path.isfile(local_path):
             self._show_status(f"Local config not found: {local_path}. Save first.")
             return
-        remote_path = self._remote_config_path(local_path, profile)
-        cache_key = self._config_cache_key(local_path, profile_name)
-        cache_config = load_existing_config(local_path)
-        self._show_status(f"Syncing to {profile_name}:{remote_path} ...")
-        self.run_worker(
-            self._run_scp(
-                profile_name,
-                local_path,
-                remote_path,
-                cache_key=cache_key,
-                cache_config=cache_config,
-            ),
-            exclusive=True,
+        self._show_status(
+            f"Syncing {os.path.relpath(local_path, self._root)} from {_host_label(source)} "
+            f"to {_host_label(dest)} ..."
         )
+        self.run_worker(self._run_config_copy(source, dest, local_path), exclusive=True)
 
-    def _sync_transform_to_remote(self) -> None:
+    def _sync_files_between_hosts(
+        self, source: str, dest: str, local_dir: str, files: list[str], label: str, say=None
+    ) -> None:
+        say = say or self._show_status
+        if source == dest or not self._source_is_reachable(source, say):
+            return
+        dest_dir = self._host_path(local_dir, dest)
+        say(
+            f"Syncing {len(files)} {label} file(s) from {_host_label(source)} "
+            f"to {_host_label(dest)}:{dest_dir} ..."
+        )
+        self.run_worker(self._run_files_copy(source, dest, local_dir, files, label, say), exclusive=True)
+
+    def _sync_transform_to_host(self) -> None:
         try:
-            sel = self.query_one("#transform-sync-profile-select", Select)
-            val = sel.value
-            if val is Select.BLANK or val is None:
-                self._show_status("Select an SSH profile first.")
-                return
-            profile_name = str(val)
+            panel = self.query_one(TransformMatrixPanel)
         except Exception:
             return
-        self._sync_transform_dir_to_profile(profile_name)
-
-    def _sync_transform_local_to_selected_target(self) -> None:
-        target = self._get_panel_target()
-        if target == "local":
+        dest = self._sync_selection("#transform-sync-host-select", panel.set_status)
+        if dest is None:
             return
-        self._sync_transform_dir_to_profile(target)
-
-    def _sync_transform_dir_to_profile(self, profile_name: str) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._show_status(f"SSH profile '{profile_name}' not found.")
-            return
-        local_dir = _ips_transform_local_dir(self._root)
-        files = _local_transform_matrix_files(local_dir)
+        source = panel.target
+        local_dir = panel.local_dir
+        profile = self._host_profile(source)
+        files = (
+            _local_transform_matrix_files(local_dir) if profile is None
+            else _remote_transform_matrix_files(profile, self._host_path(local_dir, source))
+        )
         if not files:
-            self._show_status(f"No transformation_matrices*.json files found in {local_dir}.")
+            panel.set_status(
+                f"No transformation_matrices*.json files on {_host_label(source)}: "
+                f"{self._host_path(local_dir, source)}"
+            )
             return
-        remote_dir = self._ips_transform_remote_dir(profile)
-        self._show_status(f"Syncing IPS transform matrices to {profile_name}:{remote_dir} ...")
-        self.run_worker(
-            self._run_transform_matrix_sync(profile_name, local_dir, remote_dir, files),
-            exclusive=True,
-        )
+        self._sync_files_between_hosts(
+            source, dest, local_dir, files, "transform matrix", panel.set_status)
 
-    def _remote_dir_for_local(self, local_dir: str, profile) -> str:
-        rel = os.path.relpath(local_dir, self._root)
-        return _remote_path_join(profile.remote_project_path, rel)
-
-    def _sync_prompts_to_remote(self) -> None:
-        try:
-            sel = self.query_one("#prompts-sync-profile-select", Select)
-            val = sel.value
-            if val is Select.BLANK or val is None:
-                self._show_status("Select an SSH profile first.")
-                return
-            profile_name = str(val)
-        except Exception:
-            return
+    def _sync_prompts_to_host(self) -> None:
         try:
             panel = self.query_one(PromptsPanel)
         except Exception:
             return
+        dest = self._sync_selection("#prompts-sync-host-select", panel.set_status)
+        if dest is None:
+            return
+        source = panel.target
         local_dir = panel.prompts_dir
-        if not os.path.isdir(local_dir):
-            self._show_status(f"No prompts directory: {local_dir}")
-            return
-        files = [
-            f for f in os.listdir(local_dir)
-            if f.endswith(".txt") and not f.startswith(".")
-        ]
+        files = self._host_files(source, local_dir, ".txt")
         if not files:
-            self._show_status("No prompt files to sync.")
+            panel.set_status(
+                f"No prompt files on {_host_label(source)}: {self._host_path(local_dir, source)}")
             return
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._show_status(f"SSH profile '{profile_name}' not found.")
-            return
-        remote_dir = self._remote_dir_for_local(local_dir, profile)
-        self._show_status(f"Syncing prompts to {profile_name}:{remote_dir} ...")
-        self.run_worker(
-            self._run_files_sync(profile_name, local_dir, remote_dir, files, "prompt"),
-            exclusive=True,
-        )
+        self._sync_files_between_hosts(source, dest, local_dir, files, "prompt", panel.set_status)
 
-    def _sync_action_schema_to_remote(self) -> None:
-        try:
-            sel = self.query_one("#aschema-sync-profile-select", Select)
-            val = sel.value
-            if val is Select.BLANK or val is None:
-                self._show_status("Select an SSH profile first.")
-                return
-            profile_name = str(val)
-        except Exception:
-            return
+    def _sync_action_schema_to_host(self) -> None:
         try:
             panel = self.query_one(ActionSchemaPanel)
         except Exception:
             return
+        dest = self._sync_selection("#aschema-sync-host-select", panel.set_status)
+        if dest is None:
+            return
+        source = panel.target
         local_path = panel.schema_path
-        if not os.path.isfile(local_path):
-            self._show_status(f"No action schema file: {local_path}")
+        if source == "local" and not os.path.isfile(local_path):
+            panel.set_status(f"No action schema file: {local_path}")
             return
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            self._show_status(f"SSH profile '{profile_name}' not found.")
-            return
-        remote_path = self._remote_config_path(local_path, profile)
-        self._show_status(f"Syncing action schema to {profile_name}:{remote_path} ...")
-        self.run_worker(
-            self._run_scp(profile_name, local_path, remote_path),
-            exclusive=True,
-        )
+        self._sync_files_between_hosts(
+            source, dest, os.path.dirname(local_path), [os.path.basename(local_path)],
+            "action schema", panel.set_status)
 
-    async def _run_files_sync(
-        self,
-        profile_name: str,
-        local_dir: str,
-        remote_dir: str,
-        files: list[str],
-        label: str,
-    ) -> None:
-        profile = get_profile_by_name(profile_name)
+    async def _stage_from_host(self, host: str, paths: list[str]) -> tuple[str, dict[str, str], list[str]]:
+        """bring files of `host` onto this machine, from where they can be
+        written to any other: (staging dir, {path on the host: local copy},
+        failures). A local source is staged as itself and leaves no staging
+        dir; two remote hosts have no route to each other, so a copy between
+        them goes through here."""
+        profile = self._host_profile(host)
         if profile is None:
-            return
-        mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
-        await mkdir_proc.wait()
-        copied = 0
+            staged = {path: path for path in paths if os.path.isfile(path)}
+            return "", staged, [
+                f"{os.path.basename(path)}: not on this machine" for path in paths if path not in staged
+            ]
+        staging = tempfile.mkdtemp(prefix="openmmla-sync-")
+        staged: dict[str, str] = {}
         failures: list[str] = []
-        for name in files:
-            local_path = os.path.join(local_dir, name)
-            remote_path = _remote_path_join(remote_dir, name)
-            proc = await scp_file_async(profile, local_path, remote_path)
-            assert proc.stdout is not None
-            output = ""
-            async for line in proc.stdout:
-                output += line.decode(errors="replace")
+        for index, path in enumerate(paths):
+            # the index keeps two files of the same name (another directory,
+            # another host) from landing on each other in the staging dir
+            local_copy = os.path.join(staging, f"{index}-{os.path.basename(path)}")
+            proc = await scp_from_remote_async(profile, path, local_copy)
+            output = await _process_output(proc)
+            rc = await proc.wait()
+            if rc == 0 and os.path.isfile(local_copy):
+                staged[path] = local_copy
+            else:
+                failures.append(f"{os.path.basename(path)}: {output.strip() or f'exit code {rc}'}")
+        return staging, staged, failures
+
+    async def _place_on_host(self, host: str, pairs: list[tuple[str, str]]) -> tuple[int, list[str]]:
+        """write files that are on this machine onto `host`: (written, failures)."""
+        profile = self._host_profile(host)
+        written = 0
+        failures: list[str] = []
+        for local_path, dest_path in pairs:
+            if profile is None:
+                try:
+                    if os.path.abspath(local_path) != os.path.abspath(dest_path):
+                        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+                        shutil.copyfile(local_path, dest_path)
+                    written += 1
+                except OSError as exc:
+                    failures.append(f"{os.path.basename(dest_path)}: {exc}")
+                continue
+            remote_dir = dest_path.rsplit("/", 1)[0]
+            mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
+            await mkdir_proc.wait()
+            proc = await scp_file_async(profile, local_path, dest_path)
+            output = await _process_output(proc)
             rc = await proc.wait()
             if rc == 0:
-                copied += 1
+                written += 1
             else:
-                detail = output.strip() or f"exit code {rc}"
-                failures.append(f"{name}: {detail}")
-        if failures:
-            self._show_status(f"{label} sync failed: {'; '.join(failures[:2])}")
-            return
-        self._show_status(f"Synced {copied} {label} file(s) to {profile_name}:{remote_dir}")
+                failures.append(f"{os.path.basename(dest_path)}: {output.strip() or f'exit code {rc}'}")
+        return written, failures
+
+    async def _run_config_copy(self, source: str, dest: str, local_path: str) -> None:
+        """one config file from one host to another. What lands is what the
+        console then holds for the destination, and what its [C] marker says."""
+        source_path = self._host_path(local_path, source)
+        dest_path = self._host_path(local_path, dest)
+        staging, staged, failures = await self._stage_from_host(source, [source_path])
+        try:
+            if source_path not in staged:
+                self._show_status(
+                    f"Sync failed: {failures[0] if failures else f'{_host_label(source)}:{source_path}'}")
+                return
+            written, failures = await self._place_on_host(dest, [(staged[source_path], dest_path)])
+            if not written:
+                self._show_status(f"Sync failed: {'; '.join(failures[:2])}")
+                return
+            self._target_config_cache[self._config_cache_key(local_path, dest)] = (
+                load_existing_config(staged[source_path]))
+            self._note_config_presence(dest, local_path, True)
+            profile = self._host_profile(dest)
+            if profile is not None:
+                await self._maybe_push_master_key(profile, staged[source_path])
+            self._show_status(
+                f"Synced {os.path.relpath(local_path, self._root)} from {_host_label(source)} "
+                f"to {_host_label(dest)}: {dest_path}"
+            )
+            self._refresh_service_cards()
+        finally:
+            if staging:
+                shutil.rmtree(staging, ignore_errors=True)
+
+    async def _run_files_copy(
+        self, source: str, dest: str, local_dir: str, files: list[str], label: str, say=None
+    ) -> None:
+        """the named files of one directory of this project, from one host to
+        another."""
+        say = say or self._show_status
+        source_dir = self._host_path(local_dir, source)
+        dest_dir = self._host_path(local_dir, dest)
+        paths = [self._host_join(source, source_dir, name) for name in files]
+        staging, staged, failures = await self._stage_from_host(source, paths)
+        try:
+            written, placed_failures = await self._place_on_host(dest, [
+                (staged[path], self._host_join(dest, dest_dir, name))
+                for path, name in zip(paths, files) if path in staged
+            ])
+            failures += placed_failures
+            if failures:
+                say(
+                    f"{label} sync to {_host_label(dest)}: {written} file(s) copied, "
+                    f"{'; '.join(failures[:2])}"
+                )
+                return
+            say(
+                f"Synced {written} {label} file(s) from {_host_label(source)} "
+                f"to {_host_label(dest)}:{dest_dir}"
+            )
+        finally:
+            if staging:
+                shutil.rmtree(staging, ignore_errors=True)
+
+    def _remote_dir_for_local(self, local_dir: str, profile) -> str:
+        rel = os.path.relpath(local_dir, self._root)
+        return _remote_path_join(profile.remote_project_path, rel)
 
     async def _run_remote_streamed(
         self, profile_name: str, cmd: str, ok_msg: str, fail_msg: str
@@ -6839,7 +6963,7 @@ class ServicePanel(Widget):
         """write the section on screen into `target`: its pipeline configs and
         its own settings file. `save` is the Save of a form that shows that
         machine's settings (the file is created when it has none); otherwise
-        this is Sync to Remote, which copies Local's and only ever updates a
+        this is Sync to Host, which copies Local's and only ever updates a
         settings file that is already there."""
         profile = get_profile_by_name(target)
         if profile is None:
@@ -6926,7 +7050,7 @@ class ServicePanel(Widget):
         )
 
     def _sync_streams_to_target(self, target: str) -> None:
-        """Sync to Remote on the Stream Server form: that machine gets this
+        """Sync to Host on the Stream Server form: that machine gets this
         address in its own settings file (no pipeline config carries the
         section; a console there reads it from the file, created when it has
         none) and the stream URLs the address completed, which are what
@@ -6994,7 +7118,7 @@ class ServicePanel(Widget):
         The services read that file on top of their pipeline config (a section
         the pipeline pins stays its own), so a copy left behind on a host, by a
         console that once ran there, would silently beat everything this
-        console pushes if it were left out: Sync to Remote and a Save on that
+        console pushes if it were left out: Sync to Host and a Save on that
         host's own form both bring it in step, and create it when the host has
         none, so what its services read and what a console there shows are
         what this one says. `create` False only looks (nothing is written for
@@ -7196,7 +7320,7 @@ class ServicePanel(Widget):
             self._log(
                 f"[yellow]'{target}' has System Settings of its own that differ from this machine's: "
                 f"{'; '.join(own_drift)}. What runs there connects to those. Open the Connections "
-                f"forms with Host = {target} to review them, or press Sync to Remote on the Local "
+                f"forms with Host = {target} to review them, or press Sync to Host on the Local "
                 f"forms to replace them.[/yellow]"
             )
         reference = self._settings_reference_for(target, central)
@@ -7314,7 +7438,7 @@ class ServicePanel(Widget):
         )
         if target != "local" and os.path.isfile(pipeline.config_path):
             # the form on that host starts from defaults; this one is filled in
-            hint += f", or copy this machine's with Host = Local and Sync to Remote to '{target}'"
+            hint += f", or copy this machine's with Host = Local and Sync to Host to '{target}'"
         self._log(f"[yellow]{hint}.[/yellow]")
         return False
 
@@ -7351,10 +7475,10 @@ class ServicePanel(Widget):
         )
 
     async def _sync_camera_to_host(self, panel, camera: str, profile_name: str) -> None:
-        """Sync to Remote on the Calibration Cameras panel: that host's IPS base
+        """Sync to Host on the Calibration Cameras panel: that host's IPS base
         config gets this camera's parameters, Cameras.<name>, and the rest of
         it (its Bases and Streams, which belong to that host) stays as it is.
-        The config's own Sync to Remote copies the whole file instead."""
+        The config's own Sync to Host copies the whole file instead."""
         def report(text: str, color: str) -> None:
             panel.set_status(text)
             self._log(f"[{color}]{rich_escape(text)}[/{color}]")
@@ -7536,42 +7660,6 @@ class ServicePanel(Widget):
                 "Config has encrypted values but master key sync failed; "
                 "copy ~/.openmmla/master.key to the remote manually."
             )
-
-    async def _run_transform_matrix_sync(
-        self,
-        profile_name: str,
-        local_dir: str,
-        remote_dir: str,
-        files: list[str],
-    ) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            return
-
-        mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
-        await mkdir_proc.wait()
-
-        copied = 0
-        failures: list[str] = []
-        for name in files:
-            local_path = os.path.join(local_dir, name)
-            remote_path = _remote_path_join(remote_dir, name)
-            proc = await scp_file_async(profile, local_path, remote_path)
-            assert proc.stdout is not None
-            output = ""
-            async for line in proc.stdout:
-                output += line.decode(errors="replace")
-            rc = await proc.wait()
-            if rc == 0:
-                copied += 1
-            else:
-                detail = output.strip() or f"exit code {rc}"
-                failures.append(f"{name}: {detail}")
-
-        if failures:
-            self._show_status(f"Transform matrix sync failed: {'; '.join(failures[:2])}")
-            return
-        self._show_status(f"Synced {copied} transform matrix file(s) to {profile_name}:{remote_dir}")
 
     async def _run_scp_batch(
         self,
@@ -7821,6 +7909,11 @@ class ServicePanel(Widget):
             self._launch_remote(svc, launch_params, target)
         else:
             self._launch_service(svc, launch_params)
+        if svc.name in _GATEWAY_ROUTED_CARDS:
+            self.run_worker(
+                self._reload_gateway_after_start(svc.display_name),
+                group="launcher-gateway-reload", exclusive=True,
+            )
         self.set_timer(3.0, self._refresh_visible_statuses)
 
     def on_service_card_stop_requested(self, event: ServiceCard.StopRequested) -> None:
@@ -9981,6 +10074,81 @@ class ServicePanel(Widget):
                 stderr=subprocess.DEVNULL,
             )
             self._log(f"[green]Uber {target} started.[/green]")
+
+    async def _reload_gateway_after_start(self, started: str) -> None:
+        """render the Gateway's config again and reload it, after a card whose
+        services it routes started.
+
+        The rendered config leaves out a machine whose name did not resolve then,
+        and the reload also clears what nginx learned of the servers, so one that
+        has just started is tried at once instead of after fail_timeout. Nothing
+        to do while the Gateway does not run: its own Start renders it."""
+        label = SYSTEM_SERVICE_LABELS["nginx"]
+        host = (system_service_endpoint(self._root, "nginx") or ("", 0))[0]
+        if not await asyncio.to_thread(system_service_reachable, self._root, "nginx"):
+            self._log(
+                f"[yellow]{label} does not answer at {host or 'its configured address'}: start it "
+                f"to route {started}.[/yellow]"
+            )
+            return
+        if is_loopback_host(host):
+            target = "local"
+        else:
+            target = await asyncio.to_thread(target_for_service_host, host, load_ssh_profiles())
+        if not target:
+            self._log(
+                f"[yellow]{label} runs on '{host}', which this console has no way onto: press Start on "
+                f"its card there if {started} is not routed.[/yellow]"
+            )
+            return
+        where = "locally" if target == "local" else f"on '{target}'"
+        self._log(f"  Reloading {label} {where} so it routes {started}...")
+        ok, said = await asyncio.to_thread(self._gateway_reload_sync, target)
+        if ok:
+            self._log(f"[green]{label} reloaded {where}.[/green]")
+        else:
+            self._log(
+                f"[yellow]Could not reload {label} {where}: {said}. Press Start on its card if "
+                f"{started} is not routed.[/yellow]"
+            )
+
+    def _gateway_reload_sync(self, target: str) -> tuple[bool, str]:
+        """`make nginx` on the machine the Gateway is on, with a sudo prompt
+        answered as the console's command line answers it: the stored local
+        password here, the SSH profile's password on another machine. Returns
+        whether it worked and, when it did not, the last thing it said."""
+        uber_rel = "pipelines/uber-server"
+        try:
+            if target == "local":
+                password = get_sudo_password(self._root) or ""
+                result = subprocess.run(
+                    ["make", "-C", os.path.join(self._root, *uber_rel.split("/")),
+                     "nginx", "SUDO=sudo -S"],
+                    input=f"{password}\n", capture_output=True, text=True, timeout=180,
+                )
+            else:
+                profile = get_profile_by_name(target)
+                if profile is None:
+                    return False, f"no SSH profile named '{target}'"
+                remote_dir = f"{profile.remote_project_path}/{uber_rel}"
+                command = wrap_remote(
+                    f'cd {_quote_remote_path(remote_dir)} && make nginx SUDO="sudo -S"', "uber-server"
+                )
+                result = subprocess.run(
+                    profile.base_ssh_args() + [command],
+                    input=f"{getattr(profile, 'password', '') or ''}\n",
+                    capture_output=True, text=True, timeout=180,
+                )
+        except subprocess.TimeoutExpired:
+            # never the exception itself: its repr holds the ssh arguments, which
+            # begin with the password
+            return False, "it did not finish in 180 s"
+        except Exception as exc:
+            return False, str(exc)
+        if result.returncode == 0:
+            return True, ""
+        said = [line for line in ((result.stderr or "") + (result.stdout or "")).splitlines() if line.strip()]
+        return False, said[-1].strip()[:200] if said else f"make nginx exited {result.returncode}"
 
     @staticmethod
     def _bash_run_flag_str(svc: ServiceDef, params: dict) -> str:

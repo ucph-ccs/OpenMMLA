@@ -266,8 +266,12 @@ else
 	$(SUDO) systemctl restart mongod
 endif
 
+# renders the config, installs it and reloads nginx (starting it if it is not
+# running): the old workers finish the requests they hold, so a session in
+# progress keeps its answers, and the reload clears what nginx learned of the
+# servers, so one that just started is tried at once instead of after fail_timeout
 nginx: install-nginx
-	@echo "🔁 Rendering and starting NGINX"
+	@echo "🔁 Rendering and reloading NGINX"
 	@test -f nginx/config.yml || { echo "❌ nginx/config.yml is missing: fill in the Config tab of the Gateway card in the console, or copy nginx/config_template.yml to it and edit it"; exit 1; }
 ifeq ($(check_port), 1)
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf --port-check
@@ -275,16 +279,30 @@ else
 	$(CONDA_ACTIVATE) && python3 nginx/render_nginx.py nginx/config.yml nginx/nginx.conf.j2 nginx/nginx.generated.conf
 endif
 ifeq ($(IS_MAC), 1)
-	@$(SUDO) sh -c 'cp nginx/nginx.generated.conf /opt/homebrew/etc/nginx/nginx.conf; \
+	@$(SUDO) sh -c 'conf=$(BREW_PREFIX)/etc/nginx/nginx.conf; \
+		if [ -f "$$conf" ]; then cp "$$conf" "$$conf.openmmla.bak"; fi; \
+		cp nginx/nginx.generated.conf "$$conf"; \
+		if ! nginx -t; then \
+			echo "❌ the rendered config does not pass nginx -t: keeping the one that ran"; \
+			if [ -f "$$conf.openmmla.bak" ]; then cp "$$conf.openmmla.bak" "$$conf"; fi; \
+			exit 1; \
+		fi; \
 		if pgrep nginx > /dev/null; then \
-			echo "🔁 Reloading NGINX (macOS)"; nginx -t && nginx -s reload; \
+			echo "🔁 Reloading NGINX (macOS)"; nginx -s reload; \
 		else \
 			echo "🚀 Starting NGINX (macOS)"; nginx; \
 		fi'
 else
-	@$(SUDO) sh -c 'cp nginx/nginx.generated.conf /etc/nginx/nginx.conf; \
-		echo "🔁 Restarting NGINX (Linux)"; \
-		systemctl enable nginx; systemctl restart nginx'
+	@$(SUDO) sh -c 'conf=/etc/nginx/nginx.conf; \
+		if [ -f "$$conf" ]; then cp "$$conf" "$$conf.openmmla.bak"; fi; \
+		cp nginx/nginx.generated.conf "$$conf"; \
+		if ! nginx -t; then \
+			echo "❌ the rendered config does not pass nginx -t: keeping the one that ran"; \
+			if [ -f "$$conf.openmmla.bak" ]; then cp "$$conf.openmmla.bak" "$$conf"; fi; \
+			exit 1; \
+		fi; \
+		echo "🔁 Reloading NGINX (Linux)"; \
+		systemctl enable nginx; systemctl reload-or-restart nginx'
 endif
 
 flask:
