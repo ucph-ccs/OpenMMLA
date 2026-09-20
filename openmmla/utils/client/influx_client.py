@@ -107,7 +107,12 @@ class InfluxDBClientWrapper:
         events = self._execute_query(query)
         return events[0] if events else None
 
-    def get_all_session_ids(self) -> list[str]:
+    def get_all_session_ids(self, raise_on_error: bool = False) -> list[str]:
+        """Return every session id in the bucket.
+
+        An unreachable or rejecting InfluxDB is indistinguishable from an empty
+        bucket in the returned list, so callers that show the result to someone
+        pass raise_on_error and report the reason instead."""
         try:
             query = f'''
                 from(bucket: "{self.bucket}")
@@ -126,6 +131,8 @@ class InfluxDBClientWrapper:
             return sorted(list(session_ids))
         except Exception as e:
             logger.warning("get_all_session_ids failed: %s", e)
+            if raise_on_error:
+                raise
             return []
 
     def count_session_events(self, session_id: str) -> int:

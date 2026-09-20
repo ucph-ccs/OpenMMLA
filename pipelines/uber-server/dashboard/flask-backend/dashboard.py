@@ -89,7 +89,17 @@ def frontend_css(filename):
 # ======= API =======
 @app.route('/api/get_sessions')
 def get_sessions():
-    return jsonify(influx_client.get_all_session_ids())
+    """List the recorded sessions.
+
+    An InfluxDB that refuses the connection or the token answers 503 with the
+    reason: returning an empty list instead would render as 'no sessions yet',
+    which is what a misconfigured dashboard looked like for a whole session."""
+    try:
+        return jsonify(influx_client.get_all_session_ids(raise_on_error=True))
+    except Exception as e:
+        message = f"InfluxDB at {influx_client.url} (bucket {influx_client.bucket}): {e}"
+        print(f"get_sessions failed: {message}")
+        return jsonify({'error': message}), 503
 
 
 @celery.task

@@ -196,6 +196,15 @@ def merge_system_services(
     return merged
 
 
+def _holds_encrypted_values(node: Any) -> bool:
+    """whether any leaf is an ENC(...) string, recognised without importing crypto."""
+    if isinstance(node, dict):
+        return any(_holds_encrypted_values(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_holds_encrypted_values(v) for v in node)
+    return isinstance(node, str) and node.startswith("ENC(") and node.endswith(")")
+
+
 def decrypt_config_values(data: Any) -> Any:
     """Return a copy of a nested config structure with ENC(...) leaves
     decrypted (best-effort: values stay encrypted if the crypto module or
@@ -204,6 +213,17 @@ def decrypt_config_values(data: Any) -> Any:
     try:
         from openmmla.utils.crypto import is_encrypted, decrypt_value
     except ImportError:
+        # an env whose extra forgot cryptography reaches here, and silence would
+        # send the literal ENC(...) to the service as a credential: influxdb
+        # answers 401 and the caller reports "no data" rather than "bad token"
+        if _holds_encrypted_values(data):
+            import logging
+            logging.getLogger(__name__).warning(
+                "Config holds ENC(...) values but 'cryptography' is not installed in "
+                "this environment, so they stay encrypted and the service they are sent "
+                "to will reject them. Reinstall this environment's extra, e.g. "
+                "pip install -e '.[uber-server]'."
+            )
         return data
 
     def walk(node: Any) -> Any:

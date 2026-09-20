@@ -169,6 +169,48 @@ Then put the new ports in the System Settings URLs (`http://server-01:8087`, `mo
 
 Do not go the other way and reuse the other project's instance: it is usually bound to loopback only (unreachable from other machines), has authentication enabled (the password would have to go into `MongoDB.url` in plaintext), and if it runs `influxdb:latest`, one `pull` after 2026-09-15 turns it into InfluxDB 3 and takes your data with it.
 
+### When the database host has to reach its own databases
+
+`INFRA_BIND_ADDRESS` pinned to one interface — a tailnet or VPN address, say — leaves that
+machine unable to dial its own databases by name. On Debian and Ubuntu the host's own name
+resolves to `127.0.1.1` (it is in `/etc/hosts`), nothing is published there, and anything
+running locally gets `Connection refused` from a URL that works perfectly from every other
+machine. The dashboard backend is the one that runs on the database host, so this shows up
+as an empty Session Explorer.
+
+Publish the same ports on loopback as well:
+
+```bash
+# docker/.env, on the database host only
+INFRA_BIND_ADDRESS=100.x.x.x      # tailnet interface, as before
+INFRA_LOOPBACK_ADDRESS=127.0.0.1  # plus loopback, for this machine's own processes
+```
+
+```bash
+docker compose -f docker/docker-compose.infra.yml up -d influxdb mongodb
+```
+
+A ports change needs a **recreate**, which `up -d` does and `restart` does not; naming the two
+services keeps MediaMTX and any recording it is writing untouched. The named volumes are not
+affected. Leave `INFRA_LOOPBACK_ADDRESS` empty while `INFRA_BIND_ADDRESS` is `0.0.0.0` — a
+wildcard bind and a `127.0.0.1` bind on one port is refused by the kernel and the container
+will not start at all.
+
+Then let that machine's own config say `localhost`, and pin the section so a later sync from
+the console does not put the host name back:
+
+```yaml
+# pipelines/uber-server/dashboard/flask-backend/config.yml, on the database host
+SystemServicesOverride:
+  - InfluxDB
+InfluxDB:
+  url: http://localhost:8087
+```
+
+A pinned section is the pipeline's own: System Settings stops writing it, so a rotated token
+has to be pasted here too. Exposure is unchanged by the extra publish — loopback is reachable
+only from the machine itself, and its own processes could already dial the bind address.
+
 ### Pointing OpenMMLA at the stack
 
 `mmla tui` → Launcher → **System Settings → Connections**; only three fields change:

@@ -24,7 +24,7 @@
       <a class="btn primary" id="btn-live" aria-disabled="true">● Live view</a>
       <a class="btn" id="btn-report" aria-disabled="true">Analysis report</a>
     </div>
-    <span class="empty-note" id="note" hidden>No sessions found — is InfluxDB reachable and populated?</span>
+    <span class="empty-note" id="note" hidden></span>
   </div>
 </main>
 
@@ -44,22 +44,30 @@ function syncButtons() {
   btnLive.style.opacity = btnReport.style.opacity = id ? '' : '.5';
 }
 
+// an empty list and an unreachable database used to look identical here, so
+// the endpoint reports the reason and the two are told apart
+function fail(label, detail) {
+  select.innerHTML = `<option value="">${label}</option>`;
+  note.textContent = detail;
+  note.hidden = false;
+}
+
 fetch('/api/get_sessions')
-  .then(r => r.json())
-  .then(ids => {
-    if (!Array.isArray(ids) || !ids.length) {
-      select.innerHTML = '<option value="">No sessions available</option>';
-      note.hidden = false;
+  .then(r => r.json().then(body => ({ ok: r.ok, body })))
+  .then(({ ok, body }) => {
+    if (!ok || !Array.isArray(body)) {
+      fail('Could not reach the database', (body && body.error) || 'The dashboard could not query InfluxDB.');
       return;
     }
-    ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    if (!body.length) {
+      fail('No sessions recorded yet', 'InfluxDB answered, but no session has written to it yet.');
+      return;
+    }
+    const ids = body.slice().sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     select.innerHTML = '<option value="">— Choose a session —</option>' +
       ids.map(id => `<option value="${id}">${id}</option>`).join('');
   })
-  .catch(() => {
-    select.innerHTML = '<option value="">Failed to load sessions</option>';
-    note.hidden = false;
-  });
+  .catch(() => fail('Failed to load sessions', 'The dashboard backend did not answer.'));
 
 select.addEventListener('change', syncButtons);
 syncButtons();
