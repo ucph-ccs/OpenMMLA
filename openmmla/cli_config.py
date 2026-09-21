@@ -49,6 +49,7 @@ OPTIONAL_DEP_MAP = {
     "ses-man": "uber-base",
     "ses-import": "uber-base",
     "ses-tidy": "uber-base",
+    "ses-align": "uber-base",
     "tui": "tui",
     "crypto": "tui",
 }
@@ -158,6 +159,10 @@ COMMANDS = {
     "ses-tidy": (
         "openmmla.commands.ses.tidy:main",
         "Rename a session under artifacts/, relabel its hosts, reduce legacy/ to what is raw."
+    ),
+    "ses-align": (
+        "openmmla.commands.ses.align:main",
+        "Measure a session's recordings against one clock by their audio, move them, cut them to one start."
     ),
     "tui": (
         "openmmla.commands.tui:main",

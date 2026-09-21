@@ -194,6 +194,13 @@ mmla ses-tidy exp_20241210_life_group_01_241210T0911Z -e exp_20241210_microbit \
   --audio-host cam-1=jabra --to-raw cam-1 --tag-size 0.07 --prune-legacy
 ```
 
+`mmla ses-align` puts a session's recordings on one clock and one start. A per-person microphone (badge, vimo) is stamped by the base that recorded it; a camera's file is stamped by whatever wrote it, to the second at best and after the delay of a stream. Both heard the same room, so the command cross-correlates every audio recording with the longest per-person microphone (`--reference HOST` picks another) and reports how far each one's nominal start is off, with a confidence (how far the correlation peak stands above the rest; below 8 the number is a guess) and a margin over the runner-up; two recordings of one base come out at 0.00, which is the check that the method works. `--apply` moves the recordings measured off by more than `--tolerance` (0.25 s) with confidence above `--min-confidence`, and moves a camera's video with its audio track since they share one start. `--trim` then cuts every recording to the session's common start, the latest start among them: audio to the sample, video at the last keyframe before it (a stream copy, nothing re-encoded, so a video that starts before a microphone ends up at most one keyframe interval ahead of it), and names every file with its exact start. What came before the common start is gone.
+
+```bash
+mmla ses-align exp_20250616_microbit_group_01_250616T0812Z              # measure only
+mmla ses-align exp_20250616_microbit_group_01_250616T0812Z --apply --trim
+```
+
 ### Pipelines
 
 The ASR, IPS and VFA base cards share one shape:
