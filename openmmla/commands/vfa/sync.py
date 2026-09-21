@@ -21,6 +21,13 @@ def get_parser():
     add_arg('num_bases', int, None,
             "number of bases to synchronize; if not set, asked interactively, or with -sid, the number of entries "
             "in the config's 'Bases' list", shortname='-nb')
+    add_arg('actions', bool, True,
+            "whether every synchronized frame set is sent for its action labels (the VLM; the vfa_action event)",
+            shortname='-a')
+    add_arg('features', bool, False,
+            "whether every synchronized frame set is sent to the frame analyzer's features endpoint for its "
+            "skeletons, AprilTags, head yaws and gazes (no VLM; the vfa_features event, one per frame set, so set "
+            "the bases' keyframe_interval to about 1 second)", shortname='-f')
     return parser
 
 
@@ -39,6 +46,8 @@ def main():
             config_path=args.config_path,
             session_id=args.session_id,
             num_bases=args.num_bases,
+            actions=args.actions,
+            features=args.features,
         )
     except Exception as e:
         # it connects to MQTT and MongoDB as it is made, so there is no menu yet to fall back to

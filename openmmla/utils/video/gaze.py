@@ -123,8 +123,10 @@ def detect_gaze(
                 heatmap_np = heatmap.detach().cpu().numpy()
                 if heatmap_np.size > 0:
                     max_index = np.unravel_index(np.argmax(heatmap_np), heatmap_np.shape)
-                    target_y_norm_hm = max_index[0] / heatmap_np.shape[0]
-                    target_x_norm_hm = max_index[1] / heatmap_np.shape[1]
+                    # the centre of the hottest cell: its corner would put every gaze half a
+                    # cell up and left (a cell is 1/64 of the image on each side)
+                    target_y_norm_hm = (max_index[0] + 0.5) / heatmap_np.shape[0]
+                    target_x_norm_hm = (max_index[1] + 0.5) / heatmap_np.shape[1]
 
                     if normalize_target:
                         gaze_target_coords = [target_x_norm_hm, 1.0 - target_y_norm_hm]

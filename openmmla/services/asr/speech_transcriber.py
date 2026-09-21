@@ -15,7 +15,22 @@ from openmmla.services.server import Server
 from openmmla.utils.audio.auga import normalize_decibel
 from openmmla.utils.audio.io import write_bytes_to_wav
 from openmmla.utils.audio.languages import azure_locale, language_code
-from openmmla.utils.audio.transcriber import get_transcriber
+from openmmla.utils.audio.transcriber import WhisperXTranscriber, get_transcriber
+
+
+def _as_bool(value, default=False) -> bool:
+    """a config or request value as a bool: true/false, 1/0, yes/no, on/off; `default` for none."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
+
+
+def _filled(value):
+    """a config value, or None for an <...> placeholder the user never replaced (or nothing)."""
+    text = str(value or "").strip()
+    return None if not text or (text.startswith("<") and text.endswith(">")) else value
 
 
 class SpeechTranscriber(Server):
@@ -24,7 +39,13 @@ class SpeechTranscriber(Server):
 
     A request may name the language to transcribe it in (a base's -lang), which holds for that
     request alone; without one it is the language of this service's config. The answer says which
-    language was used."""
+    language was used.
+
+    A request may also ask for anonymous speaker turns (a base's -dia): a local WhisperX model
+    diarizes the file with pyannote and the answer carries `diarization`, [{start, end, speaker}]
+    as SPEAKER_00, SPEAKER_01 ... in seconds from the start of the file, and `diarized`, which
+    says whether it could (the other backends cannot). `diarize` in the local config does it for
+    every file."""
 
     def __init__(self, project_dir: str | None, config_path: str):
         """Initialize the speech transcriber.
@@ -122,8 +143,21 @@ class SpeechTranscriber(Server):
                     "Use Azure backend or switch to WhisperX model with format 'whisperx/model-name' (e.g., 'whisperx/large-v3')"
                 )
 
+            # anonymous speaker turns with every file (a request can ask for them on its own)
+            self.diarize = _as_bool(local_config.get('diarize'), False)
+            self.diarize_model = _filled(local_config.get('diarize_model'))
+            self.hf_token = _filled(local_config.get('hf_token'))
+            self.min_speakers = _filled(local_config.get('min_speakers'))
+            self.max_speakers = _filled(local_config.get('max_speakers'))
+            if self.diarize and not self.tr_model.startswith('whisperx/'):
+                raise ValueError(
+                    "Diarization needs a WhisperX model (whisperx/model-name), which runs pyannote on the file. "
+                    f"Current model '{self.tr_model}' cannot diarize: switch the model or set diarize: false"
+                )
+
             self.logger.info(
-                f"Using local transcription model: {self.tr_model}, language: {self.language}, word_level: {self.word_level}")
+                f"Using local transcription model: {self.tr_model}, language: {self.language}, "
+                f"word_level: {self.word_level}, diarize: {self.diarize}")
 
     def _setup_objects(self):
         """Initialize necessary objects based on the selected backend."""
@@ -189,7 +223,9 @@ class SpeechTranscriber(Server):
         else:
             # local model - automatically handles both regular whisper and whisperx
             self.transcriber = get_transcriber(self.tr_model, self.language, word_level=self.word_level,
-                                               use_cuda=self.cuda)
+                                               use_cuda=self.cuda, diarize=self.diarize,
+                                               diarize_model=self.diarize_model, hf_token=self.hf_token,
+                                               min_speakers=self.min_speakers, max_speakers=self.max_speakers)
             self.logger.info("Local speech transcription models initialized")
 
         # common lock for thread safety
@@ -209,7 +245,9 @@ class SpeechTranscriber(Server):
                         language=getattr(self, 'language_hints', None) or getattr(self, 'language', None),
                         enable_itn=getattr(self, 'enable_itn', None))
         else:
-            info.update(model=getattr(self, 'tr_model', None), language=getattr(self, 'language', None))
+            info.update(model=getattr(self, 'tr_model', None), language=getattr(self, 'language', None),
+                        diarize=bool(getattr(self, 'diarize', False)),
+                        diarize_model=getattr(self, 'diarize_model', None))
         return {name: value for name, value in info.items() if value is not None}
 
     def process_request(self):
@@ -226,6 +264,9 @@ class SpeechTranscriber(Server):
                     fr = int(request.values.get('fr', 16000))
                     # the language this request is to be transcribed in, for this request alone
                     language = (request.values.get('language') or '').strip() or None
+                    # whether this request asks for speaker turns; None leaves it to the config
+                    asked = request.values.get('diarize')
+                    diarize = _as_bool(asked) if asked not in (None, '') else None
                     audio_file = request.files['audio']
                     audio_file_path = self._get_temp_file_path('transcribe_audio', base_id, 'wav')
                     write_bytes_to_wav(audio_file_path, audio_file.read(), 1, 2, fr)
@@ -246,11 +287,14 @@ class SpeechTranscriber(Server):
                     else:
                         self._apply_nr(audio_file_path)
                         normalize_decibel(infile=audio_file_path, rms_level=-20)
-                        response = self._transcribe_with_local_model(audio_file_path, language)
+                        response = self._transcribe_with_local_model(audio_file_path, language, diarize)
 
                     # what it was transcribed in, so that a base sees whether its -lang was taken
                     if used:
                         response.setdefault("language", used)
+                    # and whether it was diarized, so that a base sees whether its -dia was taken
+                    if diarize:
+                        response.setdefault("diarized", False)
                     self.logger.info(f"Finished transcription for {base_id}")
                     return jsonify(response), 200
 
@@ -280,26 +324,35 @@ class SpeechTranscriber(Server):
             return language_code(language) or (self.language_hints[0] if self.language_hints else None)
         return language_code(language) or language_code(getattr(self, 'language', None))
 
-    def _transcribe_with_local_model(self, audio_file_path, language=None):
+    def _transcribe_with_local_model(self, audio_file_path, language=None, diarize=None):
         """Transcribe audio using local model.
         
         Args:
             audio_file_path: Path to the audio file
             language: the language to transcribe this file in; None takes the configured one
+            diarize: whether to diarize this file; None takes the configured `diarize`
             
         Returns:
-            Dict with the transcribed text, and its words when word_level
+            Dict with the transcribed text, its words when word_level, and when diarized its
+            speaker turns (`diarization`) and `diarized: True`
         """
-        result = self.transcriber.transcribe(audio_file_path, language=language_code(language))
-        # WhisperX answers (text, words), the other transcribers the text alone
-        text, words = result if isinstance(result, tuple) else (result, [])
-        if self.word_level:
-            return {
-                "text": text,
-                "words": words
-            }
+        if isinstance(self.transcriber, WhisperXTranscriber):
+            result = self.transcriber.transcribe(audio_file_path, language=language_code(language), diarize=diarize)
         else:
-            return {"text": text}
+            result = self.transcriber.transcribe(audio_file_path, language=language_code(language))
+        # WhisperX answers (text, words, turns, segments), the other transcribers the text alone
+        if isinstance(result, tuple):
+            text, words, turns = (tuple(result) + (None, None, None))[:3]
+            words = words or []
+        else:
+            text, words, turns = result, [], None
+        response = {"text": text}
+        if self.word_level:
+            response["words"] = words
+        if turns is not None:
+            response["diarization"] = turns
+            response["diarized"] = True
+        return response
 
     def _transcribe_with_azure(self, audio_file_path, language=None):
         """Transcribe audio using Azure Speech-to-Text service.

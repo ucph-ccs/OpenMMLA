@@ -13,6 +13,15 @@ VLLMFrameAnalyzer:
   prompt_profile: cot  # end-to-end prompt variant: cot (zero-shot CoT, paper default), baseline, baseline_no_pre
   # action_schema: collaboration_v1  # optional explicit override; otherwise use config/vfa/action_schemas.yml default_schema
 
+  # POST /vllm/features: the persons of a frame as skeletons (a YOLO pose model), the AprilTag each wears, their head yaw and their gaze (the gaze model above), as geometry; no VLM
+  features:
+    enabled: true  # answer /vllm/features; false makes it answer 503
+    pose_model: yolo11n-pose.pt  # an Ultralytics pose weights file (yolo11n-pose.pt, yolo11s-pose.pt, yolov8m-pose.pt ...): a bare name or a relative path lives under weights_dir (a bare name is fetched there once, at start); an absolute path is used as it is. Note: ultralytics is AGPL-3.0, see the Docker guide
+    weights_dir: weights  # where the pose weights live, relative to this folder (the container's /project, so they survive a rebuild)
+    pose_confidence: 0.25  # a person below this detection confidence is left out
+    keypoint_confidence: 0.3  # a keypoint below this confidence counts as hidden (head yaw, torso, hands)
+    inout_threshold: 0.5  # a gaze the gaze model puts in the frame with less than this probability is out_of_frame; a request may name its own
+
   # Supported backends
   ollama:
     api_key: <OLLAMA_API_KEY>

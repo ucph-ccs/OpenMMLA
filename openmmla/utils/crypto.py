@@ -14,7 +14,7 @@ ENC_PREFIX = "ENC("
 ENC_SUFFIX = ")"
 ENC_RE = re.compile(r"^ENC\((.+)\)$")
 
-SENSITIVE_KEYS = {"api_key", "token", "password", "secret", "secret_key", "subscription_key"}
+SENSITIVE_KEYS = {"api_key", "token", "hf_token", "password", "secret", "secret_key", "subscription_key"}
 
 
 def _ensure_key_dir():

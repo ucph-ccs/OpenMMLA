@@ -1521,7 +1521,7 @@ class SessionsPanel(Widget):
         from openmmla.tui.schema.loader import _find_project_root
         from openmmla.utils.constants import (
             EVENT_TYPE_ASR_RECOGNITION, EVENT_TYPE_ASR_TRANSCRIPTION,
-            EVENT_TYPE_VFA_ACTION,
+            EVENT_TYPE_VFA_ACTION, EVENT_TYPE_VFA_FEATURES,
             EVENT_TYPE_IPS_TRANSLATION, EVENT_TYPE_IPS_ROTATION, EVENT_TYPE_IPS_RELATION,
         )
         from openmmla.utils.querys import fetch_and_process_data, save_to_json_file
@@ -1545,6 +1545,7 @@ class SessionsPanel(Widget):
                 "ASR Recognition": (EVENT_TYPE_ASR_RECOGNITION, "speaker_recognition"),
                 "ASR Transcription": (EVENT_TYPE_ASR_TRANSCRIPTION, "speaker_transcription"),
                 "VFA Action": (EVENT_TYPE_VFA_ACTION, "action_recognition"),
+                "VFA Features": (EVENT_TYPE_VFA_FEATURES, "features"),
                 "IPS Translation": (EVENT_TYPE_IPS_TRANSLATION, "badge_translation"),
                 "IPS Rotation": (EVENT_TYPE_IPS_ROTATION, "badge_rotation"),
                 "IPS Relation": (EVENT_TYPE_IPS_RELATION, "badge_relation"),
@@ -1555,7 +1556,10 @@ class SessionsPanel(Widget):
                 try:
                     data = fetch_and_process_data(session_id, evt, self._influx_client)
                     if data:
-                        path = save_to_json_file(session_id, data, suffix, measurements_dir)
+                        # the features of a session (a skeleton per person per frame) are large:
+                        # written compactly, they are a fraction of the indented size
+                        path = save_to_json_file(session_id, data, suffix, measurements_dir,
+                                                 compact=(evt == EVENT_TYPE_VFA_FEATURES))
                         exported_files[label] = path
                         self._log(f"  [green]✓[/green] {label}: {len(data)} records -> {os.path.basename(path)}")
                     else:

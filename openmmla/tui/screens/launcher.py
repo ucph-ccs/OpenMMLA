@@ -2210,13 +2210,16 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-nr", "Noise Reduce", "bool", True),
             ParamDef("-tr", "Transcribe", "bool", True),
             ParamDef("-lang", "Language", "str", "", _ASR_LANGUAGES),
+            # anonymous speaker turns with every transcript (pyannote on the speech
+            # transcriber, local WhisperX only): who-of-how-many spoke when, no names
+            ParamDef("-dia", "Diarize", "bool", False),
             ParamDef("-sp", "Speech Separate", "bool", False),
             ParamDef("-d", "Dominant Speaker", "bool", False),
             ParamDef("-hsr", "Half-Scaled Recognition", "bool", True),
         ],
         components=[
             ComponentDef("base", "mmla asr-base", "-nb",
-                         ["-sid", "-b", "--speakers", "-m", "-s", "-vad", "-nr", "-tr", "-lang", "-sp", "-hsr"]),
+                         ["-sid", "-b", "--speakers", "-m", "-s", "-vad", "-nr", "-tr", "-lang", "-dia", "-sp", "-hsr"]),
             ComponentDef("synchronizer", "mmla asr-sync", "-ns",
                          ["-sid", _SYNC_WAIT_FLAG, "-bt", "-d", "-sp"]),
         ],
@@ -2241,11 +2244,16 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-g", "Graphics", "bool", True),
             ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
+            # what the synchronizer asks the frame analyzer for: action labels
+            # (the VLM, vfa_action) and/or features (skeletons, tags, head yaws,
+            # gazes; vfa_features, one per frame set)
+            ParamDef("-a", "Action Labels", "bool", True),
+            ParamDef("-f", "Body & Gaze Features", "bool", False),
         ],
         components=[
             ComponentDef("base", "mmla vfa-base", "-nb",
                          ["-sid", "-b", "-m", "-g", "-s", "-v"]),
-            ComponentDef("synchronizer", "mmla vfa-sync", "-ns", ["-sid", _SYNC_WAIT_FLAG]),
+            ComponentDef("synchronizer", "mmla vfa-sync", "-ns", ["-sid", _SYNC_WAIT_FLAG, "-a", "-f"]),
         ],
         artifact_pipeline="vfa-base",
     ))

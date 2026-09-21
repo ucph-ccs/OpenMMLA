@@ -45,6 +45,7 @@ OPTIONAL_DEP_MAP = {
     "collect-video": "tui",
     "ses-ctl": "uber-base",
     "ses-ana": "uber-base",
+    "ses-fuse": "uber-base",
     "ses-man": "uber-base",
     "tui": "tui",
     "crypto": "tui",
@@ -139,6 +140,10 @@ COMMANDS = {
     "ses-ana": (
         "openmmla.commands.ses.ana:main",
         "Analyze bucket data."
+    ),
+    "ses-fuse": (
+        "openmmla.commands.ses.fuse:main",
+        "Build a session's fusion table: speech, space, body, gaze and action features per time window."
     ),
     "ses-man": (
         "openmmla.commands.ses.man:main",

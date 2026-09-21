@@ -16,6 +16,8 @@ app = create_app(
     endpoint='vllm',
     method_name='process_request',
     class_args={'project_dir': project_dir, 'config_path': config_path},
+    # POST /vllm/features: skeletons, tags, head yaw and gaze as geometry (no VLM)
+    routes={'features': 'process_features'},
 )
 
 # Run with: python serve_multi_angle_vllm_frame_analyzer.py

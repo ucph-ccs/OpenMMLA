@@ -14,7 +14,7 @@ Two kinds of stacks live in this directory:
 | SpeechSeparator | `openmmla/asr-speech-separator` | 5004 | ✅ | torch 2.4.1 + modelscope |
 | SpeechTranscriber | `openmmla/asr-speech-transcriber` | 5005 | ✅ | **whisperx 3.8.6 + torch 2.8 + ct2 ≥4.5 (cuDNN 9)** |
 | VoiceActivityDetector | `openmmla/asr-voice-activity-detector` | 5006 | — | silero-vad (CPU torch) |
-| VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | ✅ | torch 2.7 + tf-keras/retina-face |
+| VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | ✅ | torch 2.7 + tf-keras/retina-face + ultralytics (YOLO pose, **AGPL-3.0**: serving this image over a network carries the AGPL source-offer obligation for the combined work; leave it out and set `features.enabled: false` for an AGPL-free deployment) |
 | vLLM VLM backend (optional) | `vllm/vllm-openai` | 8000 | ✅ | official image, profile `mllm` |
 
 ## Host requirements
@@ -112,7 +112,7 @@ docker compose -f docker/docker-compose.infra.yml logs -f influxdb
 docker compose -f docker/docker-compose.infra.yml down
 ```
 
-Keep the secrets in `docker/.env` (gitignored) rather than `export`ing them: compose reads `.env` for **every** subcommand, so `ps`, `logs` and `down` behave the same from any shell and after a reboot, while an exported value only lives in that one shell and ends up in `~/.bash_history`. The same goes for `INFRA_BIND_ADDRESS`: only a value in `.env` guarantees that every later `up -d` uses the same bind address instead of silently falling back to `0.0.0.0`.
+Keep the secrets in `docker/.env` (gitignored) rather than `export`ing them: compose reads `.env` for **every** subcommand, so `ps`, `logs` and `down` behave the same from any shell and after a reboot, while an exported value only lives in that one shell and ends up in `~/.bash_history`. The same file serves the ASR stack on the ASR Server's host: `HF_TOKEN` there is the Hugging Face token the speech transcriber fetches the gated pyannote diarization pipeline with (`SpeechTranscriber.local.diarize`, see the [ASR guide](pipelines/asr.md#diarize)); it is read at every `up`, not only the first. The same goes for `INFRA_BIND_ADDRESS`: only a value in `.env` guarantees that every later `up -d` uses the same bind address instead of silently falling back to `0.0.0.0`.
 
 ### Migrating from the bare-metal databases (do this first)
 
@@ -254,7 +254,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
 
 ## Mounts
 
-- `pipelines/asr-server` / `pipelines/vfa-server` → `/project` in the container: `config.yml`, `temp/` and runtime logs stay on the host, the same as with conda.
+- `pipelines/asr-server` / `pipelines/vfa-server` → `/project` in the container: `config.yml`, `temp/`, runtime logs and, for the frame analyzer, `weights/` (the pose weights of the [features endpoint](pipelines/vfa/index.md#features-endpoint-skeletons-and-gazes), fetched once at the first start into this bind mount rather than a named volume) stay on the host, the same as with conda.
 - Model caches (HuggingFace / torch hub / ModelScope / wespeaker) are shared named volumes, so re-created containers do not download again.
 - `~/.openmmla` is mounted read-only so the containers can decrypt `ENC(...)` secrets.
 - The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.

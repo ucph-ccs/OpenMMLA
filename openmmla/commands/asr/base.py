@@ -34,6 +34,10 @@ def get_parser():
             "language to transcribe this base's speech in ('en', 'da', 'zh-CN'): sent with every request and "
             "taken for it alone, whatever the speech transcriber is configured for; if not set, that "
             "configured language", shortname='-lang')
+    add_arg('diarize', bool, False,
+            "whether every chunk is sent for its anonymous speaker turns (pyannote diarization on the speech "
+            "transcriber, local WhisperX models only): the transcript record then carries who-of-how-many spoke "
+            "when as SPEAKER_00, SPEAKER_01 ..., without names or profiles", shortname='-dia')
     return parser
 
 
@@ -62,7 +66,8 @@ def main():
         session_id=args.session_id,
         base=args.base,
         speakers=args.speakers,
-        language=args.language
+        language=args.language,
+        diarize=args.diarize
     )
 
 

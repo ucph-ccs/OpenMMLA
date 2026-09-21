@@ -3,11 +3,12 @@ import json
 import os
 import queue
 import threading
+import time
 
 from typing import Any
 
 from openmmla.bases.synchronizer import Synchronizer
-from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
+from openmmla.services.vfa.requests import request_frame_features, request_multi_angle_frame_analyze
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
 from openmmla.utils.clean import clear_directory
@@ -21,12 +22,22 @@ from .enums import BLUE, ENDC
 from .input import get_function_synchronizer
 
 
+def _config_flag(value, default: bool) -> bool:
+    """a config flag: true/false, 1/0, yes/no, on/off; `default` for none or an unfilled placeholder."""
+    text = str(value).strip().lower() if value is not None else ""
+    if not text or (text.startswith("<") and text.endswith(">")):
+        return default
+    if isinstance(value, bool):
+        return value
+    return text in {"true", "1", "yes", "y", "on"}
+
+
 class VFASynchronizer(Synchronizer):
     """VFASynchronizer class for synchronizing video frames from multiple angles."""
     logger = get_logger('vfa-synchronizer')
 
     def __init__(self, project_dir: str | None, config_path: str, session_id: str | None = None,
-                 num_bases: int | None = None):
+                 num_bases: int | None = None, actions: bool = True, features: bool = False):
         """Initialize the VFASynchronizer class.
         
         Args:
@@ -38,10 +49,18 @@ class VFASynchronizer(Synchronizer):
             num_bases: how many bases to synchronize; if omitted, it is asked
                 (from the menu) or, launched from the console, the number of
                 entries in the config's 'Bases' list.
+            actions: whether every synchronized frame set is sent to the frame
+                analyzer for its action labels (the VLM; the vfa_action event)
+            features: whether every synchronized frame set is sent to the frame
+                analyzer's features endpoint for its skeletons, tags, head yaws
+                and gazes (no VLM; the vfa_features event, one per frame set,
+                so as often as the bases' keyframe_interval)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.launch_session_id = session_id
         self.launch_num_bases = num_bases
+        self.actions = bool(actions)
+        self.features = bool(features)
 
         # Runtime attributes
         self.threads = []
@@ -70,8 +89,40 @@ class VFASynchronizer(Synchronizer):
         self.match_tolerance = float(sync_config.get('match_tolerance', 0.5))
         self.vllm_frame_analyzer_url = build_service_url(self.config, vfa_server_config['vllm_frame_analyzer'])
         self.angle_config = base_config.get('angle_config', {})
+        # the features endpoint: whether the skeletons ride along in every vfa_features event, and
+        # the zones a gaze may land in, from a JSON file ({name: polygon} for every angle, or
+        # {angle: {name: polygon}}) named by the config; an unfilled placeholder is no file
+        self.features_keypoints = _config_flag(sync_config.get('features_keypoints'), True)
+        self.feature_zones = self._load_feature_zones(sync_config.get('feature_zones_file'))
+        # the VLM at its own pace: with the bases sending a frame set every second for the
+        # features, the action labels are asked for at most once per action_interval seconds
+        # (0: every frame set)
+        try:
+            self.action_interval = max(0.0, float(sync_config.get('action_interval') or 0))
+        except (TypeError, ValueError):
+            self.action_interval = 0.0
+        self._last_action_time = None
         
         self.logger.info(f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
+
+    def _load_feature_zones(self, path) -> dict | None:
+        """the zones of the features endpoint, from the JSON file the config names; None for
+        none, or for a file that cannot be read (said in the log, never a stop)."""
+        text = str(path or "").strip()
+        if not text or (text.startswith("<") and text.endswith(">")):
+            return None
+        if not os.path.isabs(text):
+            text = os.path.join(os.path.dirname(os.path.abspath(self.config_path)), text)
+        try:
+            with open(text, 'r', encoding='utf-8') as handle:
+                zones = json.load(handle)
+            if not isinstance(zones, dict):
+                raise ValueError("not a JSON object")
+            self.logger.info(f"Feature zones: {sorted(zones)} from {text}")
+            return zones
+        except Exception as e:
+            self.logger.warning(f"Synchronizer.feature_zones_file {text} could not be read ({e}): no zones")
+            return None
 
     def _setup_directories(self):
         """Set up required directories."""
@@ -107,9 +158,10 @@ class VFASynchronizer(Synchronizer):
         self.logger.info("Starting synchronizer reinitialization...")
         project_dir, config_path = self.project_dir, self.config_path
         session_id, num_bases = self.launch_session_id, self.launch_num_bases
+        actions, features = self.actions, self.features
         self._clean_up()
         self.__init__(project_dir=project_dir, config_path=config_path, session_id=session_id,
-                      num_bases=num_bases)
+                      num_bases=num_bases, actions=actions, features=features)
         self.logger.info("Synchronizer reinitialization completed successfully")
 
     def _close_clients(self):
@@ -245,6 +297,7 @@ class VFASynchronizer(Synchronizer):
         # reset attributes
         self.latest_time = 0
         self.time_bucket_buffer = {}
+        self._last_action_time = None
 
         # bucket selection
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
@@ -290,6 +343,12 @@ class VFASynchronizer(Synchronizer):
         # reinitialize mqtt client with a new topic and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/vfa')
         self.mqtt_client.loop_start()
+        if not self.actions and not self.features:
+            self.logger.warning("Neither action labels (-a) nor features (-f) are asked for: the synchronizer "
+                                "merges the frames and sends nothing to the frame analyzer.")
+        else:
+            self.logger.info(f"Each frame set goes to the frame analyzer for: "
+                             f"{', '.join(name for name, on in (('action labels', self.actions), ('features', self.features)) if on)}")
 
         # create threads
         self._create_thread(self._listen_for_stop_signal)
@@ -313,17 +372,22 @@ class VFASynchronizer(Synchronizer):
     def _record_provenance(self):
         """Note in the session what this synchronizer runs with (openmmla.utils.session_provenance):
         how many bases it merges, its tolerances, the participants it describes to the frame
-        analyzer; what that analyzer runs (its models, prompt profile) is asked after, in a
-        thread. A failure is a warning, never a stop."""
+        analyzer, whether it asks for action labels and for features (and with which zones and
+        whether the skeletons ride along); what that analyzer runs (its models, prompt profile,
+        pose model and thresholds) is asked after, in a thread. A failure is a warning, never a
+        stop."""
         if not self.session_id:
             return
         try:
             entry = session_provenance.component_entry(
                 'vfa', 'synchronizer',
-                arguments={'session_id': self.launch_session_id, 'num_bases': self.launch_num_bases},
+                arguments={'session_id': self.launch_session_id, 'num_bases': self.launch_num_bases,
+                           'actions': self.actions, 'features': self.features},
                 parameters={'number_of_bases': self.number_of_bases, 'buffer_expiry_time': self.buffer_expiry_time,
                             'match_tolerance': self.match_tolerance, 'angle_config': self.angle_config,
                             'participant_descriptions': self.selected_participant_descriptions,
+                            'features_keypoints': self.features_keypoints, 'feature_zones': self.feature_zones,
+                            'action_interval': self.action_interval,
                             'service_urls': {'vllm_frame_analyzer': self.vllm_frame_analyzer_url}},
                 config=self.config, config_path=self.config_path, project_dir=self.project_dir)
             session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
@@ -439,11 +503,19 @@ class VFASynchronizer(Synchronizer):
 
     def _process_vllm_requests(self):
         """Process VLLM requests from the queue."""
+        backlog_said = 0.0
         while not self.stop_event.is_set():
             try:
                 # get a frame set from the queue with a timeout
                 frame_set = self.vllm_queue.get(timeout=1.0)
                 frames = {}
+                # one worker serves the queue: frame sets that come faster than the analyzer
+                # answers pile up here, and a features run at 1 Hz can; say so now and then
+                backlog = self.vllm_queue.qsize()
+                if backlog >= 10 and time.time() - backlog_said > 30:
+                    backlog_said = time.time()
+                    self.logger.warning(f"{backlog} frame sets wait for the frame analyzer: it answers slower than "
+                                        f"the bases send (raise Base.keyframe_interval, or a faster analyzer)")
                 
                 try:
                     time_bucket_key = frame_set['time_bucket_key']  # the start time of this time bucket
@@ -468,7 +540,11 @@ class VFASynchronizer(Synchronizer):
 
                     if not image_paths:
                         self.logger.warning(f"No valid images found for time bucket {time_bucket_key}")
-                    else:
+                    # the labels are due when no interval is set, or the last ones are old enough
+                    labels_due = self.actions and (self.action_interval <= 0 or self._last_action_time is None
+                                                   or time_bucket_key - self._last_action_time >= self.action_interval - 1e-6)
+                    if image_paths and labels_due:
+                        self._last_action_time = time_bucket_key
                         try:
                             # request analysis from VLLM server
                             self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
@@ -491,6 +567,19 @@ class VFASynchronizer(Synchronizer):
 
                         except Exception as e:
                             self.logger.error(f"Error processing frame set: {e}", exc_info=True)
+                    if image_paths and self.features:
+                        try:
+                            # the same frames, for their skeletons, tags, head yaws and gazes
+                            result = request_frame_features(
+                                image_paths=image_paths, angles=angles, session_id=self.session_id,
+                                url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
+                                keypoints=self.features_keypoints)
+                            if result:
+                                self._upload_features(time_bucket_key, result)
+                            else:
+                                self.logger.warning(f"Received no features for time bucket {time_bucket_key}")
+                        except Exception as e:
+                            self.logger.error(f"Error getting the features of a frame set: {e}", exc_info=True)
                 
                 finally:
                     if frames:
@@ -556,6 +645,39 @@ class VFASynchronizer(Synchronizer):
 
         if not self.influx_client.write_event(self.session_id, EVENT_TYPE_VFA_ACTION, fields):
             self.logger.error(f"Failed to upload result for time bucket {time_bucket_key}")
+
+    def _upload_features(self, time_bucket_key: float, result: dict[str, Any]):
+        """Upload the features of a frame set to InfluxDB as one vfa_features event: the frames
+        as the features endpoint answered them (one per angle, each with its persons, tags,
+        zones and pairs; see openmmla.services.vfa.features), and the pose model they came from.
+
+        Args:
+            time_bucket_key: the start time of the frame set's time bucket
+            result: the answer of the features endpoint, {frames, pose_model, gaze}
+        """
+        if self.session_id is None:
+            self.logger.warning(f"Cannot upload features for time bucket {time_bucket_key}: session_id is None")
+            return
+        from openmmla.utils.constants import EVENT_TYPE_VFA_FEATURES
+        frames = result.get('frames') or []
+        fields = {
+            "window_start_time": time_bucket_key,
+            "window_end_time": time_bucket_key,
+            "features": json.dumps(frames),
+            "pose_model": str(result.get('pose_model') or ''),
+            "gaze": 1.0 if result.get('gaze') else 0.0,
+        }
+        seen = ', '.join(f"{frame.get('angle')}: {', '.join(str(p.get('person_id')) for p in frame.get('persons', []))}"
+                         for frame in frames) or 'no one'
+        print(f"{BLUE}[Features]{ENDC} {time_bucket_key}: {BLUE}{seen}{ENDC}")
+        if not self.influx_client.write_event(self.session_id, EVENT_TYPE_VFA_FEATURES, fields):
+            self.logger.error(f"Failed to upload features for time bucket {time_bucket_key}")
+        # and to the bases, which draw their own angle's on their live window
+        try:
+            self.mqtt_client.publish(f'{self.session_id}/vfa/features',
+                                     json.dumps({'time': time_bucket_key, 'frames': frames}))
+        except Exception as e:
+            self.logger.debug(f"Could not publish the features of {time_bucket_key} to the bases: {e}")
 
     @property
     def session_control(self) -> str | None:

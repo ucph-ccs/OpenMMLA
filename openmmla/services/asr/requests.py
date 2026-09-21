@@ -81,9 +81,12 @@ def request_speech_transcription(
         url: str,
         timeout: int = 60,
         language: str | None = None,
+        diarize: bool = False,
 ) -> dict | None:
     def process_response(response):
-        response_dict = response.json() # {text: str, words: list[dict], language: str}, the last two optional
+        # {text: str, words: list[dict], language: str, diarization: list[dict], diarized: bool},
+        # all but the text optional
+        response_dict = response.json()
         return response_dict
 
     files = {'audio': ('audio.wav', frames, 'audio/wav')}
@@ -91,6 +94,9 @@ def request_speech_transcription(
     if language:
         # this file is to be transcribed in that language, whatever the service is configured for
         data['language'] = language
+    if diarize:
+        # this file is to come with its anonymous speaker turns, whatever the service is configured for
+        data['diarize'] = '1'
 
     return send_request_with_retry(url, files, data, timeout=timeout, process_response=process_response)
 

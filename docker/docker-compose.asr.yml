@@ -17,6 +17,9 @@ x-common: &common
   environment: &common-env
     PROJECT_DIR: /project
     CONFIG_PATH: /project/config.yml
+    # the Hugging Face token the speech transcriber fetches a gated pyannote diarization
+    # pipeline with (SpeechTranscriber.local.diarize), when its config names no hf_token
+    HF_TOKEN: ${HF_TOKEN:-}
   volumes:
     # pipeline project dir (config.yml, temp/, runtime artifacts/logs)
     - ../pipelines/asr-server:/project

@@ -5,6 +5,7 @@ from io import BytesIO
 from PIL import Image
 from typing import Dict, Any, cast
 
+import cv2
 import torch
 from flask import request, jsonify
 from openai import OpenAI
@@ -12,11 +13,12 @@ from pupil_apriltags import Detector
 from retinaface import RetinaFace
 
 from openmmla.services.server import Server
+from openmmla.services.vfa.features import frame_features
 from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze
-from openmmla.utils.video.image import encode_image_base64
+from openmmla.utils.video.image import encode_image_base64, load_image
 
 SUPPORTED_BACKENDS = (
     'ollama', 'vllm', 'openai', 'qwen', 'gemini',
@@ -42,6 +44,52 @@ def _is_unfilled(value) -> bool:
     """an <...> placeholder the user never replaced counts as no value at all."""
     text = str(value or "").strip()
     return text.startswith("<") and text.endswith(">")
+
+
+def _text(value, default: str) -> str:
+    """a config text, or `default` when it is missing, empty or an unfilled placeholder."""
+    text = str(value or "").strip()
+    return default if not text or _is_unfilled(text) else text
+
+
+def _number(value, default: float) -> float:
+    """a config number, or `default` when it is missing, unfilled or not a number."""
+    if value is None or _is_unfilled(value):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_bool(value, default: bool) -> bool:
+    """a config flag: true/false, 1/0, yes/no, on/off; `default` for none or a placeholder."""
+    if value is None or _is_unfilled(value) or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
+
+
+def _json_value(text, default):
+    """a JSON form field, or `default` when it is missing or not JSON."""
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _zones_for(zones, angle: str) -> dict:
+    """the zones a frame's gaze targets are looked for in: `zones` holds {name: polygon}
+    entries for every angle and {angle: {name: polygon}} entries for one; a frame gets the
+    former plus its own angle's."""
+    if not isinstance(zones, dict) or not zones:
+        return {}
+    every = {name: polygon for name, polygon in zones.items() if not isinstance(polygon, dict)}
+    own = zones.get(angle)
+    return {**every, **own} if isinstance(own, dict) else every
 
 
 class MultiAngleVLLMFrameAnalyzer(Server):
@@ -166,6 +214,21 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"AprilTag Detection: {self.april_tag_enabled}")
         self.logger.info(f"Gaze Detection: {self.gaze_detect_enabled}")
 
+        # /features: the persons of a frame as skeletons (a pose model), the AprilTag each
+        # wears, their head yaw and their gaze (the gaze model above), as geometry
+        features_config = analyzer_config.get('features') or {}
+        if not isinstance(features_config, dict):
+            features_config = {}
+        self.features_enabled = _as_bool(features_config.get('enabled'), True)
+        self.pose_model = _text(features_config.get('pose_model'), 'yolo11n-pose.pt')
+        weights_dir = _text(features_config.get('weights_dir'), 'weights')
+        self.pose_weights_dir = weights_dir if os.path.isabs(weights_dir) else os.path.join(self.project_dir, weights_dir)
+        self.pose_confidence = _number(features_config.get('pose_confidence'), 0.25)
+        self.keypoint_confidence = _number(features_config.get('keypoint_confidence'), 0.3)
+        self.features_inout_threshold = _number(features_config.get('inout_threshold'), 0.5)
+        self.logger.info(f"Features endpoint: {self.features_enabled}"
+                         f"{f' (pose model {self.pose_model} under {self.pose_weights_dir})' if self.features_enabled else ''}")
+
     def _load_prompt_templates(self):
         """Load prompt templates from files in the prompt_templates_dir."""
         # Initialize with default values in case files are not found
@@ -228,6 +291,27 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.device = None
             self.logger.info("Gaze detection disabled - models not initialized")
 
+        # the pose model of /features, fetched once at start and never during a request; a
+        # model that cannot be loaded makes /features answer 503 with the reason
+        self.pose_estimator = None
+        self.pose_error = None
+        if self.features_enabled:
+            try:
+                from openmmla.utils.video.pose import PoseEstimator
+                self.pose_estimator = PoseEstimator(
+                    self.pose_model, weights_dir=self.pose_weights_dir,
+                    device='cuda' if torch.cuda.is_available() else 'cpu', confidence=self.pose_confidence)
+                count = self.pose_estimator.keypoints_count
+                if count is not None and count != 17:
+                    raise ValueError(f"pose model {self.pose_model} answers {count} keypoints per person, "
+                                     f"not the 17 of COCO that /features reads")
+                self.logger.info(f"Pose model loaded: {self.pose_estimator.weights_path}")
+            except Exception as e:
+                self.pose_error = f"{type(e).__name__}: {e}"
+                self.logger.error(f"Pose model {self.pose_model} could not be loaded ({self.pose_error}): "
+                                  f"/features answers 503 until it can. The vfa-server extra installs "
+                                  f"ultralytics, and the weights are fetched into {self.pose_weights_dir}.")
+
         # Setup VLM/LLM clients (required for analysis)
         if self.backend == 'zhipuai':
             try:
@@ -280,8 +364,96 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'families': self.families,
             'april_tag': bool(self.april_tag_enabled),
             'gaze_detect': bool(self.gaze_detect_enabled),
+            # the features endpoint: what its geometry ran with, since nothing else records
+            # the server's config (openmmla.utils.session_provenance reads this answer)
+            'features': {'enabled': bool(self.features_enabled),
+                         'pose_model': self.pose_model if self.features_enabled else None,
+                         'pose_loaded': self.pose_estimator is not None,
+                         'weights_path': getattr(self.pose_estimator, 'weights_path', None),
+                         'pose_confidence': self.pose_confidence if self.features_enabled else None,
+                         'keypoint_confidence': self.keypoint_confidence if self.features_enabled else None,
+                         'inout_threshold': self.features_inout_threshold if self.features_enabled else None},
         }
         return {name: value for name, value in info.items() if value is not None}
+
+    def process_features(self):
+        """POST /vllm/features: for every image, the persons in it as skeletons with the AprilTag
+        each wears, their head yaw and their gaze (point, in-frame probability, what it lands on),
+        as geometry on the image (openmmla.services.vfa.features). Form fields: `images` (one or
+        more), `angles` (JSON list, one name per image), `session_id`, `zones` (JSON: {name:
+        polygon} for every image, or {angle: {name: polygon}}; a polygon in pixels, or in [0, 1]),
+        `inout_threshold` (below it a gaze is out of frame), `keypoints` (false leaves the skeletons
+        out of the answer, for a study that wants the derived features alone)."""
+        if not self.features_enabled:
+            return jsonify({'error': 'the features endpoint is off (VLLMFrameAnalyzer.features.enabled)'}), 503
+        if self.pose_estimator is None:
+            return jsonify({'error': f'the pose model is not loaded ({self.pose_error})'}), 503
+        try:
+            session_id = request.values.get('session_id')
+            angles = _json_value(request.values.get('angles'), [])
+            if not isinstance(angles, list):
+                angles = []
+            zones = _json_value(request.values.get('zones'), {})
+            if zones and not isinstance(zones, dict):
+                return jsonify({'error': 'zones must be a JSON object: {name: polygon}, or {angle: {name: polygon}}'}), 400
+            inout_threshold = _number(request.values.get('inout_threshold'), self.features_inout_threshold)
+            keypoints = _as_bool(request.values.get('keypoints'), True)
+            image_files = request.files.getlist('images')
+            if not image_files:
+                return jsonify({'error': 'No images provided in request'}), 400
+
+            frames = []
+            for i, image_file in enumerate(image_files):
+                angle = str(angles[i]) if i < len(angles) else f"perspective_{i + 1}"
+                try:
+                    frames.append(self._frame_features(image_file.read(), angle, _zones_for(zones, angle),
+                                                       inout_threshold, keypoints))
+                except ValueError as e:
+                    # a frame that is not an image, or a zone that is not a polygon: the client's
+                    # to fix, so no retry is asked for
+                    return jsonify({'error': f"{image_file.filename or angle}: {e}"}), 400
+            self.logger.info(f"Features for {session_id}: {len(frames)} frames, "
+                             f"{sum(len(frame['persons']) for frame in frames)} persons")
+            return jsonify({'frames': frames, 'pose_model': self.pose_estimator.model_name,
+                            'gaze': bool(self.gazelle_model and self.gazelle_transform)}), 200
+        except Exception as e:
+            self.logger.error("Exception during feature extraction", exc_info=True)
+            return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
+
+    def _frame_features(self, image_bytes: bytes, angle: str, zones: dict, inout_threshold: float,
+                        keypoints: bool = True) -> dict:
+        """the features of one frame: its AprilTags (centres in pixels from the top-left corner),
+        its persons from the pose model, its faces and gazes from the gaze model, put together."""
+        image = load_image(image_bytes)
+        height, width = image.shape[:2]
+        tags = {}
+        if self.detector is not None:
+            for tag in self.detector.detect(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)):
+                centre = getattr(tag, 'center', None)
+                if centre is None:
+                    centre = tag.corners.mean(axis=0)
+                tags[int(tag.tag_id)] = (float(centre[0]), float(centre[1]))
+        persons = self.pose_estimator.detect(image)
+        faces, gaze_error = [], None
+        if self.gazelle_model and self.gazelle_transform:
+            try:
+                gaze_results, _ = detect_gaze(
+                    image_input=image_bytes, face_detector=self.face_detector, gazelle_model=self.gazelle_model,
+                    gazelle_transform=self.gazelle_transform, device=self.device if self.device else 'cpu',
+                    normalize_bbox=False, normalize_target=False, render=False, show=False,
+                    inout_thresh=inout_threshold, render_heatmap=False, save=False)
+                faces = [{'bbox': result['face_bbox'], 'gaze_point': result['gaze_target'], 'inout': result['inout_score']}
+                         for result in gaze_results]
+            except Exception as e:
+                # the frame keeps its skeletons; the answer says the gazes are missing for a reason
+                gaze_error = f"{type(e).__name__}: {e}"
+                self.logger.error(f"Gaze detection failed on a {angle} frame: {gaze_error}", exc_info=True)
+        frame = frame_features(persons, tags, faces, zones, width, height, angle,
+                               min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
+                               keypoints=keypoints)
+        if gaze_error:
+            frame['gaze_error'] = gaze_error
+        return frame
 
     def process_request(self):
         """Process multiple images from different angles with contextual awareness."""

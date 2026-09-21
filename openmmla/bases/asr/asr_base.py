@@ -42,7 +42,7 @@ from openmmla.utils.config import get_bases, get_base_by_id
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = True,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                    hsr: bool = True, session_id: str | None = None, base: str | None = None,
-                   speakers: str | None = None, language: str | None = None):
+                   speakers: str | None = None, language: str | None = None, diarize: bool = False):
     """Start ASR Base with restart capability.
     
     Args:
@@ -59,13 +59,15 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
         base: Id of the config 'Bases' entry this base is
         speakers: Comma-separated speaker profiles to recognize; if omitted, every registered one
         language: Language to transcribe in, whatever the speech transcriber is configured for
+        diarize: Whether to ask the speech transcriber for anonymous speaker turns with every chunk
     """
     # restart loop - allows restarting the entire process
     while True:
         try:
             asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode,
                               vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr,
-                              session_id=session_id, base=base, speakers=speakers, language=language)
+                              session_id=session_id, base=base, speakers=speakers, language=language,
+                              diarize=diarize)
             asr_base.run()
             break  # run() returns only once a run launched from the console has ended with STOP
         except KeyboardInterrupt as e:
@@ -90,7 +92,7 @@ class ASRBase(Base):
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                  hsr: bool = True, session_id: str | None = None, base: str | None = None,
                  speakers: str | list[str] | None = None, registration: str | None = None,
-                 language: str | None = None):
+                 language: str | None = None, diarize: bool = False):
         """Initialize the ASRBase class.
 
         Args:
@@ -115,6 +117,11 @@ class ASRBase(Base):
             language: the language this base's speech is transcribed in ('en', 'da', 'zh-CN'), sent
                 with every request and taken for it alone, whatever the speech transcriber is
                 configured for; if omitted, that configured language (default: None)
+            diarize: whether every chunk is sent for its anonymous speaker turns (SPEAKER_00,
+                SPEAKER_01 ... within the chunk, no names), which the transcript record then
+                carries as `diarization`; a group-level base (asr_scope: group) gets who-of-how-many
+                spoke when without any speaker profile. Only a local WhisperX transcriber can
+                (default: False)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -130,6 +137,7 @@ class ASRBase(Base):
         self.launch_speakers = parse_speakers(speakers)
         self.registration = registration
         self.language = str(language).strip() if language and str(language).strip() else None
+        self.diarize = bool(diarize)
 
         # runtime attributes
         self.session_id = None
@@ -146,6 +154,7 @@ class ASRBase(Base):
         self.group_speaker_id = "group"
         self.stream_name = None  # the Streams entry a 'stream' source pulls
         self._language_told = False  # whether a transcriber that did not take our language was named
+        self._diarize_told = False  # whether a transcriber that did not diarize for us was named
         self.url = None
         self._joined_session = None  # (session id, source key) this base noted itself in (session sources)
 
@@ -1037,7 +1046,7 @@ class ASRBase(Base):
                 arguments={'mode': self.mode, 'store': self.store, 'vad': self.vad, 'nr': self.nr, 'tr': self.tr,
                            'sp': self.sp, 'hsr': self.hsr, 'session_id': self.launch_session_id,
                            'base': self._base_entry.get('id'), 'speakers': self.launch_speakers,
-                           'language': self.language},
+                           'language': self.language, 'diarize': self.diarize},
                 parameters={
                     'base_type': self.base_type, 'id': self.id, 'asr_scope': self.asr_scope,
                     'speaker_verification': self.speaker_verification,
@@ -1661,11 +1670,31 @@ class ASRBase(Base):
             The transcription result as a dictionary. Empty dictionary if transcription failed.
         """
         response = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
-                                            self.speech_transcriber_url, language=self.language)
+                                            self.speech_transcriber_url, language=self.language,
+                                            diarize=self.diarize)
         if response is None:
             return {}
         self._check_language(response)
+        self._check_diarize(response)
         return response
+
+    def _check_diarize(self, response: dict) -> None:
+        """say once, when this base asked for speaker turns, that the speech transcriber gave none:
+        its backend cannot (only a local WhisperX model diarizes), its pyannote pipeline could not
+        be made (no Hugging Face token, terms not accepted), or it runs code from before a request
+        could ask."""
+        if not self.diarize or self._diarize_told:
+            return
+        if response.get("diarized"):
+            self._diarize_told = True
+            return
+        self._diarize_told = True
+        self.logger.warning(
+            "This base asked the speech transcriber to diarize, and it did not: its backend cannot (only a "
+            "local WhisperX model diarizes), its pyannote pipeline could not be made (see its log: the model "
+            "is gated on huggingface.co and needs hf_token or HF_TOKEN), or its service runs code from before "
+            "a request could ask. Transcripts come without speaker turns until the ASR Server card is started "
+            "again with that put right.")
 
     def _check_language(self, response: dict) -> None:
         """say once, when this base asked for a language, that the speech transcriber did not
@@ -1705,8 +1734,13 @@ class ASRBase(Base):
             "words": json.dumps(transcribe_result.get("words", [])),
             "speaker": speaker,
         }
+        turns = transcribe_result.get("diarization")
+        if turns is not None:
+            # the anonymous speaker turns of the chunk, in seconds from its start, as the words are
+            fields["diarization"] = json.dumps(turns)
+        heard = f" ({len({turn.get('speaker') for turn in turns})} speakers, {len(turns)} turns)" if turns else ""
         print(f"{GREEN}[Speaker Transcription]{ENDC}{chunk_start_time}: "
-              f"{GREEN}{speaker} : {transcribe_result.get('text', 'N/A')}{ENDC}")
+              f"{GREEN}{speaker} : {transcribe_result.get('text', 'N/A')}{heard}{ENDC}")
         self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_TRANSCRIPTION, fields)
 
     def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],

@@ -143,6 +143,7 @@ class VFABase(Base):
         self.mqtt_client = MQTTClientWrapper(self.config_path)
 
     def _clean_up(self):
+        self.latest_features = None
         if self.threads:
             self._stop_threads()
         self._clear_threads()
@@ -328,7 +329,13 @@ class VFABase(Base):
             self._clean_up()
             return
 
-        self.mqtt_client.reinitialise()
+        # with graphics on, the base also hears what the synchronizer's features endpoint saw,
+        # to draw its own angle's skeletons and gazes on its window
+        self.latest_features = None
+        if self.graphics:
+            self.mqtt_client.reinitialise(on_message=self._handle_features, topics=f'{self.session_id}/vfa/features')
+        else:
+            self.mqtt_client.reinitialise()
         self.mqtt_client.loop_start()
 
         self._create_thread(self._listen_for_stop_signal)
@@ -705,12 +712,35 @@ class VFABase(Base):
 
         if self.graphics:
             display_frame = cv2.resize(frame, (960, 540))
+            latest = getattr(self, 'latest_features', None)
+            if latest:
+                # the last features the synchronizer saw for this angle, and how old they are
+                seen_at, features = latest
+                try:
+                    from openmmla.utils.video.overlay import draw_features
+                    draw_features(display_frame, features, note=f"features {max(0.0, acquired_time - seen_at):.1f} s ago")
+                except Exception as e:
+                    self.logger.debug(f"Could not draw the features on the window: {e}")
             timestamp = datetime.datetime.fromtimestamp(acquired_time).strftime("%Y-%m-%d %H:%M:%S")
             cv2.putText(display_frame, timestamp, (display_frame.shape[1] - 300, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.imshow(f'VFA Base {self.base_id}, Camera {self.selected_source}', display_frame)
 
         return frame
+
+    def _handle_features(self, client, userdata, message):
+        """keep the frame of this base's angle from what the synchronizer's features endpoint
+        answered (the other angles are the other bases'), for the window to draw."""
+        try:
+            payload = json.loads(message.payload.decode('utf-8'))
+            frames = payload.get('frames') or []
+            mine = next((f for f in frames if str(f.get('angle')) == str(self.camera_angle)), None)
+            if mine is None and len(frames) == 1:
+                mine = frames[0]
+            if mine is not None:
+                self.latest_features = (float(payload.get('time') or 0.0), mine)
+        except Exception as e:
+            self.logger.debug(f"Ignoring a features message: {e}")
 
     @staticmethod
     def _frame_timestamp(filename: str) -> float:

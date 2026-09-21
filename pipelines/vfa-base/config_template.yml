@@ -85,6 +85,9 @@ Bases:
 Synchronizer:
   result_expiry_time: 30                            # cleanup timeout (seconds)
   match_tolerance: 0.5                              # matching tolerance (seconds) for incoming result to time buckets
+  action_interval: 0                                # seconds between two action-label (VLM) requests, whatever the bases' keyframe_interval; 0 asks for every frame set. For a features run at 1 frame set per second, 30 keeps the VLM at its usual pace
+  features_keypoints: true                          # with the synchronizer's Body & Gaze Features on (-f): keep the skeletons in every vfa_features event; false keeps the derived fields alone (smaller events)
+  feature_zones_file: <zones-json-file>             # optional: a JSON file of named polygons a gaze may land in, {name: [[x, y], ...]} for every angle or {angle: {name: polygon}}, in pixels or in [0, 1]; relative to this folder
 
 
 # streams settings

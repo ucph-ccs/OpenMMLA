@@ -1,6 +1,13 @@
 # VLLMFrameAnalyzer — multi-angle frame analysis, port 5007, GPU
 # (torch for gaze detection, tensorflow/retina-face for face detection,
+#  ultralytics for the pose model behind /vllm/features,
 #  OpenAI-compatible client for the VLM/LLM backends)
+# The pose weights are fetched once, at the first start, into /project/weights
+# (pipelines/vfa-server/weights on the host), so a rebuild does not fetch them again.
+# Licence note: ultralytics (and ultralytics-thop) are AGPL-3.0. openmmla's own code stays
+# MIT, but whoever publishes or serves this image over a network carries the AGPL
+# source-offer obligation for the combined work; leave ultralytics out of the image
+# (and set features.enabled: false) to keep a deployment AGPL-free.
 # Build from the repository root:
 #   docker build -f docker/vfa-frame-analyzer/Dockerfile -t openmmla/vfa-frame-analyzer .
 FROM python:3.11-slim
@@ -28,6 +35,7 @@ RUN pip install \
         "scikit-learn==1.6.1" \
         "matplotlib==3.9.2" \
         "huggingface-hub==0.24.6" \
+        "ultralytics==8.3.223" \
         "flask==3.0.3" "gunicorn==22.0.0" "gevent==24.2.1" \
         "pyyaml" "cryptography>=42.0.0"
 
@@ -39,6 +47,8 @@ ENV PROJECT_DIR=/project \
     CONFIG_PATH=/project/config.yml \
     PORT=5007 \
     WORKERS=1
+# relative paths (a pose_model written as a path) resolve inside the bind mount
+WORKDIR /project
 
 CMD gunicorn -k gevent --timeout 0 -w ${WORKERS} -b 0.0.0.0:${PORT} \
     openmmla.services.vfa.apps.serve_multi_angle_vllm_frame_analyzer:app
