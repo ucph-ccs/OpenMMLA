@@ -173,6 +173,19 @@ Files are staged under `artifacts/<session>/.staging/` and are merged into the a
 
 A session that is still recording downloads as far as it has been written: the files that are still growing are named in the log and kept in staging rather than merged, because FFmpeg only finalizes a container when the recorder stops. Stop the recorders and download again.
 
+
+#### Bringing earlier recordings in
+
+Sessions recorded before the Collection card existed, or by hand, come in through `mmla ses-import`, which builds the same `artifacts/<session>/collection/<host>/{audio,video}/` tree and manifests from whatever a folder holds:
+
+```bash
+mmla ses-import -n "Wegrow - Life - 2025-05-13/session_2025-05-13T07-55-47Z"        # -n shows the plan and changes nothing
+mmla ses-import -g group_02 "Wegrow - Life - 2025-05-13/session_2025-05-13T07-55-47Z"
+mmla ses-import --only session_2024-12-10T11-09-19Z -g group_02 "Wegrow - Life - 2024-12-10"   # a folder holding several sessions
+```
+
+It recognizes a video named by the local time it started (`2025-05-13 11-01-06.mov`, `record_20250616_124506.mp4`; `--tz`, `Europe/Copenhagen` by default, says whose local time), a file already named with its unix start (`record_1759826194.755_raspi4-01.mp4`, `audio_1759832419.338_ch0.wav`), and an ASR base's folder of three-second recordings (`badge_0/records/badge_0_record_<unix>.wav`, or `segments/` when the raw records were not kept), even downloaded twice. Continuous files are moved under their new names, a base's segments are concatenated into one file that starts when the session's first segment did (silence where nothing was recorded, so every base of a session shares one start), a video's own audio track is extracted as a 16 kHz group microphone, and two videos of one camera recorded one after the other keep one host label. The session id is `<experiment>_<group>_<start>` (`-e`, `-g`, or `-sid` outright), the start taken from a `session_<ISO>Z` folder name. Everything else in the folder (logs, frames, the old outputs, speaker profiles) moves to `legacy/` under the session, and `import_report.json` says what went where; `--copy` leaves the source untouched instead. A replay starts at the session's `initial_sync_time`, the latest start among its recordings, so a camera that started late shortens the replay of everything else.
+
 ### Pipelines
 
 The ASR, IPS and VFA base cards share one shape:
