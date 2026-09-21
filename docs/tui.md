@@ -186,6 +186,12 @@ mmla ses-import --only session_2024-12-10T11-09-19Z -g group_02 "Wegrow - Life -
 
 It recognizes a video named by the local time it started (`2025-05-13 11-01-06.mov`, `record_20250616_124506.mp4`; `--tz`, `Europe/Copenhagen` by default, says whose local time), a file already named with its unix start (`record_1759826194.755_raspi4-01.mp4`, `audio_1759832419.338_ch0.wav`), and an ASR base's folder of three-second recordings (`badge_0/records/badge_0_record_<unix>.wav`, or `segments/` when the raw records were not kept), even downloaded twice. Continuous files are moved under their new names, a base's segments are concatenated into one file that starts when the session's first segment did (silence where nothing was recorded, so every base of a session shares one start), a video's own audio track is extracted as a 16 kHz group microphone, and two videos of one camera recorded one after the other keep one host label. The session id is `<experiment>_<group>_<start>` (`-e`, `-g`, or `-sid` outright), the start taken from a `session_<ISO>Z` folder name. Everything else in the folder (logs, frames, the old outputs, speaker profiles) moves to `legacy/` under the session, and `import_report.json` says what went where; `--copy` leaves the source untouched instead. A replay starts at the session's `initial_sync_time`, the latest start among its recordings, so a camera that started late shortens the replay of everything else.
 
+`mmla ses-tidy` corrects an imported session afterwards, folders, file names and manifests together: `-e` / `-g` rename the experiment or the group (the session moves to `<experiment>_<group>_<start>`), `--host OLD=NEW` relabels a host (`base-vimo-0=vimo-0`; the audio hosts are `badge-N`, `vimo-N`, `jabra-N`, the video hosts `raspi4-0N`, `raspi5-0N`), and `--prune-legacy` keeps the speaker profiles (as `collection/<host>/profiles/`) and `meta.txt` and deletes the rest of `legacy/`, the frames, logs and measurements a replay produces again:
+
+```bash
+mmla ses-tidy exp_20250513_life_group_01_250513T0755Z -e exp_20250513_microbit --host cam-1=raspi4-01
+```
+
 ### Pipelines
 
 The ASR, IPS and VFA base cards share one shape:
