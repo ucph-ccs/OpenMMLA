@@ -329,6 +329,7 @@ def get_parser():
     parser.add_argument('--block', type=float, default=300.0, help="block length the sampling draws from (default 300 s)")
     parser.add_argument('--seed', type=int, default=1, help="sampling seed, the same for every coder (default 1)")
     parser.add_argument('-p', '--port', type=int, default=8765)
+    parser.add_argument('--bind', default='127.0.0.1', help="address to listen on (default 127.0.0.1: this machine only; a Tailscale address or 0.0.0.0 lets others in, mind who can reach it)")
     return parser
 
 
@@ -341,8 +342,8 @@ def main(argv=None):
         print(f"no sessions with video under {artifacts}")
         return 1
     total = sum(len(windows_of(s, args.window, args.step, args.sample, args.block, args.seed)) for s in Handler.sessions)
-    print(f"{len(Handler.sessions)} sessions, {total} windows to code; open http://localhost:{args.port}/  (Ctrl-C stops)")
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    print(f"{len(Handler.sessions)} sessions, {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/  (Ctrl-C stops)")
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
