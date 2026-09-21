@@ -1,9 +1,13 @@
 # VLLMFrameAnalyzer — multi-angle frame analysis, port 5007, GPU
-# (torch for gaze detection, tensorflow/retina-face for face detection,
+# (torch for gaze detection, transformers for the PaGE gaze model (its checkpoints and code come
+#  from HuggingFace; Gaze-LLE comes from torch.hub), tensorflow/retina-face for face detection,
 #  ultralytics (8.4, the first line that ships the YOLO26 weights) for the pose model behind /vllm/features,
 #  OpenAI-compatible client for the VLM/LLM backends)
 # The pose weights are fetched once, at the first start, into /project/weights
-# (pipelines/vfa-server/weights on the host), so a rebuild does not fetch them again.
+# (pipelines/vfa-server/weights on the host), so a rebuild does not fetch them again; the gaze
+# checkpoints land in the hf-cache and torch-cache volumes.
+# PaGE's code is MIT; its checkpoints carry Meta's DINOv3 licence (redistribution under the same
+# terms, trade-control clause), which is not an obligation on serving the model.
 # Licence note: ultralytics (and ultralytics-thop) are AGPL-3.0. openmmla's own code stays
 # MIT, but whoever publishes or serves this image over a network carries the AGPL
 # source-offer obligation for the combined work; leave ultralytics out of the image
@@ -34,7 +38,8 @@ RUN pip install \
         "timm==1.0.15" \
         "scikit-learn==1.6.1" \
         "matplotlib==3.9.2" \
-        "huggingface-hub==0.24.6" \
+        "huggingface-hub==1.32.0" \
+        "transformers==5.6.2" "safetensors>=0.4.3" \
         "ultralytics==8.4.157" \
         "flask==3.0.3" "gunicorn==22.0.0" "gevent==24.2.1" \
         "pyyaml" "cryptography>=42.0.0"

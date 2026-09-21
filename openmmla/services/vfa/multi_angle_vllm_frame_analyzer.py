@@ -17,7 +17,7 @@ from openmmla.services.vfa.features import frame_features
 from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
-from openmmla.utils.video.gaze import detect_gaze
+from openmmla.utils.video.gaze import detect_gaze, gaze_backend_name, load_gaze_backend
 from openmmla.utils.video.image import encode_image_base64, load_image
 
 SUPPORTED_BACKENDS = (
@@ -133,9 +133,14 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.april_tag_enabled = analyzer_config.get('april_tag', True)
         self.gaze_detect_enabled = analyzer_config.get('gaze_detect', True)
         
-        # the gaze model (a Gaze-LLE checkpoint from torch.hub, fkryan/gazelle): the ViT-L one
-        # with in/out-of-frame by default; the _childplay variants were fine-tuned on children
-        self.gaze_model = _text(analyzer_config.get('gaze_model'), 'gazelle_dinov2_vitl14_inout')
+        # the gaze model: which backend (page = PaGE, the default; gazelle = Gaze-LLE from
+        # torch.hub, also what a gazelle_* checkpoint name alone means) and which of its
+        # checkpoints (empty: the backend's default)
+        gaze_model = _text(analyzer_config.get('gaze_model'), '')
+        self.gaze_model = gaze_model or None
+        self.gaze_backend = gaze_backend_name(_text(analyzer_config.get('gaze_backend'), ''), gaze_model)
+        # PaGE crops the head its second branch looks at from the face box widened by this much
+        self.gaze_head_scale = _number(analyzer_config.get('gaze_head_scale'), None)
 
         # Only load families if AprilTag detection is enabled
         if self.april_tag_enabled:
@@ -271,29 +276,22 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.detector = None
             self.logger.info("AprilTag detection disabled - detector not initialized")
         
-        # Conditionally setup gaze detection objects
+        # Conditionally setup gaze detection objects: the face detector and the gaze backend
+        self.gaze = None
         if self.gaze_detect_enabled:
             self.face_detector = RetinaFace.detect_faces
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             try:
-                self.gazelle_model, self.gazelle_transform = torch.hub.load(
-                    'fkryan/gazelle',
-                    self.gaze_model,
-                    trust_repo=True
-                )
-                self.gazelle_model.eval()
-                self.gazelle_model.to(device)
+                self.gaze = load_gaze_backend(self.gaze_backend, self.gaze_model, device, self.gaze_head_scale)
+                self.gaze_model = self.gaze.model_name or self.gaze_model
                 self.device = device
-                self.logger.info(f"Gazelle model {self.gaze_model} loaded on {device}")
+                self.logger.info(f"Gaze model loaded on {device}: {self.gaze_backend} {self.gaze_model}")
             except Exception as e:
-                self.logger.error(f"Error loading Gazelle model: {e}")
-                self.gazelle_model = None
-                self.gazelle_transform = None
+                self.logger.error(f"Error loading the gaze model ({self.gaze_backend} {self.gaze_model or ''}): {e}")
+                self.gaze = None
                 self.device = None
         else:
             self.face_detector = None
-            self.gazelle_model = None
-            self.gazelle_transform = None
             self.device = None
             self.logger.info("Gaze detection disabled - models not initialized")
 
@@ -370,7 +368,10 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'families': self.families,
             'april_tag': bool(self.april_tag_enabled),
             'gaze_detect': bool(self.gaze_detect_enabled),
+            'gaze_backend': self.gaze_backend if self.gaze_detect_enabled else None,
             'gaze_model': self.gaze_model if self.gaze_detect_enabled else None,
+            'gaze_loaded': self.gaze is not None,
+            'gaze_head_scale': getattr(self.gaze, 'head_scale', None),
             # the features endpoint: what its geometry ran with, since nothing else records
             # the server's config (openmmla.utils.session_provenance reads this answer)
             'features': {'enabled': bool(self.features_enabled),
@@ -425,7 +426,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.info(f"Features for {session_id}: {len(frames)} frames, "
                              f"{sum(len(frame['persons']) for frame in frames)} persons")
             return jsonify({'frames': frames, 'pose_model': self.pose_estimator.model_name,
-                            'gaze': bool(gaze and self.gazelle_model and self.gazelle_transform)}), 200
+                            'gaze': bool(gaze and self.gaze is not None)}), 200
         except Exception as e:
             self.logger.error("Exception during feature extraction", exc_info=True)
             return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
@@ -445,11 +446,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 tags[int(tag.tag_id)] = (float(centre[0]), float(centre[1]))
         persons = self.pose_estimator.detect(image)
         faces, gaze_error = [], None
-        if gaze and self.gazelle_model and self.gazelle_transform:
+        if gaze and self.gaze is not None:
             try:
                 gaze_results, _ = detect_gaze(
-                    image_input=image_bytes, face_detector=self.face_detector, gazelle_model=self.gazelle_model,
-                    gazelle_transform=self.gazelle_transform, device=self.device if self.device else 'cpu',
+                    image_input=image_bytes, face_detector=self.face_detector, backend=self.gaze,
+                    device=self.device if self.device else 'cpu',
                     normalize_bbox=False, normalize_target=False, render=False, show=False,
                     inout_thresh=inout_threshold, render_heatmap=False, save=False)
                 faces = [{'bbox': result['face_bbox'], 'gaze_point': result['gaze_target'], 'inout': result['inout_score']}
@@ -587,14 +588,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 image_bytes = pil_image_to_bytes(apriltag_image)
 
         # Step 2: Conditionally detect gaze on the processed image if gaze detection is available
-        if gaze_detect and self.gazelle_model and self.gazelle_transform:
+        if gaze_detect and self.gaze is not None:
             device = self.device if self.device is not None else 'cpu'
             
             gaze_results, rendered_image = detect_gaze(
                 image_input=image_bytes,
                 face_detector=self.face_detector,
-                gazelle_model=self.gazelle_model,
-                gazelle_transform=self.gazelle_transform,
+                backend=self.gaze,
                 device=device,
                 normalize_bbox=True,
                 normalize_target=True,

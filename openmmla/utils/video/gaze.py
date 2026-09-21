@@ -1,4 +1,6 @@
-"""This module contains utility functions to detect faces and estimate gaze using Gazelle."""
+"""This module contains utility functions to detect faces and estimate where each face looks: a
+gaze backend (PaGE or Gaze-LLE, behind one interface) answers, per face, a heatmap
+over the image and the probability that the gaze lands inside it."""
 import os
 from typing import Any
 
@@ -11,11 +13,74 @@ from PIL import Image, ImageDraw, ImageFont
 from .image import load_image
 
 
+class GazeBackend:
+    """what a gaze model answers for one image: a heatmap per face (a 2-D array over the image,
+    any resolution, the hottest cell being the gaze target) and, when it can tell, the
+    probability that the gaze lands inside the frame. Subclasses wrap one model each."""
+    name = 'gaze'
+    model_name = ''
+
+    def predict(self, pil_image: Image.Image, norm_boxes: list[list[float]]) -> tuple[list[np.ndarray], list[float | None]]:
+        """the heatmaps and in-frame probabilities of the faces at `norm_boxes` ([x1, y1, x2, y2]
+        in [0, 1], top-left origin), one each, in the order given."""
+        raise NotImplementedError
+
+
+class GazelleBackend(GazeBackend):
+    """Gaze-LLE (fkryan/gazelle on torch.hub): a frozen DINOv2 encoder with a small gaze decoder,
+    64 x 64 heatmaps, in/out-of-frame from the _inout checkpoints."""
+    name = 'gazelle'
+
+    def __init__(self, model: torch.nn.Module, transform: Any, device: str = 'cpu', model_name: str = ''):
+        self.model, self.transform, self.device, self.model_name = model, transform, device, model_name
+
+    @classmethod
+    def load(cls, model_name: str = 'gazelle_dinov2_vitl14_inout', device: str = 'cpu') -> 'GazelleBackend':
+        model, transform = torch.hub.load('fkryan/gazelle', model_name, trust_repo=True)
+        model.eval()
+        model.to(device)
+        return cls(model, transform, device, model_name)
+
+    def predict(self, pil_image, norm_boxes):
+        img_tensor = self.transform(pil_image).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            output = self.model({"images": img_tensor, "bboxes": [norm_boxes]})
+        heatmaps = [h.detach().cpu().numpy() for h in output['heatmap'][0]]
+        inout = output.get('inout')
+        scores = [float(s.item()) for s in inout[0]] if inout is not None else [None] * len(heatmaps)
+        return heatmaps, scores
+
+
+def gaze_backend_name(backend: str | None, model_name: str | None = None) -> str:
+    """the backend a config means: the one it names ('page' for PaGE, 'gazelle' for Gaze-LLE),
+    else the one its checkpoint name belongs to (gazelle_* is Gaze-LLE), else PaGE."""
+    key = str(backend or '').strip().lower()
+    if key:
+        return key
+    if str(model_name or '').strip().lower().startswith('gazelle'):
+        return 'gazelle'
+    return 'page'
+
+
+def load_gaze_backend(backend: str | None, model_name: str | None, device: str = 'cpu',
+                      head_scale: float | None = None) -> GazeBackend:
+    """the gaze backend named by the config (see gaze_backend_name); `model_name` picks its
+    checkpoint, None its default; `head_scale` widens the face box into the head crop PaGE
+    looks at (None: its default)."""
+    key = gaze_backend_name(backend, model_name)
+    if key == 'gazelle':
+        return GazelleBackend.load(model_name or 'gazelle_dinov2_vitl14_inout', device)
+    if key == 'page':
+        from .gaze_page import DEFAULT_HEAD_SCALE, PageBackend
+        return PageBackend.load(model_name, device, DEFAULT_HEAD_SCALE if head_scale is None else head_scale)
+    raise ValueError(f"unknown gaze backend '{backend}': use gazelle or page")
+
+
 def detect_gaze(
         image_input: Any,
         face_detector: Any,
-        gazelle_model: torch.nn.Module,
-        gazelle_transform: Any,
+        gazelle_model: torch.nn.Module | None = None,
+        gazelle_transform: Any = None,
         device: str = 'cpu',
         normalize_bbox: bool = True,
         normalize_target: bool = True,
@@ -24,14 +89,15 @@ def detect_gaze(
         inout_thresh: float = 0.5,
         render_heatmap: bool = False,
         save: bool = False,
-        save_path: str | None = None
+        save_path: str | None = None,
+        backend: GazeBackend | None = None,
 ) -> tuple[list[dict[str, Any]], Image.Image | None]:
     """Detect faces, estimate gaze, and optionally render visualizations.
 
     Args:
         image_input: Image data (bytes) or file path (str).
         face_detector: Face detection function (e.g., RetinaFace.detect_faces).
-        gazelle_model: Loaded Gazelle model.
+        gazelle_model: Loaded Gazelle model (the older way to name the backend; `backend` is the newer).
         gazelle_transform: Preprocessing transform for Gazelle.
         device: Torch device ('cuda' or 'cpu').
         normalize_bbox: If True, return face bounding boxes normalized to [0,1] (top-left origin).
@@ -42,6 +108,8 @@ def detect_gaze(
         render_heatmap: If True (and render=True), render individual heatmaps (can be slow).
         save: If True (and render=True), save the rendered image.
         save_path: Path to save the rendered image (required if save=True).
+        backend: the gaze model as a GazeBackend (Gaze-LLE, PaGE ...); given, the two gazelle
+            arguments are not needed.
 
     Returns:
         A tuple containing:
@@ -55,6 +123,10 @@ def detect_gaze(
         - Image.Image | None: The rendered PIL image if render=True, otherwise None.
     """
     gaze_results: list[dict[str, Any]] = []
+    if backend is None:
+        if gazelle_model is None or gazelle_transform is None:
+            raise ValueError("detect_gaze needs a gaze backend, or a gazelle model and its transform")
+        backend = GazelleBackend(gazelle_model, gazelle_transform, device)
 
     try:
         image = load_image(image_input)
@@ -95,32 +167,20 @@ def detect_gaze(
             print("No valid face bboxes found after filtering.")
             return gaze_results, rendered_image
 
-        # 3. Prepare Gazelle Input (using PIL image)
-        img_tensor = gazelle_transform(pil_image).unsqueeze(0).to(device)
-        gazelle_input = {
-            "images": img_tensor,
-            "bboxes": [norm_face_bboxes_tl]
-        }
-
-        # 4. Run Gazelle Inference
-        with torch.no_grad():
-            gazelle_output = gazelle_model(gazelle_input)
+        # 3. and 4. the backend answers a heatmap and an in-frame probability per face
+        heatmaps, inout_scores = backend.predict(pil_image, norm_face_bboxes_tl)
 
         # 5. Process Output
-        heatmaps = gazelle_output['heatmap'][0]
-        inout_scores_tensor = gazelle_output.get('inout')
-        inout_scores = inout_scores_tensor[0] if inout_scores_tensor is not None else None
-
         for idx_norm, original_face_idx in enumerate(valid_face_indices):
             bbox_pixels = face_bboxes_pixels[original_face_idx]
             bbox_norm_tl = norm_face_bboxes_tl[idx_norm]
-            score_tensor = inout_scores[idx_norm] if inout_scores is not None and idx_norm < len(inout_scores) else None
-            inout_score = score_tensor.item() if score_tensor is not None else None
+            inout_score = inout_scores[idx_norm] if idx_norm < len(inout_scores) else None
+            inout_score = float(inout_score) if inout_score is not None else None
             heatmap = heatmaps[idx_norm] if idx_norm < len(heatmaps) else None
 
             gaze_target_coords = None
             if heatmap is not None and inout_score is not None and inout_score > 0.0:
-                heatmap_np = heatmap.detach().cpu().numpy()
+                heatmap_np = np.asarray(heatmap)
                 if heatmap_np.size > 0:
                     max_index = np.unravel_index(np.argmax(heatmap_np), heatmap_np.shape)
                     # the centre of the hottest cell: its corner would put every gaze half a
@@ -191,9 +251,9 @@ def detect_gaze(
                 for face_detail in face_details:
                     original_index = face_detail['original_index']
                     if original_index < len(heatmaps):
-                        heatmap_tensor = heatmaps[original_index]
-                        if heatmap_tensor is not None:
-                            heatmap_np = heatmap_tensor.detach().cpu().numpy()
+                        heatmap_array = heatmaps[original_index]
+                        if heatmap_array is not None:
+                            heatmap_np = np.asarray(heatmap_array, dtype=np.float32)
                             if heatmap_np.size > 0:
                                 heatmap_img = Image.fromarray((heatmap_np * 255).astype(np.uint8)).resize(
                                     pil_image.size,

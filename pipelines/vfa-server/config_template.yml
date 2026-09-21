@@ -6,7 +6,9 @@ VLLMFrameAnalyzer:
   workers: 1 # number of workers
 
   families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
-  gaze_model: gazelle_dinov2_vitl14_inout  # the Gaze-LLE checkpoint (torch.hub fkryan/gazelle) for the gaze lines and the features' gazes: gazelle_dinov2_vitl14_inout, gazelle_dinov2_vitb14_inout (smaller), or the _childplay variants fine-tuned on children
+  gaze_backend: page  # the gaze model behind the gaze lines and the features' gazes: page (PaGE, human-level on the gaze benchmarks) or gazelle (Gaze-LLE from torch.hub)
+  gaze_head_scale: 1.3  # page only: the face box widened about its centre into the head crop the model looks at (it learned from head boxes, the face detector answers face boxes); 1 crops the face box as is
+  gaze_model: <gaze-checkpoint>  # its checkpoint; left out, the backend's default. page: Octopus1/page-vitb (default), Octopus1/page-vits (a third of the compute), Octopus1/page-vithplus (the 840M teacher). gazelle: gazelle_dinov2_vitl14_inout (default), gazelle_dinov2_vitb14_inout, the _childplay variants fine-tuned on children
 
   backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek, llamacpp, grok
   end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
