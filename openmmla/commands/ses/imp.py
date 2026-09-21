@@ -41,7 +41,7 @@ DEFAULT_GROUP = 'group_01'
 UNIX_RE = re.compile(r'(?<!\d)(\d{10}(?:\.\d+)?)(?!\d)')
 LOCAL_DASH_RE = re.compile(r'(\d{4})-(\d{2})-(\d{2})[ _T](\d{2})-(\d{2})-(\d{2})')
 LOCAL_COMPACT_RE = re.compile(r'(?<!\d)(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?!\d)')
-HOST_RE = re.compile(r'(?<![a-z0-9])((?:raspi|pi|mac|dell|desktop|nuc)[a-z0-9]*-\d+)', re.I)
+HOST_RE = re.compile(r'(?<![a-z0-9])([a-z]+[0-9]*-\d{1,3})(?![0-9])', re.I)  # a device or machine label: c920-01, raspi4-01, vimo-0
 CHANNEL_RE = re.compile(r'_ch(\d+)(?=\.)', re.I)
 COPY_RE = re.compile(r' \(\d+\)(?=\.[A-Za-z0-9]+$)')
 SESSION_DIR_RE = re.compile(r'session_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})Z')
