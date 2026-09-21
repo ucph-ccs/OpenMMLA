@@ -23,8 +23,7 @@ from typing import Any
 import numpy as np
 
 ENVELOPE_RATE = 100          # bins per second the audio is reduced to before correlating
-MIC_CHANNELS = ('mic',)      # per-person microphones: the clock the others are aligned to
-CAMERA_CHANNELS = ('mix',)   # a camera's own audio track
+MIC_DEVICES = ('vimo', 'badge')   # per-person microphones (device label prefix): the clock the others are aligned to
 
 
 def envelope(path: str, offset: float, duration: float) -> np.ndarray:
@@ -83,7 +82,7 @@ def pick_reference(recordings: list[dict[str, Any]], host: str | None = None) ->
     audio = [r for r in recordings if r['modality'] == 'audio' and r.get('duration')]
     if host:
         return next((r for r in audio if r['host'] == host), None)
-    mics = [r for r in audio if r.get('channel') in MIC_CHANNELS]
+    mics = [r for r in audio if str(r.get('device') or '').startswith(MIC_DEVICES)]
     return max(mics, key=lambda r: r['duration']) if mics else None
 
 
@@ -98,7 +97,7 @@ def measure_session(session_dir: Path, reference_host: str | None = None, window
         if other['modality'] != 'audio' or other is reference or not other.get('duration'):
             continue
         result = measure_lag(reference, other, window, max_lag)
-        results.append({'host': other['host'], 'channel': other.get('channel'), 'start_time': other['start_time'],
+        results.append({'host': other['host'], 'device': other.get('device'), 'channel': other.get('channel'), 'start_time': other['start_time'],
                         'shares_start_with': sorted(r['host'] + '/' + r['modality'] for r in recordings
                                                     if r is not other and abs(r['start_time'] - other['start_time']) < 0.0015),
                         **result})
@@ -223,7 +222,7 @@ def main(argv=None):
         for r in measured['results']:
             lag = 'no result' if r['lag'] is None else f"{r['lag']:+.2f} s"
             extra = r.get('reason') or f"confidence {r['confidence']}, margin {r.get('margin')}, over {r.get('compared_seconds')} s"
-            print(f"  {r['host']:12} {r['channel'] or '':4} off by {lag:>10}  ({extra}); shares its start with {', '.join(r['shares_start_with']) or 'nothing'}")
+            print(f"  {r['host']}/{r.get('device') or '?':12} off by {lag:>10}  ({extra}); shares its start with {', '.join(r['shares_start_with']) or 'nothing'}")
     if args.apply and measured['reference'] is not None:
         done = set()
         for r in measured['results']:

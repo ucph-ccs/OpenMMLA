@@ -101,13 +101,15 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
             record['duration'] = round(float(probe(str(path)).get('duration') or 0), 3) or None
         record.update({'id': path.stem, 'modality': parsed['modality'], 'status': 'stopped', 'path': str(path),
                        'start_time': round(parsed['start'], 3), 'host': host, 'format': parsed['ext']})
+        # the device slot of the name: the physical device and its base id (c920-01, vimo-0,
+        # badge-0, jabra-0), a channel of a multi-channel device as a -chN suffix
+        record['device'] = parsed['device']
         if parsed['modality'] == 'audio':
-            record['channel'] = parsed['device']
+            channel = re.search(r'-(ch\d+)$', parsed['device'])
+            record['channel'] = channel.group(1) if channel else 'mono'
             record.setdefault('channels', 1)
             record.setdefault('sample_rate', 16000)
-            record.pop('device', None)
         else:
-            record['device'] = parsed['device']
             record.pop('channel', None)
         if record.get('duration'):
             record['stopped_at'] = round(record['start_time'] + record['duration'], 3)
