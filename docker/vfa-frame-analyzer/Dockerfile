@@ -25,7 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# pins mirror the vfa-server extra in pyproject.toml
+# pins mirror the vfa-server extra in pyproject.toml; timm 1.0.27 is the first whose layers take
+# the device/dtype keywords PaGE's blocks pass on
 RUN pip install \
         "torch==2.7.0" "torchvision==0.22.0" \
         "numpy==1.26.4" \
@@ -35,7 +36,7 @@ RUN pip install \
         "pupil_apriltags==1.0.4.post11" \
         "retina-face==0.0.17" \
         "tf-keras==2.19.0" \
-        "timm==1.0.15" \
+        "timm==1.0.27" \
         "scikit-learn==1.6.1" \
         "matplotlib==3.9.2" \
         "huggingface-hub==1.32.0" \
