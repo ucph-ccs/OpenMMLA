@@ -21,6 +21,7 @@ VLLMFrameAnalyzer:
     pose_confidence: 0.25  # a person below this detection confidence is left out
     keypoint_confidence: 0.3  # a keypoint below this confidence counts as hidden (head yaw, torso, hands)
     inout_threshold: 0.5  # a gaze the gaze model puts in the frame with less than this probability is out_of_frame; a request may name its own
+    gaze: true  # answer the gazes with the features (the gaze model); false answers the pose alone, and a request may ask either way
 
   # Supported backends
   ollama:

@@ -226,6 +226,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.pose_confidence = _number(features_config.get('pose_confidence'), 0.25)
         self.keypoint_confidence = _number(features_config.get('keypoint_confidence'), 0.3)
         self.features_inout_threshold = _number(features_config.get('inout_threshold'), 0.5)
+        # whether the features come with the gaze model's gazes (the pose alone is faster)
+        self.features_gaze = _as_bool(features_config.get('gaze'), True)
         self.logger.info(f"Features endpoint: {self.features_enabled}"
                          f"{f' (pose model {self.pose_model} under {self.pose_weights_dir})' if self.features_enabled else ''}")
 
@@ -370,6 +372,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                          'pose_model': self.pose_model if self.features_enabled else None,
                          'pose_loaded': self.pose_estimator is not None,
                          'weights_path': getattr(self.pose_estimator, 'weights_path', None),
+                         'gaze': bool(self.features_gaze) if self.features_enabled else None,
                          'pose_confidence': self.pose_confidence if self.features_enabled else None,
                          'keypoint_confidence': self.keypoint_confidence if self.features_enabled else None,
                          'inout_threshold': self.features_inout_threshold if self.features_enabled else None},
@@ -383,7 +386,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         more), `angles` (JSON list, one name per image), `session_id`, `zones` (JSON: {name:
         polygon} for every image, or {angle: {name: polygon}}; a polygon in pixels, or in [0, 1]),
         `inout_threshold` (below it a gaze is out of frame), `keypoints` (false leaves the skeletons
-        out of the answer, for a study that wants the derived features alone)."""
+        out of the answer, for a study that wants the derived features alone), `gaze` (false skips
+        the gaze model for this request; the config's features.gaze otherwise)."""
         if not self.features_enabled:
             return jsonify({'error': 'the features endpoint is off (VLLMFrameAnalyzer.features.enabled)'}), 503
         if self.pose_estimator is None:
@@ -398,6 +402,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 return jsonify({'error': 'zones must be a JSON object: {name: polygon}, or {angle: {name: polygon}}'}), 400
             inout_threshold = _number(request.values.get('inout_threshold'), self.features_inout_threshold)
             keypoints = _as_bool(request.values.get('keypoints'), True)
+            gaze = _as_bool(request.values.get('gaze'), self.features_gaze)
             image_files = request.files.getlist('images')
             if not image_files:
                 return jsonify({'error': 'No images provided in request'}), 400
@@ -407,7 +412,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 angle = str(angles[i]) if i < len(angles) else f"perspective_{i + 1}"
                 try:
                     frames.append(self._frame_features(image_file.read(), angle, _zones_for(zones, angle),
-                                                       inout_threshold, keypoints))
+                                                       inout_threshold, keypoints, gaze))
                 except ValueError as e:
                     # a frame that is not an image, or a zone that is not a polygon: the client's
                     # to fix, so no retry is asked for
@@ -415,13 +420,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.info(f"Features for {session_id}: {len(frames)} frames, "
                              f"{sum(len(frame['persons']) for frame in frames)} persons")
             return jsonify({'frames': frames, 'pose_model': self.pose_estimator.model_name,
-                            'gaze': bool(self.gazelle_model and self.gazelle_transform)}), 200
+                            'gaze': bool(gaze and self.gazelle_model and self.gazelle_transform)}), 200
         except Exception as e:
             self.logger.error("Exception during feature extraction", exc_info=True)
             return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
 
     def _frame_features(self, image_bytes: bytes, angle: str, zones: dict, inout_threshold: float,
-                        keypoints: bool = True) -> dict:
+                        keypoints: bool = True, gaze: bool = True) -> dict:
         """the features of one frame: its AprilTags (centres in pixels from the top-left corner),
         its persons from the pose model, its faces and gazes from the gaze model, put together."""
         image = load_image(image_bytes)
@@ -435,7 +440,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 tags[int(tag.tag_id)] = (float(centre[0]), float(centre[1]))
         persons = self.pose_estimator.detect(image)
         faces, gaze_error = [], None
-        if self.gazelle_model and self.gazelle_transform:
+        if gaze and self.gazelle_model and self.gazelle_transform:
             try:
                 gaze_results, _ = detect_gaze(
                     image_input=image_bytes, face_detector=self.face_detector, gazelle_model=self.gazelle_model,

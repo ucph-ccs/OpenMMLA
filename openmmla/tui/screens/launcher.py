@@ -806,6 +806,10 @@ _SYNC_WAIT_CARDS = ("ASR Base", "VFA Base")
 # Bases entry it is (for a config whose Bases list has no entry for it)
 _ASK_BASE_LABEL = "ask in its window"
 
+# a flag the config decides unless the card says otherwise (the VFA synchronizer's
+# Action Labels and Body & Gaze Features): the first option passes nothing
+_CONFIG_OR_ON_OFF = [("as the config says", ""), ("on", "true"), ("off", "false")]
+
 # what the ASR Base card's Language offers (-lang): the language each of its
 # bases has its speech transcribed in, sent with every request, which leaves
 # the speech transcriber's own configured language for the first option. The
@@ -2246,9 +2250,10 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-v", "Verbose", "bool", True),
             # what the synchronizer asks the frame analyzer for: action labels
             # (the VLM, vfa_action) and/or features (skeletons, tags, head yaws,
-            # gazes; vfa_features, one per frame set)
-            ParamDef("-a", "Action Labels", "bool", True),
-            ParamDef("-f", "Body & Gaze Features", "bool", False),
+            # gazes; vfa_features, one per frame set); the config's
+            # Synchronizer.actions / features decide unless the card says
+            ParamDef("-a", "Action Labels", "str", "", _CONFIG_OR_ON_OFF),
+            ParamDef("-f", "Body & Gaze Features", "str", "", _CONFIG_OR_ON_OFF),
         ],
         components=[
             ComponentDef("base", "mmla vfa-base", "-nb",

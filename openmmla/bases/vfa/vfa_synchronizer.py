@@ -37,7 +37,7 @@ class VFASynchronizer(Synchronizer):
     logger = get_logger('vfa-synchronizer')
 
     def __init__(self, project_dir: str | None, config_path: str, session_id: str | None = None,
-                 num_bases: int | None = None, actions: bool = True, features: bool = False):
+                 num_bases: int | None = None, actions: bool | None = None, features: bool | None = None):
         """Initialize the VFASynchronizer class.
         
         Args:
@@ -50,17 +50,19 @@ class VFASynchronizer(Synchronizer):
                 (from the menu) or, launched from the console, the number of
                 entries in the config's 'Bases' list.
             actions: whether every synchronized frame set is sent to the frame
-                analyzer for its action labels (the VLM; the vfa_action event)
+                analyzer for its action labels (the VLM; the vfa_action event);
+                None leaves it to the config (Synchronizer.actions)
             features: whether every synchronized frame set is sent to the frame
                 analyzer's features endpoint for its skeletons, tags, head yaws
                 and gazes (no VLM; the vfa_features event, one per frame set,
-                so as often as the bases' keyframe_interval)
+                so as often as the bases' keyframe_interval); None leaves it to
+                the config (Synchronizer.features)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.launch_session_id = session_id
         self.launch_num_bases = num_bases
-        self.actions = bool(actions)
-        self.features = bool(features)
+        self.launch_actions = actions
+        self.launch_features = features
 
         # Runtime attributes
         self.threads = []
@@ -92,6 +94,13 @@ class VFASynchronizer(Synchronizer):
         # the features endpoint: whether the skeletons ride along in every vfa_features event, and
         # the zones a gaze may land in, from a JSON file ({name: polygon} for every angle, or
         # {angle: {name: polygon}}) named by the config; an unfilled placeholder is no file
+        # what each frame set is sent for: the config's say, unless the launch flags (-a, -f)
+        # said otherwise; and whether the features come with the gaze model's gazes
+        config_actions = _config_flag(sync_config.get('actions'), True)
+        config_features = _config_flag(sync_config.get('features'), False)
+        self.actions = config_actions if self.launch_actions is None else bool(self.launch_actions)
+        self.features = config_features if self.launch_features is None else bool(self.launch_features)
+        self.features_gaze = _config_flag(sync_config.get('features_gaze'), True)
         self.features_keypoints = _config_flag(sync_config.get('features_keypoints'), True)
         self.feature_zones = self._load_feature_zones(sync_config.get('feature_zones_file'))
         # the VLM at its own pace: with the bases sending a frame set every second for the
@@ -158,7 +167,7 @@ class VFASynchronizer(Synchronizer):
         self.logger.info("Starting synchronizer reinitialization...")
         project_dir, config_path = self.project_dir, self.config_path
         session_id, num_bases = self.launch_session_id, self.launch_num_bases
-        actions, features = self.actions, self.features
+        actions, features = self.launch_actions, self.launch_features
         self._clean_up()
         self.__init__(project_dir=project_dir, config_path=config_path, session_id=session_id,
                       num_bases=num_bases, actions=actions, features=features)
@@ -382,10 +391,11 @@ class VFASynchronizer(Synchronizer):
             entry = session_provenance.component_entry(
                 'vfa', 'synchronizer',
                 arguments={'session_id': self.launch_session_id, 'num_bases': self.launch_num_bases,
-                           'actions': self.actions, 'features': self.features},
+                           'actions': self.launch_actions, 'features': self.launch_features},
                 parameters={'number_of_bases': self.number_of_bases, 'buffer_expiry_time': self.buffer_expiry_time,
                             'match_tolerance': self.match_tolerance, 'angle_config': self.angle_config,
                             'participant_descriptions': self.selected_participant_descriptions,
+                            'actions': self.actions, 'features': self.features, 'features_gaze': self.features_gaze,
                             'features_keypoints': self.features_keypoints, 'feature_zones': self.feature_zones,
                             'action_interval': self.action_interval,
                             'service_urls': {'vllm_frame_analyzer': self.vllm_frame_analyzer_url}},
@@ -573,7 +583,7 @@ class VFASynchronizer(Synchronizer):
                             result = request_frame_features(
                                 image_paths=image_paths, angles=angles, session_id=self.session_id,
                                 url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
-                                keypoints=self.features_keypoints)
+                                keypoints=self.features_keypoints, gaze=self.features_gaze)
                             if result:
                                 self._upload_features(time_bucket_key, result)
                             else:

@@ -65,7 +65,7 @@ def request_multi_angle_frame_analyze(image_paths: list[str], angles: list[str],
 
 def request_frame_features(image_paths: list[str], angles: list[str], session_id: str, url: str,
                            zones: dict | None = None, inout_threshold: float | None = None,
-                           keypoints: bool = True, timeout: int = 60) -> dict[str, Any] | None:
+                           keypoints: bool = True, gaze: bool = True, timeout: int = 60) -> dict[str, Any] | None:
     """Request the features of one set of frames (POST <url>/features): per frame, the persons as
     skeletons with the AprilTag each wears, their head yaw and gaze, as geometry on the image.
 
@@ -78,6 +78,7 @@ def request_frame_features(image_paths: list[str], angles: list[str], session_id
             {angle: {name: polygon}}, in pixels or in [0, 1] (optional)
         inout_threshold: below it a gaze counts as out of frame (optional; the server's default)
         keypoints: False leaves the skeletons out of the answer (the derived features alone)
+        gaze: False skips the gaze model (the pose alone, faster)
         timeout: Request timeout in seconds
 
     Returns:
@@ -103,6 +104,8 @@ def request_frame_features(image_paths: list[str], angles: list[str], session_id
         data['inout_threshold'] = str(inout_threshold)
     if not keypoints:
         data['keypoints'] = 'false'
+    if not gaze:
+        data['gaze'] = 'false'
 
     files = []
     for image_path in image_paths:
