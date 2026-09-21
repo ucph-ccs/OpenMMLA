@@ -50,6 +50,8 @@ class VideoStream(StreamReceiver):
             capture_options(str, optional): OPENCV_FFMPEG_CAPTURE_OPTIONS applied to the 'stream' source when the
                 variable is unset (default: DEFAULT_STREAM_CAPTURE_OPTIONS)
             file_path(str, optional): Path to the video file (required for 'file' source)
+            timestamp_offset(float, optional): seconds added to every live frame's stamp, the measured
+                delay of this stream as a negative number (default: 0)
         """
         super().__init__(**kwargs)
         self.source = normalize_source(source)
@@ -287,7 +289,7 @@ class VideoStream(StreamReceiver):
 
         while not self._stop_event.is_set():
             try:
-                frame = self._read_frame()
+                frame = self._stamped(self._read_frame())
                 if frame:
                     self.buffer.push(frame)
                     frame_count += 1

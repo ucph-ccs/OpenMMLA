@@ -19,30 +19,36 @@
 		background-color: rgba(0, 0, 0, 0.75);">
   </div>
 
-  <script src='https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.18.1/moment.min.js'></script>
   <script>
-// https://stackoverflow.com/questions/901115/how-can-i-get-query-string-values-in-javascript
-var urlParams;
-(function () {
-    var match,
-        pl     = /\+/g,  // Regex for replacing addition symbol with a space
-        search = /([^&=]+)=?([^&]*)/g,
-        decode = function (s) { return decodeURIComponent(s.replace(pl, " ")); },
-        query  = window.location.search.substring(1);
-    urlParams = {};
-    while (match = search.exec(query))
-       urlParams[decode(match[1])] = decode(match[2]);
-})();
+// a clock to film: the top line is the local time with milliseconds, the bottom line the unix
+// time the pipelines stamp frames with (a keyframe's file name, an audio segment's name), so
+// the delay of a stream is the stamp of a frame minus the time the frame shows.
+// ?style= restyles the box, ?bodyStyle= the page (e.g. bodyStyle=background:black), ?format= the
+// top line (tokens YYYY MM DD HH mm ss SSS, default YYYY-MM-DD HH:mm:ss.SSS); the clock ticks
+// every 40 ms, which is the floor of what can be read off a filmed frame.
+var urlParams = {};
+window.location.search.substring(1).split('&').forEach(function (pair) {
+    if (!pair) return;
+    var parts = pair.split('=');
+    urlParams[decodeURIComponent(parts[0])] = decodeURIComponent((parts[1] || '').replace(/\+/g, ' '));
+});
 var output = document.getElementById("output");
 if (urlParams["style"]) output.setAttribute("style", urlParams["style"]);
 if (urlParams["bodyStyle"]) document.body.setAttribute("style", urlParams["bodyStyle"]);
-var c;
-setInterval(
-c = function() {
-	output.innerText = moment().format(urlParams["format"] || 'DD/MM/YYYY HH:mm:ss');
-//    output.innerText = moment().format(urlParams["format"] || '');
-}, 1000);
-c();
+function pad(n, width) { return String(n).padStart(width, '0'); }
+var format = urlParams["format"] || 'YYYY-MM-DD HH:mm:ss.SSS';
+function render(now) {
+    var tokens = {YYYY: now.getFullYear(), MM: pad(now.getMonth() + 1, 2), DD: pad(now.getDate(), 2),
+                  HH: pad(now.getHours(), 2), mm: pad(now.getMinutes(), 2), ss: pad(now.getSeconds(), 2),
+                  SSS: pad(now.getMilliseconds(), 3)};
+    return format.replace(/YYYY|SSS|MM|DD|HH|mm|ss/g, function (token) { return tokens[token]; });
+}
+function tick() {
+    var now = new Date();
+    output.innerText = render(now) + '\n' + (now.getTime() / 1000).toFixed(3);
+}
+setInterval(tick, 40);
+tick();
   </script>
 </body>
 </html>

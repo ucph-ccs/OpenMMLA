@@ -46,6 +46,13 @@ authInternalUsers:
       - action: metrics
 
 pathDefaults:
+  # useAbsoluteTimestamp: yes would keep the clock an RTSP publisher sends (RTCP sender reports)
+  # instead of stamping frames as they arrive here; RTMP and SRT publishers carry no clock. Off,
+  # because with it on an RTSP path publishes nothing until the first sender report arrives
+  # (the log says "received RTP packet without absolute time, skipping it") and its recordings
+  # are then filed by the publisher's clock, which Sessions -> Export Streams matches against
+  # the session's window: only for a path whose publisher is NTP-synchronized, and per path
+  # (paths: <name>: useAbsoluteTimestamp: yes), see docs/rtmp_streaming.md#timestamps
   # record every published path; segments are fMP4 files named after their
   # start time. ./streams/server is artifacts/streams/server of the repository
   # either way: make starts MediaMTX from artifacts/, and docker compose mounts

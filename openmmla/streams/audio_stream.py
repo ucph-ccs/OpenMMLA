@@ -134,6 +134,8 @@ class AudioStream(StreamReceiver):
                 the first packet (default: 'auto')
             url (str, optional): stream URL, rtmp:// rtsp:// or srt:// (required for the 'stream' source)
             file_path (str, optional): Path to the audio file (required for 'file' source)
+            timestamp_offset (float, optional): seconds added to every live chunk's stamp, the measured
+                delay of this stream as a negative number (default: 0)
         """
         super().__init__(**kwargs)
         self.source = normalize_source(source)
@@ -653,7 +655,7 @@ class AudioStream(StreamReceiver):
         failure_count = 0
         while not self._stop_event.is_set():
             try:
-                frame = self._read_chunk()
+                frame = self._stamped(self._read_chunk())
                 if frame:
                     self.buffer.push(frame)
                     failure_count = 0
@@ -773,7 +775,7 @@ class AudioStream(StreamReceiver):
         if usable <= 0:
             return None
         return AudioFrame(data=np.frombuffer(payload[:usable], dtype=self.dtype), timestamp=timestamp,
-                          metadata=self._frame_metadata)
+                          metadata=dict(self._frame_metadata, timestamp_source='sender_packet_header'))
 
     def _push_raw_bytes(self, data: bytes, received: float) -> None:
         """Append header-less PCM bytes and cut them into chunk_size frames.
@@ -838,6 +840,8 @@ class AudioStream(StreamReceiver):
                     return None
                 audio_data = np.array(chunk, dtype=self.dtype)
                 timestamp = (timestamps[0] + self.lsl_offset) if timestamps else time.time()
+                return AudioFrame(data=audio_data, timestamp=timestamp,
+                                  metadata=dict(self._frame_metadata, timestamp_source='lsl'))
             else:
                 return None
 

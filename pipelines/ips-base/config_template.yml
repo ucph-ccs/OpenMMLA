@@ -32,6 +32,7 @@ Base:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
     format: MJPG                                    # Source format (e.g., MJPG (live camera), H264 (file), JPEG (lsl), raw (lsl))
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
+    timestamp_offset: 0.0                           # seconds added to every frame's stamp, for every base of this config: the measured delay of the stream as a negative number (e.g. -0.35), see docs/rtmp_streaming.md#timestamps
   # example 1: external stream (already running; the base pulls read_target, else target)
   # cam-external:
   #   target: rtmp://uber-server.local:1935/ips/3
