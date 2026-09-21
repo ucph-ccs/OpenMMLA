@@ -91,6 +91,7 @@ def detect_gaze(
         save: bool = False,
         save_path: str | None = None,
         backend: GazeBackend | None = None,
+        raise_errors: bool = False,
 ) -> tuple[list[dict[str, Any]], Image.Image | None]:
     """Detect faces, estimate gaze, and optionally render visualizations.
 
@@ -110,6 +111,9 @@ def detect_gaze(
         save_path: Path to save the rendered image (required if save=True).
         backend: the gaze model as a GazeBackend (Gaze-LLE, PaGE ...); given, the two gazelle
             arguments are not needed.
+        raise_errors: True raises what the face detector or the gaze model raise instead of
+            printing it and answering no faces (the overlay path tolerates a miss, the features
+            endpoint reports it).
 
     Returns:
         A tuple containing:
@@ -320,6 +324,8 @@ def detect_gaze(
                 print(f"Gaze detection image saved to {save_path}")
 
     except Exception as e:
+        if raise_errors:
+            raise
         print(f"Error during gaze detection: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()

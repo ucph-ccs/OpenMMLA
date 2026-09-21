@@ -583,6 +583,7 @@ class VFASynchronizer(Synchronizer):
                                        url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
                                        keypoints=self.features_keypoints, gaze=self.gaze)
                     if result:
+                        self._note_gaze_errors(result)
                         self._upload_features(time_bucket_key, result)
                         self.logger.info(f"Features of time bucket {time_bucket_key}: "
                                          f"{sum(len(f.get('persons', [])) for f in result.get('frames', []))} persons "
@@ -595,6 +596,19 @@ class VFASynchronizer(Synchronizer):
                 self._finish(job)
                 if not self.stop_event.is_set():
                     self.features_queue.task_done()
+
+    def _note_gaze_errors(self, result: dict):
+        """a frame whose gazes the analyzer could not compute says why in gaze_error; the console
+        hears each distinct reason once, not every second"""
+        seen = getattr(self, '_gaze_errors_seen', None)
+        if seen is None:
+            seen = self._gaze_errors_seen = set()
+        for frame in result.get('frames', []):
+            error = frame.get('gaze_error')
+            if error and error not in seen:
+                seen.add(error)
+                self.logger.warning(f"The frame analyzer could not compute the gazes of the {frame.get('angle')} frames "
+                                    f"({error}): the features carry skeletons and tags only until it can")
 
     def _synchronization_handler(self, e: Exception | KeyboardInterrupt | None):
         """Handle exceptions and stop all threads.

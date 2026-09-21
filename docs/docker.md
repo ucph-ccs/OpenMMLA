@@ -255,7 +255,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
 ## Mounts
 
 - `pipelines/asr-server` / `pipelines/vfa-server` → `/project` in the container: `config.yml`, `temp/`, runtime logs and, for the frame analyzer, `weights/` (the pose weights of the [features endpoint](pipelines/vfa/index.md#features-endpoint-skeletons-and-gazes), fetched once at the first start into this bind mount rather than a named volume) stay on the host, the same as with conda.
-- Model caches (HuggingFace / torch hub / ModelScope / wespeaker) are shared named volumes, so re-created containers do not download again (the frame analyzer's PaGE checkpoint and its model code land in `hf-cache`, a Gaze-LLE checkpoint in `torch-cache`).
+- Model caches (HuggingFace / torch hub / ModelScope / wespeaker) are shared named volumes, so re-created containers do not download again (the frame analyzer's PaGE checkpoint and its model code land in `hf-cache`, a Gaze-LLE checkpoint in `torch-cache`, RetinaFace's weights in `deepface-cache`).
 - `~/.openmmla` is mounted read-only so the containers can decrypt `ENC(...)` secrets.
 - The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.
 - The database containers do **not** mount `~/.openmmla`: the official influxdb / mongo images contain no OpenMMLA code, never read `config.yml`, and have nothing to decrypt.

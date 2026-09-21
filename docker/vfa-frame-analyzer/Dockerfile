@@ -49,10 +49,13 @@ COPY pyproject.toml README.md /opt/openmmla/
 COPY openmmla /opt/openmmla/openmmla
 RUN pip install --no-deps /opt/openmmla
 
+# retina-face needs Keras 2 (tf-keras) and sets this itself, but only if nothing imported
+# tensorflow before it; set here, the import order can never matter
 ENV PROJECT_DIR=/project \
     CONFIG_PATH=/project/config.yml \
     PORT=5007 \
-    WORKERS=1
+    WORKERS=1 \
+    TF_USE_LEGACY_KERAS=1
 # relative paths (a pose_model written as a path) resolve inside the bind mount
 WORKDIR /project
 

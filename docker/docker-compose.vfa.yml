@@ -38,6 +38,8 @@ services:
       - ${OPENMMLA_KEY_DIR:-~/.openmmla}:/root/.openmmla:ro
       - hf-cache:/root/.cache/huggingface
       - torch-cache:/root/.cache/torch
+      # RetinaFace's weights (retina-face keeps them under ~/.deepface)
+      - deepface-cache:/root/.deepface
     ports:
       - "5007:5007"
     extra_hosts:
@@ -65,3 +67,4 @@ services:
 volumes:
   hf-cache:
   torch-cache:
+  deepface-cache:

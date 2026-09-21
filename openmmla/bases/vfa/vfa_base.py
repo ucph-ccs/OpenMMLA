@@ -718,7 +718,10 @@ class VFABase(Base):
                 seen_at, features = latest
                 try:
                     from openmmla.utils.video.overlay import draw_features
-                    draw_features(display_frame, features, note=f"features {max(0.0, acquired_time - seen_at):.1f} s ago")
+                    note = f"features {max(0.0, acquired_time - seen_at):.1f} s ago"
+                    if features.get('gaze_error'):
+                        note += f"  no gaze: {features['gaze_error'][:60]}"
+                    draw_features(display_frame, features, note=note)
                 except Exception as e:
                     self.logger.debug(f"Could not draw the features on the window: {e}")
             timestamp = datetime.datetime.fromtimestamp(acquired_time).strftime("%Y-%m-%d %H:%M:%S")

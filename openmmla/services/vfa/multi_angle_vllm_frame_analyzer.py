@@ -1,11 +1,13 @@
 import json
 import os
 import re
+import threading
 from io import BytesIO
 from PIL import Image
 from typing import Dict, Any, cast
 
 import cv2
+import numpy as np
 import torch
 from flask import request, jsonify
 from openai import OpenAI
@@ -267,20 +269,37 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         except Exception as e:
             self.logger.error(f"Error loading prompt templates: {e}")
 
-    def _setup_objects(self):
-        # Conditionally setup AprilTag detector
-        if self.april_tag_enabled and self.families:
-            self.detector = Detector(families=self.families, nthreads=4)
-            self.logger.info(f"AprilTag detector initialized with families: {self.families}")
-        else:
-            self.detector = None
-            self.logger.info("AprilTag detection disabled - detector not initialized")
-        
+    @staticmethod
+    def _load_face_detector():
+        """RetinaFace built and warmed up now, before any request, and answering one call at a
+        time. Its model is a lazy singleton that the first call builds, downloading the weights
+        on the way; two requests arriving together (the action overlay and a features request,
+        the moment a session starts) each built one in the gevent worker, and the model that
+        survived answered symbolic tensors for the life of the worker: no faces, no gazes,
+        nothing but a line in the server log."""
+        RetinaFace.build_model()
+        # the first call traces the graph and claims the GPU memory; better now than in a request
+        RetinaFace.detect_faces(np.zeros((320, 320, 3), dtype=np.uint8))
+        lock = threading.Lock()
+
+        def detect_faces(image):
+            with lock:
+                return RetinaFace.detect_faces(image)
+
+        return detect_faces
+
+    def _setup_gaze(self):
+        """the face detector and the gaze backend, both before the first request"""
         # Conditionally setup gaze detection objects: the face detector and the gaze backend
         self.gaze = None
+        self.face_detector = None
         if self.gaze_detect_enabled:
-            self.face_detector = RetinaFace.detect_faces
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            try:
+                self.face_detector = self._load_face_detector()
+                self.logger.info("Face detector loaded: RetinaFace")
+            except Exception as e:
+                self.logger.error(f"Error loading the face detector (RetinaFace): {e}")
             try:
                 self.gaze = load_gaze_backend(self.gaze_backend, self.gaze_model, device, self.gaze_head_scale)
                 self.gaze_model = self.gaze.model_name or self.gaze_model
@@ -290,10 +309,24 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 self.logger.error(f"Error loading the gaze model ({self.gaze_backend} {self.gaze_model or ''}): {e}")
                 self.gaze = None
                 self.device = None
+            if self.face_detector is None and self.gaze is not None:
+                # a gaze needs a face first; without the detector the gaze model would only ever see nothing
+                self.logger.error("Gaze detection is off: the face detector did not load")
+                self.gaze = None
         else:
-            self.face_detector = None
             self.device = None
             self.logger.info("Gaze detection disabled - models not initialized")
+
+    def _setup_objects(self):
+        # Conditionally setup AprilTag detector
+        if self.april_tag_enabled and self.families:
+            self.detector = Detector(families=self.families, nthreads=4)
+            self.logger.info(f"AprilTag detector initialized with families: {self.families}")
+        else:
+            self.detector = None
+            self.logger.info("AprilTag detection disabled - detector not initialized")
+        
+        self._setup_gaze()
 
         # the pose model of /features, fetched once at start and never during a request; a
         # model that cannot be loaded makes /features answer 503 with the reason
@@ -371,6 +404,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'gaze_backend': self.gaze_backend if self.gaze_detect_enabled else None,
             'gaze_model': self.gaze_model if self.gaze_detect_enabled else None,
             'gaze_loaded': self.gaze is not None,
+            'face_detector_loaded': self.face_detector is not None,
             'gaze_head_scale': getattr(self.gaze, 'head_scale', None),
             # the features endpoint: what its geometry ran with, since nothing else records
             # the server's config (openmmla.utils.session_provenance reads this answer)
@@ -452,7 +486,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                     image_input=image_bytes, face_detector=self.face_detector, backend=self.gaze,
                     device=self.device if self.device else 'cpu',
                     normalize_bbox=False, normalize_target=False, render=False, show=False,
-                    inout_thresh=inout_threshold, render_heatmap=False, save=False)
+                    inout_thresh=inout_threshold, render_heatmap=False, save=False, raise_errors=True)
                 faces = [{'bbox': result['face_bbox'], 'gaze_point': result['gaze_target'], 'inout': result['inout_score']}
                          for result in gaze_results]
             except Exception as e:
