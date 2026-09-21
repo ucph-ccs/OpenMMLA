@@ -533,6 +533,37 @@ class VFASynchronizer(Synchronizer):
                 self.logger.warning(f"Image path no longer exists: {frame_info['path']}")
         return image_paths, angles, angle_descriptions
 
+    def _ask(self, request, what: str, time_bucket_key: float, **kwargs) -> dict[str, Any] | None:
+        """what the frame analyzer answers to `request(**kwargs)`, or None when STOP came first.
+
+        A request that is out cannot be interrupted, and the analyzer can take minutes to answer
+        (the VLM behind it is a remote API), so the request goes out on a daemon thread of its
+        own while the worker watches the stop event: on STOP the worker gives the request up at
+        once, the `what` of that time bucket are dropped, and the request runs out on its own,
+        holding no one up. Without STOP this is the plain call: its answer is returned, its
+        exception raised.
+        """
+        answer: dict[str, Any] = {}
+
+        def call():
+            try:
+                answer['result'] = request(**kwargs)
+            except Exception as e:
+                answer['error'] = e
+
+        thread = threading.Thread(target=call, daemon=True, name=f'{what}-request')
+        thread.start()
+        while thread.is_alive():
+            thread.join(timeout=0.5)
+            if thread.is_alive() and self.stop_event.is_set():
+                self.logger.warning(f"STOP came while the frame analyzer was still working on the {what} of time "
+                                    f"bucket {time_bucket_key}: they are dropped, and the request is left to run "
+                                    f"out on its own")
+                return None
+        if 'error' in answer:
+            raise answer['error']
+        return answer.get('result')
+
     def _process_feature_requests(self):
         """the features worker: every frame set to the features endpoint, for its skeletons, tags,
         head yaws and (when asked) gazes, as fast as the pose model answers."""
@@ -547,16 +578,16 @@ class VFASynchronizer(Synchronizer):
                 if not image_paths:
                     self.logger.warning(f"No valid images found for the features of time bucket {time_bucket_key}")
                 else:
-                    result = request_frame_features(
-                        image_paths=image_paths, angles=angles, session_id=self.session_id,
-                        url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
-                        keypoints=self.features_keypoints, gaze=self.gaze)
+                    result = self._ask(request_frame_features, 'features', time_bucket_key,
+                                       image_paths=image_paths, angles=angles, session_id=self.session_id,
+                                       url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
+                                       keypoints=self.features_keypoints, gaze=self.gaze)
                     if result:
                         self._upload_features(time_bucket_key, result)
                         self.logger.info(f"Features of time bucket {time_bucket_key}: "
                                          f"{sum(len(f.get('persons', [])) for f in result.get('frames', []))} persons "
                                          f"in {len(result.get('frames', []))} frames")
-                    else:
+                    elif not self.stop_event.is_set():
                         self.logger.warning(f"Received no features for time bucket {time_bucket_key}")
             except Exception as e:
                 self.logger.error(f"Error getting the features of a frame set: {e}", exc_info=True)
@@ -615,18 +646,14 @@ class VFASynchronizer(Synchronizer):
                 self._last_action_time = time_bucket_key
                 self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
                                  f"{len(image_paths)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
-                result = request_multi_angle_frame_analyze(
-                    image_paths=image_paths,
-                    angles=angles,
-                    angle_descriptions=angle_descriptions,
-                    session_id=self.session_id,
-                    url=self.vllm_frame_analyzer_url,
-                    participant_descriptions=self.selected_participant_descriptions,
-                )
+                result = self._ask(request_multi_angle_frame_analyze, 'action labels', time_bucket_key,
+                                   image_paths=image_paths, angles=angles, angle_descriptions=angle_descriptions,
+                                   session_id=self.session_id, url=self.vllm_frame_analyzer_url,
+                                   participant_descriptions=self.selected_participant_descriptions)
                 if result:
                     self.logger.info(f"Successfully received analysis result for time bucket {time_bucket_key}")
                     self._upload_result(time_bucket_key, result)
-                else:
+                elif not self.stop_event.is_set():
                     self.logger.warning(f"Received null/empty analysis result for time bucket {time_bucket_key}")
             except Exception as e:
                 self.logger.error(f"Error processing frame set: {e}", exc_info=True)
