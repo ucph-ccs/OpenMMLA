@@ -1497,6 +1497,23 @@ class SessionsPanel(Widget):
         except Exception as e:
             self._log(f"  [red]✗ Parameters: {e}[/red]")
 
+    def _export_analysis_record(self, session_id: str, root, analysis_dir: str, vis_dir: str,
+                                inputs: list[str], steps: list[str]) -> None:
+        """write analysis/parameters.json (openmmla.utils.session_provenance): the measurement
+        files the plots were made from, with their digests, the plots made, and the software."""
+        from openmmla.utils import session_provenance
+        try:
+            outputs = sorted(
+                os.path.join(vis_dir, name) for name in os.listdir(vis_dir)
+                if os.path.isfile(os.path.join(vis_dir, name)))
+            record = session_provenance.analysis_record(
+                session_id, inputs=inputs, outputs=outputs, steps=steps, root=root, project_dir=root)
+            path = session_provenance.write_analysis_record(record, analysis_dir)
+            self._log(f"  [green]✓[/green] Analysis record: {len(steps)} step(s) from {len(inputs)} file(s) "
+                      f"-> {os.path.relpath(path, root)}")
+        except Exception as e:
+            self._log(f"  [red]✗ Analysis record: {e}[/red]")
+
     def _do_export(self, session_id: str, logs: bool, vis: bool) -> None:
         import time
         import yaml
@@ -1562,18 +1579,24 @@ class SessionsPanel(Widget):
         # ---- export visualizations ----
         if vis:
             os.makedirs(vis_dir, exist_ok=True)
+            # what the plots were made from and with, for analysis/parameters.json
+            steps: list[str] = []
+            inputs: list[str] = []
 
             # ASR visualizations
             recognition_path = os.path.join(measurements_dir, f"{session_id}_speaker_recognition.json")
             if os.path.isfile(recognition_path):
+                inputs.append(recognition_path)
                 try:
                     from openmmla.analytics.asr.analyze import (
                         plot_speaker_diarization_interactive,
                         plot_speaking_interaction_network,
                     )
                     plot_speaker_diarization_interactive(recognition_path, vis_dir)
+                    steps.append("asr.plot_speaker_diarization_interactive")
                     self._log("  [green]✓[/green] ASR: speaker diarization chart")
                     plot_speaking_interaction_network(recognition_path, vis_dir)
+                    steps.append("asr.plot_speaking_interaction_network")
                     self._log("  [green]✓[/green] ASR: speaking interaction network")
                 except Exception as e:
                     self._log(f"  [red]✗ ASR visualizations: {e}[/red]")
@@ -1584,6 +1607,7 @@ class SessionsPanel(Widget):
             translation_path = os.path.join(measurements_dir, f"{session_id}_badge_translation.json")
             relation_path = os.path.join(measurements_dir, f"{session_id}_badge_relation.json")
             if os.path.isfile(translation_path):
+                inputs.append(translation_path)
                 try:
                     from openmmla.analytics.ips.analyze import (
                         plot_badge_locations_and_trajectories,
@@ -1591,11 +1615,15 @@ class SessionsPanel(Widget):
                         plot_physical_interaction_network,
                     )
                     plot_badge_locations_and_trajectories(translation_path, vis_dir)
+                    steps.append("ips.plot_badge_locations_and_trajectories")
                     self._log("  [green]✓[/green] IPS: badge locations and trajectories")
                     plot_2d_heatmap(translation_path, vis_dir)
+                    steps.append("ips.plot_2d_heatmap")
                     self._log("  [green]✓[/green] IPS: 2D heatmap")
                     if os.path.isfile(relation_path):
+                        inputs.append(relation_path)
                         plot_physical_interaction_network(relation_path, vis_dir)
+                        steps.append("ips.plot_physical_interaction_network")
                         self._log("  [green]✓[/green] IPS: physical interaction network")
                 except Exception as e:
                     self._log(f"  [red]✗ IPS visualizations: {e}[/red]")
@@ -1604,6 +1632,8 @@ class SessionsPanel(Widget):
 
             # VFA has no visualizations currently
             self._log("  [dim]- VFA visualizations: not available[/dim]")
+
+            self._export_analysis_record(session_id, root, analysis_dir, vis_dir, inputs, steps)
 
         manifest_path = os.path.join(session_dir, "manifest.yml")
         manifest = {}
@@ -1631,6 +1661,7 @@ class SessionsPanel(Widget):
         analysis["visualizations_path"] = relative_to_root(root, vis_dir)
         if vis:
             analysis["visualizations_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            analysis["parameters_path"] = relative_to_root(root, os.path.join(analysis_dir, "parameters.json"))
         manifest["analysis"] = analysis
         with open(manifest_path, "w", encoding="utf-8") as file:
             yaml.safe_dump(manifest, file, sort_keys=False, allow_unicode=True)

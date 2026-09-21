@@ -367,3 +367,62 @@ def write_session_parameters(record: dict, out_dir) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(session_parameters(record), indent=2, default=str, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+# ---- the analysis layer: what was made from the measurements, and from what ----
+
+ANALYSIS_RECORD_NAME = "parameters.json"
+
+
+def _file_note(path, root=None) -> dict:
+    """a file as an input or output of an analysis: its path (relative to a root
+    when given), size and digest, and for a measurements export its record count."""
+    file = Path(path)
+    note: dict = {"path": str(file)}
+    if root is not None:
+        try:
+            note["path"] = file.resolve().relative_to(Path(root).resolve()).as_posix()
+        except ValueError:
+            pass
+    try:
+        note["bytes"] = file.stat().st_size
+    except OSError:
+        note["missing"] = True
+        return note
+    note["sha256"] = file_digest(file)
+    if file.suffix == ".json":
+        try:
+            loaded = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, list):
+            note["records"] = len(loaded)
+    return note
+
+
+def analysis_record(session_id: str, *, inputs, outputs, steps, parameters: dict | None = None,
+                    root=None, project_dir=None, now: datetime | None = None) -> dict:
+    """what an analysis of a session was made from and with: the measurement files
+    it read (with their digests and record counts), the files it wrote, the steps
+    it ran, its parameters (none yet: the plots take no thresholds) and the
+    software. Sessions -> Export Visualizations writes it as analysis/parameters.json,
+    so a plot can be traced to the measurements export it came from, which
+    <session>_parameters.json traces to the components that made them."""
+    return {
+        "session_id": session_id,
+        "layer": "analysis",
+        "produced_at": now or datetime.now(timezone.utc),
+        "software": software_info(project_dir),
+        "steps": [str(step) for step in steps],
+        "parameters": plain(parameters or {}),
+        "inputs": [_file_note(path, root) for path in inputs],
+        "outputs": [_file_note(path, root) for path in outputs],
+    }
+
+
+def write_analysis_record(record: dict, analysis_dir) -> Path:
+    """write analysis/parameters.json."""
+    path = Path(analysis_dir) / ANALYSIS_RECORD_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
+    return path

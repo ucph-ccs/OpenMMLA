@@ -159,6 +159,16 @@ The console reads it back with **Sessions → Export Streams**, which fetches bo
 
 `components` is what the session ran with, written by every component as soon as it knows its session: each base, synchronizer and the IPS visualizer adds its entry (one per `key`; a component started again in the same session replaces its own) with the flags it was started with, the values it resolved from them and its config, the files it read that the config does not hold, the config itself with its secrets masked, and the software it runs. What its servers run is asked right after, in a thread that does not hold the component up: each server answers `GET /<endpoint>/info` with its backend, model and language (the ASR services) or its models, prompt profile and action schema (the frame analyzer), and the answers are set into the entry as `services`; a server that runs an older openmmla answers 404 there, and one that does not answer at all, are noted with the error instead. The measurements in InfluxDB carry only the session id, so this is the record to set a run up again from, or to compare two sessions' numbers against: the IPS transformation matrices and camera intrinsics, the ASR thresholds and the transcriber's model, the VFA prompt profile and models. The same entry is written on the component's machine as `artifacts/<session>/pipelines/<pipeline>/<host>/config/<role>[_<id>].json`, next to the `config.yml` it copied there (and, for IPS, the `transformation_matrices_<main>.json` it loaded), which **Sessions → Export Base Files** brings over; **Sessions → Export Measurements** writes the document's part out as `measurements/<session>_parameters.json`. Writing never stops a component either. The helpers are in `openmmla/utils/session_provenance.py`.
 
+Seen as layers, each level of a session's data has its own record of how it was made, and each points at the level below:
+
+| Layer | The data | What made it, and with what |
+| --- | --- | --- |
+| Raw | the streams (`artifacts/<session>/streams/`, from the Stream Server and the capture hosts) and the Collection recordings | the session's `sources` (which stream each base took, where it was captured) and the `Streams` entries in every component's `config`; a Collection recording's device, channels, sample rate and format in its `manifest`; the Stream Server's `mediamtx.yml` (`recordFormat`, `recordSegmentDuration`) |
+| Measurements | the InfluxDB events, exported to `artifacts/<session>/measurements/` | `components`: the flags, resolved values, files, config and server models of every base and synchronizer, exported as `measurements/<session>_parameters.json` |
+| Analysis | the plots and files under `artifacts/<session>/analysis/` | `analysis/parameters.json`: the measurement files read (digests, record counts), the steps run, the software; the plots take no thresholds yet, and when they do, those go into its `parameters` |
+
+What the raw layer still lacks is the capture command itself: the ffmpeg the Streams tab runs is built from the `Streams` entry by the console's version of openmmla, so the entry and the version pin it, but the command line, the capture host's ffmpeg version and the device's real mode are not written next to the recording yet.
+
 ### mongosh
 
 ```bash
