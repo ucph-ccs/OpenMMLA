@@ -1,25 +1,30 @@
-"""mmla ses-tidy: a session under artifacts/ renamed, its hosts relabelled, its legacy folder
-reduced to what is raw.
+"""mmla ses-tidy: a session under artifacts/ renamed, its hosts relabelled, a video flipped or a
+quadrant of a mosaic cut out, and its legacy folder reduced to what is raw.
 
 The collection layout names a session <experiment>_<group>_<start> and every recording after
-its host: audio_<host>_<channel>_<start>.wav, video_<host>_<device>_<start>.<ext>. When the
-experiment or the group was wrong, or a host label should be the device's kind (vimo-0 rather
-than base-vimo-0), the files, the folders and every path in the manifests move together.
---prune-legacy keeps a session's speaker profiles (moved next to their base's recordings as
-collection/<host>/profiles/) and its meta.txt, and deletes the rest of legacy/: the frames, the
-logs and the measurements an earlier run produced, which a replay produces again.
+its host: audio_<host>_<channel>_<start>.wav, video_<host>_<device>_<start>.<ext>. Whatever
+changes here, files, folders and manifests move together: the manifests are rebuilt from the
+tree at the end (a host's recordings under collection/<host>/{audio,video}/, raw/ holds what is
+kept but not replayed), so a relabel is a move and nothing else. --prune-legacy keeps a
+session's speaker profiles (as collection/<host>/profiles/) and its meta.txt, and deletes the
+rest of legacy/ and the folders an earlier run's analysis produced.
 """
 import argparse
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 SESSION_ID_RE = re.compile(r'^(?P<experiment>.+?)_(?P<group>group_[^_]+)_(?P<start>\d{6}T\d{4}Z)$')
+RECORDING_RE = re.compile(r'^(?P<modality>audio|video)_(?P<host>.+?)_(?P<device>[^_]+)_(?P<start>\d+(?:\.\d+)?)\.(?P<ext>\w+)$')
 KEEP_IN_LEGACY_ROOT = ('meta.txt',)
+OUTPUT_FOLDERS = ('legacy', 'analysis', 'exports', 'measurements', 'pipelines', 'visualizations', '.staging')
+MEDIA_EXTS = ('.wav', '.mp4', '.mov', '.mkv', '.m4a', '.avi', '.webm', '.flac', '.mp3')
 
 
 def split_session_id(session_id: str) -> dict[str, str]:
@@ -39,138 +44,329 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     path.with_suffix('.yml').write_text("\n".join(_dump_yaml(data)) + "\n", encoding='utf-8')
 
 
-def _replace_paths(value: Any, old: str, new: str) -> Any:
-    """every string in a manifest that starts with the old path, moved to the new one"""
-    if isinstance(value, str):
-        return new + value[len(old):] if value.startswith(old) else value
-    if isinstance(value, list):
-        return [_replace_paths(v, old, new) for v in value]
-    if isinstance(value, dict):
-        return {k: _replace_paths(v, old, new) for k, v in value.items()}
-    return value
+def parse_recording_name(name: str) -> dict[str, Any] | None:
+    match = RECORDING_RE.match(name)
+    if not match:
+        return None
+    parts = match.groupdict()
+    parts['start'] = float(parts['start'])
+    return parts
 
 
-def _rewrite_manifests(session_dir: Path, transform) -> None:
-    """every manifest and report of the session passed through `transform(data) -> data`"""
-    for path in [session_dir / 'manifest.json', session_dir / 'import_report.json',
-                 *sorted((session_dir / 'collection').glob('*/manifest.json'))]:
-        if path.exists():
-            data = transform(_read(path))
-            if path.name == 'import_report.json':
-                path.write_text(json.dumps(data, indent=2) + "\n", encoding='utf-8')
-            else:
-                _write(path, data)
+def _recording_key(record: dict[str, Any]) -> tuple:
+    """what survives a relabel: the modality, the start and the channel or device"""
+    return (record.get('modality'), round(float(record.get('start_time') or 0), 3),
+            record.get('channel') or record.get('device'))
+
+
+def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group_id: str | None = None,
+                      notes: list[str] | None = None, log=print) -> dict[str, Any]:
+    """the host manifests and the session manifest written again from what collection/ holds,
+    keeping what the old manifests knew about each recording (duration, how it was imported)"""
+    from openmmla.collection.recording import format_epoch_ms
+    from openmmla.commands.ses.imp import probe
+
+    old = _read(session_dir / 'manifest.json')
+    known = {_recording_key(r): r for r in old.get('recordings', []) if isinstance(r, dict)}
+    for host_manifest in (session_dir / 'collection').glob('*/manifest.json'):
+        for r in _read(host_manifest).get('recordings', []):
+            if isinstance(r, dict):
+                known.setdefault(_recording_key(r), r)
+    parts = split_session_id(session_dir.name)
+    session_id = session_dir.name
+    now = format_epoch_ms()
+    hosts: dict[str, list[dict[str, Any]]] = {}
+    for path in sorted((session_dir / 'collection').glob('*/*/*')):
+        if not path.is_file() or path.parent.name not in ('audio', 'video') or path.suffix.lower() not in MEDIA_EXTS:
+            continue
+        parsed = parse_recording_name(path.name)
+        if not parsed:
+            log(f"  {path.relative_to(session_dir)}: not <kind>_<host>_<device>_<start>.<ext>, left out of the manifest")
+            continue
+        host = path.parent.parent.name
+        record = dict(known.get((parsed['modality'], round(parsed['start'], 3), parsed['device']), {}))
+        if not record.get('duration'):
+            record['duration'] = round(float(probe(str(path)).get('duration') or 0), 3) or None
+        record.update({'id': path.stem, 'modality': parsed['modality'], 'status': 'stopped', 'path': str(path),
+                       'start_time': round(parsed['start'], 3), 'host': host, 'format': parsed['ext']})
+        if parsed['modality'] == 'audio':
+            record['channel'] = parsed['device']
+            record.setdefault('channels', 1)
+            record.setdefault('sample_rate', 16000)
+            record.pop('device', None)
+        else:
+            record['device'] = parsed['device']
+            record.pop('channel', None)
+        if record.get('duration'):
+            record['stopped_at'] = round(record['start_time'] + record['duration'], 3)
+        hosts.setdefault(host, []).append(record)
+
+    all_records = [r for records in hosts.values() for r in records]
+    sync = max((r['start_time'] for r in all_records), default=float(old.get('initial_sync_time') or 0))
+    for host, records in hosts.items():
+        host_dir = session_dir / 'collection' / host
+        _write(host_dir / 'manifest.json', {
+            'session_id': session_id, 'initial_sync_time': sync,
+            'created_at': _read(host_dir / 'manifest.json').get('created_at') or format_epoch_ms(sync),
+            'updated_at': now, 'recordings': records})
+    for stale in (session_dir / 'collection').glob('*/manifest.json'):
+        if stale.parent.name not in hosts:
+            stale.unlink()
+            stale.with_suffix('.yml').unlink(missing_ok=True)
+
+    file_sources: dict[str, list[dict[str, Any]]] = {'asr': [], 'ips': [], 'vfa': []}
+    for host, records in hosts.items():
+        host_dir = session_dir / 'collection' / host
+        if any(r['modality'] == 'audio' for r in records):
+            file_sources['asr'].append({'host': host, 'pipeline': 'collection', 'source': 'file',
+                                        'file_dir': str(host_dir / 'audio'), 'initial_sync_time': sync})
+        if any(r['modality'] == 'video' for r in records):
+            for pipeline in ('ips', 'vfa'):
+                file_sources[pipeline].append({'host': host, 'pipeline': 'collection', 'source': 'file',
+                                               'file_dir': str(host_dir / 'video'), 'initial_sync_time': sync})
+    data: dict[str, Any] = {
+        'session_id': session_id,
+        'experiment_id': experiment_id or old.get('experiment_id') or parts['experiment'],
+        'group_id': group_id or old.get('group_id') or parts['group'],
+        'initial_sync_time': sync,
+        'created_at': old.get('created_at') or format_epoch_ms(sync),
+        'updated_at': now,
+        'artifacts': {'collection': [{'host': host, 'local_path': str(session_dir / 'collection' / host), 'updated_at': now}
+                                     for host in hosts]},
+        'file_sources': {k: v for k, v in file_sources.items() if v},
+        'recordings': all_records,
+    }
+    for key in ('legacy_meta', 'imported_from', 'tag_size'):
+        if old.get(key) is not None:
+            data[key] = old[key]
+    raw = session_dir / 'raw'
+    if raw.is_dir():
+        data['raw'] = sorted(str(p.relative_to(session_dir)) for p in raw.rglob('*') if p.is_file())
+    kept_notes = [n for n in (old.get('notes') or []) if isinstance(n, str)]
+    for note in notes or []:
+        if note not in kept_notes:
+            kept_notes.append(note)
+    if kept_notes:
+        data['notes'] = kept_notes
+    _write(session_dir / 'manifest.json', data)
+    return data
 
 
 def rename_session(session_dir: Path, experiment_id: str | None = None, group_id: str | None = None,
                    log=print) -> Path:
-    """the session moved to <experiment>_<group>_<start>, ids and paths inside its manifests following"""
+    """the session moved to <experiment>_<group>_<start>, its manifests rebuilt on the new paths"""
     parts = split_session_id(session_dir.name)
     new_id = f"{experiment_id or parts['experiment']}_{group_id or parts['group']}_{parts['start']}"
     if new_id == session_dir.name:
+        rebuild_manifests(session_dir, experiment_id, group_id, log=log)
         return session_dir
     target = session_dir.parent / new_id
     if target.exists():
         raise FileExistsError(f"{target} exists")
     log(f"  session {session_dir.name} -> {new_id}")
     shutil.move(str(session_dir), str(target))
-    old_root, new_root = str(session_dir), str(target)
-
-    def transform(data):
-        data = _replace_paths(data, old_root, new_root)
-        if 'session_id' in data:
-            data['session_id'] = new_id
-        if 'experiment_id' in data or experiment_id:
-            data['experiment_id'] = experiment_id or data.get('experiment_id')
-        if 'group_id' in data or group_id:
-            data['group_id'] = group_id or data.get('group_id')
-        return data
-    _rewrite_manifests(target, transform)
+    report = target / 'import_report.json'
+    if report.exists():
+        data = _read(report)
+        data['target'] = str(target)
+        data['session_id'] = new_id
+        report.write_text(json.dumps(data, indent=2) + "\n", encoding='utf-8')
+    rebuild_manifests(target, experiment_id or parts['experiment'], group_id or parts['group'], log=log)
     return target
 
 
-def relabel_host(session_dir: Path, old: str, new: str, log=print) -> int:
-    """collection/<old> and its recordings renamed to <new>, in the file names and the manifests;
-    returns how many files were renamed"""
+def _rename_in_place(path: Path, old_host: str, new_host: str) -> Path:
+    parsed = parse_recording_name(path.name)
+    if parsed and parsed['host'] == old_host:
+        target = path.with_name(f"{parsed['modality']}_{new_host}_{parsed['device']}_{path.name.split('_', 2)[2].split('_', 1)[1]}")
+        path.rename(target)
+        return target
+    return path
+
+
+def relabel_host(session_dir: Path, old: str, new: str, modality: str | None = None, log=print) -> int:
+    """collection/<old> (or only its audio or video) moved to collection/<new>, its files renamed;
+    returns how many files moved"""
     old_dir, new_dir = session_dir / 'collection' / old, session_dir / 'collection' / new
     if not old_dir.is_dir():
         raise FileNotFoundError(f"no host {old} in {session_dir.name}")
-    if new_dir.exists():
-        raise FileExistsError(f"{new_dir} exists")
-    log(f"  host {old} -> {new}")
-    shutil.move(str(old_dir), str(new_dir))
-    renamed = 0
-    prefixes = (f"audio_{old}_", f"video_{old}_")
-    for path in sorted(new_dir.rglob('*')):
-        if path.is_file() and path.name.startswith(prefixes):
-            path.rename(path.with_name(path.name.replace(f"_{old}_", f"_{new}_", 1)))
-            renamed += 1
-
-    def transform(data):
-        data = _replace_paths(data, str(old_dir), str(new_dir))
-        # the file names and the recording ids carry the host between the kind and the channel
-        text = json.dumps(data)
-        for kind in ('audio', 'video'):
-            text = text.replace(f"{kind}_{old}_", f"{kind}_{new}_")
-        data = json.loads(text)
-
-        def fix_host(value):
-            if isinstance(value, dict):
-                if value.get('host') == old:
-                    value['host'] = new
-                for v in value.values():
-                    fix_host(v)
-            elif isinstance(value, list):
-                for v in value:
-                    fix_host(v)
-        fix_host(data)
-        return data
-    _rewrite_manifests(session_dir, transform)
-    return renamed
+    folders = [modality] if modality else ['audio', 'video', 'profiles']
+    moved = 0
+    log(f"  {modality or 'host'} {old} -> {new}")
+    for folder in folders:
+        source = old_dir / folder
+        if not source.is_dir():
+            continue
+        target = new_dir / folder
+        target.mkdir(parents=True, exist_ok=True)
+        for path in sorted(source.iterdir()):
+            destination = target / path.name
+            if destination.exists():
+                raise FileExistsError(f"{destination} exists")
+            shutil.move(str(path), str(destination))
+            if path.is_file() or destination.is_file():
+                _rename_in_place(destination, old, new)
+                moved += 1
+        if not any(source.iterdir()):
+            source.rmdir()
+    if not any(p for p in old_dir.iterdir() if p.name not in ('manifest.json', 'manifest.yml', '.manifest.lock')):
+        shutil.rmtree(old_dir)
+    return moved
 
 
-def prune_legacy(session_dir: Path, host_map: dict[str, str] | None = None, log=print) -> dict[str, Any]:
-    """speaker profiles and meta.txt kept, the rest of legacy/ deleted"""
-    legacy = session_dir / 'legacy'
-    result: dict[str, Any] = {'profiles': [], 'kept': [], 'deleted_files': 0}
-    if not legacy.is_dir():
-        return result
+def move_to_raw(session_dir: Path, host: str, log=print) -> Path:
+    """collection/<host> kept under raw/<host>: not a source any more, not deleted either"""
+    source = session_dir / 'collection' / host
+    if not source.is_dir():
+        raise FileNotFoundError(f"no host {host} in {session_dir.name}")
+    target = session_dir / 'raw' / host
+    target.parent.mkdir(exist_ok=True)
+    if target.exists():
+        raise FileExistsError(f"{target} exists")
+    for name in ('manifest.json', 'manifest.yml', '.manifest.lock'):
+        (source / name).unlink(missing_ok=True)
+    shutil.move(str(source), str(target))
+    log(f"  host {host} -> raw/{host}")
+    return target
+
+
+def delete_host(session_dir: Path, host: str, log=print) -> int:
+    source = session_dir / 'collection' / host
+    if not source.is_dir():
+        raise FileNotFoundError(f"no host {host} in {session_dir.name}")
+    count = sum(len(files) for _, _, files in os.walk(source))
+    shutil.rmtree(source)
+    log(f"  host {host} deleted ({count} files)")
+    return count
+
+
+def _encoder_args(source: str) -> list[str]:
+    """the h264 encoder: VideoToolbox on a Mac at the source's bitrate, libx264 elsewhere"""
+    from openmmla.commands.ses.imp import probe
+    info = probe(source)
+    size = os.path.getsize(source)
+    bitrate = int(size * 8 / (info.get('duration') or 1))
+    bitrate = max(2_000_000, min(bitrate, 12_000_000))
+    encoders = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'], capture_output=True, text=True).stdout
+    if 'h264_videotoolbox' in encoders:
+        return ['-c:v', 'h264_videotoolbox', '-b:v', str(bitrate), '-pix_fmt', 'yuv420p']
+    return ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p']
+
+
+def transcode(source: str, destination: str, video_filter: str, fps: int | None = None, keep_audio: bool = True) -> None:
+    command = ['ffmpeg', '-v', 'error', '-y', '-i', source, '-vf', video_filter, *_encoder_args(source)]
+    if fps:
+        command += ['-r', str(fps)]
+    command += ['-c:a', 'aac', '-b:a', '128k'] if keep_audio else ['-an']
+    command += ['-movflags', '+faststart', destination]
+    subprocess.run(command, check=True, timeout=6 * 3600)
+
+
+def flip_video(session_dir: Path, host: str, log=print) -> list[str]:
+    """every video of the host turned by 180 degrees (re-encoded); the original kept under raw/"""
+    video_dir = session_dir / 'collection' / host / 'video'
+    done = []
+    for path in sorted(video_dir.glob('video_*')):
+        if path.suffix.lower() not in MEDIA_EXTS:
+            continue
+        log(f"  flipping {path.name}")
+        flipped = path.with_suffix('.mp4')
+        temp = path.with_name(f".{path.stem}.flipping.mp4")
+        transcode(str(path), str(temp), 'hflip,vflip')
+        raw_dir = session_dir / 'raw' / host / 'upside-down'
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(raw_dir / path.name))
+        temp.rename(flipped)
+        done.append(flipped.name)
+    return done
+
+
+def crop_video(session_dir: Path, host: str, new_host: str, x: int, y: int, w: int, h: int, fps: int | None = None,
+               log=print) -> list[str]:
+    """a region of every video of the host cut out into a video of new_host, same start, no audio"""
+    video_dir = session_dir / 'collection' / host / 'video'
+    target_dir = session_dir / 'collection' / new_host / 'video'
+    target_dir.mkdir(parents=True, exist_ok=True)
+    done = []
+    for path in sorted(video_dir.glob('video_*')):
+        parsed = parse_recording_name(path.name)
+        if not parsed or path.suffix.lower() not in MEDIA_EXTS:
+            continue
+        target = target_dir / f"video_{new_host}_{parsed['device']}_{parsed['start']:.3f}.mp4"
+        log(f"  cropping {path.name} [{w}x{h} at {x},{y}] -> {new_host}")
+        temp = target.with_name(f".{target.stem}.cropping.mp4")
+        transcode(str(path), str(temp), f'crop={w}:{h}:{x}:{y}', fps=fps, keep_audio=False)
+        temp.rename(target)
+        done.append(target.name)
+    return done
+
+
+def prune_legacy(session_dir: Path, log=print) -> dict[str, Any]:
+    """speaker profiles and meta.txt kept, legacy/ and the old analysis folders deleted"""
     from openmmla.commands.ses.imp import _safe
-    for profiles in sorted(p for p in legacy.rglob('profiles') if p.is_dir()):
-        base = _safe(profiles.parent.name)
-        host = (host_map or {}).get(base, base)
-        target = session_dir / 'collection' / host / 'profiles'
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            for child in profiles.iterdir():
-                shutil.move(str(child), str(target / child.name))
-        else:
-            shutil.move(str(profiles), str(target))
-        result['profiles'].append(str(target))
-        log(f"  profiles of {profiles.parent.name} -> collection/{host}/profiles")
-    for name in KEEP_IN_LEGACY_ROOT:
-        for path in legacy.rglob(name):
-            kept = session_dir / name
-            if not kept.exists():
-                shutil.move(str(path), str(kept))
-                result['kept'].append(str(kept))
-    result['deleted_files'] = sum(len(files) for _, _, files in os.walk(legacy))
-    shutil.rmtree(legacy)
-    log(f"  legacy/ deleted ({result['deleted_files']} files)")
+    result: dict[str, Any] = {'profiles': [], 'kept': [], 'deleted_files': 0, 'deleted_folders': []}
+    legacy = session_dir / 'legacy'
+    if legacy.is_dir():
+        for profiles in sorted(p for p in legacy.rglob('profiles') if p.is_dir()):
+            host = _safe(profiles.parent.name)
+            target = session_dir / 'collection' / host / 'profiles'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                for child in profiles.iterdir():
+                    shutil.move(str(child), str(target / child.name))
+            else:
+                shutil.move(str(profiles), str(target))
+            result['profiles'].append(str(target))
+            log(f"  profiles of {profiles.parent.name} -> collection/{host}/profiles")
+        for name in KEEP_IN_LEGACY_ROOT:
+            for path in legacy.rglob(name):
+                kept = session_dir / name
+                if not kept.exists():
+                    shutil.move(str(path), str(kept))
+                    result['kept'].append(str(kept))
+    for folder in OUTPUT_FOLDERS:
+        target = session_dir / folder
+        if target.is_dir():
+            result['deleted_files'] += sum(len(files) for _, _, files in os.walk(target))
+            shutil.rmtree(target)
+            result['deleted_folders'].append(folder)
+    if result['deleted_folders']:
+        log(f"  deleted {', '.join(result['deleted_folders'])} ({result['deleted_files']} files)")
     return result
 
 
 def get_parser():
     parser = argparse.ArgumentParser(
         prog='mmla ses-tidy',
-        description="Rename a session under artifacts/, relabel its hosts, and reduce legacy/ to what is raw.")
+        description="Rename a session under artifacts/, relabel its hosts, flip or crop its videos, "
+                    "and reduce legacy/ to what is raw. The manifests are rebuilt from the tree afterwards.")
     parser.add_argument('session', help="the session folder under artifacts/, or its id")
     parser.add_argument('-e', '--experiment', default=None, help="new experiment id")
     parser.add_argument('-g', '--group', default=None, help="new group id")
-    parser.add_argument('--host', action='append', default=[], metavar='OLD=NEW', help="relabel a host (repeatable)")
-    parser.add_argument('--prune-legacy', action='store_true', help="keep speaker profiles and meta.txt, delete the rest of legacy/")
+    parser.add_argument('--host', action='append', default=[], metavar='OLD=NEW', help="relabel a host, audio and video (repeatable)")
+    parser.add_argument('--audio-host', action='append', default=[], metavar='OLD=NEW', help="move only the audio of a host to another label")
+    parser.add_argument('--video-host', action='append', default=[], metavar='OLD=NEW', help="move only the video of a host to another label")
+    parser.add_argument('--crop', action='append', default=[], metavar='HOST=NEW:X,Y,W,H',
+                        help="cut a region of a host's videos out as the videos of NEW (a quadrant of a mosaic)")
+    parser.add_argument('--crop-fps', type=int, default=None, help="frame rate of the cropped videos (default: the source's)")
+    parser.add_argument('--flip', action='append', default=[], metavar='HOST', help="turn a host's videos by 180 degrees")
+    parser.add_argument('--to-raw', action='append', default=[], metavar='HOST', help="keep a host's files under raw/, out of the sources")
+    parser.add_argument('--delete-host', action='append', default=[], metavar='HOST', help="delete a host's files")
+    parser.add_argument('--tag-size', type=float, default=None, help="the AprilTag size of the session, in metres, noted in the manifest")
+    parser.add_argument('--note', action='append', default=[], help="a note kept in the session manifest (repeatable)")
+    parser.add_argument('--prune-legacy', action='store_true', help="keep speaker profiles and meta.txt, delete legacy/ and the old analysis folders")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
     return parser
+
+
+def _pairs(values: list[str], what: str) -> list[tuple[str, str]]:
+    pairs = []
+    for value in values:
+        old, _, new = value.partition('=')
+        if not old or not new:
+            raise ValueError(f"{what} wants OLD=NEW, not {value!r}")
+        pairs.append((old, new))
+    return pairs
 
 
 def main(argv=None):
@@ -182,22 +378,50 @@ def main(argv=None):
         print(f"no session at {session_dir}")
         return 1
     session_dir = session_dir.resolve()
-    host_map = {}
-    for pair in args.host:
-        old, _, new = pair.partition('=')
-        if not old or not new:
-            print(f"--host wants OLD=NEW, not {pair!r}")
-            return 1
-        host_map[old] = new
+    try:
+        hosts, audio_hosts, video_hosts = (_pairs(v, w) for v, w in ((args.host, '--host'), (args.audio_host, '--audio-host'), (args.video_host, '--video-host')))
+        crops = []
+        for value in args.crop:
+            spec, _, region = value.partition(':')
+            host, _, new = spec.partition('=')
+            numbers = [int(n) for n in region.split(',')] if region else []
+            if not host or not new or len(numbers) != 4:
+                raise ValueError(f"--crop wants HOST=NEW:X,Y,W,H, not {value!r}")
+            crops.append((host, new, numbers))
+    except ValueError as error:
+        print(error)
+        return 1
     print(session_dir.name)
-    for old, new in host_map.items():
-        renamed = relabel_host(session_dir, old, new)
-        print(f"    {renamed} files renamed")
+    started = time.time()
+    notes = list(args.note)
+    # legacy first: its profiles land under the host label the base had, which a relabel then moves
     if args.prune_legacy:
-        prune_legacy(session_dir, host_map)
-    if args.experiment or args.group:
-        session_dir = rename_session(session_dir, args.experiment, args.group)
-    print(f"-> {session_dir}")
+        prune_legacy(session_dir)
+    for host, new, (x, y, w, h) in crops:
+        made = crop_video(session_dir, host, new, x, y, w, h, fps=args.crop_fps)
+        notes.append(f"{new}: {w}x{h} at {x},{y} cut out of {host}'s video")
+        print(f"    {len(made)} videos cropped")
+    for host in args.flip:
+        made = flip_video(session_dir, host)
+        notes.append(f"{host}: video turned by 180 degrees (the original under raw/{host}/upside-down)")
+        print(f"    {len(made)} videos flipped")
+    for old, new in hosts:
+        print(f"    {relabel_host(session_dir, old, new)} files moved")
+    for old, new in audio_hosts:
+        print(f"    {relabel_host(session_dir, old, new, modality='audio')} files moved")
+    for old, new in video_hosts:
+        print(f"    {relabel_host(session_dir, old, new, modality='video')} files moved")
+    for host in args.to_raw:
+        move_to_raw(session_dir, host)
+    for host in args.delete_host:
+        delete_host(session_dir, host)
+    if args.tag_size is not None:
+        data = _read(session_dir / 'manifest.json')
+        data['tag_size'] = args.tag_size
+        _write(session_dir / 'manifest.json', data)
+    rebuild_manifests(session_dir, notes=notes)
+    session_dir = rename_session(session_dir, args.experiment, args.group)
+    print(f"-> {session_dir}  ({time.time() - started:.0f} s)")
     return 0
 
 
