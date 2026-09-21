@@ -50,6 +50,7 @@ OPTIONAL_DEP_MAP = {
     "ses-import": "uber-base",
     "ses-tidy": "uber-base",
     "ses-align": "uber-base",
+    "ses-code": "uber-base",
     "tui": "tui",
     "crypto": "tui",
 }
@@ -163,6 +164,10 @@ COMMANDS = {
     "ses-align": (
         "openmmla.commands.ses.align:main",
         "Measure a session's recordings against one clock by their audio, move them, cut them to one start."
+    ),
+    "ses-code": (
+        "openmmla.commands.ses.code:main",
+        "Code a session's ten-second windows by hand in the browser (ground truth for the interaction classes)."
     ),
     "tui": (
         "openmmla.commands.tui:main",

@@ -201,6 +201,8 @@ mmla ses-align exp_20250616_microbit_group_01_250616T0812Z              # measur
 mmla ses-align exp_20250616_microbit_group_01_250616T0812Z --apply --trim
 ```
 
+`mmla ses-code` is the page a person codes a session's windows on, the ground truth of the interaction classes. It serves every session under `artifacts/` (`-s` narrows by id) at `http://localhost:8765/`: for each ten-second window (`-w`, `-st`) it cuts a clip on demand, the two preferred cameras side by side with the group microphone as audio, exact to the window's start, and takes one key per window: `1` individual or parallel work, `2` social interaction, `3` collaborative interaction, `0` unclear, `n` for a note, `u` to undo, `space` to replay, arrows to move. The codebook and its rule are on the page. Labels go to `artifacts/<session>/labels/<coder>.jsonl`, one line per window with the time spent, so a second coder writes a second file and the two are compared for agreement; `--sample 0.2` codes a fifth of the five-minute blocks, the same blocks for every coder (`--seed`). Clips are cached under `labels/clips/` and can be deleted.
+
 ### Pipelines
 
 The ASR, IPS and VFA base cards share one shape:
