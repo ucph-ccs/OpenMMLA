@@ -84,7 +84,7 @@ from openmmla.utils.artifact_paths import (
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources, normalize_source
-from openmmla.utils.config import get_bases, get_base_by_id
+from openmmla.utils.config import get_bases, get_base_by_id, decrypt_config_values
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -656,6 +656,9 @@ def _influxdb_session_ids_from_config(config: dict) -> list[str]:
         influx_config = config.get("InfluxDB", {})
         if not isinstance(influx_config, dict):
             return []
+        # these configs are read raw, so the token is still ENC(...); sent as-is
+        # influx answers 401 and the except below turns it into "no sessions"
+        influx_config = decrypt_config_values(influx_config)
         url = str(influx_config.get("url") or "").strip()
         token = str(influx_config.get("token") or "").strip()
         org = str(influx_config.get("org") or "").strip()
@@ -3070,8 +3073,34 @@ def _service_python_hint(svc: ServiceDef) -> str:
     return "3.12" if svc.conda_env == "vfa-vllm" else "3.10"
 
 
-def _vllm_serve_command(config: dict | None = None) -> str:
+_MLLM_KEY_UNDECRYPTABLE = (
+    "[red]The MLLM api key cannot be decrypted on this machine: "
+    "~/.openmmla/master.key is missing or is not the key it was saved with. "
+    "Re-enter the key on the MLLM Server Config tab.[/red]"
+)
+
+
+def _undecryptable_api_key(config: dict) -> bool:
+    """whether the MLLM api key is still ENC(...) after a decrypt attempt.
+
+    That means this machine's ~/.openmmla/master.key is not the one the key was
+    saved with. Launching anyway would bring vllm up demanding a token the frame
+    analyzer cannot produce, and the 401s would look like a model problem."""
+    key = str(decrypt_config_values(config.get("api_key") or ""))
+    return key.startswith("ENC(") and key.endswith(")")
+
+
+def _vllm_serve_command(config: dict | None = None, *, mask: bool = False) -> str:
+    """the `vllm serve` command line, with the api key decrypted for vllm itself.
+
+    The form keeps the key as save_config wrote it, ENC(...) and all, the way the
+    System Settings forms keep theirs; it is decrypted here, at the one place that
+    hands it to a server. Undecryptable, it stays ENC(...) rather than becoming
+    empty, so _launch_vllm_server can say so instead of starting a server whose
+    key nobody holds. mask=True is for the log pane: the same line with the key
+    shortened, since the command is echoed there in full."""
     cfg = config or _mllm_config(_find_project_root())
+    api_key = str(decrypt_config_values(cfg["api_key"]))
     args = [
         "vllm", "serve", cfg["model"],
         "--host", cfg["host"],
@@ -3080,7 +3109,7 @@ def _vllm_serve_command(config: dict | None = None) -> str:
         "--max-model-len", str(cfg["max_model_len"]),
         "--limit-mm-per-prompt", cfg["limit_mm_per_prompt"],
         "--gpu-memory-utilization", str(cfg["gpu_memory_utilization"]),
-        "--api-key", cfg["api_key"],
+        "--api-key", _mask_secret(api_key) if mask else api_key,
     ]
     return " ".join(shlex.quote(arg) for arg in args)
 
@@ -10180,6 +10209,9 @@ class ServicePanel(Widget):
     def _launch_vllm_server(self, svc: ServiceDef) -> None:
         session_name = _service_session_name(svc)
         config = _mllm_config(self._root)
+        if _undecryptable_api_key(config):
+            self._log(_MLLM_KEY_UNDECRYPTABLE)
+            return
         vllm_cmd = _vllm_serve_command(config)
         run_cmd = f"cd {shlex.quote(self._root)} && {vllm_cmd}; exec bash"
         wrapped_cmd = wrap_local(run_cmd, svc.conda_env)
@@ -10191,7 +10223,7 @@ class ServicePanel(Widget):
             ["tmux", "new-session", "-d", "-s", session_name, wrapped_cmd],
             cwd=self._root,
         )
-        self._log(f"  Command: {vllm_cmd}")
+        self._log(f"  Command: {_vllm_serve_command(config, mask=True)}")
         self._log(f"[green]{svc.display_name} tmux session '{session_name}' started on port {config['port']}.[/green]")
 
     @staticmethod
@@ -10515,6 +10547,9 @@ class ServicePanel(Widget):
             elif svc.launch_type == "vllm":
                 session_name = _service_session_name(svc)
                 config = _mllm_config(self._root)
+                if _undecryptable_api_key(config):
+                    self._log(_MLLM_KEY_UNDECRYPTABLE)
+                    return
                 vllm_cmd = _vllm_serve_command(config)
                 run_cmd = f"cd {_quote_remote_path(remote_root)} && {vllm_cmd}; exec bash"
                 wrapped_cmd = wrap_remote(run_cmd, svc.conda_env)
@@ -10524,9 +10559,10 @@ class ServicePanel(Widget):
                     f"tmux attach -t {session_name}"
                 )
                 ssh_cmd = self._remote_terminal_command(profile, cmd)
-                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {vllm_cmd}")
+                masked_cmd = _vllm_serve_command(config, mask=True)
+                self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {masked_cmd}")
                 if self._open_collection_terminal([(svc.name, ssh_cmd)]):
-                    self._log(f"  Command: {vllm_cmd}")
+                    self._log(f"  Command: {masked_cmd}")
                     self._log(f"[green]{svc.display_name} tmux session opened remotely on port {config['port']}.[/green]")
                 else:
                     self._log("[yellow]Could not open remote MLLM terminal.[/yellow]")
