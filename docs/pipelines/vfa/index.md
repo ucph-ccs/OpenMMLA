@@ -158,6 +158,8 @@ export PROJECT_DIR=pipelines/vfa-server CONFIG_PATH=pipelines/vfa-server/config.
 gunicorn -k gevent -w 1 -b 0.0.0.0:5007 openmmla.services.vfa.apps.serve_multi_angle_vllm_frame_analyzer:app
 ```
 
+The server also answers `GET /vllm/info` (through the gateway too) with what it runs — the backend, its VLM and LLM models and their addresses, the prompt profile, the action schema, the temperature — and the VFA synchronizer asks and notes the answer in the session's document, so that a session's actions can be traced to the models and prompts that produced them (see [Databases](../../database.md#mongodb)). A server running an older openmmla has no `/info`, and the session says so instead.
+
 ## Smoke test
 
 With the VFA Server running, send still frames straight to it without starting any base:

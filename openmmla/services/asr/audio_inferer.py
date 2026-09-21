@@ -153,6 +153,16 @@ class AudioInferer(Server):
         self.ws_model.set_device(device)
         self.logger.info(f"WeSpeaker backend initialized (model={self.model_name}, device={device})")
 
+
+    def describe(self) -> dict:
+        """What this inferer runs with, for GET /infer/info: the speaker embedding backend
+        and model (see openmmla.utils.session_provenance)."""
+        info = {'service': self.__class__.__name__, 'backend': self.backend, 'cuda': bool(self.cuda),
+                'model': getattr(self, 'model_name', None)}
+        if self.backend == 'nemo':
+            info['onnx'] = bool(getattr(self, 'onnx', False))
+        return {name: value for name, value in info.items() if value is not None}
+
     def process_request(self):
         """Perform inference on the audio.
 

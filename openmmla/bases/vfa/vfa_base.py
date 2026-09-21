@@ -14,6 +14,7 @@ import numpy as np
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.config import (
     get_bases, get_base_by_id, select_source_by_index_or_name, compute_initial_sync_time,
@@ -314,6 +315,7 @@ class VFABase(Base):
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
         self._join_session()
+        self._record_provenance()
 
         if self.mode != 'analyze':
             self._configure_video_stream()
@@ -339,6 +341,37 @@ class VFABase(Base):
         finally:
             self._leave_session()  # before the clean-up, which can take seconds
             self._clean_up()
+
+    def _record_provenance(self):
+        """Note in the session what this base runs with (openmmla.utils.session_provenance): its
+        flags, the camera and its intrinsics, the angle, the frame settings, the stream it takes and
+        the config with the secrets masked. A failure is a warning, never a stop."""
+        if not self.session_id:
+            return
+        try:
+            cameras = self.config.get('Cameras', {}) or {}
+            camera = {'name': self.chosen_camera, **(cameras.get(self.chosen_camera) or {})} if self.chosen_camera else None
+            base_config = self.config.get('Base', {}) or {}
+            entry = session_provenance.component_entry(
+                'vfa', 'base', self.base_id,
+                arguments={'mode': self.mode, 'graphics': self.graphics, 'store': self.store,
+                           'verbose': self.verbose, 'session_id': self.launch_session_id, 'base': self.launch_base},
+                parameters={
+                    'base_id': self.base_id, 'camera': camera, 'camera_angle': self.camera_angle,
+                    'tag_size': base_config.get('tag_size'), 'families': base_config.get('families'),
+                    'resolution': self.res, 'rotate': self.rotate, 'fps': self.fps,
+                    'keyframe_interval': self.keyframe_interval, 'processing_rate': self.processing_rate,
+                    'enable_timing_sync': self.enable_timing_sync,
+                    'source': self.source, 'source_index': self._source_index,
+                    'selected_source': self.selected_source, 'stream': self._stream_name, 'url': self._stream_url,
+                    'initial_sync_time': getattr(self, 'initial_sync_time', None),
+                    'stream_kwargs': self.stream_kwargs, 'angle_config': self.angle_config,
+                },
+                config=self.config, config_path=self.config_path, project_dir=self.project_dir)
+            session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
+                                                'vfa-base', log=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} what VFA base {self.base_id} runs with: {e}")
 
     def _configure_video_stream(self):
         """Configure video stream."""

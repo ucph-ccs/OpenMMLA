@@ -146,7 +146,7 @@ export PROJECT_DIR=pipelines/asr-server CONFIG_PATH=pipelines/asr-server/config.
 gunicorn -k gevent -w 1 -b 0.0.0.0:5005 openmmla.services.asr.apps.serve_speech_transcriber:app
 ```
 
-The modules are `serve_audio_inferer` (5001), `serve_audio_resampler` (5002), `serve_speech_enhancer` (5003), `serve_speech_separator` (5004), `serve_speech_transcriber` (5005) and `serve_voice_activity_detector` (5006).
+The modules are `serve_audio_inferer` (5001), `serve_audio_resampler` (5002), `serve_speech_enhancer` (5003), `serve_speech_separator` (5004), `serve_speech_transcriber` (5005) and `serve_voice_activity_detector` (5006). Each also answers `GET /<endpoint>/info` (`/transcribe/info`, through the gateway too) with what it runs — the backend, the model, the language, whether it is on CUDA — and a base that joins a session asks and notes the answers in the session's document, so that a session's measurements can be traced to the models that made them (see [Databases](../database.md#mongodb)). A server running an older openmmla has no `/info`, and the session says so instead.
 
 ## Post-time processing
 

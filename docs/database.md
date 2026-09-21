@@ -128,6 +128,25 @@ Database: openmmla
             capture: {ssh_profile, record, record_root, kind} | null,
             host,                              # the machine the base runs on
             joined_at, left_at                 # UTC; left_at is null while the base is in
+          }],
+          components: [{                       # one per base, synchronizer and visualizer that ran in the session
+            key,                               # <pipeline>:<role>[:<id>], e.g. asr:base:1, ips:synchronizer,
+                                               # asr:synchronizer:Jabra (the base type it merges)
+            pipeline, role, id,                # asr | ips | vfa; base | synchronizer | visualizer; the id, as text
+            host, pid, started_at,             # where and when it started (UTC)
+            software: {openmmla, python, platform, git_commit},
+            arguments: {...},                  # the flags it was started with (-m, -vad, -lang, -b, -mc ...)
+            parameters: {...},                 # what it resolved and runs with: thresholds and durations, the
+                                               # camera and its intrinsics, the stream it takes, the speaker
+                                               # profiles it recognizes, the main camera, the service URLs
+            files: {...},                      # what it read besides the config: the IPS transformation
+                                               # matrices (inline), the speaker profile snapshot's folder
+            services: {<name>: {url, ...}},    # what its servers answered on /info (the transcriber's backend,
+                                               # model and language, the frame analyzer's models and prompt
+                                               # profile), or {url, error} for one without /info or unreachable;
+                                               # null until asked
+            config: {...},                     # the pipeline config it loaded, secrets masked
+            config_path, config_sha256         # the file and its digest, to tell two runs' configs apart at a glance
           }]
         }
 ```
@@ -137,6 +156,8 @@ A document is inserted when a session is started (from the TUI or `mmla ses-ctl`
 `sources` is written by the bases, not by the console: every IPS, VFA and ASR base adds its entry as soon as it knows its session (the id the console launched it with, or the session picked in its menu) and sets its `left_at` once, on its way out. A base that joins the same session again gets its entry back, open again, with its first `joined_at`. `stream` and `url` are what the base resolved (an ASR base picks its stream from a menu when its `source_index` is empty), otherwise what its Bases entry names; `capture` is null for a base that takes no stream, and otherwise holds what the console needs to find the capture-side recording again: the Streams entry's `ssh_profile`, whether it has `record` on, its `record_root`, and `kind` (`audio` or `video`). Synchronizers and visualizers write nothing here. Writing never stops a base: when MongoDB is down, or the session is not in it, the base logs a warning and runs on. The helpers are in `openmmla/utils/session_sources.py`.
 
 The console reads it back with **Sessions → Export Streams**, which fetches both copies of every stream the session used into `artifacts/<session>/streams/`: the Stream Server's, by the `url` of each entry (its path on the Stream Server of System Settings, the host checked, so a stream published to another server is named in the log and skipped), into `streams/server/<app>/<name>_<start>.mp4`; and the capture host's, by `capture` (the streams the console runs with `record` on, cut on their capture host), into `streams/capture/<host label>/<video|audio>/`. A session that was never ended runs until the last `left_at`, once every base has left. A document without `sources` (a session from before the bases wrote them, or one no base joined) has nothing to export, and the log says so. See [Streaming](rtmp_streaming.md#a-sessions-part-sessions-export-streams).
+
+`components` is what the session ran with, written by every component as soon as it knows its session: each base, synchronizer and the IPS visualizer adds its entry (one per `key`; a component started again in the same session replaces its own) with the flags it was started with, the values it resolved from them and its config, the files it read that the config does not hold, the config itself with its secrets masked, and the software it runs. What its servers run is asked right after, in a thread that does not hold the component up: each server answers `GET /<endpoint>/info` with its backend, model and language (the ASR services) or its models, prompt profile and action schema (the frame analyzer), and the answers are set into the entry as `services`; a server that runs an older openmmla answers 404 there, and one that does not answer at all, are noted with the error instead. The measurements in InfluxDB carry only the session id, so this is the record to set a run up again from, or to compare two sessions' numbers against: the IPS transformation matrices and camera intrinsics, the ASR thresholds and the transcriber's model, the VFA prompt profile and models. The same entry is written on the component's machine as `artifacts/<session>/pipelines/<pipeline>/<host>/config/<role>[_<id>].json`, next to the `config.yml` it copied there (and, for IPS, the `transformation_matrices_<main>.json` it loaded), which **Sessions → Export Base Files** brings over; **Sessions → Export Measurements** writes the document's part out as `measurements/<session>_parameters.json`. Writing never stops a component either. The helpers are in `openmmla/utils/session_provenance.py`.
 
 ### mongosh
 
@@ -150,6 +171,8 @@ show collections
 db.sessions.find().sort({start_time: -1}).pretty()
 db.sessions.countDocuments({status: "active"})
 db.sessions.find({session_id: "<session-id>"}, {_id: 0, sources: 1})   # the streams its bases took
+db.sessions.find({session_id: "<session-id>"}, {_id: 0, components: 1})   # what each component ran with
+db.sessions.find({}, {_id: 0, session_id: 1, "components.key": 1, "components.services": 1})   # models per session
 ```
 
 ### Reset MongoDB

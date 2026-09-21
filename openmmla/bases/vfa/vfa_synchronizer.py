@@ -9,6 +9,7 @@ from typing import Any
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.services.vfa.requests import request_multi_angle_frame_analyze
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils import session_provenance
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.config import get_bases
@@ -278,6 +279,7 @@ class VFASynchronizer(Synchronizer):
             self.selected_participant_descriptions = None
         
         self._create_bucket_logger()
+        self._record_provenance()
 
         # listen for start signal
         if not self._listen_for_start_signal():
@@ -307,6 +309,30 @@ class VFASynchronizer(Synchronizer):
             self._synchronization_handler(exception_occurred)
         # Ctrl+C ends the run as STOP does; any other exception is an error
         return exception_occurred is None or isinstance(exception_occurred, KeyboardInterrupt)
+
+    def _record_provenance(self):
+        """Note in the session what this synchronizer runs with (openmmla.utils.session_provenance):
+        how many bases it merges, its tolerances, the participants it describes to the frame
+        analyzer; what that analyzer runs (its models, prompt profile) is asked after, in a
+        thread. A failure is a warning, never a stop."""
+        if not self.session_id:
+            return
+        try:
+            entry = session_provenance.component_entry(
+                'vfa', 'synchronizer',
+                arguments={'session_id': self.launch_session_id, 'num_bases': self.launch_num_bases},
+                parameters={'number_of_bases': self.number_of_bases, 'buffer_expiry_time': self.buffer_expiry_time,
+                            'match_tolerance': self.match_tolerance, 'angle_config': self.angle_config,
+                            'participant_descriptions': self.selected_participant_descriptions,
+                            'service_urls': {'vllm_frame_analyzer': self.vllm_frame_analyzer_url}},
+                config=self.config, config_path=self.config_path, project_dir=self.project_dir)
+            session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
+                                                'vfa-base', log=self.logger)
+            session_provenance.record_services_later(
+                self.mongo_client, self.session_id, entry, {'vllm_frame_analyzer': self.vllm_frame_analyzer_url},
+                self.project_dir, 'vfa-base', log=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} what the VFA synchronizer runs with: {e}")
 
     def _create_bucket_logger(self):
         self.bucket_logger_dir = os.fspath(

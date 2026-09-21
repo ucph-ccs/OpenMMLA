@@ -11,6 +11,7 @@ from numpy.linalg import norm
 
 from openmmla.bases.base import Base
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -146,6 +147,7 @@ class IPSVisualizer(Base):
     def _start_visualization(self):
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
+        self._record_provenance()
 
         if self.store:
             self.visualizations_dir = os.fspath(
@@ -172,6 +174,22 @@ class IPSVisualizer(Base):
             # the listener would otherwise outlive the plot, and a second start could not restart it
             self._clean_up()
             self.session_id = None
+
+    def _record_provenance(self):
+        """Note in the session what this visualizer runs with (openmmla.utils.session_provenance).
+        A failure is a warning, never a stop."""
+        if not self.session_id:
+            return
+        try:
+            entry = session_provenance.component_entry(
+                'ips', 'visualizer',
+                arguments={'store': self.store, 'use_3d': self.use_3d, 'session_id': self.launch_session_id},
+                parameters={'view': '3d' if self.use_3d else '2d'},
+                config=self.config, config_path=self.config_path, project_dir=self.project_dir)
+            session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
+                                                'ips-base', log=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} what the IPS visualizer runs with: {e}")
 
     def _create_bucket_logger(self):
         self.bucket_logger_dir = os.fspath(

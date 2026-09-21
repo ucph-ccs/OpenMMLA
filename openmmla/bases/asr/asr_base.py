@@ -22,7 +22,8 @@ from openmmla.utils.audio.auga import normalize_decibel, apply_gain
 from openmmla.utils.audio.augf import resample_audio
 from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
-from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir, session_artifact_dir
+from openmmla.utils import session_provenance
 from openmmla.utils.asr_scope import normalize_asr_scope, resolve_speaker_verification as _resolve_speaker_verification
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
@@ -917,6 +918,7 @@ class ASRBase(Base):
         self._resolve_group_speaker_id()
         self._create_bucket_logger()
         self._create_speaker_profile_snapshot()
+        self._record_provenance()
 
         # reset attributes
         self.last_speaker = None
@@ -1015,6 +1017,67 @@ class ASRBase(Base):
         self.logger = get_logger(f'asr-base-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir,
                                               f'asr_{self.base_type}_{self.id}.log'))
+
+    def _record_provenance(self):
+        """Note in the session what this base runs with (openmmla.utils.session_provenance):
+        its flags, the thresholds and durations of its base type, the stream it takes, the
+        speaker profiles it recognizes, its config with the secrets masked; what its servers
+        run (the transcriber's model and language ...) is asked after, in a thread. A failure
+        is a warning, never a stop."""
+        if not self.session_id:
+            return
+        try:
+            profiles = None
+            if self.speaker_verification and self.selected_speakers:
+                snapshot_dir = os.path.join(self.runtime_dir, f'{self.base_type}_{self.id}', 'profiles')
+                profiles = {'names': list(self.selected_speakers),
+                            'snapshot': os.path.relpath(snapshot_dir, session_artifact_dir(self.project_dir, self.session_id))}
+            entry = session_provenance.component_entry(
+                'asr', 'base', self.id,
+                arguments={'mode': self.mode, 'store': self.store, 'vad': self.vad, 'nr': self.nr, 'tr': self.tr,
+                           'sp': self.sp, 'hsr': self.hsr, 'session_id': self.launch_session_id,
+                           'base': self._base_entry.get('id'), 'speakers': self.launch_speakers,
+                           'language': self.language},
+                parameters={
+                    'base_type': self.base_type, 'id': self.id, 'asr_scope': self.asr_scope,
+                    'speaker_verification': self.speaker_verification,
+                    'selected_speakers': list(self.selected_speakers or []),
+                    'group_speaker_id': self.group_speaker_id, 'language': self.language,
+                    'register_duration': self.register_duration, 'recognize_duration': self.recognize_duration,
+                    'rms_threshold': self.rms_threshold, 'rms_peak_threshold': self.rms_peak_threshold,
+                    'recognize_threshold': self.threshold, 'keep_threshold': self.keep_threshold,
+                    'update_threshold': self.update_threshold, 'gain': self.gain,
+                    'score_amplified': self.score_amplified,
+                    'source': self.source, 'source_index': self._base_entry.get('source_index'),
+                    'stream': self.stream_name, 'url': self.url, 'port': getattr(self, 'port', None),
+                    'input_device_index': getattr(self, 'input_device_index', None),
+                    'initial_sync_time': getattr(self, 'initial_sync_time', None),
+                    'stream_kwargs': self.stream_kwargs,
+                    'service_urls': {'speech_transcriber': self.speech_transcriber_url,
+                                     'speech_separator': self.speech_separator_url,
+                                     'speech_enhancer': self.speech_enhancer_url,
+                                     'voice_activity_detector': self.vad_url,
+                                     'audio_inferer': getattr(self.audio_recognizer, 'audio_inferer_url', None)},
+                },
+                files={'speaker_profiles': profiles},
+                config=self.config, config_path=self.config_path, project_dir=self.project_dir)
+            session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
+                                                'asr-base', log=self.logger)
+            urls = {}
+            if self.tr:
+                urls['speech_transcriber'] = self.speech_transcriber_url
+            if self.vad:
+                urls['voice_activity_detector'] = self.vad_url
+            if self.nr:
+                urls['speech_enhancer'] = self.speech_enhancer_url
+            if self.sp:
+                urls['speech_separator'] = self.speech_separator_url
+            if self.speaker_verification:
+                urls['audio_inferer'] = getattr(self.audio_recognizer, 'audio_inferer_url', None)
+            session_provenance.record_services_later(self.mongo_client, self.session_id, entry, urls,
+                                                     self.project_dir, 'asr-base', log=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} what ASR base {self.id} runs with: {e}")
 
     def _create_speaker_profile_snapshot(self):
         """Create a snapshot of the speaker profiles used in the current session.

@@ -130,6 +130,31 @@ class MongoDBClientWrapper:
             logger.warning("add_session_source failed: %s", e)
             return False
 
+    def add_session_component(self, session_id: str, entry: dict[str, Any]) -> bool:
+        """note what a component of the session runs with (openmmla.utils.session_provenance):
+        one entry per key, a component started again in the session replacing its own.
+        False when the session is not there."""
+        try:
+            self.sessions.update_one(
+                {"session_id": session_id}, {"$pull": {"components": {"key": entry["key"]}}})
+            result = self.sessions.update_one({"session_id": session_id}, {"$push": {"components": entry}})
+            return bool(result.matched_count)
+        except Exception as e:
+            logger.warning("add_session_component failed: %s", e)
+            return False
+
+    def set_session_component_field(self, session_id: str, key: str, field: str, value: Any) -> bool:
+        """set one field of a component's entry (what its servers answered, asked after it
+        joined). False when the session or the entry is not there."""
+        try:
+            result = self.sessions.update_one(
+                {"session_id": session_id, "components.key": key},
+                {"$set": {f"components.$.{field}": value}})
+            return bool(result.matched_count)
+        except Exception as e:
+            logger.warning("set_session_component_field failed: %s", e)
+            return False
+
     def mark_session_source_left(self, session_id: str, key: str, when: datetime | None = None) -> bool:
         """note when a base left the session."""
         try:

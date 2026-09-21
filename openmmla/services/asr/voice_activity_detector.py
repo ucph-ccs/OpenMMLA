@@ -33,6 +33,12 @@ class VoiceActivityDetector(Server):
     def _setup_objects(self):
         self.vad_model = load_silero_vad(onnx=self.onnx)
 
+
+    def describe(self) -> dict:
+        """What this detector runs with, for GET /vad/info (see openmmla.utils.session_provenance)."""
+        return {'service': self.__class__.__name__, 'model': 'silero-vad', 'onnx': bool(self.onnx),
+                'cuda': bool(self.cuda)}
+
     def process_request(self):
         """Perform voice activity detection.
 

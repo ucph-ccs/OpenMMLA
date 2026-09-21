@@ -35,6 +35,11 @@ class SpeechEnhancer(Server):
     def _setup_objects(self):
         self.nr_model = pretrained.dns64().cuda() if self.cuda else pretrained.dns64()
 
+
+    def describe(self) -> dict:
+        """What this enhancer runs with, for GET /enhance/info (see openmmla.utils.session_provenance)."""
+        return {'service': self.__class__.__name__, 'model': 'denoiser/dns64', 'cuda': bool(self.cuda)}
+
     def process_request(self):
         """Enhance the audio.
 

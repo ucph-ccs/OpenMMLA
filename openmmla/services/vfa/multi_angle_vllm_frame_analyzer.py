@@ -254,6 +254,35 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 base_url=self.llm_base_url
             )
 
+
+    def describe(self) -> dict:
+        """What this analyzer runs with, for GET /vllm/info: the backend, its models and
+        their addresses, the prompt profile and the action schema, as resolved at start
+        (see openmmla.utils.session_provenance). The api key stays here."""
+        import os
+        from openmmla.utils.session_provenance import plain
+        info = {
+            'service': self.__class__.__name__,
+            'backend': self.backend,
+            'vlm_model': self.vlm_model,
+            'llm_model': self.llm_model,
+            'vlm_base_url': self.vlm_base_url,
+            'llm_base_url': self.llm_base_url,
+            'end_to_end': bool(self.end_to_end),
+            'image_detail': self.image_detail,
+            'prompt_profile': self.prompt_profile,
+            'temperature': self.temperature,
+            'top_p': self.top_p,
+            'vlm_extra_body': plain(self.vlm_extra_body or {}),
+            'llm_extra_body': plain(self.llm_extra_body or {}),
+            'action_schema': self.action_schema_name,
+            'action_schema_file': os.path.basename(str(self.action_schema_path)) if self.action_schema_path else None,
+            'families': self.families,
+            'april_tag': bool(self.april_tag_enabled),
+            'gaze_detect': bool(self.gaze_detect_enabled),
+        }
+        return {name: value for name, value in info.items() if value is not None}
+
     def process_request(self):
         """Process multiple images from different angles with contextual awareness."""
         try:

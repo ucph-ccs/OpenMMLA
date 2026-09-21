@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 
 
 def create_app(class_type, endpoint, method_name, class_args=None, route_args=None):
@@ -27,5 +27,13 @@ def create_app(class_type, endpoint, method_name, class_args=None, route_args=No
     def process_route():
         method = getattr(processor, method_name)
         return method(**route_args)
+
+    # what the service runs (its backend, model, language ...), for the bases to note in
+    # their session: a component's entry in the session document, `services`
+    @app.route(f'/{endpoint}/info', methods=['GET'])
+    def info_route():
+        describe = getattr(processor, 'describe', None)
+        info = describe() if callable(describe) else {'service': type(processor).__name__}
+        return jsonify(info)
 
     return app

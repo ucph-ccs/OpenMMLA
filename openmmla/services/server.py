@@ -90,6 +90,17 @@ class Server(ABC):
         
         self.logger.info("Server reinitialization completed successfully")
 
+    def describe(self) -> dict:
+        """What this server runs with, answered on GET /<endpoint>/info so that a base
+        notes it in its session (openmmla.utils.session_provenance): its config section
+        with the secrets masked. A subclass that resolves more (the model it loaded, the
+        backend it took) says that instead."""
+        from openmmla.utils.session_provenance import plain, redact_secrets
+        section = (self.config or {}).get(self.__class__.__name__) or {}
+        if not isinstance(section, dict):
+            section = {}
+        return {'service': self.__class__.__name__, **redact_secrets(plain(section))}
+
     @abstractmethod
     def process_request(self):
         """Process the incoming request. To be implemented by subclasses."""

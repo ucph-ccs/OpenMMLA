@@ -1475,6 +1475,28 @@ class SessionsPanel(Widget):
         except Exception as e:
             self._log(f"  [red]✗ Local artifact delete failed: {e}[/red]")
 
+    def _export_parameters(self, session_id: str, measurements_dir: str) -> None:
+        """write <session>_parameters.json (openmmla.utils.session_provenance): the session's
+        fields, the streams its bases took, and what each component ran with — its flags, the
+        values it resolved, the models its servers answered — and say in the log what is there."""
+        from openmmla.utils import session_provenance
+        try:
+            record = None
+            if self._mongo_client is not None:
+                record = self._mongo_client.get_session(session_id)
+            if not isinstance(record, dict) or not record:
+                self._log("  [dim]- Parameters: the session is not in MongoDB, so what it ran with is not known[/dim]")
+                return
+            path = session_provenance.write_session_parameters(record, measurements_dir)
+            components = session_provenance.session_components(record)
+            self._log(f"  [green]✓[/green] Parameters: {len(components)} component(s) -> {os.path.basename(path)}")
+            for entry in components:
+                self._log(f"    [dim]{escape(session_provenance.component_summary(entry))}[/dim]")
+            if not components:
+                self._log("  [dim]  no component noted what it ran with (bases from before they did, or none joined)[/dim]")
+        except Exception as e:
+            self._log(f"  [red]✗ Parameters: {e}[/red]")
+
     def _do_export(self, session_id: str, logs: bool, vis: bool) -> None:
         import time
         import yaml
@@ -1532,6 +1554,10 @@ class SessionsPanel(Widget):
                     self._log("  [green]✓[/green] ASR Transcription -> .txt")
                 except Exception as e:
                     self._log(f"  [red]✗ Transcription txt conversion: {e}[/red]")
+
+            # the run's parameters, next to its measurements: what every component of the
+            # session ran with, as the bases noted it in the session's document
+            self._export_parameters(session_id, measurements_dir)
 
         # ---- export visualizations ----
         if vis:

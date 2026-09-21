@@ -195,6 +195,23 @@ class SpeechTranscriber(Server):
         # common lock for thread safety
         self.transcriber_lock = threading.Lock()
 
+
+    def describe(self) -> dict:
+        """What this transcriber runs with, for GET /transcribe/info: the backend and its
+        model and language, as resolved at start (see openmmla.utils.session_provenance)."""
+        info = {'service': self.__class__.__name__, 'backend': self.backend, 'cuda': bool(self.cuda),
+                'word_level': bool(getattr(self, 'word_level', False))}
+        if self.backend == 'azure':
+            info.update(region=getattr(self, 'region', None), language=getattr(self, 'language', None),
+                        profanity_option=getattr(self, 'profanity_option', None))
+        elif self.backend == 'dashscope':
+            info.update(model=getattr(self, 'model', None), region=getattr(self, 'ds_region', None),
+                        language=getattr(self, 'language_hints', None) or getattr(self, 'language', None),
+                        enable_itn=getattr(self, 'enable_itn', None))
+        else:
+            info.update(model=getattr(self, 'tr_model', None), language=getattr(self, 'language', None))
+        return {name: value for name, value in info.items() if value is not None}
+
     def process_request(self):
         """Transcribe the audio using the configured backend.
 

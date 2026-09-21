@@ -6,6 +6,7 @@ import threading
 
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.config import is_main_base
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
@@ -210,6 +211,7 @@ class IPSSynchronizer(Synchronizer):
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
         self._resolve_session_tag_filter()
+        self._record_provenance()
         if not self._listen_for_start_signal():
             self._clean_up()  # STOP came before START: nothing was started
             return True
@@ -246,6 +248,33 @@ class IPSSynchronizer(Synchronizer):
         self.logger = get_logger(f'ips-synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_synchronizer.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
+
+    def _record_provenance(self):
+        """Note in the session what this synchronizer runs with (openmmla.utils.session_provenance):
+        the main camera and its transformation matrices (the file copied next to the config too),
+        the bucket duration, the tags it keeps. A failure is a warning, never a stop."""
+        if not self.session_id:
+            return
+        try:
+            matrices = None
+            if self.main_id is not None:
+                file_name = matrices_file_name(self.main_id)
+                matrices = {'file': file_name, 'main_id': self.main_id, 'matrices': self.transform_matrices_dict}
+                copy_config_snapshot(os.path.join(self.camera_sync_dir, file_name),
+                                     self.project_dir, self.session_id, 'ips-base')
+            entry = session_provenance.component_entry(
+                'ips', 'synchronizer',
+                arguments={'verbose': self.verbose, 'session_id': self.launch_session_id,
+                           'main_camera': self.launch_main_camera or None},
+                parameters={'main_id': self.main_id, 'bucket_duration': self.bucket_duration,
+                            'allowed_tag_ids': None if self.allowed_tag_ids is None else sorted(
+                                self.allowed_tag_ids, key=str)},
+                files={'transformation_matrices': matrices},
+                config=self.config, config_path=self.config_path, project_dir=self.project_dir)
+            session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
+                                                'ips-base', log=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} what the IPS synchronizer runs with: {e}")
 
     def _resolve_session_tag_filter(self):
         """Limit IPS aggregation to tag ids assigned to the selected session group."""

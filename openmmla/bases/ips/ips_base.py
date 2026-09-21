@@ -14,6 +14,7 @@ from pupil_apriltags import Detector
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
@@ -71,6 +72,7 @@ class IPSBase(Base):
         self.base_id = None  # the base camera id
         self.main_id = None  # the main camera id
         self.transform_matrices_dict = None
+        self.transform_matrices_file = None  # the camera_sync file the matrices came from
         self.camera_configured = False
         self.session_id = None
         self.video_stream = None
@@ -194,6 +196,7 @@ class IPSBase(Base):
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self._create_bucket_logger()
         self._note_joined()
+        self._record_provenance()
 
         # configure video stream and start it
         self._configure_video_stream()
@@ -230,6 +233,44 @@ class IPSBase(Base):
         self.logger = get_logger(f'ips-base-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
+
+    def _record_provenance(self):
+        """Note in the session what this base runs with (openmmla.utils.session_provenance): its
+        flags, the camera and its intrinsics, the tag and frame settings, the stream it takes, the
+        transformation matrices (the file copied next to the config too) and the config with the
+        secrets masked. A failure is a warning, never a stop."""
+        if not self.session_id:
+            return
+        try:
+            cameras = self.config.get('Cameras', {}) or {}
+            camera = {'name': self.chosen_camera, **(cameras.get(self.chosen_camera) or {})} if self.chosen_camera else None
+            matrices = None
+            if self.transform_matrices_file:
+                matrices = {'file': self.transform_matrices_file, 'main_id': self.main_id,
+                            'matrices': self.transform_matrices_dict}
+                copy_config_snapshot(os.path.join(self.camera_sync_dir, self.transform_matrices_file),
+                                     self.project_dir, self.session_id, 'ips-base')
+            entry = session_provenance.component_entry(
+                'ips', 'base', self.base_id,
+                arguments={'graphics': self.graphics, 'store': self.store, 'verbose': self.verbose,
+                           'session_id': self.launch_session_id, 'base': self._base_entry.get('id')},
+                parameters={
+                    'base_id': self.base_id, 'main_id': self.main_id, 'camera': camera,
+                    'tag_size': self.tag_size, 'families': self.families, 'max_badge_id': self.max_badge_id,
+                    'resolution': self.res, 'rotate': self.rotate, 'fps': self.fps,
+                    'keyframe_interval': self.keyframe_interval, 'processing_rate': self.processing_rate,
+                    'enable_timing_sync': self.enable_timing_sync,
+                    'source': self.source, 'source_index': self._source_index,
+                    'selected_source': self.selected_source, 'stream': self.stream_name,
+                    'initial_sync_time': getattr(self, 'initial_sync_time', None),
+                    'stream_kwargs': self.stream_kwargs,
+                },
+                files={'transformation_matrices': matrices},
+                config=self.config, config_path=self.config_path, project_dir=self.project_dir)
+            session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
+                                                'ips-base', log=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} what IPS base {self.base_id} runs with: {e}")
 
     def _note_joined(self):
         """Note in the session which Bases entry this base is and the stream it takes, so that the
@@ -675,6 +716,7 @@ class IPSBase(Base):
         # non-interactive: use the first transform matrix file; main_id is its
         # suffix (e.g. transformation_matrices_m.json -> main camera id 'm')
         chosen_transformation = sorted(transformation_choices)[0]
+        self.transform_matrices_file = chosen_transformation
         self.main_id = chosen_transformation.split('_')[-1].split('.')[0]
         self.logger.info(f"Using transform matrices '{chosen_transformation}' (main: {self.main_id})")
 

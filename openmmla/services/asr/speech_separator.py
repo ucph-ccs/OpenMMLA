@@ -42,6 +42,11 @@ class SpeechSeparator(Server):
         except ValueError:
             self.separation_model = pipeline(Tasks.speech_separation, device=self.device, model=self.sp_model_local)
 
+
+    def describe(self) -> dict:
+        """What this separator runs with, for GET /separate/info (see openmmla.utils.session_provenance)."""
+        return {'service': self.__class__.__name__, 'model': self.sp_model, 'cuda': bool(self.cuda)}
+
     def process_request(self):
         """Resample the audio.
 

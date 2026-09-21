@@ -5,6 +5,7 @@ import threading
 
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils import session_provenance
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
@@ -262,6 +263,7 @@ class ASRSynchronizer(Synchronizer):
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
         self.number_of_bases = self._choose_number_of_bases()
         self._create_bucket_logger()
+        self._record_provenance()
 
         # reset attributes
         self.latest_time = 0
@@ -319,6 +321,26 @@ class ASRSynchronizer(Synchronizer):
                       num_bases=self._num_bases_arg)
         self.logger.info(f"ASR Synchronizer reset successfully.")
         gc.collect()
+
+    def _record_provenance(self):
+        """Note in the session what this synchronizer runs with (openmmla.utils.session_provenance).
+        A failure is a warning, never a stop."""
+        if not self.session_id:
+            return
+        try:
+            entry = session_provenance.component_entry(
+                'asr', 'synchronizer', self.base_type,
+                arguments={'mode': self.mode, 'dominant': self.dominant, 'sp': self.sp,
+                           'session_id': self.launch_session_id, 'base_type': self._base_type_arg,
+                           'num_bases': self._num_bases_arg},
+                parameters={'base_type': self.base_type, 'number_of_bases': self.number_of_bases,
+                            'buffer_expiry_time': self.buffer_expiry_time, 'bucket_duration': self.bucket_duration,
+                            'match_tolerance': self.match_tolerance},
+                config=self.config, config_path=self.config_path, project_dir=self.project_dir)
+            session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
+                                                'asr-base', log=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Could not note in session {self.session_id} what the ASR synchronizer runs with: {e}")
 
     def _create_bucket_logger(self):
         self.bucket_logger_dir = os.fspath(
