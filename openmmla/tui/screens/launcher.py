@@ -807,7 +807,7 @@ _SYNC_WAIT_CARDS = ("ASR Base", "VFA Base")
 _ASK_BASE_LABEL = "ask in its window"
 
 # a flag the config decides unless the card says otherwise (the VFA synchronizer's
-# Action Labels and Body & Gaze Features): the first option passes nothing
+# Action Labels, Pose and Gaze): the first option passes nothing
 _CONFIG_OR_ON_OFF = [("as the config says", ""), ("on", "true"), ("off", "false")]
 
 # what the ASR Base card's Language offers (-lang): the language each of its
@@ -2249,16 +2249,17 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
             # what the synchronizer asks the frame analyzer for: action labels
-            # (the VLM, vfa_action) and/or features (skeletons, tags, head yaws,
-            # gazes; vfa_features, one per frame set); the config's
-            # Synchronizer.actions / features decide unless the card says
+            # (the VLM, vfa_action), the pose (skeletons, tags, head yaws;
+            # vfa_features, one per frame set) and the gazes with it; the
+            # config's Synchronizer.actions / pose / gaze decide unless the card says
             ParamDef("-a", "Action Labels", "str", "", _CONFIG_OR_ON_OFF),
-            ParamDef("-f", "Body & Gaze Features", "str", "", _CONFIG_OR_ON_OFF),
+            ParamDef("-pose", "Pose", "str", "", _CONFIG_OR_ON_OFF),
+            ParamDef("-gaze", "Gaze", "str", "", _CONFIG_OR_ON_OFF),
         ],
         components=[
             ComponentDef("base", "mmla vfa-base", "-nb",
                          ["-sid", "-b", "-m", "-g", "-s", "-v"]),
-            ComponentDef("synchronizer", "mmla vfa-sync", "-ns", ["-sid", _SYNC_WAIT_FLAG, "-a", "-f"]),
+            ComponentDef("synchronizer", "mmla vfa-sync", "-ns", ["-sid", _SYNC_WAIT_FLAG, "-a", "-pose", "-gaze"]),
         ],
         artifact_pipeline="vfa-base",
     ))

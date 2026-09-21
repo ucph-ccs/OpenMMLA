@@ -24,11 +24,15 @@ def get_parser():
     add_arg('actions', bool, None,
             "whether every synchronized frame set is sent for its action labels (the VLM; the vfa_action event); "
             "if not set, what the config's Synchronizer.actions says (true by default)", shortname='-a')
-    add_arg('features', bool, None,
+    add_arg('pose', bool, None,
             "whether every synchronized frame set is sent to the frame analyzer's features endpoint for its "
-            "skeletons, AprilTags, head yaws and gazes (no VLM; the vfa_features event, one per frame set, so set "
-            "the bases' keyframe_interval to about 1 second); if not set, what the config's Synchronizer.features "
-            "says (false by default)", shortname='-f')
+            "skeletons, AprilTags and head yaws (no VLM; the vfa_features event, one per frame set, so set the "
+            "bases' keyframe_interval to about 1 second); if not set, what the config's Synchronizer.pose says "
+            "(false by default)", shortname='-pose')
+    add_arg('gaze', bool, None,
+            "whether those features come with the gaze model's gazes (where each person looks: a partner's face or "
+            "hands, own hands, a zone); a gaze needs the pose, so this turns the pose on too; if not set, what the "
+            "config's Synchronizer.gaze says (false by default)", shortname='-gaze')
     return parser
 
 
@@ -48,7 +52,8 @@ def main():
             session_id=args.session_id,
             num_bases=args.num_bases,
             actions=args.actions,
-            features=args.features,
+            pose=args.pose,
+            gaze=args.gaze,
         )
     except Exception as e:
         # it connects to MQTT and MongoDB as it is made, so there is no menu yet to fall back to

@@ -28,7 +28,7 @@ Organization (default: admin)
 | `ips_rotation` | IPS synchronizer | `window_start_time`, `window_end_time`, `rotations` |
 | `ips_relation` | IPS synchronizer | `window_start_time`, `window_end_time`, `graph` |
 | `vfa_action` | VFA synchronizer | `window_start_time`, `window_end_time`, `action_recognition` |
-| `vfa_features` | VFA synchronizer (with Body & Gaze Features on, `-f`) | `window_start_time`, `window_end_time`, `features` (the frames of one synchronized set as the [features endpoint](pipelines/vfa/index.md#features-endpoint-skeletons-and-gazes) answered them: per angle, the persons with their tag, skeleton, head yaw and gaze, the tags, the zones and the pairs), `pose_model`, `gaze` (1 when the gaze model ran) |
+| `vfa_features` | VFA synchronizer (with Pose or Gaze on, `-pose` / `-gaze`) | `window_start_time`, `window_end_time`, `features` (the frames of one synchronized set as the [features endpoint](pipelines/vfa/index.md#features-endpoint-skeletons-and-gazes) answered them: per angle, the persons with their tag, skeleton, head yaw and gaze, the tags, the zones and the pairs), `pose_model`, `gaze` (1 when the gaze model ran) |
 | `participant_indicators`, `participant_summary`, `group_indicators`, `group_summary` | analytics (`mmla ses-ana`, Sessions tab) | derived indicators per participant and per group |
 
 The names are defined in `openmmla/utils/constants.py`; the pipelines, the dashboard and the TUI all read and write through the shared wrapper in `openmmla/utils/client/influx_client.py`.

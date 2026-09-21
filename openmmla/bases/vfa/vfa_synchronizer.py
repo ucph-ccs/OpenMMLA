@@ -37,7 +37,8 @@ class VFASynchronizer(Synchronizer):
     logger = get_logger('vfa-synchronizer')
 
     def __init__(self, project_dir: str | None, config_path: str, session_id: str | None = None,
-                 num_bases: int | None = None, actions: bool | None = None, features: bool | None = None):
+                 num_bases: int | None = None, actions: bool | None = None, pose: bool | None = None,
+                 gaze: bool | None = None):
         """Initialize the VFASynchronizer class.
         
         Args:
@@ -52,17 +53,21 @@ class VFASynchronizer(Synchronizer):
             actions: whether every synchronized frame set is sent to the frame
                 analyzer for its action labels (the VLM; the vfa_action event);
                 None leaves it to the config (Synchronizer.actions)
-            features: whether every synchronized frame set is sent to the frame
-                analyzer's features endpoint for its skeletons, tags, head yaws
-                and gazes (no VLM; the vfa_features event, one per frame set,
-                so as often as the bases' keyframe_interval); None leaves it to
-                the config (Synchronizer.features)
+            pose: whether every synchronized frame set is sent to the frame
+                analyzer's features endpoint for its skeletons, tags and head
+                yaws (no VLM; the vfa_features event, one per frame set, so as
+                often as the bases' keyframe_interval); None leaves it to the
+                config (Synchronizer.pose)
+            gaze: whether those features come with the gaze model's gazes, which
+                need the pose (a gaze lands on someone's face or hands), so gaze
+                on means pose on; None leaves it to the config (Synchronizer.gaze)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.launch_session_id = session_id
         self.launch_num_bases = num_bases
         self.launch_actions = actions
-        self.launch_features = features
+        self.launch_pose = pose
+        self.launch_gaze = gaze
 
         # Runtime attributes
         self.threads = []
@@ -94,14 +99,16 @@ class VFASynchronizer(Synchronizer):
         # the features endpoint: whether the skeletons ride along in every vfa_features event, and
         # the zones a gaze may land in, from a JSON file ({name: polygon} for every angle, or
         # {angle: {name: polygon}}) named by the config; an unfilled placeholder is no file
-        # what each frame set is sent for: the config's say, unless the launch flags (-a, -f)
-        # said otherwise; and whether the features come with the gaze model's gazes
+        # what each frame set is sent for: the config's say, unless the launch flags (-a, -pose,
+        # -gaze) said otherwise. The gazes need the pose (a gaze lands on someone's face or
+        # hands), so gaze on means pose on
         config_actions = _config_flag(sync_config.get('actions'), True)
-        config_features = _config_flag(sync_config.get('features'), False)
+        config_pose = _config_flag(sync_config.get('pose'), False)
+        config_gaze = _config_flag(sync_config.get('gaze'), False)
         self.actions = config_actions if self.launch_actions is None else bool(self.launch_actions)
-        self.features = config_features if self.launch_features is None else bool(self.launch_features)
-        self.features_gaze = _config_flag(sync_config.get('features_gaze'), True)
-        self.features_keypoints = _config_flag(sync_config.get('features_keypoints'), True)
+        self.gaze = config_gaze if self.launch_gaze is None else bool(self.launch_gaze)
+        self.pose = (config_pose if self.launch_pose is None else bool(self.launch_pose)) or self.gaze
+        self.features_keypoints = _config_flag(sync_config.get('pose_keypoints'), True)
         self.feature_zones = self._load_feature_zones(sync_config.get('feature_zones_file'))
         # the VLM at its own pace: with the bases sending a frame set every second for the
         # features, the action labels are asked for at most once per action_interval seconds
@@ -167,10 +174,10 @@ class VFASynchronizer(Synchronizer):
         self.logger.info("Starting synchronizer reinitialization...")
         project_dir, config_path = self.project_dir, self.config_path
         session_id, num_bases = self.launch_session_id, self.launch_num_bases
-        actions, features = self.launch_actions, self.launch_features
+        actions, pose, gaze = self.launch_actions, self.launch_pose, self.launch_gaze
         self._clean_up()
         self.__init__(project_dir=project_dir, config_path=config_path, session_id=session_id,
-                      num_bases=num_bases, actions=actions, features=features)
+                      num_bases=num_bases, actions=actions, pose=pose, gaze=gaze)
         self.logger.info("Synchronizer reinitialization completed successfully")
 
     def _close_clients(self):
@@ -352,12 +359,12 @@ class VFASynchronizer(Synchronizer):
         # reinitialize mqtt client with a new topic and on_message callback
         self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics=f'{self.session_id}/vfa')
         self.mqtt_client.loop_start()
-        if not self.actions and not self.features:
-            self.logger.warning("Neither action labels (-a) nor features (-f) are asked for: the synchronizer "
-                                "merges the frames and sends nothing to the frame analyzer.")
+        if not self.actions and not self.pose:
+            self.logger.warning("Neither action labels (-a) nor pose (-pose) nor gaze (-gaze) are asked for: the "
+                                "synchronizer merges the frames and sends nothing to the frame analyzer.")
         else:
             self.logger.info(f"Each frame set goes to the frame analyzer for: "
-                             f"{', '.join(name for name, on in (('action labels', self.actions), ('features', self.features)) if on)}")
+                             f"{', '.join(name for name, on in (('action labels', self.actions), ('pose', self.pose), ('gaze', self.gaze)) if on)}")
 
         # create threads
         self._create_thread(self._listen_for_stop_signal)
@@ -391,12 +398,12 @@ class VFASynchronizer(Synchronizer):
             entry = session_provenance.component_entry(
                 'vfa', 'synchronizer',
                 arguments={'session_id': self.launch_session_id, 'num_bases': self.launch_num_bases,
-                           'actions': self.launch_actions, 'features': self.launch_features},
+                           'actions': self.launch_actions, 'pose': self.launch_pose, 'gaze': self.launch_gaze},
                 parameters={'number_of_bases': self.number_of_bases, 'buffer_expiry_time': self.buffer_expiry_time,
                             'match_tolerance': self.match_tolerance, 'angle_config': self.angle_config,
                             'participant_descriptions': self.selected_participant_descriptions,
-                            'actions': self.actions, 'features': self.features, 'features_gaze': self.features_gaze,
-                            'features_keypoints': self.features_keypoints, 'feature_zones': self.feature_zones,
+                            'actions': self.actions, 'pose': self.pose, 'gaze': self.gaze,
+                            'pose_keypoints': self.features_keypoints, 'feature_zones': self.feature_zones,
                             'action_interval': self.action_interval,
                             'service_urls': {'vllm_frame_analyzer': self.vllm_frame_analyzer_url}},
                 config=self.config, config_path=self.config_path, project_dir=self.project_dir)
@@ -577,13 +584,13 @@ class VFASynchronizer(Synchronizer):
 
                         except Exception as e:
                             self.logger.error(f"Error processing frame set: {e}", exc_info=True)
-                    if image_paths and self.features:
+                    if image_paths and self.pose:
                         try:
-                            # the same frames, for their skeletons, tags, head yaws and gazes
+                            # the same frames, for their skeletons, tags, head yaws and (when asked) gazes
                             result = request_frame_features(
                                 image_paths=image_paths, angles=angles, session_id=self.session_id,
                                 url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
-                                keypoints=self.features_keypoints, gaze=self.features_gaze)
+                                keypoints=self.features_keypoints, gaze=self.gaze)
                             if result:
                                 self._upload_features(time_bucket_key, result)
                             else:
