@@ -14,7 +14,7 @@ Two kinds of stacks live in this directory:
 | SpeechSeparator | `openmmla/asr-speech-separator` | 5004 | ✅ | torch 2.4.1 + modelscope |
 | SpeechTranscriber | `openmmla/asr-speech-transcriber` | 5005 | ✅ | **whisperx 3.8.6 + torch 2.8 + ct2 ≥4.5 (cuDNN 9)** |
 | VoiceActivityDetector | `openmmla/asr-voice-activity-detector` | 5006 | — | silero-vad (CPU torch) |
-| VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | ✅ | torch 2.7 + tf-keras/retina-face + ultralytics (YOLO pose, **AGPL-3.0**: serving this image over a network carries the AGPL source-offer obligation for the combined work; leave it out and set `features.enabled: false` for an AGPL-free deployment) |
+| VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | ✅ | torch 2.7 + tf-keras/retina-face + ultralytics 8.4 (YOLO26 pose, **AGPL-3.0**: serving this image over a network carries the AGPL source-offer obligation for the combined work; leave it out and set `features.enabled: false` for an AGPL-free deployment) |
 | vLLM VLM backend (optional) | `vllm/vllm-openai` | 8000 | ✅ | official image, profile `mllm` |
 
 ## Host requirements

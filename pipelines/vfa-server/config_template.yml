@@ -6,6 +6,7 @@ VLLMFrameAnalyzer:
   workers: 1 # number of workers
 
   families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
+  gaze_model: gazelle_dinov2_vitl14_inout  # the Gaze-LLE checkpoint (torch.hub fkryan/gazelle) for the gaze lines and the features' gazes: gazelle_dinov2_vitl14_inout, gazelle_dinov2_vitb14_inout (smaller), or the _childplay variants fine-tuned on children
 
   backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek, llamacpp, grok
   end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
@@ -16,7 +17,7 @@ VLLMFrameAnalyzer:
   # POST /vllm/features: the persons of a frame as skeletons (a YOLO pose model), the AprilTag each wears, their head yaw and their gaze (the gaze model above), as geometry; no VLM
   features:
     enabled: true  # answer /vllm/features; false makes it answer 503
-    pose_model: yolo11n-pose.pt  # an Ultralytics pose weights file (yolo11n-pose.pt, yolo11s-pose.pt, yolov8m-pose.pt ...): a bare name or a relative path lives under weights_dir (a bare name is fetched there once, at start); an absolute path is used as it is. Note: ultralytics is AGPL-3.0, see the Docker guide
+    pose_model: yolo26n-pose.pt  # an Ultralytics pose weights file (yolo26n/s/m-pose.pt, yolo11n-pose.pt ...): a bare name or a relative path lives under weights_dir (a bare name is fetched there once, at start); an absolute path is used as it is. Note: ultralytics is AGPL-3.0, see the Docker guide
     weights_dir: weights  # where the pose weights live, relative to this folder (the container's /project, so they survive a rebuild)
     pose_confidence: 0.25  # a person below this detection confidence is left out
     keypoint_confidence: 0.3  # a keypoint below this confidence counts as hidden (head yaw, torso, hands)

@@ -133,6 +133,10 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.april_tag_enabled = analyzer_config.get('april_tag', True)
         self.gaze_detect_enabled = analyzer_config.get('gaze_detect', True)
         
+        # the gaze model (a Gaze-LLE checkpoint from torch.hub, fkryan/gazelle): the ViT-L one
+        # with in/out-of-frame by default; the _childplay variants were fine-tuned on children
+        self.gaze_model = _text(analyzer_config.get('gaze_model'), 'gazelle_dinov2_vitl14_inout')
+
         # Only load families if AprilTag detection is enabled
         if self.april_tag_enabled:
             if 'families' not in analyzer_config:
@@ -220,7 +224,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         if not isinstance(features_config, dict):
             features_config = {}
         self.features_enabled = _as_bool(features_config.get('enabled'), True)
-        self.pose_model = _text(features_config.get('pose_model'), 'yolo11n-pose.pt')
+        self.pose_model = _text(features_config.get('pose_model'), 'yolo26n-pose.pt')
         weights_dir = _text(features_config.get('weights_dir'), 'weights')
         self.pose_weights_dir = weights_dir if os.path.isabs(weights_dir) else os.path.join(self.project_dir, weights_dir)
         self.pose_confidence = _number(features_config.get('pose_confidence'), 0.25)
@@ -274,13 +278,13 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             try:
                 self.gazelle_model, self.gazelle_transform = torch.hub.load(
                     'fkryan/gazelle',
-                    'gazelle_dinov2_vitl14_inout',
+                    self.gaze_model,
                     trust_repo=True
                 )
                 self.gazelle_model.eval()
                 self.gazelle_model.to(device)
                 self.device = device
-                self.logger.info(f"Gazelle model loaded on {device}")
+                self.logger.info(f"Gazelle model {self.gaze_model} loaded on {device}")
             except Exception as e:
                 self.logger.error(f"Error loading Gazelle model: {e}")
                 self.gazelle_model = None
@@ -366,6 +370,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'families': self.families,
             'april_tag': bool(self.april_tag_enabled),
             'gaze_detect': bool(self.gaze_detect_enabled),
+            'gaze_model': self.gaze_model if self.gaze_detect_enabled else None,
             # the features endpoint: what its geometry ran with, since nothing else records
             # the server's config (openmmla.utils.session_provenance reads this answer)
             'features': {'enabled': bool(self.features_enabled),

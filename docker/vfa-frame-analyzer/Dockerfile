@@ -1,6 +1,6 @@
 # VLLMFrameAnalyzer — multi-angle frame analysis, port 5007, GPU
 # (torch for gaze detection, tensorflow/retina-face for face detection,
-#  ultralytics for the pose model behind /vllm/features,
+#  ultralytics (8.4, the first line that ships the YOLO26 weights) for the pose model behind /vllm/features,
 #  OpenAI-compatible client for the VLM/LLM backends)
 # The pose weights are fetched once, at the first start, into /project/weights
 # (pipelines/vfa-server/weights on the host), so a rebuild does not fetch them again.
@@ -35,7 +35,7 @@ RUN pip install \
         "scikit-learn==1.6.1" \
         "matplotlib==3.9.2" \
         "huggingface-hub==0.24.6" \
-        "ultralytics==8.3.223" \
+        "ultralytics==8.4.157" \
         "flask==3.0.3" "gunicorn==22.0.0" "gevent==24.2.1" \
         "pyyaml" "cryptography>=42.0.0"
 
