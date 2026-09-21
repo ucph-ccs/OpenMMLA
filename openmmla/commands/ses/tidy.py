@@ -25,6 +25,18 @@ RECORDING_RE = re.compile(r'^(?P<modality>audio|video)_(?P<host>.+?)_(?P<device>
 KEEP_IN_LEGACY_ROOT = ('meta.txt',)
 OUTPUT_FOLDERS = ('legacy', 'analysis', 'exports', 'measurements', 'pipelines', 'visualizations', '.staging')
 MEDIA_EXTS = ('.wav', '.mp4', '.mov', '.mkv', '.m4a', '.avi', '.webm', '.flac', '.mp3')
+CLUTTER = ('.DS_Store', 'Thumbs.db', '.manifest.lock', 'manifest.json', 'manifest.yml')  # never a reason to keep a folder
+
+
+def _remove_if_empty(folder: Path) -> bool:
+    """a folder holding nothing but manifests and Finder droppings is removed"""
+    if not folder.is_dir():
+        return False
+    for path in folder.rglob('*'):
+        if path.is_file() and path.name not in CLUTTER:
+            return False
+    shutil.rmtree(folder)
+    return True
 
 
 def split_session_id(session_id: str) -> dict[str, str]:
@@ -207,10 +219,8 @@ def relabel_host(session_dir: Path, old: str, new: str, modality: str | None = N
             if path.is_file() or destination.is_file():
                 _rename_in_place(destination, old, new)
                 moved += 1
-        if not any(source.iterdir()):
-            source.rmdir()
-    if not any(p for p in old_dir.iterdir() if p.name not in ('manifest.json', 'manifest.yml', '.manifest.lock')):
-        shutil.rmtree(old_dir)
+        _remove_if_empty(source)
+    _remove_if_empty(old_dir)
     return moved
 
 
