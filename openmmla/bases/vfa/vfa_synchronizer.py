@@ -78,9 +78,13 @@ class VFASynchronizer(Synchronizer):
         self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<angle>, <path>, <base_result_time>}}}
         self.selected_participant_descriptions = None  # Selected participant descriptions for current session
 
-        # VLLM request queue and processing thread
+        # one queue per request kind, each with its own worker: the action labels wait on the
+        # VLM (seconds to a minute), the features on the pose model (a second), and neither
+        # holds the other up. A frame set goes to both, and the last to finish cleans its frames
         self.vllm_queue = queue.Queue()
+        self.features_queue = queue.Queue()
         self.vllm_processing_thread = None
+        self._jobs_lock = threading.Lock()
 
         self._setup_yaml()
         self._setup_directories()
@@ -166,6 +170,7 @@ class VFASynchronizer(Synchronizer):
         self.time_bucket_buffer = {}
         self.selected_participant_descriptions = None
         self.vllm_queue = queue.Queue()
+        self.features_queue = queue.Queue()
         gc.collect()
 
     def _reinit(self):
@@ -366,9 +371,10 @@ class VFASynchronizer(Synchronizer):
             self.logger.info(f"Each frame set goes to the frame analyzer for: "
                              f"{', '.join(name for name, on in (('action labels', self.actions), ('pose', self.pose), ('gaze', self.gaze)) if on)}")
 
-        # create threads
+        # create threads: one worker per request kind
         self._create_thread(self._listen_for_stop_signal)
-        self._create_thread(self._process_vllm_requests)  # add vllm processing thread
+        self._create_thread(self._process_vllm_requests)
+        self._create_thread(self._process_feature_requests)
 
         # start and join threads, handling exceptions if they occur
         exception_occurred = None
@@ -450,11 +456,7 @@ class VFASynchronizer(Synchronizer):
                 if len(frame_set) >= 2:  # If there are at least two frames, try to process
                     self.logger.info(
                         f"Processing incomplete frame set at {t} with {len(frame_set)}/{self.number_of_bases} frames")
-                    # Add to VLLM queue instead of processing directly
-                    self.vllm_queue.put({
-                        'time_bucket_key': t,
-                        'frames': frame_set
-                    })
+                    self._dispatch(t, frame_set)
                 else:
                     self.logger.warning(f"Dropping expired frame set at {t} with only {len(frame_set)} frame(s)")
                     self._cleanup_unstored_frames(frame_set)
@@ -489,15 +491,79 @@ class VFASynchronizer(Synchronizer):
 
             # Check if we've received frames from all cameras for this time bucket
             if len(self.time_bucket_buffer[closest_time]) == self.number_of_bases:
-                # Add to VLLM queue instead of processing directly
-                self.vllm_queue.put({
-                    'time_bucket_key': closest_time,  # closest_time is the time_bucket_key (start time of the bucket)
-                    'frames': self.time_bucket_buffer[closest_time]
-                })
+                # closest_time is the time_bucket_key (start time of the bucket)
+                self._dispatch(closest_time, self.time_bucket_buffer[closest_time])
                 del self.time_bucket_buffer[closest_time]
 
         except Exception as e:
             self.logger.error(f"Error handling frame: {e}", exc_info=True)
+
+    def _dispatch(self, time_bucket_key: float, frames: dict[str, dict[str, Any]]) -> None:
+        """hand a synchronized frame set to the workers it is for: the action labels, the
+        features, or both; a set no one is asked for is cleaned up at once."""
+        job = {'time_bucket_key': time_bucket_key, 'frames': frames,
+               'pending': int(bool(self.actions)) + int(bool(self.pose))}
+        if not job['pending']:
+            self._cleanup_unstored_frames(frames)
+            return
+        if self.actions:
+            self.vllm_queue.put(job)
+        if self.pose:
+            self.features_queue.put(job)
+
+    def _finish(self, job: dict) -> None:
+        """one worker is done with a frame set; the last one cleans its unstored frames."""
+        with self._jobs_lock:
+            job['pending'] = job.get('pending', 1) - 1
+            last = job['pending'] <= 0
+        if last:
+            self._cleanup_unstored_frames(job['frames'])
+
+    def _frame_set_paths(self, frames: dict[str, dict[str, Any]]) -> tuple[list[str], list[str], list[str]]:
+        """the image paths, angles and angle descriptions of a frame set, in base order, leaving
+        out a frame whose file is gone."""
+        image_paths, angles, angle_descriptions = [], [], []
+        for base_id, frame_info in sorted(frames.items()):
+            if os.path.exists(frame_info['path']):
+                angle = frame_info['angle']
+                image_paths.append(frame_info['path'])
+                angles.append(angle)
+                angle_descriptions.append(self.angle_config.get(angle, f"Image from {angle} perspective"))
+            else:
+                self.logger.warning(f"Image path no longer exists: {frame_info['path']}")
+        return image_paths, angles, angle_descriptions
+
+    def _process_feature_requests(self):
+        """the features worker: every frame set to the features endpoint, for its skeletons, tags,
+        head yaws and (when asked) gazes, as fast as the pose model answers."""
+        while not self.stop_event.is_set():
+            try:
+                job = self.features_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                time_bucket_key = job['time_bucket_key']
+                image_paths, angles, _ = self._frame_set_paths(job['frames'])
+                if not image_paths:
+                    self.logger.warning(f"No valid images found for the features of time bucket {time_bucket_key}")
+                else:
+                    result = request_frame_features(
+                        image_paths=image_paths, angles=angles, session_id=self.session_id,
+                        url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
+                        keypoints=self.features_keypoints, gaze=self.gaze)
+                    if result:
+                        self._upload_features(time_bucket_key, result)
+                        self.logger.info(f"Features of time bucket {time_bucket_key}: "
+                                         f"{sum(len(f.get('persons', [])) for f in result.get('frames', []))} persons "
+                                         f"in {len(result.get('frames', []))} frames")
+                    else:
+                        self.logger.warning(f"Received no features for time bucket {time_bucket_key}")
+            except Exception as e:
+                self.logger.error(f"Error getting the features of a frame set: {e}", exc_info=True)
+            finally:
+                self._finish(job)
+                if not self.stop_event.is_set():
+                    self.features_queue.task_done()
 
     def _synchronization_handler(self, e: Exception | KeyboardInterrupt | None):
         """Handle exceptions and stop all threads.
@@ -510,105 +576,64 @@ class VFASynchronizer(Synchronizer):
         else:
             self.logger.info("All threads stopped.")
     
-        if self.vllm_queue.empty():
-            self.logger.info("VLLM queue processing completed")
+        if self.vllm_queue.empty() and self.features_queue.empty():
+            self.logger.info("VLLM and features queues processed")
         else:
-            self.logger.warning(f"VLLM queue still has {self.vllm_queue.qsize()} items")
+            self.logger.warning(f"VLLM queue still has {self.vllm_queue.qsize()} items, "
+                                f"the features queue {self.features_queue.qsize()}")
         
         clear_directory(self.temp_dir)
         self._clean_up()
 
     def _process_vllm_requests(self):
-        """Process VLLM requests from the queue."""
+        """the action-labels worker: a frame set to the frame analyzer's VLM, at most once per
+        action_interval; the answer is the vfa_action event."""
         backlog_said = 0.0
         while not self.stop_event.is_set():
             try:
-                # get a frame set from the queue with a timeout
-                frame_set = self.vllm_queue.get(timeout=1.0)
-                frames = {}
-                # one worker serves the queue: frame sets that come faster than the analyzer
-                # answers pile up here, and a features run at 1 Hz can; say so now and then
+                job = self.vllm_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                # this worker waits on the VLM: frame sets that come faster than it answers pile
+                # up here, and a run at 1 frame set per second can; say so now and then
                 backlog = self.vllm_queue.qsize()
                 if backlog >= 10 and time.time() - backlog_said > 30:
                     backlog_said = time.time()
-                    self.logger.warning(f"{backlog} frame sets wait for the frame analyzer: it answers slower than "
-                                        f"the bases send (raise Base.keyframe_interval, or a faster analyzer)")
-                
-                try:
-                    time_bucket_key = frame_set['time_bucket_key']  # the start time of this time bucket
-                    frames = frame_set['frames']
-
-                    # prepare data for multi-angle analysis
-                    image_paths = []
-                    angles = []
-                    angle_descriptions = []
-
-                    for base_id, frame_info in sorted(frames.items()):
-                        if os.path.exists(frame_info['path']):
-                            angle = frame_info['angle']
-                            image_paths.append(frame_info['path'])
-                            angles.append(angle)
-                            
-                            # get angle description from config, or create generic one if not found
-                            angle_desc = self.angle_config.get(angle, f"Image from {angle} perspective")
-                            angle_descriptions.append(angle_desc)
-                        else:
-                            self.logger.warning(f"Image path no longer exists: {frame_info['path']}")
-
-                    if not image_paths:
-                        self.logger.warning(f"No valid images found for time bucket {time_bucket_key}")
-                    # the labels are due when no interval is set, or the last ones are old enough
-                    labels_due = self.actions and (self.action_interval <= 0 or self._last_action_time is None
-                                                   or time_bucket_key - self._last_action_time >= self.action_interval - 1e-6)
-                    if image_paths and labels_due:
-                        self._last_action_time = time_bucket_key
-                        try:
-                            # request analysis from VLLM server
-                            self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
-                                           f"{len(image_paths)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
-                            
-                            result = request_multi_angle_frame_analyze(
-                                image_paths=image_paths,
-                                angles=angles,
-                                angle_descriptions=angle_descriptions,
-                                session_id=self.session_id,
-                                url=self.vllm_frame_analyzer_url,
-                                participant_descriptions=self.selected_participant_descriptions,
-                            )
-                            
-                            if result:
-                                self.logger.info(f"Successfully received analysis result for time bucket {time_bucket_key}")
-                                self._upload_result(time_bucket_key, result)
-                            else:
-                                self.logger.warning(f"Received null/empty analysis result for time bucket {time_bucket_key}")
-
-                        except Exception as e:
-                            self.logger.error(f"Error processing frame set: {e}", exc_info=True)
-                    if image_paths and self.pose:
-                        try:
-                            # the same frames, for their skeletons, tags, head yaws and (when asked) gazes
-                            result = request_frame_features(
-                                image_paths=image_paths, angles=angles, session_id=self.session_id,
-                                url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
-                                keypoints=self.features_keypoints, gaze=self.gaze)
-                            if result:
-                                self._upload_features(time_bucket_key, result)
-                            else:
-                                self.logger.warning(f"Received no features for time bucket {time_bucket_key}")
-                        except Exception as e:
-                            self.logger.error(f"Error getting the features of a frame set: {e}", exc_info=True)
-                
-                finally:
-                    if frames:
-                        self._cleanup_unstored_frames(frames)
-                    # if not stopped, mark the task as done since vllm_queue is still existing
-                    if not self.stop_event.is_set():
-                        self.vllm_queue.task_done()
-
-            except queue.Empty:
-                continue
+                    self.logger.warning(f"{backlog} frame sets wait for action labels: the VLM answers slower than "
+                                        f"the bases send (raise Synchronizer.action_interval or Base.keyframe_interval)")
+                time_bucket_key = job['time_bucket_key']
+                # the labels are due when no interval is set, or the last ones are old enough
+                due = (self.action_interval <= 0 or self._last_action_time is None
+                       or time_bucket_key - self._last_action_time >= self.action_interval - 1e-6)
+                if not due:
+                    continue
+                image_paths, angles, angle_descriptions = self._frame_set_paths(job['frames'])
+                if not image_paths:
+                    self.logger.warning(f"No valid images found for time bucket {time_bucket_key}")
+                    continue
+                self._last_action_time = time_bucket_key
+                self.logger.info(f"Requesting multi-angle frame analysis for time bucket {time_bucket_key}: "
+                                 f"{len(image_paths)} images from angles {angles} -> {self.vllm_frame_analyzer_url}")
+                result = request_multi_angle_frame_analyze(
+                    image_paths=image_paths,
+                    angles=angles,
+                    angle_descriptions=angle_descriptions,
+                    session_id=self.session_id,
+                    url=self.vllm_frame_analyzer_url,
+                    participant_descriptions=self.selected_participant_descriptions,
+                )
+                if result:
+                    self.logger.info(f"Successfully received analysis result for time bucket {time_bucket_key}")
+                    self._upload_result(time_bucket_key, result)
+                else:
+                    self.logger.warning(f"Received null/empty analysis result for time bucket {time_bucket_key}")
             except Exception as e:
-                self.logger.error(f"Error in VLLM processing thread: {e}", exc_info=True)
+                self.logger.error(f"Error processing frame set: {e}", exc_info=True)
+            finally:
+                self._finish(job)
+                if not self.stop_event.is_set():
+                    self.vllm_queue.task_done()
 
     def _cleanup_unstored_frames(self, frames: dict[str, dict[str, Any]]) -> None:
         """Remove temporary frames when bases did not request persistent frame storage."""
