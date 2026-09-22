@@ -70,6 +70,8 @@ nav:
       - Video frame analyzer (VFA):
           - pipelines/vfa/index.md
           - Human coding interface: pipelines/vfa/coding_interface.md
+  - Analysis:
+      - Interaction classifier: analytics/interaction_classifier.md
   - Deployment:
       - Docker: docker.md
       - Dashboard: dashboard.md

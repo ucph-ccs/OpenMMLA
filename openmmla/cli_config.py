@@ -51,6 +51,8 @@ OPTIONAL_DEP_MAP = {
     "ses-tidy": "uber-base",
     "ses-align": "uber-base",
     "ses-code": "uber-base",
+    "ses-jev": "uber-base",
+    "ses-classify": "uber-base",
     "ses-calibrate": "ips-base",
     "tui": "tui",
     "crypto": "tui",
@@ -173,6 +175,14 @@ COMMANDS = {
     "ses-code": (
         "openmmla.commands.ses.code:main",
         "Code a session's ten-second windows by hand in the browser (ground truth for the interaction classes)."
+    ),
+    "ses-jev": (
+        "openmmla.commands.ses.jev:main",
+        "Ask Jev to label each 10 s window from a plain description of its sensor features (zero-shot baseline)."
+    ),
+    "ses-classify": (
+        "openmmla.commands.ses.classify:main",
+        "Train and evaluate the 10 s interaction classifier across sessions."
     ),
     "tui": (
         "openmmla.commands.tui:main",

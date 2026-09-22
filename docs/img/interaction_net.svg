@@ -1,0 +1,92 @@
+<svg style="color:#1b1f23" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" role="img" aria-label="InteractionNet: set encoders over persons and pairs, window fusion, a two-block temporal convolution and the 3-class head, with parameter counts" font-family="Source Sans 3, Helvetica Neue, Arial, sans-serif"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="26" text-anchor="start" font-size="11" font-weight="600" opacity="0.6" fill="currentColor">inputs per window t</text>
+<rect x="20" y="40" width="170" height="56" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="105.0" y="64.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">G  (11)</text>
+<text x="105.0" y="80.0" text-anchor="middle" font-size="11" fill="currentColor">7 speech values + 3 masks + group size</text>
+<rect x="20" y="130" width="170" height="100" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="105.0" y="160.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">persons  &#8804; 3 &#215; 19</text>
+<text x="105.0" y="176.0" text-anchor="middle" font-size="11" fill="currentColor">13 values + 6 masks</text>
+<text x="105.0" y="192.0" text-anchor="middle" font-size="11" fill="currentColor">slot mask e_P</text>
+<text x="105.0" y="208.0" text-anchor="middle" font-size="11" fill="currentColor">(order-free)</text>
+<rect x="20" y="260" width="170" height="90" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="105.0" y="293.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">pairs  &#8804; 3 &#215; 13</text>
+<text x="105.0" y="309.0" text-anchor="middle" font-size="11" fill="currentColor">8 symmetric values + 5 masks</text>
+<text x="105.0" y="325.0" text-anchor="middle" font-size="11" fill="currentColor">slot mask e_Q</text>
+<rect x="20" y="380" width="170" height="44" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="105.0" y="398.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">availability a  (3)</text>
+<text x="105.0" y="414.0" text-anchor="middle" font-size="11" fill="currentColor">speech &#183; ips &#183; vfa ran</text>
+<text x="20" y="460" text-anchor="start" font-size="10.5" opacity="0.6" fill="currentColor">training only: modality dropout p=0.15 for 6&#8211;24 windows,</text>
+<text x="20" y="474" text-anchor="start" font-size="10.5" opacity="0.6" fill="currentColor">person dropout p=0.1, gaussian noise &#963;=0.1</text>
+<rect x="250" y="40" width="200" height="56" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="350.0" y="56.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">speech encoder</text>
+<text x="350.0" y="72.0" text-anchor="middle" font-size="11" fill="currentColor">Linear 11&#8594;16 &#183; GELU</text>
+<text x="350.0" y="88.0" text-anchor="middle" font-size="11" fill="currentColor">[192]</text>
+<rect x="250" y="130" width="200" height="100" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="350.0" y="160.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">&#966;_P shared over slots</text>
+<text x="350.0" y="176.0" text-anchor="middle" font-size="11" fill="currentColor">Linear 19&#8594;24 &#183; GELU &#183; Linear 24&#8594;24</text>
+<text x="350.0" y="192.0" text-anchor="middle" font-size="11" fill="currentColor">masked mean &#8214; masked max</text>
+<text x="350.0" y="208.0" text-anchor="middle" font-size="11" fill="currentColor">[1,080]  &#8594; 48</text>
+<rect x="250" y="260" width="200" height="90" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="350.0" y="285.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">&#966;_Q shared over pairs</text>
+<text x="350.0" y="301.0" text-anchor="middle" font-size="11" fill="currentColor">Linear 13&#8594;24 &#183; GELU &#183; Linear 24&#8594;24</text>
+<text x="350.0" y="317.0" text-anchor="middle" font-size="11" fill="currentColor">masked mean &#8214; max</text>
+<text x="350.0" y="333.0" text-anchor="middle" font-size="11" fill="currentColor">[936]  &#8594; 48</text>
+<line x1="190" y1="68" x2="250" y2="68" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="220.0" y="63.0" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">11</text>
+<line x1="190" y1="180" x2="250" y2="180" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="220.0" y="175.0" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">3&#215;19</text>
+<line x1="190" y1="305" x2="250" y2="305" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="220.0" y="300.0" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">3&#215;13</text>
+<path d="M350,230 L350,245 L340,245 L340,260" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
+<text x="356" y="250" text-anchor="start" font-size="10" opacity="0.6" fill="currentColor">rung (d): h_a + h_b, h_a &#8857; h_b</text>
+<rect x="520" y="150" width="200" height="110" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="620.0" y="177.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">window fusion</text>
+<text x="620.0" y="193.0" text-anchor="middle" font-size="11" fill="currentColor">concat 16 + 48 + 48 + 3 = 115</text>
+<text x="620.0" y="209.0" text-anchor="middle" font-size="11" fill="currentColor">LayerNorm &#183; Linear 115&#8594;48</text>
+<text x="620.0" y="225.0" text-anchor="middle" font-size="11" fill="currentColor">GELU &#183; Dropout 0.3</text>
+<text x="620.0" y="241.0" text-anchor="middle" font-size="11" fill="currentColor">h_t (48)   [5,798]</text>
+<line x1="450" y1="68" x2="520" y2="190" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="490" y="120" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">16</text>
+<line x1="450" y1="180" x2="520" y2="200" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="486" y="185" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">48</text>
+<line x1="450" y1="305" x2="520" y2="215" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="486" y="270" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">48</text>
+<line x1="190" y1="402" x2="520" y2="240" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="400" y="330" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">a (3)</text>
+<rect x="780" y="130" width="220" height="150" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="890.0" y="169.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">temporal: 2 residual blocks</text>
+<text x="890.0" y="185.0" text-anchor="middle" font-size="11" fill="currentColor">depthwise Conv1d k=5 (dilation 1, then 2)</text>
+<text x="890.0" y="201.0" text-anchor="middle" font-size="11" fill="currentColor">GELU &#183; pointwise 48&#8594;48 &#183; Dropout 0.2</text>
+<text x="890.0" y="217.0" text-anchor="middle" font-size="11" fill="currentColor">+ residual &#183; LayerNorm</text>
+<text x="890.0" y="233.0" text-anchor="middle" font-size="11" fill="currentColor">receptive field 13 windows = &#177;60 s</text>
+<text x="890.0" y="249.0" text-anchor="middle" font-size="11" fill="currentColor">(causal variant pads left only)   [5,472]</text>
+<line x1="720" y1="205" x2="780" y2="205" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="750" y="192" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">h_t&#8722;6 &#8230; h_t+6</text>
+<rect x="1040" y="160" width="140" height="90" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="1110.0" y="185.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">head</text>
+<text x="1110.0" y="201.0" text-anchor="middle" font-size="11" fill="currentColor">Linear 48&#8594;3 &#183; softmax</text>
+<text x="1110.0" y="217.0" text-anchor="middle" font-size="11" fill="currentColor">[147]</text>
+<text x="1110.0" y="233.0" text-anchor="middle" font-size="11" fill="currentColor">p(ind, soc, col)</text>
+<line x1="1000" y1="205" x2="1040" y2="205" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="1020.0" y="200.0" text-anchor="middle" font-size="11" opacity="0.6" fill="currentColor">z_t (48)</text>
+<rect x="1040" y="290" width="140" height="60" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="1110.0" y="308.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">p_int = p_s + p_c</text>
+<text x="1110.0" y="324.0" text-anchor="middle" font-size="11" fill="currentColor">then calibration</text>
+<text x="1110.0" y="340.0" text-anchor="middle" font-size="11" fill="currentColor">then optional HMM</text>
+<line x1="1110" y1="250" x2="1110" y2="290" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="520" y="318" text-anchor="start" font-size="11" font-weight="600" fill="currentColor">total 13,625 parameters &#183; small config (d_set 16, d_speech 12, d_window 32) 6,673</text>
+<text x="520" y="336" text-anchor="start" font-size="11" opacity="0.6" fill="currentColor">loss: tempered class-weighted cross-entropy on coded windows only, label smoothing 0.05</text>
+<text x="520" y="352" text-anchor="start" font-size="11" opacity="0.6" fill="currentColor">48-window crops (8 min) &#183; AdamW 2e-3 &#183; epochs = median inner best &#183; 5-seed ensemble</text>
+<line x1="520" y1="380" x2="1180" y2="380" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+<text x="520" y="402" text-anchor="start" font-size="11" font-weight="600" opacity="0.6" fill="currentColor">CONTROL AND LADDER</text>
+<rect x="520" y="416" width="220" height="56" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="630.0" y="432.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">PooledNet (control)</text>
+<text x="630.0" y="448.0" text-anchor="middle" font-size="11" fill="currentColor">pooled view 82 &#8594; same fusion, TCN, head</text>
+<text x="630.0" y="464.0" text-anchor="middle" font-size="11" fill="currentColor">[9,767]</text>
+<rect x="770" y="416" width="410" height="56" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+<text x="975.0" y="432.7" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">ladder, each rung must beat the last on dev with a paired CI</text>
+<text x="975.0" y="447.7" text-anchor="middle" font-size="10" fill="currentColor">(a) PooledNet &#8594; (b) DeepSets only &#8594; (c) + TCN &#8594; (d) + pair conditioning</text>
+<text x="975.0" y="462.7" text-anchor="middle" font-size="10" fill="currentColor">(e) + masked-modality pretraining (deferred)</text>
+<text x="520" y="500" text-anchor="start" font-size="10.5" opacity="0.6" fill="currentColor">what the network can add at this N: binding (which values belong to the same person), learned multivariate context over &#177;60 s,</text>
+<text x="520" y="514" text-anchor="start" font-size="10.5" opacity="0.6" fill="currentColor">trained robustness to outages, per-person embeddings for Layer B; expected: parity with late-HGB + HMM within the session-bootstrap CI.</text>
+</svg>

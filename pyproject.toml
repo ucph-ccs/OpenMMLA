@@ -30,6 +30,9 @@ vfa-server = [ "cryptography>=42.0.0", "flask==3.0.3", "gevent==24.2.1", "gunico
 vfa-vllm-runtime = [ "qwen-vl-utils==0.0.14", "transformers>=4.57.0", "vllm>=0.11.0",]
 uber-base = [ "cryptography>=42.0.0", "influxdb_client==1.44.0", "jiwer==3.0.4", "matplotlib==3.9.2", "networkx==3.3", "pandas==2.2.2", "pyecharts==2.0.6", "pymongo>=4.6.0", "pyyaml==6.0.2", "redis==5.0.7", "scipy==1.14.0",]
 uber-server = [ "celery[redis]==5.4.0", "cryptography>=42.0.0", "flask-cors==4.0.1", "flask-socketio==5.3.6", "flask==3.0.3", "gevent==24.2.1", "gunicorn==23.0.0", "influxdb_client==1.44.0", "matplotlib==3.9.2", "networkx==3.3", "numpy==2.1.0", "pandas==2.2.2", "pyecharts==2.0.6", "pyyaml==6.0.2", "scipy==1.14.0",]
+# mmla ses-classify and ses-jev; the network variants (-m pooled-net,net,...) also need torch, which is
+# left out on purpose (a large install most runs do not need): pip install torch
+analysis = [ "numpy>=1.24", "pandas>=2.0", "requests>=2.31", "scikit-learn>=1.4", "scipy>=1.10",]
 tui = [ "cryptography>=42.0.0", "influxdb-client==1.44.0", "pymongo>=4.6.0", "redis==5.0.7", "textual>=0.80.0", "pyyaml==6.0.2",]
 
 [project.urls]
