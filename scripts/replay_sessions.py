@@ -39,6 +39,8 @@ AUDIO_PREFERENCE = ('jabra-0', 'vimo-0-ch0', 'vimo-0', 'badge-0')
 CAMERA_ANGLE = 'front-top-45'
 ENVS = {'asr': 'asr-base', 'vfa': 'vfa-base', 'ips': 'ips-base'}
 EVENT_OF = {'asr': 'asr_transcription', 'vfa': 'vfa_features', 'ips': 'ips_translation'}
+EVENTS_OF = {'asr': ['asr_recognition', 'asr_transcription'], 'vfa': ['vfa_features'],
+             'ips': ['ips_translation', 'ips_rotation', 'ips_relation']}  # what --force clears before a pipeline runs again
 CALIBRATIONS_DIR = os.path.join('pipelines', 'ips-base', 'camera_sync', 'calibrations')
 
 
@@ -53,8 +55,8 @@ def calibration_for(session_id: str, cameras: list[str]) -> tuple[str | None, st
     A single camera is its own main without matrices; the wegrow (microscope) rig is the
     2025-06-16 calibration with raspi5-01 (c920-05) as main; the micro:bit rig from 2025-10-15 on
     the calibration of that day, with the flipped-main variant for 2025-10-07, when camera 1
-    hung upside down and its video was flipped; an earlier two-camera micro:bit session, from
-    before any calibration we have, runs its main camera alone."""
+    hung upside down and its video was flipped; an earlier micro:bit session (2024-12-10, two
+    cameras) takes the June 2025 calibration of that rig (a, b, c = c920-02/03/04)."""
     date = session_id.split('_')[1]
     cameras = sorted(cameras)
     if len(cameras) == 1:
@@ -67,7 +69,7 @@ def calibration_for(session_id: str, cameras: list[str]) -> tuple[str | None, st
         return 'microbit-2025-10-15-upsidedown-main-flipped', main, cameras
     if date >= '20251015':
         return 'microbit-2025-10-15', main, cameras
-    return None, main, [main]
+    return 'microbit-2025-06-12', main, cameras
 
 
 def plan_session(manifest: dict) -> dict:
@@ -199,6 +201,10 @@ class Runner:
             if not self.dry_run:
                 self.fuse(sid)
             return summary
+        if self.force:
+            for pipeline in wanted:
+                self._clients()[0].delete_event_types(sid, EVENTS_OF[pipeline])
+                log(f"{sid}: cleared the {pipeline} events of an earlier run")
         configs = self.write_configs(plan, wanted)
         logs_of = {p: os.path.join(self.project, 'artifacts', sid, 'pipelines', f'{p}-base', 'logs') for p in wanted}
         for d in logs_of.values():
@@ -343,7 +349,7 @@ def main() -> int:
     parser.add_argument('--asr-template', default='pipelines/asr-base/config_pilot_260603.yml')
     parser.add_argument('--vfa-template', default='pipelines/vfa-base/config_pilot_260603.yml')
     parser.add_argument('--ips-template', default='pipelines/ips-base/config_pilot_260603.yml')
-    parser.add_argument('--force', action='store_true', help='replay a pipeline even when the session already has its events')
+    parser.add_argument('--force', action='store_true', help='replay a pipeline even when the session already has its events (they are cleared first)')
     parser.add_argument('--dry-run', action='store_true', help='print the plan of every session and launch nothing')
     args = parser.parse_args()
     project = os.path.abspath(args.project)
