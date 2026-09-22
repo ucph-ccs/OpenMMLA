@@ -111,10 +111,15 @@ def asr_config(template: dict, plan: dict) -> dict:
     return config
 
 
+VFA_PACE = {1: 4.0, 2: 4.0}  # frame sets per second the bases pace themselves at, by camera count; more cameras keep the template's
+
+
 def vfa_config(template: dict, plan: dict) -> dict:
     config = json.loads(json.dumps(template))
     config['Base']['initial_sync_time'] = plan['sync_time']
     config['Base']['tag_size'] = plan['tag_size']
+    # the bases' pace bounds a replay, not the server (~105 ms a frame): one or two cameras can go faster
+    config['Base']['processing_rate'] = VFA_PACE.get(len(plan['videos']), config['Base'].get('processing_rate', 2.0))
     config['Bases'] = [{'id': device, 'camera': 'logitechC920', 'source': 'file', 'source_index': path, 'camera_angle': CAMERA_ANGLE}
                        for device, path in sorted(plan['videos'].items())]
     return config
