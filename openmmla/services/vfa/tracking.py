@@ -6,6 +6,7 @@ when the camera's first frame comes. Ultralytics is imported when a tracker is m
 server without the vfa-server extra, and a test, can import this module."""
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from types import SimpleNamespace
@@ -54,8 +55,10 @@ class PersonTracker:
         args = SimpleNamespace(track_high_thresh=0.0, track_low_thresh=0.0,
                                new_track_thresh=float(new_track_threshold), track_buffer=int(buffer_frames),
                                match_thresh=float(match_threshold), fuse_score=True)
-        # at frame_rate 30 the buffer counts frames as given (max_time_lost = frame_rate / 30 * track_buffer)
-        self.tracker = BYTETracker(args, frame_rate=30)
+        # the buffer counts frames as given: ultralytics 8.4 keeps a lost track args.track_buffer
+        # frames, 8.3 frame_rate / 30 * track_buffer, so it is told frame_rate 30 when it asks
+        parameters = inspect.signature(BYTETracker.__init__).parameters
+        self.tracker = BYTETracker(args, frame_rate=30) if 'frame_rate' in parameters else BYTETracker(args)
         self.buffer_frames = int(buffer_frames)
         self.tags: dict[int, tuple[int, int]] = {}  # track id -> (tag id, the frame it was seen on)
         self.frame = 0
