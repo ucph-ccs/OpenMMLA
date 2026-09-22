@@ -27,7 +27,7 @@ Create the `asr-base` environment from the TUI's Environment tab or by hand (`co
 
 | Section | What it holds |
 |---|---|
-| `Base.<device>` | one block per **kind** of microphone (a table speakerphone, a badge, a laptop mic), named as you like: how its audio is processed (`asr_scope`, recognition thresholds and durations, gain, VAD thresholds) and the format the base works in, whatever the source (`stream_kwargs`: `channels`, `rate`, `format`, chunk size). Add one with `+ Add Base`. |
+| `Base.<device>` | one block per **kind** of microphone (a table speakerphone, a badge, a laptop mic), named as you like: how its audio is processed (`asr_scope`, recognition thresholds and durations, gain, VAD thresholds, `max_chunk_duration`) and the format the base works in, whatever the source (`stream_kwargs`: `channels`, `rate`, `format`, chunk size). Add one with `+ Add Base`. |
 | `Bases` | one entry per **microphone**, that is per base process you start: its `id`, its `base_type` (a block of `Base`), its `source`, and the fields that source needs: `source_index` (a device index, a stream name, the full path of a file), `channel_select` (pyaudio), or `port`, `host` and `packet_format` (udp/tcp); the Config tab shows only those, see [Input sources](#input-sources). The card's Base dropdowns offer these entries. |
 | `Synchronizer` | `bucket_duration`, `match_tolerance`, `result_expiry_time` |
 | `Streams` | managed and external streams, see below |
@@ -103,9 +103,13 @@ The dropdown lists the common languages; `-lang` itself takes any code the backe
 
 With `word_level` on, WhisperX aligns the words with a model of that language: the first use of a language fetches it on the server (once), and a language it has none for gives text without word timestamps.
 
+A stretch of noise can make WhisperX write a token or a phrase over and over (`6 6 6 6 …`, `Yes.Yes.Yes.`), and its batched pipeline does not notice, so the speech transcriber drops such a segment itself, by Whisper's own criterion: a segment whose text compresses more than `SpeechTranscriber.local.compression_ratio_threshold` times (2.4 unless set; 0 keeps every segment) goes, with its words, before alignment and diarization, and the service's log says which.
+
 ### Diarize
 
 **Diarize** on the Launch tab (`-dia`) sends every chunk for its anonymous speaker turns as well: the speech transcriber runs pyannote's diarization on the chunk (through WhisperX, so only a local `whisperx/` model can) and answers with `diarization`, the turns `[{start, end, speaker}]` in seconds from the start of the chunk, the speakers named `SPEAKER_00`, `SPEAKER_01` ... within that chunk. No profile, no name, no enrolment: the transcript record of the chunk (`asr_transcription`) carries the turns next to its words, which is what a group-level base (`asr_scope: group`, one microphone for the group) has of who-of-how-many spoke when. From them a session's speaker changes, overlaps, active speakers per window and the equality of their shares can be computed without knowing who anyone is; only which person a turn belongs to needs a profile, or another modality.
+
+A chunk is the audio of one speaker between two changes of speaker, and a group-level base never hears one: its chunk would end only at silence, in a classroom minutes later. `Base.<device>.max_chunk_duration` caps it (30 s for `asr_scope: group` unless set, no cap for an individual base, 0 for none): a chunk that reaches the cap is transcribed and diarized on its own and the next segment starts a new one, so the turns of a group microphone are per chunk of at most that length.
 
 The turns are the request's alone, as the language is: `SpeechTranscriber.local.diarize: true` in the server config diarizes every file for every base instead. The pyannote pipeline is gated on huggingface.co: accept its terms with an account, and give that account's token as `SpeechTranscriber.local.hf_token` (stored encrypted, like the other keys), or as `HF_TOKEN` in `docker/.env` on the ASR Server's host (`docker-compose.asr.yml` passes it into the container; an exported variable does not reach a stack the console starts over SSH). `diarize_model` names another pyannote pipeline than WhisperX's default, and `min_speakers` / `max_speakers` bound the count when it is known. A base that asked and got no turns says so once in its window (the backend cannot, the pipeline could not be made, or the service runs code from before a request could ask), and the service's log says which.
 

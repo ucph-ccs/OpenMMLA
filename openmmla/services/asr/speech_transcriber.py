@@ -149,6 +149,9 @@ class SpeechTranscriber(Server):
             self.hf_token = _filled(local_config.get('hf_token'))
             self.min_speakers = _filled(local_config.get('min_speakers'))
             self.max_speakers = _filled(local_config.get('max_speakers'))
+            # a segment whose text compresses more than this many times is dropped as a hallucination
+            # (not through _filled: 0 turns the dropping off, and the transcriber reads placeholders itself)
+            self.compression_ratio_threshold = local_config.get('compression_ratio_threshold')
             if self.diarize and not self.tr_model.startswith('whisperx/'):
                 raise ValueError(
                     "Diarization needs a WhisperX model (whisperx/model-name), which runs pyannote on the file. "
@@ -225,7 +228,8 @@ class SpeechTranscriber(Server):
             self.transcriber = get_transcriber(self.tr_model, self.language, word_level=self.word_level,
                                                use_cuda=self.cuda, diarize=self.diarize,
                                                diarize_model=self.diarize_model, hf_token=self.hf_token,
-                                               min_speakers=self.min_speakers, max_speakers=self.max_speakers)
+                                               min_speakers=self.min_speakers, max_speakers=self.max_speakers,
+                                               compression_ratio_threshold=self.compression_ratio_threshold)
             self.logger.info("Local speech transcription models initialized")
 
         # common lock for thread safety
@@ -247,7 +251,9 @@ class SpeechTranscriber(Server):
         else:
             info.update(model=getattr(self, 'tr_model', None), language=getattr(self, 'language', None),
                         diarize=bool(getattr(self, 'diarize', False)),
-                        diarize_model=getattr(self, 'diarize_model', None))
+                        diarize_model=getattr(self, 'diarize_model', None),
+                        compression_ratio_threshold=getattr(getattr(self, 'transcriber', None),
+                                                            'compression_ratio_threshold', None))
         return {name: value for name, value in info.items() if value is not None}
 
     def process_request(self):

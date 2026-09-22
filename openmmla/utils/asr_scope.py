@@ -30,3 +30,24 @@ def resolve_speaker_verification(value, asr_scope: str) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
+
+
+GROUP_CHUNK_SECONDS = 30.0
+
+
+def chunk_cap(value, asr_scope: str) -> float | None:
+    """the longest a chunk of one speaker may grow before it is transcribed on its own, in
+    seconds. A chunk ends at a change of speaker, which a group-scope base never hears: its chunk
+    would end only at silence, minutes later in a classroom, so it is cut at 30 s unless told
+    otherwise; an individual base's chunks end at speaker changes, so it has no cap unless told.
+    Nothing or an unfilled placeholder keeps that default, a number is taken as given, 0 (or
+    less) means no cap; a non-number keeps the default too."""
+    text = str(value if value is not None else "").strip()
+    default = GROUP_CHUNK_SECONDS if asr_scope == "group" else None
+    if not text or (text.startswith("<") and text.endswith(">")):
+        return default
+    try:
+        seconds = float(text)
+    except ValueError:
+        return default
+    return seconds if seconds > 0 else None

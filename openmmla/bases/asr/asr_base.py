@@ -24,7 +24,7 @@ from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir, session_artifact_dir
 from openmmla.utils import session_provenance
-from openmmla.utils.asr_scope import normalize_asr_scope, resolve_speaker_verification as _resolve_speaker_verification
+from openmmla.utils.asr_scope import chunk_cap, normalize_asr_scope, resolve_speaker_verification as _resolve_speaker_verification
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
@@ -151,6 +151,7 @@ class ASRBase(Base):
         self.selected_speakers = None
         self.asr_scope = "individual"
         self.speaker_verification = True
+        self.max_chunk_duration = None
         self.group_speaker_id = "group"
         self.stream_name = None  # the Streams entry a 'stream' source pulls
         self._language_told = False  # whether a transcriber that did not take our language was named
@@ -242,6 +243,8 @@ class ASRBase(Base):
             base_config.get('speaker_verification', 'auto'),
             self.asr_scope,
         )
+        # the longest a chunk of one speaker may grow (30 s for a group microphone unless set)
+        self.max_chunk_duration = chunk_cap(base_config.get('max_chunk_duration'), self.asr_scope)
 
         self.register_duration = int(base_config['register_duration'])
         self.recognize_duration = int(base_config['recognize_sp_duration']) if self.sp else int(
@@ -1049,7 +1052,7 @@ class ASRBase(Base):
                            'language': self.language, 'diarize': self.diarize},
                 parameters={
                     'base_type': self.base_type, 'id': self.id, 'asr_scope': self.asr_scope,
-                    'speaker_verification': self.speaker_verification,
+                    'speaker_verification': self.speaker_verification, 'max_chunk_duration': self.max_chunk_duration,
                     'selected_speakers': list(self.selected_speakers or []),
                     'group_speaker_id': self.group_speaker_id, 'language': self.language,
                     'register_duration': self.register_duration, 'recognize_duration': self.recognize_duration,
@@ -1505,7 +1508,14 @@ class ASRBase(Base):
             if speaker == self.last_speaker:
                 chunk_start_time, last_speaker_frames = self.speaker_frames_dict[speaker]
                 last_speaker_frames += frames
-                self.speaker_frames_dict[speaker] = (chunk_start_time, last_speaker_frames)
+                chunk_end_time = segment_start_time + self.recognize_duration
+                if self.max_chunk_duration and chunk_end_time - chunk_start_time >= self.max_chunk_duration:
+                    # the chunk has grown to its cap: it goes on its own, and the next segment of
+                    # this speaker starts a new one
+                    self._finish_chunk(speaker, chunk_start_time, chunk_end_time, last_speaker_frames, fr)
+                    self.speaker_frames_dict[speaker] = (chunk_end_time, b'')
+                else:
+                    self.speaker_frames_dict[speaker] = (chunk_start_time, last_speaker_frames)
             else:
                 chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(self.last_speaker)
                 chunk_end_time = segment_start_time
@@ -1545,20 +1555,23 @@ class ASRBase(Base):
                     os.remove(right_temp_path)
 
                 if chunk_frames:
-                    if self.last_speaker not in ['silent', 'unknown']:
-                        self._enqueue_transcription(chunk_frames, self.last_speaker, chunk_start_time, chunk_end_time)
-
-                    # optionally store the audio chunk locally
-                    if self.store:
-                        chunk_audio_path = os.path.join(self.audio_dir, 'chunks',
-                                                        f'{self.last_speaker}_chunk_{chunk_start_time}.wav')
-                        write_bytes_to_wav(chunk_audio_path, chunk_frames, framerate=fr)
-                        if self.last_speaker != 'silent':
-                            normalize_decibel(chunk_audio_path, rms_level=-20)
+                    self._finish_chunk(self.last_speaker, chunk_start_time, chunk_end_time, chunk_frames, fr)
 
                 self.speaker_frames_dict[speaker] = (segment_start_time, frames)
 
         self.last_speaker = speaker
+
+    def _finish_chunk(self, speaker: str, chunk_start_time: float, chunk_end_time: float, chunk_frames: bytes,
+                      framerate: int):
+        """a chunk of one speaker is complete (the speaker changed, or the chunk reached its cap):
+        it goes for transcription unless no one spoke, and to disk when audio is stored."""
+        if speaker not in ['silent', 'unknown']:
+            self._enqueue_transcription(chunk_frames, speaker, chunk_start_time, chunk_end_time)
+        if self.store:
+            chunk_audio_path = os.path.join(self.audio_dir, 'chunks', f'{speaker}_chunk_{chunk_start_time}.wav')
+            write_bytes_to_wav(chunk_audio_path, chunk_frames, framerate=framerate)
+            if speaker != 'silent':
+                normalize_decibel(chunk_audio_path, rms_level=-20)
 
     def _update_chunk_list(self, left_speaker: str, right_speaker: str, last_speaker: str, current_speaker: str,
                            chunk_frames: bytes, frames: bytes, segment_start_time: float) -> tuple:

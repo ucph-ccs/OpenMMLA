@@ -2,6 +2,7 @@
 import contextlib
 import inspect
 import os
+import zlib
 from abc import ABC, abstractmethod
 
 import librosa
@@ -28,6 +29,30 @@ def _speaker_bound(value):
         number = int(str(value).strip())
     except (TypeError, ValueError):
         return None
+    return number if number > 0 else None
+
+
+DEFAULT_COMPRESSION_RATIO_THRESHOLD = 2.4  # Whisper's own
+
+
+def _compression_ratio(text: str) -> float:
+    """how many times zlib shrinks `text`: Whisper's own measure of a degenerate transcript, a
+    token or a phrase written over and over compressing many times better than speech does."""
+    data = text.encode("utf-8")
+    return len(data) / max(len(zlib.compress(data)), 1)
+
+
+def _degenerate_threshold(value) -> float | None:
+    """the compression ratio above which a segment is dropped as a hallucination: nothing or an
+    unfilled placeholder keeps Whisper's 2.4, a number is taken as given, 0 (or less) turns the
+    dropping off; a non-number keeps the default too."""
+    text = str(value if value is not None else "").strip()  # 0 is a value here, not nothing
+    if not text or (text.startswith("<") and text.endswith(">")):
+        return DEFAULT_COMPRESSION_RATIO_THRESHOLD
+    try:
+        number = float(text)
+    except ValueError:
+        return DEFAULT_COMPRESSION_RATIO_THRESHOLD
     return number if number > 0 else None
 
 
@@ -87,8 +112,12 @@ class WhisperXTranscriber(Transcriber):
     SPEAKER_01 ... within one file: no names, no profiles. It is on for every file with
     `diarize`, and a single call can ask for it (a base's -dia)."""
 
+    # the compression ratio above which a segment is a hallucination (_degenerate_threshold)
+    compression_ratio_threshold = DEFAULT_COMPRESSION_RATIO_THRESHOLD
+
     def __init__(self, model_name, language, word_level=False, use_cuda=True, diarize=False,
-                 diarize_model=None, hf_token=None, min_speakers=None, max_speakers=None):
+                 diarize_model=None, hf_token=None, min_speakers=None, max_speakers=None,
+                 compression_ratio_threshold=None):
         super().__init__(model_name, language, word_level, use_cuda)
 
         self.compute_type = "float16" if self.device == "cuda" else "int8"
@@ -112,6 +141,7 @@ class WhisperXTranscriber(Transcriber):
                          or os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN') or None)
         self.min_speakers = _speaker_bound(min_speakers)
         self.max_speakers = _speaker_bound(max_speakers)
+        self.compression_ratio_threshold = _degenerate_threshold(compression_ratio_threshold)
         self.diarize_pipeline = None
         self.diarize_failed = None
         self.diarize_terminal = False
@@ -133,6 +163,23 @@ class WhisperXTranscriber(Transcriber):
 
         except ImportError as e:
             raise ImportError(f"WhisperX not installed. Install with: pip install whisperx") from e
+
+    def _drop_degenerate(self, segments):
+        """the segments minus the ones whose text compresses more than the threshold allows: a
+        hallucination, said so once per segment."""
+        threshold = self.compression_ratio_threshold
+        if not threshold:
+            return segments
+        kept = []
+        for segment in segments:
+            text = str(segment.get("text") or "")
+            ratio = _compression_ratio(text) if text.strip() else 0.0
+            if ratio > threshold:
+                print(f"WhisperX dropped a segment as a hallucination (its text compresses {ratio:.1f} times, "
+                      f"over {threshold}): {text.strip()[:60]!r}")
+                continue
+            kept.append(segment)
+        return kept
 
     def _align_model(self, language):
         """the alignment model that gives `language` its word timestamps, made once per language;
@@ -238,6 +285,10 @@ class WhisperXTranscriber(Transcriber):
         # ('50359' is not a valid task), which a language of its own would run into
         result = self.model.transcribe(audio, batch_size=self.batch_size, task="transcribe",
                                        language=language_code(language) or language_code(self.language))
+        # a stretch of noise can come back as a token or a phrase written over and over, which
+        # the batched pipeline does not notice: such a segment goes, with its words, before
+        # alignment and diarization
+        result["segments"] = self._drop_degenerate(result.get("segments") or [])
         text = ''
         words = []
         
@@ -390,7 +441,8 @@ TRANSCRIBER_MAP = {
 
 def get_transcriber(model_name, language="en", word_level=False, use_cuda=True, **diarization):
     """the transcriber of `model_name`; `diarization` (diarize, diarize_model, hf_token,
-    min_speakers, max_speakers) goes to a WhisperX transcriber, the only kind that diarizes."""
+    min_speakers, max_speakers, and compression_ratio_threshold) goes to a WhisperX transcriber, the
+    only kind that diarizes and drops hallucinated segments."""
     transcriber_class = TRANSCRIBER_MAP.get(model_name)
 
     if transcriber_class is None:
