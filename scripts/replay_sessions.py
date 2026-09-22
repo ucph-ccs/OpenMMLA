@@ -45,8 +45,9 @@ EVENT_OF = {'asr': 'asr_transcription', 'vfa': 'vfa_features', 'ips': 'ips_trans
 EVENTS_OF = {'asr': ['asr_recognition', 'asr_transcription'], 'vfa': ['vfa_features'],
              'ips': ['ips_translation', 'ips_rotation', 'ips_relation']}  # what --force clears before a pipeline runs again
 CALIBRATIONS_DIR = os.path.join('pipelines', 'ips-base', 'camera_sync', 'calibrations')
-MIN_INLIERS = 30  # paired sightings a camera's own fit must rest on
+MIN_INLIERS = 10  # paired sightings a camera's own fit must rest on
 MAX_P90_M = 0.15  # and the residual its p90 must stay within
+MAX_GIVEN_MEDIAN_M = 0.3  # a given entry scored worse than this on the session's pairs is not used
 
 
 def log(message: str) -> None:
@@ -128,24 +129,28 @@ def ips_config(template: dict, plan: dict) -> dict:
 
 
 def choose_matrices(report: dict, own: dict, given: dict | None, main: str,
-                    min_inliers: int = MIN_INLIERS, max_p90: float = MAX_P90_M) -> tuple[dict, list[str], dict]:
+                    min_inliers: int = MIN_INLIERS, max_p90: float = MAX_P90_M,
+                    max_given_median: float = MAX_GIVEN_MEDIAN_M) -> tuple[dict, list[str], dict]:
     """which transform each camera of an IPS run takes: its own fit from the session (ses-calibrate's
     report and matrices) when it rests on at least `min_inliers` pairs with a p90 residual within
-    `max_p90`, else the given calibration's entry, else none, and the camera stays out. Returns
-    (matrices for transformation_matrices_<main>.json, the cameras of the run, the decisions)."""
+    `max_p90`; else the given calibration's entry, unless the session's pairs scored it worse than
+    `max_given_median` (a rig that moved); else none, and the camera stays out. Returns (matrices
+    for transformation_matrices_<main>.json, the cameras of the run, the decisions)."""
     matrices, cameras, decisions = {}, [main], {}
     for camera, entry in (report.get('cameras') or {}).items():
         fit = entry.get('residual_m') or {}
         if camera in own and entry.get('inliers', 0) >= min_inliers and fit.get('p90', 1e9) <= max_p90:
             matrices[camera] = own[camera]
             decisions[camera] = f"own fit ({entry['inliers']} pairs, p90 {fit['p90']} m)"
-        elif given and camera in given:
+        elif given and camera in given and ((entry.get('given') or {}).get('residual_m') or {}).get('median', 0.0) <= max_given_median:
             matrices[camera] = given[camera]
             scored = (entry.get('given') or {}).get('residual_m') or {}
             decisions[camera] = f"given calibration ({entry.get('pairs', 0)} pairs to judge it" + \
-                                (f", its residual median {scored['median']} m)" if scored else ")")
+                                (f", its residual median {scored['median']} m)" if scored else ", unjudged)")
         else:
-            decisions[camera] = f"left out ({entry.get('pairs', 0)} pairs, no given entry)"
+            scored = (entry.get('given') or {}).get('residual_m') or {}
+            why = (f"the given entry is {scored['median']} m off" if scored else 'no given entry')
+            decisions[camera] = f"left out ({entry.get('pairs', 0)} pairs, own fit p90 {fit.get('p90')} m on {entry.get('inliers', 0)}, {why})"
             continue
         cameras.append(camera)
     return matrices, sorted(cameras), decisions
