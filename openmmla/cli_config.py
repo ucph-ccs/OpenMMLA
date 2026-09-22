@@ -51,6 +51,7 @@ OPTIONAL_DEP_MAP = {
     "ses-tidy": "uber-base",
     "ses-align": "uber-base",
     "ses-code": "uber-base",
+    "ses-calibrate": "ips-base",
     "tui": "tui",
     "crypto": "tui",
 }
@@ -148,6 +149,10 @@ COMMANDS = {
     "ses-fuse": (
         "openmmla.commands.ses.fuse:main",
         "Build a session's fusion table: speech, space, body, gaze and action features per time window."
+    ),
+    "ses-calibrate": (
+        "openmmla.commands.ses.calibrate:main",
+        "Compute a session's transformation matrices between its cameras from its recordings, and check given ones."
     ),
     "ses-man": (
         "openmmla.commands.ses.man:main",

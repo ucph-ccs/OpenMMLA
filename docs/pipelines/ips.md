@@ -102,6 +102,16 @@ Define the `Bases` entries first (one per camera position, exactly one `main: tr
 
 The **Transform Matrix** tab of the IPS Base card shows the exported files as editable JSON. The tab edits the files of the host it is set to, and **Sync to Host** copies them into `pipelines/ips-base/camera_sync/` on the machine picked beside it: from here to a base station, or from a base station back here. **Delete** removes the file on screen from the host the tab edits, after a second press (the other hosts keep theirs). Every base station that runs an IPS base needs the exported file.
 
+### Calibrate from a recorded session
+
+A recorded session calibrates itself: whenever two cameras saw the same tag at the same moment, the tag's position in both camera frames is one sample of the transform between them. `mmla ses-calibrate` reads the session's videos (from `artifacts/<session>/manifest.json`), detects the tags on a frame every `-st` seconds with the same detector, intrinsics (`Cameras`) and tag size as the IPS base, pairs the sightings of the main camera with each other camera's, fits one rigid transform per camera to the paired positions (with the pairs that disagree thrown out) and writes `artifacts/<session>/analysis/calibration/transformation_matrices_<main>.json`, ready for `camera_sync/`, next to a `calibration_report.json` with the residuals. Given matrices are scored on the same pairs with `-v`, which is how a calibration made on another day is checked against a session:
+
+```bash
+mmla ses-calibrate -c pipelines/ips-base/config.yml -sid exp_20260603_microbit_group_01_260603T0826Z -v pipelines/ips-base/camera_sync/calibrations/microbit-2025-10-15/transformation_matrices_c920-01.json
+```
+
+The report says, per camera, how many paired sightings there were, the residual of the fit (median and p90, in metres), how far the pose-to-pose average that Camera Sync would compute lies from it, and for the given matrices their residuals, the share of pairs within 0.15 m and their difference to the fit. A camera that never saw a tag together with the main one cannot be placed.
+
 ## Run from the TUI
 
 1. **System services** running and reachable, and the setup above done: calibrated `Cameras`, `Bases` with one `main: true`, and the exported transform matrices on every base station.
