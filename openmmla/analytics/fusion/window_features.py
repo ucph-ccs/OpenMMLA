@@ -10,6 +10,16 @@ every pair a sorted tag pair; persons the pose model saw without a tag are left 
 
 The events come from InfluxDB (a session id) or from a Sessions -> Export Measurements folder
 (`<session>_<suffix>.json`), so a table can be built offline from an export.
+
+Body and gaze follow each camera on its own. Replayed cameras share one angle name, and the
+frames of one frame set share its moment, so a sequence keyed by the angle alternates between
+two viewpoints: every wrist speed became a jump from one camera to the other, the gaze switches
+counted camera flips, and the yaw spread mixed two views of one head. A frame's camera is the
+`camera` the features endpoint echoes; for older events it is the angle, numbered by its place
+in the frame set when several cameras share it. How many cameras and frame sets saw a person is
+counted beside the values (`_cameras`, `_frame_sets`), since frame counts double with a second
+camera, and a frame set that lost or gained a frame is counted in `n_vfa_incomplete`, because
+numbering by place can then give one camera's frame to another.
 """
 from __future__ import annotations
 
@@ -463,63 +473,126 @@ def _wrists(person: dict) -> dict[str, tuple[float, float]]:
     return wrists
 
 
-def body_gaze_features(features: EventIndex, ws: float, we: float, participants: list[str]) -> dict:
+def _angle(frame: dict) -> str:
+    return str(frame.get('angle') or 'frame')
+
+
+def _echoed_camera(frame: dict) -> str | None:
+    camera = frame.get('camera')
+    return None if camera in (None, '') else str(camera)
+
+
+def frame_set_layout(records: Iterable[dict]) -> tuple[int | None, frozenset[str]]:
+    """what the frame sets of a session hold: the modal number of frames in one (a set with
+    another count lost or gained a camera; a tie goes to the larger count), and the angles some
+    set repeats among the frames that do not name their camera, which several cameras share.
+    Decided once for the session, so a set that lost one of those cameras still numbers its
+    frame rather than making it a camera of its own."""
+    counts: dict[int, int] = defaultdict(int)
+    shared: set[str] = set()
+    for record in records:
+        frames = _frames_of(record)
+        counts[len(frames)] += 1
+        angles = [_angle(frame) for frame in frames if _echoed_camera(frame) is None]
+        shared.update(angle for angle in set(angles) if angles.count(angle) > 1)
+    modal = max(counts, key=lambda n: (counts[n], n)) if counts else None
+    return modal, frozenset(shared)
+
+
+def camera_keys(frames: list[dict], shared_angles: Iterable[str] = ()) -> list[str]:
+    """the camera each frame of a frame set came from: the `camera` the features endpoint echoed;
+    else, for an angle several cameras share, `<angle>#<k>` for its k-th frame in the set (the
+    synchronizer sends them in sorted base order, so k is the same camera from set to set while
+    none is missing); else the angle."""
+    shared_angles = set(shared_angles)
+    keys, taken = [], defaultdict(int)
+    for frame in frames:
+        camera, angle = _echoed_camera(frame), _angle(frame)
+        if camera is not None:
+            keys.append(camera)
+        elif angle in shared_angles:
+            keys.append(f"{angle}#{taken[angle]}")
+            taken[angle] += 1
+        else:
+            keys.append(angle)
+    return keys
+
+
+def body_gaze_features(features: EventIndex, ws: float, we: float, participants: list[str],
+                       layout: tuple[int | None, frozenset[str]] | None = None) -> dict:
     """what the bodies and gazes did in the window, per person and per pair, from the frames the
-    features endpoint answered, pooled over every camera angle that saw the person (or the pair),
-    each frame counting once. Distances are in shares of the frame's width, so cameras compare;
-    the wrist speed follows each hand from one frame to the next of the same angle."""
+    features endpoint answered. Every sequence (the wrist speed, following each hand from one
+    frame to the next; the gaze switches; the yaw spread) is taken within one camera, and the
+    cameras are then pooled, each frame counting once in the shares and the mean yaw. Distances
+    are in shares of the frame's width, so cameras compare. `layout` is the session's
+    frame_set_layout, worked out from the whole index when not given."""
     out: dict[str, Any] = {}
     records = features.between(ws, we)
     out['n_vfa_features'] = len(records)
-    # angle -> person -> [(time, person dict, width)], and angle -> [(time, frame)]
-    seen: dict[str, dict[str, list[tuple[float, dict, float]]]] = defaultdict(lambda: defaultdict(list))
-    frames_by_angle: dict[str, list[tuple[float, dict]]] = defaultdict(list)
-    for record, start, _ in records:
-        for frame in _frames_of(record):
-            angle = str(frame.get('angle') or 'frame')
+    modal, shared = layout if layout is not None else frame_set_layout(features.records)
+    # camera -> person -> [(time, frame set, person dict, width)], and camera -> [(time, frame set, frame)]
+    seen: dict[str, dict[str, list[tuple[float, int, dict, float]]]] = defaultdict(lambda: defaultdict(list))
+    frames_by_camera: dict[str, list[tuple[float, int, dict]]] = defaultdict(list)
+    angles, incomplete = set(), 0
+    for number, (record, start, _) in enumerate(records):
+        frames = _frames_of(record)
+        incomplete += modal is not None and len(frames) != modal
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            angles.add(_angle(frame))
             width = float(frame.get('width') or 0.0) or None
-            frames_by_angle[angle].append((start, frame))
+            frames_by_camera[camera].append((start, number, frame))
             for person in frame.get('persons', []):
                 if person.get('tag_id') is None:
                     continue
-                seen[angle][str(person['tag_id'])].append((start, person, width))
-    out['n_vfa_angles'] = len(frames_by_angle)
+                seen[camera][str(person['tag_id'])].append((start, number, person, width))
+    out['n_vfa_angles'] = len(angles)
+    out['n_vfa_cameras'] = len(frames_by_camera)
+    out['n_vfa_incomplete'] = incomplete
 
     for tag in participants:
-        yaws, speeds, switches, categories = [], [], [], []
-        for angle, persons in seen.items():
+        yaws, spreads, speeds, switches, categories = [], [], [], [], []
+        cameras, frame_sets = 0, set()
+        for camera, persons in seen.items():
             rows = sorted(persons.get(tag, []), key=lambda row: row[0])
             if not rows:
                 continue
-            for _, person, _ in rows:
-                if person.get('head_yaw') is not None:
-                    yaws.append(float(person['head_yaw']))
-            sequence = [((person.get('gaze') or {}).get('target') or {}).get('category') or 'unknown' for _, person, _ in rows]
+            cameras += 1
+            frame_sets.update(number for _, number, _, _ in rows)
+            camera_yaws = [float(person['head_yaw']) for _, _, person, _ in rows if person.get('head_yaw') is not None]
+            yaws.extend(camera_yaws)
+            if len(camera_yaws) > 1:
+                spreads.append((_std(camera_yaws), len(camera_yaws)))
+            sequence = [((person.get('gaze') or {}).get('target') or {}).get('category') or 'unknown' for _, _, person, _ in rows]
             categories.extend(sequence)
             switches.append(sum(1 for a, b in zip(sequence, sequence[1:]) if a != b))
             # each hand against itself from one frame to the next, in frame widths per second
-            for (t0, p0, width), (t1, p1, _) in zip(rows, rows[1:]):
+            for (t0, _, p0, width), (t1, _, p1, _) in zip(rows, rows[1:]):
                 w0, w1 = _wrists(p0), _wrists(p1)
                 moved = [math.dist(w0[side], w1[side]) for side in w0 if side in w1]
                 if moved and width and t1 > t0:
                     speeds.append(_mean(moved) / width / (t1 - t0))
         out[f'p{tag}_frames'] = len(categories)
+        out[f'p{tag}_frame_sets'] = len(frame_sets)
+        out[f'p{tag}_cameras'] = cameras
         out[f'p{tag}_yaw_mean'] = _round(_mean(yaws), 1)
         out[f'p{tag}_yaw_abs_mean'] = _round(_mean(abs(y) for y in yaws), 1)
-        out[f'p{tag}_yaw_std'] = _round(_std(yaws), 1)
+        # two views of one head differ by where the cameras stand, not by any turn: the spread
+        # is taken per camera and averaged, weighted by the yaws each gave
+        out[f'p{tag}_yaw_std'] = _round(sum(std * n for std, n in spreads) / sum(n for _, n in spreads), 1) if spreads else None
         out[f'p{tag}_wrist_speed'] = _round(_mean(speeds))
         out[f'p{tag}_gaze_switches'] = _round(_mean(switches), 2)
         for category in GAZE_CATEGORIES:
             out[f'p{tag}_gaze_{category}_ratio'] = _round(categories.count(category) / len(categories)) if categories else None
 
     for a, b in _pairs(participants):
-        hand, gaze_dist, joint, mutual = [], [], [], []
-        for rows in frames_by_angle.values():
-            for _, frame in rows:
+        hand, gaze_dist, joint, mutual, frame_sets = [], [], [], [], set()
+        for rows in frames_by_camera.values():
+            for _, number, frame in rows:
                 width = float(frame.get('width') or 0.0)
                 persons = {str(p['tag_id']): p for p in frame.get('persons', []) if p.get('tag_id') is not None}
                 if a not in persons or b not in persons:
                     continue
+                frame_sets.add(number)
                 pairs = frame.get('pairs') or {}
                 pair = pairs.get(f'{a}|{b}') or pairs.get(f'{b}|{a}') or {}
                 if width:
@@ -532,6 +605,7 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
                 mutual.append(1.0 if targets[0].get('category') == 'partner_face' and str(targets[0].get('person_id')) == b
                               and targets[1].get('category') == 'partner_face' and str(targets[1].get('person_id')) == a else 0.0)
         out[f'pair{a}_{b}_frames'] = len(mutual)
+        out[f'pair{a}_{b}_frame_sets'] = len(frame_sets)
         out[f'pair{a}_{b}_hand_dist_min'] = _round(min(hand)) if hand else None
         out[f'pair{a}_{b}_hand_dist_mean'] = _round(_mean(hand))
         out[f'pair{a}_{b}_gaze_dist_mean'] = _round(_mean(gaze_dist))
@@ -587,13 +661,14 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     translations = EventIndex(events.get(EVENT_TYPE_IPS_TRANSLATION, []), 1.0)
     relations = EventIndex(events.get(EVENT_TYPE_IPS_RELATION, []), 1.0)
     features = EventIndex(events.get(EVENT_TYPE_VFA_FEATURES, []), instant=True)
+    layout = frame_set_layout(features.records)
     actions = EventIndex(events.get(EVENT_TYPE_VFA_ACTION, []), instant=True)
     rows = []
     for index, ws, we in windows(span[0], span[1], window, step):
         row: dict[str, Any] = {'window_index': index, 'window_start': round(ws, 3), 'window_end': round(we, 3)}
         row.update(speech_features(recognition, transcription, ws, we, speakers))
         row.update(space_features(translations, relations, ws, we, participants))
-        row.update(body_gaze_features(features, ws, we, participants))
+        row.update(body_gaze_features(features, ws, we, participants, layout))
         row.update(action_features(actions, ws, we, participants))
         rows.append(row)
     return rows

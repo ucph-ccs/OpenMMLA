@@ -439,6 +439,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         as geometry on the image (openmmla.services.vfa.features). Form fields: `images` (one or
         more), `angles` (JSON list, one name per image), `session_id`, `zones` (JSON: {name:
         polygon} for every image, or {angle: {name: polygon}}; a polygon in pixels, or in [0, 1]),
+        `cameras` (JSON list, the base id of each image: its persons are tracked across that
+        camera's frames, and its frame echoes it as `camera`),
         `inout_threshold` (below it a gaze is out of frame), `keypoints` (false leaves the skeletons
         out of the answer, for a study that wants the derived features alone), `gaze` (false skips
         the gaze model for this request; the config's features.gaze otherwise)."""
@@ -471,13 +473,18 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 angle = str(angles[i]) if i < len(angles) else f"perspective_{i + 1}"
                 camera = str(cameras[i]) if i < len(cameras) and cameras[i] not in (None, '') else None
                 try:
-                    frames.append(self._frame_features(image_file.read(), angle, _zones_for(zones, angle),
-                                                       inout_threshold, keypoints, gaze,
-                                                       tracker=self._tracker(session_id, camera)))
+                    frame = self._frame_features(image_file.read(), angle, _zones_for(zones, angle),
+                                                 inout_threshold, keypoints, gaze,
+                                                 tracker=self._tracker(session_id, camera))
                 except ValueError as e:
                     # a frame that is not an image, or a zone that is not a polygon: the client's
                     # to fix, so no retry is asked for
                     return jsonify({'error': f"{image_file.filename or angle}: {e}"}), 400
+                if camera is not None:
+                    # replayed cameras share one angle name: the camera echoed keeps their frames
+                    # apart in the event, so the window features follow each camera on its own
+                    frame['camera'] = camera
+                frames.append(frame)
             self.logger.info(f"Features for {session_id}: {len(frames)} frames, "
                              f"{sum(len(frame['persons']) for frame in frames)} persons")
             return jsonify({'frames': frames, 'pose_model': self.pose_estimator.model_name,
