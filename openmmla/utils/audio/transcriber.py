@@ -43,9 +43,9 @@ def _compression_ratio(text: str) -> float:
 
 
 def _degenerate_threshold(value) -> float | None:
-    """the compression ratio above which a segment is dropped as a hallucination: nothing or an
-    unfilled placeholder keeps Whisper's 2.4, a number is taken as given, 0 (or less) turns the
-    dropping off; a non-number keeps the default too."""
+    """the compression ratio above which a segment, its loops cut, is dropped as a hallucination:
+    nothing or an unfilled placeholder keeps Whisper's 2.4, a number is taken as given, 0 (or
+    less) turns the dropping off; a non-number keeps the default too."""
     text = str(value if value is not None else "").strip()  # 0 is a value here, not nothing
     if not text or (text.startswith("<") and text.endswith(">")):
         return DEFAULT_COMPRESSION_RATIO_THRESHOLD
@@ -54,6 +54,38 @@ def _degenerate_threshold(value) -> float | None:
     except ValueError:
         return DEFAULT_COMPRESSION_RATIO_THRESHOLD
     return number if number > 0 else None
+
+
+LOOP_MAX_NGRAM = 8  # a repeated phrase of up to this many words is a loop
+LOOP_KEEP = 2  # the turns of it that are kept
+
+
+def collapse_loops(text: str) -> str:
+    """the text with any phrase of up to LOOP_MAX_NGRAM words said more than LOOP_KEEP times in a
+    row cut down to LOOP_KEEP turns: a stretch of noise can make WhisperX write a word or a phrase
+    over and over, most often at the end of a segment that began as real speech, and the turns
+    after the second are the model's, not the speaker's."""
+    words = text.split()
+    lead = ' ' if text[:1].isspace() else ''
+    out, i = [], 0
+    while i < len(words):
+        cut = False
+        for n in range(1, LOOP_MAX_NGRAM + 1):
+            phrase = words[i:i + n]
+            if len(phrase) < n:
+                break
+            repeats = 1
+            while words[i + repeats * n:i + (repeats + 1) * n] == phrase:
+                repeats += 1
+            if repeats > LOOP_KEEP:
+                out.extend(phrase * LOOP_KEEP)
+                i += repeats * n
+                cut = True
+                break
+        if not cut:
+            out.append(words[i])
+            i += 1
+    return lead + ' '.join(out) if out else text
 
 
 def _terminal_diarize_error(error: Exception) -> bool:
@@ -164,19 +196,24 @@ class WhisperXTranscriber(Transcriber):
         except ImportError as e:
             raise ImportError(f"WhisperX not installed. Install with: pip install whisperx") from e
 
-    def _drop_degenerate(self, segments):
-        """the segments minus the ones whose text compresses more than the threshold allows: a
-        hallucination, said so once per segment."""
+    def _clean_segments(self, segments):
+        """the segments with their loops cut (collapse_loops), minus the ones whose text still
+        compresses more than the threshold allows (a run of one character, and the like); the
+        console says what was cut and what was dropped."""
         threshold = self.compression_ratio_threshold
-        if not threshold:
-            return segments
         kept = []
         for segment in segments:
             text = str(segment.get("text") or "")
+            cleaned = collapse_loops(text)
+            if cleaned != text:
+                cut = len(text.split()) - len(cleaned.split())
+                print(f"WhisperX looped: {cut} repeated words cut from a segment, now {cleaned.strip()[:80]!r}")
+                segment = dict(segment, text=cleaned)
+                text = cleaned
             ratio = _compression_ratio(text) if text.strip() else 0.0
-            if ratio > threshold:
+            if threshold and ratio > threshold:
                 print(f"WhisperX dropped a segment as a hallucination (its text compresses {ratio:.1f} times, "
-                      f"over {threshold}): {text.strip()[:60]!r}")
+                      f"over {threshold}): {text.strip()[:80]!r}")
                 continue
             kept.append(segment)
         return kept
@@ -285,10 +322,10 @@ class WhisperXTranscriber(Transcriber):
         # ('50359' is not a valid task), which a language of its own would run into
         result = self.model.transcribe(audio, batch_size=self.batch_size, task="transcribe",
                                        language=language_code(language) or language_code(self.language))
-        # a stretch of noise can come back as a token or a phrase written over and over, which
-        # the batched pipeline does not notice: such a segment goes, with its words, before
-        # alignment and diarization
-        result["segments"] = self._drop_degenerate(result.get("segments") or [])
+        # a stretch of noise can come back as a word or a phrase written over and over, which
+        # the batched pipeline does not notice: the loop is cut to two turns, and a segment that
+        # is garbage still (a run of one character) goes, before alignment and diarization
+        result["segments"] = self._clean_segments(result.get("segments") or [])
         text = ''
         words = []
         

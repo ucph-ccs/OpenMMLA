@@ -103,7 +103,7 @@ The dropdown lists the common languages; `-lang` itself takes any code the backe
 
 With `word_level` on, WhisperX aligns the words with a model of that language: the first use of a language fetches it on the server (once), and a language it has none for gives text without word timestamps.
 
-A stretch of noise can make WhisperX write a token or a phrase over and over (`6 6 6 6 …`, `Yes.Yes.Yes.`), and its batched pipeline does not notice, so the speech transcriber drops such a segment itself, by Whisper's own criterion: a segment whose text compresses more than `SpeechTranscriber.local.compression_ratio_threshold` times (2.4 unless set; 0 keeps every segment) goes, with its words, before alignment and diarization, and the service's log says which.
+A stretch of noise can make WhisperX write a word or a phrase over and over (`Vi gør det igen. Kom.` twenty times, `Mmm. Mmm. Mmm.`), most often at the end of a segment that began as real speech, and its batched pipeline does not notice. The speech transcriber cuts such a loop itself, before alignment and diarization: a phrase of up to eight words said more than twice in a row is cut to two turns, and a segment whose text still compresses more than `SpeechTranscriber.local.compression_ratio_threshold` times (2.4, Whisper's own criterion, unless set; 0 keeps every segment) — a run of one character is what remains — is dropped with its words. The service's log says what was cut and what was dropped.
 
 ### Diarize
 

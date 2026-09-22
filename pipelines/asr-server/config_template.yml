@@ -46,7 +46,7 @@ SpeechTranscriber:
     model: <model>  # e.g., base.en, small.en, medium.en, large.en for regular Whisper, or whisperx/large-v3, whisperx/medium for WhisperX with word-level timestamps
     language: en  # language code, e.g., en, zh, fr, etc. Set to null for auto-detection. A base may ask for another one per request (mmla asr-base -lang, the ASR Base card's Language)
     word_level: <bool>
-    compression_ratio_threshold: 2.4  # a transcript segment that repeats itself (a token or a phrase over and over: WhisperX's hallucination on a stretch of noise) is dropped when its text compresses more than this many times, Whisper's own criterion; 0 keeps every segment
+    compression_ratio_threshold: 2.4  # a loop (a phrase of up to eight words said more than twice in a row: WhisperX's hallucination on a stretch of noise) is cut to two turns; a segment whose text still compresses more than this many times (a run of one character) is dropped, Whisper's own criterion; 0 keeps every segment
     diarize: false  # anonymous speaker turns (SPEAKER_00, SPEAKER_01 ...) with every transcript, by pyannote through WhisperX (whisperx/ models only); a base can ask for them per request instead (mmla asr-base -dia, the ASR Base card's Diarize)
     diarize_model: <pyannote-pipeline>  # the pyannote pipeline to run; left out, WhisperX's default. It is gated: accept its terms on huggingface.co with the account of the token below
     hf_token: <hugging-face-token>  # the Hugging Face token that may fetch the pyannote pipeline (stored encrypted); left out, HF_TOKEN in docker/.env on the ASR Server's host (docker-compose.asr.yml passes it in)
