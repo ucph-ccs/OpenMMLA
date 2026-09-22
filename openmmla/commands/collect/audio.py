@@ -51,6 +51,13 @@ def get_parser():
         default=DEFAULT_AUDIO_CHANNEL,
         help="0-based channel to record as mono, or 'mix' to average all input channels",
     )
+    parser.add_argument(
+        "--device-label", "--audio-device-label",
+        dest="device_label",
+        default=None,
+        help="the device this records, as the pipeline config's Streams name it (jabra-1); "
+             "the device slot of the output file name, a single channel appended as -chN",
+    )
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_AUDIO_SAMPLE_RATE, help="output sample rate")
     parser.add_argument("--format", "--audio-format", dest="audio_format", choices=["wav", "flac", "aac"], default=DEFAULT_AUDIO_FORMAT, help="output audio format")
     parser.add_argument(
@@ -83,6 +90,7 @@ def main():
             channel=args.channel,
             sample_rate=args.sample_rate,
             audio_format=args.audio_format,
+            device_label=args.device_label,
         )
         args.input_format = selected["input_format"]
         args.device = selected["device"]
@@ -90,6 +98,7 @@ def main():
         args.channel = selected["channel"]
         args.sample_rate = selected["sample_rate"]
         args.audio_format = selected["audio_format"]
+        args.device_label = selected["device_label"]
 
     raise SystemExit(record_audio(
         project_dir=args.project_dir,
@@ -103,6 +112,7 @@ def main():
         channel=args.channel,
         sample_rate=args.sample_rate,
         audio_format=args.audio_format,
+        device_label=args.device_label,
     ))
 
 

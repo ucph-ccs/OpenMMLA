@@ -83,8 +83,8 @@ from openmmla.utils.artifact_paths import (
     STREAMS_DIR,
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
-from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source
-from openmmla.utils.config import get_bases, get_base_by_id, decrypt_config_values
+from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source, stream_kind
+from openmmla.utils.config import get_bases, get_base_by_id, decrypt_config_values, load_yaml_config
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -192,7 +192,27 @@ _COLLECTION_HIDDEN_PRESET_FLAGS = {
     "--maxrate",
     "--bufsize",
     "--preset",
-    "--camera-label",
+}
+# the Collection card's Device Label, by role: the counter it follows and the
+# kind of stream whose names it offers. A recording's device slot should name
+# the device the way the pipeline configs already do, so a session's files and
+# its streams call one camera or one microphone by one name.
+_COLLECTION_DEVICE_LABEL_FLAGS = {
+    "--audio-device-label": ("-na", "audio"),
+    "--video-device-label": ("-nv", "video"),
+}
+# the pipeline configs whose Streams entries make up that vocabulary, with the
+# kind a stream of each is when nothing else says (_card_stream_kind)
+_COLLECTION_DEVICE_CONFIGS = (
+    ("pipelines/asr-base/config.yml", "audio"),
+    ("pipelines/ips-base/config.yml", "video"),
+    ("pipelines/vfa-base/config.yml", "video"),
+)
+# what "type another…" suggests for a device none of them names: the device and
+# its number, the way the Streams entries are spelled
+_COLLECTION_DEVICE_EXAMPLES = {
+    "audio": "a microphone, e.g. badge-0 or vimo-0",
+    "video": "a camera, e.g. c920-01",
 }
 _LAUNCHER_UI_WORKER_GROUP = "launcher-ui"
 _LAUNCHER_STATUS_WORKER_GROUP = "launcher-status"
@@ -331,6 +351,15 @@ _STREAM_FIELDS_TEMPLATE = [
 _STREAM_FIELD_CHOICES = {"kind": ["audio", "video"]}
 # what the Streams tab picks for a stream, and a Config tab Save keeps
 _STREAMS_TAB_KEYS = ("ssh_profile", "device")
+
+
+def _with_instance_flags(command: str, parts: list[str]) -> str:
+    """a built command line plus the flags one instance of a component gets for
+    itself (ServicePanel._instance_flag_parts): a Collection recorder's Device
+    Label, which is a different device for each recorder of its role."""
+    if not parts:
+        return command
+    return command + " " + " ".join(shlex.quote(part) for part in parts)
 
 
 def _card_stream_kind(card_name: str) -> str:
@@ -2372,6 +2401,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 [
                     "--session-id", "--output-root", "--host-label",
                     "--audio-interactive", "--sample-rate", "--audio-format",
+                    "--audio-device-label",
                 ],
             ),
             ComponentDef(
@@ -2382,7 +2412,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                     "--session-id", "--output-root", "--host-label",
                     "--video-interactive",
                     "--framerate", "--size", "--bitrate", "--maxrate", "--bufsize",
-                    "--preset", "--camera-label",
+                    "--preset", "--video-device-label",
                 ],
             ),
         ],
@@ -4818,6 +4848,14 @@ class ServicePanel(Widget):
                     if last_experiment_group in experiment_group_choices
                     else experiment_group_choices[0]
                 )
+            elif param.flag in _COLLECTION_DEVICE_LABEL_FLAGS:
+                choices = self._collection_device_choices(_COLLECTION_DEVICE_LABEL_FLAGS[param.flag][1])
+                # the picks this host was last given (target_sticky, above) are
+                # one value per recorder; with none, recorder 1 opens on the
+                # first device, recorder 2 on the second, and so on
+                # (ServiceCard._instance_default)
+                if not isinstance(default, (list, tuple)):
+                    default = []
             params.append(replace(param, default=default, choices=choices))
         return replace(svc, params=params)
 
@@ -4844,7 +4882,8 @@ class ServicePanel(Widget):
             "--maxrate": "Maxrate",
             "--bufsize": "Bufsize",
             "--preset": "Preset",
-            "--camera-label": "Camera Label",
+            "--audio-device-label": "Device Label",
+            "--video-device-label": "Device Label",
         }
         video_source_choices = (
             [""]
@@ -4869,11 +4908,62 @@ class ServicePanel(Widget):
                     or flag in _COLLECTION_HIDDEN_PRESET_FLAGS
                 ):
                     continue
+                if flag in _COLLECTION_DEVICE_LABEL_FLAGS:
+                    # one Select per recorder, following that role's counter:
+                    # two microphones are two devices, and say so. The Streams
+                    # entries are what a device is usually called; "type
+                    # another…" names one no pipeline config has.
+                    counter, kind = _COLLECTION_DEVICE_LABEL_FLAGS[flag]
+                    params.append(ParamDef(
+                        flag, labels[flag], "choice", "",
+                        per_instance=counter,
+                        free_text=_COLLECTION_DEVICE_EXAMPLES[kind],
+                    ))
+                    existing.add(flag)
+                    continue
                 default = defaults.get(flag, "")
                 param_type = "bool" if flag in bool_flags else "str"
                 params.append(ParamDef(flag, labels.get(flag, flag.lstrip("-")), param_type, default, choices.get(flag, [])))
                 existing.add(flag)
         return params
+
+    def _collection_device_choices(self, kind: str) -> list[str]:
+        """the devices a Collection recorder may say it is: the Streams entries
+        of this checkout's pipeline configs, of the wanted kind (jabra-1 and the
+        other microphones for audio, c920-01 and the other cameras for video).
+
+        The vocabulary is the deployment's, not one machine's, so it is read
+        here rather than asked of the card's host: this runs on the UI thread
+        (a redraw, a Start), which asks a remote host nothing. Each file is read
+        again only once it has been written."""
+        cache = getattr(self, "_collection_device_cache", None)
+        if cache is None:
+            cache = self._collection_device_cache = {}
+        names: list[str] = []
+        for relative, default_kind in _COLLECTION_DEVICE_CONFIGS:
+            path = os.path.join(self._root, relative)
+            try:
+                stamp = os.path.getmtime(path)
+            except OSError:
+                cache.pop(path, None)
+                continue
+            cached = cache.get(path)
+            if cached is None or cached[0] != stamp:
+                try:
+                    config = load_yaml_config(path)
+                except Exception:
+                    config = {}
+                streams = config.get("Streams")
+                entries = streams.items() if isinstance(streams, dict) else ()
+                cached = (stamp, [
+                    (str(name).strip(), stream_kind(entry if isinstance(entry, dict) else {}, default_kind))
+                    for name, entry in entries if str(name or "").strip()
+                ])
+                cache[path] = cached
+            for name, entry_kind in cached[1]:
+                if entry_kind == kind and name not in names:
+                    names.append(name)
+        return sorted(names)
 
     def _service_for_current_target(self, svc: ServiceDef) -> ServiceDef:
         return self._service_for_target(svc, self._get_panel_target())
@@ -9233,7 +9323,6 @@ class ServicePanel(Widget):
             "--maxrate": DEFAULT_VIDEO_MAXRATE_MACOS if is_macos else DEFAULT_VIDEO_MAXRATE_LINUX,
             "--bufsize": DEFAULT_VIDEO_BUFSIZE_MACOS if is_macos else DEFAULT_VIDEO_BUFSIZE_LINUX,
             "--preset": DEFAULT_VIDEO_PRESET,
-            "--camera-label": "",
         }
         return defaults
 
@@ -9723,8 +9812,8 @@ class ServicePanel(Widget):
         args = ["bash", script_path]
         for flag in comp.flags:
             value = params.get(flag)
-            if value is None:
-                continue
+            if value is None or isinstance(value, (list, tuple)):
+                continue  # a per-instance value goes to its own instance below
             if isinstance(value, bool):
                 args.extend([flag, "true" if value else "false"])
                 continue
@@ -9745,8 +9834,8 @@ class ServicePanel(Widget):
         args = ["python3", "-m", module]
         for flag in comp.flags:
             value = params.get(flag)
-            if value is None:
-                continue
+            if value is None or isinstance(value, (list, tuple)):
+                continue  # a per-instance value goes to its own instance below
             if isinstance(value, bool):
                 args.extend([flag, "true" if value else "false"])
                 continue
@@ -10020,6 +10109,7 @@ class ServicePanel(Widget):
             for index in range(count):
                 label = self._collection_session_name(svc, comp.role, index, count)
                 command = self._collection_component_command(comp, prepared, self._root)
+                command = _with_instance_flags(command, self._instance_flag_parts(comp, prepared, index))
                 run_cmd = f"cd {shlex.quote(self._root)} && {command}"
                 tab_cmds.append((label, run_cmd))
                 self._log(rich_escape(f"    [{label}] {command}"))
@@ -10657,6 +10747,7 @@ class ServicePanel(Widget):
                     for index in range(count):
                         label = self._collection_session_name(svc, comp.role, index, count)
                         command = self._collection_remote_component_command(comp, prepared)
+                        command = _with_instance_flags(command, self._instance_flag_parts(comp, prepared, index))
                         ssh_cmd = self._collection_remote_terminal_command(profile, command)
                         tab_cmds.append((label, ssh_cmd))
                         self._log(rich_escape(f"    [{label}] ssh {profile.ssh_destination()} {command}"))

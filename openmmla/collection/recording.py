@@ -560,6 +560,7 @@ def prompt_audio_options(
     channel: str,
     sample_rate: int,
     audio_format: str,
+    device_label: str | None,
 ) -> dict[str, Any]:
     print("\nListing audio devices:")
     list_audio_devices(input_format)
@@ -578,7 +579,9 @@ def prompt_audio_options(
         print("Could not detect channel count. Use mix or a 0-based channel number.")
 
     selected_channel = input(f"Audio channel [{channel}]: ").strip() or str(channel)
-    _audio_channel_filter(selected_channel, detected_channels)
+    _, channel_label = _audio_channel_filter(selected_channel, detected_channels)
+    label = sanitize_label(device_label, _device_label_from_device(selected_device, "mic"))
+    print(f"Device label: {_audio_device_slot(label, channel_label)}")
 
     return {
         "input_format": input_format,
@@ -587,7 +590,15 @@ def prompt_audio_options(
         "channel": selected_channel,
         "sample_rate": sample_rate,
         "audio_format": audio_format,
+        "device_label": device_label,
     }
+
+
+def _audio_device_slot(label: str, channel_label) -> str:
+    """the device slot of an audio file name: the device, with the channel of a
+    multi-channel one as a suffix (vimo-0-ch1), which is how ses-tidy reads the
+    channel back out of a name. A downmix carries no suffix: it is mono."""
+    return label if channel_label == "mix" else f"{label}-ch{channel_label}"
 
 
 def _audio_channel_filter(channel: str, channel_count: int | None) -> tuple[str | None, str | int]:
@@ -620,6 +631,7 @@ def record_audio(
     channel: str,
     sample_rate: int,
     audio_format: str,
+    device_label: str | None,
 ) -> int:
     ensure_command("ffmpeg")
     fmt = audio_format.lower()
@@ -638,8 +650,9 @@ def record_audio(
     start_time = time.time()
     start_text = format_epoch_ms(start_time)
     host = sanitize_label(host_label, short_hostname())
-    filename_channel = "mix" if channel_label == "mix" else f"ch{channel_label}"
-    filename = f"audio_{host}_{filename_channel}_{start_text}.{extension}"
+    label = sanitize_label(device_label, _device_label_from_device(device, "mic"))
+    slot = _audio_device_slot(label, channel_label)
+    filename = f"audio_{host}_{slot}_{start_text}.{extension}"
     session_dir, output_file, session, sync_time, host = prepare_recording_paths(
         modality="audio",
         project_dir=project_dir,
@@ -660,7 +673,7 @@ def record_audio(
         input_options.extend(["-ac", str(channels)])
     input_options.extend(["-i", input_spec])
 
-    recording_id = f"audio_{host}_{filename_channel}_{start_text}"
+    recording_id = f"audio_{host}_{slot}_{start_text}"
     recording = {
         "id": recording_id,
         "modality": "audio",
@@ -669,9 +682,12 @@ def record_audio(
         "start_time": float(start_text),
         "host": host,
         "input_format": input_format,
-        "device": device,
+        # `device` is the device slot of the file name, as ses-tidy rebuilds it
+        # from the tree; the ffmpeg device is input_device
+        "device": slot,
+        "input_device": device,
         "channels": detected_channels,
-        "channel": channel_label,
+        "channel": "mono" if channel_label == "mix" else f"ch{channel_label}",
         "sample_rate": sample_rate,
         "format": fmt,
     }
@@ -703,9 +719,13 @@ def record_audio(
     return return_code
 
 
-def _camera_label_from_device(device: str) -> str:
-    label = os.path.basename(device.rstrip("/")) if device else "camera"
-    return sanitize_label(label, "camera")
+def _device_label_from_device(device: str, default: str = "camera") -> str:
+    """the device slot of a file name when nobody gave a label: the tail of the
+    ffmpeg device (/dev/video0 -> video0, a Mac's 0 -> 0). It names no device of
+    the deployment, so the card's Device Label (a Streams entry of the pipeline
+    config: c920-01, jabra-1) is what a recording should carry."""
+    label = os.path.basename(str(device).rstrip("/")) if device else default
+    return sanitize_label(label, default)
 
 
 def list_video_devices(input_format: str = "v4l2") -> int:
@@ -743,13 +763,14 @@ def prompt_video_options(
     maxrate: str,
     bufsize: str,
     preset: str,
-    camera_label: str | None,
+    device_label: str | None,
 ) -> dict[str, Any]:
     print("\nListing video devices:")
     list_video_devices(input_format)
     print()
 
     selected_device = input(f"Video device [{device}]: ").strip() or device
+    print(f"Device label: {sanitize_label(device_label, _device_label_from_device(selected_device))}")
 
     return {
         "input_format": input_format,
@@ -761,7 +782,7 @@ def prompt_video_options(
         "maxrate": str(maxrate),
         "bufsize": str(bufsize),
         "preset": str(preset),
-        "camera_label": camera_label,
+        "device_label": device_label,
     }
 
 
@@ -781,14 +802,14 @@ def record_video(
     maxrate: str,
     bufsize: str,
     preset: str,
-    camera_label: str | None,
+    device_label: str | None,
 ) -> int:
     ensure_command("ffmpeg")
     start_time = time.time()
     start_text = format_epoch_ms(start_time)
     host = sanitize_label(host_label, short_hostname())
-    camera = sanitize_label(camera_label, _camera_label_from_device(device))
-    filename = f"video_{host}_{camera}_{start_text}.mp4"
+    label = sanitize_label(device_label, _device_label_from_device(device))
+    filename = f"video_{host}_{label}_{start_text}.mp4"
     session_dir, output_file, session, sync_time, host = prepare_recording_paths(
         modality="video",
         project_dir=project_dir,
@@ -809,7 +830,7 @@ def record_video(
         input_spec = device
     input_options.extend(["-framerate", str(framerate), "-video_size", size, "-i", input_spec])
 
-    recording_id = f"video_{host}_{camera}_{start_text}"
+    recording_id = f"video_{host}_{label}_{start_text}"
     recording = {
         "id": recording_id,
         "modality": "video",
@@ -818,9 +839,11 @@ def record_video(
         "start_time": float(start_text),
         "host": host,
         "input_format": input_format,
-        "device": device,
+        # `device` is the device slot of the file name, as ses-tidy rebuilds it
+        # from the tree; the ffmpeg device is input_device
+        "device": label,
+        "input_device": device,
         "source_format": source_format,
-        "camera_label": camera,
         "framerate": framerate,
         "size": size,
         "bitrate": bitrate,

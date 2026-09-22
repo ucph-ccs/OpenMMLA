@@ -78,7 +78,15 @@ class ParamDef:
     # then. Either way, a counter nobody has set moves to a fresh default.
     follows: str = ""
     follow_values: dict = field(default_factory=dict)
+    # a per-instance Select whose options are not the whole world: it gets a
+    # "type another…" option, and picking it opens a text box in the same row
+    # with this as its placeholder (a Collection recorder's Device Label, for a
+    # device no pipeline config names). Empty: the options are all there is.
+    free_text: str = ""
 
+
+# the last option of a Select that takes a typed value too (ParamDef.free_text)
+TYPE_ANOTHER = "\x00type"
 
 # flags whose Select lists artifact/collection sessions; these get an inline
 # "↻" button so the list can be re-queried on demand (bypassing the cache)
@@ -266,6 +274,13 @@ class ServiceCard(Widget):
         width: 44;
         min-width: 22;
         height: 3;
+    }
+    /* the box beside a "type another…" Select: it shares the row with it */
+    ServiceCard .param-typed {
+        width: 30;
+        min-width: 14;
+        height: 3;
+        margin-left: 1;
     }
     ServiceCard .param-refresh {
         width: 5;
@@ -579,6 +594,15 @@ class ServiceCard(Widget):
 
         with Vertical(classes="card-params"):
             for param in self._collection_params_for_role(role):
+                if param.per_instance:
+                    # one row per recorder of this role; its + and - show, hide
+                    # and add rows (_sync_instances). The flag belongs to this
+                    # tab alone, so the rows take the plain ids _sync_instances
+                    # and collect_params look for, not the role-scoped ones.
+                    with Vertical(id=self._param_id("instances", param.flag), classes="param-instances"):
+                        for index in range(len(self._param_values[param.flag])):
+                            yield self._instance_row(param, index)
+                    continue
                 with Horizontal(classes="param-row"):
                     for widget in self._param_widgets(
                         param,
@@ -689,18 +713,31 @@ class ServiceCard(Widget):
     @staticmethod
     def _instance_default(param: ParamDef, index: int) -> str:
         """what instance `index` starts on: the list default's entry for it,
-        else the index-th option that has a value, else "" (none)."""
+        else the index-th option that has a value, else "" (none). A param that
+        takes a typed value keeps one of those too, so a device no config names
+        survives the rebuild that a host switch or a Refresh makes."""
         options = _choice_options(param.choices)
         legal = {value for _, value in options}
         if isinstance(param.default, (list, tuple)) and index < len(param.default):
             wanted = str(param.default[index] if param.default[index] is not None else "")
-            if wanted in legal:
+            if wanted in legal or (param.free_text and wanted):
                 return wanted
         valued = [value for _, value in options if value]
         return valued[index] if index < len(valued) else ""
 
     def _instance_select_id(self, flag: str, index: int) -> str:
         return self._param_id(f"select{index}", flag)
+
+    def _instance_input_id(self, flag: str, index: int) -> str:
+        return self._param_id(f"typed{index}", flag)
+
+    def _instance_options(self, param: ParamDef) -> list[tuple[str, str]]:
+        """a per-instance Select's options, with "type another…" last when the
+        param takes a typed value too."""
+        options = _choice_options(param.choices)
+        if param.free_text:
+            options.append(("type another…", TYPE_ANOTHER))
+        return options
 
     def _instance_row_id(self, flag: str, index: int) -> str:
         return self._param_id(f"instance{index}", flag)
@@ -718,13 +755,19 @@ class ServiceCard(Widget):
                 id=self._instance_row_id(param.flag, index),
                 classes="param-row",
             )
-        options = _choice_options(param.choices)
+        options = self._instance_options(param)
         values = self._param_values.get(param.flag) or []
         value = values[index] if index < len(values) else self._instance_default(param, index)
+        typed = ""
         if not any(option_value == value for _, option_value in options):
-            value = Select.NULL
+            if param.free_text and str(value or "").strip():
+                # a value of its own: the Select sits on "type another…" and the
+                # box beside it holds it
+                typed, value = str(value), TYPE_ANOTHER
+            else:
+                value = Select.NULL
         self._card_shown.setdefault(param.flag, {})[index] = "" if value is Select.NULL else str(value)
-        return Horizontal(
+        widgets = [
             Static(f"{param.label} {index + 1}:", classes="param-label"),
             Select(
                 options,
@@ -733,6 +776,18 @@ class ServiceCard(Widget):
                 id=self._instance_select_id(param.flag, index),
                 classes="param-select",
             ),
+        ]
+        if param.free_text:
+            box = Input(
+                value=typed,
+                placeholder=param.free_text,
+                id=self._instance_input_id(param.flag, index),
+                classes="param-typed",
+            )
+            box.display = value == TYPE_ANOTHER
+            widgets.append(box)
+        return Horizontal(
+            *widgets,
             id=self._instance_row_id(param.flag, index),
             classes="param-row",
         )
@@ -749,7 +804,14 @@ class ServiceCard(Widget):
                 sel = self.query_one(f"#{self._instance_select_id(param.flag, index)}", Select)
             except Exception:
                 continue
-            values[index] = "" if sel.value is Select.NULL else str(sel.value)
+            value = "" if sel.value is Select.NULL else str(sel.value)
+            if value == TYPE_ANOTHER:
+                # the row is on "type another…": what was typed is the value
+                try:
+                    value = self.query_one(f"#{self._instance_input_id(param.flag, index)}", Input).value.strip()
+                except Exception:
+                    value = ""
+            values[index] = value
         self._param_values[param.flag] = values
         return values[:count]
 
@@ -923,6 +985,8 @@ class ServiceCard(Widget):
             )
         except Exception:
             pass
+        # a recorder more or less is a Device Label row more or less
+        self._sync_instances(flag)
 
     def _toggle_bool_param(self, flag: str) -> None:
         self._param_values[flag] = not bool(self._param_values.get(flag, False))
@@ -949,6 +1013,11 @@ class ServiceCard(Widget):
         for param in params:
             if param.param_type in ("bool", "int"):
                 values[param.flag] = self._param_values[param.flag]
+                continue
+            if param.per_instance:
+                # one value per instance, read off the rows themselves: a
+                # Device Label picked but not yet launched is still the pick
+                values[param.flag] = self._collect_instances(param)
                 continue
             try:
                 if _is_select_param(param):
@@ -1145,9 +1214,26 @@ class ServiceCard(Widget):
                     picked.add(index)
                 else:
                     picked.discard(index)
+                if param.free_text:
+                    self._show_typed_box(param, index, value == TYPE_ANOTHER)
                 if index == 0:
                     self._follow_first_instance(param.flag, value)
                 return
+
+    def _show_typed_box(self, param: ParamDef, index: int, wanted: bool) -> None:
+        """the text box of a row on "type another…": shown and focused while
+        that is the pick, hidden (and emptied) once an option is picked again."""
+        try:
+            box = self.query_one(f"#{self._instance_input_id(param.flag, index)}", Input)
+        except Exception:
+            return
+        if box.display == wanted:
+            return
+        box.display = wanted
+        if wanted:
+            box.focus()
+        else:
+            box.value = ""
 
     def _follow_first_instance(self, flag: str, picked: str) -> None:
         """set every Select that follows the first instance of `flag` to what

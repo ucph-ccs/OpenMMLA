@@ -79,7 +79,13 @@ def get_parser():
     parser.add_argument("--maxrate", default=_default_video_maxrate(), help="maximum H.264 bitrate")
     parser.add_argument("--bufsize", default=_default_video_bufsize(), help="H.264 rate-control buffer size")
     parser.add_argument("--preset", default=DEFAULT_VIDEO_PRESET, help="libx264 preset")
-    parser.add_argument("--camera-label", default=None, help="camera label used in output filenames")
+    parser.add_argument(
+        "--device-label", "--video-device-label", "--camera-label",
+        dest="device_label",
+        default=None,
+        help="the device this records, as the pipeline config's Streams name it (c920-01); "
+             "the device slot of the output file name",
+    )
     parser.add_argument(
         "--interactive", "--video-interactive",
         dest="interactive",
@@ -109,7 +115,7 @@ def main():
             maxrate=args.maxrate,
             bufsize=args.bufsize,
             preset=args.preset,
-            camera_label=args.camera_label,
+            device_label=args.device_label,
         )
         args.input_format = selected["input_format"]
         args.device = selected["device"]
@@ -120,7 +126,7 @@ def main():
         args.maxrate = selected["maxrate"]
         args.bufsize = selected["bufsize"]
         args.preset = selected["preset"]
-        args.camera_label = selected["camera_label"]
+        args.device_label = selected["device_label"]
 
     raise SystemExit(record_video(
         project_dir=args.project_dir,
@@ -137,7 +143,7 @@ def main():
         maxrate=args.maxrate,
         bufsize=args.bufsize,
         preset=args.preset,
-        camera_label=args.camera_label,
+        device_label=args.device_label,
     ))
 
 

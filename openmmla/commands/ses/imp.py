@@ -47,6 +47,16 @@ COPY_RE = re.compile(r' \(\d+\)(?=\.[A-Za-z0-9]+$)')
 SESSION_DIR_RE = re.compile(r'session_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})Z')
 
 
+def host_and_device(name: str) -> tuple[str, str]:
+    """the machine and the device a file name carries, as its <label>-<number>
+    parts in order: 'raspi4-01_c920-01_...' is the camera c920-01 on raspi4-01.
+    One part alone is the machine ('record_...-raspi4-01.mp4'), and the device
+    slot then keeps the placeholder its caller picks; none is neither."""
+    labels = [_safe(label) for label in HOST_RE.findall(name)]
+    labels = [label for label in labels if label]
+    return (labels[0] if labels else '', labels[1] if len(labels) > 1 else '')
+
+
 def _safe(label: str) -> str:
     """a host or device label the file names and folder names can carry"""
     text = re.sub(r'[^A-Za-z0-9]+', '-', str(label)).strip('-').lower()
@@ -136,10 +146,10 @@ class Item:
         if self.duration:
             record['duration'] = round(self.duration, 3)
             record['stopped_at'] = round(self.start + self.duration, 3)
+        record['device'] = self.device
         if self.modality == 'audio':
-            record.update({'channel': self.device, 'channels': 1, 'sample_rate': SEGMENT_RATE})
-        else:
-            record['device'] = self.device
+            from openmmla.commands.ses.tidy import channel_of_device
+            record.update({'channel': channel_of_device(self.device), 'channels': 1, 'sample_rate': SEGMENT_RATE})
         if self.pipeline_hint:
             record['pipeline_hint'] = self.pipeline_hint
         if self.notes:
@@ -339,10 +349,9 @@ def plan_import(source: str, artifacts_root: str, experiment_id: str = DEFAULT_E
             info = probe_media(str(path))
         duration = info.get('duration')
         is_video = name.lower().endswith(VIDEO_EXTS)
-        host_match = HOST_RE.search(name)
+        host, named_device = host_and_device(name)
         if is_video:
-            host = _safe(host_match.group(1)) if host_match else ''
-            item = Item('video', 'move', host=host, device='video0', start=start, sources=[str(path)],
+            item = Item('video', 'move', host=host, device=named_device or 'video0', start=start, sources=[str(path)],
                         ext=path.suffix.lower(), duration=duration, pipeline_hint=_pipeline_hint(rel))
             item.notes.append(f"start from the {origin}")
             items.append(item)
@@ -358,8 +367,12 @@ def plan_import(source: str, artifacts_root: str, experiment_id: str = DEFAULT_E
                 skipped.append(f"{rel}: {duration:.0f} s, not a continuous recording")
                 continue
             channel = CHANNEL_RE.search(name)
-            host = _safe(host_match.group(1)) if host_match else 'mic'
-            item = Item('audio', 'move', host=host, device=f"ch{channel.group(1)}" if channel else 'mix', start=start,
+            suffix = f"ch{channel.group(1)}" if channel else ''
+            if named_device:
+                device = f"{named_device}-{suffix}" if suffix else named_device
+            else:
+                device = suffix or 'mix'   # no device in the name: the placeholder, as before
+            item = Item('audio', 'move', host=host or 'mic', device=device, start=start,
                         sources=[str(path)], ext=path.suffix.lower(), duration=duration, pipeline_hint='asr')
             item.notes.append(f"start from the {origin}")
             if (info.get('audio') or {}).get('sample_rate') not in (None, 0, SEGMENT_RATE):

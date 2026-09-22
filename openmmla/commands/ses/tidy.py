@@ -2,7 +2,8 @@
 quadrant of a mosaic cut out, and its legacy folder reduced to what is raw.
 
 The collection layout names a session <experiment>_<group>_<start> and every recording after
-its host: audio_<host>_<channel>_<start>.wav, video_<host>_<device>_<start>.<ext>. Whatever
+its machine and its device: <kind>_<host>_<device>_<start>.<ext>, a single channel of a
+multi-channel device appended to the device (vimo-0-ch1). Whatever
 changes here, files, folders and manifests move together: the manifests are rebuilt from the
 tree at the end (a host's recordings under collection/<host>/{audio,video}/, raw/ holds what is
 kept but not replayed), so a relabel is a move and nothing else. --prune-legacy keeps a
@@ -56,6 +57,13 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     path.with_suffix('.yml').write_text("\n".join(_dump_yaml(data)) + "\n", encoding='utf-8')
 
 
+def channel_of_device(device: str) -> str:
+    """the channel a device slot says it is: the -chN suffix of a multi-channel
+    device (vimo-0-ch1 -> ch1), else mono. The live recorders write the same."""
+    channel = re.search(r'-(ch\d+)$', str(device or ''))
+    return channel.group(1) if channel else 'mono'
+
+
 def parse_recording_name(name: str) -> dict[str, Any] | None:
     match = RECORDING_RE.match(name)
     if not match:
@@ -65,10 +73,15 @@ def parse_recording_name(name: str) -> dict[str, Any] | None:
     return parts
 
 
-def _recording_key(record: dict[str, Any]) -> tuple:
-    """what survives a relabel: the modality, the start and the channel or device"""
-    return (record.get('modality'), round(float(record.get('start_time') or 0), 3),
-            record.get('channel') or record.get('device'))
+def _recording_keys(record: dict[str, Any]) -> set[tuple]:
+    """what a manifest entry survives a relabel by: the modality, the start and
+    the device slot of its name. A manifest written before the device slot was
+    the device kept that slot under `channel` or `camera_label` (`device` was
+    the ffmpeg one then), so every spelling is offered and any of them finds it."""
+    modality = record.get('modality')
+    start = round(float(record.get('start_time') or 0), 3)
+    slots = (record.get('device'), record.get('channel'), record.get('camera_label'))
+    return {(modality, start, slot) for slot in slots if slot}
 
 
 def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group_id: str | None = None,
@@ -79,11 +92,13 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
     from openmmla.commands.ses.imp import probe
 
     old = _read(session_dir / 'manifest.json')
-    known = {_recording_key(r): r for r in old.get('recordings', []) if isinstance(r, dict)}
-    for host_manifest in (session_dir / 'collection').glob('*/manifest.json'):
-        for r in _read(host_manifest).get('recordings', []):
+    known: dict[tuple, dict[str, Any]] = {}
+    manifests = [old] + [_read(path) for path in sorted((session_dir / 'collection').glob('*/manifest.json'))]
+    for manifest in manifests:
+        for r in manifest.get('recordings', []):
             if isinstance(r, dict):
-                known.setdefault(_recording_key(r), r)
+                for key in _recording_keys(r):
+                    known.setdefault(key, r)
     parts = split_session_id(session_dir.name)
     session_id = session_dir.name
     now = format_epoch_ms()
@@ -105,8 +120,7 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
         # badge-0, jabra-0), a channel of a multi-channel device as a -chN suffix
         record['device'] = parsed['device']
         if parsed['modality'] == 'audio':
-            channel = re.search(r'-(ch\d+)$', parsed['device'])
-            record['channel'] = channel.group(1) if channel else 'mono'
+            record['channel'] = channel_of_device(parsed['device'])
             record.setdefault('channels', 1)
             record.setdefault('sample_rate', 16000)
         else:
@@ -224,6 +238,59 @@ def relabel_host(session_dir: Path, old: str, new: str, modality: str | None = N
         _remove_if_empty(source)
     _remove_if_empty(old_dir)
     return moved
+
+
+def relabel_device(session_dir: Path, old: str, new: str, host: str | None = None, log=print) -> int:
+    """the device slot of a session's file names, `old` -> `new`, under every
+    host or only under `host`; returns how many files were renamed.
+
+    The slot is taken as it is spelled, channel suffix and all, so ses-import's
+    placeholders become the device that recorded: `video0` -> `c920-01`,
+    `ch1` -> `vimo-0-ch1`. Nothing moves between folders: the machine is the
+    folder (relabel_host) and the device is in the name."""
+    collection = session_dir / 'collection'
+    hosts = [collection / host] if host else sorted(p for p in collection.glob('*') if p.is_dir())
+    if host and not hosts[0].is_dir():
+        raise FileNotFoundError(f"no host {host} in {session_dir.name}")
+    log(f"  device {old} -> {new}" + (f" on {host}" if host else ""))
+    renamed = 0
+    for host_dir in hosts:
+        for folder in ('audio', 'video'):
+            source = host_dir / folder
+            if not source.is_dir():
+                continue
+            for path in sorted(source.iterdir()):
+                parsed = parse_recording_name(path.name) if path.is_file() else None
+                if not parsed or parsed['device'] != old:
+                    continue
+                target = path.with_name(
+                    f"{parsed['modality']}_{parsed['host']}_{new}_{parsed['start']:.3f}.{parsed['ext']}")
+                if target.exists():
+                    raise FileExistsError(f"{target} exists")
+                path.rename(target)
+                renamed += 1
+    if not renamed:
+        log(f"    [no file of {session_dir.name} records {old}]")
+        return 0
+    # the manifests move with the files: a rebuild finds an entry again by its
+    # start and its device slot, so the slot it knows has to change as well
+    for manifest in [session_dir / 'manifest.json', *sorted((session_dir / 'collection').glob('*/manifest.json'))]:
+        data = _read(manifest)
+        entries = [
+            r for r in data.get('recordings', [])
+            if isinstance(r, dict) and old in (r.get('device'), r.get('channel'), r.get('camera_label'))
+        ]
+        if host:
+            entries = [r for r in entries if r.get('host') == host]
+        if not entries:
+            continue
+        for record in entries:
+            record['device'] = new
+            record.pop('camera_label', None)
+            if record.get('modality') == 'audio':
+                record['channel'] = channel_of_device(new)
+        _write(manifest, data)
+    return renamed
 
 
 def move_to_raw(session_dir: Path, host: str, log=print) -> Path:
@@ -358,6 +425,9 @@ def get_parser():
     parser.add_argument('--host', action='append', default=[], metavar='OLD=NEW', help="relabel a host, audio and video (repeatable)")
     parser.add_argument('--audio-host', action='append', default=[], metavar='OLD=NEW', help="move only the audio of a host to another label")
     parser.add_argument('--video-host', action='append', default=[], metavar='OLD=NEW', help="move only the video of a host to another label")
+    parser.add_argument('--device', action='append', default=[], metavar='[HOST/]OLD=NEW',
+                        help="rename the device in the file names (video0=c920-01, ch1=vimo-0-ch1); "
+                             "HOST/ limits it to one machine's files (repeatable)")
     parser.add_argument('--crop', action='append', default=[], metavar='HOST=NEW:X,Y,W,H',
                         help="cut a region of a host's videos out as the videos of NEW (a quadrant of a mosaic)")
     parser.add_argument('--crop-fps', type=int, default=None, help="frame rate of the cropped videos (default: the source's)")
@@ -392,6 +462,12 @@ def main(argv=None):
     session_dir = session_dir.resolve()
     try:
         hosts, audio_hosts, video_hosts = (_pairs(v, w) for v, w in ((args.host, '--host'), (args.audio_host, '--audio-host'), (args.video_host, '--video-host')))
+        devices = []
+        for host_old, new in _pairs(args.device, '--device'):
+            host, _, old = host_old.rpartition('/')
+            if not old:
+                raise ValueError(f"--device wants [HOST/]OLD=NEW, not {host_old}={new!r}")
+            devices.append((host or None, old, new))
         crops = []
         for value in args.crop:
             spec, _, region = value.partition(':')
@@ -423,6 +499,9 @@ def main(argv=None):
         print(f"    {relabel_host(session_dir, old, new, modality='audio')} files moved")
     for old, new in video_hosts:
         print(f"    {relabel_host(session_dir, old, new, modality='video')} files moved")
+    # after the host relabels: a device is renamed where its machine's files now are
+    for host, old, new in devices:
+        print(f"    {relabel_device(session_dir, old, new, host=host)} files renamed")
     for host in args.to_raw:
         move_to_raw(session_dir, host)
     for host in args.delete_host:
