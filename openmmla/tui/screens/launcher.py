@@ -83,7 +83,7 @@ from openmmla.utils.artifact_paths import (
     STREAMS_DIR,
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
-from openmmla.utils.constants import get_stream_sources, normalize_source
+from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source
 from openmmla.utils.config import get_bases, get_base_by_id, decrypt_config_values
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -853,23 +853,39 @@ def _is_main_base(base: dict) -> bool:
     return str(base.get("main")).strip().lower() in ("true", "1", "yes", "on")
 
 
-def _base_choice_label(pipeline: str, base: dict) -> str:
+def _stream_is_there(config: dict, source_index: str) -> bool:
+    """whether a stream base's source_index still finds a stream of the
+    config, by the rule the base applies to it (a name, a URL, or the
+    position older configs hold)."""
+    try:
+        resolve_stream_source(config or {}, source_index)
+    except ValueError:
+        return False
+    return True
+
+
+def _base_choice_label(pipeline: str, base: dict, config: dict | None = None) -> str:
     """what a Base dropdown shows for one Bases entry, `0 · macbook-air ·
     stream ips-cam-1`: its id, the camera of an IPS or VFA base (the
-    base_type of an ASR one), then its source and source_index."""
+    base_type of an ASR one), then its source and source_index. A base that
+    pulls a stream the config's Streams no longer name says so: it is what
+    the base would stop on, and the entry is the one place to repoint it
+    (Config tab, Bases)."""
     what = _shown_base_value(base.get("base_type") if pipeline == "asr" else base.get("camera"))
     source = _shown_base_value(base.get("source"))
     index = _shown_base_value(base.get("source_index"))
     if index and normalize_source(source) == "file":
         index = os.path.basename(index.rstrip("/")) or index  # the file, not its path
     where = " ".join(part for part in (source, index) if part)
+    if where and config is not None and normalize_source(source) == "stream" and not _stream_is_there(config, index):
+        where = f"{where}  (not in Streams)"
     return " · ".join(part for part in (str(base.get("id")), what, where) if part)
 
 
 def _base_choices(pipeline: str, config: dict) -> list[tuple[str, str]]:
     """the options of a Base dropdown: every Bases entry of the config in its
     order (value: the id, as -b takes it), then asking in the base's window."""
-    options = [(_base_choice_label(pipeline, base), str(base.get("id"))) for base in get_bases(config)]
+    options = [(_base_choice_label(pipeline, base, config), str(base.get("id"))) for base in get_bases(config)]
     return options + [(_ASK_BASE_LABEL, "")]
 
 
@@ -5931,6 +5947,22 @@ class ServicePanel(Widget):
             self.run_worker(self._probe_form_devices(form, pipeline, existing, force=True), group="config-devices",
                             exclusive=True)
 
+    def _refresh_form_stream_choices(self, config: dict) -> None:
+        """the stream dropdowns of the Bases form on screen follow the Streams
+        just saved: one added there can be picked without reopening the card,
+        and an entry left pointing at one that was deleted shows it as gone
+        instead of keeping a dropdown that no longer offers it."""
+        form = self._current_form
+        if form is None or not form.is_attached:
+            return
+        fields = [f for f in form.query(DictListField) if f.field_def.path == "Bases"]
+        if not fields:
+            return
+        streams = get_stream_sources(config if isinstance(config, dict) else {})
+        for field in fields:
+            field.set_stream_choices(streams)
+        self._remark_live_streams()
+
     def _remark_live_streams(self) -> None:
         """ask the Stream Server again which streams of the Bases form on
         screen are live, as when the form was built."""
@@ -6299,6 +6331,9 @@ class ServicePanel(Widget):
         # what was saved, on another host as well as here
         if saved is not None:
             self._refresh_stream_panels(pipeline, saved)
+            # a Bases entry pulls a stream of these: the entries on screen
+            # follow the Streams that were just saved
+            self._refresh_form_stream_choices(saved)
         self._refresh_vfa_prompts(pipeline)
         self._show_sync_bar(pipeline)
         self._build_tree()

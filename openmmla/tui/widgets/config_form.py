@@ -34,6 +34,19 @@ def _no_choice(value) -> bool:
     return value is None or value is Select.BLANK or value is getattr(Select, "NULL", None)
 
 
+def _held_value(widget):
+    """what a widget holds, before or after it is mounted. A Select keeps the
+    value it was built with in `_value` until its Mount runs and copies it
+    into `value`, so reading `value` alone reads nothing off a dropdown still
+    on its way up: whoever reads it loses the pick, and an option list rebuilt
+    around that reading leaves the dropdown holding a value it no longer
+    offers (Textual then refuses it at Mount)."""
+    value = getattr(widget, "value", "")
+    if _no_choice(value) and isinstance(widget, Select):
+        value = getattr(widget, "_value", value)
+    return "" if _no_choice(value) else value
+
+
 def _media_files(folder: str) -> list[str]:
     """the media files of a folder on this machine, by name; none when it
     cannot be listed."""
@@ -487,20 +500,40 @@ class DictListField(Widget):
         self._device_notes[source] = note
         for container in self.query(".dict-entry"):
             picked = self._find_in_container(container, "__source")
-            value = getattr(picked, "value", "") if picked is not None else ""
-            if value is Select.BLANK or normalize_source(value) != source:
+            value = _held_value(picked) if picked is not None else ""
+            if normalize_source(value) != source:
                 continue
             widget = self._find_in_container(container, "__source_index")
-            current = ""
-            if widget is not None:
-                raw = getattr(widget, "value", "")
-                current = "" if raw in (None, Select.BLANK) else str(raw)
+            current = str(_held_value(widget)) if widget is not None else ""
             self.run_worker(self._rebuild_source_index(container, source, current), exclusive=False)
 
     @property
     def stream_choices(self) -> list[tuple[str, str]]:
         """(name, url) of the streams a 'stream' entry can pull."""
         return list(self._choices.get("source_index:stream") or [])
+
+    def set_stream_choices(self, options: list[tuple[str, str]]) -> None:
+        """the streams a 'stream' entry can pull, once a Save has changed this
+        config's Streams: the dropdowns offer them straight away, as the hint
+        under them says, and each keeps the stream it shows. One the Streams
+        no longer name is marked there rather than dropped, so an entry says
+        which stream it is still pointed at."""
+        self._choices["source_index:stream"] = [(str(name), str(url)) for name, url in options]
+        for container in self.query(".dict-entry"):
+            source = self._find_in_container(container, "__source")
+            if source is None or normalize_source(_held_value(source)) != "stream":
+                continue
+            widget = self._find_in_container(container, "__source_index")
+            if widget is None:
+                continue
+            current = str(_held_value(widget))
+            # a row with no stream to offer and none named is a text box; it
+            # becomes a dropdown (and back) as the Streams gain and lose them
+            wants_select = bool(self.stream_choices or current)
+            if isinstance(widget, Select) != wants_select:
+                self.run_worker(self._rebuild_source_index(container, "stream", current), exclusive=False)
+            elif wants_select:
+                self._show_stream_states_in(widget, current)
 
     def _stream_label(self, name: str, url: str):
         state = self._stream_states.get(name)
@@ -547,8 +580,8 @@ class DictListField(Widget):
         self._stream_note = note
         for container in self.query(".dict-entry"):
             source = self._find_in_container(container, "__source")
-            value = getattr(source, "value", "") if source is not None else ""
-            if value is Select.BLANK or normalize_source(value) != "stream":
+            value = _held_value(source) if source is not None else ""
+            if normalize_source(value) != "stream":
                 continue
             widget = self._find_in_container(container, "__source_index")
             if isinstance(widget, Select):
@@ -563,8 +596,7 @@ class DictListField(Widget):
         another one picked), when it has no label to set: it gets them on the
         next refresh instead, keeping the stream it showed."""
         if current is None:
-            value = widget.value
-            current = "" if value in (None, Select.BLANK, getattr(Select, "NULL", None)) else str(value)
+            current = str(_held_value(widget))
         options, cur = self._stream_options(current)
         try:
             widget.set_options(options)
@@ -676,10 +708,7 @@ class DictListField(Widget):
                     if isinstance(w, Switch):
                         read[key] = bool(w.value)
                     else:
-                        raw = w.value
-                        if _no_choice(raw):
-                            raw = ""
-                        read[key] = _auto_parse(str(raw).strip())
+                        read[key] = _auto_parse(str(_held_value(w)).strip())
                 except Exception:
                     read[key] = ""
             # a field the entry's source does not use stays out of the file
@@ -709,8 +738,7 @@ class DictListField(Widget):
         for w in container.query():
             if w.id and w.id.endswith("__source_index"):
                 try:
-                    v = w.value
-                    cur = "" if _no_choice(v) else str(v)
+                    cur = str(_held_value(w))
                 except Exception:
                     cur = ""
                 break
@@ -762,7 +790,7 @@ class DictListField(Widget):
         start = None
         # open where the entry's file is, else where the last pick was
         current = self._find_in_container(container, "__source_index")
-        value = str(getattr(current, "value", "") or "")
+        value = str(_held_value(current) or "") if current is not None else ""
         if os.path.isabs(value) and os.path.isdir(os.path.dirname(value)):
             start = os.path.dirname(value)
         elif isinstance(self._last_file_dir, str) and os.path.isdir(self._last_file_dir):
