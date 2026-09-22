@@ -519,19 +519,20 @@ class VFASynchronizer(Synchronizer):
         if last:
             self._cleanup_unstored_frames(job['frames'])
 
-    def _frame_set_paths(self, frames: dict[str, dict[str, Any]]) -> tuple[list[str], list[str], list[str]]:
-        """the image paths, angles and angle descriptions of a frame set, in base order, leaving
-        out a frame whose file is gone."""
-        image_paths, angles, angle_descriptions = [], [], []
+    def _frame_set_paths(self, frames: dict[str, dict[str, Any]]) -> tuple[list[str], list[str], list[str], list[str]]:
+        """the image paths, angles, angle descriptions and base ids (the cameras) of a frame set,
+        in base order, leaving out a frame whose file is gone."""
+        image_paths, angles, angle_descriptions, cameras = [], [], [], []
         for base_id, frame_info in sorted(frames.items()):
             if os.path.exists(frame_info['path']):
                 angle = frame_info['angle']
                 image_paths.append(frame_info['path'])
                 angles.append(angle)
                 angle_descriptions.append(self.angle_config.get(angle, f"Image from {angle} perspective"))
+                cameras.append(str(base_id))
             else:
                 self.logger.warning(f"Image path no longer exists: {frame_info['path']}")
-        return image_paths, angles, angle_descriptions
+        return image_paths, angles, angle_descriptions, cameras
 
     def _ask(self, request, what: str, time_bucket_key: float, **kwargs) -> dict[str, Any] | None:
         """what the frame analyzer answers to `request(**kwargs)`, or None when STOP came first.
@@ -574,14 +575,14 @@ class VFASynchronizer(Synchronizer):
                 continue
             try:
                 time_bucket_key = job['time_bucket_key']
-                image_paths, angles, _ = self._frame_set_paths(job['frames'])
+                image_paths, angles, _, cameras = self._frame_set_paths(job['frames'])
                 if not image_paths:
                     self.logger.warning(f"No valid images found for the features of time bucket {time_bucket_key}")
                 else:
                     result = self._ask(request_frame_features, 'features', time_bucket_key,
                                        image_paths=image_paths, angles=angles, session_id=self.session_id,
                                        url=self.vllm_frame_analyzer_url, zones=self.feature_zones,
-                                       keypoints=self.features_keypoints, gaze=self.gaze)
+                                       keypoints=self.features_keypoints, gaze=self.gaze, cameras=cameras)
                     if result:
                         self._note_gaze_errors(result)
                         self._upload_features(time_bucket_key, result)
@@ -653,7 +654,7 @@ class VFASynchronizer(Synchronizer):
                        or time_bucket_key - self._last_action_time >= self.action_interval - 1e-6)
                 if not due:
                     continue
-                image_paths, angles, angle_descriptions = self._frame_set_paths(job['frames'])
+                image_paths, angles, angle_descriptions, _ = self._frame_set_paths(job['frames'])
                 if not image_paths:
                     self.logger.warning(f"No valid images found for time bucket {time_bucket_key}")
                     continue

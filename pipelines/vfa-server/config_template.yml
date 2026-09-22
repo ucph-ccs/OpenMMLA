@@ -25,6 +25,10 @@ VLLMFrameAnalyzer:
     keypoint_confidence: 0.3  # a keypoint below this confidence counts as hidden (head yaw, torso, hands)
     inout_threshold: 0.5  # a gaze the gaze model puts in the frame with less than this probability is out_of_frame; a request may name its own
     gaze: true  # answer the gazes with the features (the gaze model); false answers the pose alone, and a request may ask either way
+    tracking:  # a track id per person across the frames of one camera (ByteTrack over the pose boxes), so a tag hidden for a while keeps naming its person; needs the request's cameras (the synchronizer sends its base ids) and one worker, as the tracks live in the process
+      enabled: true  # false answers without track ids, every frame standing alone
+      buffer_frames: 30  # frames a person out of view keeps their track and tag: at the bases' keyframe_interval 1.0 that is 30 s
+      idle_seconds: 600  # a camera not heard from for this long forgets its tracks
 
   # Supported backends
   ollama:

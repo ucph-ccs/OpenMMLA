@@ -65,13 +65,17 @@ def request_multi_angle_frame_analyze(image_paths: list[str], angles: list[str],
 
 def request_frame_features(image_paths: list[str], angles: list[str], session_id: str, url: str,
                            zones: dict | None = None, inout_threshold: float | None = None,
-                           keypoints: bool = True, gaze: bool = True, timeout: int = 60) -> dict[str, Any] | None:
+                           keypoints: bool = True, gaze: bool = True, timeout: int = 60,
+                           cameras: list[str] | None = None) -> dict[str, Any] | None:
     """Request the features of one set of frames (POST <url>/features): per frame, the persons as
     skeletons with the AprilTag each wears, their head yaw and gaze, as geometry on the image.
 
     Args:
         image_paths: the frames, one file per angle
         angles: the angle name of each frame
+        cameras: the camera (base id) of each frame: the server then tracks the persons of a
+            camera across the frames it sends, so a tag hidden for a while keeps naming its
+            person (optional; without it every frame stands alone)
         session_id: Session ID for identification
         url: URL of the frame analyzer service (.../vllm); /features is appended
         zones: named polygons a gaze may land in, {name: [[x, y], ...]} for every frame or
@@ -97,7 +101,11 @@ def request_frame_features(image_paths: list[str], angles: list[str], session_id
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
 
+    if cameras is not None and len(cameras) != len(image_paths):
+        raise ValueError("image_paths and cameras must have the same length")
     data = {'session_id': session_id, 'angles': json.dumps(angles)}
+    if cameras is not None:
+        data['cameras'] = json.dumps([str(camera) for camera in cameras])
     if zones:
         data['zones'] = json.dumps(zones)
     if inout_threshold is not None:

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import threading
+import time
 from io import BytesIO
 from PIL import Image
 from typing import Dict, Any, cast
@@ -16,6 +17,7 @@ from retinaface import RetinaFace
 
 from openmmla.services.server import Server
 from openmmla.services.vfa.features import frame_features
+from openmmla.services.vfa.tracking import DEFAULT_BUFFER_FRAMES, DEFAULT_IDLE_SECONDS, PersonTracker
 from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
@@ -239,6 +241,17 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.features_inout_threshold = _number(features_config.get('inout_threshold'), 0.5)
         # whether the features come with the gaze model's gazes (the pose alone is faster)
         self.features_gaze = _as_bool(features_config.get('gaze'), True)
+        # the tracks of each camera of a session (features.tracking): a ByteTrack over the pose
+        # boxes, made at a camera's first frame, kept while the camera keeps sending
+        tracking_config = features_config.get('tracking') or {}
+        if not isinstance(tracking_config, dict):
+            tracking_config = {}
+        self.tracking_enabled = _as_bool(tracking_config.get('enabled'), True)
+        self.tracking_buffer_frames = int(_number(tracking_config.get('buffer_frames'), DEFAULT_BUFFER_FRAMES))
+        self.tracking_idle_seconds = float(_number(tracking_config.get('idle_seconds'), DEFAULT_IDLE_SECONDS))
+        self.trackers: dict[tuple[str, str], PersonTracker] = {}
+        self.trackers_lock = threading.Lock()
+        self.tracking_error = None
         self.logger.info(f"Features endpoint: {self.features_enabled}"
                          f"{f' (pose model {self.pose_model} under {self.pose_weights_dir})' if self.features_enabled else ''}")
 
@@ -415,7 +428,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                          'gaze': bool(self.features_gaze) if self.features_enabled else None,
                          'pose_confidence': self.pose_confidence if self.features_enabled else None,
                          'keypoint_confidence': self.keypoint_confidence if self.features_enabled else None,
-                         'inout_threshold': self.features_inout_threshold if self.features_enabled else None},
+                         'inout_threshold': self.features_inout_threshold if self.features_enabled else None,
+                         'tracking': self._tracking_info() if self.features_enabled else None},
         }
         return {name: value for name, value in info.items() if value is not None}
 
@@ -437,6 +451,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             angles = _json_value(request.values.get('angles'), [])
             if not isinstance(angles, list):
                 angles = []
+            # the camera of each image (the base id): a frame with one is tracked across the
+            # frames that camera sent before
+            cameras = _json_value(request.values.get('cameras'), [])
+            if not isinstance(cameras, list):
+                cameras = []
             zones = _json_value(request.values.get('zones'), {})
             if zones and not isinstance(zones, dict):
                 return jsonify({'error': 'zones must be a JSON object: {name: polygon}, or {angle: {name: polygon}}'}), 400
@@ -450,9 +469,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             frames = []
             for i, image_file in enumerate(image_files):
                 angle = str(angles[i]) if i < len(angles) else f"perspective_{i + 1}"
+                camera = str(cameras[i]) if i < len(cameras) and cameras[i] not in (None, '') else None
                 try:
                     frames.append(self._frame_features(image_file.read(), angle, _zones_for(zones, angle),
-                                                       inout_threshold, keypoints, gaze))
+                                                       inout_threshold, keypoints, gaze,
+                                                       tracker=self._tracker(session_id, camera)))
                 except ValueError as e:
                     # a frame that is not an image, or a zone that is not a polygon: the client's
                     # to fix, so no retry is asked for
@@ -465,8 +486,35 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.error("Exception during feature extraction", exc_info=True)
             return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
 
+    def _tracker(self, session_id, camera) -> PersonTracker | None:
+        """the tracker of `camera` in `session_id`, made at its first frame; None without a
+        camera, with tracking off, or when Ultralytics' tracker cannot be made (said once)."""
+        if not camera or not getattr(self, 'tracking_enabled', False):
+            return None
+        key = (str(session_id or ''), str(camera))
+        with self.trackers_lock:
+            now = time.monotonic()
+            for idle in [k for k, tracker in self.trackers.items() if now - tracker.touched > self.tracking_idle_seconds]:
+                del self.trackers[idle]
+            tracker = self.trackers.get(key)
+            if tracker is None and self.tracking_error is None:
+                try:
+                    tracker = self.trackers[key] = PersonTracker(buffer_frames=self.tracking_buffer_frames)
+                except Exception as e:
+                    self.tracking_error = f"{type(e).__name__}: {e}"
+                    self.logger.error(f"The person tracker could not be made ({self.tracking_error}): /features "
+                                      f"answers without track ids. The vfa-server extra installs ultralytics.")
+        return tracker
+
+    def _tracking_info(self) -> dict:
+        """what /features tracks with, for describe()."""
+        return {'enabled': bool(getattr(self, 'tracking_enabled', False)),
+                'buffer_frames': getattr(self, 'tracking_buffer_frames', None),
+                'cameras': len(getattr(self, 'trackers', {}) or {}),
+                'error': getattr(self, 'tracking_error', None)}
+
     def _frame_features(self, image_bytes: bytes, angle: str, zones: dict, inout_threshold: float,
-                        keypoints: bool = True, gaze: bool = True) -> dict:
+                        keypoints: bool = True, gaze: bool = True, tracker: PersonTracker | None = None) -> dict:
         """the features of one frame: its AprilTags (centres in pixels from the top-left corner),
         its persons from the pose model, its faces and gazes from the gaze model, put together."""
         image = load_image(image_bytes)
@@ -493,9 +541,18 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 # the frame keeps its skeletons; the answer says the gazes are missing for a reason
                 gaze_error = f"{type(e).__name__}: {e}"
                 self.logger.error(f"Gaze detection failed on a {angle} frame: {gaze_error}", exc_info=True)
-        frame = frame_features(persons, tags, faces, zones, width, height, angle,
-                               min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
-                               keypoints=keypoints)
+        if tracker is None:
+            frame = frame_features(persons, tags, faces, zones, width, height, angle,
+                                   min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
+                                   keypoints=keypoints)
+        else:
+            # this camera's frames go through its tracker one at a time: the track ids first,
+            # then, once the tags are matched, the tag each track wore before
+            with tracker.lock:
+                tracker.track(persons)
+                frame = frame_features(persons, tags, faces, zones, width, height, angle,
+                                       min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
+                                       keypoints=keypoints, remember=tracker.assign)
         if gaze_error:
             frame['gaze_error'] = gaze_error
         return frame

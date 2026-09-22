@@ -155,6 +155,20 @@ def polygon_center(polygon) -> tuple[float, float]:
     return sum(p[0] for p in polygon) / len(polygon), sum(p[1] for p in polygon) / len(polygon)
 
 
+def name_persons(persons: list[dict]) -> None:
+    """sets `person_id`: the tag id as text; else, tracked, track_<id>; else unknown_1, unknown_2
+    ... from left to right."""
+    unknown = 0
+    for person in sorted(persons, key=lambda p: p['bbox'][0]):
+        if person.get('tag_id') is not None:
+            person['person_id'] = str(person['tag_id'])
+        elif person.get('track_id') is not None:
+            person['person_id'] = f"track_{person['track_id']}"
+        else:
+            unknown += 1
+            person['person_id'] = f'unknown_{unknown}'
+
+
 def assign_tags(persons: list[dict], tags: dict, min_confidence: float) -> None:
     """give each person the AprilTag on their chest, one to one: a tag inside a person's torso
     beats one merely inside their box, and among those the tag nearest the middle of the torso
@@ -385,14 +399,19 @@ def scaled_zones(zones: dict | None, width: int, height: int) -> dict:
 
 def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: dict | None,
                    width: int, height: int, angle: str, min_confidence: float = 0.3,
-                   inout_threshold: float = 0.5, keypoints: bool = True) -> dict:
-    """the features of one frame: `persons`, each with person_id, tag_id, tag_match, bbox, score,
+                   inout_threshold: float = 0.5, keypoints: bool = True, remember=None) -> dict:
+    """the features of one frame: `persons`, each with person_id, tag_id, tag_match, track_id, bbox, score,
     keypoints (left out with `keypoints=False`), head_yaw, face_bbox and gaze {point, inout,
     target}; `tags` as seen; `zones` as resolved, in pixels; `pairs`; and the frame's angle,
     width and height. `tags` maps tag id -> (x, y) pixel centre; `faces` are [{bbox, gaze_point,
-    inout}] from the gaze model."""
+    inout}] from the gaze model. `remember`, given, runs on the persons once the tags are matched
+    (PersonTracker.assign: a tracked person without a tag gets the one their track wore), and the
+    persons are then named again, a tracked one without a tag as track_<id>."""
     persons = [dict(person) for person in persons]
     assign_tags(persons, tags, min_confidence)
+    if remember is not None:
+        remember(persons)
+        name_persons(persons)
     assign_faces(persons, faces, min_confidence)
     zones_px = scaled_zones(zones, width, height)
     tolerance = gaze_tolerance(width, height)
@@ -404,6 +423,7 @@ def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: di
             'person_id': person['person_id'],
             'tag_id': person['tag_id'],
             'tag_match': person['tag_match'],
+            'track_id': person.get('track_id'),
             'bbox': [round(float(v), 1) for v in person['bbox']],
             'score': round(float(person.get('score', 0.0)), 3),
             'head_yaw': head_yaw(person, min_confidence),
