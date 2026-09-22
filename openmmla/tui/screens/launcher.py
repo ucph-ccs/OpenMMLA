@@ -340,6 +340,13 @@ def _card_stream_kind(card_name: str) -> str:
     return "audio" if card_name == "ASR Base" else "video"
 
 
+def _card_stream_app(card_name: str) -> str:
+    """the app a card's streams live under on the Stream Server: the first word
+    of its name, as + Add Stream fills their path (IPS Base -> ips/cam-1)."""
+    parts = str(card_name or "").split()
+    return parts[0].lower() if parts else ""
+
+
 def _mllm_config_path(root: str) -> str:
     return os.path.join(root, _MLLM_CONFIG_REL_PATH)
 
@@ -4410,6 +4417,7 @@ class ServicePanel(Widget):
                     project_dir=self._root,
                     stream_server=self._stream_server_address,
                     default_kind=_card_stream_kind(svc.name),
+                    app=_card_stream_app(svc.name),
                 )
                 await stream_scroll.mount(panel)
 
@@ -6744,7 +6752,7 @@ class ServicePanel(Widget):
         on the ASR card says kind: audio, so a microphone that names no device
         (a Mac's first) is captured as one wherever the entry is read."""
         pipeline = self._current_pipeline
-        app = pipeline.name.split()[0].lower() if pipeline is not None else "stream"
+        app = (_card_stream_app(pipeline.name) if pipeline is not None else "") or "stream"
         path = f"{app}/{safe_segment(name, 'stream')}"
         kind = {f"Streams.{name}.kind": "audio"} if pipeline is not None and pipeline.name == "ASR Base" else {}
         server = self._stream_server_address()

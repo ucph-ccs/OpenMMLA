@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
 from rich.cells import cell_len
 from rich.markup import escape as rich_escape
@@ -42,6 +43,18 @@ STREAM_REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/
 def _with_stream_path(command: str) -> str:
     """run stream commands with a predictable PATH for non-interactive SSH shells."""
     return f"export PATH={STREAM_REMOTE_PATH}:$PATH; {command}"
+
+
+def _stream_app(url: object, server: dict) -> str:
+    """the app a stream URL names, the path segment before the stream's own
+    name (rtmp://server-01:1935/vfa/raspi5-05 -> vfa): which card a stream
+    belongs with. Read as the Stream Server reads it when it speaks for the
+    URL (rtmp, rtsp and srt alike), else off the URL's path."""
+    path = stream_server_path(url, server)
+    if path is None:
+        path = urlsplit(str(url or "").strip()).path.lstrip("/")
+    segments = [part for part in str(path).split("/") if part]
+    return segments[0] if len(segments) > 1 else ""
 
 
 def _tmux_session_name(stream_name: str) -> str:
@@ -848,10 +861,14 @@ class StreamPanel(Widget):
         project_dir: str | None = None,
         stream_server: Callable[[], dict] | None = None,
         default_kind: str = "video",
+        app: str = "",
     ) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
+        # the app this card's streams live under on the Stream Server (ips,
+        # asr, vfa): which left-over captures are its own to stop
+        self._app = str(app or "").strip().lower()
         # what a stream with no kind that neither its target nor its device
         # tells is: the card's ("audio" on ASR, whose Mac microphone pushed
         # over RTMP names no device; "video" on IPS and VFA)
@@ -867,6 +884,55 @@ class StreamPanel(Widget):
         self._live: dict[str, str] = {}
         # what each capture host said of its devices, until Refresh
         self._device_answers: dict[str, capture_devices.Devices] = {}
+        # captures this console started that the config's Streams no longer
+        # name, listed below them so they can be stopped (_left_over_captures)
+        self._left_over: list[StreamDef] = []
+
+    def _rows(self) -> list[StreamDef]:
+        """what the table shows: this config's Streams, then the captures left
+        over from entries it no longer has."""
+        return self._streams + self._left_over
+
+    def _is_left_over(self, stream: StreamDef) -> bool:
+        return any(other.name == stream.name for other in self._left_over)
+
+    def _left_over_captures(self) -> list[StreamDef]:
+        """captures this console started that this config's Streams no longer
+        name: an entry deleted (or renamed) on the Config tab leaves its
+        ffmpeg and its tmux session running, and with no row there is nothing
+        to stop them with. They come from the stream registry, which notes
+        every stream started from here and the machine it runs on, and are
+        kept to the apps of this card's streams so that another card's stream
+        stays on its own tab."""
+        try:
+            entries = load_stream_registry(self._project_dir).get("streams", {})
+        except Exception:
+            return []
+        known = {stream.name for stream in self._streams}
+        server = self._server_address()
+        apps = {app for app in
+                [self._app] + [_stream_app(stream.read_url, server) for stream in self._streams] if app}
+        if not apps:
+            return []  # nothing to tell this card's streams from another's
+        found = []
+        for name, entry in entries.items():
+            if not isinstance(entry, dict) or entry.get("status") != "running" or str(name) in known:
+                continue
+            if not str(entry.get("ssh_profile") or "").strip():
+                continue  # no machine to stop it on
+            target = str(entry.get("target") or "")
+            read_target = str(entry.get("read_target") or "")
+            if _stream_app(read_target or target, server) not in apps:
+                continue  # another card's stream
+            found.append(StreamDef(
+                name=str(name),
+                ssh_profile=str(entry.get("ssh_profile") or ""),
+                device=str(entry.get("device") or ""),
+                target=target,
+                read_target=read_target,
+                kind=str(entry.get("kind") or ""),
+            ))
+        return found
 
     def capture_streams(self) -> list[capture_recordings.CaptureStream]:
         """every stream of this card the console runs, as Manage and the keep
@@ -986,7 +1052,9 @@ class StreamPanel(Widget):
     HELP = (
         "A stream is a Streams entry of this card's config (Config tab, + Add Stream): ffmpeg publishes a camera "
         "or microphone to the Stream Server, the bases pull it. Started once, it serves any number of sessions. "
-        "Status is its ffmpeg (Exited: it stopped by itself, Logs says why); Stream Server, what the server receives.\n"
+        "Status is its ffmpeg (Exited: it stopped by itself, Logs says why); Stream Server, what the server receives. "
+        "A row marked not in Streams is a capture left over from an entry the config no longer has: Stop is all "
+        "it is here for.\n"
         "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
         "else publishes; Device (click it): its camera or microphone there; Record (click it): whether it also "
         "records there. The Stream Server records on its side whatever reaches it (its card, Config tab).\n"
@@ -1030,10 +1098,9 @@ class StreamPanel(Widget):
         table = self.query_one("#stream-table", DataTable)
         table.add_columns("Name", "SSH Profile", "Device", "Target", "Record", "Status", "Stream Server")
         table.cursor_type = "row"
-        if self._streams:
-            self._refresh_all()
-        else:
-            self._rebuild_table()
+        self._rebuild_table()
+        # even with no Streams entry there may be a capture left over from one
+        self._refresh_all()
 
     def _log(self, msg: str) -> None:
         self.post_message(self.StreamLog(msg))
@@ -1048,7 +1115,8 @@ class StreamPanel(Widget):
 
     async def _async_refresh_all(self) -> None:
         loop = asyncio.get_event_loop()
-        for stream in self._streams:
+        self._left_over = await asyncio.to_thread(self._left_over_captures)
+        for stream in self._rows():
             if not stream.ssh_profile:
                 continue
             profile = None
@@ -1059,6 +1127,15 @@ class StreamPanel(Widget):
                     continue
             state = await loop.run_in_executor(None, _stream_state, profile, _tmux_session_name(stream.name))
             self._set_state(stream.name, state)
+        # a left-over whose host has nothing left of it (no session, no
+        # ffmpeg) is over: the registry is told so, and its row goes
+        done = [stream for stream in self._left_over
+                if stream.ssh_profile and self._states.get(stream.name) == STREAM_STOPPED]
+        for stream in done:
+            mark_stream_stopped(stream.name, project_dir=self._project_dir)
+        if done:
+            names = {stream.name for stream in done}
+            self._left_over = [stream for stream in self._left_over if stream.name not in names]
         self._live = await self._server_states()
         self._rebuild_table()
 
@@ -1079,7 +1156,7 @@ class StreamPanel(Widget):
         not answer. A stream that goes elsewhere has no entry."""
         server = self._server_address()
         host = str(server.get("host") or "").strip()
-        paths = {stream.name: self._server_path(stream, server) for stream in self._streams} if host else {}
+        paths = {stream.name: self._server_path(stream, server) for stream in self._rows()} if host else {}
         paths = {name: path for name, path in paths.items() if path}
         if not paths:
             return {}
@@ -1101,21 +1178,25 @@ class StreamPanel(Widget):
         except Exception:
             selected = ""
         table.clear()
+        rows = self._rows()
         try:
             self.query_one("#stream-empty", Static).update(
-                "" if self._streams else
+                "" if rows else
                 "No streams yet. Open the Config tab, expand Streams, press + Add Stream and Save; "
                 "then pick its SSH Profile and Device here."
             )
         except Exception:
             pass
-        if not self._streams:
+        if not rows:
             return
         # the arrows line up at the right edge of the column, under its heading
-        width = max([len("SSH Profile") - 3] + [cell_len(stream.ssh_profile or "-") for stream in self._streams])
-        device_width = max([len("Device") - 3] + [cell_len(stream.device or "-") for stream in self._streams])
-        record_width = max([len("Record") - 3] + [cell_len(self._record_cell(stream)) for stream in self._streams])
-        for stream in self._streams:
+        width = max([len("SSH Profile") - 3] + [cell_len(stream.ssh_profile or "-") for stream in rows])
+        device_width = max([len("Device") - 3] + [cell_len(stream.device or "-") for stream in rows])
+        record_width = max([len("Record") - 3] + [cell_len(self._record_cell(stream)) for stream in rows])
+        for stream in rows:
+            # a left-over capture has no entry to edit: its cells are plain,
+            # and only Stop, Logs and Probe do anything on its row
+            left_over = self._is_left_over(stream)
             record = self._record_cell(stream)
             state = self._states.get(stream.name)
             if not stream.ssh_profile:
@@ -1132,15 +1213,18 @@ class StreamPanel(Widget):
             live = self._live.get(stream.name)
             profile = stream.ssh_profile or "-"
             table.add_row(
-                stream.name,
+                self._name_cell(stream),
                 # drawn as the dropdown it is
+                profile if left_over else
                 Text.assemble(profile + " " * (width - cell_len(profile)), ("  ▾", "dim")),
                 # a dropdown of the devices of that machine; an external stream's is its publisher's
+                (stream.device or "-") if left_over else
                 Text.assemble((stream.device or "-") + " " * (device_width - cell_len(stream.device or "-")),
                               ("  ▾", "dim")) if stream.ssh_profile else "-",
                 stream.target,
                 # a dropdown too; nobody records an external stream here, as the
                 # console does not run its ffmpeg
+                "n/a" if left_over else
                 Text.assemble(record + " " * (record_width - cell_len(record)),
                               ("  ▾", "dim")) if stream.ssh_profile else "n/a",
                 status,
@@ -1148,10 +1232,26 @@ class StreamPanel(Widget):
                 Text("○ not live", "dim") if live == "idle" else
                 Text("no answer", "dim") if live == "unknown" else "-",
             )
-        for row, stream in enumerate(self._streams):
-            if stream.name == selected:
+        for row, stream in enumerate(rows):
+            if str(self._name_cell(stream)) == selected:
                 table.move_cursor(row=row)
                 break
+
+    def _name_cell(self, stream: StreamDef):
+        """the Name column: a capture the config's Streams no longer name says
+        so, as it is only there to be stopped."""
+        if not self._is_left_over(stream):
+            return stream.name
+        return Text.assemble(stream.name, ("  (not in Streams)", "yellow"))
+
+    def _left_over_note(self, stream: StreamDef) -> str:
+        """why a left-over row takes no edits: its Streams entry is gone, so
+        there is nothing to write a machine, a device or Record into."""
+        return (
+            f"[yellow]{stream.name} is a capture left over from a Streams entry this config no longer has: "
+            f"Stop it (and Logs to see what it was doing), or add the entry back on the Config tab to run "
+            f"it from here again.[/yellow]"
+        )
 
     @staticmethod
     def _profile_options(current: str) -> list[tuple[str, str]]:
@@ -1167,9 +1267,13 @@ class StreamPanel(Widget):
 
     def on_stream_table_profile_menu_requested(self, event: StreamTable.ProfileMenuRequested) -> None:
         event.stop()
-        if not 0 <= event.row < len(self._streams):
+        rows = self._rows()
+        if not 0 <= event.row < len(rows):
             return
-        stream = self._streams[event.row]
+        stream = rows[event.row]
+        if self._is_left_over(stream):
+            self._log(self._left_over_note(stream))
+            return
         if self._statuses.get(stream.name, False):
             where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
             self._log(
@@ -1192,9 +1296,13 @@ class StreamPanel(Widget):
         stream's kind: asked once and kept until Refresh, then offered under
         the cell."""
         event.stop()
-        if not 0 <= event.row < len(self._streams):
+        rows = self._rows()
+        if not 0 <= event.row < len(rows):
             return
-        stream = self._streams[event.row]
+        stream = rows[event.row]
+        if self._is_left_over(stream):
+            self._log(self._left_over_note(stream))
+            return
         if not stream.ssh_profile:
             self._log(f"[yellow]{stream.name} is external: its device is up to whoever publishes it. "
                       f"{self._EXTERNAL_HINT}[/yellow]")
@@ -1260,9 +1368,13 @@ class StreamPanel(Widget):
         machine that captures it, next to the push. The keep time of those
         recordings stays Manage's, for every stream of the card at once."""
         event.stop()
-        if not 0 <= event.row < len(self._streams):
+        rows = self._rows()
+        if not 0 <= event.row < len(rows):
             return
-        stream = self._streams[event.row]
+        stream = rows[event.row]
+        if self._is_left_over(stream):
+            self._log(self._left_over_note(stream))
+            return
         if not stream.ssh_profile:
             self._log(
                 f"[yellow]{stream.name} is external: the console does not run its ffmpeg, so it cannot "
@@ -1285,10 +1397,11 @@ class StreamPanel(Widget):
     def _get_selected_stream(self) -> StreamDef | None:
         try:
             table = self.query_one("#stream-table", DataTable)
+            rows = self._rows()
             row_key = table.cursor_row
-            if row_key < 0 or row_key >= len(self._streams):
+            if row_key < 0 or row_key >= len(rows):
                 return None
-            return self._streams[row_key]
+            return rows[row_key]
         except Exception:
             return None
 
@@ -1296,7 +1409,9 @@ class StreamPanel(Widget):
         btn = event.button.id or ""
         if btn == "stream-btn-start":
             stream = self._get_selected_stream()
-            if stream and stream.ssh_profile:
+            if stream and self._is_left_over(stream):
+                self._log(self._left_over_note(stream))
+            elif stream and stream.ssh_profile:
                 self._start_stream(stream)
             elif stream and not stream.ssh_profile:
                 self._log(
@@ -1337,7 +1452,7 @@ class StreamPanel(Widget):
                 if s.ssh_profile:
                     self._start_stream(s)
         elif btn == "stream-btn-stop-all":
-            for s in self._streams:
+            for s in self._rows():
                 if s.ssh_profile:
                     self._stop_stream(s)
         elif btn == "stream-btn-refresh":
@@ -1643,6 +1758,9 @@ class StreamPanel(Widget):
                 recorded = self._registered_record_path(stream.name)
                 mark_stream_stopped(stream.name, project_dir=self._project_dir)
                 self._set_state(stream.name, STREAM_STOPPED)
+                if self._is_left_over(stream):
+                    # it was on the tab to be stopped: its row goes with it
+                    self._left_over = [s for s in self._left_over if s.name != stream.name]
                 self._live = await self._server_states()
                 record_dir = self._record_dir(stream)
                 if recorded:
@@ -1715,14 +1833,17 @@ class StreamPanel(Widget):
     def update_streams(self, streams: list[StreamDef]) -> None:
         """replace the stream list and refresh. Shown at once, a stream whose
         machine is the same with the status it had, then checked again."""
-        hosts = {stream.name: stream.ssh_profile for stream in self._streams}
+        hosts = {stream.name: stream.ssh_profile for stream in self._rows()}
         self._streams = list(streams)
+        # an entry taken out of the config is a left-over capture until it is
+        # stopped, and keeps the status it had until the refresh says otherwise
+        self._left_over = [stream for stream in self._left_over
+                           if not any(other.name == stream.name for other in self._streams)]
         self._statuses = {
-            stream.name: self._statuses[stream.name] for stream in self._streams
+            stream.name: self._statuses[stream.name] for stream in self._rows()
             if stream.name in self._statuses and hosts.get(stream.name) == stream.ssh_profile
         }
         self._states = {name: self._states[name] for name in self._statuses if name in self._states}
-        self._live = {stream.name: self._live[stream.name] for stream in self._streams if stream.name in self._live}
+        self._live = {stream.name: self._live[stream.name] for stream in self._rows() if stream.name in self._live}
         self._rebuild_table()
-        if streams:
-            self._refresh_all()
+        self._refresh_all()
