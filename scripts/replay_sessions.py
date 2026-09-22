@@ -14,7 +14,10 @@ For every session the runner reads `artifacts/<session>/manifest.json`, picks th
 microphone (jabra-0, else vimo-0-ch0, vimo-0, badge-0) and every video, writes one config per
 pipeline from that pipeline's template config (`--asr-template` ...: the pilot configs, whose
 system sections and camera intrinsics are kept), puts the session's transformation matrices in
-`<project_dir>/camera_sync/` (see `calibration_for`), launches every base and synchronizer in a
+`<project_dir>/camera_sync/` (a multi-camera session calibrates itself first with `mmla
+ses-calibrate`: a camera's own fit is taken when it rests on enough paired sightings, else the
+given calibration's entry, else the camera stays out of the IPS run; see `choose_matrices`),
+launches every base and synchronizer in a
 tmux session `replay-<session>` (each in its pipeline's conda environment, logging under
 `artifacts/<session>/pipelines/<pipeline>-base/logs/replay_*.log`), sends START on each
 pipeline's control channel once all of them wait for it, watches the logs until every video was
@@ -42,6 +45,8 @@ EVENT_OF = {'asr': 'asr_transcription', 'vfa': 'vfa_features', 'ips': 'ips_trans
 EVENTS_OF = {'asr': ['asr_recognition', 'asr_transcription'], 'vfa': ['vfa_features'],
              'ips': ['ips_translation', 'ips_rotation', 'ips_relation']}  # what --force clears before a pipeline runs again
 CALIBRATIONS_DIR = os.path.join('pipelines', 'ips-base', 'camera_sync', 'calibrations')
+MIN_INLIERS = 30  # paired sightings a camera's own fit must rest on
+MAX_P90_M = 0.15  # and the residual its p90 must stay within
 
 
 def log(message: str) -> None:
@@ -120,6 +125,30 @@ def ips_config(template: dict, plan: dict) -> dict:
     config['Bases'] = [{'id': device, 'camera': 'logitechC920', 'source': 'file', 'source_index': plan['videos'][device],
                         'main': device == plan['ips_main']} for device in plan['ips_cameras']]
     return config
+
+
+def choose_matrices(report: dict, own: dict, given: dict | None, main: str,
+                    min_inliers: int = MIN_INLIERS, max_p90: float = MAX_P90_M) -> tuple[dict, list[str], dict]:
+    """which transform each camera of an IPS run takes: its own fit from the session (ses-calibrate's
+    report and matrices) when it rests on at least `min_inliers` pairs with a p90 residual within
+    `max_p90`, else the given calibration's entry, else none, and the camera stays out. Returns
+    (matrices for transformation_matrices_<main>.json, the cameras of the run, the decisions)."""
+    matrices, cameras, decisions = {}, [main], {}
+    for camera, entry in (report.get('cameras') or {}).items():
+        fit = entry.get('residual_m') or {}
+        if camera in own and entry.get('inliers', 0) >= min_inliers and fit.get('p90', 1e9) <= max_p90:
+            matrices[camera] = own[camera]
+            decisions[camera] = f"own fit ({entry['inliers']} pairs, p90 {fit['p90']} m)"
+        elif given and camera in given:
+            matrices[camera] = given[camera]
+            scored = (entry.get('given') or {}).get('residual_m') or {}
+            decisions[camera] = f"given calibration ({entry.get('pairs', 0)} pairs to judge it" + \
+                                (f", its residual median {scored['median']} m)" if scored else ")")
+        else:
+            decisions[camera] = f"left out ({entry.get('pairs', 0)} pairs, no given entry)"
+            continue
+        cameras.append(camera)
+    return matrices, sorted(cameras), decisions
 
 
 def commands(plan: dict, pipelines: list[str], configs: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -205,12 +234,19 @@ class Runner:
             for pipeline in wanted:
                 self._clients()[0].delete_event_types(sid, EVENTS_OF[pipeline])
                 log(f"{sid}: cleared the {pipeline} events of an earlier run")
-        configs = self.write_configs(plan, wanted)
         logs_of = {p: os.path.join(self.project, 'artifacts', sid, 'pipelines', f'{p}-base', 'logs') for p in wanted}
         for d in logs_of.values():
             os.makedirs(d, exist_ok=True)
             for old in glob.glob(os.path.join(d, 'replay_*.log')):
                 os.remove(old)
+        if 'ips' in wanted:
+            try:
+                self.calibrate(plan, self.template_paths['ips'])
+            except Exception as e:
+                log(f"{sid}: {type(e).__name__}: {e}; IPS runs with the main camera alone")
+                plan['ips_cameras'], plan['ips_matrices'] = [plan['ips_main']], {}
+            summary['ips_cameras'], summary['ips_decisions'] = plan['ips_cameras'], plan.get('ips_decisions')
+        configs = self.write_configs(plan, wanted)
         launcher = os.path.join(self.project, 'artifacts', sid, 'pipelines', 'replay_run.sh')
         with open(launcher, 'w') as f:
             f.write(LAUNCHER.format(project=self.project))
@@ -272,12 +308,36 @@ class Runner:
             camera_sync = os.path.join(self.project, 'camera_sync')
             os.makedirs(camera_sync, exist_ok=True)
             target = os.path.join(camera_sync, f"transformation_matrices_{plan['ips_main']}.json")
-            if plan['calibration']:
-                shutil.copy(os.path.join(self.project, CALIBRATIONS_DIR, plan['calibration'], f"transformation_matrices_{plan['ips_main']}.json"), target)
-            else:
-                with open(target, 'w') as f:
-                    f.write('{}\n')
+            with open(target, 'w') as f:
+                json.dump(plan.get('ips_matrices') or {}, f, indent=2)
         return paths
+
+    def calibrate(self, plan: dict, ips_config: str) -> None:
+        """a multi-camera session calibrates itself: mmla ses-calibrate over its videos (the given
+        calibration scored on the way), then choose_matrices sets the IPS cameras and matrices."""
+        sid, main = plan['session_id'], plan['ips_main']
+        given_path = os.path.join(self.project, CALIBRATIONS_DIR, plan['calibration'], f'transformation_matrices_{main}.json') if plan['calibration'] else None
+        given = json.load(open(given_path)) if given_path and os.path.isfile(given_path) else None
+        if len(plan['ips_cameras']) < 2:
+            plan['ips_matrices'] = {}
+            return
+        out_dir = os.path.join(self.project, 'artifacts', sid, 'analysis', 'calibration')
+        command = (f"source ~/miniforge3/etc/profile.d/conda.sh && conda activate {ENVS['ips']} && cd {self.project} && "
+                   f"mmla ses-calibrate -c {ips_config} -sid {sid} -mc {main} -cams {','.join(plan['ips_cameras'])} -st 2"
+                   + (f" -v {given_path}" if given else ''))
+        log(f"{sid}: calibrating from the recordings ({len(plan['ips_cameras'])} cameras)")
+        result = subprocess.run(['bash', '-c', command], capture_output=True, text=True)
+        with open(os.path.join(self.project, 'artifacts', sid, 'pipelines', 'ips-base', 'logs', 'replay_calibrate.log'), 'w') as f:
+            f.write(result.stdout + result.stderr)
+        report_path = os.path.join(out_dir, 'calibration_report.json')
+        if result.returncode or not os.path.isfile(report_path):
+            raise RuntimeError(f"ses-calibrate failed: {result.stderr.strip()[-200:]}")
+        report = json.load(open(report_path))
+        own = json.load(open(os.path.join(out_dir, f'transformation_matrices_{main}.json')))
+        matrices, cameras, decisions = choose_matrices(report, own, given, main)
+        plan['ips_matrices'], plan['ips_cameras'], plan['ips_decisions'] = matrices, cameras, decisions
+        for camera, decision in decisions.items():
+            log(f"{sid}: {camera} -> {main}: {decision}")
 
     def ensure_session(self, plan: dict) -> None:
         mongo = self._clients()[1]
