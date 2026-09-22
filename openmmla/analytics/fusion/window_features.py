@@ -195,6 +195,29 @@ def windows(start: float, end: float, window: float, step: float) -> list[tuple[
     return out
 
 
+def _word_stamps(record: dict) -> list[float] | None:
+    """the start of every word of a transcribed chunk, in seconds from the chunk's start, in the
+    order they were said; None when the chunk carries no stamped words (no `words`, or none with a
+    start). A word the aligner could not place takes the stamp of the word before it."""
+    entries = record.get('words')
+    if isinstance(entries, str):
+        try:
+            entries = json.loads(entries)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(entries, list) or not entries:
+        return None
+    stamps, last = [], None
+    for entry in entries:
+        try:
+            last = float(entry['start'])
+        except (KeyError, TypeError, ValueError):
+            pass
+        if last is not None:
+            stamps.append(last)
+    return stamps or None
+
+
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
 
@@ -316,7 +339,18 @@ def speech_features(recognition: EventIndex, transcription: EventIndex, ws: floa
     started = [(record, start, end) for record, start, end in chunks if ws <= start < we]
     out['n_spurts'] = len(started)
     out['mean_spurt_seconds'] = _round(_mean(end - start for _, start, end in started))
-    out['words'] = sum(len(str(record.get('text') or '').split()) for record, _, _ in started)
+    # a word counts in the window it was spoken in when the transcriber stamped it (word_level:
+    # seconds from the chunk's start); a chunk without stamps gives its words to the window it
+    # started in, and a chunk of minutes would otherwise give them all to one window
+    words = 0
+    for record, start, _ in chunks:
+        stamps = _word_stamps(record)
+        if stamps is None:
+            if ws <= start < we:
+                words += len(str(record.get('text') or '').split())
+        else:
+            words += sum(1 for stamp in stamps if ws <= start + stamp < we)
+    out['words'] = words
 
     # the anonymous turns: labels hold within a chunk, so the counts are per chunk; the entropy
     # is averaged over the chunks, the switches and the overlap summed
