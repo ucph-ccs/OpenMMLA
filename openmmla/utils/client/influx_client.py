@@ -77,7 +77,9 @@ class InfluxDBClientWrapper:
                      start_time: datetime | None = None,
                      end_time: datetime | None = None) -> list[dict]:
         if start_time is None:
-            start_time = datetime.now(timezone.utc) - timedelta(days=365)
+            # events are stamped with their own window time, so a session recorded years ago
+            # is as far back as that: the session id bounds the query, not a lookback
+            start_time = datetime(1970, 1, 1, tzinfo=timezone.utc)
         if end_time is None:
             end_time = datetime.now(timezone.utc)
 
@@ -116,7 +118,7 @@ class InfluxDBClientWrapper:
         try:
             query = f'''
                 from(bucket: "{self.bucket}")
-                |> range(start: -365d)
+                |> range(start: 0)
                 |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}")
                 |> keep(columns: ["session_id"])
                 |> distinct(column: "session_id")
