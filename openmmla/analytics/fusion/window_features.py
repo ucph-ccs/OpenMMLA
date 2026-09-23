@@ -6,7 +6,8 @@ Speech comes from `asr_recognition` (who-or-whether someone spoke, 3 s buckets) 
 space from `ips_translation` and `ips_relation` (positions, facing, movement, presence); body
 and gaze from `vfa_features` (head yaw, wrist speed, where gazes land, joint attention, hand
 distance); the semantic layer from `vfa_action` (the VLM's labels). Every person is a tag id,
-every pair a sorted tag pair; persons the pose model saw without a tag are left out.
+every pair a sorted tag pair; persons the pose model saw without a tag count only in the seat
+trace.
 
 The events come from InfluxDB (a session id) or from a Sessions -> Export Measurements folder
 (`<session>_<suffix>.json`), so a table can be built offline from an export.
@@ -21,6 +22,14 @@ counted beside the values (`_cameras`, `_frame_sets`), since frame counts double
 camera, and a frame set that lost or gained a frame is counted in `n_vfa_incomplete`, because
 numbering by place can then give one camera's frame to another.
 
+The seat trace keeps what the untagged bodies say about presence. A participant's seat on a
+camera is the median centre of their own boxes there (SEAT_MIN_BOXES at least), and a body
+without a tag is at the seat within half their median box width. `p<tag>_untagged_at_seat_ratio`
+is the share of the window's frame sets (all of them, so a camera that dropped out lowers it) in
+which such a body stood at the seat while the tag was not seen on that camera (someone there whose
+tag was not read), empty when no camera holding the seat gave a frame; `n_untagged_at_seats`
+counts those bodies per frame set. A table of a session without VFA has neither.
+
 A session with personal microphones (transcripts that carry a `participant`) counts each
 wearer's words only in the 3 s buckets the synchronizer's energy vote gave them
 (`p<tag>_words`); its spurts, words and turns stay the group microphone's. A session without
@@ -33,6 +42,7 @@ import csv
 import json
 import math
 import os
+import statistics
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
@@ -64,6 +74,12 @@ ASR_BUCKET = 3.0
 COCO_WRISTS = {'left': 9, 'right': 10}
 # the events that are instants (a frame set, a label), not spans: each belongs to one window
 INSTANT_EVENT_TYPES = {EVENT_TYPE_VFA_FEATURES, EVENT_TYPE_VFA_ACTION}
+# a tag's seat on a camera is the median centre of its own boxes there; a body is at the seat
+# within this many of those boxes' median widths of it
+SEAT_RADIUS_WIDTHS = 0.5
+# a camera learns a tag's seat only from at least this many of the tag's boxes (5 s at 2 frame
+# sets a second), so a tag misread for a few frames makes no seat
+SEAT_MIN_BOXES = 10
 
 
 # ---- loading ----
@@ -761,6 +777,101 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
     return out
 
 
+# ---- the seats ----
+
+def _box_centre(person: dict) -> tuple[float, float, float] | None:
+    """the person's `bbox` [x1, y1, x2, y2] as (centre x, centre y, width); None when the box is
+    missing, short, not a number or empty."""
+    bbox = person.get('bbox')
+    try:
+        x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) for v in (x1, y1, x2, y2)) or x2 <= x1:
+        return None
+    return (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1
+
+
+def seats_of(records: Iterable[dict], participants: list[str],
+             layout: tuple[int | None, frozenset[str]] | None = None) -> dict[str, dict[str, tuple[float, float, float]]]:
+    """the seat of every participant on every camera, learned from the whole session: camera ->
+    tag -> (x, y, radius), the median centre of the tag's own boxes on that camera and
+    SEAT_RADIUS_WIDTHS of their median width. A camera that gave a tag fewer than SEAT_MIN_BOXES
+    boxes has no seat for it. `layout` is the session's frame_set_layout, worked out from the
+    records when not given."""
+    records = list(records)
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    wanted = set(participants)
+    boxes: dict[str, dict[str, list[tuple[float, float, float]]]] = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        frames = _frames_of(record)
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            for person in frame.get('persons') or []:
+                tag = person.get('tag_id')
+                if tag is None or str(tag) not in wanted:
+                    continue
+                box = _box_centre(person)
+                if box is not None:
+                    boxes[camera][str(tag)].append(box)
+    seats: dict[str, dict[str, tuple[float, float, float]]] = {}
+    for camera, by_tag in boxes.items():
+        for tag, found in by_tag.items():
+            if len(found) < SEAT_MIN_BOXES:
+                continue
+            xs, ys, widths = zip(*found)
+            seats.setdefault(camera, {})[tag] = (statistics.median(xs), statistics.median(ys),
+                                                 SEAT_RADIUS_WIDTHS * statistics.median(widths))
+    return seats
+
+
+def _at_seat(body: tuple[float, float, float], seat: tuple[float, float, float]) -> bool:
+    """whether a body's centre is within the seat's radius (on it counts)."""
+    return math.dist(body[:2], seat[:2]) <= seat[2]
+
+
+def seat_features(features: EventIndex, ws: float, we: float, participants: list[str], seats: dict,
+                  layout: tuple[int | None, frozenset[str]]) -> dict:
+    """where the pose model saw bodies without a tag at the participants' seats in the window.
+    p<tag>_untagged_at_seat_ratio: the share of the window's frame sets in which, on some camera
+    holding the tag's seat, a body without a tag stood at the seat while the tag itself was not
+    seen on that camera; None when no such camera gave a frame. A frame set that lost those
+    cameras counts as one without such a body, so a camera that dropped out cannot make one frame
+    the whole window. n_untagged_at_seats: the untagged bodies at any seat, summed over the
+    cameras, per frame set of the window; None when no camera holding a seat gave a frame."""
+    _, shared = layout
+    hits, bases = defaultdict(int), defaultdict(int)
+    total, seat_sets = 0, 0
+    inside = features.between(ws, we)
+    for record, _, _ in inside:
+        frames = _frames_of(record)
+        with_seat, hit, any_seat, count = set(), set(), False, 0
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            here = seats.get(camera)
+            if not here:
+                continue
+            any_seat = True
+            persons = frame.get('persons') or []
+            tagged = {str(p['tag_id']) for p in persons if p.get('tag_id') is not None}
+            bodies = [box for box in (_box_centre(p) for p in persons if p.get('tag_id') is None) if box is not None]
+            count += sum(1 for body in bodies if any(_at_seat(body, seat) for seat in here.values()))
+            for tag, seat in here.items():
+                with_seat.add(tag)
+                if tag not in tagged and any(_at_seat(body, seat) for body in bodies):
+                    hit.add(tag)
+        if any_seat:
+            seat_sets += 1
+            total += count
+        for tag in with_seat:
+            bases[tag] += 1
+        for tag in hit:
+            hits[tag] += 1
+    # the share is of every frame set in the window, the one the presence gate reads
+    out = {f'p{tag}_untagged_at_seat_ratio': _round(hits[tag] / len(inside)) if bases[tag] else None
+           for tag in participants}
+    out['n_untagged_at_seats'] = _round(total / len(inside)) if seat_sets else None
+    return out
+
+
 # ---- semantic ----
 
 def action_features(actions: EventIndex, ws: float, we: float, participants: list[str]) -> dict:
@@ -809,6 +920,8 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     relations = EventIndex(events.get(EVENT_TYPE_IPS_RELATION, []), 1.0)
     features = EventIndex(events.get(EVENT_TYPE_VFA_FEATURES, []), instant=True)
     layout = frame_set_layout(features.records)
+    # the seats of the participants, learned once from the whole session; None without VFA, so its table has no seat trace
+    seats = seats_of(features.records, participants, layout) if len(features) else None
     actions = EventIndex(events.get(EVENT_TYPE_VFA_ACTION, []), instant=True)
     # the personal microphones and the buckets each wearer won; None for a session without them
     personal = personal_speech(events.get(EVENT_TYPE_ASR_RECOGNITION, []), events.get(EVENT_TYPE_ASR_TRANSCRIPTION, []))
@@ -819,6 +932,8 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
         row.update(space_features(translations, relations, ws, we, participants))
         row.update(body_gaze_features(features, ws, we, participants, layout))
         row.update(action_features(actions, ws, we, participants))
+        if seats is not None:
+            row.update(seat_features(features, ws, we, participants, seats, layout))
         rows.append(row)
     return rows
 

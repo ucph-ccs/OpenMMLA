@@ -39,7 +39,7 @@ def get_parser():
     parser.add_argument('-s', '--sessions', default=None, help="only sessions whose id contains this text")
     parser.add_argument('--variant', choices=('j0', 'j1', 'j2'), default='j0',
                         help="j0 the window alone; j1 with the two windows before it; j2 j0 with unclear offered, "
-                             "on coded windows only (default j0)")
+                             "on coded windows only, absent ones aside (default j0)")
     parser.add_argument('--pilot', action='store_true',
                         help="dev sessions only, and a state without head-turn variability, gaze switches, hand "
                              "movement or frame shares; never scored")
@@ -97,10 +97,14 @@ def _test_sessions() -> set[str]:
 
 
 def _coded_windows(session_dir: Path, coder: str | None) -> list[float]:
-    """the window starts a coder labelled in a session (j2 asks about those only)."""
-    from openmmla.analytics.interaction.labels import load_labels
+    """the window starts a coder labelled in a session, absent ones aside (j2 asks about those
+    only)."""
+    from openmmla.analytics.interaction.labels import ABSENT, load_labels
     labels = load_labels(str(session_dir), coder=coder)
-    return [] if labels is None or len(labels) == 0 else [float(start) for start in labels['window_start']]
+    if labels is None or len(labels) == 0:
+        return []
+    labels = labels[labels['label'] != ABSENT]
+    return [float(start) for start in labels['window_start']]
 
 
 def find_tables(artifacts: Path, pattern: str | None = None) -> list[tuple[str, Path]]:

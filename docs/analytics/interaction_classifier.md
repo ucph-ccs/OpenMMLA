@@ -18,15 +18,18 @@ The coder presses one key per window in `mmla ses-code`, from a codebook both th
 | 1 | individual | nobody interacts with another member for most of the window: working alone, waiting, watching the teacher |
 | 2 | social | members interact (talk, gesture, look at each other), but not about the task |
 | 3 | collaborative | members interact about the task: talk about it, joint attention on the shared artifact, pointing, handing over, working on one thing together |
-| 0 | unclear | cannot tell: out of view, no audio, or a transition with no dominant state |
+| 4 | absent | fewer than two members at the group's place for most of the window (everyone away, or one of a pair); a triad with one away is coded normally |
+| 0 | unclear | the group is at its place but its state cannot be told: members out of frame and inaudible, or a transition with no dominant state |
 
 The rule is to label the group as a whole with the state that fills most of the ten seconds. Two members collaborating while a third works alone is still collaborative.
 
+Code what the video shows, not what the sensors show. With both video and audio missing, code unclear unless the video shows the seats empty. For a pair with one member away, absent is the pre-registered code, not individual.
+
 - **Binary target.** Interaction (social or collaborative) against individual. It is always derived, as p_interaction = p_social + p_collaborative, and never trained on its own. The exception is the `--target binary` fallback described below.
-- **Unclear windows** are left out of the loss and the scores. They stay in the sequence as context and are counted per session.
+- **Unclear and absent windows** are left out of the loss, the headline and every class metric. They stay in the sequence as context, break coded runs for the temporal metrics, and are counted per session (`label_counts.csv`, `metrics.json` labels). Absent windows are never scored as individual.
 - **Labels.** Each coder has an append-only file, `artifacts/<session>/labels/<coder>.jsonl`. A later line for a window replaces an earlier one, and a line with label `null` undoes it.
 - **Truth.** The truth is the primary coder: `--coder`, or by default the coder with the most windows over the dev sessions. TEST labels never decide it, and a `--split test` run must name the coder with `--coder`. Where `adjudicated.jsonl` exists, it overrules that coder for the windows it holds. `config.json` records the coder and how it was chosen.
-- **Second coder.** A second coder's overlapping windows give Cohen's κ, three-class and binary. It is reported as the ceiling. Labels are never averaged across coders.
+- **Second coder.** A second coder's overlapping windows give Cohen's κ, three-class and binary, and κ over all five codes (the three classes, unclear, absent) on every window both coded. It is reported as the ceiling. Labels are never averaged across coders.
 - **Join.** Labels join the table on the window start, to the millisecond, then on the nearest window within 0.5 s. A run aborts when more than 1 % of labels find no window. That happens when the coding grid moved because a recording was missing on the coding machine. `--join overlap` then maps each label to the window it overlaps by at least 5 s and reports the offsets.
 
 ## From the fusion table to the model inputs
@@ -47,7 +50,7 @@ The rule is to label the group as a whole with the state that fills most of the 
 
 Slots follow descending coverage. A duplicate-skeleton gate masks a person's camera values in a window where two kept persons are seen together with their hands under 0.01 frame widths apart on average: that is one body tagged twice.
 
-**Zero is not missing.** A value no sensor could observe is NaN before scaling and 0 after it, and a mask column says which of the two it is. An observed 0 stays 0. So IPS being off never reads as "far apart", and a window with no transcription chunk never reads as "no words".
+**Zero is not missing.** A value no sensor could observe is NaN before scaling and 0 after it, and a mask column says which of the two it is. An observed 0 stays 0. So IPS being off never reads as "far apart", and a window with no transcription chunk never reads as "no words". One exception is new in layout version 2: a present_ratio of 0 in a window a camera saw the person in means IPS lost the badge, not the person, so it is unobserved (mask m_ips off). A camera sighting the duplicate-skeleton gate masks does not count.
 
 **Tokens** (per window, the network's input and the source of every other view):
 
@@ -76,6 +79,7 @@ The dropped columns, with a reason each (`layout.DROPPED`), include:
 - `yaw_mean`, whose sign depends on the seat;
 - `face_ab`/`face_ba`, replaced by face_any, and the near-dead mutual gaze and mutual facing;
 - every coverage counter (`n_*`, `*_frames`, `*_frame_sets`, `*_cameras`). Camera count is a session fingerprint, so these are only masks and normalisers;
+- the seat trace (`p<tag>_untagged_at_seat_ratio`, `n_untagged_at_seats`): untagged bodies at the persons' seats, read by the presence gate only and never a model input. `data_checks.json` gives its support and, per session, `seat_check`: how often the trace could be read, how often a body sat at a missing person's seat, and how many present_ratio zeros the camera made unobserved;
 - the action columns, reserved for a semantic block once the VLM runs.
 
 ## Models
@@ -158,6 +162,8 @@ These sessions never reach a scaler, the Jev word bins or a pilot, and a LOSO ru
 
 **Inclusion rule S1** (fixed before any label is read, in `layout.session_inclusion`): a session enters a run only when its roster keeps at least two persons and two of them are observed together (positioned by IPS or seen by a camera) in at least 30 % of its windows. A session that fails is left out whole, DEV or TEST: it trains nothing and is scored nowhere. The run names it and the reason in `roster.json` (`included: false`), and refuses when nothing is left.
 
+**Presence gate** (pre-registered, fixed before any label is read, in `presence.py`): a window is gated absent when fewer than two (`MIN_OBSERVED`) of the roster's kept persons are observed in it. A person is observed when IPS positioned them (present_ratio > 0), a camera saw their tag (frame sets > 0), or, where the table has the seat trace, an untagged body stood at their seat in at least half of the window's frame sets (`p<tag>_untagged_at_seat_ratio` ≥ 0.5). The gate never makes a label. `metrics.json` `presence_gate` scores it against the coder's absent on the held-out coded windows (absent against the three classes, unclear left out): precision, recall, F1, κ and the counts, overall, by observed persons and by session. The gate is scored on the held-out rows, so a lesson with no class-coded window (all absent or unclear) gets no fold and is in neither the gate's nor the state shares' rows.
+
 - **Lessons.** The unit is the lesson: the session id without its start suffix, so the two 2025-05-13 takes are one lesson.
 - **Outer folds.** `--split loso` holds out one lesson with coded windows at a time.
 - **Inner folds.** Grouped by lesson, the same way.
@@ -171,6 +177,8 @@ These sessions never reach a scaler, the Jev word bins or a pilot, and a LOSO ru
 - **Temporal fidelity:** predicted against true switches per hour and mean run length, within coded stretches.
 - **State shares:** the absolute error of each state's time share per session.
 - **Onset latency and miss rate:** for the causal `filter` variants.
+- **Strata:** every variant again by observed kept persons (0, 1, 2+, by the gate's definition) and gaze readability (every kept person's gaze readable or not), on the three-class windows (`metrics.json` strata, `results.csv` n_ and macro_f1_ columns).
+- **End-to-end state shares:** per lesson, the coder's shares of absent, individual, social and collaborative against the predicted ones, where gated windows are absent and the rest take the headline's decision, so gate errors count (`state_shares.csv`, `metrics.json` state_shares; a test run uses the first `late-lr` or `late-hgb` variant without the forward filter).
 
 The R0 rule has no posterior, so its NLL, ECE and AUROC are n/a.
 
@@ -192,19 +200,20 @@ The R0 rule has no posterior, so its NLL, ECE and AUROC are n/a.
 
 A contrast is computed only when both of its variants answered every coded held-out window, so C3 never compares the headline with a partial Jev. A contrast the run cannot compute is listed with the reason and left out of the Holm correction.
 
-**Absent-class policy.** With fewer than 200 coded social windows on dev, or social at least 5 times in fewer than 6 lessons, the confirmatory target becomes binary macro-F1, and the three-class results are exploratory.
+**Absent-class policy** (this concerns a rare social class, not the absent code). With fewer than 200 coded social windows on dev, or social at least 5 times in fewer than 6 lessons, the confirmatory target becomes binary macro-F1, and the three-class results are exploratory.
 
 **The run folder**, `artifacts/_analysis/interaction/<split>-<time>/` (or `-o`):
 
 | File | Holds |
 |---|---|
-| `predictions.csv` | one row per held-out window and variant. Columns: session, lesson, task, window_index, window_start, fold, model, variant, coded, empty_window, y_true, the three probabilities, p_interaction, y_pred, y_pred_binary, temporal mode, HMM mode and the Viterbi state |
-| `metrics.json` | every metric of every variant with its interval and coverage, the headline and contrasts (with the reason for any left out), the models left out, the notes on each session's Jev map, the absent-class policy, inter-coder κ, label join reports, and per fold the chosen parameters, calibrators, γ and epochs |
+| `predictions.csv` | one row per held-out window and variant. Columns: session, lesson, task, window_index, window_start, fold, model, variant, coded, empty_window, y_true (-1 unclear, -2 absent), the three probabilities, p_interaction, y_pred, y_pred_binary, temporal mode, HMM mode, the Viterbi state, n_observed, presence_gated and gaze_readable |
+| `metrics.json` | every metric of every variant with its interval and coverage, the headline and contrasts (with the reason for any left out), the models left out, the notes on each session's Jev map, the absent-class policy, inter-coder κ, label join reports, the presence gate, the strata, the state shares, and per fold the chosen parameters, calibrators, γ and epochs |
 | `results.csv` | the results table: one row per variant with its coverage, grouped as no labels, label floors, few-label, tabular, neural, online and ceiling |
 | `per_session.csv`, `confusion.csv` | per-session scores and pooled confusion cells of every variant |
-| `label_counts.csv` | coded windows per class and session, written before any training |
+| `label_counts.csv` | coded windows per class and session (unclear and absent included), written before any training |
+| `state_shares.csv` | per lesson, coder against predicted state shares with the gate's absent windows |
 | `roster.json`, `data_checks.json` | each session's roster with reasons and whether the inclusion rule S1 kept it (`included`, `reason`), and the data checks: low-speech sessions with windows to listen to, the support of every column, the one- against two-camera check |
-| `config.json` | the truth coder and how it was chosen, feature lists, the layout version, grids, seeds, the sha256 of every fusion table and label file, software and git commit (secrets masked) |
+| `config.json` | the truth coder and how it was chosen, feature lists, the layout version, the presence-gate rule, grids, seeds, the sha256 of every fusion table and label file, software and git commit (secrets masked) |
 | `coefficients.csv` | the LR weights per modality block and fold |
 
 The `_analysis` prefix keeps `ses-code` from taking the folder for a session.
@@ -218,7 +227,7 @@ The `_analysis` prefix keeps `ses-code` from taking the folder for a session.
 
 The command applies the inclusion rule S1 first: a session the rule leaves out fits no tertiles and is asked about nothing, and the command says so. The tertile edges are part of the template. The first run fits them and freezes them in `artifacts/_analysis/interaction/jev/bins.json`. A pilot uses `bins_pilot.json` instead, since its tables predate the camera fix. Every later run reads the frozen file, or the one `--bins` names. Only `--fit-bins` fits them again, and the command then says that every state is new.
 
-A missing modality is said in words ("not measured", "C not in view"), never as 0. No tag id, session id, date, task name or transcript text is in the state, so nothing said leaves the machine. The question is the coder's codebook, plus a note on what the sensors can and cannot tell. `unclear` is offered only in J2.
+A missing modality is said in words ("not measured", "C not in view"), never as 0. No tag id, session id, date, task name or transcript text is in the state, so nothing said leaves the machine. The question is the coder's codebook, plus a note on what the sensors can and cannot tell. `unclear` is offered only in J2. `absent` is never offered, and J2 skips windows coded absent.
 
 | Variant | What Jev sees |
 |---|---|
@@ -292,7 +301,7 @@ The full grids are costly: `late-hgb` takes about 70 s per outer fold and tempor
 
 | `ses-jev` flag | Does |
 |---|---|
-| `--variant j0` / `j1` / `j2` | which question (J2 asks about the `--coder`'s coded windows only) |
+| `--variant j0` / `j1` / `j2` | which question (J2 asks about the `--coder`'s coded windows only, absent ones aside) |
 | `--pilot` | dev sessions, and a state without the quantities the old camera interleave corrupted; writes `jev_<variant>_pilot.jsonl` |
 | `--limit N` | at most N windows, drawn with a fixed seed; the answers are added to the session maps |
 | `--bins PATH`, `--fit-bins` | read the frozen tertile words from another file; fit them again and freeze them in place of the old ones |

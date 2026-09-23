@@ -12,6 +12,12 @@ Missing is not zero. A value no sensor could observe is NaN before scaling and 0
 mask (a 0/1 column of the token) says which of the two it is; an observed 0 stays 0. So imputation
 never turns "IPS was off" into "far apart", or "no transcription chunk" into "no words".
 
+Layout version 2: a present_ratio of 0 in a window a camera saw the person in (and not as the
+duplicate gate's copy) is unobserved, not an observed 0. IPS lost the badge, not the person.
+Version 1 read it as 0. The seat trace of window_features (p<t>_untagged_at_seat_ratio,
+n_untagged_at_seats) is auxiliary: parse_columns sets it apart, no token reads it, and the presence
+gate reads it where the table has it.
+
 Tables fused before the camera fix have no frame-set or camera counts (p<t>_frame_sets,
 p<t>_cameras, pair<a>_<b>_frame_sets, n_vfa_cameras). Their frame counts stand in for them there,
 and a second camera inflates those: the seen share is clipped at 1 and the switch rate runs over
@@ -34,7 +40,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 
-LAYOUT_VERSION = 1
+LAYOUT_VERSION = 2
 # the IPS trust bound: a higher tag id is a mis-decoded badge
 MAX_TAG = 12
 N_SLOTS = 3
@@ -57,6 +63,10 @@ SPEAKER_RE = re.compile(r'^spk_.+_ratio$')
 
 _COUNTER = ('a coverage counter: a mask or a normaliser only, never a feature, because the camera count '
             'is a session fingerprint and a posture proxy')
+# the seat trace of window_features (untagged bodies at the seats): read by the presence gate, never a model input
+AUXILIARY_RE = re.compile(r'^(p\d+_untagged_at_seat_ratio|n_untagged_at_seats)$')
+_AUXILIARY = ('an auxiliary presence trace (untagged bodies at the seats) for the presence gate, never a feature: '
+              'it is outside the pre-registered feature set')
 # the table columns no model reads as a feature, by pattern, with the reason
 DROPPED = {
     r'^spk_.+_ratio$': 'named after the group; equals speech_ratio',
@@ -74,6 +84,7 @@ DROPPED = {
     r'^pair\d+_\d+_(frames|frame_sets)$': _COUNTER,
     # the reserved block `semantic`, not built: it joins MODALITIES with --with-actions once the VLM runs
     r'^(n_vfa_action|p\d+_action|pair\d+_\d+_co_manipulating)$': 'empty in this batch; the reserved semantic block',
+    AUXILIARY_RE.pattern: _AUXILIARY,
     r'^(window_index|window_start|window_end)$': 'an index, not a feature',
 }
 # the table columns the tokens are made from
@@ -203,13 +214,16 @@ def read_table(path) -> pd.DataFrame:
 def parse_columns(columns) -> dict:
     """the table's columns grouped by the patterns of window_features: per person
     ({tag: {feature: column}}), per pair ({(a, b): {feature: column}}), the named-speaker ratios,
-    and the rest (group-level values and counters). Tags are ints."""
+    the auxiliary seat-trace columns (never a person's feature, so a tag named only there gets no
+    roster entry), and the rest (group-level values and counters). Tags are ints."""
     persons, pairs = defaultdict(dict), defaultdict(dict)
-    speakers, group = [], []
+    speakers, group, auxiliary = [], [], []
     for column in columns:
         pair = PAIR_RE.match(column)
         person = PERSON_RE.match(column)
-        if pair:
+        if AUXILIARY_RE.match(column):
+            auxiliary.append(column)
+        elif pair:
             pairs[(int(pair.group(1)), int(pair.group(2)))][pair.group(3)] = column
         elif person:
             persons[int(person.group(1))][person.group(2)] = column
@@ -218,7 +232,7 @@ def parse_columns(columns) -> dict:
         else:
             group.append(column)
     return {'persons': dict(sorted(persons.items())), 'pairs': dict(sorted(pairs.items())),
-            'speakers': speakers, 'group': group}
+            'speakers': speakers, 'group': group, 'auxiliary': auxiliary}
 
 
 def column_status(column: str) -> str:
@@ -435,6 +449,13 @@ def _settle(values: np.ndarray, masks: np.ndarray, spec, mask_names) -> tuple[np
     return values, masks
 
 
+def _ips_missed(present: np.ndarray, frame_sets: np.ndarray, gated: np.ndarray) -> np.ndarray:
+    """where IPS gave a person 0 while a camera saw them (and not as the copy the duplicate gate
+    masks): the badge was lost, not the person, so that 0 is not an observation."""
+    with np.errstate(invalid='ignore'):
+        return (present == 0) & (frame_sets > 0) & ~gated
+
+
 def _person(table, tag, ips_ran, n_vfa, gated):
     present = _column(table, f'p{tag}_present_ratio')
     frame_sets = _frame_sets(table, tag)
@@ -453,8 +474,9 @@ def _person(table, tag, ips_ran, n_vfa, gated):
             *[_column(table, f'p{tag}_gaze_{share}_ratio') / known for share in GAZE_SHARES],
             known,
         ])
-        # present_ratio 0 is an observation whenever IPS ran; camera values need the person seen
-        masks = np.column_stack([ips_ran, ips_ran, seen, seen, seen, seen & (known >= MIN_KNOWN_SHARE)])
+        # present_ratio 0 is an observation where IPS ran and no camera saw the person; where one did,
+        # IPS lost the badge and the 0 is unobserved. Camera values need the person seen
+        masks = np.column_stack([ips_ran & ~_ips_missed(present, frame_sets, gated), ips_ran, seen, seen, seen, seen & (known >= MIN_KNOWN_SHARE)])
     values, masks = _settle(values, masks, PERSON_VALUES, PERSON_MASKS)
     return values, masks, present, frame_sets
 
@@ -918,9 +940,41 @@ def camera_check(table: pd.DataFrame, roster: Roster) -> dict:
             'median_ratio': {name: float(np.median(r)) for name, r in ratios.items()}}
 
 
+def seat_check(table: pd.DataFrame, roster: Roster) -> dict:
+    """the present_ratio rule and the seat trace per kept person: `present_unobserved`, the windows
+    whose present_ratio 0 a camera made unobserved; and where the table has the trace,
+    `seat_windows` (share of windows a camera holding the person's seat ran in), `at_seat_windows`
+    (share with an untagged body at the seat while the tag was missing) and `at_seat_unobserved`
+    (that share among the windows no sensor observed the person in; None when there are none),
+    with the mean of n_untagged_at_seats."""
+    gate = duplicate_gate(table, roster.kept)
+    trace = any(f'p{tag}_untagged_at_seat_ratio' in table.columns for tag in roster.kept)
+    persons = {}
+    for i, tag in enumerate(roster.kept):
+        present = _column(table, f'p{tag}_present_ratio')
+        frame_sets = _frame_sets(table, tag)
+        entry = {'present_unobserved': int(_ips_missed(present, frame_sets, gate[:, i]).sum())}
+        if trace:
+            ratio = _column(table, f'p{tag}_untagged_at_seat_ratio')
+            with np.errstate(invalid='ignore'):
+                unobserved = ~((present > 0) | (frame_sets > 0))
+                at = ratio > 0
+            if len(table):
+                entry['seat_windows'] = round(float(np.isfinite(ratio).mean()), 4)
+                entry['at_seat_windows'] = round(float(at.mean()), 4)
+            else:
+                entry['seat_windows'] = entry['at_seat_windows'] = None
+            entry['at_seat_unobserved'] = round(float(at[unobserved].mean()), 4) if unobserved.any() else None
+        persons[str(tag)] = entry
+    n = _column(table, 'n_untagged_at_seats')
+    return {'trace': trace, 'persons': persons,
+            'n_untagged_at_seats_mean': round(float(np.nanmean(n)), 4) if trace and np.isfinite(n).any() else None}
+
+
 def data_checks(tables: dict, rosters: dict, threshold: float = 0.2, n: int = 10, seed: int = 0) -> dict:
     """what data_checks.json holds, before any training: the low-speech sessions with windows to
-    listen to, the support of every kept and dropped column per session, and the camera check."""
+    listen to, the support of every kept and dropped column per session, the camera check, and the
+    present_ratio rule and the seat trace."""
     low = low_speech(tables, threshold)
     return {
         'layout_version': LAYOUT_VERSION,
@@ -929,6 +983,8 @@ def data_checks(tables: dict, rosters: dict, threshold: float = 0.2, n: int = 10
         'support': json_ready(support_table(tables)),
         'camera_check': {session: camera_check(table, rosters[session]) for session, table in tables.items()
                          if session in rosters},
+        'seat_check': {session: seat_check(table, rosters[session]) for session, table in tables.items()
+                       if session in rosters},
     }
 
 

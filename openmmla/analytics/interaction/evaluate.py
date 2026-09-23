@@ -36,6 +36,12 @@ variants answered every coded window, so a partial Jev never stands in for a who
 jev-cal are left out of a run, with the reason, when a session they would score (or jev-cal would
 train on) has no map made from its current fused table.
 
+Windows the coder called absent (fewer than two members at the group's place) train nothing and
+score nothing, like unclear ones. The presence gate (presence.py), fixed before labels were read,
+is scored against them as a task of its own. Every variant is also scored per observed-person
+stratum and gaze readability, and the headline's decisions with the gate's absent windows give the
+end-to-end state shares per lesson (state_shares.csv).
+
 Deferred by decision, with their places kept: the ablation grids of 4.6 (`--ablate`), the causal
 network row, the lexicon feature, masked-modality pretraining, and the leave-one-date-out and
 task-transfer runs (splits.date_folds and splits.task_transfer exist; the driver does not run
@@ -61,6 +67,7 @@ from openmmla.analytics.interaction import hmm as H
 from openmmla.analytics.interaction import labels as L
 from openmmla.analytics.interaction import layout as LY
 from openmmla.analytics.interaction import metrics as M
+from openmmla.analytics.interaction import presence as P
 from openmmla.analytics.interaction import splits as S
 from openmmla.analytics.interaction import tabular as TB
 
@@ -107,7 +114,8 @@ QUICK = {
 }
 PREDICTION_COLUMNS = ('session', 'lesson', 'task', 'window_index', 'window_start', 'fold', 'model', 'variant',
                       'coded', 'empty_window', 'y_true', 'p_individual', 'p_social', 'p_collaborative',
-                      'p_interaction', 'y_pred', 'y_pred_binary', 'temporal', 'hmm', 'y_viterbi')
+                      'p_interaction', 'y_pred', 'y_pred_binary', 'temporal', 'hmm', 'y_viterbi',
+                      'n_observed', 'presence_gated', 'gaze_readable')
 
 
 class Refused(RuntimeError):
@@ -153,8 +161,10 @@ class Config:
 class SessionData:
     """one session as the driver holds it: the roster, the unscaled tokens and the unscaled pooled
     view (the rule's input), the coded labels over the table's grid (3-class: 0, 1, 2, -1
-    unclear, NaN uncoded) and the target the models learn (the same, or its binary form), the
-    join report, the other coders' labels (for agreement) and the cached Jev answers."""
+    unclear, -2 absent, NaN uncoded) and the target the models learn (the same, or its binary
+    form), the join report, the other coders' labels (for agreement), the cached Jev answers and,
+    per window, the kept persons observed, whether the presence gate calls it absent, and whether
+    every kept person's gaze was readable."""
     session: str
     lesson: str
     task: str | None
@@ -171,6 +181,9 @@ class SessionData:
     others: dict = field(default_factory=dict)
     jev: np.ndarray | None = None
     jev_note: str | None = None
+    n_observed: np.ndarray | None = None
+    presence_gated: np.ndarray | None = None
+    gaze_readable: np.ndarray | None = None
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -251,10 +264,12 @@ def load_session(session: str, table_path, coder: str | None = None, join: str =
         others[name] = joined.to_numpy(dtype=float)
     label_files = {path.name: file_digest(path) for path in sorted((directory / 'labels').glob('*.jsonl'))} \
         if (directory / 'labels').is_dir() else {}
+    n_observed = P.observed_count(table, ros)
     data = SessionData(session=session, lesson=S.lesson_key(session), task=S.task_of(session), directory=directory,
                        table_path=table_path, table_sha256=file_digest(table_path), roster=ros, tokens=tokens,
                        raw=LY.pooled(tokens), y=y, target=L.to_binary(y) if target == 'binary' else y.copy(),
-                       join=report, label_files=label_files, others=others)
+                       join=report, label_files=label_files, others=others, n_observed=n_observed,
+                       presence_gated=n_observed < P.MIN_OBSERVED, gaze_readable=P.gaze_readable(tokens))
     return data, table
 
 
@@ -361,7 +376,7 @@ def label_refusal(folds, data: dict, k: int, minimum: int = MIN_CLASS_WINDOWS) -
 
 
 def label_counts(data: dict) -> pd.DataFrame:
-    """windows per class and session (and unclear, uncoded), with the lesson, task and split role:
+    """windows per class and session (and unclear, absent, uncoded), with the lesson, task and split role:
     the table printed before training."""
     counts = L.label_counts({s: d.y for s, d in data.items()})
     counts.insert(0, 'role', ['test' if s in S.TEST_SESSIONS else 'dev' for s in counts.index])
@@ -700,10 +715,14 @@ def _base_rows(outputs: list, data: dict) -> pd.DataFrame:
     for out in outputs:
         for session in out['test']:
             d = data[session]
+            n = len(d)
             frames.append(pd.DataFrame({
                 'session': session, 'lesson': d.lesson, 'task': d.task, 'window_index': d.tokens.window_index,
                 'window_start': d.tokens.window_start, 'fold': out['name'], 'coded': L.scored(d.target),
-                'empty_window': d.tokens.empty, 'y_true': d.target, 'block': d.blocks}))
+                'empty_window': d.tokens.empty, 'y_true': d.target, 'block': d.blocks,
+                'n_observed': d.n_observed if d.n_observed is not None else np.full(n, -1),
+                'presence_gated': d.presence_gated if d.presence_gated is not None else np.zeros(n, dtype=bool),
+                'gaze_readable': d.gaze_readable if d.gaze_readable is not None else np.zeros(n, dtype=bool)}))
     return pd.concat(frames, ignore_index=True)
 
 
@@ -777,8 +796,9 @@ def score_variant(variant: dict, base: pd.DataFrame, k: int, n_boot: int) -> tup
     sessions, lessons = base['session'].to_numpy(), base['lesson'].to_numpy()
     tasks, blocks = base['task'].to_numpy(dtype=object), base['block'].to_numpy()
     p, y_pred, y_binary = variant['p'], variant['y_pred'], variant['y_pred_binary']
+    strata = P.strata(base['n_observed'].to_numpy(), base['gaze_readable'].to_numpy(dtype=bool))
     report = M.report(y, p, sessions, tasks, base['empty_window'].to_numpy(), blocks, y_pred=y_pred,
-                      y_pred_binary=y_binary, viterbi_path=variant.get('viterbi'))
+                      y_pred_binary=y_binary, viterbi_path=variant.get('viterbi'), strata=strata)
     per_session = report.pop('per_session', [])
     report['coverage'] = coverage(variant, base)
     coded = y >= 0
@@ -822,6 +842,10 @@ def _result_row(key: str, variant: dict, report: dict) -> dict:
                 'state_share_error': (report.get('state_share_error') or {}).get('err_mean')})
     for task, scores in (report.get('by_task') or {}).items():
         row[f'macro_f1_{task}'] = scores['macro_f1']
+    for name, levels in (report.get('strata') or {}).items():
+        for level, scores in levels.items():
+            row[f'n_{name}_{level}'] = scores['n']
+            row[f'macro_f1_{name}_{level}'] = scores['macro_f1']
     return row
 
 
@@ -837,6 +861,18 @@ def select_headline(variants: dict, reports: dict, binary: bool = False) -> str 
         if score is not None and (best is None or score > best[0]):
             best = (score, key)
     return None if best is None else best[1]
+
+
+def share_variant(headline: str | None, variants: dict) -> str | None:
+    """the variant whose decisions the end-to-end state shares take: the headline, or where there
+    is none (a test run) the first late-lr or late-hgb variant without the forward filter, in run
+    order; None when the run has neither."""
+    if headline is not None:
+        return headline
+    for key, variant in variants.items():
+        if variant['model'] in HEADLINE_MODELS and variant['hmm'] in ('none', 'fb'):
+            return key
+    return None
 
 
 def contrasts(headline: str | None, variants: dict, base: pd.DataFrame, n_boot: int, binary: bool = False) -> dict:
@@ -925,7 +961,7 @@ def predictions_frame(base: pd.DataFrame, variants: dict, k: int) -> pd.DataFram
         frame['y_viterbi'] = pd.array(viterbi if viterbi is not None else [pd.NA] * n, dtype='Int64')
         frames.append(frame)
     out = pd.concat(frames, ignore_index=True)
-    # uncoded is empty, unclear -1
+    # uncoded is empty, unclear -1, absent -2
     out['y_true'] = out['y_true'].astype(float).astype('Int64')
     return out[list(PREDICTION_COLUMNS)]
 
@@ -992,6 +1028,7 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
                                          'modality': v.modality} for v in values},
                      'dropped': dict(LY.DROPPED)},
         'rule_thresholds': dict(TB.RULE_THRESHOLDS),
+        'presence_gate': dict(P.RULE),
         'grids': {'lr': plan['lr_grid'], 'hgb': plan['hgb_grid']},
         'network': {'max_epochs': plan['max_epochs'], 'patience': plan['patience'],
                     'seeds': list(range(plan['seeds'])), 'small': plan['small'], 'epochs': plan['epochs']},
@@ -1201,6 +1238,17 @@ def run(config, log=None) -> Path:
     binary_confirmatory = policy['confirmatory_target'] == 'binary' or k == 2
     headline = select_headline(variants, reports, binary_confirmatory) if cfg.split == 'loso' else None
     tests = contrasts(headline, variants, base, plan['bootstrap'], binary_confirmatory) if headline else {}
+    presence_gated = base['presence_gated'].to_numpy(dtype=bool)
+    gate = P.evaluate_gate(base['y_true'].to_numpy(dtype=float), presence_gated, base['session'].to_numpy(),
+                           base['n_observed'].to_numpy())
+    share_key = share_variant(headline, variants)
+    if share_key:
+        frame = P.state_shares(base['y_true'].to_numpy(dtype=float), variants[share_key]['y_pred'], presence_gated,
+                               base['lesson'].to_numpy(), class_names(k))
+        frame.to_csv(run_dir / 'state_shares.csv', index=False)
+        shares = {'variant': share_key, **P.share_summary(frame)}
+    else:
+        shares = {'left_out': 'the run has no late-lr or late-hgb variant without the forward filter'}
 
     predictions_frame(base, variants, k).to_csv(run_dir / 'predictions.csv', index=False)
     pd.DataFrame(per_session).to_csv(run_dir / 'per_session.csv', index=False)
@@ -1210,7 +1258,8 @@ def run(config, log=None) -> Path:
     for name, agreement in ceiling.items():
         results = pd.concat([results, pd.DataFrame([{'group': 'ceiling', 'variant': f'inter-coder {name}',
                                                      'model': 'coder', 'n': agreement['windows'],
-                                                     'kappa': agreement['kappa']}])], ignore_index=True)
+                                                     'kappa': agreement['kappa'],
+                                                     'kappa_codes': agreement['kappa_codes']}])], ignore_index=True)
     results.to_csv(run_dir / 'results.csv', index=False)
     coefficients = [frame for out in outputs for frame in (out['coefficients'] or [])]
     if coefficients:
@@ -1221,11 +1270,13 @@ def run(config, log=None) -> Path:
         'run': run_dir.name, 'split': cfg.split, 'target': cfg.target, 'classes': list(class_names(k)),
         'quick': cfg.quick, 'seconds': round(time.time() - started, 1),
         'labels': {'coder': coder, 'coded': int(L.scored(scored).sum()), 'unclear': int((scored == L.UNCLEAR_Y).sum()),
+                   'absent': int((scored == L.ABSENT_Y).sum()),
                    'join': {s: d.join for s, d in data.items()}},
         'inter_coder': ceiling, 'absent_class_policy': policy,
         'headline': {'variant': headline, 'selected_on': 'dev LOSO pooled ' + ('binary macro-F1' if binary_confirmatory
-                                                                                else 'macro-F1')} if headline else None,
-        'contrasts': tests, 'notes': notes, 'left_out': dropped,
+                                                                                else 'macro-F1'),
+                     'strata': reports[headline].get('strata')} if headline else None,
+        'contrasts': tests, 'presence_gate': gate, 'state_shares': shares, 'notes': notes, 'left_out': dropped,
         'folds': [{key: out[key] for key in ('name', 'train', 'test', 'inner', 'prior', 'transitions', 'models',
                                              'seconds')} for out in outputs],
         'variants': {key: dict(reports[key], model=variants[key]['model'], temporal=variants[key]['temporal'],

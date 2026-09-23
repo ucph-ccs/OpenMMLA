@@ -7,9 +7,10 @@ order, which is how ses-code itself reads it back, so the model trains on exactl
 last saw; the time stamps cannot order it, since an undo line carries the server's `undone_at` and
 no `coded_at`.
 
-Labels are floats over the table's grid: 0 individual, 1 social, 2 collaborative, -1 unclear (kept
-as sequence context, never scored) and NaN for a window nobody coded. The binary target
-(interaction = social or collaborative) is always derived from these, never coded on its own.
+Labels are floats over the table's grid: 0 individual, 1 social, 2 collaborative, -1 unclear and
+-2 absent (fewer than two members at the group's place; both kept as sequence context, never
+scored) and NaN for a window nobody coded. The binary target (interaction = social or
+collaborative) is always derived from these, never coded on its own.
 """
 from __future__ import annotations
 
@@ -22,6 +23,12 @@ import pandas as pd
 CLASSES = ('individual', 'social', 'collaborative')
 UNCLEAR = 'unclear'
 UNCLEAR_Y = -1
+# a window where fewer than two members are at the group's place: coded, context, never scored
+ABSENT = 'absent'
+ABSENT_Y = -2
+# every code a coder can give, in the order of the five-code agreement, and its y
+CODES = CLASSES + (UNCLEAR, ABSENT)
+CODE_Y = {**{name: k for k, name in enumerate(CLASSES)}, UNCLEAR: UNCLEAR_Y, ABSENT: ABSENT_Y}
 # the file whose labels overrule every coder's for the windows it holds
 ADJUDICATED = 'adjudicated'
 # `coder` is whose truth a row is part of, `source` the file it came from: in a coder's resolved
@@ -39,7 +46,7 @@ class LabelJoinError(ValueError):
 
 
 def _y(label: str) -> float:
-    return float(UNCLEAR_Y) if label == UNCLEAR else float(CLASSES.index(label))
+    return float(CODE_Y[label])
 
 
 def _read_coder(path: Path, session: str) -> tuple[pd.DataFrame, int]:
@@ -60,7 +67,7 @@ def _read_coder(path: Path, session: str) -> tuple[pd.DataFrame, int]:
         if label is None:
             labels.pop(key, None)  # an undo line
             continue
-        if label != UNCLEAR and label not in CLASSES:
+        if label not in CODE_Y:
             raise ValueError(f"{path}: line {number}: unknown label {label!r}")
         start = round(float(record['window_start']), 3)
         end = record.get('window_end')
@@ -122,8 +129,8 @@ def _millis(values) -> np.ndarray:
 def join_labels(table: pd.DataFrame, labels: pd.DataFrame, tolerance: float = 0.5, mode: str = 'exact',
                 max_unmatched: float = 0.01, min_overlap: float = 5.0) -> tuple[pd.Series, dict]:
     """the labels over the table's grid (a float Series indexed by window_index: 0, 1, 2, -1 for
-    unclear, NaN uncoded) and a report of how they were matched. 'exact' matches on the window
-    start to the millisecond (the grids coincide), then the nearest window within `tolerance`
+    unclear, -2 for absent, NaN uncoded) and a report of how they were matched. 'exact' matches
+    on the window start to the millisecond (the grids coincide), then the nearest window within `tolerance`
     seconds; 'overlap' (opt-in, for a coding grid whose start moved because a recording was
     missing on the coding machine) maps each label to a window it overlaps by at least
     `min_overlap` seconds, one to one, and reports the offsets. More than `max_unmatched` of the
@@ -143,7 +150,7 @@ def join_labels(table: pd.DataFrame, labels: pd.DataFrame, tolerance: float = 0.
     y = np.full(len(table), np.nan)
     taken = np.zeros(len(table), dtype=bool)
     report = {'mode': mode, 'labels': len(labels), 'exact': 0, 'nearest': 0, 'overlap': 0, 'unmatched': 0,
-              'unclear': int((label_y == UNCLEAR_Y).sum())}
+              'unclear': int((label_y == UNCLEAR_Y).sum()), 'absent': int((label_y == ABSENT_Y).sum())}
     offsets = []
 
     def assign(k, i, how, offset):
@@ -201,15 +208,16 @@ def join_labels(table: pd.DataFrame, labels: pd.DataFrame, tolerance: float = 0.
 
 
 def scored(y) -> np.ndarray:
-    """where a label is a class (not unclear, not uncoded): the windows loss and metrics read."""
+    """where a label is a class (not unclear, not absent, not uncoded): the windows loss and
+    metrics read."""
     values = np.asarray(y, dtype=float)
     with np.errstate(invalid='ignore'):
         return np.isfinite(values) & (values >= 0)
 
 
 def to_binary(y):
-    """interaction (1: social or collaborative) against individual (0). From labels, unclear (-1)
-    and uncoded (NaN) pass through; from (n, 3) class probabilities it is p_social +
+    """interaction (1: social or collaborative) against individual (0). From labels, unclear (-1),
+    absent (-2) and uncoded (NaN) pass through; from (n, 3) class probabilities it is p_social +
     p_collaborative. A Series stays a Series."""
     values = np.asarray(y, dtype=float)
     if values.ndim == 2:
@@ -233,9 +241,11 @@ def _kappa(confusion: np.ndarray) -> float:
 
 def agreement(a, b) -> dict:
     """two coders' agreement on the windows both gave a class: Cohen's kappa for the three
-    classes and for the derived binary, and the confusion matrices (rows a, columns b). Series
-    are aligned on their index (window_start or window_index), anything else by position; a
-    window either coder called unclear is counted apart, not scored."""
+    classes and for the derived binary, and the confusion matrices (rows a, columns b), and
+    Cohen's kappa over all five codes (the three classes, unclear and absent) on every window both
+    coded. Series are aligned on their index (window_start or window_index), anything else by
+    position; a window either coder called unclear or absent is counted apart from the
+    three-class kappa."""
     if isinstance(a, pd.Series) and isinstance(b, pd.Series):
         a, b = a.align(b, join='inner')
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
@@ -247,21 +257,32 @@ def agreement(a, b) -> dict:
     np.add.at(confusion, (a[keep].astype(int), b[keep].astype(int)), 1)
     binary = np.zeros((2, 2), dtype=int)
     np.add.at(binary, (to_binary(a[keep]).astype(int), to_binary(b[keep]).astype(int)), 1)
+    index = {float(CODE_Y[c]): i for i, c in enumerate(CODES)}
+    ai = np.array([index.get(v, -1) if np.isfinite(v) else -1 for v in a], dtype=int)
+    bi = np.array([index.get(v, -1) if np.isfinite(v) else -1 for v in b], dtype=int)
+    keep5 = (ai >= 0) & (bi >= 0)
+    codes = np.zeros((len(CODES), len(CODES)), dtype=int)
+    np.add.at(codes, (ai[keep5], bi[keep5]), 1)
     return {'windows': int(keep.sum()), 'both_coded': int(both.sum()),
             'unclear_a': int((both & (a == UNCLEAR_Y)).sum()), 'unclear_b': int((both & (b == UNCLEAR_Y)).sum()),
             'kappa': _kappa(confusion), 'kappa_binary': _kappa(binary),
             'accuracy': float(np.trace(confusion) / keep.sum()) if keep.any() else float('nan'),
-            'confusion': confusion.tolist(), 'confusion_binary': binary.tolist()}
+            'confusion': confusion.tolist(), 'confusion_binary': binary.tolist(),
+            'absent_a': int((both & (a == ABSENT_Y)).sum()), 'absent_b': int((both & (b == ABSENT_Y)).sum()),
+            'codes': list(CODES), 'kappa_codes': _kappa(codes),
+            'accuracy_codes': float(np.trace(codes) / keep5.sum()) if keep5.any() else float('nan'),
+            'confusion_codes': codes.tolist()}
 
 
 def label_counts(y_by_session: dict) -> pd.DataFrame:
-    """windows per class and session (and unclear, uncoded), the table printed before training
+    """windows per class and session (and unclear, absent, uncoded), the table printed before training
     and checked against the 30-window refusal."""
     rows = {}
     for session, y in y_by_session.items():
         values = np.asarray(y, dtype=float)
         row = {name: int((values == k).sum()) for k, name in enumerate(CLASSES)}
         row[UNCLEAR] = int((values == UNCLEAR_Y).sum())
+        row[ABSENT] = int((values == ABSENT_Y).sum())
         row['uncoded'] = int((~np.isfinite(values)).sum())
         rows[session] = row
-    return pd.DataFrame.from_dict(rows, orient='index', columns=list(CLASSES) + [UNCLEAR, 'uncoded'])
+    return pd.DataFrame.from_dict(rows, orient='index', columns=list(CLASSES) + [UNCLEAR, ABSENT, 'uncoded'])

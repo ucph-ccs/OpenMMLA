@@ -73,9 +73,11 @@ def provider_settings(provider: str = DEFAULT_PROVIDER, url: str | None = None, 
     if not settings['url']:
         raise ValueError("--provider url needs --endpoint, the URL of a host that speaks TypeSafe's decide API")
     return settings
-# the classes in the codebook's order (individual, social, collaborative); unclear is offered only in j2
+# the classes in the codebook's order (individual, social, collaborative); unclear is offered only
+# in j2, and absent never (a window nobody is at is no question for Jev)
 UNCLEAR = 'unclear'
-CLASSES = tuple(c['label'] for c in CODEBOOK['classes'] if c['label'] != UNCLEAR)
+ABSENT = 'absent'
+CLASSES = tuple(c['label'] for c in CODEBOOK['classes'] if c['label'] not in (UNCLEAR, ABSENT))
 # variant -> how many preceding windows the state describes
 VARIANTS = {'j0': 0, 'j1': 2, 'j2': 0}
 # the codebook sentence a state without context must not carry

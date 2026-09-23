@@ -2,8 +2,8 @@
 and reliability, temporal fidelity, the closing-the-loop measures (state shares, onset latency),
 and the uncertainty around them.
 
-Labels are ints (0 individual, 1 social, 2 collaborative, -1 for a window that is not coded or is
-unclear, which no score reads) and posteriors (n, 3) arrays; the binary target is always derived,
+Labels are ints (0 individual, 1 social, 2 collaborative, -1 for a window that is not coded,
+unclear or absent, which no score reads) and posteriors (n, 3) arrays; the binary target is always derived,
 interaction = social or collaborative, p_interaction = p_social + p_collaborative. Rows are in
 session and window order, so that neighbouring rows of one session (and one coded block) are
 neighbouring windows.
@@ -369,7 +369,8 @@ def per_session(y, p, sessions, y_pred=None, tasks=None, min_support: int = MIN_
 
 
 def report(y, p, sessions=None, tasks=None, empty=None, blocks=None, y_pred=None, y_pred_binary=None,
-           viterbi_path=None, window: float = WINDOW, bins: int = ECE_BINS, min_support: int = MIN_SUPPORT) -> dict:
+           viterbi_path=None, window: float = WINDOW, bins: int = ECE_BINS, min_support: int = MIN_SUPPORT,
+           strata=None) -> dict:
     """every metric of 4.4 as a JSON-ready dict: pooled over the held-out windows, without the
     empty windows (no speech, nobody located, nobody seen), per task and per session, with the
     temporal fidelity and the state-share error.
@@ -378,7 +379,9 @@ def report(y, p, sessions=None, tasks=None, empty=None, blocks=None, y_pred=None
     NLL, Brier, ECE, AUROC and AUPRC are then None, i.e. n/a). `y_pred` is the hard label (the
     balanced decision, computed per fold with that fold's prior), argmax p by default;
     `y_pred_binary` the binary decision, y_pred > 0 by default; `viterbi_path` the Viterbi path
-    for the switch counts and run lengths, y_pred by default."""
+    for the switch counts and run lengths, y_pred by default. `strata` scores the same rows split
+    into pre-declared levels (the presence strata), without reliability tables: {name: {level:
+    bool mask over the rows}}."""
     y = _labels(y)
     p = None if p is None else np.asarray(p, dtype=float)
     y_pred, y_pred_binary = _decisions(p, y_pred, y_pred_binary)
@@ -408,6 +411,12 @@ def report(y, p, sessions=None, tasks=None, empty=None, blocks=None, y_pred=None
             shares = state_share_error(y, p, sessions)
             out['state_share_error'] = {column: _float(shares[column].mean()) for column in shares.columns
                                         if column.startswith('err_')} if len(shares) else None
+    if strata is not None:
+        def lean(keep):
+            return {key: value for key, value in part(keep).items() if key != 'reliability'}
+
+        out['strata'] = {str(name): {str(level): lean(np.asarray(mask, dtype=bool)) for level, mask in levels.items()}
+                         for name, levels in strata.items()}
     return out
 
 

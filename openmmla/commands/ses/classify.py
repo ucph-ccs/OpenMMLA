@@ -9,8 +9,8 @@ on every DEV session and scores the four TEST sessions, once, after every choice
 artifacts/_analysis/interaction/test_runs.jsonl).
 
 Every run lands in artifacts/_analysis/interaction/<split>-<time>/ (or -o): predictions.csv,
-metrics.json, results.csv, per_session.csv, confusion.csv, label_counts.csv, roster.json,
-data_checks.json, config.json (and coefficients.csv for lr). The label counts are printed first;
+metrics.json, results.csv, per_session.csv, confusion.csv, label_counts.csv, state_shares.csv,
+roster.json, data_checks.json, config.json (and coefficients.csv for lr). The label counts are printed first;
 when a class has fewer than 30 coded windows in an outer-training fold, the run refuses to train
 any learned model and says which folds fall short. jev and jev-cal are left out, with the reason,
 when a session they need has no ses-jev map made from its current fused table; a variant is
@@ -95,6 +95,10 @@ def _missing(modules) -> list:
 
 def _signed(value) -> str:
     return 'n/a' if value is None else f'{value:+.3f}'
+
+
+def _plain(value) -> str:
+    return 'n/a' if value is None else f'{value:.3f}'
 
 
 def _summary(run_dir) -> str:
@@ -198,6 +202,10 @@ def main(argv=None):
             continue
         print(f"{name} {contrast['a']} - {contrast['b']}: {_signed(contrast['delta'])} "
               f"[{_signed(contrast['lo'])}, {_signed(contrast['hi'])}], Holm p {contrast['p_holm']:.3f}")
+    gate = metrics.get('presence_gate') or {}
+    if gate.get('coded'):
+        print(f"presence gate: {gate['absent']} absent of {gate['coded']} coded windows, {gate['gated']} gated; "
+              f"precision {_plain(gate['precision'])}, recall {_plain(gate['recall'])}, kappa {_plain(gate['kappa'])}")
     for line in _caveats(metrics):
         print(line)
     policy = metrics['absent_class_policy']

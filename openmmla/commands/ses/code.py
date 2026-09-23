@@ -4,9 +4,9 @@ Ground truth for the interaction classes comes from a person watching the record
 at a time. This command serves the sessions under artifacts/: for every window it cuts a clip on
 demand with ffmpeg (up to two cameras side by side with the group microphone, exact to the
 window's start), and the page plays it and takes one key per window (1 individual or parallel
-work, 2 social interaction, 3 collaborative interaction, 0 unclear, with an optional note).
-Labels go to artifacts/<session>/labels/<coder>.jsonl, one line per window, so a second coder
-writes a second file and the two are compared for agreement. Clips are cached under
+work, 2 social interaction, 3 collaborative interaction, 4 not at the table, 0 unclear, with an
+optional note). Labels go to artifacts/<session>/labels/<coder>.jsonl, one line per window, so a
+second coder writes a second file and the two are compared for agreement. Clips are cached under
 artifacts/<session>/labels/clips/ and can be deleted at any time.
 """
 import argparse
@@ -30,8 +30,10 @@ CODEBOOK = {
          'definition': 'Members interact (talk, gesture, look at each other) but not about the task: chat, jokes, phones, waiting together.'},
         {'key': '3', 'label': 'collaborative', 'title': 'Collaborative interaction',
          'definition': 'Members interact about the task: talking about it, joint attention on the shared artifact (micro:bit, microscope, tablet, sheet), pointing, handing over, working on one thing together, explaining or asking.'},
+        {'key': '4', 'label': 'absent', 'title': 'Not at the table',
+         'definition': "Fewer than two group members are at the group's place for most of the window: everyone is away, or one of a pair is. In a group of three with one member away two remain, so code the window normally. Code what the video shows, not what the sensors show."},
         {'key': '0', 'label': 'unclear', 'title': 'Unclear',
-         'definition': 'Cannot tell: the group is out of view, the audio is missing, or the window is a transition with no dominant state.'},
+         'definition': "The group is at its place but you cannot tell its state: members are out of frame and inaudible, or the window is a transition with no dominant state."},
     ],
     'rule': 'Label the group as a whole with the state that fills most of the ten seconds. Use the preceding windows as context. If two members collaborate while a third works alone, it is still collaborative interaction.',
 }
@@ -138,7 +140,7 @@ PAGE = r"""<!doctype html>
   <video id="video" controls autoplay playsinline></video>
   <div class="meta" id="when"></div>
   <div class="bar"><div id="fill" style="width:0"></div></div>
-  <div class="meta">Keys: <b>1</b> <b>2</b> <b>3</b> <b>0</b> label and go on · <b>space</b> replay · <b>←</b> <b>→</b> move · <b>n</b> note · <b>u</b> undo the last label</div>
+  <div class="meta">Keys: <b>1</b> <b>2</b> <b>3</b> <b>4</b> <b>0</b> label and go on · <b>space</b> replay · <b>←</b> <b>→</b> move · <b>n</b> note · <b>u</b> undo the last label</div>
  </div>
  <div class="keys">
   <div id="classes"></div>
