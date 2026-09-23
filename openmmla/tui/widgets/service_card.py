@@ -8,7 +8,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static, Button, Input, Select, TabbedContent, TabPane
+from textual.widgets import Static, Button, Input, Rule, Select, TabbedContent, TabPane
 
 
 def _safe_id(raw: str) -> str:
@@ -318,6 +318,15 @@ class ServiceCard(Widget):
         min-width: 12;
         height: 3;
     }
+    /* the line that sets off the rows of one instance from the next (a
+       recorder's Host, Device Label and Participant; a base's Base,
+       Participant and Speakers), as wide as a label and its dropdown */
+    ServiceCard Rule.instance-sep {
+        margin: 0;
+        width: 66;
+        max-width: 100%;
+        color: $text-muted;
+    }
     /* action buttons wrap to the next row when the card is too narrow (grid
        column count is recomputed on resize in on_resize) */
     ServiceCard .card-actions {
@@ -527,15 +536,7 @@ class ServiceCard(Widget):
                             if p.per_instance:
                                 # one row per instance; + and - of its counter
                                 # show, hide or add rows (_sync_instances)
-                                paired = self._paired_params(p.flag)
-                                with Vertical(id=self._param_id("instances", p.flag), classes="param-instances"):
-                                    for index in range(len(self._param_values[p.flag])):
-                                        yield self._instance_row(p, index)
-                                        for other in paired:
-                                            if index < len(self._param_values.get(other.flag) or []):
-                                                row = self._instance_row(other, index)
-                                                row.display = self._instance_shown(other, index)
-                                                yield row
+                                yield from self._compose_instances(p)
                                 continue
                             with Horizontal(classes="param-row"):
                                 for widget in self._param_widgets(p):
@@ -628,22 +629,7 @@ class ServiceCard(Widget):
                     # and add rows (_sync_instances). The flag belongs to this
                     # tab alone, so the rows take the plain ids _sync_instances
                     # and collect_params look for, not the role-scoped ones.
-                    paired = self._paired_params(param.flag)
-                    above = [other for other in paired if other.above]
-                    below = [other for other in paired if not other.above]
-                    with Vertical(id=self._param_id("instances", param.flag), classes="param-instances"):
-                        for index in range(len(self._param_values[param.flag])):
-                            for other in above:
-                                if index < len(self._param_values.get(other.flag) or []):
-                                    row = self._instance_row(other, index)
-                                    row.display = self._instance_shown(other, index)
-                                    yield row
-                            yield self._instance_row(param, index)
-                            for other in below:
-                                if index < len(self._param_values.get(other.flag) or []):
-                                    row = self._instance_row(other, index)
-                                    row.display = self._instance_shown(other, index)
-                                    yield row
+                    yield from self._compose_instances(param)
                     continue
                 with Horizontal(classes="param-row"):
                     for widget in self._param_widgets(
@@ -651,6 +637,40 @@ class ServiceCard(Widget):
                         param_id=lambda kind, flag, role=role: self._collection_param_id(role, kind, flag),
                     ):
                         yield widget
+
+    def _instance_sep(self, flag: str, key: str) -> Rule:
+        """the line above the first instance of `flag` ("top") or below
+        instance `key`, for instances of several rows."""
+        return Rule(id=self._param_id(f"sep{key}", flag), classes="instance-sep")
+
+    def _compose_instances(self, param: ParamDef) -> ComposeResult:
+        """the rows of a per-instance param, instance by instance, each with
+        the rows of the params that sit with it (above or under). Instances of
+        several rows are set off from each other, and from the rows around
+        them, by a line."""
+        paired = self._paired_params(param.flag)
+        above = [other for other in paired if other.above]
+        below = [other for other in paired if not other.above]
+        count = len(self._param_values[param.flag])
+        with Vertical(id=self._param_id("instances", param.flag), classes="param-instances"):
+            if paired:
+                top = self._instance_sep(param.flag, "top")
+                top.display = count > 0
+                yield top
+            for index in range(count):
+                for other in above:
+                    if index < len(self._param_values.get(other.flag) or []):
+                        row = self._instance_row(other, index)
+                        row.display = self._instance_shown(other, index)
+                        yield row
+                yield self._instance_row(param, index)
+                for other in below:
+                    if index < len(self._param_values.get(other.flag) or []):
+                        row = self._instance_row(other, index)
+                        row.display = self._instance_shown(other, index)
+                        yield row
+                if paired:
+                    yield self._instance_sep(param.flag, str(index))
 
     def _param_widgets(self, param: ParamDef, param_id=None) -> list:
         """build the widgets for one launch parameter control."""
@@ -937,6 +957,11 @@ class ServiceCard(Widget):
             above = [other for other in paired if other.above]
             below = [other for other in paired if not other.above]
             values = self._param_values.get(param.flag) or []
+            if paired:
+                try:
+                    self.query_one(f"#{self._param_id('septop', param.flag)}").display = count > 0
+                except Exception:
+                    pass
             for index in range(max(count, len(values))):
                 try:
                     row = self.query_one(f"#{self._instance_row_id(param.flag, index)}")
@@ -955,6 +980,8 @@ class ServiceCard(Widget):
                         other_row = self._instance_row(other, index)
                         other_row.display = self._instance_shown(other, index)
                         container.mount(other_row)
+                    if paired:
+                        container.mount(self._instance_sep(param.flag, str(index)))
                     continue
                 row.display = index < count
                 for other in above:
@@ -977,6 +1004,15 @@ class ServiceCard(Widget):
                         container.mount(other_row, after=after)
                     other_row.display = index < count and self._instance_shown(other, index)
                     after = other_row
+                if paired:
+                    try:
+                        sep = self.query_one(f"#{self._param_id(f'sep{index}', param.flag)}")
+                    except Exception:
+                        if index >= count:
+                            continue
+                        sep = self._instance_sep(param.flag, str(index))
+                        container.mount(sep, after=after)
+                    sep.display = index < count
 
     def _initial_param_value(self, param: ParamDef) -> Any:
         if param.param_type == "bool":
@@ -1375,10 +1411,10 @@ class ServiceCard(Widget):
                     return
 
     def set_instance_choices(self, flag: str, choices: list, default: list) -> None:
-        """fresh options and defaults for one per-instance param of a
-        collection card (a recorder's Participant when the session or the
-        experiment group changes): a row the user picked keeps its pick while
-        it is still an option; every other row takes its new default."""
+        """fresh options and defaults for one per-instance param (a
+        recorder's or a base's Participant when the session or the experiment
+        group changes): a row the user picked keeps its pick while it is still
+        an option; every other row takes its new default."""
         param = next((other for other in self.service_def.params if other.flag == flag), None)
         if param is None:
             return
@@ -1389,6 +1425,10 @@ class ServiceCard(Widget):
         )
         options = self._instance_options(new_param)
         legal = {value for _, value in options}
+        # the Selects are given options only when they change: the ASR Base
+        # card's Participant rows are given theirs on every redraw of its
+        # Speakers lines
+        fresh_options = options != self._instance_options(param)
         values = list(self._param_values.get(flag) or [])
         picked = self._picked_instances.setdefault(flag, set())
         card_shown = self._card_shown.setdefault(flag, {})
@@ -1407,8 +1447,11 @@ class ServiceCard(Widget):
             card_shown[index] = keep
             if sel is not None:
                 with sel.prevent(Select.Changed):
-                    sel.set_options(options)
-                    sel.value = keep if keep in legal else Select.NULL
+                    if fresh_options:
+                        sel.set_options(options)
+                    wanted = keep if keep in legal else Select.NULL
+                    if fresh_options or sel.value != wanted:
+                        sel.value = wanted
         self._param_values[flag] = values
         count = self._instance_count(new_param)
         for index in range(len(values)):
