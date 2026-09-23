@@ -1,21 +1,23 @@
 """The evaluation driver of the 10 s interaction classifier (Layer A): it reads every session's
-fused table and coded labels, holds out one lesson at a time (or, once, the four TEST sessions),
+fused table and coded labels, holds out one date at a time (or, once, the four TEST sessions),
 fits everything a model needs on the training side only, and writes the run folder
 artifacts/_analysis/interaction/<run>/ the results table is made from.
 
-What is fit where; nothing ever reads the held-out lesson's labels:
+What is fit where; nothing ever reads the held-out date's labels:
 - the [g] scaling statistics: the outer-training sessions' windows (label-free); the [s] ones
   each session itself;
 - hyperparameters (C, the HGB grid, the network's epoch count): the inner folds over the
-  outer-training lessons (splits.inner_folds), by the class-weighted NLL of their out-of-fold
+  outer-training dates (splits.inner_folds), by the class-weighted NLL of their out-of-fold
   answers;
 - the calibrator, the late-fusion stacker and the HMM's gamma: those same out-of-fold answers;
 - the HMM's transitions and the prior: the outer-training labels;
-- the final model: every outer-training session, applied once to the held-out lesson.
+- the final model: every outer-training session, applied once to the held-out date.
 
-A lesson here is the unit of splits.class_units: lessons of one school class (a manifest's
-same_class_as) are held out, grouped in the inner folds and resampled together, and a run whose
-links join a TEST session to a DEV one is refused.
+The unit of every split is splits.class_units: a date, with the dates a manifest's same_class_as
+links reach, so the same group on the same date is never on both sides. Its sessions are held out,
+grouped in the inner folds and resampled together; SessionData.lesson and the lesson column of
+predictions.csv hold the unit, named by its lessons joined with '+'. A run where a DEV session
+shares a date or a class with a TEST one is refused.
 
 Every model ends in one format: calibrated p(individual), p(social), p(collaborative), the hard
 label by the balanced decision argmax p / pi under the outer-training prior (pre-declared, never
@@ -44,12 +46,13 @@ Windows the coder called absent (fewer than two members at the group's place) tr
 score nothing, like unclear ones. The presence gate (presence.py), fixed before labels were read,
 is scored against them as a task of its own. Every variant is also scored per observed-person
 stratum and gaze readability, and the headline's decisions with the gate's absent windows give the
-end-to-end state shares per lesson (state_shares.csv).
+end-to-end state shares per lesson (state_shares.csv). A bootstrap interval or contrast needs at
+least MIN_BOOTSTRAP_UNITS units; the TEST sessions fall on 2 dates, so a test run reports its
+estimates without intervals.
 
 Deferred by decision, with their places kept: the ablation grids of 4.6 (`--ablate`), the causal
-network row, the lexicon feature, masked-modality pretraining, and the leave-one-date-out and
-task-transfer runs (splits.date_folds and splits.task_transfer exist; the driver does not run
-them yet).
+network row, the lexicon feature, masked-modality pretraining, and the task-transfer run
+(splits.task_transfer exists; the driver does not run it yet).
 """
 from __future__ import annotations
 
@@ -91,7 +94,8 @@ UNLEARNED = ('r0', 'jev')
 HEADLINE_MODELS = ('late-lr', 'late-hgb')
 TEMPORAL = ('T0', 'T1c', 'T2')
 HMM_MODES = ('none', 'fb', 'filter')
-SPLITS = ('loso', 'test')
+# 'date' leaves one date out of DEV (the unit of every split); 'test' scores TEST once
+SPLITS = ('date', 'test')
 TARGETS = ('3class', 'binary')
 # the network reads its sequence through its own temporal blocks, not through lag columns
 NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair': 'tcn'}
@@ -103,6 +107,9 @@ JEV_MODELS = ('jev', 'jev-cal')
 MIN_CLASS_WINDOWS = 30
 INNER_FOLDS = 4
 BOOTSTRAP = 2000
+# fewer units than this give no bootstrap interval or contrast: a resample of 2 dates is one of
+# them, the other or both, so its percentiles are those dates' own scores, not an interval
+MIN_BOOTSTRAP_UNITS = 5
 STRATIFIED_SEEDS = (0, 1, 2, 3, 4)
 # the pre-registered absent-class policy (4.5): below either bound the confirmatory target is the
 # binary one and the three-class results are exploratory
@@ -124,7 +131,7 @@ PREDICTION_COLUMNS = ('session', 'lesson', 'task', 'window_index', 'window_start
 
 class Refused(RuntimeError):
     """the run would not train: `problems` says which outer-training folds lack which class (or
-    lack two lessons to hold out), and `run_dir` holds the label counts it read."""
+    lack two dates to hold out), and `run_dir` holds the label counts it read."""
 
     def __init__(self, message: str, problems: list, run_dir: Path):
         super().__init__(message)
@@ -136,13 +143,13 @@ class Config:
     """what a run does (mmla ses-classify fills it from its flags). `models`, `temporal` and `hmm`
     are lists; `coder` is the truth (default: the coder with the most windows over the DEV
     sessions; a test run must name it); `quick` swaps in the QUICK grids and training lengths;
-    `epochs` fixes the network's E* (the median of the LOSO folds' for the test model) instead of
-    the inner choice; `bootstrap` overrides the number of lesson resamples."""
+    `epochs` fixes the network's E* (the median of the date folds' for the test model) instead of
+    the inner choice; `bootstrap` overrides the number of unit resamples."""
     artifacts: str = 'artifacts'
     sessions: str | None = None
     coder: str | None = None
     models: tuple = ('r0', 'r1', 'lr', 'hgb', 'late-lr', 'late-hgb')
-    split: str = 'loso'
+    split: str = 'date'
     temporal: tuple = TEMPORAL
     hmm: tuple = HMM_MODES
     target: str = '3class'
@@ -252,9 +259,9 @@ def same_class_of(directory) -> tuple:
 
 
 def link_lessons(data: dict) -> None:
-    """every session's lesson widened to its class unit (splits.class_units over the loaded
-    sessions' same_class_as), so predictions, the bootstrap and the refusal group what the folds
-    group."""
+    """every session's lesson widened to its unit (splits.class_units over the loaded sessions:
+    its date, with the dates their same_class_as reach), so predictions, the bootstrap and the
+    refusal group what the folds group."""
     units = S.class_units(list(data), {s: d.same_class_as for s, d in data.items()})
     for session, d in data.items():
         d.lesson = units[session]
@@ -372,41 +379,41 @@ def class_names(k: int) -> tuple:
 
 
 def make_folds(split: str, data: dict) -> list:
-    """the outer folds: one per DEV lesson with coded windows (loso), lessons of one school class
-    (same_class_as) together, or the one scoring of the TEST sessions (test). Raises
-    splits.SplitError when a same_class_as link joins a TEST session to a DEV one."""
+    """the outer folds: one per DEV date with coded windows (date), dates joined by same_class_as
+    together, or the one scoring of the TEST sessions (test). Raises splits.SplitError when a DEV
+    session shares a date or a same_class_as link with a TEST one."""
     sessions = list(data)
     links = {s: d.same_class_as for s, d in data.items()}
-    if split == 'loso':
-        return S.loso_folds(sessions, coded={s: d.n_coded for s, d in data.items()}, same_class=links)
+    if split == 'date':
+        return S.date_folds(sessions, coded={s: d.n_coded for s, d in data.items()}, same_class=links)
     fold = S.final_fold(sessions, same_class=links)
     return [fold] if fold.test else []
 
 
 def label_refusal(folds, data: dict, k: int, minimum: int = MIN_CLASS_WINDOWS) -> list:
     """the outer-training folds a learned model may not be fitted on: a class with fewer than
-    `minimum` coded windows, or fewer than two lessons with coded windows for the inner folds."""
+    `minimum` coded windows, or fewer than two units (dates) with coded windows for the inner folds."""
     names = class_names(k)
     problems = []
     for fold in folds:
         counts = np.zeros(k, dtype=int)
-        lessons = set()
+        units = set()
         for session in fold.train:
             target = data[session].target
             coded = L.scored(target)
             counts += np.bincount(target[coded].astype(int), minlength=k)[:k]
             if coded.any():
-                lessons.add(data[session].lesson)
+                units.add(data[session].lesson)
         short = [names[c] for c in range(k) if counts[c] < minimum]
-        if short or len(lessons) < 2:
+        if short or len(units) < 2:
             problems.append({'fold': fold.name, 'counts': dict(zip(names, counts.tolist())), 'short': short,
-                             'coded_lessons': len(lessons)})
+                             'coded_units': len(units)})
     return problems
 
 
 def label_counts(data: dict) -> pd.DataFrame:
-    """windows per class and session (and unclear, absent, uncoded), with the lesson, task and split role:
-    the table printed before training."""
+    """windows per class and session (and unclear, absent, uncoded), with the unit (lesson column),
+    task and split role: the table printed before training."""
     counts = L.label_counts({s: d.y for s, d in data.items()})
     counts.insert(0, 'role', ['test' if s in S.TEST_SESSIONS else 'dev' for s in counts.index])
     counts.insert(0, 'task', [data[s].task for s in counts.index])
@@ -418,15 +425,15 @@ def label_counts(data: dict) -> pd.DataFrame:
 def absent_class_policy(data: dict) -> dict:
     """the pre-registered policy: with fewer than 200 coded social windows on dev, or social at
     least 5 times in fewer than 6 lessons, the confirmatory target becomes the binary one. The
-    lessons are counted as registered, by splits.lesson_key, not by the same-class units the folds
-    hold out, so a same_class_as link never changes the target."""
+    lessons are counted as registered, by splits.lesson_key, not by the date units the folds hold
+    out, so neither the date unit nor a same_class_as link changes the target."""
     social, by_lesson = 0, {}
     for d in data.values():
         if d.session in S.TEST_SESSIONS:
             continue
         n = int((d.y == 1).sum())
         social += n
-        # d.lesson is the class unit after link_lessons; the policy counts the lesson itself
+        # d.lesson is the date unit after link_lessons; the policy counts the lesson itself
         lesson = S.lesson_key(d.session)
         by_lesson[lesson] = by_lesson.get(lesson, 0) + n
     lessons = sum(1 for n in by_lesson.values() if n >= POLICY_SOCIAL_PER_LESSON)
@@ -447,7 +454,7 @@ def _offsets(sessions) -> dict:
 
 class _Fold:
     """one outer fold, scaled with the statistics of its training side: the pooled views and their
-    lags, the rows of the training side with their lessons, the inner folds (as row positions for
+    lags, the rows of the training side with their units, the inner folds (as row positions for
     the tabular models, as session names for the network), the training prior and transitions."""
 
     def __init__(self, fold, data: dict, k: int, learned: bool = True):
@@ -461,11 +468,11 @@ class _Fold:
         self.at = {'train': _offsets(self.train), 'test': _offsets(self.test)}
         self.y = np.concatenate([d.target for d in self.train])
         sessions = np.concatenate([np.full(len(d), d.session, dtype=object) for d in self.train])
-        # lessons of one school class are one group, as in the outer folds
+        # a date (with its same_class_as dates) is one group, as in the outer folds
         links = {d.session: d.same_class_as for d in self.train}
         self.units = S.class_units(fold.train, links)
         self.groups = np.concatenate([np.full(len(d), self.units[d.session], dtype=object) for d in self.train])
-        # the rule and zero-shot Jev choose nothing, so they need no inner folds (nor two coded lessons)
+        # the rule and zero-shot Jev choose nothing, so they need no inner folds (nor two coded dates)
         self.inner = S.inner_folds(fold.train, k=INNER_FOLDS, sizes={d.session: d.n_coded for d in self.train},
                                    same_class=links) if learned else []
         self.pairs = [S.fold_indices(inner, sessions) for inner in self.inner]
@@ -823,8 +830,8 @@ def _complete(variant: dict, base: pd.DataFrame) -> bool:
 
 def score_variant(variant: dict, base: pd.DataFrame, k: int, n_boot: int) -> tuple[dict, list]:
     """every metric of 4.4 for one variant over the pooled held-out windows it answered
-    (metrics.report), the lesson-bootstrap interval of its pooled macro-F1 (three-class and
-    binary), the onset latency of an online variant, the seed mean of the stratified floor, the
+    (metrics.report), the unit-bootstrap interval of its pooled macro-F1 (three-class and
+    binary; left out, with the reason, below MIN_BOOTSTRAP_UNITS units), the onset latency of an online variant, the seed mean of the stratified floor, the
     2-state HMM check and its coverage; and its per-session rows. A coded window the variant gave
     no answer for is left out rather than counted as a miss, and `coverage` says how many."""
     # a window without an answer is scored as not coded; its share is the coverage
@@ -840,10 +847,9 @@ def score_variant(variant: dict, base: pd.DataFrame, k: int, n_boot: int) -> tup
     coded = y >= 0
     yc, pc, gc = y[coded], y_pred[coded], lessons[coded]
     truth, binary = _binary_truth(y)[coded], y_binary[coded]
-    report['macro_f1_ci'] = _drop_samples(M.session_bootstrap(
-        lambda rows: M.macro_f1(yc[rows], pc[rows]), gc, n=n_boot))
-    report['binary_macro_f1_ci'] = _drop_samples(M.session_bootstrap(
-        lambda rows: M.macro_f1(truth[rows], binary[rows], n_classes=2), gc, n=n_boot))
+    report['macro_f1_ci'] = _interval(lambda rows: M.macro_f1(yc[rows], pc[rows]), gc, n_boot)
+    report['binary_macro_f1_ci'] = _interval(
+        lambda rows: M.macro_f1(truth[rows], binary[rows], n_classes=2), gc, n_boot)
     if variant['hmm'] == 'filter' and k == 3:
         report['onset_latency'] = M.onset_latency(y, y_pred, blocks, sessions)
     if variant.get('seed_preds'):
@@ -858,6 +864,27 @@ def score_variant(variant: dict, base: pd.DataFrame, k: int, n_boot: int) -> tup
 
 def _drop_samples(result: dict) -> dict:
     return {key: value for key, value in result.items() if key != 'samples'}
+
+
+def _too_few_units(units: int) -> str | None:
+    """why a bootstrap over this many units is left out, or None when it is not."""
+    if units >= MIN_BOOTSTRAP_UNITS:
+        return None
+    return (f"{units} unit(s) (dates) to resample, fewer than {MIN_BOOTSTRAP_UNITS}: "
+            f"the percentiles would be those dates' own scores")
+
+
+def _interval(fn, groups, n_boot: int) -> dict:
+    """the unit-bootstrap interval of a pooled metric (metrics.session_bootstrap) with the number
+    of units it resampled; with fewer than MIN_BOOTSTRAP_UNITS the estimate stands alone, lo and
+    hi are None and `left_out` says why."""
+    units = len(pd.unique(np.asarray(groups, dtype=object)))
+    why = _too_few_units(units)
+    if why is None:
+        return dict(_drop_samples(M.session_bootstrap(fn, groups, n=n_boot)), units=units)
+    estimate = float(fn(np.arange(len(groups))))
+    return {'estimate': estimate if np.isfinite(estimate) else None, 'lo': None, 'hi': None, 'n': 0,
+            'n_undefined': 0, 'units': units, 'left_out': why}
 
 
 def _result_row(key: str, variant: dict, report: dict) -> dict:
@@ -887,7 +914,8 @@ def _result_row(key: str, variant: dict, report: dict) -> dict:
 
 def select_headline(variants: dict, reports: dict, binary: bool = False) -> str | None:
     """the pre-registered headline: the best of late-lr and late-hgb, over the temporal modes, with
-    and without the HMM, by pooled dev macro-F1 (the binary one under the absent-class policy);
+    and without the HMM, by pooled dev leave-one-date-out macro-F1 (the binary one under the
+    absent-class policy);
     the first in run order on a tie."""
     best = None
     for key, variant in variants.items():
@@ -912,11 +940,12 @@ def share_variant(headline: str | None, variants: dict) -> str | None:
 
 
 def contrasts(headline: str | None, variants: dict, base: pd.DataFrame, n_boot: int, binary: bool = False) -> dict:
-    """the three confirmatory contrasts on pooled dev macro-F1, paired on the same lesson
+    """the three confirmatory contrasts on pooled dev macro-F1, paired on the same unit (date)
     resamples and Holm-corrected: C1 the headline against the fitted rule R1, C2 the headline's
     model and temporal mode with the HMM against without it, C3 the headline against zero-shot Jev
     J0. A contrast is computed only when both of its variants answered every coded held-out
-    window, so both sides are scored on the same windows; one the run cannot give comes back with
+    window, so both sides are scored on the same windows, and when the coded windows span at least
+    MIN_BOOTSTRAP_UNITS units; one the run cannot give comes back with
     `left_out` saying why, and stays out of the Holm family."""
     if headline is None:
         return {}
@@ -933,11 +962,14 @@ def contrasts(headline: str | None, variants: dict, base: pd.DataFrame, n_boot: 
         pred = (variants[key]['y_pred_binary'] if binary else variants[key]['y_pred'])[coded]
         return lambda rows: M.macro_f1(truth[rows], pred[rows], n_classes=2 if binary else 3)
 
+    few = _too_few_units(len(pd.unique(np.asarray(lessons, dtype=object))))
     out = {}
     for name, (a, b) in wanted.items():
         absent = [key for key in (a, b) if key not in variants]
         partial = [key for key in (a, b) if key in variants and not _complete(variants[key], base)]
-        if absent:
+        if few:
+            out[name] = {'a': a, 'b': b, 'left_out': few}
+        elif absent:
             why = f"the run has no {' or '.join(absent)}" + (f" ({hints[absent[0]]})" if absent[0] in hints else '')
             out[name] = {'a': a, 'b': b, 'left_out': why}
         elif partial:
@@ -1131,8 +1163,9 @@ def _check(cfg: Config):
     if not cfg.models:
         raise ValueError("name at least one model")
     if cfg.split not in SPLITS:
-        raise ValueError(f"split {cfg.split!r} is not built: one of {', '.join(SPLITS)} "
-                         f"(leave-one-date-out and task transfer are deferred)")
+        hint = " ('loso' became 'date': the same group on one date is never on both sides)" \
+            if cfg.split == 'loso' else ' (task transfer is deferred)'
+        raise ValueError(f"split {cfg.split!r} is not built: one of {', '.join(SPLITS)}{hint}")
     if cfg.target not in TARGETS:
         raise ValueError(f"target must be one of {', '.join(TARGETS)}")
     bad = [t for t in cfg.temporal if t not in TEMPORAL] + [h for h in cfg.hmm if h not in HMM_MODES]
@@ -1141,7 +1174,7 @@ def _check(cfg: Config):
     if cfg.split == 'test' and not cfg.confirm_frozen:
         raise ValueError("the TEST sessions are scored once, after every choice is frozen: confirm with confirm_frozen")
     if cfg.split == 'test' and not cfg.coder:
-        raise ValueError("the TEST scoring names its truth coder: pass the coder the LOSO runs were chosen on "
+        raise ValueError("the TEST scoring names its truth coder: pass the coder the date runs were chosen on "
                          "(their config.json 'coder')")
     barren = _barren(cfg)
     if barren:
@@ -1193,8 +1226,8 @@ def run(config, log=None) -> Path:
     k = plan['k']
     artifacts = Path(cfg.artifacts).resolve()
     found = session_tables(artifacts, cfg.sessions)
-    if cfg.split == 'loso':
-        # LOSO never opens a TEST session, not even its labels
+    if cfg.split == 'date':
+        # a dev run never opens a TEST session, not even its labels
         found = [(s, p) for s, p in found if s not in S.TEST_SESSIONS]
     if not found:
         raise FileNotFoundError(f"no fused table under {artifacts} for {cfg.sessions or 'any session'}: "
@@ -1247,12 +1280,12 @@ def run(config, log=None) -> Path:
     elif not plan['models']:
         why = f"every model named was left out ({', '.join(dropped)}: no usable Jev maps, see left_out and notes)"
     elif not folds:
-        why = 'no TEST session has a fused table' if cfg.split == 'test' else 'no lesson has coded windows to hold out'
+        why = 'no TEST session has a fused table' if cfg.split == 'test' else 'no date has coded windows to hold out'
     elif not held:
         why = 'the held-out sessions have no coded window to score'
     elif problems:
         why = f"{len(problems)} outer-training fold(s) lack {cfg.min_class_windows} coded windows of a class " \
-              f"(or two coded lessons for the inner folds)"
+              f"(or two coded dates for the inner folds)"
     if why:
         write_json(run_dir / 'metrics.json', {'run': run_dir.name, 'refused': why, 'problems': problems,
                                               'models': plan['models'], 'target': cfg.target,
@@ -1278,15 +1311,16 @@ def run(config, log=None) -> Path:
         per_session += [dict(row, variant=key) for row in rows]
     policy = absent_class_policy(data)
     binary_confirmatory = policy['confirmatory_target'] == 'binary' or k == 2
-    headline = select_headline(variants, reports, binary_confirmatory) if cfg.split == 'loso' else None
+    headline = select_headline(variants, reports, binary_confirmatory) if cfg.split == 'date' else None
     tests = contrasts(headline, variants, base, plan['bootstrap'], binary_confirmatory) if headline else {}
     presence_gated = base['presence_gated'].to_numpy(dtype=bool)
     gate = P.evaluate_gate(base['y_true'].to_numpy(dtype=float), presence_gated, base['session'].to_numpy(),
                            base['n_observed'].to_numpy())
     share_key = share_variant(headline, variants)
     if share_key:
+        # per lesson, not per unit: a unit's lessons would pool their share errors and cancel them
         frame = P.state_shares(base['y_true'].to_numpy(dtype=float), variants[share_key]['y_pred'], presence_gated,
-                               base['lesson'].to_numpy(), class_names(k))
+                               base['session'].map(S.lesson_key).to_numpy(), class_names(k))
         frame.to_csv(run_dir / 'state_shares.csv', index=False)
         shares = {'variant': share_key, **P.share_summary(frame)}
     else:
@@ -1315,8 +1349,8 @@ def run(config, log=None) -> Path:
                    'absent': int((scored == L.ABSENT_Y).sum()),
                    'join': {s: d.join for s, d in data.items()}},
         'inter_coder': ceiling, 'absent_class_policy': policy,
-        'headline': {'variant': headline, 'selected_on': 'dev LOSO pooled ' + ('binary macro-F1' if binary_confirmatory
-                                                                                else 'macro-F1'),
+        'headline': {'variant': headline, 'selected_on': 'dev leave-one-date-out pooled '
+                     + ('binary macro-F1' if binary_confirmatory else 'macro-F1'),
                      'strata': reports[headline].get('strata')} if headline else None,
         'contrasts': tests, 'presence_gate': gate, 'state_shares': shares, 'notes': notes, 'left_out': dropped,
         'folds': [{key: out[key] for key in ('name', 'train', 'test', 'inner', 'prior', 'transitions', 'models',

@@ -4,7 +4,7 @@ The interaction classifier labels every 10 s window of a session as **individual
 
 Two commands make up the classifier:
 
-- `mmla ses-classify` trains and scores the models, holding out one lesson at a time.
+- `mmla ses-classify` trains and scores the models, holding out one date at a time.
 - `mmla ses-jev` asks Jev, a zero-shot model, for the same labels from a plain-text description of each window. It is the no-label baseline the trained models are compared against.
 
 ![From sensors to per-window probabilities: pipelines, fusion, layout, the four model lanes and the post-processing](../img/interaction_architecture.svg)
@@ -113,10 +113,10 @@ A 2-state HMM on the derived binary posteriors is reported next to each `fb` var
 |---|---|
 | [g] scaling statistics | the outer-training sessions, label-free |
 | [s] scaling statistics | each session itself, label-free |
-| C, the HGB grid point, the network's epoch count | inner folds over the outer-training lessons (4, grouped by lesson), class-weighted NLL of the out-of-fold answers |
+| C, the HGB grid point, the network's epoch count | inner folds over the outer-training dates (4, grouped by date), class-weighted NLL of the out-of-fold answers |
 | calibrator, stacker, HMM γ | the same inner out-of-fold answers |
 | HMM transitions, π | the outer-training labels |
-| the model that is scored | refit on every outer-training session, applied once to the held-out lesson |
+| the model that is scored | refit on every outer-training session, applied once to the held-out date |
 
 ## The network
 
@@ -156,18 +156,20 @@ The rungs form a ladder: `pooled-net`, then `net-notcn`, then `net`, then `net-p
 - `exp_20260603_microbit_group_01_260603T0826Z`
 - `exp_20260603_wegrow_group_01_260603T1037Z`
 
-These sessions never reach a scaler, the Jev word bins or a pilot, and a LOSO run does not open them at all.
+These sessions never reach a scaler, the Jev word bins or a pilot, and a dev run (`--split date`) does not open them at all. They are the only sessions of their two dates.
 
-**DEV** is the other sessions.
+**DEV** is the other sessions: 16 since 2025-05-20 group_02 was voided (moved out of `artifacts/`), in 15 lessons on 9 dates. 2024-12-10, 2025-04-08, 2025-06-16, 2025-10-07, 2025-11-25 and 2026-03-02 have two sessions each (two groups, or one group's micro:bit and WeGrow lessons), 2025-05-13 has two takes of one group, and 2025-05-01 and 2025-05-20 have one session each.
 
 **Inclusion rule S1** (fixed before any label is read, in `layout.session_inclusion`): a session enters a run only when its roster keeps at least two persons and two of them are observed together (positioned by IPS or seen by a camera) in at least 30 % of its windows. A session that fails is left out whole, DEV or TEST: it trains nothing and is scored nowhere. The run names it and the reason in `roster.json` (`included: false`), and refuses when nothing is left.
 
-**Presence gate** (pre-registered, fixed before any label is read, in `presence.py`): a window is gated absent when fewer than two (`MIN_OBSERVED`) of the roster's kept persons are observed in it. A person is observed when IPS positioned them (present_ratio > 0), a camera saw their tag (frame sets > 0), or, where the table has the seat trace, an untagged body stood at their seat in at least half of the window's frame sets (`p<tag>_untagged_at_seat_ratio` ≥ 0.5). The gate never makes a label. `metrics.json` `presence_gate` scores it against the coder's absent on the held-out coded windows (absent against the three classes, unclear left out): precision, recall, F1, κ and the counts, overall, by observed persons and by session. The gate is scored on the held-out rows, so a lesson with no class-coded window (all absent or unclear) gets no fold and is in neither the gate's nor the state shares' rows.
+**Presence gate** (pre-registered, fixed before any label is read, in `presence.py`): a window is gated absent when fewer than two (`MIN_OBSERVED`) of the roster's kept persons are observed in it. A person is observed when IPS positioned them (present_ratio > 0), a camera saw their tag (frame sets > 0), or, where the table has the seat trace, an untagged body stood at their seat in at least half of the window's frame sets (`p<tag>_untagged_at_seat_ratio` ≥ 0.5). The gate never makes a label. `metrics.json` `presence_gate` scores it against the coder's absent on the held-out coded windows (absent against the three classes, unclear left out): precision, recall, F1, κ and the counts, overall, by observed persons and by session. The gate is scored on the held-out rows, so a date with no class-coded window (all absent or unclear) gets no fold and is in neither the gate's nor the state shares' rows.
 
-- **Lessons.** The unit is the lesson: the session id without its start suffix, so the two 2025-05-13 takes are one lesson.
-- **Same class.** Sessions of different pupils from one school class are not independent either. A session manifest's `same_class_as` (written by `mmla ses-tidy --same-class-as`, both ways) links them, and the lessons the links reach, transitively, are one unit, named by its lessons joined with `+` (`exp_20250520_microbit_group_01+exp_20250520_microbit_group_02`). The unit is what the outer and inner folds hold out, what the bootstrap resamples and the `lesson` column of `predictions.csv`. The absent-class policy still counts lessons one by one, so a link never changes the confirmatory target. A link between a TEST and a DEV session refuses the run, in either split, since the TEST scoring would train on that class; two TEST sessions may be linked.
-- **Outer folds.** `--split loso` holds out one lesson (unit) with coded windows at a time.
-- **Inner folds.** Grouped by lesson, the same way.
+- **Dates.** The unit of every split is the date: the same group on the same date is never on both sides of a split. Sessions of one date share pupils or a class (a group's micro:bit and WeGrow lessons of one morning, two groups of one class, the two takes of 2025-05-13), so every DEV session of a date is held out together and trained on together. A lesson is the session id without its start suffix; a unit is named by its lessons joined with `+` (`exp_20241210_microbit_group_01+exp_20241210_microbit_group_02`).
+- **Same class.** Sessions of one school class on different dates are not independent either. A session manifest's `same_class_as` (written by `mmla ses-tidy --same-class-as`, both ways) links them, and the dates the links reach, transitively, are one unit. The unit is what the outer and inner folds hold out, what the bootstrap resamples and the `lesson` column of `predictions.csv`. The absent-class policy still counts lessons one by one, so neither the date nor a link changes the confirmatory target.
+- **TEST apart.** A DEV session that shares a date with a TEST session, or reaches one through `same_class_as` links, refuses the run in either split, since the TEST scoring would train on those pupils. Two TEST sessions may share a date or a link. No DEV session shares a date with TEST today.
+- **Outer folds.** `--split date` (the default) holds out one unit with coded windows at a time: 9 folds over today's DEV set. It replaced `--split loso`, which held out one lesson and so trained on a group's other lesson of the same morning.
+- **Inner folds.** Grouped by unit, the same way: 4 folds over the 8 dates of an outer-training set.
+- **Task transfer** (not run yet) trains on one task and scores the other; a session of the training task whose date holds a scored session stays out, so micro:bit → WeGrow trains on the micro:bit sessions of the five dates without WeGrow.
 - **Refusal.** A run refuses to train any learned model when a class has fewer than 30 coded windows in an outer-training fold. It prints the class × session counts first. `--target binary` then trains individual against interaction, labelled as a fallback.
 
 **Metrics.** Every variant is scored pooled over the held-out windows, per session and per task, with and without empty windows. An empty window has no speech, nobody positioned and nobody seen.
@@ -179,11 +181,11 @@ These sessions never reach a scaler, the Jev word bins or a pilot, and a LOSO ru
 - **State shares:** the absolute error of each state's time share per session.
 - **Onset latency and miss rate:** for the causal `filter` variants.
 - **Strata:** every variant again by observed kept persons (0, 1, 2+, by the gate's definition) and gaze readability (every kept person's gaze readable or not), on the three-class windows (`metrics.json` strata, `results.csv` n_ and macro_f1_ columns).
-- **End-to-end state shares:** per lesson, the coder's shares of absent, individual, social and collaborative against the predicted ones, where gated windows are absent and the rest take the headline's decision, so gate errors count (`state_shares.csv`, `metrics.json` state_shares; a test run uses the first `late-lr` or `late-hgb` variant without the forward filter).
+- **End-to-end state shares:** per lesson (not per unit, so the micro:bit and WeGrow lessons of one morning do not pool their errors and cancel them), the coder's shares of absent, individual, social and collaborative against the predicted ones, where gated windows are absent and the rest take the headline's decision, so gate errors count (`state_shares.csv`, `metrics.json` state_shares; a test run uses the first `late-lr` or `late-hgb` variant without the forward filter).
 
 The R0 rule has no posterior, so its NLL, ECE and AUROC are n/a.
 
-**Uncertainty.** Intervals come from a session-cluster bootstrap over lessons (2,000 resamples), recomputing the pooled metric each time. Differences are paired on the same resamples. Window-level intervals are never used, because neighbouring windows are near copies.
+**Uncertainty.** Intervals come from a cluster bootstrap over units, that is dates (2,000 resamples), recomputing the pooled metric each time. Differences are paired on the same resamples. Window-level intervals are never used, because neighbouring windows are near copies. Each interval in `metrics.json` gives the number of units it resampled (`units`). With fewer than 5 units (`MIN_BOOTSTRAP_UNITS`) there is no interval or contrast, only the estimate, with `left_out` saying why: a resample of 2 dates is one date, the other or both, so its percentiles would be those dates' own scores. The TEST sessions fall on 2 dates (2026-05-20 and 2026-06-03), so a test run reports its estimates without intervals; the dev run's 9 dates keep theirs.
 
 **Coverage.** A variant is scored only on the coded windows it answered. Every model except Jev answers every window. Jev answers only the windows `ses-jev` asked about and got an answer for. `results.csv` and `metrics.json` give each variant's coverage, and the command prints any variant below 100 %. `jev` and `jev-cal` are left out of a run, with the reason, in three cases:
 
@@ -191,7 +193,7 @@ The R0 rule has no posterior, so its NLL, ECE and AUROC are n/a.
 - the map was made from an earlier version of the fusion table;
 - the maps were written with different templates.
 
-**Headline selection** (pre-registered). The headline is the best of `late-lr` and `late-hgb` over {T0, T1c, T2} × {HMM, none}, by dev LOSO macro-F1. It is tested by three Holm-corrected contrasts:
+**Headline selection** (pre-registered). The headline is the best of `late-lr` and `late-hgb` over {T0, T1c, T2} × {HMM, none}, by dev leave-one-date-out macro-F1. It is tested by three Holm-corrected contrasts:
 
 | Contrast | Compares |
 |---|---|
@@ -201,13 +203,13 @@ The R0 rule has no posterior, so its NLL, ECE and AUROC are n/a.
 
 A contrast is computed only when both of its variants answered every coded held-out window, so C3 never compares the headline with a partial Jev. A contrast the run cannot compute is listed with the reason and left out of the Holm correction.
 
-**Absent-class policy** (this concerns a rare social class, not the absent code). With fewer than 200 coded social windows on dev, or social at least 5 times in fewer than 6 lessons (each lesson counted on its own, even when `same_class_as` links it to another), the confirmatory target becomes binary macro-F1, and the three-class results are exploratory.
+**Absent-class policy** (this concerns a rare social class, not the absent code). With fewer than 200 coded social windows on dev, or social at least 5 times in fewer than 6 lessons (each lesson counted on its own, as registered, even when it shares a date or a `same_class_as` link with another), the confirmatory target becomes binary macro-F1, and the three-class results are exploratory.
 
 **The run folder**, `artifacts/_analysis/interaction/<split>-<time>/` (or `-o`):
 
 | File | Holds |
 |---|---|
-| `predictions.csv` | one row per held-out window and variant. Columns: session, lesson, task, window_index, window_start, fold, model, variant, coded, empty_window, y_true (-1 unclear, -2 absent), the three probabilities, p_interaction, y_pred, y_pred_binary, temporal mode, HMM mode, the Viterbi state, n_observed, presence_gated and gaze_readable |
+| `predictions.csv` | one row per held-out window and variant. Columns: session, lesson (the unit held out: its lessons joined with `+`), task, window_index, window_start, fold, model, variant, coded, empty_window, y_true (-1 unclear, -2 absent), the three probabilities, p_interaction, y_pred, y_pred_binary, temporal mode, HMM mode, the Viterbi state, n_observed, presence_gated and gaze_readable |
 | `metrics.json` | every metric of every variant with its interval and coverage, the headline and contrasts (with the reason for any left out), the models left out, the notes on each session's Jev map, the absent-class policy, inter-coder κ, label join reports, the presence gate, the strata, the state shares, and per fold the chosen parameters, calibrators, γ and epochs |
 | `results.csv` | the results table: one row per variant with its coverage, grouped as no labels, label floors, few-label, tabular, neural, online and ceiling |
 | `per_session.csv`, `confusion.csv` | per-session scores and pooled confusion cells of every variant |
@@ -277,19 +279,19 @@ OPENROUTER_API_KEY=... mmla ses-jev --variant j1
 # 4. code windows: 30 % of 5-minute blocks per dev session, the same blocks for a second coder
 mmla ses-code --sample 0.3 --block 300 --seed 1
 
-# 5. dev: leave one lesson out
-mmla ses-classify -m r0,jev,majority,stratified,r1,jev-cal,lr,hgb,late-lr,late-hgb --split loso --jobs 4
-mmla ses-classify -m pooled-net,net-notcn,net,net-pair --split loso --jobs 4
+# 5. dev: leave one date out
+mmla ses-classify -m r0,jev,majority,stratified,r1,jev-cal,lr,hgb,late-lr,late-hgb --split date --jobs 4
+mmla ses-classify -m pooled-net,net-notcn,net,net-pair --split date --jobs 4
 
 # 6. once every choice is frozen: the TEST sessions, exactly once
-mmla ses-classify -m <headline model>,<compared models> --split test --confirm-frozen --coder <LOSO coder> --epochs <median LOSO E*>
+mmla ses-classify -m <headline model>,<compared models> --split test --confirm-frozen --coder <coder of the date runs> --epochs <median E* of the date folds>
 ```
 
 | `ses-classify` flag | Does |
 |---|---|
 | `-a`, `-s`, `-o` | artifacts root, a session-id filter, the run folder |
 | `-m` | comma list of models (default `r0,r1,lr,hgb,late-lr,late-hgb`) |
-| `--split loso` / `test` | leave one dev lesson out, or score TEST once (needs `--confirm-frozen` and `--coder`; each start and finish is appended to `artifacts/_analysis/interaction/test_runs.jsonl`) |
+| `--split date` / `test` | leave one dev date out, every session of it together (the default), or score TEST once (needs `--confirm-frozen` and `--coder`; each start and finish is appended to `artifacts/_analysis/interaction/test_runs.jsonl`) |
 | `--temporal`, `--hmm` | comma lists, or `all` (the default for both); a model the two give no variant, such as `lr` with `--temporal T2 --hmm filter`, is refused before anything is read |
 | `--target binary` | the two-class fallback |
 | `--coder`, `--join overlap` | the truth coder (default: the most windows over the dev sessions); the overlap join |
@@ -315,7 +317,7 @@ These were deferred by decision, and each has its place in the code:
 
 - the ablation grids (`--ablate`: modality, temporal, fusion, ladder, weights);
 - the causal network row (a TCN padded on the left only; `network.TemporalBlock` takes `causal`);
-- leave-one-date-out and task transfer (`--split date` and `task`; the fold helpers exist in `splits.py`);
+- task transfer (`--split task`; `splits.task_transfer` exists);
 - the `+lexicon` content feature;
 - masked-modality pretraining (ladder rung e);
 - Jev's criteria-order and rerun checks (`--order-check`, `--rerun-check`);

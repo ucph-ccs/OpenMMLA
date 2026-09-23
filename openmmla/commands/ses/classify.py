@@ -1,12 +1,15 @@
 """mmla ses-classify: train and evaluate the 10 s interaction classifier across sessions.
 
 It reads every session's fused table (mmla ses-fuse) and the coded labels (mmla ses-code), and
-scores each named model on windows it was not trained on: --split loso holds out one DEV lesson at
-a time (the two 2025-05-13 takes are one lesson), with every choice (grid point, epoch count,
-calibrator, stacker, HMM gamma) made on inner folds over the other lessons; --split test trains
-on every DEV session and scores the four TEST sessions, once, after every choice is frozen
-(--confirm-frozen and the truth --coder the LOSO runs used; the run is recorded in
-artifacts/_analysis/interaction/test_runs.jsonl).
+scores each named model on windows it was not trained on. The unit of every split is the date,
+so the same group on the same date is never on both sides: --split date (the default) holds out
+one DEV date at a time, every session of it together (two groups of one class, a group's micro:bit
+and WeGrow lessons, the two 2025-05-13 takes), with every choice (grid point, epoch count,
+calibrator, stacker, HMM gamma) made on inner folds over the other dates; --split test trains on
+every DEV session and scores the four TEST sessions, once, after every choice is frozen
+(--confirm-frozen and the truth --coder the date runs used; the run is recorded in
+artifacts/_analysis/interaction/test_runs.jsonl). --split loso, leave one lesson out, is gone: it
+put a group's two lessons of one morning on both sides.
 
 Every run lands in artifacts/_analysis/interaction/<split>-<time>/ (or -o): predictions.csv,
 metrics.json, results.csv, per_session.csv, confusion.csv, label_counts.csv, state_shares.csv,
@@ -33,7 +36,7 @@ def get_parser():
     parser = argparse.ArgumentParser(
         prog='mmla ses-classify',
         description="Train and evaluate the 10 s interaction classifier (individual, social, collaborative) across "
-                    "sessions: leave one lesson out on the DEV sessions, or score the TEST sessions once.")
+                    "sessions: leave one date out on the DEV sessions, or score the TEST sessions once.")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
     parser.add_argument('-s', '--sessions', default=None, help="only sessions whose id contains this text")
     parser.add_argument('--coder', default=None,
@@ -43,9 +46,9 @@ def get_parser():
                         help="comma list of r0 (a-priori rule), jev (zero-shot, from mmla ses-jev's answers), "
                              "majority, stratified, r1 (fitted tree), jev-cal, lr, hgb, late-lr, late-hgb, pooled-net, "
                              f"net-notcn, net, net-pair (default {DEFAULT_MODELS})")
-    parser.add_argument('--split', choices=('loso', 'date', 'task', 'test'), default='loso',
-                        help="loso: leave one DEV lesson out; test: train on DEV, score TEST once (needs "
-                             "--confirm-frozen and --coder); date and task are not built yet")
+    parser.add_argument('--split', choices=('date', 'task', 'test'), default='date',
+                        help="date: leave one DEV date out, all its sessions together (default); test: train on "
+                             "DEV, score TEST once (needs --confirm-frozen and --coder); task is not built yet")
     parser.add_argument('--temporal', default='all',
                         help="comma list of T0 (no lags), T1c (causal lags), T2 (centred lags), or all (default all)")
     parser.add_argument('--hmm', default='all',
@@ -62,7 +65,7 @@ def get_parser():
     parser.add_argument('--small', choices=('auto', 'yes', 'no'), default='auto',
                         help="the network's small configuration: auto below 3,000 coded training windows")
     parser.add_argument('--epochs', type=int, default=None,
-                        help="the network's epoch count for the refit, e.g. the median of the LOSO folds' for the "
+                        help="the network's epoch count for the refit, e.g. the median of the date folds' for the "
                              "test model (default: chosen on the inner folds)")
     parser.add_argument('--jev-variant', choices=('j0', 'j1'), default='j0',
                         help="which cached Jev answers jev and jev-cal read (default j0)")
@@ -118,9 +121,14 @@ def _metrics(run_dir) -> dict:
 
 def _caveats(metrics: dict) -> list[str]:
     """what the results table alone does not show: models left out and why, the notes on each
-    session's Jev map, and the variants scored on only part of the coded windows."""
+    session's Jev map, the intervals left out for too few units, and the variants scored on only
+    part of the coded windows."""
     lines = [f"{model} left out: {reason}" for model, reason in (metrics.get('left_out') or {}).items()]
     lines += [f"note, {session}: {note}" for session, note in (metrics.get('notes') or {}).items()]
+    no_interval = next((report['macro_f1_ci']['left_out'] for report in (metrics.get('variants') or {}).values()
+                        if (report.get('macro_f1_ci') or {}).get('left_out')), None)
+    if no_interval:
+        lines.append(f"no bootstrap intervals: {no_interval}")
     for key, report in (metrics.get('variants') or {}).items():
         share = report.get('coverage') or {}
         if share.get('coded') and share.get('answered') != share.get('coded'):
@@ -145,13 +153,12 @@ def main(argv=None):
         parser.error("--ablate is not built yet: the ablations of section 4.6 are deferred")
     if args.with_actions:
         parser.error("--with-actions is not built yet: the semantic block waits for the VLM to run")
-    if args.split in ('date', 'task'):
-        parser.error(f"--split {args.split} is not built yet (splits.date_folds and task_transfer exist; the driver "
-                     f"does not run them)")
+    if args.split == 'task':
+        parser.error("--split task is not built yet (splits.task_transfer exists; the driver does not run it)")
     if args.split == 'test' and not args.confirm_frozen:
         parser.error("--split test scores the TEST sessions, once, after every choice is frozen: add --confirm-frozen")
     if args.split == 'test' and not args.coder:
-        parser.error("--split test names its truth: add --coder, the coder of the LOSO runs "
+        parser.error("--split test names its truth: add --coder, the coder of the date runs "
                      "(their config.json 'coder')")
     if args.seeds < 1 or args.jobs < 1 or (args.epochs is not None and args.epochs < 1):
         parser.error("--seeds, --jobs and --epochs must be at least 1")
@@ -179,7 +186,7 @@ def main(argv=None):
         print(str(refusal))
         for problem in refusal.problems:
             print(f"  fold {problem['fold']}: {problem['counts']} coded windows in training, "
-                  f"{problem['coded_lessons']} coded lesson(s)")
+                  f"{problem['coded_units']} coded date(s)")
         if refusal.problems:
             print(f"code more windows (mmla ses-code), or try --target binary; label counts in {refusal.run_dir}")
         for line in _caveats(_metrics(refusal.run_dir)):

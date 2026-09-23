@@ -8,7 +8,7 @@ What reads and writes where:
   artifacts/<session>/labels/<coder>.jsonl (mmla ses-code);
 - layout: the roster, the tokens (group, persons, pairs), their scaling, the 82-column pooled view
   and its lags; labels: reading and joining the coders' labels; splits: TEST and the
-  leave-one-lesson-out folds;
+  leave-one-date-out folds;
 - out, mmla ses-classify: artifacts/_analysis/interaction/<run>/ (predictions.csv, metrics.json,
   per_session.csv, confusion.csv, label_counts.csv, state_shares.csv, roster.json, data_checks.json,
   config.json);

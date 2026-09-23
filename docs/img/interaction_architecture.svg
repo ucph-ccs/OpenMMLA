@@ -121,7 +121,7 @@
 <line x1="840" y1="863" x2="880" y2="863" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)"/>
 <rect x="300" y="920" width="300" height="50" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
 <text x="450.0" y="941.0" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">predictions.csv &#183; metrics.json &#183; results table</text>
-<text x="450.0" y="957.0" text-anchor="middle" font-size="11" fill="currentColor">session-cluster bootstrap CIs, LOSO on 16 lessons, test on 4</text>
+<text x="450.0" y="957.0" text-anchor="middle" font-size="11" fill="currentColor">session-cluster bootstrap CIs, leave-one-date-out on 9 dates, test on 4</text>
 <rect x="640" y="920" width="200" height="50" rx="6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.45"/>
 <text x="740.0" y="941.0" text-anchor="middle" font-size="12" font-weight="600" opacity="0.45" fill="currentColor">Layer B: 60 s role function</text>
 <text x="740.0" y="957.0" text-anchor="middle" font-size="11" opacity="0.45" fill="currentColor">per-person embeddings</text>
