@@ -16,7 +16,8 @@ from pupil_apriltags import Detector
 from retinaface import RetinaFace
 
 from openmmla.services.server import Server
-from openmmla.services.vfa.features import frame_features
+from openmmla.services.vfa.features import (face_from_result, fallback_head_boxes, frame_features,
+                                            head_box_detections, pose_faces_from_results)
 from openmmla.services.vfa.tracking import DEFAULT_BUFFER_FRAMES, DEFAULT_IDLE_SECONDS, PersonTracker
 from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
@@ -73,6 +74,16 @@ def _as_bool(value, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
+
+
+def _head_box_fallback(analyzer_config: dict) -> bool:
+    """whether a person the face detector missed gets a head box from their pose keypoints:
+    gaze_head_box_fallback, else gaze: {head_box_fallback}; true when unset or a placeholder."""
+    flat = _as_bool(analyzer_config.get('gaze_head_box_fallback'), None)
+    if flat is not None:
+        return flat
+    nested = analyzer_config.get('gaze')
+    return _as_bool(nested.get('head_box_fallback') if isinstance(nested, dict) else None, True)
 
 
 def _json_value(text, default):
@@ -145,6 +156,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.gaze_backend = gaze_backend_name(_text(analyzer_config.get('gaze_backend'), ''), gaze_model)
         # PaGE crops the head its second branch looks at from the face box widened by this much
         self.gaze_head_scale = _number(analyzer_config.get('gaze_head_scale'), None)
+        # a person the face detector missed gets a head box from the pose's nose, eyes and ears (/features)
+        self.gaze_head_box_fallback = _head_box_fallback(analyzer_config)
 
         # Only load families if AprilTag detection is enabled
         if self.april_tag_enabled:
@@ -226,6 +239,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"Action Schema: {self.action_schema_name} ({self.action_schema_path})")
         self.logger.info(f"AprilTag Detection: {self.april_tag_enabled}")
         self.logger.info(f"Gaze Detection: {self.gaze_detect_enabled}")
+        self.logger.info(f"Gaze head-box fallback: {self.gaze_head_box_fallback}")
 
         # /features: the persons of a frame as skeletons (a pose model), the AprilTag each
         # wears, their head yaw and their gaze (the gaze model above), as geometry
@@ -323,9 +337,16 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 self.gaze = None
                 self.device = None
             if self.face_detector is None and self.gaze is not None:
-                # a gaze needs a face first; without the detector the gaze model would only ever see nothing
-                self.logger.error("Gaze detection is off: the face detector did not load")
-                self.gaze = None
+                if getattr(self, 'gaze_head_box_fallback', True) and getattr(self, 'features_enabled', True):
+                    # the pose still finds the heads: /features gazes from the head boxes it makes
+                    self.logger.warning("The face detector (RetinaFace) did not load: /vllm/features gazes come from the "
+                                        "pose model's head boxes alone (gaze_head_box_fallback), and the /vllm overlays draw no gaze")
+                else:
+                    # a gaze needs a face first; without the detector the gaze model would only ever see nothing
+                    self.logger.error("Gaze detection is off: the face detector did not load")
+                    self.gaze = None
+            elif self.gaze is not None and getattr(self, 'gaze_head_box_fallback', True):
+                self.logger.info("Gaze head-box fallback on: persons the face detector misses get a head box from their pose (/vllm/features)")
         else:
             self.device = None
             self.logger.info("Gaze detection disabled - models not initialized")
@@ -419,6 +440,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'gaze_loaded': self.gaze is not None,
             'face_detector_loaded': self.face_detector is not None,
             'gaze_head_scale': getattr(self.gaze, 'head_scale', None),
+            'gaze_head_box_fallback': bool(getattr(self, 'gaze_head_box_fallback', True)) if self.gaze_detect_enabled else None,
             # the features endpoint: what its geometry ran with, since nothing else records
             # the server's config (openmmla.utils.session_provenance reads this answer)
             'features': {'enabled': bool(self.features_enabled),
@@ -520,10 +542,36 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 'cameras': len(getattr(self, 'trackers', {}) or {}),
                 'error': getattr(self, 'tracking_error', None)}
 
+    def _run_gaze(self, image: np.ndarray, face_detector, inout_threshold: float) -> list[dict]:
+        """the gaze model on the faces `face_detector` answers in `image` (the frame as decoded
+        once, an OpenCV BGR array), in pixels and unrendered; raises what the detector or the
+        model raise."""
+        gaze_results, _ = detect_gaze(
+            image_input=image, face_detector=face_detector, backend=self.gaze,
+            device=self.device if self.device else 'cpu',
+            normalize_bbox=False, normalize_target=False, render=False, show=False,
+            inout_thresh=inout_threshold, render_heatmap=False, save=False, raise_errors=True)
+        return gaze_results
+
+    def _detector_faces(self, image: np.ndarray, inout_threshold: float) -> list[dict]:
+        """the faces the face detector finds, each with the gaze the gaze model gives it."""
+        return [face_from_result(result) for result in self._run_gaze(image, self.face_detector, inout_threshold)]
+
+    def _pose_faces(self, image: np.ndarray, persons: list[dict], faces: list[dict], inout_threshold: float) -> dict[int, dict]:
+        """{person index: face} for the persons the face detector missed: the gaze model runs once
+        more, on head boxes made from their pose keypoints alone."""
+        boxes = fallback_head_boxes(persons, faces, self.keypoint_confidence)
+        if not boxes:
+            return {}  # nobody missed, or no missed head seen: no second pass
+        found = head_box_detections(boxes)
+        return pose_faces_from_results(self._run_gaze(image, lambda rgb: found, inout_threshold), list(boxes))
+
     def _frame_features(self, image_bytes: bytes, angle: str, zones: dict, inout_threshold: float,
                         keypoints: bool = True, gaze: bool = True, tracker: PersonTracker | None = None) -> dict:
         """the features of one frame: its AprilTags (centres in pixels from the top-left corner),
-        its persons from the pose model, its faces and gazes from the gaze model, put together."""
+        its persons from the pose model, its faces and gazes from the gaze model, put together;
+        persons the face detector missed get a gaze from a head box made of their pose keypoints
+        (gaze_head_box_fallback)."""
         image = load_image(image_bytes)
         height, width = image.shape[:2]
         tags = {}
@@ -534,16 +582,15 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                     centre = tag.corners.mean(axis=0)
                 tags[int(tag.tag_id)] = (float(centre[0]), float(centre[1]))
         persons = self.pose_estimator.detect(image)
-        faces, gaze_error = [], None
+        faces, pose_faces, gaze_error = [], {}, None
         if gaze and self.gaze is not None:
             try:
-                gaze_results, _ = detect_gaze(
-                    image_input=image_bytes, face_detector=self.face_detector, backend=self.gaze,
-                    device=self.device if self.device else 'cpu',
-                    normalize_bbox=False, normalize_target=False, render=False, show=False,
-                    inout_thresh=inout_threshold, render_heatmap=False, save=False, raise_errors=True)
-                faces = [{'bbox': result['face_bbox'], 'gaze_point': result['gaze_target'], 'inout': result['inout_score']}
-                         for result in gaze_results]
+                if self.face_detector is not None:
+                    faces = self._detector_faces(image, inout_threshold)
+                if getattr(self, 'gaze_head_box_fallback', True):
+                    # persons the detector missed get a head box from their pose; faces go by keypoints
+                    # alone and the tracker never reorders, so this runs before the tracker and its lock
+                    pose_faces = self._pose_faces(image, persons, faces, inout_threshold)
             except Exception as e:
                 # the frame keeps its skeletons; the answer says the gazes are missing for a reason
                 gaze_error = f"{type(e).__name__}: {e}"
@@ -551,7 +598,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         if tracker is None:
             frame = frame_features(persons, tags, faces, zones, width, height, angle,
                                    min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
-                                   keypoints=keypoints)
+                                   keypoints=keypoints, pose_faces=pose_faces)
         else:
             # this camera's frames go through its tracker one at a time: the track ids first,
             # then, once the tags are matched, the tag each track wore before
@@ -559,7 +606,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 tracker.track(persons)
                 frame = frame_features(persons, tags, faces, zones, width, height, angle,
                                        min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
-                                       keypoints=keypoints, remember=tracker.assign)
+                                       keypoints=keypoints, remember=tracker.assign, pose_faces=pose_faces)
         if gaze_error:
             frame['gaze_error'] = gaze_error
         return frame
@@ -686,7 +733,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 image_bytes = pil_image_to_bytes(apriltag_image)
 
         # Step 2: Conditionally detect gaze on the processed image if gaze detection is available
-        if gaze_detect and self.gaze is not None:
+        # the overlay runs no pose, so it has no head-box fallback: no detector, no gaze
+        if gaze_detect and self.gaze is not None and self.face_detector is not None:
             device = self.device if self.device is not None else 'cpu'
             
             gaze_results, rendered_image = detect_gaze(

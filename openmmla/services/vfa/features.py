@@ -33,6 +33,16 @@ HEAD_WIDTH_SHOULDERS = 0.32
 HEAD_WIDTH_EYES = 2.3
 # a face box is grown by this much on each side before a gaze point is looked for in it
 FACE_MARGIN = 0.2
+# the keypoints a head box is centred on; the nose, or both eyes, must be seen for one
+HEAD_KEYPOINTS = ('nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear')
+# a head box's floors, for a head seen side on (one ear, the eyes close together, the
+# shoulders overlapping): the face then spans the nose to the one ear seen, and the box takes
+# half as much again of the head behind it; and three times the nose to an eye. Face on, both
+# stay below the ear span and the eye pair, so they change nothing there
+HEAD_BOX_NOSE_EAR = 1.5
+HEAD_BOX_NOSE_EYE = 3.0
+FACE_SOURCE_DETECTOR = 'detector'  # a face box the face detector (RetinaFace) found
+FACE_SOURCE_POSE = 'pose'  # a head box made from the pose model's head keypoints
 # the chest, when the hips are hidden (a person seated at a table): a box from the shoulder
 # line down this many shoulder widths, this much wider than the shoulders on each side
 TORSO_DROP = 1.6
@@ -129,6 +139,74 @@ def head_width(person: dict, min_confidence: float) -> float:
     if all(eyes):
         widths.append(HEAD_WIDTH_EYES * distance(*eyes))
     return max(widths)
+
+
+def head_box(person: dict, min_confidence: float, margin: float = FACE_MARGIN) -> list[float] | None:
+    """a square box around a person's head, made from the pose alone: centred on the nose, eyes
+    and ears seen, as wide as the head (head_width) plus `margin` of it on each side. None
+    unless the nose, or both eyes, are seen; the ears count towards the centre but are never
+    enough on their own. Side on, where head_width shrinks to a sliver, the head is at least
+    1.5 times the nose to the one ear seen and three times the nose to an eye, and the box
+    always holds every head keypoint seen. The box may reach past the frame (the gaze model clamps it)."""
+    seen = {name: keypoint(person, name, min_confidence) for name in HEAD_KEYPOINTS}
+    if seen['nose'] is None and not (seen['left_eye'] and seen['right_eye']):
+        return None
+    points = [p for p in seen.values() if p is not None]
+    cx, cy = sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points)
+    widths = [head_width(person, min_confidence),
+              # the keypoints seen fit inside, however the head is turned
+              2.0 * max(max(abs(p[0] - cx), abs(p[1] - cy)) for p in points)]
+    nose = seen['nose']
+    if nose is not None:
+        ears = [seen[name] for name in ('left_ear', 'right_ear') if seen[name] is not None]
+        if len(ears) == 1:
+            widths.append(HEAD_BOX_NOSE_EAR * distance(nose, ears[0]))
+        widths.extend(HEAD_BOX_NOSE_EYE * distance(nose, seen[name])
+                      for name in ('left_eye', 'right_eye') if seen[name] is not None)
+    half = max(widths) * (1.0 + 2.0 * margin) / 2.0
+    return [cx - half, cy - half, cx + half, cy + half]
+
+
+def fallback_head_boxes(persons: list[dict], faces: list[dict], min_confidence: float) -> dict[int, list[float]]:
+    """{index: head box} for every person the face detector left without a face (as
+    assign_faces gives them out) whose head the pose sees, in index order. Face assignment reads
+    only the keypoints and the boxes, so this holds before the tags are matched and the persons
+    tracked; it works on copies and leaves `persons` as they were."""
+    copies = [dict(person) for person in persons]
+    assign_faces(copies, faces, min_confidence)
+    boxes = {}
+    for index, person in enumerate(copies):
+        if person['face'] is not None:
+            continue
+        box = head_box(person, min_confidence)
+        if box is not None:
+            boxes[index] = box
+    return boxes
+
+
+def head_box_detections(boxes: dict[int, list[float]]) -> dict[str, dict]:
+    """head boxes as a face detector answers (RetinaFace's shape, as detect_gaze reads it):
+    {pose_<index>: {facial_area, score}}, in the order of `boxes`."""
+    return {f'pose_{index}': {'facial_area': box, 'score': 1.0} for index, box in boxes.items()}
+
+
+def face_from_result(result: dict) -> dict:
+    """a face as assign_faces takes it, from one result of detect_gaze."""
+    return {'bbox': result['face_bbox'], 'gaze_point': result['gaze_target'], 'inout': result['inout_score']}
+
+
+def pose_faces_from_results(results: list[dict], indices: list[int]) -> dict[int, dict]:
+    """{person index: face} from the gaze model's answer on head boxes made for the persons at
+    `indices`, in that order: a result maps back by its original_index (its position when it
+    has none), and one that points past `indices` is dropped. A box the gaze model skipped
+    (clamped to nothing at the frame's edge) has no result, so its person keeps no face."""
+    out = {}
+    for position, result in enumerate(results):
+        slot = result.get('original_index', position)
+        if not 0 <= slot < len(indices):
+            continue
+        out[indices[slot]] = face_from_result(result)
+    return out
 
 
 def torso_region(person: dict, min_confidence: float) -> tuple[list[tuple[float, float]], str] | None:
@@ -236,10 +314,22 @@ def _yaw_between(nose, left, right, gain: float) -> float:
     return round(math.degrees(math.atan2(gain * offset, half_width)), 1)
 
 
-def assign_faces(persons: list[dict], faces: list[dict], min_confidence: float) -> None:
+def _face(face: dict, source: str) -> dict:
+    """the face a person keeps: its box, gaze point and in-frame probability, and where the box
+    came from."""
+    return {'bbox': [float(v) for v in face['bbox']],
+            'gaze_point': [float(v) for v in face['gaze_point']] if face.get('gaze_point') else None,
+            'inout': float(face['inout']) if face.get('inout') is not None else None,
+            'face_source': source}
+
+
+def assign_faces(persons: list[dict], faces: list[dict], min_confidence: float,
+                 pose_faces: dict[int, dict] | None = None) -> None:
     """give each person the face found on them: the face whose box holds their nose, else the
     person whose box holds the face's centre (the one whose nose, or box centre, is nearest).
-    Sets `face` ({bbox, gaze_point, inout}) or None."""
+    `pose_faces` maps an index into `persons` to the face the gaze model found in the head box
+    made for that person: it goes to that person alone, and only when no detector face went to
+    them. Sets `face` ({bbox, gaze_point, inout, face_source}) or None."""
     for person in persons:
         person['face'] = None
     taken = set()
@@ -259,9 +349,11 @@ def assign_faces(persons: list[dict], faces: list[dict], min_confidence: float) 
             continue
         index = min(ranked)[2]
         taken.add(index)
-        persons[index]['face'] = {'bbox': [float(v) for v in box],
-                                  'gaze_point': [float(v) for v in face['gaze_point']] if face.get('gaze_point') else None,
-                                  'inout': float(face['inout']) if face.get('inout') is not None else None}
+        persons[index]['face'] = _face(face, FACE_SOURCE_DETECTOR)
+    for index, face in (pose_faces or {}).items():
+        # a head box made from one person's keypoints is theirs or no one's, and a detector face wins
+        if 0 <= index < len(persons) and persons[index]['face'] is None:
+            persons[index]['face'] = _face(face, FACE_SOURCE_POSE)
 
 
 def hand_regions(person: dict, min_confidence: float) -> list[tuple[tuple[float, float], float]]:
@@ -399,20 +491,26 @@ def scaled_zones(zones: dict | None, width: int, height: int) -> dict:
 
 def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: dict | None,
                    width: int, height: int, angle: str, min_confidence: float = 0.3,
-                   inout_threshold: float = 0.5, keypoints: bool = True, remember=None) -> dict:
+                   inout_threshold: float = 0.5, keypoints: bool = True, remember=None,
+                   pose_faces: dict[int, dict] | None = None) -> dict:
     """the features of one frame: `persons`, each with person_id, tag_id, tag_match, track_id, bbox, score,
-    keypoints (left out with `keypoints=False`), head_yaw, face_bbox and gaze {point, inout,
-    target}; `tags` as seen; `zones` as resolved, in pixels; `pairs`; and the frame's angle,
-    width and height. `tags` maps tag id -> (x, y) pixel centre; `faces` are [{bbox, gaze_point,
-    inout}] from the gaze model. `remember`, given, runs on the persons once the tags are matched
-    (PersonTracker.assign: a tracked person without a tag gets the one their track wore), and the
-    persons are then named again, a tracked one without a tag as track_<id>."""
+    keypoints (left out with `keypoints=False`), head_yaw, face_bbox, gaze {point, inout,
+    target} and face_source ('pose' on a person whose face is a head box made from their pose,
+    absent otherwise); `tags` as seen; `zones` as resolved, in pixels; `pairs`; and the frame's
+    angle, width and height. `tags` maps tag id -> (x, y) pixel centre; `faces` are [{bbox,
+    gaze_point, inout}] from the gaze model; `pose_faces` are {index into `persons`: face} the
+    gaze model found in the head boxes made for persons the face detector missed. `remember`,
+    given, runs on the persons once the tags are matched (PersonTracker.assign: a tracked person
+    without a tag gets the one their track wore), and the persons are then named again, a
+    tracked one without a tag as track_<id>."""
     persons = [dict(person) for person in persons]
     assign_tags(persons, tags, min_confidence)
     if remember is not None:
         remember(persons)
         name_persons(persons)
-    assign_faces(persons, faces, min_confidence)
+    # the copies, the tags, `remember` and the naming never reorder the list, so the indices of
+    # `pose_faces` still point at the persons they were made for
+    assign_faces(persons, faces, min_confidence, pose_faces)
     zones_px = scaled_zones(zones, width, height)
     tolerance = gaze_tolerance(width, height)
     answer = []
@@ -432,6 +530,9 @@ def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: di
                      'inout': round(face['inout'], 3) if face and face.get('inout') is not None else None,
                      'target': target},
         }
+        if face and face.get('face_source') == FACE_SOURCE_POSE:
+            # only a head-box face says so: a frame without one answers exactly as before
+            entry['face_source'] = FACE_SOURCE_POSE
         if keypoints:
             entry['keypoints'] = [[round(float(x), 1), round(float(y), 1), round(float(c), 3)] for x, y, c in person['keypoints']]
         answer.append(entry)

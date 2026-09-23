@@ -96,7 +96,8 @@ def detect_gaze(
     """Detect faces, estimate gaze, and optionally render visualizations.
 
     Args:
-        image_input: Image data (bytes) or file path (str).
+        image_input: Image data (bytes), a file path (str), or an image already decoded
+            (an OpenCV BGR array), which is used as it is rather than decoded again.
         face_detector: Face detection function (e.g., RetinaFace.detect_faces).
         gazelle_model: Loaded Gazelle model (the older way to name the backend; `backend` is the newer).
         gazelle_transform: Preprocessing transform for Gazelle.
@@ -133,7 +134,8 @@ def detect_gaze(
         backend = GazelleBackend(gazelle_model, gazelle_transform, device)
 
     try:
-        image = load_image(image_input)
+        # a caller that decoded the frame already hands it over, so it is not decoded twice
+        image = image_input if isinstance(image_input, np.ndarray) else load_image(image_input)
         height, width, _ = image.shape
         print(f"Image resolution: {width}x{height} (Width x Height)")
 
