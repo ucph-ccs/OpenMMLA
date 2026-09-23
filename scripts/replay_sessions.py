@@ -18,8 +18,10 @@ system sections and camera intrinsics are kept), puts the session's transformati
 ses-calibrate`: a camera's own fit is taken when it rests on enough paired sightings, else the
 given calibration's entry when the session's pairs judge it close, else, for a camera with too
 few pairs to judge, the own fit of the same camera pair from the rig's session nearest in time
-(or a given entry that sightings shared with a third camera judge close), else the camera stays
-out of the IPS run; see `choose_matrices`),
+(checked on sightings shared with a third camera where there are any), else the given entry,
+taken when such sightings judge it close or unchecked when nothing judges it; a camera stays out
+of the IPS run only when the evidence puts the given entry too far off or the given calibration
+has no entry for it; see `choose_matrices`),
 launches every base and synchronizer in a
 tmux session `replay-<session>` (each in its pipeline's conda environment, logging under
 `artifacts/<session>/pipelines/<pipeline>-base/logs/replay_*.log`), sends START on each
@@ -69,7 +71,7 @@ MIN_INLIERS = 10  # paired sightings a camera's own fit must rest on
 MAX_P90_M = 0.15  # and the residual its p90 must stay within
 MAX_GIVEN_MEDIAN_M = 0.3  # a given entry scored worse than this on the session's pairs is not used
 MAX_FAIR_P90_M = 0.3  # an own fit within this is still taken when the given entry is no better
-MAX_BORROWED_MEDIAN_M = 0.3  # a borrowed own fit, or a given entry no pair judged, this far off on the pairs kept to check it is not used
+MAX_BORROWED_MEDIAN_M = 0.3  # a borrowed own fit, or a given entry no pair judged, this far off on the pairs kept to check it is not used (with no such pairs it is taken unchecked)
 IPS_CAMERA = 'logitechC920'  # the intrinsics every classroom camera (a C920) is read with, by the IPS bases and ses-calibrate alike
 NEAR_WINDOW_S = 0.2  # sightings of a tag this close in time count as near-simultaneous (ses-calibrate -nw)
 
@@ -291,9 +293,10 @@ def choose_matrices(report: dict, own: dict, given: dict | None, main: str,
     borrowable_fits); else a given entry no pair judged. Either is checked on the pairs
     ses-calibrate kept for such a camera (`near`, its near_pairs.json: near-simultaneous sightings,
     and sightings shared with a camera already placed) and refused when they put its median residual
-    over `max_borrowed_median`; a given entry is taken only when they judged it. Else the camera
-    stays out. Returns (matrices for transformation_matrices_<main>.json, the cameras of the run,
-    the decisions)."""
+    over `max_borrowed_median`; either is taken unchecked when there are no such pairs. The camera
+    stays out only when the evidence puts the given entry too far off, or the given calibration has
+    no entry for it. Returns (matrices for transformation_matrices_<main>.json, the cameras of the
+    run, the decisions)."""
     borrowed, near = borrowed or {}, near or {}
     matrices, cameras, decisions = {}, [main], {}
     for camera, entry in (report.get('cameras') or {}).items():
@@ -312,8 +315,7 @@ def choose_matrices(report: dict, own: dict, given: dict | None, main: str,
             decisions[camera] = f"given calibration ({entry.get('pairs', 0)} pairs to judge it, its residual median {scored['median']} m)"
         else:
             pairs = entry.get('pairs', 0)
-            why = (f"the given entry is {scored['median']} m off" if scored else
-                   'the given entry unjudged' if given and camera in given else 'no given entry')
+            why = f"the given entry is {scored['median']} m off" if scored else 'no given entry'  # an unjudged one is taken below
             few = pairs < min_inliers
             candidate = borrowed.get(camera) if few else None
             refused = ''
@@ -327,10 +329,18 @@ def choose_matrices(report: dict, own: dict, given: dict | None, main: str,
                     cameras.append(camera)
                     continue
                 refused = f"; the {source} is {check['median']} m off on {_on(check)}"
-            check = check_on_near_pairs(given[camera], near.get(camera)) if few and not scored and given and camera in given else None
+            unjudged = not scored and given and camera in given
+            check = check_on_near_pairs(given[camera], near.get(camera)) if unjudged else None
             if check and check['median'] <= max_borrowed_median:
                 matrices[camera] = given[camera]
                 decisions[camera] = f"given calibration ({pairs} pairs, checked on {_on(check)}: median {check['median']} m){refused}"
+                cameras.append(camera)
+                continue
+            if unjudged and not check:
+                # nothing judges the given entry and there is nothing to borrow (a borrowed fit no sighting checks is
+                # taken above): the file is the best there is, e.g. a rig no other session shares
+                matrices[camera] = given[camera]
+                decisions[camera] = 'given calibration (unchecked: no shared sightings, nothing to borrow)'
                 cameras.append(camera)
                 continue
             if check:
