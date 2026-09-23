@@ -5,13 +5,17 @@ them. Offline, a whole session's paired sightings are at hand: the tag *position
 cameras report are fitted with one rigid transform (Kabsch), which holds steady where a small
 tag's orientation, and so a pose-to-pose transform, does not; the pose-to-pose average is kept
 next to it for comparison. Given matrices (Marie's, an earlier session's) are scored by their
-residuals on the same pairs.
+residuals on the same pairs, and, for a camera with few pairs, on near-simultaneous sightings
+(`near_pairs`, the frames around them found by `near_stamps`) and on its sightings shared with a
+third camera already placed (`relayed_pairs`).
 
 Detection runs the way the IPS base does it (pupil-apriltags, the camera's intrinsics, the tag
 size; weak detections and ids past the badges left out), on the frames nearest the sampled
 stamps of each video. OpenCV and pupil-apriltags are imported only by `observe` and
 `tag_detector`, so the fitting can be tested without them."""
 from __future__ import annotations
+
+import bisect
 
 import numpy as np
 
@@ -83,6 +87,66 @@ def pairs(main_obs: dict, alt_obs: dict) -> list[tuple]:
                 out.append((stamp, tag, np.asarray(t_m, float).reshape(3), np.asarray(t_a, float).reshape(3),
                             np.asarray(R_m, float), np.asarray(R_a, float)))
     return out
+
+
+def near_pairs(main_obs: dict, alt_obs: dict, max_gap: float) -> list[tuple]:
+    """(stamp, tag, p_main, p_alt, R_main, R_alt, gap) for every tag the other camera saw, with the
+    main camera's sighting of the same tag nearest in time when it lies at most `max_gap` seconds
+    away: near-simultaneous sightings, the strict pairs (gap 0) among them. A badge moves little in
+    a fifth of a second, so they are good enough to check a transform, not to fit one."""
+    by_tag: dict = {}
+    for stamp in sorted(main_obs):
+        for tag in main_obs[stamp]:
+            by_tag.setdefault(tag, []).append(stamp)
+    out = []
+    for stamp in sorted(alt_obs):
+        for tag, (R_a, t_a) in alt_obs[stamp].items():
+            stamps = by_tag.get(tag)
+            if not stamps:
+                continue
+            i = bisect.bisect_left(stamps, stamp)
+            nearest = min(stamps[max(i - 1, 0):i + 1], key=lambda s: abs(s - stamp))
+            gap = abs(nearest - stamp)
+            if gap > max_gap + 1e-6:
+                continue
+            R_m, t_m = main_obs[nearest][tag]
+            out.append((stamp, tag, np.asarray(t_m, float).reshape(3), np.asarray(t_a, float).reshape(3),
+                        np.asarray(R_m, float), np.asarray(R_a, float), round(gap, 3)))
+    return out
+
+
+def relayed_pairs(via_obs: dict, alt_obs: dict, R, T) -> list[tuple]:
+    """(stamp, tag, p_main, p_alt, R_main, R_alt, 0.0) for every tag a camera saw at the same stamp as a
+    third camera that is already placed: the third camera's sighting taken into the main camera's
+    frame with its transform (R, T) stands in for the main camera's. They check a transform where
+    the main camera itself saw no tag with the camera."""
+    R, T = np.asarray(R, float), np.asarray(T, float).reshape(3)
+    return [(stamp, tag, R @ p_v + T, p_a, R @ R_v, R_a, 0.0) for stamp, tag, p_v, p_a, R_v, R_a in pairs(via_obs, alt_obs)]
+
+
+def near_stamps(main_obs: dict, alt_obs: dict, step: float, window: float) -> list[float]:
+    """the extra stamps worth reading for near-simultaneous sightings: every `window / 2` seconds
+    within `window` of each sampled stamp where one camera saw a tag that the other saw one sampled
+    step (`step` seconds) before or after, but not at that stamp; the sampled stamps themselves are
+    left out."""
+    def seen(b: dict, keys: list, stamp: float, tag) -> bool:
+        i = bisect.bisect_left(keys, stamp - 1e-3)
+        return i < len(keys) and abs(keys[i] - stamp) <= 1e-3 and tag in b[keys[i]]
+
+    def anchors(a: dict, b: dict) -> set:
+        keys = sorted(b)
+        out = set()
+        for stamp, tags in a.items():
+            for tag in tags:
+                if not seen(b, keys, stamp, tag) and (seen(b, keys, stamp - step, tag) or seen(b, keys, stamp + step, tag)):
+                    out.add(stamp)
+        return out
+    fine = window / 2.0
+    extra = set()
+    for stamp in anchors(main_obs, alt_obs) | anchors(alt_obs, main_obs):
+        for k in (-2, -1, 1, 2):
+            extra.add(round(stamp + k * fine, 6))
+    return sorted(extra - set(main_obs) - set(alt_obs))
 
 
 def kabsch(p_alt, p_main) -> tuple[np.ndarray, np.ndarray]:

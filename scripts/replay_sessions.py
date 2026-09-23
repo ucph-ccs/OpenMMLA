@@ -16,7 +16,10 @@ pipeline from that pipeline's template config (`--asr-template` ...: the pilot c
 system sections and camera intrinsics are kept), puts the session's transformation matrices in
 `<project_dir>/camera_sync/` (a multi-camera session calibrates itself first with `mmla
 ses-calibrate`: a camera's own fit is taken when it rests on enough paired sightings, else the
-given calibration's entry, else the camera stays out of the IPS run; see `choose_matrices`),
+given calibration's entry when the session's pairs judge it close, else, for a camera with too
+few pairs to judge, the own fit of the same camera pair from the rig's session nearest in time
+(or a given entry that sightings shared with a third camera judge close), else the camera stays
+out of the IPS run; see `choose_matrices`),
 launches every base and synchronizer in a
 tmux session `replay-<session>` (each in its pipeline's conda environment, logging under
 `artifacts/<session>/pipelines/<pipeline>-base/logs/replay_*.log`), sends START on each
@@ -40,6 +43,7 @@ import sys
 import time
 from collections import defaultdict
 
+import numpy as np
 import yaml
 
 from openmmla.collection.recording import default_audio_scope, natural_device_key
@@ -65,6 +69,9 @@ MIN_INLIERS = 10  # paired sightings a camera's own fit must rest on
 MAX_P90_M = 0.15  # and the residual its p90 must stay within
 MAX_GIVEN_MEDIAN_M = 0.3  # a given entry scored worse than this on the session's pairs is not used
 MAX_FAIR_P90_M = 0.3  # an own fit within this is still taken when the given entry is no better
+MAX_BORROWED_MEDIAN_M = 0.3  # a borrowed own fit, or a given entry no pair judged, this far off on the pairs kept to check it is not used
+IPS_CAMERA = 'logitechC920'  # the intrinsics every classroom camera (a C920) is read with, by the IPS bases and ses-calibrate alike
+NEAR_WINDOW_S = 0.2  # sightings of a tag this close in time count as near-simultaneous (ses-calibrate -nw)
 
 
 def log(message: str) -> None:
@@ -185,7 +192,7 @@ def vfa_config(template: dict, plan: dict) -> dict:
     config['Base']['tag_size'] = plan['tag_size']
     # the bases' pace bounds a replay, not the server (~105 ms a frame): one or two cameras can go faster
     config['Base']['processing_rate'] = VFA_PACE.get(len(plan['videos']), config['Base'].get('processing_rate', 2.0))
-    config['Bases'] = [{'id': device, 'camera': 'logitechC920', 'source': 'file', 'source_index': path, 'camera_angle': CAMERA_ANGLE}
+    config['Bases'] = [{'id': device, 'camera': IPS_CAMERA, 'source': 'file', 'source_index': path, 'camera_angle': CAMERA_ANGLE}
                        for device, path in sorted(plan['videos'].items())]
     return config
 
@@ -194,20 +201,100 @@ def ips_config(template: dict, plan: dict) -> dict:
     config = json.loads(json.dumps(template))
     config['Base']['initial_sync_time'] = plan['sync_time']
     config['Base']['tag_size'] = plan['tag_size']
-    config['Bases'] = [{'id': device, 'camera': 'logitechC920', 'source': 'file', 'source_index': plan['videos'][device],
+    config['Bases'] = [{'id': device, 'camera': IPS_CAMERA, 'source': 'file', 'source_index': plan['videos'][device],
                         'main': device == plan['ips_main']} for device in plan['ips_cameras']]
     return config
 
 
+def session_day(session_id: str) -> datetime.date | None:
+    try:
+        return datetime.datetime.strptime(session_id.split('_')[1], '%Y%m%d').date()
+    except (IndexError, ValueError):
+        return None
+
+
+def borrowable_fits(project: str, session_id: str, calibration: str | None, main: str) -> dict:
+    """{camera: candidate} of the own fits another session of the same rig (the same given
+    calibration and main camera) took for the same camera pair, the one nearest in date per camera
+    (the one on more pairs when two are as near): the cameras are rarely moved, so such a fit stands
+    in for a camera that saw too few tags together with the main one. A candidate is {session,
+    matrix, inliers, p90, days}; the fits read are the `own fit` decisions of each session's
+    analysis/calibration/matrices_used.json."""
+    if not calibration:
+        return {}
+    day = session_day(session_id)
+    best: dict = {}
+    for path in sorted(glob.glob(os.path.join(project, 'artifacts', '*', 'analysis', 'calibration', 'matrices_used.json'))):
+        other = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+        if other == session_id:
+            continue
+        try:
+            used = json.load(open(path))
+        except (OSError, ValueError):
+            continue
+        if used.get('given') != calibration or used.get('main') != main:
+            continue
+        try:
+            report = json.load(open(os.path.join(os.path.dirname(path), 'calibration_report.json')))
+        except (OSError, ValueError):
+            report = {}
+        other_day = session_day(other)
+        days = abs((other_day - day).days) if day and other_day else 10 ** 6
+        for camera, decision in (used.get('decisions') or {}).items():
+            if not str(decision).startswith('own fit') or camera not in (used.get('matrices') or {}):
+                continue
+            entry = (report.get('cameras') or {}).get(camera) or {}
+            candidate = {'session': other, 'matrix': used['matrices'][camera], 'inliers': entry.get('inliers'),
+                         'p90': (entry.get('residual_m') or {}).get('p90'), 'days': days}
+            key = (days, -(candidate['inliers'] or 0), other)
+            if camera not in best or key < best[camera][0]:
+                best[camera] = (key, candidate)
+    return {camera: candidate for camera, (_, candidate) in best.items()}
+
+
+def check_on_near_pairs(matrix: dict, near: list | None) -> dict | None:
+    """{pairs, direct, via, median, p90} of a transform's residuals (m) on the pairs ses-calibrate
+    kept to check a camera with few paired sightings (near_pairs.json): its near-simultaneous
+    sightings with the main camera (`direct`) and those shared with a third camera already placed
+    (`via`, {camera: pairs}); None when there are none."""
+    if not near:
+        return None
+    p_main = np.array([p['p_main'] for p in near], dtype=float)
+    p_alt = np.array([p['p_alt'] for p in near], dtype=float)
+    res = np.linalg.norm(p_alt @ np.asarray(matrix['R'], float).T + np.asarray(matrix['T'], float).reshape(3) - p_main, axis=1)
+    via: dict = {}
+    for p in near:
+        if p.get('via'):
+            via[p['via']] = via.get(p['via'], 0) + 1
+    return {'pairs': len(near), 'direct': len(near) - sum(via.values()), 'via': via,
+            'median': round(float(np.median(res)), 3), 'p90': round(float(np.percentile(res, 90)), 3)}
+
+
+def _on(check: dict) -> str:
+    """what a check rested on, in words."""
+    parts = [f"{check['direct']} near-simultaneous pairs"] if check['direct'] else []
+    parts += [f"{n} pairs through {camera}" for camera, n in check['via'].items()]
+    return ' and '.join(parts)
+
+
 def choose_matrices(report: dict, own: dict, given: dict | None, main: str,
                     min_inliers: int = MIN_INLIERS, max_p90: float = MAX_P90_M,
-                    max_given_median: float = MAX_GIVEN_MEDIAN_M, max_fair_p90: float = MAX_FAIR_P90_M) -> tuple[dict, list[str], dict]:
+                    max_given_median: float = MAX_GIVEN_MEDIAN_M, max_fair_p90: float = MAX_FAIR_P90_M,
+                    borrowed: dict | None = None, near: dict | None = None,
+                    max_borrowed_median: float = MAX_BORROWED_MEDIAN_M) -> tuple[dict, list[str], dict]:
     """which transform each camera of an IPS run takes: its own fit from the session (ses-calibrate's
     report and matrices) when it rests on at least `min_inliers` pairs with a p90 residual within
     `max_p90`; else that fit still, within `max_fair_p90`, when the given entry is no better on the
-    same pairs; else the given calibration's entry, unless the session's pairs scored it worse than
-    `max_given_median` (a rig that moved); else none, and the camera stays out. Returns (matrices
-    for transformation_matrices_<main>.json, the cameras of the run, the decisions)."""
+    same pairs; else the given calibration's entry when the session's pairs scored it within
+    `max_given_median`. A camera with fewer than `min_inliers` pairs then takes the own fit of the
+    same camera pair borrowed from the rig's session nearest in time (`borrowed`, from
+    borrowable_fits); else a given entry no pair judged. Either is checked on the pairs
+    ses-calibrate kept for such a camera (`near`, its near_pairs.json: near-simultaneous sightings,
+    and sightings shared with a camera already placed) and refused when they put its median residual
+    over `max_borrowed_median`; a given entry is taken only when they judged it. Else the camera
+    stays out. Returns (matrices for transformation_matrices_<main>.json, the cameras of the run,
+    the decisions)."""
+    borrowed, near = borrowed or {}, near or {}
     matrices, cameras, decisions = {}, [main], {}
     for camera, entry in (report.get('cameras') or {}).items():
         fit = entry.get('residual_m') or {}
@@ -220,15 +307,37 @@ def choose_matrices(report: dict, own: dict, given: dict | None, main: str,
             matrices[camera] = own[camera]
             decisions[camera] = (f"own fit, fair ({entry['inliers']} pairs, p90 {fit['p90']} m"
                                  + (f", the given entry {scored['median']} m off)" if scored else ", no given entry)"))
-        elif given and camera in given and ((entry.get('given') or {}).get('residual_m') or {}).get('median', 0.0) <= max_given_median:
+        elif given and camera in given and scored and scored.get('median', 1e9) <= max_given_median:
             matrices[camera] = given[camera]
-            scored = (entry.get('given') or {}).get('residual_m') or {}
-            decisions[camera] = f"given calibration ({entry.get('pairs', 0)} pairs to judge it" + \
-                                (f", its residual median {scored['median']} m)" if scored else ", unjudged)")
+            decisions[camera] = f"given calibration ({entry.get('pairs', 0)} pairs to judge it, its residual median {scored['median']} m)"
         else:
-            scored = (entry.get('given') or {}).get('residual_m') or {}
-            why = (f"the given entry is {scored['median']} m off" if scored else 'no given entry')
-            decisions[camera] = f"left out ({entry.get('pairs', 0)} pairs, own fit p90 {fit.get('p90')} m on {entry.get('inliers', 0)}, {why})"
+            pairs = entry.get('pairs', 0)
+            why = (f"the given entry is {scored['median']} m off" if scored else
+                   'the given entry unjudged' if given and camera in given else 'no given entry')
+            few = pairs < min_inliers
+            candidate = borrowed.get(camera) if few else None
+            refused = ''
+            if candidate:
+                source = f"borrowed own fit from {candidate['session']} ({candidate['inliers']} pairs, p90 {candidate['p90']} m)"
+                check = check_on_near_pairs(candidate['matrix'], near.get(camera))
+                if not check or check['median'] <= max_borrowed_median:
+                    matrices[camera] = candidate['matrix']
+                    decisions[camera] = source + (f", checked on {_on(check)}: median {check['median']} m"
+                                                  if check else ', unchecked: no sightings here to check it on')
+                    cameras.append(camera)
+                    continue
+                refused = f"; the {source} is {check['median']} m off on {_on(check)}"
+            check = check_on_near_pairs(given[camera], near.get(camera)) if few and not scored and given and camera in given else None
+            if check and check['median'] <= max_borrowed_median:
+                matrices[camera] = given[camera]
+                decisions[camera] = f"given calibration ({pairs} pairs, checked on {_on(check)}: median {check['median']} m){refused}"
+                cameras.append(camera)
+                continue
+            if check:
+                why = f"the given entry is {check['median']} m off on {_on(check)}"
+            borrow = ', no own fit of the pair to borrow' if few and not candidate else ''
+            decisions[camera] = (f"left out ({pairs} pairs, own fit p90 {fit.get('p90')} m on {entry.get('inliers', 0)}, "
+                                 f"{why}{borrow}{refused})")
             continue
         cameras.append(camera)
     return matrices, sorted(cameras), decisions
@@ -424,7 +533,8 @@ class Runner:
             return
         out_dir = os.path.join(self.project, 'artifacts', sid, 'analysis', 'calibration')
         command = (f"source ~/miniforge3/etc/profile.d/conda.sh && conda activate {ENVS['ips']} && cd {self.project} && "
-                   f"mmla ses-calibrate -c {ips_config} -sid {sid} -mc {main} -cams {','.join(plan['ips_cameras'])} -st 2"
+                   f"mmla ses-calibrate -c {ips_config} -sid {sid} -mc {main} -cams {','.join(plan['ips_cameras'])} -cam {IPS_CAMERA} -st 2 "
+                   f"-nw {NEAR_WINDOW_S} -nb {MIN_INLIERS}"
                    + (f" -v {given_path}" if given else ''))
         log(f"{sid}: calibrating from the recordings ({len(plan['ips_cameras'])} cameras)")
         result = subprocess.run(['bash', '-c', command], capture_output=True, text=True)
@@ -435,12 +545,27 @@ class Runner:
             raise RuntimeError(f"ses-calibrate failed: {result.stderr.strip()[-200:]}")
         report = json.load(open(report_path))
         own = json.load(open(os.path.join(out_dir, f'transformation_matrices_{main}.json')))
-        matrices, cameras, decisions = choose_matrices(report, own, given, main)
+        near_path = os.path.join(out_dir, 'near_pairs.json')
+        near = json.load(open(near_path)) if os.path.isfile(near_path) else {}
+        borrowed = borrowable_fits(self.project, sid, plan['calibration'], main)
+        matrices, cameras, decisions = choose_matrices(report, own, given, main, borrowed=borrowed, near=near)
         plan['ips_matrices'], plan['ips_cameras'], plan['ips_decisions'] = matrices, cameras, decisions
+        # the borrowed fits, with the session they came from, in the report and in what the IPS run took
+        lent = {}
+        for camera, decision in decisions.items():
+            if 'borrowed own fit from' in decision and camera in borrowed:
+                candidate = borrowed[camera]
+                lent[camera] = {'session': candidate['session'], 'inliers': candidate['inliers'], 'p90': candidate['p90'],
+                                'days': candidate['days'], 'check': check_on_near_pairs(candidate['matrix'], near.get(camera)),
+                                'taken': camera in matrices}
+                report['cameras'][camera]['borrowed'] = lent[camera]
+        if lent:
+            with open(report_path, 'w') as f:
+                json.dump(report, f, indent=2)
         # what the IPS run took, kept with the session for the archive
         with open(os.path.join(out_dir, 'matrices_used.json'), 'w') as f:
             json.dump({'main': main, 'cameras': cameras, 'matrices': matrices, 'decisions': decisions,
-                       'given': plan['calibration']}, f, indent=2)
+                       'given': plan['calibration'], 'borrowed': lent}, f, indent=2)
         for camera, decision in decisions.items():
             log(f"{sid}: {camera} -> {main}: {decision}")
 

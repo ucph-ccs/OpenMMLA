@@ -29,6 +29,11 @@ def get_parser():
     add_arg('tag_size', float, None, "the AprilTag size in metres; if not set, the manifest's, else the config's", shortname='-ts')
     add_arg('verify', str, None, 'a transformation_matrices_<main>.json to score on the same paired sightings '
             '(e.g. one of pipelines/ips-base/camera_sync/calibrations/<name>/)', shortname='-v')
+    add_arg('near_window', float, 0.2, 'for a camera with fewer than -nb paired sightings, the most seconds apart two sightings '
+            'of a tag may lie to count as near-simultaneous (extra frames are read around the sampled ones); 0 turns it off',
+            shortname='-nw')
+    add_arg('near_below', int, 10, 'the paired sightings under which a camera is searched for near-simultaneous ones and for '
+            'sightings shared with a third camera whose own fit rests on at least this many pairs', shortname='-nb')
     add_arg('out', str, None, 'where to write transformation_matrices_<main>.json and calibration_report.json; '
             'if not set, artifacts/<session>/analysis/calibration/', shortname='-o')
     return parser
@@ -39,7 +44,8 @@ def main():
     args = parser.parse_args()
     from openmmla.utils.args import print_arguments
     print_arguments(args)
-    from openmmla.bases.ips.calibration import calibrate, observe, tag_detector
+    from openmmla.bases.ips.calibration import (calibrate, near_pairs, near_stamps, observe, relayed_pairs, tag_detector,
+                                                verify)
     from openmmla.utils.config import load_yaml_config
 
     project_dir = os.path.abspath(args.project_dir or os.getcwd())
@@ -88,8 +94,39 @@ def main():
 
     given = json.load(open(args.verify)) if args.verify else None
     matrices, report = calibrate(observations, main_camera, given)
+    # a camera with few paired sightings: the frames around the moments the two cameras saw a tag one
+    # sampled step apart are read as well, and the sightings within near_window seconds are kept, with
+    # those it shares with a third camera whose own fit is good (taken into the main frame by that fit);
+    # they check a transform from another session or file (near_pairs.json), they do not fit one
+    near_found = {}
+    placed = [c for c, e in report['cameras'].items()
+              if c in matrices and e.get('inliers', 0) >= args.near_below and (e.get('residual_m') or {}).get('p90', 1e9) <= 0.15]
+    for alt, entry in report['cameras'].items():
+        if args.near_window <= 0 or entry['pairs'] >= args.near_below:
+            continue
+        extra = near_stamps(observations[main_camera], observations[alt], args.step, args.near_window)
+        fine = {device: observe(videos[device]['path'], float(videos[device]['start_time']), extra, detect, rotate=rotate) if extra else {}
+                for device in (main_camera, alt)}
+        found = [(p, None) for p in near_pairs({**observations[main_camera], **fine[main_camera]},
+                                               {**observations[alt], **fine[alt]}, args.near_window)]
+        via = {}
+        for other in placed:
+            if other != alt:
+                relayed = relayed_pairs(observations[other], observations[alt], matrices[other]['R'], matrices[other]['T'])
+                found += [(p, other) for p in relayed]
+                if relayed:
+                    via[other] = len(relayed)
+        entry['near'] = {'pairs': len(found) - sum(via.values()), 'max_gap_s': args.near_window, 'frames_read': len(extra),
+                         'via': via, 'tags': sorted({int(p[1]) for p, _ in found})}
+        if given and alt in given and found:
+            entry['near']['given'] = verify(given[alt]['R'], given[alt]['T'], [p for p, _ in found])
+        near_found[alt] = [{'stamp': round(float(p[0]), 3), 'tag': int(p[1]), 'gap_s': p[6], 'via': other,
+                            'p_main': [round(float(x), 4) for x in p[2]], 'p_alt': [round(float(x), 4) for x in p[3]]}
+                           for p, other in found]
     out_dir = args.out or os.path.join(project_dir, 'artifacts', args.session_id, 'analysis', 'calibration')
     os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, 'near_pairs.json'), 'w') as f:
+        json.dump(near_found, f)
     matrices_path = os.path.join(out_dir, f'transformation_matrices_{main_camera}.json')
     with open(matrices_path, 'w') as f:
         json.dump(matrices, f, indent=2)
@@ -111,8 +148,14 @@ def main():
                 line += f"; {g['difference_to_fit']['rotation_deg']} deg / {g['difference_to_fit']['translation_m']} m from the fit"
         if 'problem' in entry:
             line += f": {entry['problem']}"
+        if 'near' in entry:
+            line += (f"\n    near-simultaneous (within {entry['near']['max_gap_s']} s, {entry['near']['frames_read']} extra frames "
+                     f"per camera): {entry['near']['pairs']} pairs"
+                     + ''.join(f", {n} through {other}" for other, n in entry['near']['via'].items()))
+            if 'given' in entry['near']:
+                line += f"; the given entry's residual median on them {entry['near']['given']['residual_m']['median']} m"
         print(line)
-    print(f"wrote {matrices_path} and calibration_report.json")
+    print(f"wrote {matrices_path}, calibration_report.json and near_pairs.json")
 
 
 if __name__ == "__main__":
