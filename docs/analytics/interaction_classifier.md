@@ -216,7 +216,7 @@ The `_analysis` prefix keeps `ses-code` from taking the folder for a session.
 - physical bins for badge distances: close under 0.6 m, normal 0.6–1.0 m, far above;
 - tertiles fitted once on the dev sessions' windows, label-free, for speech, words, head turn, head-turn spread, hand movement, gaze switches and hand distance.
 
-The tertile edges are part of the template. The first run fits them and freezes them in `artifacts/_analysis/interaction/jev/bins.json`. A pilot uses `bins_pilot.json` instead, since its tables predate the camera fix. Every later run reads the frozen file, or the one `--bins` names. Only `--fit-bins` fits them again, and the command then says that every state is new.
+The command applies the inclusion rule S1 first: a session the rule leaves out fits no tertiles and is asked about nothing, and the command says so. The tertile edges are part of the template. The first run fits them and freezes them in `artifacts/_analysis/interaction/jev/bins.json`. A pilot uses `bins_pilot.json` instead, since its tables predate the camera fix. Every later run reads the frozen file, or the one `--bins` names. Only `--fit-bins` fits them again, and the command then says that every state is new.
 
 A missing modality is said in words ("not measured", "C not in view"), never as 0. No tag id, session id, date, task name or transcript text is in the state, so nothing said leaves the machine. The question is the coder's codebook, plus a note on what the sensors can and cannot tell. `unclear` is offered only in J2.
 

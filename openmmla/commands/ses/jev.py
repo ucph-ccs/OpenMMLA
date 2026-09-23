@@ -115,11 +115,28 @@ def find_tables(artifacts: Path, pattern: str | None = None) -> list[tuple[str, 
     return found
 
 
+def _included(table, slots) -> tuple[bool, str]:
+    """the classifier's inclusion rule S1 on a session, from its kept slots: two persons, seen
+    together in enough windows; (included, the reason). A session left out fits no bins and is
+    asked about nothing, so Jev sees the sessions the models see."""
+    from openmmla.analytics.interaction.layout import MIN_TWO_VISIBLE, two_visible
+    if len(slots) < 2:
+        return False, f"S1 the roster keeps {len(slots)} person(s); two are needed"
+    share = float(two_visible(table, [int(tag) for tag in slots]).mean()) if len(table) else 0.0
+    if share < MIN_TWO_VISIBLE:
+        return False, f"S1 two persons observed together in {share:.2f} of the windows, under {MIN_TWO_VISIBLE:.2f}"
+    return True, ''
+
+
 def _load(path: Path):
+    """the slot table of a session, or None with the reason when the inclusion rule leaves it out."""
     from openmmla.analytics.interaction import jev as J
     table = _read(path)
     slots, group_size, gate = _roster(table)
-    return J.slot_table(table, slots, group_size, vfa_mask=gate)
+    included, reason = _included(table, slots)
+    if not included:
+        return None, reason
+    return J.slot_table(table, slots, group_size, vfa_mask=gate), ''
 
 
 def _frozen_bins(path: Path):
@@ -186,7 +203,18 @@ def main(argv=None):
     frozen = bins_path.exists() and not args.fit_bins
     if args.bins and not bins_path.exists() and not args.fit_bins:
         parser.error(f"no bins at {bins_path}: give the bins.json a run froze, or --fit-bins to fit them there")
-    slot_tables = {}
+    slot_tables, left_out = {}, {}
+    for session, path in everything:
+        slots, reason = _load(path)
+        if slots is None:
+            left_out[session] = reason
+            print(f"{session} left out: {reason}")
+        else:
+            slot_tables[session] = slots
+    chosen = [(s, p) for s, p in chosen if s not in left_out]
+    if not chosen:
+        print("every chosen session is left out by the inclusion rule S1")
+        return 1
     if frozen:
         bins, fitted_on = _frozen_bins(bins_path)
         if bins is None:
@@ -194,17 +222,17 @@ def main(argv=None):
             return 1
         print(f"tertile words frozen in {bins_path} (template {bins.digest()[:12]})")
     else:
-        # the words are fitted on every dev session, whichever sessions are asked about
-        slot_tables = {session: _load(path) for session, path in everything if session not in test}
-        if not slot_tables:
+        # the words are fitted on every dev session the rule kept, whichever sessions are asked about
+        dev_tables = {session: slots for session, slots in slot_tables.items() if session not in test}
+        if not dev_tables:
             print(f"no dev session under {artifacts} to fit the tertile words on")
             return 1
-        bins, fitted_on = J.fit_bins(list(slot_tables.values())), sorted(slot_tables)
+        bins, fitted_on = J.fit_bins(list(dev_tables.values())), sorted(dev_tables)
 
     from openmmla.utils.session_provenance import file_digest
     sessions = []
     for session, path in chosen:
-        slots = slot_tables[session] if session in slot_tables else _load(path)
+        slots = slot_tables[session]
         entry = {'session': session, 'slots': slots, 'table_sha256': file_digest(path),
                  'out_dir': str(artifacts / session / 'analysis' / 'interaction')}
         if args.variant == 'j2':
