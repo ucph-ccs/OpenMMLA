@@ -9,7 +9,9 @@ runs left instead: a video named by the local time it started (OBS, QuickTime: '
 folder of three-second recordings ('badge_0/records/badge_0_record_<unix>.wav', or 'segments/'
 when the raw records were not kept), sometimes downloaded twice ('... (2).wav'). This command
 finds them, moves the continuous files under their new names, concatenates a base's segments into
-one file that starts when the session's first segment did (silence where nothing was recorded),
+one file that starts when the session's first segment did (silence where nothing was recorded;
+a gap that opens at the same moment in every base, a step of the recording machine's wall clock,
+is reported, and taken out with --close-clock-steps),
 extracts a video's own audio track as a group microphone, writes the manifests, keeps the rest of
 the folder as legacy/<original name>/ and a report of what went where.
 """
@@ -34,6 +36,11 @@ SEGMENT_FOLDERS = ('records', 'segments', 'chunks')  # in order of preference: r
 LEFTOVER_FOLDERS = ('profiles', 'temp', 'logger', 'logs', 'visualizations')  # a base's other folders: never recordings
 MIN_SEGMENTS = 5
 SEGMENT_RATE = 16000
+# a gap between two records of a base that opens at the same moment in every base of the import is
+# a step of the recording machine's wall clock (the bases stamp their records with time.time()),
+# unless all of them stopped at once: 2025-06-16's three vimos got 1.361 s and 0.049 s of silence so
+CLOCK_STEP_MIN = 0.02        # seconds off the base's record spacing that make a gap: the 2025-06-16 vimos hold ~550 zero runs of 1-10 ms each that are not steps
+CLOCK_STEP_TOLERANCE = 0.1   # seconds within which the bases' gaps must open and agree in length: 2025-06-16's opened within 4 ms and differed by 4 ms at most
 DEFAULT_TZ = 'Europe/Copenhagen'
 DEFAULT_EXPERIMENT = 'exp_wegrow_life'
 DEFAULT_GROUP = 'group_01'
@@ -132,6 +139,7 @@ class Item:
     notes: list[str] = field(default_factory=list)
     destination: str = ''
     duplicates: list[str] = field(default_factory=list)  # second downloads of the same segments, dropped with the sources
+    shifts: list[tuple[float, float]] = field(default_factory=list)  # (from this stamp on, seconds earlier): closed clock steps
 
     @property
     def file_name(self) -> str:
@@ -172,6 +180,7 @@ class Plan:
     items: list[Item]
     warnings: list[str]
     skipped: list[str]
+    clock_steps: list[dict[str, Any]] = field(default_factory=list)
 
     def describe(self) -> str:
         lines = [f"{self.source}", f"  -> {self.target}  (session {self.session_id})"]
@@ -184,6 +193,10 @@ class Plan:
             lines.append(f"  {item.modality:5} {item.method:11} {item.file_name:60} {when} {length:>9}  <- {src}")
             for note in item.notes:
                 lines.append(f"        note: {note}")
+        for step in self.clock_steps:
+            lines.append(f"  clock step: the stamps jump {step['seconds']:+.3f} s at {step['at']:.2f} s in every base "
+                         f"({', '.join(step['bases'])}): " + ("closed" if step['closed'] else
+                                                              "left in (--close-clock-steps takes it out)"))
         for text in self.warnings:
             lines.append(f"  WARNING: {text}")
         for text in self.skipped:
@@ -285,8 +298,10 @@ def _camera_labels(videos: list[tuple[float, float | None]]) -> list[str]:
 
 def plan_import(source: str, artifacts_root: str, experiment_id: str = DEFAULT_EXPERIMENT, group_id: str = DEFAULT_GROUP,
                 tz: str = DEFAULT_TZ, only: str | None = None, session_id: str | None = None,
-                probe_media=probe) -> Plan:
-    """what an import of `source` would do, without doing it"""
+                probe_media=probe, close_clock_steps: bool = False) -> Plan:
+    """what an import of `source` would do, without doing it; with close_clock_steps the gaps that
+    open at the same moment in every base (find_clock_steps) are taken out of the stamps instead of
+    being filled with silence"""
     root = Path(source).expanduser().resolve()
     warnings_, skipped, items = [], [], []
     session = session_start_in_path(str(root)) or (session_start_in_path(only) if only else None)
@@ -315,6 +330,7 @@ def plan_import(source: str, artifacts_root: str, experiment_id: str = DEFAULT_E
         if gaps:
             item.notes.append(f"{gaps} gaps longer than 10 s, filled with silence")
         base_items.append(item)
+    clock_steps: list[dict[str, Any]] = []
     if base_items:
         t0 = min(item.start for item in base_items)
         for item in base_items:
@@ -322,6 +338,23 @@ def plan_import(source: str, artifacts_root: str, experiment_id: str = DEFAULT_E
                 item.notes.append(f"joined {(item.start - t0) / 60:.1f} min after the first base: leading silence added")
                 item.duration = (item.duration or 0) + (item.start - t0)
             item.start = t0
+        clock_steps = find_clock_steps({item.host: [unix_in_name(os.path.basename(f)) for f in item.sources]
+                                        for item in base_items})
+        by_host = {item.host: item for item in base_items}
+        for step in clock_steps:
+            step['at'] = round(step['stamp'] - t0, 3)
+            step['closed'] = close_clock_steps
+            for host, gap in step['per_base'].items():
+                item = by_host[host]
+                item.notes.append(
+                    f"the stamps jump {gap['seconds']:+.3f} s at {step['at']:.2f} s, at the same moment in every base "
+                    f"({', '.join(step['bases'])}): a step of the recording machine's wall clock, or all bases "
+                    f"stopping at once; " + (f"closed, what follows placed {step['seconds']:+.3f} s earlier" if close_clock_steps
+                                             else "left as silence" if gap['seconds'] > 0 else "left as an overlap, "
+                                             "its later record's head dropped"))
+                if close_clock_steps:
+                    item.shifts.append((gap['next'], step['seconds']))
+                    item.duration = (item.duration or 0) - step['seconds']
         items.extend(base_items)
 
     # continuous video and audio files
@@ -413,12 +446,65 @@ def plan_import(source: str, artifacts_root: str, experiment_id: str = DEFAULT_E
         warnings_.append(f"{target} exists already")
     for item in items:
         item.destination = os.path.join(target, 'collection', item.host, item.modality, item.file_name)
-    return Plan(str(root), session_dir_name, session_start, sid, experiment_id, group_id, target, items, warnings_, skipped)
+    return Plan(str(root), session_dir_name, session_start, sid, experiment_id, group_id, target, items, warnings_, skipped,
+                clock_steps)
 
 
-def concatenate(files: list[str], start: float, destination: str) -> float:
+def base_gaps(stamps: list[float], min_step: float = CLOCK_STEP_MIN) -> list[dict[str, float]]:
+    """the gaps of one base's records: every spacing between two stamps off the base's own spacing
+    (the median) by min_step or more, as {opens: the stamp a record on time would have had,
+    seconds: how much later the next one came (negative: earlier, overlapping), next: its stamp}"""
+    ordered = sorted(stamps)
+    if len(ordered) < 3:
+        return []
+    spacings = [b - a for a, b in zip(ordered, ordered[1:])]
+    nominal = sorted(spacings)[len(spacings) // 2]
+    return [{'opens': a + nominal, 'seconds': b - a - nominal, 'next': b}
+            for a, b in zip(ordered, ordered[1:]) if abs(b - a - nominal) >= min_step]
+
+
+def find_clock_steps(bases: dict[str, list[float]], min_step: float = CLOCK_STEP_MIN,
+                     tolerance: float = CLOCK_STEP_TOLERANCE) -> list[dict[str, Any]]:
+    """the gaps that open at the same stamp, and last as long, in every base recording at that
+    moment (two at least), within `tolerance`: {stamp, seconds (the median), bases, per_base: {base:
+    its gap}}. A gap in one base alone is that base's recording gap and is not among them."""
+    spans = {name: (min(stamps), max(stamps)) for name, stamps in bases.items() if len(stamps) >= 3}
+    gaps = {name: base_gaps(bases[name], min_step) for name in spans}
+    used: set[tuple[str, int]] = set()
+    steps = []
+    for name in sorted(gaps):
+        for index, gap in enumerate(gaps[name]):
+            if (name, index) in used:
+                continue
+            active = [other for other, (first, last) in spans.items() if first <= gap['opens'] <= last]
+            if len(active) < 2:
+                continue
+            members = {name: (index, gap)}
+            for other in active:
+                if other == name:
+                    continue
+                near = [(abs(g['opens'] - gap['opens']), i, g) for i, g in enumerate(gaps[other])
+                        if (other, i) not in used and abs(g['opens'] - gap['opens']) <= tolerance
+                        and abs(g['seconds'] - gap['seconds']) <= tolerance]
+                if not near:
+                    break
+                _, i, g = min(near, key=lambda hit: hit[0])
+                members[other] = (i, g)
+            else:
+                used.update((other, i) for other, (i, _) in members.items())
+                opens = sorted(g['opens'] for _, g in members.values())
+                lengths = sorted(g['seconds'] for _, g in members.values())
+                steps.append({'stamp': opens[len(opens) // 2], 'seconds': round(lengths[len(lengths) // 2], 4),
+                              'bases': sorted(members),
+                              'per_base': {other: {'opens': round(g['opens'], 4), 'seconds': round(g['seconds'], 4),
+                                                   'next': g['next']} for other, (_, g) in sorted(members.items())}})
+    return sorted(steps, key=lambda step: step['stamp'])
+
+
+def concatenate(files: list[str], start: float, destination: str, shifts: list[tuple[float, float]] = ()) -> float:
     """one 16 kHz mono wav from timestamped segments, each at its own offset from `start`; silence
-    where nothing was recorded, the earlier segment kept where two overlap. Returns the duration."""
+    where nothing was recorded, the earlier segment kept where two overlap. `shifts` (from this
+    stamp on, seconds earlier) take closed clock steps out of the stamps. Returns the duration."""
     import numpy as np
     import soundfile as sf
 
@@ -426,6 +512,7 @@ def concatenate(files: list[str], start: float, destination: str) -> float:
     with sf.SoundFile(destination, 'w', samplerate=SEGMENT_RATE, channels=1, subtype='PCM_16') as out:
         for path in sorted(files, key=lambda p: unix_in_name(os.path.basename(p))):
             stamp = unix_in_name(os.path.basename(path))
+            stamp -= sum(seconds for after, seconds in shifts if stamp >= after)
             data, rate = sf.read(path, dtype='int16', always_2d=True)
             data = data[:, 0]
             if rate != SEGMENT_RATE:
@@ -456,7 +543,9 @@ def execute(plan: Plan, copy: bool = False, log=print) -> dict[str, Any]:
 
     report: dict[str, Any] = {'source': plan.source, 'session_id': plan.session_id, 'target': plan.target,
                               'imported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'copy': copy,
-                              'recordings': [], 'warnings': list(plan.warnings), 'skipped': list(plan.skipped)}
+                              'recordings': [], 'warnings': list(plan.warnings), 'skipped': list(plan.skipped),
+                              # gaps that open at the same moment in every base: a wall-clock step, or all stopping at once
+                              'clock_steps': [dict(step) for step in plan.clock_steps]}
     transfer = shutil.copy2 if copy else shutil.move
     meta = read_meta(plan)
     for item in sorted(plan.items, key=lambda i: (i.modality, i.start)):
@@ -465,7 +554,7 @@ def execute(plan: Plan, copy: bool = False, log=print) -> dict[str, Any]:
         if item.method == 'move':
             transfer(item.sources[0], item.destination)
         elif item.method == 'concatenate':
-            item.duration = concatenate(item.sources, item.start, item.destination)
+            item.duration = concatenate(item.sources, item.start, item.destination, item.shifts)
             if not copy:
                 for path in item.sources + item.duplicates:
                     os.remove(path)
@@ -579,13 +668,18 @@ def get_parser():
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <project>/artifacts)")
     parser.add_argument('--copy', action='store_true', help="copy the files instead of moving them (needs the space)")
     parser.add_argument('-n', '--dry-run', action='store_true', help="show the plan and change nothing")
+    parser.add_argument('--close-clock-steps', action='store_true',
+                        help="take a gap that opens at the same moment in every base (a step of the recording machine's "
+                             "wall clock) out of the stamps instead of filling it with silence; check first against a "
+                             "continuous recording that no audio was lost there")
     return parser
 
 
 def main(argv=None):
     args = get_parser().parse_args(argv)
     artifacts = args.artifacts or os.path.join(os.getcwd(), 'artifacts')
-    plan = plan_import(args.source, artifacts, args.experiment, args.group, args.tz, args.only, args.session_id)
+    plan = plan_import(args.source, artifacts, args.experiment, args.group, args.tz, args.only, args.session_id,
+                       close_clock_steps=args.close_clock_steps)
     print(plan.describe())
     if args.dry_run:
         return 0

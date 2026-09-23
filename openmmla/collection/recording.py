@@ -424,7 +424,8 @@ def run_recording_process(command: list[str]) -> int:
     print("Command:")
     print(" ".join(command))
     if _recording_needs_desktop_session():
-        # the output file is the last argument of every recorder command
+        # an output file is the last argument of every recorder command (the
+        # last channel's, when one ffmpeg writes several)
         return _run_in_desktop_terminal(command, command[-1])
     print("Press Ctrl+C to stop.")
     proc = subprocess.Popen(command, start_new_session=True)
@@ -655,14 +656,15 @@ def prompt_audio_options(
 
     if detected_channels is not None:
         print(f"Detected/forced input channels: {detected_channels}")
-        print(f"Channel choices: mix or 0..{max(0, detected_channels - 1)}")
+        print(f"Channel choices: mix, one of 0..{max(0, detected_channels - 1)}, several as 0,1 or each "
+              "(one file per channel, all written by one ffmpeg)")
     else:
-        print("Could not detect channel count. Use mix or a 0-based channel number.")
+        print("Could not detect channel count. Use mix, a 0-based channel number, or several as 0,1.")
 
     selected_channel = input(f"Audio channel [{channel}]: ").strip() or str(channel)
-    _, channel_label = _audio_channel_filter(selected_channel, detected_channels)
+    picked = audio_channel_selection(selected_channel, detected_channels)
     label = sanitize_label(device_label, _device_label_from_device(selected_device, "mic"))
-    print(f"Device label: {_audio_device_slot(label, channel_label)}")
+    print(f"Device label: {', '.join(_audio_device_slot(label, index) for index in picked)}")
 
     return {
         "input_format": input_format,
@@ -699,6 +701,98 @@ def _audio_channel_filter(channel: str, channel_count: int | None) -> tuple[str 
     return f"pan=mono|c0=c{channel_index}", channel_index
 
 
+def audio_channel_selection(channel: str, channel_count: int | None) -> list[str | int]:
+    """the channels a recorder writes, one file each: ['mix'] for a downmix, else the 0-based
+    channels in the order given (2, or several as 0,1; each is every channel of the device)"""
+    text = str(channel).strip().lower()
+    if text in ("each", "every", "split"):
+        if not channel_count:
+            raise ValueError(f"audio channel '{text}' needs the channel count (--channels)")
+        return list(range(channel_count))
+    parts = [part for part in re.split(r"[,\s]+", text) if part]
+    if len(parts) <= 1:
+        return [_audio_channel_filter(text, channel_count)[1]]
+    picked: list[str | int] = []
+    for part in parts:
+        _, index = _audio_channel_filter(part, channel_count)
+        if index == "mix":
+            raise ValueError("a downmix (mix) is recorded alone, not with other channels")
+        if index in picked:
+            raise ValueError(f"audio channel {index} is picked twice")
+        picked.append(index)
+    return picked
+
+
+def channel_participants(participant: str | None, count: int) -> list[str | None]:
+    """the wearer of each of `count` channels, from --participant: one tag id per channel in channel
+    order (5,7; none for one left unbound), or nothing for all. One wearer named for several
+    channels is refused: two worn microphones on one receiver are two people."""
+    text = "" if participant is None else str(participant).strip()
+    parts = [part.strip() for part in text.split(",")] if text else []
+    wearers = [None if not part or part.lower() == "none" else part for part in parts]
+    if not any(wearers):
+        return [None] * count
+    if len(wearers) != count:
+        raise ValueError(
+            f"--participant {text} names {len(wearers)} wearer(s) for {count} channel(s): give one per channel "
+            f"in channel order (5,7; none for one left unbound), or none and bind them later with "
+            f"mmla ses-tidy --participant")
+    named = [wearer for wearer in wearers if wearer]
+    if len(set(named)) != len(named):
+        raise ValueError(f"--participant {text} names one wearer for several channels: two worn microphones "
+                         f"on one receiver are two people")
+    return wearers
+
+
+def prompt_channel_participants(device: str, device_label: str | None, channel: str, channels: int | None,
+                                participant: str | None) -> str | None:
+    """the wearers of several channels asked for in the recorder terminal, when --participant does
+    not name one per channel (the Collection card names one per recorder); the one given is the
+    first channel's default, and one wearer typed for two channels is asked again"""
+    picked = audio_channel_selection(channel, channels)
+    try:
+        channel_participants(participant, len(picked))
+        return participant
+    except ValueError:
+        pass
+    label = sanitize_label(device_label, _device_label_from_device(device, "mic"))
+    given = [part.strip() for part in str(participant or "").split(",")]
+    while True:
+        answers: list[str] = []
+        for index, channel in enumerate(picked):
+            default = given[index] if index < len(given) and given[index] and given[index] not in answers else "none"
+            answer = input(f"Participant of {_audio_device_slot(label, channel)} (tag id or none) [{default}]: ").strip()
+            answers.append(answer or default)
+        try:
+            channel_participants(",".join(answers), len(picked))
+            return ",".join(answers)
+        except ValueError as error:
+            print(error)
+            given = []
+
+
+def audio_command(input_options: list[str], outputs: list[tuple[str | None, str]], codec: str,
+                  sample_rate: int) -> list[str]:
+    """the ffmpeg command that records `outputs`, (filter or None for a downmix, file) each, from
+    the one input: several channels of one device come out of one process, split by one filter
+    graph, so they share every sample the device delivers and every one it drops. Two processes
+    on one device each open it on their own and lose audio on their own (the 2025-10/11 vimo pairs
+    drifted 1.6-12.9 s apart that way)."""
+    command = ["ffmpeg", "-hide_banner", *input_options]
+    if len(outputs) == 1:
+        audio_filter, path = outputs[0]
+        command.extend(["-af", audio_filter] if audio_filter else ["-ac", "1"])
+        return [*command, "-c:a", codec, "-ar", str(sample_rate), str(path)]
+    if any(audio_filter is None for audio_filter, _ in outputs):
+        raise ValueError("a downmix (mix) is recorded alone, not with other channels")
+    graph = [f"[0:a]asplit={len(outputs)}" + "".join(f"[s{i}]" for i in range(len(outputs)))]
+    graph += [f"[s{i}]{audio_filter}[a{i}]" for i, (audio_filter, _) in enumerate(outputs)]
+    command.extend(["-filter_complex", ";".join(graph)])
+    for i, (_, path) in enumerate(outputs):
+        command.extend(["-map", f"[a{i}]", "-c:a", codec, "-ar", str(sample_rate), str(path)])
+    return command
+
+
 def record_audio(
     *,
     project_dir: str | None,
@@ -717,7 +811,8 @@ def record_audio(
     scope: str | None = None,
 ) -> int:
     # a participant on a group microphone fails before anything else
-    live_audio_role("", participant, scope)
+    for wearer in str(participant or "").split(","):
+        live_audio_role("", wearer, scope)
     ensure_command("ffmpeg")
     fmt = audio_format.lower()
     codecs = {
@@ -730,25 +825,61 @@ def record_audio(
     codec, extension = codecs[fmt]
 
     detected_channels = channels or probe_audio_channels(input_format, device)
-    audio_filter, channel_label = _audio_channel_filter(channel, detected_channels)
+    picked = audio_channel_selection(channel, detected_channels)
+    wearers = channel_participants(participant, len(picked))
 
+    # one stamp for every channel: they come out of one ffmpeg, sample for sample together
     start_time = time.time()
     start_text = format_epoch_ms(start_time)
     host = sanitize_label(host_label, short_hostname())
+    # one session for every channel: a made-up id carries the second it is made in
+    session_id = sanitize_label(session_id, make_session_id(host))
     label = sanitize_label(device_label, _device_label_from_device(device, "mic"))
-    slot = _audio_device_slot(label, channel_label)
-    audio_scope, wearer = live_audio_role(slot, participant, scope)
-    filename = f"audio_{host}_{slot}_{start_text}.{extension}"
-    session_dir, output_file, session, sync_time, host = prepare_recording_paths(
-        modality="audio",
-        project_dir=project_dir,
-        output_root=output_root,
-        session_id=session_id,
-        initial_sync_time=initial_sync_time,
-        host_label=host,
-        leaf_dir="audio",
-        filename=filename,
-    )
+    outputs: list[tuple[str | None, str]] = []
+    recordings: list[dict[str, Any]] = []
+    for channel_label, wearer in zip(picked, wearers):
+        audio_filter = None if channel_label == "mix" else _audio_channel_filter(str(channel_label), detected_channels)[0]
+        slot = _audio_device_slot(label, channel_label)
+        audio_scope, wearer = live_audio_role(slot, wearer, scope)
+        filename = f"audio_{host}_{slot}_{start_text}.{extension}"
+        session_dir, output_file, session, sync_time, host = prepare_recording_paths(
+            modality="audio",
+            project_dir=project_dir,
+            output_root=output_root,
+            session_id=session_id,
+            initial_sync_time=initial_sync_time,
+            host_label=host,
+            leaf_dir="audio",
+            filename=filename,
+        )
+        outputs.append((audio_filter, str(output_file)))
+        recordings.append({
+            "id": f"audio_{host}_{slot}_{start_text}",
+            "modality": "audio",
+            "status": "recording",
+            "path": str(output_file),
+            "start_time": float(start_text),
+            "host": host,
+            "input_format": input_format,
+            # `device` is the device slot of the file name, as ses-tidy rebuilds it
+            # from the tree; the ffmpeg device is input_device
+            "device": slot,
+            "input_device": device,
+            "channels": detected_channels,
+            "channel": "mono" if channel_label == "mix" else f"ch{channel_label}",
+            # whose voice it is: a room microphone's or one person's; the wearer comes from the
+            # Collection form's Participant, else is bound later by mmla ses-tidy
+            "scope": audio_scope,
+            "participant": wearer,
+            "sample_rate": sample_rate,
+            "format": fmt,
+        })
+        if len(picked) > 1:
+            # the files that were recorded together, sample-locked
+            recordings[-1]["recorded_with"] = [f"audio_{host}_{_audio_device_slot(label, other)}_{start_text}"
+                                               for other in picked if other != channel_label]
+    for recording in recordings:
+        update_manifest(session_dir, session, sync_time, recording)
 
     if input_format == "avfoundation":
         input_spec = device if ":" in device else f":{device}"
@@ -759,53 +890,15 @@ def record_audio(
         input_options.extend(["-ac", str(channels)])
     input_options.extend(["-i", input_spec])
 
-    recording_id = f"audio_{host}_{slot}_{start_text}"
-    recording = {
-        "id": recording_id,
-        "modality": "audio",
-        "status": "recording",
-        "path": str(output_file),
-        "start_time": float(start_text),
-        "host": host,
-        "input_format": input_format,
-        # `device` is the device slot of the file name, as ses-tidy rebuilds it
-        # from the tree; the ffmpeg device is input_device
-        "device": slot,
-        "input_device": device,
-        "channels": detected_channels,
-        "channel": "mono" if channel_label == "mix" else f"ch{channel_label}",
-        # whose voice it is: a room microphone's or one person's; the wearer comes from the
-        # Collection form's Participant, else is bound later by mmla ses-tidy
-        "scope": audio_scope,
-        "participant": wearer,
-        "sample_rate": sample_rate,
-        "format": fmt,
-    }
-    update_manifest(session_dir, session, sync_time, recording)
-
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        *input_options,
-    ]
-    if audio_filter:
-        command.extend(["-af", audio_filter])
-    else:
-        command.extend(["-ac", "1"])
-    command.extend([
-        "-c:a",
-        codec,
-        "-ar",
-        str(sample_rate),
-        str(output_file),
-    ])
-    return_code = run_recording_process(command)
-    recording.update({
-        "status": "finished" if return_code == 0 else "stopped",
-        "stopped_at": float(format_epoch_ms()),
-        "returncode": return_code,
-    })
-    update_manifest(session_dir, session, sync_time, recording)
+    return_code = run_recording_process(audio_command(input_options, outputs, codec, sample_rate))
+    stopped_at = float(format_epoch_ms())
+    for recording in recordings:
+        recording.update({
+            "status": "finished" if return_code == 0 else "stopped",
+            "stopped_at": stopped_at,
+            "returncode": return_code,
+        })
+        update_manifest(session_dir, session, sync_time, recording)
     return return_code
 
 

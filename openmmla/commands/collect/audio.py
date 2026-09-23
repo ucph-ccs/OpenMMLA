@@ -50,7 +50,8 @@ def get_parser():
         "--channel", "--audio-channel",
         dest="channel",
         default=DEFAULT_AUDIO_CHANNEL,
-        help="0-based channel to record as mono, or 'mix' to average all input channels",
+        help="0-based channel to record as mono, several as 0,1 (one file each, all written by one ffmpeg, so they "
+             "stay sample-locked), each for every channel, or 'mix' to average all input channels",
     )
     parser.add_argument(
         "--device-label", "--audio-device-label",
@@ -63,7 +64,8 @@ def get_parser():
         "--participant", "--audio-participant",
         dest="participant",
         default=None,
-        help="the tag id of whoever wears this microphone; its recording is personal",
+        help="the tag id of whoever wears this microphone; its recording is personal. Several channels take "
+             "one per channel, in channel order (5,7; none for one left unbound)",
     )
     parser.add_argument(
         "--scope", "--audio-scope",
@@ -91,7 +93,12 @@ def main():
     parser = get_parser()
     args = parser.parse_args()
 
-    from openmmla.collection.recording import list_audio_devices, prompt_audio_options, record_audio
+    from openmmla.collection.recording import (
+        list_audio_devices,
+        prompt_audio_options,
+        prompt_channel_participants,
+        record_audio,
+    )
 
     if args.list_devices:
         raise SystemExit(list_audio_devices(args.input_format))
@@ -113,6 +120,9 @@ def main():
         args.sample_rate = selected["sample_rate"]
         args.audio_format = selected["audio_format"]
         args.device_label = selected["device_label"]
+        # several channels of one receiver are several wearers: asked for here when the card named one
+        args.participant = prompt_channel_participants(
+            args.device, args.device_label, args.channel, args.channels, args.participant)
 
     if args.participant and args.scope == "group":
         parser.error("a group microphone has no participant")
@@ -121,22 +131,27 @@ def main():
     elif args.scope:
         print(f"Scope: {args.scope}")
 
-    raise SystemExit(record_audio(
-        project_dir=args.project_dir,
-        output_root=args.output_root,
-        session_id=args.session_id,
-        initial_sync_time=args.initial_sync_time,
-        host_label=args.host_label,
-        input_format=args.input_format,
-        device=args.device,
-        channels=args.channels,
-        channel=args.channel,
-        sample_rate=args.sample_rate,
-        audio_format=args.audio_format,
-        device_label=args.device_label,
-        participant=args.participant,
-        scope=args.scope,
-    ))
+    try:
+        return_code = record_audio(
+            project_dir=args.project_dir,
+            output_root=args.output_root,
+            session_id=args.session_id,
+            initial_sync_time=args.initial_sync_time,
+            host_label=args.host_label,
+            input_format=args.input_format,
+            device=args.device,
+            channels=args.channels,
+            channel=args.channel,
+            sample_rate=args.sample_rate,
+            audio_format=args.audio_format,
+            device_label=args.device_label,
+            participant=args.participant,
+            scope=args.scope,
+        )
+    except ValueError as error:
+        # a channel or wearer that does not fit the device, said before ffmpeg starts
+        parser.error(str(error))
+    raise SystemExit(return_code)
 
 
 if __name__ == "__main__":

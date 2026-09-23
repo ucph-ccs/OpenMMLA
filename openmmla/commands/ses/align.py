@@ -4,11 +4,12 @@ A session's recordings come from different clocks: a per-person microphone (badg
 stamped by the base that recorded it, a camera's file by the machine that wrote it, at best to
 the second and after the delay of a stream. The camera's own audio track and the microphones
 heard the same room, so cross-correlating them says how far the camera's nominal start is off,
-and --apply moves the camera's recordings (its video and its audio track share one start) by
-that much. --trim then cuts every recording to the session's common start, the latest start
-among them: audio to the sample, video at the last keyframe before it (a stream copy, nothing
-re-encoded), and names every file with its exact start. Nothing is kept: what came before the
-common start is gone.
+and --apply moves that track and the videos that share its start (the camera's, or the crops of
+one recording) by that much, and nothing else: not the reference, not a per-person microphone
+that shares the start. --trim then cuts every recording to the session's common start, the
+latest start among them: audio to the sample, video at the last keyframe before it (a stream
+copy, nothing re-encoded), and names every file with its exact start. Nothing is kept: what
+came before the common start is gone.
 
 --end SECONDS cuts the other side: every recording ends SECONDS after the common start (the
 latest start, what the manifest's initial_sync_time says after a rebuild, the reference --trim
@@ -19,6 +20,15 @@ the manifest takes the length ffprobe reads. A recording that already ends by th
 END_SLACK after, so a second run cuts nothing again) is left as is. This one is reversible: the
 full-length originals move under raw/<host>/<audio|video>/ (their paths under collection/, out
 of the sources), the manifests are rebuilt with the new lengths and a note naming the cut.
+
+--devices with --warp, --cut, --cut-zeros or --cut-head edits the timing inside audio files, for
+what no shift of a start can fix: two channels that lost audio on their own (a piecewise time map
+from a measured lag track), the silence an import put in for a wall-clock step of the recording
+machine (the digital-zero runs at given times), a recording that runs a constant time late (its
+head). Samples are cut or silence inserted where the timing changes, never resampled (that would
+change the pitch of speech), the start stamp of the name stays, the original moves under raw/
+(the first original, when a file is edited twice) with an .edits.json beside it, and the manifests
+get the new lengths and a note with the numbers. --dry-run says what would change.
 """
 import argparse
 import json
@@ -35,6 +45,7 @@ import numpy as np
 ENVELOPE_RATE = 100          # bins per second the audio is reduced to before correlating
 MIC_DEVICES = ('vimo', 'badge')   # per-person microphones (device label prefix): the clock the others are aligned to
 END_SLACK = 0.25             # seconds past --end a recording may run and count as ended (a stream-copied video does)
+SAME_START = 0.0015          # seconds within which two file names give one start (the names carry milliseconds)
 
 
 def envelope(path: str, offset: float, duration: float) -> np.ndarray:
@@ -99,6 +110,7 @@ def pick_reference(recordings: list[dict[str, Any]], host: str | None = None) ->
 
 def measure_session(session_dir: Path, reference_host: str | None = None, window: float = 1200.0,
                     max_lag: float = 120.0) -> dict[str, Any]:
+    from openmmla.commands.ses.tidy import audio_scope_of
     recordings = _recordings(session_dir)
     reference = pick_reference(recordings, reference_host)
     if reference is None:
@@ -109,25 +121,71 @@ def measure_session(session_dir: Path, reference_host: str | None = None, window
             continue
         result = measure_lag(reference, other, window, max_lag)
         results.append({'host': other['host'], 'device': other.get('device'), 'channel': other.get('channel'), 'start_time': other['start_time'],
+                        'path': other['path'], 'scope': audio_scope_of(other),
                         'shares_start_with': sorted(r['host'] + '/' + r['modality'] for r in recordings
-                                                    if r is not other and abs(r['start_time'] - other['start_time']) < 0.0015),
+                                                    if r is not other and abs(r['start_time'] - other['start_time']) < SAME_START),
                         **result})
-    return {'reference': reference['host'], 'results': results}
+    return {'reference': reference['host'], 'reference_path': reference['path'], 'results': results}
 
 
-def apply_shift(session_dir: Path, start_time: float, lag: float, log=print) -> list[str]:
-    """every recording that starts at `start_time` (a camera's video and its audio track) renamed
-    to start `lag` seconds later"""
-    from openmmla.commands.ses.tidy import parse_recording_name, rebuild_manifests
-    renamed = []
+def shift_plan(session_dir: Path, measured: dict[str, Any], reference: str | None = None
+               ) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """(the files a lag measured for the recording `measured` {path, host, start_time} moves, the
+    files sharing its start that stay and why). What moves is the recording itself and, when it is
+    not a per-person microphone, every video that starts with it to the millisecond, on any host:
+    the video of the camera it is the audio track of (a track filed under another machine than its
+    video: jabra-0 under ericli, c920-01 under raspi4-01), or the crops of the one recording they
+    were all cut from (2024-12-10 group_02: jabra-0, c920-01 and c920-04 out of one OBS mosaic), a
+    track never moving without its picture. Nothing else moves along: not the reference, not a
+    per-person microphone (a take split can give it the camera's start, as it did the 2025-05-13
+    vimos, which a shift for the camera then moved too), and not another audio recording (each is
+    measured on its own)."""
+    from openmmla.collection.recording import default_audio_scope
+    from openmmla.commands.ses.tidy import audio_scope_of, parse_recording_name
+    own = Path(measured['path']).resolve()
+    ref = Path(reference).resolve() if reference else None
+    scopes = {Path(r['path']).resolve(): audio_scope_of(r) for r in _recordings(session_dir) if r.get('modality') == 'audio'}
+    sharing = []
     for path in sorted((session_dir / 'collection').glob('*/*/*')):
         parsed = parse_recording_name(path.name) if path.is_file() else None
-        if parsed and abs(parsed['start'] - start_time) < 0.0015:
-            target = path.with_name(f"{parsed['modality']}_{parsed['host']}_{parsed['device']}_{parsed['start'] + lag:.3f}.{parsed['ext']}")
-            path.rename(target)
-            renamed.append(target.name)
-            log(f"  {path.name} -> {target.name}")
-    rebuild_manifests(session_dir, notes=[f"start of {', '.join(renamed)} moved by {lag:+.2f} s, measured by cross-correlation"], log=log)
+        if parsed and abs(parsed['start'] - measured['start_time']) < SAME_START and path.resolve() != own:
+            sharing.append((path, parsed))
+    personal = (measured.get('scope') or scopes.get(own)) == 'personal'
+    videos = [] if personal else [path for path, parsed in sharing if parsed['modality'] == 'video']
+    moves, stays = [Path(measured['path'])] + videos, []
+    for path, parsed in sharing:
+        if path in videos:
+            continue
+        if ref is not None and path.resolve() == ref:
+            why = 'the reference'
+        elif parsed['modality'] == 'video':
+            why = 'the measured recording is a per-person microphone, which no video goes with'
+        elif (scopes.get(path.resolve()) or default_audio_scope(parsed['device'], None, parsed['host'])) == 'personal':
+            why = 'a per-person microphone'
+        else:
+            why = 'another audio recording, which goes by its own measurement'
+        stays.append((path, why))
+    return moves, stays
+
+
+def apply_shift(session_dir: Path, measured: dict[str, Any], lag: float, reference: str | None = None,
+                log=print) -> list[str]:
+    """the recording `measured` {path, host, start_time} and the videos that go with it
+    (shift_plan) renamed to start `lag` seconds later; what shares their start and stays is said"""
+    from openmmla.commands.ses.tidy import parse_recording_name, rebuild_manifests
+    moves, stays = shift_plan(session_dir, measured, reference)
+    renamed = []
+    for path in moves:
+        parsed = parse_recording_name(path.name)
+        target = path.with_name(f"{parsed['modality']}_{parsed['host']}_{parsed['device']}_{parsed['start'] + lag:.3f}.{parsed['ext']}")
+        path.rename(target)
+        renamed.append(target.name)
+        log(f"  {path.name} -> {target.name}")
+    for path, why in stays:
+        log(f"  {path.name} starts with it and stays: {why}")
+    rebuild_manifests(session_dir, notes=[f"start of {', '.join(renamed)} moved by {lag:+.2f} s, measured by cross-correlation"
+                                          + (f"; left in place though starting with it: {', '.join(p.name for p, _ in stays)}" if stays else '')],
+                      log=log)
     return renamed
 
 
@@ -311,11 +369,295 @@ def end_session(session_dir: Path, seconds: float, dry_run: bool = False, log=pr
     return {'common_start': start, 'end': end, 'cut': report, 'dry_run': False}
 
 
+# the edits of one device's audio file (--warp, --cut, --cut-zeros, --cut-head): samples are cut
+# or silence inserted where the timing changes, nothing is resampled (a stretch would change the
+# pitch of speech), the start stamp of the name stays, and the original is kept under raw/
+MIN_ZERO_RUN = 0.01          # seconds of digital zero a --cut-zeros run needs: 2025-06-16's clock steps left runs of 49 ms and 1.36 s in each vimo, whose ~550 other zero runs last 1-10 ms
+ZERO_RUN_SEARCH = 0.5        # seconds from the time given within which a --cut-zeros run must start
+NOTE_KNOTS = 12              # knots of a warp the manifest note lists; a measured lag track has hundreds (the 2025-10/11 vimo pairs 219-1052), which only the .edits.json keeps
+
+
+def warp_pieces(frames: int, steps: list[tuple[int, int]]) -> list[tuple[int, int, int]]:
+    """(first input sample, end input sample, output position) of each stretch a file keeps, for
+    steps (input sample, shift in samples): from each step's sample on, the input sits `shift`
+    samples later than it is (the first step's shift holds from the start; of two steps at one
+    sample the later given wins). A stretch that would land on output already written loses its
+    head (samples cut), one that lands past it leaves silence (samples inserted)."""
+    ordered = sorted(dict(steps).items())
+    if not ordered:
+        return [(0, frames, 0)] if frames else []
+    starts = [0] + [max(0, min(frames, first)) for first, _ in ordered[1:]]
+    ends = starts[1:] + [frames]
+    pieces, written = [], 0
+    for first, end, (_, shift) in zip(starts, ends, ordered):
+        position = first + shift
+        if position < written:
+            first, position = first + written - position, written
+        if first < end:
+            pieces.append((first, end, position))
+            written = position + end - first
+    return pieces
+
+
+def render_pieces(data: np.ndarray, pieces: list[tuple[int, int, int]]) -> np.ndarray:
+    """the output the pieces make of `data` (frames x channels), silence between them"""
+    length = max((position + end - first for first, end, position in pieces), default=0)
+    out = np.zeros((length, data.shape[1]), dtype=data.dtype)
+    for first, end, position in pieces:
+        out[position:position + end - first] = data[first:end]
+    return out
+
+
+def cut_steps(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """the steps that cut these sample ranges [first, end) out of a file, overlapping ones merged"""
+    merged: list[list[int]] = []
+    for first, end in sorted(ranges):
+        if end <= first:
+            continue
+        if merged and first <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([first, end])
+    steps, cut = [(0, 0)], 0
+    for first, end in merged:
+        cut += end - first
+        steps.append((first, -cut))
+    return steps
+
+
+def zero_runs(data: np.ndarray, rate: int) -> list[tuple[int, int]]:
+    """the stretches [first, end) where every channel is digital zero for MIN_ZERO_RUN or longer"""
+    silent = np.all(data == 0, axis=1).astype(np.int8)
+    edges = np.diff(np.concatenate([[0], silent, [0]]))
+    firsts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+    keep = ends - firsts >= int(round(MIN_ZERO_RUN * rate))
+    return list(zip(firsts[keep].tolist(), ends[keep].tolist()))
+
+
+def zero_run_at(data: np.ndarray, rate: int, at: int, length: int | None = None) -> tuple[int, int]:
+    """the digital-zero run [first, end) that starts nearest sample `at`, within ZERO_RUN_SEARCH, cut
+    to its first `length` samples when given; ValueError when there is none"""
+    near = [(abs(first - at), first, end) for first, end in zero_runs(data, rate)
+            if abs(first - at) <= ZERO_RUN_SEARCH * rate]
+    if not near:
+        raise ValueError(f"no digital-zero run of {MIN_ZERO_RUN * 1000:.0f} ms or more starts within "
+                         f"{ZERO_RUN_SEARCH} s of {at / rate:.3f} s")
+    _, first, end = min(near)
+    if length is not None:
+        if length > end - first:
+            raise ValueError(f"the zero run at {first / rate:.3f} s lasts {(end - first) / rate:.3f} s, "
+                             f"less than the {length / rate:.3f} s to cut")
+        end = first + length
+    return first, end
+
+
+def read_time_map(value: str) -> tuple[list[tuple[float, float]], str | None]:
+    """(time, lag) steps and the map's own note, from a JSON file or inline JSON: {"lags": [[time,
+    lag], ...]} (from `time`, in seconds into the file as it is, on, its content sits `lag` seconds
+    later), {"knots": [[t_in, t_out], ...]} (the stretch from t_in to the next knot starts at
+    t_out), or a list of {"time", "lag"} or {"t_in", "t_out"} objects; an optional "note" says how
+    the map was measured"""
+    text = Path(value).read_text(encoding='utf-8') if os.path.isfile(value) else value
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"--warp wants a JSON file or inline JSON: {error}") from None
+    note = data.get('note') if isinstance(data, dict) else None
+    if isinstance(data, dict) and 'lags' in data:
+        pairs = [(float(t), float(lag)) for t, lag in data['lags']]
+    elif isinstance(data, dict) and 'knots' in data:
+        pairs = [(float(t_in), float(t_out) - float(t_in)) for t_in, t_out in data['knots']]
+    elif isinstance(data, list) and data and all(isinstance(k, dict) for k in data):
+        pairs = [(float(k['time']), float(k['lag'])) if 'lag' in k else (float(k['t_in']), float(k['t_out']) - float(k['t_in']))
+                 for k in data]
+    else:
+        raise ValueError('--warp wants {"lags": [[time, lag], ...]}, {"knots": [[t_in, t_out], ...]} or a list of such objects')
+    times = [t for t, _ in pairs]
+    if not pairs or any(not np.isfinite(v) for pair in pairs for v in pair) or times[0] < 0 \
+            or any(b <= a for a, b in zip(times, times[1:])):
+        raise ValueError("--warp wants finite times from 0 on, each later than the one before")
+    return pairs, note
+
+
+def parse_cut(value: str, in_samples: bool = False) -> tuple[float, float]:
+    """START:END or START+LENGTH, in seconds (in samples with --samples), as (start, end)"""
+    for sign in (':', '+'):
+        first, found, second = str(value).partition(sign)
+        if found:
+            try:
+                start, other = (int(first), int(second)) if in_samples else (float(first), float(second))
+            except ValueError:
+                break
+            end = start + other if sign == '+' else other
+            if start < 0 or end <= start:
+                break
+            return start, end
+    raise ValueError(f"--cut wants START:END or START+LENGTH ({'samples' if in_samples else 'seconds'}), not {value!r}")
+
+
+def parse_zero_run(value: str, in_samples: bool = False) -> tuple[float, float | None]:
+    """TIME or TIME:LENGTH, in seconds (in samples with --samples)"""
+    at, _, length = str(value).partition(':')
+    try:
+        number = int if in_samples else float
+        parsed = (number(at), number(length) if length else None)
+    except ValueError:
+        parsed = (-1, None)
+    if parsed[0] < 0 or (parsed[1] is not None and parsed[1] <= 0):
+        raise ValueError(f"--cut-zeros wants TIME or TIME:LENGTH ({'samples' if in_samples else 'seconds'}), not {value!r}")
+    return parsed
+
+
+def find_audio(recordings: list[dict[str, Any]], spec: str) -> dict[str, Any]:
+    """the one audio recording [HOST/]DEVICE names; ValueError when none or several do"""
+    host, _, device = str(spec).strip().rpartition('/')
+    hits = [r for r in recordings if r.get('modality') == 'audio' and r.get('device') == device
+            and (not host or r.get('host') == host)]
+    if len(hits) != 1:
+        found = ', '.join(f"{r.get('host')}/{r.get('device')}" for r in recordings if r.get('modality') == 'audio')
+        raise ValueError(f"{spec} names {'no' if not hits else len(hits)} audio recording(s) of the session "
+                         f"({'give HOST/DEVICE' if hits else 'it has ' + (found or 'none')})")
+    return hits[0]
+
+
+def _seconds(samples: int, rate: int) -> str:
+    return f"{samples / rate:.3f}"
+
+
+def edit_audio(session_dir: Path, devices: list[str], *, warp: tuple[list[tuple[float, float]], str | None] | None = None,
+               cuts: list[tuple[float, float]] = (), zeros: list[tuple[float, float | None]] = (),
+               head: float | None = None, in_samples: bool = False, note: str | None = None,
+               dry_run: bool = False, log=print) -> dict[str, Any]:
+    """the audio files of `devices` ([HOST/]DEVICE) re-timed in place, each by its own samples:
+    `warp` (time, lag) steps, or cuts of sample ranges, of the digital-zero runs at given times and
+    of the first `head` seconds. The start stamp of each name stays; the original moves under
+    raw/<host>/audio/ (an earlier edit's original stays there, the first one), next to a
+    <name>.edits.json of every edit made, and the manifests are rebuilt with the new lengths and a
+    note of what was done. With dry_run only what would change is said."""
+    import soundfile as sf
+    from openmmla.commands.ses.tidy import rebuild_manifests
+    if warp is not None and (cuts or zeros or head):
+        raise ValueError("--warp goes alone, without --cut, --cut-zeros and --cut-head")
+    if warp is None and not (cuts or zeros or head):
+        raise ValueError("nothing to do: give --warp, --cut, --cut-zeros or --cut-head")
+    if head is not None and head <= 0:
+        raise ValueError(f"--cut-head wants a positive number of seconds, not {head}")
+    recordings = _recordings(session_dir)
+    targets = [find_audio(recordings, spec) for spec in devices]
+    if not targets:
+        raise ValueError("--devices names no recording to change")
+    plans = []
+    for r in targets:
+        path = Path(r['path'])
+        with sf.SoundFile(str(path)) as f:
+            rate, subtype, fmt = f.samplerate, f.subtype, f.format
+            data = f.read(dtype=AUDIO_DTYPES.get(subtype, 'float64'), always_2d=True)
+        to_samples = (lambda v: int(v)) if in_samples else (lambda v: int(round(v * rate)))
+        if warp is not None:
+            steps = [(int(round(t * rate)), int(round(lag * rate))) for t, lag in warp[0]]
+            ranges = []
+        else:
+            ranges = [(0, int(round(head * rate)))] if head else []
+            ranges += [(to_samples(a), to_samples(b)) for a, b in cuts]
+            ranges += [zero_run_at(data, rate, to_samples(at), None if length is None else to_samples(length))
+                       for at, length in zeros]
+            if any(end > len(data) for _, end in ranges):
+                raise ValueError(f"{path.name}: a cut reaches past its end ({_seconds(len(data), rate)} s)")
+            steps = cut_steps(ranges)
+        pieces = warp_pieces(len(data), steps)
+        kept = sum(end - first for first, end, _ in pieces)
+        length = max((position + end - first for first, end, position in pieces), default=0)
+        raw = session_dir / 'raw' / path.relative_to(session_dir / 'collection')
+        plans.append({'record': r, 'path': path, 'raw': raw, 'rate': rate, 'subtype': subtype, 'format': fmt,
+                      'data': data, 'steps': steps, 'ranges': sorted(ranges), 'pieces': pieces,
+                      'cut': len(data) - kept, 'inserted': length - kept, 'frames': len(data), 'length': length})
+    kind = 'warp' if warp is not None else 'cut'
+    verb = 'would be' if dry_run else 'is'
+    for plan in plans:
+        rate = plan['rate']
+        what = (f"warped at {len(plan['steps'])} steps" if kind == 'warp'
+                else f"cut at {', '.join(f'[{a}, {b})' for a, b in plan['ranges'])} (samples at {rate} Hz)")
+        log(f"  {plan['path'].name} {verb} {what}: {_seconds(plan['cut'], rate)} s cut, {_seconds(plan['inserted'], rate)} s "
+            f"of silence inserted, {_seconds(plan['frames'], rate)} s -> {_seconds(plan['length'], rate)} s; the start "
+            f"stamp kept, the original {'already ' if plan['raw'].exists() else ''}under {plan['raw'].relative_to(session_dir)}")
+        if kind == 'warp':
+            previous = 0
+            for index, (sample, shift) in enumerate(sorted(plan['steps'])):
+                change = shift - previous if index else shift
+                previous = shift
+                if change:
+                    log(f"    at {_seconds(sample if index else 0, rate)} s: {'+' if change > 0 else '-'}{_seconds(abs(change), rate)} s "
+                        f"({'silence inserted' if change > 0 else 'cut'}), from then on {shift / rate:+.3f} s")
+    report = [{'host': p['record']['host'], 'device': p['record'].get('device'), 'file': p['path'].name,
+               'raw': str(p['raw'].relative_to(session_dir)), 'cut_seconds': round(p['cut'] / p['rate'], 4),
+               'inserted_seconds': round(p['inserted'] / p['rate'], 4), 'seconds': round(p['length'] / p['rate'], 4),
+               'ranges': [list(r) for r in p['ranges']], 'steps': [list(s) for s in sorted(p['steps'])], 'rate': p['rate']}
+              for p in plans]
+    if dry_run:
+        return {'edited': report, 'dry_run': True}
+
+    from openmmla.commands.ses.tidy import parse_recording_name
+    durations, done = {}, []
+    when = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    try:
+        for plan, entry in zip(plans, report):
+            path, raw = plan['path'], plan['raw']
+            kept_before = raw.exists()
+            if not kept_before:
+                raw.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(path), str(raw))
+            temp = path.with_name(f".{path.stem}.editing{path.suffix}")
+            try:
+                sf.write(str(temp), render_pieces(plan['data'], plan['pieces']), plan['rate'], subtype=plan['subtype'], format=plan['format'])
+            except BaseException:
+                # the original goes back where it was, nothing half-written is left
+                temp.unlink(missing_ok=True)
+                if not kept_before:
+                    shutil.move(str(raw), str(path))
+                raise
+            temp.replace(path)
+            log_path = raw.with_name(raw.name + '.edits.json')
+            edits = json.loads(log_path.read_text(encoding='utf-8')) if log_path.exists() else []
+            edits.append({'at': when, 'edit': kind, 'from_seconds': round(plan['frames'] / plan['rate'], 4),
+                          **{k: entry[k] for k in ('seconds', 'cut_seconds', 'inserted_seconds', 'ranges', 'steps', 'rate')},
+                          **({'map': [list(pair) for pair in warp[0]], 'map_note': warp[1]} if warp is not None else {}),
+                          **({'note': note} if note else {})})
+            log_path.write_text(json.dumps(edits, indent=2) + "\n", encoding='utf-8')
+            parsed = parse_recording_name(path.name)
+            durations[('audio', round(parsed['start'], 3), parsed['device'])] = plan['length'] / plan['rate']
+            done.append(entry)
+    finally:
+        if done:
+            _set_durations(session_dir, durations)
+            rebuild_manifests(session_dir, notes=[_edit_note(kind, done, warp, head, note)], log=log)
+    return {'edited': report, 'dry_run': False}
+
+
+def _edit_note(kind: str, done: list[dict[str, Any]], warp, head: float | None, note: str | None) -> str:
+    names = ', '.join(e['device'] for e in done)
+    tail = (f"; the start stamps kept, nothing resampled, the originals under raw/ with an .edits.json each"
+            + (f"; {note}" if note else ''))
+    if kind == 'warp':
+        lags = [lag for _, lag in warp[0]]
+        pairs = (', '.join(f"{t:.3f}:{lag:+.3f}" for t, lag in warp[0]) if len(warp[0]) <= NOTE_KNOTS
+                 else f"{len(warp[0])} knots from {warp[0][0][0]:.3f}:{lags[0]:+.3f} to {warp[0][-1][0]:.3f}:{lags[-1]:+.3f}, "
+                      f"the lag between {min(lags):+.3f} and {max(lags):+.3f} (every knot in the .edits.json)")
+        totals = '; '.join(f"{e['device']} {e['cut_seconds']:.3f} s cut, {e['inserted_seconds']:.3f} s of silence inserted"
+                           for e in done)
+        return (f"{names} re-timed by a piecewise time map, samples cut or silence inserted "
+                f"where the lag changes (s into the file as it was: s later): {pairs}"
+                + (f" ({warp[1]})" if warp[1] else '') + f"; {totals}" + tail)
+    parts = [f"{e['device']} {e['cut_seconds']:.4f} s at {', '.join(f'[{a}, {b})' for a, b in e['ranges'])} ({e['rate']} Hz)"
+             for e in done]
+    lead = f"the first {head:.3f} s cut, so what follows sits {head:.3f} s earlier; " if head else ''
+    return f"{names}: {lead}samples cut, [first, end) of the file as it was: {'; '.join(parts)}" + tail
+
+
 def get_parser():
     parser = argparse.ArgumentParser(
         prog='mmla ses-align',
         description="Measure how far a session's recordings are off one clock (by cross-correlating the audio), "
-                    "move them by that much, and cut them to one common start.")
+                    "move them by that much, and cut them to one common start; or re-time the audio inside a file.")
     parser.add_argument('session', help="the session folder under artifacts/, or its id")
     parser.add_argument('--reference', default=None, help="the host whose clock the others are aligned to (default: the longest per-person mic)")
     parser.add_argument('--apply', action='store_true', help="move the recordings whose start is measured off by more than --tolerance")
@@ -324,7 +666,26 @@ def get_parser():
     parser.add_argument('--trim', action='store_true', help="cut every recording to the session's common start")
     parser.add_argument('--end', type=float, default=None, metavar='SECONDS',
                         help="cut every recording to end SECONDS after the common start, the originals kept under raw/")
-    parser.add_argument('--dry-run', action='store_true', help="with --end: say what would be cut, change nothing")
+    parser.add_argument('--dry-run', action='store_true', help="with --end or an edit: say what would change, change nothing")
+    edits = parser.add_argument_group(
+        'edits of audio files', "re-time the audio of --devices by cutting samples or inserting silence (nothing is "
+        "resampled); the start stamp in the name stays, the original moves under raw/, the manifest notes what was done")
+    edits.add_argument('--devices', action='append', default=[], metavar='[HOST/]DEVICE[,...]',
+                       help="the audio recordings to edit (vimo-0-ch1, ericli/vimo-0; repeatable)")
+    edits.add_argument('--warp', default=None, metavar='MAP',
+                       help='a piecewise time map, a JSON file or inline JSON: {"lags": [[time, lag], ...]} (from time, '
+                            'in s into the file as it is, on, its content sits lag s later; the first lag holds from the '
+                            'start) or {"knots": [[t_in, t_out], ...]}, optionally with a "note"')
+    edits.add_argument('--cut', action='append', default=[], metavar='START:END',
+                       help="cut this stretch, START:END or START+LENGTH in s into the file as it is (repeatable)")
+    edits.add_argument('--cut-zeros', action='append', default=[], metavar='TIME[:LENGTH]',
+                       help=f"cut the digital-zero run that starts within {ZERO_RUN_SEARCH} s of TIME, all of it or its "
+                            f"first LENGTH (repeatable); refused when there is none")
+    edits.add_argument('--cut-head', type=float, default=None, metavar='SECONDS',
+                       help="cut the first SECONDS and keep the start stamp, so the rest sits SECONDS earlier "
+                            "(a recording measured SECONDS late; --trim is the cut that keeps the timing)")
+    edits.add_argument('--samples', action='store_true', help="--cut and --cut-zeros positions are sample indices, not seconds")
+    edits.add_argument('--note', default=None, help="said in the manifest note of the edit (why, how it was measured)")
     parser.add_argument('--window', type=float, default=1200.0, help="seconds of audio compared (default 1200)")
     parser.add_argument('--max-lag', type=float, default=120.0, help="largest offset looked for, in seconds (default 120)")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
@@ -340,12 +701,33 @@ def main(argv=None):
         print(f"no session at {session_dir}")
         return 1
     session_dir = session_dir.resolve()
-    if args.dry_run and (args.end is None or args.apply or args.trim):
-        print("--dry-run goes with --end alone")
+    editing = bool(args.warp or args.cut or args.cut_zeros or args.cut_head is not None)
+    if editing and (args.apply or args.trim or args.end is not None):
+        print("--warp, --cut, --cut-zeros and --cut-head go without --apply, --trim and --end")
+        return 1
+    if args.dry_run and not editing and (args.end is None or args.apply or args.trim):
+        print("--dry-run goes with --end alone, or with an edit")
         return 1
     if args.end is not None and args.end <= 0:
         print(f"--end wants a positive number of seconds, not {args.end}")
         return 1
+    if editing or args.devices:
+        try:
+            devices = [d for value in args.devices for d in value.split(',') if d.strip()]
+            if not devices:
+                raise ValueError("an edit wants --devices")
+            if not editing:
+                raise ValueError("--devices goes with --warp, --cut, --cut-zeros or --cut-head")
+            warp = read_time_map(args.warp) if args.warp else None
+            cuts = [parse_cut(v, args.samples) for v in args.cut]
+            zeros = [parse_zero_run(v, args.samples) for v in args.cut_zeros]
+            print(session_dir.name)
+            edit_audio(session_dir, devices, warp=warp, cuts=cuts, zeros=zeros, head=args.cut_head,
+                       in_samples=args.samples, note=args.note, dry_run=args.dry_run)
+        except (ValueError, FileNotFoundError) as error:
+            print(error)
+            return 1
+        return 0
     print(session_dir.name)
     # --end alone needs no measuring
     measured = measure_session(session_dir, args.reference, args.window, args.max_lag) \
@@ -359,13 +741,13 @@ def main(argv=None):
             extra = r.get('reason') or f"confidence {r['confidence']}, margin {r.get('margin')}, over {r.get('compared_seconds')} s"
             print(f"  {r['host']}/{r.get('device') or '?':12} off by {lag:>10}  ({extra}); shares its start with {', '.join(r['shares_start_with']) or 'nothing'}")
     if args.apply and measured['reference'] is not None:
-        done = set()
+        moved = False
         for r in measured['results']:
-            if r['lag'] is None or abs(r['lag']) <= args.tolerance or r['confidence'] < args.min_confidence or r['start_time'] in done:
+            if r['lag'] is None or abs(r['lag']) <= args.tolerance or r['confidence'] < args.min_confidence:
                 continue
-            apply_shift(session_dir, r['start_time'], r['lag'])
-            done.add(r['start_time'])
-        if not done:
+            apply_shift(session_dir, r, r['lag'], reference=measured['reference_path'])
+            moved = True
+        if not moved:
             print("  nothing moved")
     if args.trim:
         result = trim_session(session_dir)
