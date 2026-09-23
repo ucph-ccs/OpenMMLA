@@ -220,7 +220,7 @@ PAGE = r"""<!doctype html>
  #text{margin-top:12px;padding:10px 12px;background:#1b1b1b;border-radius:8px;font-size:14px}
  #text .line{margin:0 0 10px} #text .who{color:#8ab4f8;font-size:12px;margin-right:6px}
  #text .ctx{color:#777} #text .en{color:#bbb;font-style:italic;margin-top:2px}
- #text .approx{color:#d9a441;font-size:12px;margin-left:6px}
+ #text .approx{color:#d9a441;font-size:12px;margin-left:6px} #text .voice{color:#8ab4f8;font-size:12px}
 </style></head><body>
 <header>
  <div id="hidden" class="meta" style="flex-basis:100%;display:none"></div>
@@ -273,6 +273,19 @@ function classOf(l) { return codebook.classes.find(c => c.label === l.label) || 
 function coderName() { return $('coder').value.trim() || 'anonymous'; }
 // a pupil's line is what that pupil's worn mic transcribed, the partner and the teacher included; it names no speaker
 function speaker(s) { return /^pupil /.test(s) ? `${s}'s mic` : s; }
+// one block per microphone, the group mic first, then the pupils' mics; a block keeps its lines in
+// time order, and a group-mic line carries its diarized voice
+function blocks(lines) {
+  const order = [], by = {};
+  for (const l of lines) {
+    const m = /^group mic(?: · (.+))?$/.exec(l.speaker || '');
+    const source = m ? 'group mic' : speaker(l.speaker);
+    if (!by[source]) { by[source] = []; order.push(source); }
+    by[source].push({...l, voice: m ? (m[1] || '') : ''});
+  }
+  order.sort((a, b) => (b === 'group mic') - (a === 'group mic') || a.localeCompare(b, undefined, {numeric: true}));
+  return order.map(source => [source, by[source]]);
+}
 // the clip's sound is the session's preferred microphone, a worn one when it has no group microphone
 function clipSound() { const a = session.audio; return !a ? 'the clip has no sound' : a.scope === 'group' ? 'the clip plays the group mic' : `the clip plays ${a.device}${a.scope === 'personal' ? ', a worn mic' : ''}`; }
 function s1(s) { return s.included === false ? ', left out by S1' : s.included === null ? ', S1 not checked' : ''; }
@@ -312,10 +325,12 @@ async function renderText(again) {
   const lines = data.lines || [];
   let html = `<div class="meta">Transcript of the window, <span class="ctx">grey: ${data.context ?? ''} s before and after</span> · a pupil's mic picks up the others too; ${esc(clipSound())}</div>`;
   if (!lines.length && !data.note) html += '<div class="meta">nothing transcribed in the window</div>';
-  for (const l of lines) {
-    html += `<div class="line"><div><span class="who">${esc(speaker(l.speaker))}</span>${l.approximate ? '<span class="approx">approximate: the chunk has no word times</span>' : ''}</div>`;
-    html += `<div>${part(l.before, 'ctx')}${part(l.inside, 'in')}${part(l.after, 'ctx')}</div>`;
-    if (l.en) html += `<div class="en${l.inside ? '' : ' ctx'}">${esc(l.en)}</div>`;
+  for (const [source, group] of blocks(lines)) {
+    html += `<div class="line"><div><span class="who">${esc(source)}</span>${group.some(l => l.approximate) ? '<span class="approx">approximate: a chunk has no word times</span>' : ''}</div>`;
+    for (const l of group) {
+      html += `<div>${l.voice ? `<span class="voice">${esc(l.voice)}</span> ` : ''}${part(l.before, 'ctx')}${part(l.inside, 'in')}${part(l.after, 'ctx')}</div>`;
+      if (l.en) html += `<div class="en${l.inside ? '' : ' ctx'}">${esc(l.en)}</div>`;
+    }
     html += '</div>';
   }
   if (data.note) html += `<div class="meta">${esc(data.note)}</div>`;
