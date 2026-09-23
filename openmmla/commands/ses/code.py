@@ -8,6 +8,13 @@ work, 2 social interaction, 3 collaborative interaction, 4 not at the table, 0 u
 optional note). Labels go to artifacts/<session>/labels/<coder>.jsonl, one line per window, so a
 second coder writes a second file and the two are compared for agreement. Clips are cached under
 artifacts/<session>/labels/clips/ and can be deleted at any time.
+
+Sessions the interaction classifier leaves out are hidden, so nobody codes windows no model will
+read: a session whose fused table (artifacts/<session>/analysis/features/<session>_window_features.csv)
+fails the inclusion rule S1 (openmmla.analytics.interaction.layout.session_inclusion) is not listed.
+A session without a fused table cannot be judged and is kept, and so is every session when the
+analytics package (pandas) cannot be imported. --all lists every session. A voided session is one
+moved out of artifacts/; the manifest has no marker for it.
 """
 import argparse
 import json
@@ -45,8 +52,43 @@ def _read(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
 
-def load_sessions(artifacts: Path, pattern: str | None = None) -> list[dict[str, Any]]:
-    sessions = []
+def fused_table(session_dir: Path) -> Path:
+    return session_dir / 'analysis' / 'features' / f'{session_dir.name}_window_features.csv'
+
+
+def _inclusion_rule():
+    """the classifier's layout module, which holds S1; imported here so ses-code starts without
+    pandas. Raises ImportError when the analytics package cannot be loaded."""
+    from openmmla.analytics.interaction import layout
+    return layout
+
+
+def inclusion(session_dir: Path, rule=None) -> tuple[bool | None, str]:
+    """S1 for one session, as the classifier applies it: (True, reason) or (False, reason) from its
+    fused table, or (None, why it cannot be judged) when there is no table or it cannot be read.
+    `rule` is the layout module (None: import it here)."""
+    path = fused_table(session_dir)
+    if not path.exists():
+        return None, 'no fused table (mmla ses-fuse), so S1 is not checked'
+    try:
+        layout = rule or _inclusion_rule()
+    except ImportError as error:
+        return None, f'the analytics package cannot be imported ({error}), so S1 is not checked'
+    try:
+        table = layout.read_table(path)
+        return layout.session_inclusion(table, layout.roster(table))
+    except Exception as error:  # a broken table must not stop the coding page
+        return None, f'the fused table cannot be read ({type(error).__name__}: {error}), so S1 is not checked'
+
+
+def load_sessions(artifacts: Path, pattern: str | None = None,
+                  show_all: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(shown, hidden): every artifacts/exp_* session with video whose id contains `pattern`.
+    A session that fails S1 goes to `hidden` ({'id', 'reason'}) unless `show_all`; every shown
+    session carries 'included' (True, False, or None when it could not be judged) and its
+    'inclusion' reason."""
+    sessions, hidden = [], []
+    rule = None
     for session_dir in sorted(artifacts.glob('exp_*')):
         if pattern and pattern not in session_dir.name:
             continue
@@ -56,14 +98,24 @@ def load_sessions(artifacts: Path, pattern: str | None = None) -> list[dict[str,
         audios = [r for r in recordings if r['modality'] == 'audio']
         if not videos:
             continue
+        if rule is None and fused_table(session_dir).exists():
+            try:
+                rule = _inclusion_rule()
+            except ImportError:
+                rule = False  # inclusion() says why, per session
+        included, reason = inclusion(session_dir, rule or None)
+        if included is False and not show_all:
+            hidden.append({'id': session_dir.name, 'reason': reason})
+            continue
         videos.sort(key=lambda r: (CAMERA_PREFERENCE.index(r['device']) if r['device'] in CAMERA_PREFERENCE else 99, r['device']))
         audios.sort(key=lambda r: (AUDIO_PREFERENCE.index(r['device']) if r['device'] in AUDIO_PREFERENCE else 99, r['device']))
         start = max(r['start_time'] for r in recordings)
         end = min(r['start_time'] + (r.get('duration') or 0) for r in recordings if r.get('duration'))
         sessions.append({'id': session_dir.name, 'dir': str(session_dir), 'start': start, 'end': end,
                          'videos': videos[:2], 'audio': audios[0] if audios else None,
-                         'experiment': manifest.get('experiment_id'), 'group': manifest.get('group_id')})
-    return sessions
+                         'experiment': manifest.get('experiment_id'), 'group': manifest.get('group_id'),
+                         'included': included, 'inclusion': reason})
+    return sessions, hidden
 
 
 def windows_of(session: dict[str, Any], window: float, step: float, sample: float, block: float, seed: int) -> list[dict[str, float]]:
@@ -131,6 +183,7 @@ PAGE = r"""<!doctype html>
  #status{color:#8c8}
 </style></head><body>
 <header>
+ <div id="hidden" class="meta" style="flex-basis:100%;display:none"></div>
  <label>Coder <input id="coder" size="10"></label>
  <label>Session <select id="session"></select></label>
  <span id="progress" class="meta"></span><span id="status"></span>
@@ -207,7 +260,13 @@ document.addEventListener('keydown', e => {
   $('classes').innerHTML = codebook.classes.map(c => `<button data-label="${c.label}" onclick="label(codebook.classes.find(x=>x.key==='${c.key}'))"><b>${c.key}</b>${c.title}</button><div class="def">${c.definition}</div>`).join('');
   $('rule').textContent = codebook.rule;
   $('coder').value = localStorage.getItem('coder') || '';
-  $('session').innerHTML = sessions.map(s => `<option value="${s.id}">${s.id} (${Math.round((s.end - s.start) / 60)} min, ${s.videos.length} cam${s.audio ? ', audio' : ', no audio'})</option>`).join('');
+  const s1 = s => s.included === false ? ', left out by S1' : s.included === null ? ', S1 not checked' : '';
+  $('session').innerHTML = sessions.map(s => `<option value="${s.id}" title="${(s.inclusion || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}">${s.id} (${Math.round((s.end - s.start) / 60)} min, ${s.videos.length} cam${s.audio ? ', audio' : ', no audio'}${s1(s)})</option>`).join('');
+  if (boot.hidden.length) {
+    $('hidden').textContent = `${boot.hidden.length} session${boot.hidden.length === 1 ? '' : 's'} hidden: left out of the analysis by the inclusion rule S1`;
+    $('hidden').title = boot.hidden.map(h => `${h.id}: ${h.reason}`).join('\n');
+    $('hidden').style.display = '';
+  }
   $('session').onchange = e => loadSession(e.target.value);
   $('coder').onchange = () => loadSession($('session').value);
   const remembered = localStorage.getItem('session');
@@ -220,6 +279,7 @@ document.addEventListener('keydown', e => {
 class Handler(BaseHTTPRequestHandler):
     settings: dict[str, Any] = {}
     sessions: list[dict[str, Any]] = []
+    hidden: list[dict[str, Any]] = []
     lock = threading.Lock()
 
     def log_message(self, format, *args):  # quiet
@@ -248,7 +308,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif url.path == '/api/boot':
-            self._json({'codebook': CODEBOOK, 'sessions': [{k: v for k, v in s.items() if k != 'dir'} for s in self.sessions]})
+            self._json({'codebook': CODEBOOK, 'sessions': [{k: v for k, v in s.items() if k != 'dir'} for s in self.sessions],
+                        'hidden': self.hidden})
         elif url.path == '/api/windows':
             session = self._session(query)
             if not session:
@@ -330,6 +391,8 @@ def get_parser():
     parser.add_argument('--sample', type=float, default=1.0, help="share of five-minute blocks to code, 0 to 1 (default 1: everything)")
     parser.add_argument('--block', type=float, default=300.0, help="block length the sampling draws from (default 300 s)")
     parser.add_argument('--seed', type=int, default=1, help="sampling seed, the same for every coder (default 1)")
+    parser.add_argument('--all', dest='show_all', action='store_true',
+                        help="list every session, also those the inclusion rule S1 leaves out of the analysis")
     parser.add_argument('-p', '--port', type=int, default=8765)
     parser.add_argument('--bind', default='127.0.0.1', help="address to listen on (default 127.0.0.1: this machine only; a Tailscale address or 0.0.0.0 lets others in, mind who can reach it)")
     return parser
@@ -338,13 +401,23 @@ def get_parser():
 def main(argv=None):
     args = get_parser().parse_args(argv)
     artifacts = Path(args.artifacts or os.path.join(os.getcwd(), 'artifacts')).resolve()
-    Handler.sessions = load_sessions(artifacts, args.sessions)
+    Handler.sessions, Handler.hidden = load_sessions(artifacts, args.sessions, args.show_all)
     Handler.settings = {'window': args.window, 'step': args.step, 'sample': args.sample, 'block': args.block, 'seed': args.seed}
+    for s in Handler.hidden:
+        print(f"hidden: {s['id']}: {s['reason']}")
+    for s in Handler.sessions:
+        if s['included'] is False:
+            print(f"shown (--all): {s['id']}: {s['reason']}")
+        elif s['included'] is None:
+            print(f"kept, not judged: {s['id']}: {s['inclusion']}")
     if not Handler.sessions:
-        print(f"no sessions with video under {artifacts}")
+        if Handler.hidden:
+            print(f"every session with video under {artifacts} is left out by S1; --all lists them")
+        else:
+            print(f"no sessions with video under {artifacts}")
         return 1
     total = sum(len(windows_of(s, args.window, args.step, args.sample, args.block, args.seed)) for s in Handler.sessions)
-    print(f"{len(Handler.sessions)} sessions, {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/  (Ctrl-C stops)")
+    print(f"{len(Handler.sessions)} sessions ({len(Handler.hidden)} hidden by S1), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/  (Ctrl-C stops)")
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     try:
         server.serve_forever()
