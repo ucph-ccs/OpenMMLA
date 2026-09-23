@@ -35,7 +35,7 @@ from openmmla.utils.requests import resolve_url, build_service_url, service_prob
 from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from .audio_recognizer import AudioRecognizer
 from .speaker_profiles import REGISTRATION_SENTENCES, name_problem, parse_speakers, profiles_dir as speaker_profiles_dir
-from .enums import BLUE, ENDC, GREEN, PURPLE, GREY, RED
+from .enums import BLUE, ENDC, GREEN, PURPLE, GREY, RED, YELLOW
 from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion, explain_cannot_start
 from openmmla.utils.config import get_bases, get_base_by_id
 
@@ -240,9 +240,11 @@ class ASRBase(Base):
         asr_server_config = self.config['Server']['asr']
 
         # recognition scope is a per-device setting: a room microphone profile
-        # is typically group-scope (transcription only), a personal badge
-        # profile individual-scope (speaker verification + transcription).
-        # the actual group id is resolved from the session at runtime.
+        # is typically group-scope (transcription only), a microphone worn by
+        # one person wearer-scope (labelled with its wearer, no verification),
+        # a badge that tells speakers apart individual-scope (speaker
+        # verification + transcription). the actual group id is resolved from
+        # the session at runtime.
         self.asr_scope = normalize_asr_scope(base_config.get('asr_scope'))
         self.speaker_verification = _resolve_speaker_verification(
             base_config.get('speaker_verification', 'auto'),
@@ -987,6 +989,13 @@ class ASRBase(Base):
             if self.participant is not None:
                 print(f"{GREEN}ASR chunks are attributed to participant {self.participant} when their channel is "
                       f"the loudest (energy attribution).{ENDC}")
+            elif self.asr_scope == "wearer":
+                # a worn microphone nobody is noted as wearing: its speech has no one to go to
+                print(f"{YELLOW}Base type {self.base_type} is asr_scope wearer, but no one is noted as wearing "
+                      f"this microphone (the participant of its Bases entry, or for a stream the wearer the "
+                      f"session's Collection Start picked): its ASR chunks are attributed at group scope for "
+                      f"this run.{ENDC}")
+                self.logger.warning(f"Base {self.id} is asr_scope wearer with no wearer: group scope for this run.")
             else:
                 print(f"{GREEN}ASR chunks will be attributed at group scope.{ENDC}")
         print(f"{GREEN}{self._speech_gate_text()}{ENDC}")
@@ -1082,7 +1091,8 @@ class ASRBase(Base):
         """Prefer the selected session group id for group-level ASR attribution."""
         if self.participant is not None:
             return  # a worn microphone is labelled with its wearer, never the group
-        if self.asr_scope != "group" or not self.session_id:
+        # a wearer-scope base with no wearer noted falls back on the group too
+        if self.asr_scope not in ("group", "wearer") or not self.session_id:
             return
         try:
             session = self.mongo_client.get_session(self.session_id) or {}

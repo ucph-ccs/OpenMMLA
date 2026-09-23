@@ -33,7 +33,7 @@ from openmmla.commands.asr.speakers import MARKER
 from openmmla.tui.ssh import get_profile_by_name, scp_file_async, ssh_run_async, ssh_run_sync, wrap_local, wrap_remote
 from openmmla.tui.stream_cuts import _quote_root
 from openmmla.utils.artifact_paths import short_hostname
-from openmmla.utils.asr_scope import normalize_asr_scope, resolve_speaker_verification
+from openmmla.utils.asr_scope import normalize_asr_scope, participant_of, resolve_speaker_verification
 from openmmla.utils.config import get_base_by_id, get_bases
 
 CONDA_ENV = "asr-base"
@@ -410,10 +410,9 @@ def summary(context: Context, where: str, unused: str = "") -> str:
 
 # ---- the bases that use them ----
 
-def verifies_speakers(config: dict, base_id: str) -> bool | None:
-    """whether base `base_id` of `config` recognizes speakers (its base type's
-    asr_scope is individual, or speaker_verification is on); None when the
-    config does not say."""
+def _base_entry_and_block(config: dict, base_id: str) -> tuple[dict, dict] | None:
+    """the Bases entry base `base_id` of `config` is and its base type's Base
+    block; None when the config does not say."""
     entry = get_base_by_id(config or {}, base_id) if base_id else None
     if entry is None:
         bases = get_bases(config or {})
@@ -423,8 +422,43 @@ def verifies_speakers(config: dict, base_id: str) -> bool | None:
     block = ((config or {}).get("Base") or {}).get(str(entry.get("base_type")))
     if not isinstance(block, dict):
         return None
+    return entry, block
+
+
+def verifies_speakers(config: dict, base_id: str) -> bool | None:
+    """whether base `base_id` of `config` recognizes speakers (its base type's
+    asr_scope is individual, or speaker_verification is on, and its Bases entry
+    names no wearer); None when the config does not say."""
+    found = _base_entry_and_block(config, base_id)
+    if found is None:
+        return None
+    entry, block = found
     try:
         scope = normalize_asr_scope(block.get("asr_scope"))
     except ValueError:
         return None
+    if participant_of(entry.get("participant")) is not None:
+        return False   # a worn microphone: its speech is its wearer's
     return resolve_speaker_verification(block.get("speaker_verification", "auto"), scope)
+
+
+def unverified_reason(config: dict, base_id: str) -> str:
+    """why base `base_id` of `config` recognizes no speakers, for its Speakers
+    line: the wearer its Bases entry names, its base type's asr_scope, or
+    speaker_verification off; "" when it does, or the config does not say."""
+    found = _base_entry_and_block(config, base_id)
+    if found is None:
+        return ""
+    entry, block = found
+    wearer = participant_of(entry.get("participant"))
+    if wearer is not None:
+        return f"this base is worn by participant {wearer}"
+    try:
+        scope = normalize_asr_scope(block.get("asr_scope"))
+    except ValueError:
+        return ""
+    if resolve_speaker_verification(block.get("speaker_verification", "auto"), scope):
+        return ""
+    if scope != "individual":
+        return f"this base is asr_scope {scope}"
+    return "speaker_verification is off for this base"

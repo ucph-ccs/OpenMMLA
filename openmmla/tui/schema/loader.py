@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+from openmmla.utils.asr_scope import ASR_SCOPES
+
 
 PLACEHOLDER_RE = re.compile(r'^<.*>$')
 URL_PLACEHOLDER_RE = re.compile(r'https?://.*<.*>')
@@ -16,6 +18,13 @@ INLINE_COMMENT_RE = re.compile(r'^[^#]*#\s*(.*?)\s*$')
 # and a text each), not a block of fixed keys: the form edits one as a whole,
 # a row per pair, so a name can be added, renamed and removed
 MAPPING_FIELDS = frozenset({"Base.angle_config"})
+
+# config keys that take one of a few words: the form offers them as a dropdown
+# (a blank keeps the default the pipeline reads for nothing)
+KEY_CHOICES = {
+    "asr_scope": ASR_SCOPES,
+    "speech_gate": ("absolute", "relative"),
+}
 
 
 @dataclass
@@ -254,6 +263,7 @@ def _walk_yaml(data, path_parts, section, comments, fields, indent_level=0):
                 description=desc,
                 required=req,
                 section=section,
+                choices=list(KEY_CHOICES.get(str(key), ())),
             ))
 
 

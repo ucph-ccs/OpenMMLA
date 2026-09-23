@@ -5706,7 +5706,10 @@ class ServicePanel(Widget):
         if str(params.get("-m") or "live") == "capture":
             return "capture mode records only"
         if self._base_verifies(params, target, index) is False:
-            return "this base is asr_scope group"
+            ids = self._base_ids(params)
+            return (asr_speakers.unverified_reason(self._asr_card_config(target),
+                                                   ids[index] if index < len(ids) else "")
+                    or "this base verifies no speakers")
         return ""
 
     def _show_speakers_summary(self) -> None:
@@ -6303,6 +6306,14 @@ class ServicePanel(Widget):
                         val = get_nested_value(existing, f.path)
                         if val is not None:
                             values[f.path] = val
+
+        for path, value in values.items():
+            if path.endswith(".asr_scope") and str(value or "").strip():
+                # an older spelling (participant) shows as the scope it means
+                try:
+                    values[path] = normalize_asr_scope(value)
+                except ValueError:
+                    pass  # shown as it stands, "not in the list now"
 
         if pipeline.name == "Nginx":
             existing_upstreams = existing.get("upstreams", {})

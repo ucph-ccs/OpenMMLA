@@ -10,9 +10,9 @@
 # list below.
 Base:
   <Your_Device_Name>:
-    asr_scope: individual         # individual = speaker verification + transcription; group = attribute transcript to the session group (no verification)
-    speaker_verification: auto    # auto = individual:true, group:false; set true/false to override
-    max_chunk_duration:           # seconds a chunk of one speaker may grow before it is transcribed (and diarized) on its own; empty = 30 for asr_scope group (a room microphone hears no speaker change, so its chunk would otherwise end only at silence), no cap for individual; 0 = no cap
+    asr_scope: individual         # individual = speaker verification + transcription; wearer = a microphone one person wears: its speech is labelled with its wearer (the participant of its Bases entry, else for a stream the wearer the session's Collection Start picked), no verification; group = attribute transcript to the session group (no verification)
+    speaker_verification: auto    # auto = individual:true, wearer:false, group:false; set true/false to override
+    max_chunk_duration:           # seconds a chunk of one speaker may grow before it is transcribed (and diarized) on its own; empty = 30 for asr_scope wearer and group (a room or worn microphone hears no speaker change, so its chunk would otherwise end only at silence), no cap for individual; 0 = no cap
     register_duration:            # Seconds to record for registration
     recognize_duration:           # Seconds to record for recognition
     recognize_sp_duration:        # Seconds to record for recognition (with speech separation)

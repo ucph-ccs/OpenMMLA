@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 # the scope a transcript is attributed at: each speaker on their own
-# (speaker verification) or the session's group as one
-ASR_SCOPES = ("individual", "group")
+# (speaker verification), the one person who wears the microphone (the wearer
+# its Bases entry or the session's Collection Start names), or the session's
+# group as one
+ASR_SCOPES = ("individual", "wearer", "group")
 
-# names a scope went by before; a config still holding one keeps working
-_LEGACY_ASR_SCOPES = {"participant": "individual"}
+# names a scope went by before, and other spellings of one; a config still
+# holding one keeps working
+_LEGACY_ASR_SCOPES = {"participant": "individual", "wear": "wearer", "worn": "wearer"}
+
+# the scopes whose chunks never end at a change of speaker, as no speaker is
+# told apart on them: a room microphone's, and a worn one's
+_UNVERIFIED_SCOPES = ("wearer", "group")
 
 
 def normalize_asr_scope(asr_scope: str | None = None) -> str:
@@ -13,7 +20,7 @@ def normalize_asr_scope(asr_scope: str | None = None) -> str:
     resolved_scope = str(asr_scope or "individual").strip().lower()
     resolved_scope = _LEGACY_ASR_SCOPES.get(resolved_scope, resolved_scope)
     if resolved_scope not in ASR_SCOPES:
-        raise ValueError(f"asr_scope must be 'individual' or 'group', not '{asr_scope}'.")
+        raise ValueError(f"asr_scope must be 'individual', 'wearer' or 'group', not '{asr_scope}'.")
     return resolved_scope
 
 
@@ -21,7 +28,7 @@ def resolve_speaker_verification(value, asr_scope: str) -> bool:
     """resolve the speaker_verification setting of a Base block.
 
     auto follows the ASR attribution scope: individual-level ASR verifies speakers,
-    group-level ASR skips speaker profile verification by default.
+    wearer- and group-level ASR skip speaker profile verification by default.
     """
     if value is None or str(value).strip().lower() in {"", "auto"}:
         return asr_scope == "individual"
@@ -37,13 +44,13 @@ GROUP_CHUNK_SECONDS = 30.0
 
 def chunk_cap(value, asr_scope: str) -> float | None:
     """the longest a chunk of one speaker may grow before it is transcribed on its own, in
-    seconds. A chunk ends at a change of speaker, which a group-scope base never hears: its chunk
-    would end only at silence, minutes later in a classroom, so it is cut at 30 s unless told
-    otherwise; an individual base's chunks end at speaker changes, so it has no cap unless told.
-    Nothing or an unfilled placeholder keeps that default, a number is taken as given, 0 (or
+    seconds. A chunk ends at a change of speaker, which a group- or wearer-scope base never hears:
+    its chunk would end only at silence, minutes later in a classroom, so it is cut at 30 s unless
+    told otherwise; an individual base's chunks end at speaker changes, so it has no cap unless
+    told. Nothing or an unfilled placeholder keeps that default, a number is taken as given, 0 (or
     less) means no cap; a non-number keeps the default too."""
     text = str(value if value is not None else "").strip()
-    default = GROUP_CHUNK_SECONDS if asr_scope == "group" else None
+    default = GROUP_CHUNK_SECONDS if asr_scope in _UNVERIFIED_SCOPES else None
     if not text or (text.startswith("<") and text.endswith(">")):
         return default
     try:
