@@ -9,6 +9,14 @@ distance); the semantic layer from `vfa_action` (the VLM's labels). Every person
 every pair a sorted tag pair; persons the pose model saw without a tag count only in the seat
 trace.
 
+A tag names more frames than the ones it was read in. The features endpoint tracks every person
+per camera and keeps a read tag on the track from then on; the fusion carries it further, over
+the whole session: the frames of a track before its first read, and those after the server lost
+its memory of it, take the tag of the track's nearest read (propagate_track_tags). Such a person
+counts like a tagged one everywhere but in learning the seats, and `n_vfa_propagated` says how
+many of the window's person frames were named that way; a session whose persons were not tracked
+has no such column.
+
 The events come from InfluxDB (a session id) or from a Sessions -> Export Measurements folder
 (`<session>_<suffix>.json`), so a table can be built offline from an export.
 
@@ -23,12 +31,13 @@ camera, and a frame set that lost or gained a frame is counted in `n_vfa_incompl
 numbering by place can then give one camera's frame to another.
 
 The seat trace keeps what the untagged bodies say about presence. A participant's seat on a
-camera is the median centre of their own boxes there (SEAT_MIN_BOXES at least), and a body
-without a tag is at the seat within half their median box width. `p<tag>_untagged_at_seat_ratio`
-is the share of the window's frame sets (all of them, so a camera that dropped out lowers it) in
-which such a body stood at the seat while the tag was not seen on that camera (someone there whose
-tag was not read), empty when no camera holding the seat gave a frame; `n_untagged_at_seats`
-counts those bodies per frame set. A table of a session without VFA has neither.
+camera is the median centre of their own boxes there (SEAT_MIN_BOXES at least; the boxes the
+server tagged, read or kept on the track, never the propagated ones), and a body without a tag is
+at the seat within half their median box width. `p<tag>_untagged_at_seat_ratio` is the share of
+the window's frame sets (all of them, so a camera that dropped out lowers it) in which such a body
+stood at the seat while the tag was not seen on that camera (someone there whose tag was not
+read), empty when no camera holding the seat gave a frame; `n_untagged_at_seats` counts those
+bodies per frame set. A table of a session without VFA has neither.
 
 A session with personal microphones (transcripts that carry a `participant`) counts each
 wearer's words only in the 3 s buckets the synchronizer's energy vote gave them
@@ -77,9 +86,16 @@ INSTANT_EVENT_TYPES = {EVENT_TYPE_VFA_FEATURES, EVENT_TYPE_VFA_ACTION}
 # a tag's seat on a camera is the median centre of its own boxes there; a body is at the seat
 # within this many of those boxes' median widths of it
 SEAT_RADIUS_WIDTHS = 0.5
-# a camera learns a tag's seat only from at least this many of the tag's boxes (5 s at 2 frame
-# sets a second), so a tag misread for a few frames makes no seat
+# a camera learns a tag's seat only from at least this many of the tag's boxes (10 s at the bases'
+# one frame set a second), so a tag misread for a few frames makes no seat
 SEAT_MIN_BOXES = 10
+# a track id seen again after this long is another track: ByteTrack keeps a lost track for 30
+# frames (30 s at the bases' one frame set a second; no track of the 21 replayed sessions was
+# away longer than 32 s), so a longer absence means the server restarted or forgot the camera and
+# handed the id out again
+TRACK_GAP_SECONDS = 60.0
+# the tag_match of a person whose tag the fusion carried along their track
+PROPAGATED = 'propagated'
 
 
 # ---- loading ----
@@ -681,6 +697,136 @@ def camera_keys(frames: list[dict], shared_angles: Iterable[str] = ()) -> list[s
     return keys
 
 
+# ---- identity along the tracks ----
+
+def _decoded(person: dict) -> bool:
+    """whether the person's tag was read in this frame (`torso`, `box`, or an older event that
+    does not say), not carried by the server's track memory (`track`) or by the fusion."""
+    return person.get('tag_id') is not None and person.get('tag_match') not in ('track', PROPAGATED)
+
+
+def _track_segments(occurrences: list[tuple], gap: float) -> list[list[tuple]]:
+    """a track's occurrences (sorted by time) cut wherever the track id was not seen for more
+    than `gap` seconds: the id was handed out again."""
+    segments: list[list[tuple]] = []
+    for occurrence in occurrences:
+        if not segments or occurrence[0] - segments[-1][-1][0] > gap:
+            segments.append([])
+        segments[-1].append(occurrence)
+    return segments
+
+
+def _nearest_tag(anchors: list[tuple[float, Any]], times: list[float], moment: float):
+    """the tag of the read nearest `moment` (the earlier one on a tie)."""
+    i = bisect.bisect_left(times, moment)
+    before = anchors[i - 1] if i > 0 else None
+    after = anchors[i] if i < len(anchors) else None
+    if before is None:
+        return after[1]
+    if after is None or moment - before[0] <= after[0] - moment:
+        return before[1]
+    return after[1]
+
+
+def _renamed(frame: dict, persons: list[dict], names: dict[str, str]) -> dict:
+    """a copy of the frame with `persons`, and its pairs and gaze targets renamed from the
+    persons' old ids to their tags."""
+    frame = dict(frame, persons=persons)
+    pairs = frame.get('pairs')
+    if isinstance(pairs, dict):
+        frame['pairs'] = {'|'.join(names.get(part, part) for part in str(key).split('|')): value
+                          for key, value in pairs.items()}
+    for n, person in enumerate(persons):
+        target = (person.get('gaze') or {}).get('target')
+        if isinstance(target, dict) and str(target.get('person_id')) in names:
+            gaze = dict(person['gaze'], target=dict(target, person_id=names[str(target['person_id'])]))
+            persons[n] = dict(person, gaze=gaze)
+    return frame
+
+
+def propagate_track_tags(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None,
+                         gap: float = TRACK_GAP_SECONDS) -> list[dict]:
+    """the vfa_features records with the tags carried along the tracks, offline, over the whole
+    session: within a camera, a person without a tag whose track has a read tag somewhere takes
+    the tag of the nearest read of that track (`tag_match: propagated`, `person_id` the tag), so
+    the frames before a track's first read and those after the server's memory of it was lost
+    are named too. A track that read two tags is split at the switch that way, each untagged
+    frame going to the read nearest it. A track id not seen for more than `gap` seconds is
+    another track from then on. A tag is only ever given to a person without one, and not in a
+    frame where another person already carries it or where two tracks would get it (then
+    neither does); a track id twice in one frame names nobody. The pairs and gaze targets of a
+    renamed person's frame follow the new name. Records nothing changes in are returned as they
+    were; `layout` is the session's frame_set_layout, worked out from the records when not
+    given."""
+    records = list(records)
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    parsed = [_frames_of(record) for record in records]
+    # (camera, track id) -> [(time, record, frame, person)]
+    tracks: dict[tuple[str, Any], list[tuple[float, int, int, int]]] = defaultdict(list)
+    for i, (record, frames) in enumerate(zip(records, parsed)):
+        moment = _time(record)
+        for j, (frame, camera) in enumerate(zip(frames, camera_keys(frames, shared))):
+            persons = frame.get('persons') or []
+            counts = defaultdict(int)
+            for person in persons:
+                if person.get('track_id') is not None:
+                    counts[person['track_id']] += 1
+            for k, person in enumerate(persons):
+                track = person.get('track_id')
+                if track is not None and counts[track] == 1:
+                    tracks[(camera, track)].append((moment, i, j, k))
+    # (record, frame) -> [(person, tag)]
+    proposed: dict[tuple[int, int], list[tuple[int, Any]]] = defaultdict(list)
+    for occurrences in tracks.values():
+        occurrences.sort()
+        for segment in _track_segments(occurrences, gap):
+            anchors = [(moment, parsed[i][j]['persons'][k]['tag_id']) for moment, i, j, k in segment
+                       if _decoded(parsed[i][j]['persons'][k])]
+            if not anchors:
+                continue
+            times = [moment for moment, _ in anchors]
+            for moment, i, j, k in segment:
+                if parsed[i][j]['persons'][k].get('tag_id') is None:
+                    proposed[(i, j)].append((k, _nearest_tag(anchors, times, moment)))
+    if not proposed:
+        return records
+    out = list(records)
+    changed: dict[int, dict[int, dict]] = defaultdict(dict)
+    for (i, j), wanted in proposed.items():
+        frame = parsed[i][j]
+        persons = list(frame.get('persons') or [])
+        held = {str(p['tag_id']) for p in persons if p.get('tag_id') is not None}
+        asked = defaultdict(int)
+        for _, tag in wanted:
+            asked[str(tag)] += 1
+        names: dict[str, str] = {}
+        for k, tag in wanted:
+            if str(tag) in held or asked[str(tag)] > 1:
+                continue
+            person = persons[k]
+            if person.get('person_id') is not None:
+                names[str(person['person_id'])] = str(tag)
+            persons[k] = dict(person, tag_id=tag, tag_match=PROPAGATED, person_id=str(tag))
+        if any(p is not q for p, q in zip(persons, frame.get('persons') or [])):
+            changed[i][j] = _renamed(frame, persons, names)
+    for i, frames in changed.items():
+        out[i] = dict(records[i], features=[frames.get(j, frame) for j, frame in enumerate(parsed[i])])
+    return out
+
+
+def _tracked(records: Iterable[dict]) -> bool:
+    """whether the features endpoint tracked the persons of these records (some carry a
+    `track_id`)."""
+    return any(person.get('track_id') is not None for record in records for frame in _frames_of(record)
+               for person in frame.get('persons') or [])
+
+
+def _propagated_count(features: EventIndex, ws: float, we: float) -> int:
+    """the persons of the window's frames whose tag the fusion carried along their track."""
+    return sum(1 for record, _, _ in features.between(ws, we) for frame in _frames_of(record)
+               for person in frame.get('persons') or [] if person.get('tag_match') == PROPAGATED)
+
+
 def body_gaze_features(features: EventIndex, ws: float, we: float, participants: list[str],
                        layout: tuple[int | None, frozenset[str]] | None = None) -> dict:
     """what the bodies and gazes did in the window, per person and per pair, from the frames the
@@ -900,8 +1046,11 @@ def action_features(actions: EventIndex, ws: float, we: float, participants: lis
 # ---- the table ----
 
 def window_features(events: dict[str, list[dict]], window: float = 10.0, step: float = 10.0,
-                    participants: list[str] | None = None, speakers: list[str] | None = None) -> list[dict]:
-    """the fusion table: one row per window over the session's span."""
+                    participants: list[str] | None = None, speakers: list[str] | None = None,
+                    track_tags: bool = True) -> list[dict]:
+    """the fusion table: one row per window over the session's span. With `track_tags` (the
+    default) the tags are first carried along the tracks of the features endpoint
+    (propagate_track_tags), and a session whose persons were tracked gets `n_vfa_propagated`."""
     if window <= 0 or step <= 0:
         raise ValueError("window and step must be greater than 0")
     span = session_span(events)
@@ -918,10 +1067,16 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     transcription = EventIndex(events.get(EVENT_TYPE_ASR_TRANSCRIPTION, []), 1.0)
     translations = EventIndex(events.get(EVENT_TYPE_IPS_TRANSLATION, []), 1.0)
     relations = EventIndex(events.get(EVENT_TYPE_IPS_RELATION, []), 1.0)
-    features = EventIndex(events.get(EVENT_TYPE_VFA_FEATURES, []), instant=True)
-    layout = frame_set_layout(features.records)
-    # the seats of the participants, learned once from the whole session; None without VFA, so its table has no seat trace
-    seats = seats_of(features.records, participants, layout) if len(features) else None
+    raw = events.get(EVENT_TYPE_VFA_FEATURES, [])
+    layout = frame_set_layout(raw)
+    # the persons' tags carried along their tracks, before any window is cut; a session the server
+    # did not track has no propagation column
+    tracked = track_tags and _tracked(raw)
+    features = EventIndex(propagate_track_tags(raw, layout) if tracked else raw, instant=True)
+    # the seats of the participants, learned once from the whole session and from the tags the
+    # server gave (read or kept on the track), not the propagated ones, so a track carried to the
+    # wrong person cannot move a seat; None without VFA, so its table has no seat trace
+    seats = seats_of(raw, participants, layout) if len(features) else None
     actions = EventIndex(events.get(EVENT_TYPE_VFA_ACTION, []), instant=True)
     # the personal microphones and the buckets each wearer won; None for a session without them
     personal = personal_speech(events.get(EVENT_TYPE_ASR_RECOGNITION, []), events.get(EVENT_TYPE_ASR_TRANSCRIPTION, []))
@@ -931,6 +1086,8 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
         row.update(speech_features(recognition, transcription, ws, we, speakers, personal=personal))
         row.update(space_features(translations, relations, ws, we, participants))
         row.update(body_gaze_features(features, ws, we, participants, layout))
+        if tracked:
+            row['n_vfa_propagated'] = _propagated_count(features, ws, we)
         row.update(action_features(actions, ws, we, participants))
         if seats is not None:
             row.update(seat_features(features, ws, we, participants, seats, layout))

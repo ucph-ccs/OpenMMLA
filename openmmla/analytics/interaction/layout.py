@@ -79,7 +79,7 @@ DROPPED = {
     r'^pair\d+_\d+_face_mutual_ratio$': 'near-dead (> 0 in 0-0.3 % of windows); its support is in data_checks.json',
     r'^pair\d+_\d+_mutual_gaze_ratio$': 'near-dead (> 0 in 0-2.5 % of windows); its support is in data_checks.json',
     r'^(n_asr_recognition|n_asr_transcription|n_ips|n_ips_relation|n_vfa_features|n_vfa_angles|n_vfa_cameras'
-    r'|n_vfa_incomplete)$': _COUNTER,
+    r'|n_vfa_incomplete|n_vfa_propagated)$': _COUNTER,
     r'^p\d+_(cameras|frames|frame_sets)$': _COUNTER,
     r'^pair\d+_\d+_(frames|frame_sets)$': _COUNTER,
     # the reserved block `semantic`, not built: it joins MODALITIES with --with-actions once the VLM runs
