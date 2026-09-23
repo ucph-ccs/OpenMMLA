@@ -91,6 +91,12 @@ class ParamDef:
     # (its typed text on "type another…"); None shows every row. A hidden row
     # passes ""
     shown_when: Callable[[str], bool] | None = None
+    # with `under`: its rows sit above the rows of `under` rather than below
+    # (a recorder's Host above its Device Label)
+    above: bool = False
+    # what an instance with no default of its own starts on, when that is one
+    # of the options (a recorder's Host: this machine); else `fill` decides
+    instance_default: str = ""
     # whether an instance with no default of its own takes the next option
     # that has a value (True), or none (False)
     fill: bool = True
@@ -613,10 +619,17 @@ class ServiceCard(Widget):
                     # tab alone, so the rows take the plain ids _sync_instances
                     # and collect_params look for, not the role-scoped ones.
                     paired = self._paired_params(param.flag)
+                    above = [other for other in paired if other.above]
+                    below = [other for other in paired if not other.above]
                     with Vertical(id=self._param_id("instances", param.flag), classes="param-instances"):
                         for index in range(len(self._param_values[param.flag])):
+                            for other in above:
+                                if index < len(self._param_values.get(other.flag) or []):
+                                    row = self._instance_row(other, index)
+                                    row.display = self._instance_shown(other, index)
+                                    yield row
                             yield self._instance_row(param, index)
-                            for other in paired:
+                            for other in below:
                                 if index < len(self._param_values.get(other.flag) or []):
                                     row = self._instance_row(other, index)
                                     row.display = self._instance_shown(other, index)
@@ -741,6 +754,8 @@ class ServiceCard(Widget):
             wanted = str(param.default[index] if param.default[index] is not None else "")
             if wanted in legal or (param.free_text and wanted):
                 return wanted
+        if param.instance_default and param.instance_default in legal:
+            return param.instance_default
         if not param.fill:
             return ""
         valued = [value for _, value in options if value]
@@ -904,6 +919,8 @@ class ServiceCard(Widget):
             except Exception:
                 continue
             paired = [other for other in self._paired_params(param.flag) if other.per_instance == count_flag]
+            above = [other for other in paired if other.above]
+            below = [other for other in paired if not other.above]
             values = self._param_values.get(param.flag) or []
             for index in range(max(count, len(values))):
                 try:
@@ -913,16 +930,29 @@ class ServiceCard(Widget):
                 if row is None:
                     if index >= count:
                         continue
+                    for other in above:
+                        other_row = self._instance_row(other, index)
+                        other_row.display = self._instance_shown(other, index)
+                        container.mount(other_row)
                     row = self._instance_row(param, index)
                     container.mount(row)
-                    for other in paired:
+                    for other in below:
                         other_row = self._instance_row(other, index)
                         other_row.display = self._instance_shown(other, index)
                         container.mount(other_row)
                     continue
                 row.display = index < count
+                for other in above:
+                    try:
+                        other_row = self.query_one(f"#{self._instance_row_id(other.flag, index)}")
+                    except Exception:
+                        if index >= count:
+                            continue
+                        other_row = self._instance_row(other, index)
+                        container.mount(other_row, before=row)
+                    other_row.display = index < count and self._instance_shown(other, index)
                 after = row
-                for other in paired:
+                for other in below:
                     try:
                         other_row = self.query_one(f"#{self._instance_row_id(other.flag, index)}")
                     except Exception:
@@ -1049,10 +1079,9 @@ class ServiceCard(Widget):
             "--session-id",
             "--experiment-group",
             "--output-root",
-            "--host-label",
             *[
                 flag for flag in component.flags
-                if flag not in {"--session-id", "--experiment-group", "--output-root", "--host-label"}
+                if flag not in {"--session-id", "--experiment-group", "--output-root"}
             ],
         ]
         params = {param.flag: param for param in self.service_def.params}

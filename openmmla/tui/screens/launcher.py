@@ -180,6 +180,9 @@ _REMOTE_COLLECTION_FILES = (
 )
 _NEW_COLLECTION_SESSION_CHOICE = "Create MongoDB Session"
 _COLLECTION_HIDDEN_PRESET_FLAGS = {
+    # the recording machine's name in the files and folders: each host's own
+    # (_collection_default_host_label), as each recorder picks its host
+    "--host-label",
     "--audio-interactive",
     "--audio-input-format",
     "--audio-device",
@@ -205,6 +208,15 @@ _COLLECTION_HIDDEN_PRESET_FLAGS = {
 _COLLECTION_DEVICE_LABEL_FLAGS = {
     "--audio-device-label": ("-na", "audio"),
     "--video-device-label": ("-nv", "video"),
+}
+# where each Collection recorder runs: a Host row above its Device Label (this
+# machine, or an SSH profile), by role, with the counter it follows and the
+# Device Label it sits above. Start groups the recorders by host and starts each
+# group there, so the card has no use for the Host selector; the flag is the
+# card's alone and never reaches a recorder
+_COLLECTION_HOST_FLAGS = {
+    "--audio-host": ("-na", "--audio-device-label"),
+    "--video-host": ("-nv", "--video-device-label"),
 }
 # the pipeline configs whose Streams entries make up that vocabulary, with the
 # kind a stream of each is when nothing else says (_card_stream_kind)
@@ -312,6 +324,7 @@ _LAUNCHER_STAGING_SWEEP_WORKER_GROUP = "launcher-staging-sweep"
 _LAUNCHER_REMOTE_DELETE_WORKER_GROUP = "launcher-remote-delete"
 _LAUNCHER_REMOTE_STOP_WORKER_GROUP = "launcher-remote-stop"
 _LAUNCHER_COLLECTION_STOP_WORKER_GROUP = "launcher-collection-stop"
+_LAUNCHER_COLLECTION_START_WORKER_GROUP = "launcher-collection-start"
 
 _MLLM_FIELDS = [
     LoaderFieldDef(
@@ -2491,7 +2504,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 [
                     "--session-id", "--output-root", "--host-label",
                     "--audio-interactive", "--sample-rate", "--audio-format",
-                    "--audio-device-label", "--audio-participant", "--audio-scope",
+                    "--audio-host", "--audio-device-label", "--audio-participant", "--audio-scope",
                 ],
             ),
             ComponentDef(
@@ -2502,7 +2515,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                     "--session-id", "--output-root", "--host-label",
                     "--video-interactive",
                     "--framerate", "--size", "--bitrate", "--maxrate", "--bufsize",
-                    "--preset", "--video-device-label",
+                    "--preset", "--video-host", "--video-device-label",
                 ],
             ),
         ],
@@ -2904,6 +2917,7 @@ _LOCAL_SETTINGS_NOTES: dict[str, str] = {
                               "this address and the stream URLs it completed)",
 }
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
+_COLLECTION_HOST_NOTE = "Per recorder  (the Host row above each Device Label)"
 
 # the host each launcher node was last pointed at, kept across restarts
 _NODE_HOSTS_REL_PATH = os.path.join("config", "launcher_hosts.yml")
@@ -3928,6 +3942,10 @@ class ServicePanel(Widget):
         return ""
 
     def _derive_node_host(self, svc: ServiceDef, profiles: list) -> NodeHost:
+        if svc.launch_type == "collection":
+            # each recorder runs on the host of its own row: the card itself,
+            # its command line and its log are this machine's
+            return NodeHost()
         if svc.launch_type == "make":
             make_target = _make_target_for(svc.name)
             endpoint = system_service_endpoint(
@@ -3986,7 +4004,7 @@ class ServicePanel(Widget):
     def _apply_node_host(self, svc: ServiceDef, node: NodeHost) -> None:
         """point the Host bar, and everything that follows it, at a node's host."""
         self._current_node_host = node
-        self._show_host_bar(None)
+        self._show_host_bar(_COLLECTION_HOST_NOTE if svc.launch_type == "collection" else None)
         target = self._card_target(svc, node)
         self._set_log_context(svc, target)
         # said once per cause: the card is rebuilt often, the reason stays the same
@@ -4069,6 +4087,13 @@ class ServicePanel(Widget):
             }:
                 # the session's group decides whom the Participant rows offer
                 self.call_after_refresh(self._refresh_collection_participants)
+                return
+            if card is not None and card.service_def.launch_type == "collection" and event.select.id in {
+                card._instance_select_id(flag, index)
+                for flag in _COLLECTION_HOST_FLAGS for index in range(len(card._param_values.get(flag) or []))
+            }:
+                # a recorder moved to another host: the status probes ask that one too
+                self._note_collection_card_hosts(self._collection_card_values())
                 return
         if event.select.id != "svc-target-select" and any(
                 isinstance(node, ServiceCard) and node.service_def.name == _ASR_BASE_CARD
@@ -4783,9 +4808,10 @@ class ServicePanel(Widget):
     def _capture_collection_card_state(self, target: str | None = None) -> None:
         """remember the collection card's choices before the card is rebuilt.
 
-        `target` names the host the card was built for; on a host switch that
-        is the *previous* one, since the Select has already moved on."""
-        target = target or self._get_panel_target()
+        The card is one whichever host the Host selector shows (each recorder
+        names its own host), so what it keeps is kept under this machine's
+        name; `target` is left for the callers that pass the selector's."""
+        target = "local"
         try:
             cards = list(self.query(ServiceCard))
         except Exception:
@@ -4816,6 +4842,7 @@ class ServicePanel(Widget):
                 else:
                     target_values[flag] = value
             self._note_collection_wearer_snapshot(target, snapshot.get("values") or {}, card)
+            self._note_collection_card_hosts(snapshot.get("values") or {})
             break
 
     def _note_host_recorders(self, target: str, recorders: list) -> bool:
@@ -4829,26 +4856,88 @@ class ServicePanel(Widget):
         self.__dict__.setdefault("_collection_host_sessions", {})[target] = sessions
         return bool(recorders)
 
-    def _host_recording_session(self, target: str, shown: object = "") -> str:
-        """the session the card of `target` should open on because that host is
-        recording it, or "" when it records nothing. One session id follows the
-        user from host to host (one take, several machines); with two groups
-        recording at once on different hosts that id is the other group's, and
-        Stop would look for it here in vain. What the host records wins."""
-        sessions = self.__dict__.get("_collection_host_sessions", {}).get(target) or []
-        if not sessions:
-            return ""
-        shown = _safe_session_id(shown)
-        return shown if shown in sessions else sessions[0]
+    # ── the hosts of the Collection card ─────────────────────────
 
-    def _follow_host_recording_session(self, target: str) -> None:
+    def _collection_host_choices(self) -> list[tuple[str, str]]:
+        """what a recorder's Host row offers: this machine, then every SSH
+        profile but a Windows one (no recorder runs there)."""
+        names = self.__dict__.get("_ssh_profile_names")
+        if names is None:
+            names = [profile.name for profile in load_ssh_profiles()]
+        return [(_host_label("local"), "local")] + [
+            (name, name) for name in names if TARGET_PLATFORMS.get(name) != "windows"
+        ]
+
+    @staticmethod
+    def _collection_hosts_of(values: dict) -> list[str]:
+        """the hosts the recorders of these card values run on, audio rows
+        first, each once; a row that names none is this machine's."""
+        hosts: list[str] = []
+        for flag, (counter, _device) in _COLLECTION_HOST_FLAGS.items():
+            picks = values.get(flag)
+            picks = list(picks) if isinstance(picks, (list, tuple)) else []
+            for index in range(ServicePanel._collection_count(values, counter)):
+                host = str(picks[index] if index < len(picks) and picks[index] else "").strip() or "local"
+                if host not in hosts:
+                    hosts.append(host)
+        return hosts
+
+    def _note_collection_card_hosts(self, values: dict) -> None:
+        """keep the hosts the card's recorders run on, for the status probes
+        (which run off the UI thread and cannot read the card)."""
+        self.__dict__["_collection_card_hosts"] = self._collection_hosts_of(values)
+
+    def _collection_status_hosts(self) -> list[str]:
+        """every host whose recorders the card reports on: this machine, the
+        hosts its rows name, and the hosts this console started its session on."""
+        hosts = ["local"]
+        session = _safe_session_id(self.__dict__.get("_collection_sticky", {}).get("--session-id"))
+        launched = sorted(self.__dict__.get("_collection_launch_targets", {}).get(session, set())) if session else []
+        for host in [*self.__dict__.get("_collection_card_hosts", []), *launched]:
+            if host not in hosts:
+                hosts.append(host)
+        return hosts
+
+    def _collection_running(self) -> bool:
+        """whether a recorder is alive on a host of the card, whichever session
+        it records. Asks each remote host for its processes, so it runs off
+        the UI thread; one known to be offline or a Windows one is not asked."""
+        running = False
+        for host in self._collection_status_hosts():
+            if host == "local":
+                recorders = _collection_recorders_local()
+            else:
+                profile = get_profile_by_name(host)
+                if (profile is None or TARGET_STATES.get(host) == "offline"
+                        or TARGET_PLATFORMS.get(host) == "windows"):
+                    continue
+                recorders = _collection_recorders_remote(profile)
+            running = self._note_host_recorders(host, recorders) or running
+        return running
+
+    def _card_recording_session(self, shown: object = "") -> str:
+        """the session the card should open on because a host of it is
+        recording it, or "" when none of them records anything: the one it
+        shows when a host records that, else the newest of the first host
+        that records one."""
+        recorded = self.__dict__.get("_collection_host_sessions", {})
+        hosts = self._collection_status_hosts()
+        shown = _safe_session_id(shown)
+        if shown and any(shown in (recorded.get(host) or []) for host in hosts):
+            return shown
+        for host in hosts:
+            if recorded.get(host):
+                return recorded[host][0]
+        return ""
+
+    def _follow_card_recording_session(self) -> None:
         """after a status probe: point the card on screen at the session its
-        host records. Once per change, so a session the user picks on purpose
-        while the host records (to download an older one) is left alone."""
+        hosts record. Once per change, so a session the user picks on purpose
+        while they record (to download an older one) is left alone."""
         followed = self.__dict__.setdefault("_collection_followed", {})
-        sessions = self.__dict__.get("_collection_host_sessions", {}).get(target) or []
-        if not sessions:
-            followed.pop(target, None)
+        session = self._card_recording_session()
+        if not session:
+            followed.pop("card", None)
             return
         try:
             cards = [card for card in self.query(ServiceCard) if card.service_def.launch_type == "collection"]
@@ -4856,15 +4945,20 @@ class ServicePanel(Widget):
             return
         for card in cards:
             shown = ((card.collection_snapshot() or {}).get("values") or {}).get("--session-id")
-            session = self._host_recording_session(target, shown)
-            if followed.get(target) == session:
+            session = self._card_recording_session(shown)
+            if followed.get("card") == session:
                 continue
-            followed[target] = session
+            followed["card"] = session
             if _safe_session_id(shown) != session:
                 card.select_collection_session(session)
+                recorded = self.__dict__.get("_collection_host_sessions", {})
+                where = [
+                    "this machine" if host == "local" else host for host in self._collection_status_hosts()
+                    if session in (recorded.get(host) or [])
+                ]
                 self._log(
-                    f"[cyan]{'This machine' if target == 'local' else target} is recording session "
-                    f"{session}: the card shows it, so Stop and Download act on it.[/cyan]"
+                    f"[cyan]{', '.join(where) or 'A host'} {'is' if len(where) < 2 else 'are'} recording "
+                    f"session {session}: the card shows it, so Stop and Download act on it.[/cyan]"
                 )
 
     def _remember_collection_session(self, session_id: object) -> None:
@@ -4898,7 +4992,10 @@ class ServicePanel(Widget):
         if svc.launch_type != "collection":
             return svc
 
-        target = target or self._get_panel_target()
+        # the card is the same whichever host the Host selector shows: each
+        # recorder names its own host, and what the card keeps is kept under
+        # this machine's name
+        target = "local"
         defaults = self._collection_defaults_for_current_target(target)
         session_choices = self._artifact_session_choices_for_target(target)
         experiment_group_choices = self._collection_experiment_group_choices()
@@ -4906,12 +5003,16 @@ class ServicePanel(Widget):
         sticky = self._collection_sticky
         target_sticky = self._collection_target_sticky.get(target, {})
         shared_flags = self._collection_session_scoped_flags(svc)
+        # the hosts the card's recorders were last given, which say what it is recording
+        counts = {param.flag: param.default for param in svc.params if param.param_type == "int"}
+        counts.update({flag: sticky[flag] for flag in counts if flag in sticky})
+        self._note_collection_card_hosts({**counts, **target_sticky})
 
-        recording = self._host_recording_session(target, sticky.get("--session-id"))
+        recording = self._card_recording_session(sticky.get("--session-id"))
         if recording:
-            # this host is in the middle of a take: that is the session its card is about
+            # a host of the card is in the middle of a take: that is the session the card is about
             last_session = recording
-            self.__dict__.setdefault("_collection_followed", {})[target] = recording
+            self.__dict__.setdefault("_collection_followed", {})["card"] = recording
         elif "--session-id" in sticky:
             # an explicit pick (or a session a launch just created): always
             # offered, even before the databases list it
@@ -4960,6 +5061,12 @@ class ServicePanel(Widget):
                     default = []
             elif param.flag == _COLLECTION_PARTICIPANT_FLAG:
                 default = []  # set below, once the Device Labels are known
+            elif param.flag in _COLLECTION_HOST_FLAGS:
+                choices = self._collection_host_choices()
+                # the picks the card was last given, one per recorder; a new
+                # recorder records on this machine (ParamDef.instance_default)
+                if not isinstance(default, (list, tuple)):
+                    default = []
             params.append(replace(param, default=default, choices=choices))
         by_flag = {param.flag: param for param in params}
         device = by_flag.get("--audio-device-label")
@@ -4980,7 +5087,6 @@ class ServicePanel(Widget):
         params = list(svc.params)
         existing = {param.flag for param in params}
         labels = {
-            "--host-label": "Host Label",
             "--audio-interactive": "Terminal Setup",
             "--audio-input-format": "Input Format",
             "--audio-device": "Device",
@@ -5024,6 +5130,22 @@ class ServicePanel(Widget):
                     or flag in _COLLECTION_HIDDEN_PRESET_FLAGS
                     or flag == _COLLECTION_SCOPE_FLAG
                 ):
+                    continue
+                if flag in _COLLECTION_HOST_FLAGS:
+                    # the machine the recorder runs on, in the row above its
+                    # Device Label: this machine unless picked; the SSH
+                    # profiles are added with the card (_collection_host_choices)
+                    counter, device_flag = _COLLECTION_HOST_FLAGS[flag]
+                    params.append(ParamDef(
+                        flag, "Host", "choice", [],
+                        choices=[(_host_label("local"), "local")],
+                        per_instance=counter,
+                        under=device_flag,
+                        above=True,
+                        fill=False,
+                        instance_default="local",
+                    ))
+                    existing.add(flag)
                     continue
                 if flag == _COLLECTION_PARTICIPANT_FLAG:
                     # who wears each microphone, under its Device Label; a room
@@ -5272,7 +5394,7 @@ class ServicePanel(Widget):
         device = params.get("--audio-device-label")
         if wearer is None or device is None:
             return
-        target = self._get_panel_target()
+        target = "local"  # the card's picks are kept under this machine's name
         values = (card.collection_snapshot() or {}).get("values") or {}
         labels = card.instance_values("--audio-device-label")
         before = self.__dict__.get("_collection_wearer_scope")
@@ -8595,9 +8717,9 @@ class ServicePanel(Widget):
                 return system_service_reachable(self._root, "flask", own_port=own_port)
             return _check_tmux_session(target)
         elif svc.launch_type == "collection":
-            # a recorder process alive on this machine means a recording is
-            # in progress, whichever session it belongs to
-            return self._note_host_recorders("local", _collection_recorders_local())
+            # a recorder process alive on a host of the card means a recording
+            # is in progress, whichever session it belongs to
+            return self._collection_running()
         return False
 
     def on_service_card_start_requested(self, event: ServiceCard.StartRequested) -> None:
@@ -8609,6 +8731,10 @@ class ServicePanel(Widget):
         self._capture_collection_card_state()
         self._capture_infra_mode()
         svc = self._service_for_current_target(svc)
+        if svc.launch_type == "collection":
+            # each recorder runs on the host of its own row, whatever the Host selector says
+            self._start_collection(svc, event.params)
+            return
 
         target = self._get_panel_target()
         is_remote = target != "local"
@@ -8675,16 +8801,6 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
                 return
 
-        if svc.launch_type == "collection" and self._collection_count(event.params, "-na") > 0:
-            problem = self._collection_wearer_problem(event.params)
-            if problem:
-                self._log(problem)
-                return
-            for note in self._collection_wearer_notes(event.params, target):
-                self._log(note)
-        if svc.launch_type == "collection" and not self._confirm_start_into_ended_session(event.params, target):
-            return
-
         launch_params = dict(event.params)
         if not self._ensure_pipeline_session_for_launch(svc, launch_params, target=target):
             self._log("[red]Could not resolve a launch session id.[/red]")
@@ -8708,6 +8824,9 @@ class ServicePanel(Widget):
     def on_service_card_stop_requested(self, event: ServiceCard.StopRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
+            return
+        if svc.launch_type == "collection":
+            self._stop_collection(svc, event.params or {})
             return
 
         target = self._get_panel_target()
@@ -8886,75 +9005,90 @@ class ServicePanel(Widget):
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
             return
-        target = self._get_panel_target()
         if svc.launch_type == "collection":
-            if target == "local":
-                self._log("[yellow]Download is only needed for remote collection targets.[/yellow]")
+            remote, pairs = self._collection_remote_pairs(svc, event.params)
+            if not remote:
+                self._log("[yellow]Download is only needed for recorders on remote hosts: every recorder of "
+                          "this card records on this machine.[/yellow]")
                 return
-            params = self._collection_params_for_action(svc, event.params, target)
-            session_id = self._collection_session_id(params)
-            if not session_id:
+            if not pairs:
                 self._log("[yellow]No valid collection session id. Enter one or start a collection first.[/yellow]")
                 return
-            if (target, session_id) in self._remote_deletes_in_flight:
-                self._log(
-                    f"[yellow]'{session_id}' is being deleted on '{target}' right now; there is nothing "
-                    f"left to download there.[/yellow]"
-                )
-                return
-            host_label = safe_segment(params.get("--host-label") or target, "host")
-            key = f"collection-download:{target}:{session_id}:{host_label}"
-            if key in self._downloads_in_flight:
-                self._log(
-                    "[yellow]A download for this session and host is already running; it takes the "
-                    "audio and the video alike, whichever tab Download was pressed on.[/yellow]"
-                )
-                return
-            self._downloads_in_flight.add(key)
-            self.run_worker(
-                self._run_collection_download(target, params, key),
-                name=key,
-                group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
-                exclusive=False,
+            for host, params in pairs:
+                self._download_collection_from(host, params)
+
+    def _download_collection_from(self, target: str, params: dict) -> None:
+        """start a Download of the session in `params` from one remote host,
+        unless its folder there is being deleted or already downloaded."""
+        session_id = self._collection_session_id(params)
+        if (target, session_id) in self._remote_deletes_in_flight:
+            self._log(
+                f"[yellow]'{session_id}' is being deleted on '{target}' right now; there is nothing "
+                f"left to download there.[/yellow]"
             )
+            return
+        host_label = safe_segment(params.get("--host-label") or target, "host")
+        key = f"collection-download:{target}:{session_id}:{host_label}"
+        if key in self._downloads_in_flight:
+            self._log(
+                f"[yellow]A download of this session from '{target}' is already running; it takes the "
+                f"audio and the video alike, whichever tab Download was pressed on.[/yellow]"
+            )
+            return
+        self._downloads_in_flight.add(key)
+        self.run_worker(
+            self._run_collection_download(target, params, key),
+            name=key,
+            group=_LAUNCHER_DOWNLOAD_WORKER_GROUP,
+            exclusive=False,
+        )
 
     def on_service_card_delete_files_requested(self, event: ServiceCard.DeleteFilesRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None or svc.launch_type != "collection":
             return
-        target = self._get_panel_target()
-        if target == "local":
-            self._log("[yellow]Delete Remote is only available for remote collection targets.[/yellow]")
+        remote, pairs = self._collection_remote_pairs(svc, event.params)
+        if not remote:
+            self._log("[yellow]Delete Remote is only available for recorders on remote hosts: every recorder "
+                      "of this card records on this machine.[/yellow]")
             return
-        params = self._collection_params_for_action(svc, event.params, target)
-        session_id = self._collection_session_id(params)
-        if not session_id:
+        if not pairs:
             self._log("[yellow]No valid collection session id. Enter one or start a collection first.[/yellow]")
             return
-        if self._collection_download_running(target, session_id):
+        busy = [(host, self._collection_session_id(params)) for host, params in pairs
+                if self._collection_download_running(host, self._collection_session_id(params))]
+        if busy:
             self._pending_collection_delete = None
-            self._log(
-                f"[yellow]'{session_id}' is being downloaded from '{target}' right now: Delete Remote waits "
-                f"until that download is done or cancelled.[/yellow]"
-            )
+            for host, session_id in busy:
+                self._log(
+                    f"[yellow]'{session_id}' is being downloaded from '{host}' right now: Delete Remote waits "
+                    f"until that download is done or cancelled.[/yellow]"
+                )
             return
-        delete_key = (target, session_id)
-        if delete_key in self._remote_deletes_in_flight:
-            self._log(f"[yellow]'{session_id}' is already being deleted on '{target}'.[/yellow]")
+        deleting = [(host, params) for host, params in pairs
+                    if (host, self._collection_session_id(params)) in self._remote_deletes_in_flight]
+        for host, params in deleting:
+            self._log(f"[yellow]'{self._collection_session_id(params)}' is already being deleted on '{host}'.[/yellow]")
+        pairs = [pair for pair in pairs if pair not in deleting]
+        if not pairs:
             return
+        delete_key = tuple((host, self._collection_session_id(params)) for host, params in pairs)
         if self._pending_collection_delete != delete_key:
             self._pending_collection_delete = delete_key
+            where = ", ".join(f"'{session_id}' on '{host}'" for host, session_id in delete_key)
             self._log(
-                f"[yellow]Press Delete Remote again to permanently delete remote collection '{session_id}' on '{target}'.[/yellow]"
+                f"[yellow]Press Delete Remote again to permanently delete the remote collection {where}.[/yellow]"
             )
             return
         self._pending_collection_delete = None
-        self.run_worker(
-            self._run_collection_remote_delete(target, params),
-            name=f"collection-remote-delete:{target}:{session_id}",
-            group=_LAUNCHER_REMOTE_DELETE_WORKER_GROUP,
-            exclusive=False,
-        )
+        for host, params in pairs:
+            session_id = self._collection_session_id(params)
+            self.run_worker(
+                self._run_collection_remote_delete(host, params),
+                name=f"collection-remote-delete:{host}:{session_id}",
+                group=_LAUNCHER_REMOTE_DELETE_WORKER_GROUP,
+                exclusive=False,
+            )
 
     async def _run_collection_download(self, profile_name: str, params: dict, key: str = "") -> None:
         try:
@@ -9140,43 +9274,13 @@ class ServicePanel(Widget):
         rc = await proc.wait()
         return rc, output
 
-    async def _run_collection_remote_stop(self, profile_name: str, session_id: str) -> None:
-        if get_profile_by_name(profile_name) is None:
-            self._log(f"[red]SSH profile '{profile_name}' not found.[/red]")
-            return
-
-        self._log(
-            f"[red]Stopping collection session '{session_id}' on '{profile_name}' ...[/red]"
-        )
-        rc, output = await self._collection_stop_on_target(profile_name, session_id)
-        for line in output.strip().splitlines():
-            self._log(rich_escape(line))
-        if rc == 0:
-            self._log(
-                f"[green]Stop command completed for collection session '{session_id}' on '{profile_name}'.[/green]"
-            )
-        else:
-            self._log(f"[red]Remote collection stop failed (exit {rc}).[/red]")
-        await self._end_session_unless_still_recording(session_id, profile_name)
-        await self._reload_current_service_view()
-
-    async def _run_collection_local_stop(self, session_id: str) -> None:
-        self._log(f"[red]Stopping collection session '{session_id}' locally ...[/red]")
-        rc, output = await self._collection_stop_on_target("local", session_id)
-        for line in output.strip().splitlines():
-            self._log(rich_escape(line))
-        if rc == 0:
-            self._log(f"[green]Stop command completed for collection session '{session_id}'.[/green]")
-        else:
-            self._log(f"[yellow]Collection stop command finished with warnings (exit {rc}).[/yellow]")
-        await self._end_session_unless_still_recording(session_id, "local")
-        await self._reload_current_service_view()
-
-    def _hosts_still_recording(self, session_id: str, stopped: str) -> list[str]:
+    def _hosts_still_recording(self, session_id: str, stopped) -> list[str]:
         """the other hosts this console started the session on (and this
-        machine) where one of its recorders is still alive. Asks each of them
-        for its processes, so it runs off the event loop."""
-        candidates = {"local", *self._collection_launch_targets.get(session_id, set())} - {stopped}
+        machine) where one of its recorders is still alive: all but `stopped`
+        (a host, or several). Asks each of them for its processes, so it runs
+        off the event loop."""
+        stopped = {stopped} if isinstance(stopped, str) else set(stopped)
+        candidates = {"local", *self._collection_launch_targets.get(session_id, set())} - stopped
         busy = []
         for host in sorted(candidates):
             if host == "local":
@@ -9191,15 +9295,18 @@ class ServicePanel(Widget):
                 busy.append("this machine" if host == "local" else f"'{host}'")
         return busy
 
-    async def _end_session_unless_still_recording(self, session_id: str, stopped: str) -> None:
-        """Stop on one host: the session as a whole has only ended when no
-        other host is still recording it. It used to be marked ended at the
-        first Stop, in the middle of a recording that went on elsewhere."""
-        # the recorders of this session are gone from the host that was stopped:
-        # its card must not open on the session again before the next probe
-        recording = self.__dict__.get("_collection_host_sessions", {}).get(stopped)
-        if recording and session_id in recording:
-            recording.remove(session_id)
+    async def _end_session_unless_still_recording(self, session_id: str, stopped) -> None:
+        """Stop on some hosts (a host, or several): the session as a whole has
+        only ended when no other host is still recording it. It used to be
+        marked ended at the first Stop, in the middle of a recording that went
+        on elsewhere."""
+        stopped = {stopped} if isinstance(stopped, str) else set(stopped)
+        # the recorders of this session are gone from the hosts that were
+        # stopped: the card must not open on the session again before the next probe
+        for host in stopped:
+            recording = self.__dict__.get("_collection_host_sessions", {}).get(host)
+            if recording and session_id in recording:
+                recording.remove(session_id)
         busy = await asyncio.to_thread(self._hosts_still_recording, session_id, stopped)
         if busy:
             self._log(
@@ -9207,7 +9314,7 @@ class ServicePanel(Widget):
                 f"ended. Stop All Hosts ends it everywhere.[/yellow]"
             )
             return
-        await self._mark_session_ended(session_id, stopped)
+        await self._mark_session_ended(session_id, "local")
 
     def _collection_stop_targets(self, session_id: str) -> list[str]:
         """every host that could still be recording this session.
@@ -9308,7 +9415,7 @@ class ServicePanel(Widget):
                     else:
                         card.update_status(is_running)
             if svc.launch_type == "collection":
-                self._follow_host_recording_session(probed_target)
+                self._follow_card_recording_session()
         self._build_tree()
         # the [E] markers need the env states of every host a node sits on
         for target in {node.target for node in self._node_host_cache.values()}:
@@ -9356,6 +9463,9 @@ class ServicePanel(Widget):
     def _status_needs_ssh(self, svc: ServiceDef, node: NodeHost) -> bool:
         """whether this node's state can only be had by logging into its host
         (an address that names a machine is probed from here instead)."""
+        if svc.launch_type == "collection":
+            # the card's recorders may run on other hosts, whatever its node's
+            return any(host != "local" for host in self._collection_status_hosts())
         if node.target == "local":
             return False
         if svc.launch_type != "make" or not node.machine_target:
@@ -9544,6 +9654,11 @@ class ServicePanel(Widget):
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
             return
+        if svc.launch_type == "collection":
+            # the recorders of every host of the card, wherever they run
+            self._note_collection_card_hosts(self._collection_card_values())
+            self.run_worker(self._run_collection_logs(svc), group="launcher-collection-logs", exclusive=True)
+            return
 
         target = self._get_panel_target()
         is_remote = target != "local"
@@ -9633,9 +9748,6 @@ class ServicePanel(Widget):
             else:
                 self._log(f"[yellow]Compose file not found: {rel}[/yellow]")
             return
-        elif svc.launch_type == "collection":
-            self._log_collection_recorders(svc, _collection_recorders_local(), "this machine")
-            return
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
         else:
@@ -9698,11 +9810,6 @@ class ServicePanel(Widget):
             cmd = f"docker compose -f {compose_path} --profile nemo logs --tail 40 --no-color"
             self._cmd.run(cmd)
             return
-        elif svc.launch_type == "collection":
-            profile = get_profile_by_name(self._get_panel_target())
-            if profile is not None:
-                self._log_collection_recorders(svc, _collection_recorders_remote(profile), profile.name)
-            return
         elif svc.launch_type in ("tmux", "vllm"):
             session_name = _service_session_name(svc)
         else:
@@ -9721,8 +9828,6 @@ class ServicePanel(Widget):
                 self._launch_vllm_server(svc)
             elif svc.launch_type == "make":
                 self._launch_make(svc, params)
-            elif svc.launch_type == "collection":
-                self._launch_collection(svc, params)
         except Exception as e:
             self._log(f"[red]Error launching {svc.display_name}: {e}[/red]")
 
@@ -10519,7 +10624,9 @@ class ServicePanel(Widget):
             "echo \"Stop signal sent for collection session: $SESSION_ID\""
         )
 
-    def _ensure_remote_collection_runtime(self, profile) -> bool:
+    def _upload_collection_runtime(self, profile) -> str:
+        """put the recorder code on a remote host, which needs no checkout of
+        its own; what went wrong, or "". Runs off the UI thread."""
         remote_home = _remote_home(profile)
         remote_runtime = _expand_remote_home_path(_REMOTE_COLLECTION_RUNTIME, remote_home)
         dirs = sorted({os.path.dirname(path) for path in _REMOTE_COLLECTION_FILES})
@@ -10530,12 +10637,13 @@ class ServicePanel(Widget):
         mkdir_cmd = "mkdir -p " + " ".join(_quote_remote_path(path) for path in mkdir_parts)
         try:
             result = ssh_run_sync(profile, mkdir_cmd, timeout=15.0)
+        except subprocess.TimeoutExpired:
+            # its text spells out the ssh arguments, the password among them
+            return "Failed to prepare remote collection runtime: ssh timed out"
         except Exception as e:
-            self._log(f"[red]Failed to prepare remote collection runtime: {e}[/red]")
-            return False
+            return f"Failed to prepare remote collection runtime: {e}"
         if result.returncode != 0:
-            self._log(f"[red]Failed to prepare remote collection runtime: {result.stderr.strip()}[/red]")
-            return False
+            return f"Failed to prepare remote collection runtime: {result.stderr.strip()}"
 
         for rel_path in _REMOTE_COLLECTION_FILES:
             local_path = os.path.join(self._root, rel_path)
@@ -10547,61 +10655,289 @@ class ServicePanel(Widget):
                     text=True,
                     timeout=20,
                 )
+            except subprocess.TimeoutExpired:
+                return f"Failed to upload collection runtime file {rel_path}: scp timed out"
             except Exception as e:
-                self._log(f"[red]Failed to upload collection runtime file {rel_path}: {e}[/red]")
-                return False
+                return f"Failed to upload collection runtime file {rel_path}: {e}"
             if result.returncode != 0:
-                self._log(f"[red]Failed to upload collection runtime file {rel_path}: {result.stderr.strip()}[/red]")
-                return False
-        return True
+                return f"Failed to upload collection runtime file {rel_path}: {result.stderr.strip()}"
+        return ""
 
     def _collection_session_name(self, svc: ServiceDef, role: str, index: int, count: int) -> str:
         suffix = role if count <= 1 else f"{role}-{index + 1}"
         return _collection_session_prefix(svc) + suffix
 
-    def _launch_collection(self, svc: ServiceDef, params: dict) -> None:
-        if not svc.components:
-            self._log(f"[red]No collection components defined for {svc.display_name}[/red]")
-            return
+    def _collection_host_plan(self, svc: ServiceDef, params: dict) -> list[tuple[str, dict[str, list[int]]]]:
+        """which recorders of a Start run where: (host, {role: row indices}),
+        the hosts in the order their first row comes (audio before video). A
+        row that names no host is this machine's."""
+        plan: dict[str, dict[str, list[int]]] = {}
+        for comp in svc.components:
+            flag = next((flag for flag, (counter, _) in _COLLECTION_HOST_FLAGS.items()
+                         if counter == comp.count_flag), "")
+            picks = params.get(flag)
+            picks = list(picks) if isinstance(picks, (list, tuple)) else []
+            for index in range(self._collection_count(params, comp.count_flag)):
+                host = str(picks[index] if index < len(picks) and picks[index] else "").strip() or "local"
+                plan.setdefault(host, {}).setdefault(comp.role, []).append(index)
+        return list(plan.items())
 
-        prepared = self._collection_launch_params(params, service_name=svc.name)
-        if self._collection_requested_component_count(svc, prepared) <= 0:
+    @staticmethod
+    def _collection_rows_text(rows: dict[str, list[int]]) -> str:
+        """the recorders of one host as the card numbers them: audio 1, 3 · video 2."""
+        return " · ".join(
+            f"{role} {', '.join(str(index + 1) for index in indices)}" for role, indices in rows.items()
+        )
+
+    def _collection_host_params(self, svc: ServiceDef, prepared: dict, host: str,
+                                rows: dict[str, list[int]]) -> dict:
+        """the params of the recorders `rows` that run on `host`: the card's,
+        cut to those rows (their counts, Device Labels and Participants), with
+        the host's own name, formats and output root. May ask a remote host
+        for its platform once, so it runs off the UI thread."""
+        params = dict(prepared)
+        for comp in svc.components:
+            indices = rows.get(comp.role, [])
+            params[comp.count_flag] = len(indices)
+            for flag in comp.flags:
+                values = prepared.get(flag)
+                if isinstance(values, (list, tuple)):
+                    params[flag] = [values[index] if index < len(values) else "" for index in indices]
+        for flag in _COLLECTION_HOST_FLAGS:
+            params.pop(flag, None)
+        defaults = self._collection_defaults_for_current_target(host)
+        for flag in _COLLECTION_HIDDEN_PRESET_FLAGS:
+            if flag in defaults:
+                params[flag] = defaults[flag]
+        if self._is_default_collection_output_root(str(prepared.get("--output-root") or "").strip()):
+            params["--output-root"] = self._collection_default_output_root(host)
+        return params
+
+    def _start_collection(self, svc: ServiceDef, params: dict) -> None:
+        """Start on the Collection card: the session is resolved once (created
+        from the Experiment Group for Create MongoDB Session), then every
+        recorder starts on the host of its row, one terminal window each."""
+        plan = self._collection_host_plan(svc, params)
+        if not plan:
             self._log("[yellow]No collection components launched.[/yellow]")
             return
+        unknown = [host for host, _ in plan if host != "local" and get_profile_by_name(host) is None]
+        if unknown:
+            self._log(f"[red]No SSH profile is named {', '.join(repr(host) for host in unknown)}: pick another "
+                      f"Host for its recorders.[/red]")
+            return
+        if self._collection_count(params, "-na") > 0:
+            problem = self._collection_wearer_problem(params)
+            if problem:
+                self._log(problem)
+                return
+            for note in self._collection_wearer_notes(params, "local"):
+                self._log(note)
+        if not self._confirm_start_into_ended_session(params, "local"):
+            return
+        prepared = self._collection_launch_params(params, target="local", service_name=svc.name)
         if not self._ensure_collection_session_for_launch(prepared, target="local"):
             self._log("[red]Could not resolve a collection session id.[/red]")
             return
-        self._collection_last_params[(self._get_panel_target(), svc.name)] = dict(prepared)
         self._remember_collection_session(prepared.get("--session-id"))
-        self._remember_collection_launch("local", prepared.get("--session-id"))
         self._note_collection_wearers(prepared, "local")
-        launched = 0
+        where = "; ".join(f"{_host_label(host)}: {self._collection_rows_text(rows)}" for host, rows in plan)
+        self._log(f"[green]Starting {svc.display_name} ({where})...[/green]")
         self._log(f"  Session ID: {prepared['--session-id']}")
         self._log("  Sync time: auto; manifest will use the earliest common replay time")
+        self.run_worker(
+            self._launch_collection_plan(svc, prepared, plan),
+            name=f"collection-start:{prepared['--session-id']}",
+            group=_LAUNCHER_COLLECTION_START_WORKER_GROUP,
+            exclusive=False,
+        )
 
+    async def _launch_collection_plan(self, svc: ServiceDef, prepared: dict,
+                                      plan: list[tuple[str, dict[str, list[int]]]]) -> None:
+        """get every host of a Start ready at once (a remote one is reached
+        and given the recorder code), then open the recorders of all of them
+        in one go: several openers at once would type into each other's
+        Terminal windows. A host that is not ready is left out, and says why."""
+        session_id = prepared["--session-id"]
+        results = await asyncio.gather(
+            *(self._prepare_collection_host(svc, prepared, host, rows) for host, rows in plan),
+            return_exceptions=True,
+        )
         tab_cmds: list[tuple[str, str]] = []
-        for comp in svc.components:
-            count = self._collection_count(prepared, comp.count_flag)
-            for index in range(count):
-                label = self._collection_session_name(svc, comp.role, index, count)
-                command = self._collection_component_command(comp, prepared, self._root)
-                command = _with_instance_flags(command, self._instance_flag_parts(comp, prepared, index))
-                run_cmd = f"cd {shlex.quote(self._root)} && {command}"
-                tab_cmds.append((label, run_cmd))
-                self._log(rich_escape(f"    [{label}] {command}"))
+        started: list[str] = []
+        for (host, _rows), result in zip(plan, results):
+            if isinstance(result, BaseException):
+                self._log(f"[red]{rich_escape(_host_label(host))}: could not start its recorders "
+                          f"({rich_escape(str(result))}).[/red]")
+                continue
+            if result is None:
+                continue  # said why already
+            params, commands = result
+            self._collection_last_params[(host, svc.name)] = dict(params)
+            self._remember_collection_launch(host, session_id)
+            tab_cmds.extend(commands)
+            started.append(_host_label(host))
         if tab_cmds and self._open_collection_terminal(tab_cmds):
-            launched = len(tab_cmds)
-
-        if launched:
-            output_root = str(prepared.get("--output-root") or "collection")
-            self._log(f"[green]Collection recording started; files will be written under {output_root}.[/green]")
-            self.run_worker(
-                self._reload_current_service_view(capture=False),
-                group=_LAUNCHER_UI_WORKER_GROUP,
-                exclusive=True,
-            )
+            output_root = str(prepared.get("--output-root") or "artifacts")
+            self._log(f"[green]Collection recording started on {', '.join(started)}; files are written under "
+                      f"{output_root} on each host.[/green]")
         else:
             self._log("[yellow]No collection components launched.[/yellow]")
+        self.run_worker(
+            self._reload_current_service_view(capture=False),
+            group=_LAUNCHER_UI_WORKER_GROUP,
+            exclusive=True,
+        )
+        self.set_timer(3.0, self._refresh_visible_statuses)
+
+    async def _prepare_collection_host(self, svc: ServiceDef, prepared: dict, host: str,
+                                       rows: dict[str, list[int]]) -> tuple[dict, list[tuple[str, str]]] | None:
+        """the params and the (window label, command) of each recorder of one
+        host of a Start; None when that host cannot record now (said why)."""
+        params = await asyncio.to_thread(self._collection_host_params, svc, prepared, host, rows)
+        profile = None
+        if host != "local":
+            profile = get_profile_by_name(host)
+            if profile is None:
+                self._log(f"[red]SSH profile '{host}' not found.[/red]")
+                return None
+            success, msg = await asyncio.to_thread(ssh_test_connection, profile)
+            if not success:
+                self._log(f"[red]{host}: SSH connection failed: {msg}[/red]")
+                return None
+            problem = await asyncio.to_thread(self._upload_collection_runtime, profile)
+            if problem:
+                self._log(f"[red]{host}: {problem}[/red]")
+                return None
+            if await asyncio.to_thread(remote_platform, profile) == "darwin":
+                self._log(
+                    f"  [yellow]{host} is a Mac: its recorders start FFmpeg from a Terminal window "
+                    "on its own screen, as macOS lets nothing started over SSH use the camera or the "
+                    "microphone; the window closes by itself once FFmpeg runs. Someone has to be logged "
+                    "in there, with Terminal allowed under Privacy & Security (Camera, Microphone).[/yellow]"
+                )
+        tab_cmds: list[tuple[str, str]] = []
+        for comp in svc.components:
+            count = self._collection_count(params, comp.count_flag)
+            for index in range(count):
+                label = self._collection_session_name(svc, comp.role, index, count)
+                if profile is None:
+                    command = self._collection_component_command(comp, params, self._root)
+                    command = _with_instance_flags(command, self._instance_flag_parts(comp, params, index))
+                    tab_cmds.append((label, f"cd {shlex.quote(self._root)} && {command}"))
+                    self._log(rich_escape(f"    [{label}] {command}"))
+                else:
+                    command = self._collection_remote_component_command(comp, params)
+                    command = _with_instance_flags(command, self._instance_flag_parts(comp, params, index))
+                    tab_cmds.append((f"{label}@{host}", self._collection_remote_terminal_command(profile, command)))
+                    self._log(rich_escape(f"    [{label}@{host}] ssh {profile.ssh_destination()} {command}"))
+        return params, tab_cmds
+
+    def _collection_card_values(self, params: dict | None = None) -> dict:
+        """what the Collection card on screen holds, both tabs (a button
+        sends only its own tab's); `params` when no card is up."""
+        try:
+            card = next(card for card in self.query(ServiceCard) if card.service_def.launch_type == "collection")
+            values = (card.collection_snapshot() or {}).get("values") or {}
+        except Exception:
+            values = {}
+        return dict(values) or dict(params or {})
+
+    def _collection_action_pairs(self, svc: ServiceDef, params: dict) -> list[tuple[str, dict]]:
+        """(host, params) of each host a Stop, Download or Delete Remote of the
+        card acts on: the hosts its rows name, both tabs, and the hosts this
+        console started the card's session on. A host whose params hold no
+        session is left out: with the card on Create MongoDB Session, each
+        falls back to the session it recorded last (_collection_params_for_action)."""
+        values = self._collection_card_values(params)
+        self._note_collection_card_hosts(values)
+        hosts = self._collection_hosts_of(values)
+        shown = values.get("--session-id")
+        shown = "" if _is_new_collection_session_choice(shown) else _safe_session_id(shown)
+        for host in sorted(self._collection_launch_targets.get(shown, set())) if shown else []:
+            if host not in hosts:
+                hosts.append(host)
+        pairs: list[tuple[str, dict]] = []
+        for host in hosts:
+            own = self._collection_params_for_action(svc, params, host)
+            if self._collection_session_id(own):
+                pairs.append((host, own))
+        return pairs
+
+    def _collection_remote_pairs(self, svc: ServiceDef, params: dict) -> tuple[bool, list[tuple[str, dict]]]:
+        """whether the card names a remote host at all, and the (host, params)
+        of the remote ones that have a session to act on."""
+        values = self._collection_card_values(params)
+        remote = any(host != "local" for host in self._collection_hosts_of(values))
+        pairs = [(host, own) for host, own in self._collection_action_pairs(svc, params) if host != "local"]
+        return remote or bool(pairs), pairs
+
+    def _stop_collection(self, svc: ServiceDef, params: dict) -> None:
+        """Stop on the card: the session on every host the card records on."""
+        pairs = self._collection_action_pairs(svc, params)
+        if not pairs:
+            self._log("[yellow]No collection session has been started from this card yet.[/yellow]")
+            return
+        by_session: dict[str, list[str]] = {}
+        for host, own in pairs:
+            by_session.setdefault(self._collection_session_id(own), []).append(_host_label(host))
+        for session_id, hosts in by_session.items():
+            self._log(f"[red]Stopping collection session '{session_id}' on {', '.join(hosts)} ...[/red]")
+        self.run_worker(
+            self._run_collection_stop_on(pairs),
+            name="collection-stop:" + ",".join(host for host, _ in pairs),
+            group=_LAUNCHER_COLLECTION_STOP_WORKER_GROUP,
+            exclusive=False,
+        )
+        self.set_timer(2.0, self._refresh_visible_statuses)
+
+    async def _run_collection_stop_on(self, pairs: list[tuple[str, dict]]) -> None:
+        """the session-scoped stop command on each host at once; a session is
+        then marked ended unless another host it was started on still records
+        it (a host whose stop did not finish cleanly is asked again)."""
+        jobs = [(host, self._collection_session_id(own)) for host, own in pairs]
+        results = await asyncio.gather(
+            *(self._collection_stop_on_target(host, session_id) for host, session_id in jobs),
+            return_exceptions=True,
+        )
+        stopped: dict[str, set[str]] = {}
+        for (host, session_id), result in zip(jobs, results):
+            where = "this machine" if host == "local" else f"'{host}'"
+            stopped.setdefault(session_id, set())
+            if isinstance(result, BaseException):
+                self._log(f"[red]{where}: stop failed ({rich_escape(str(result))}).[/red]")
+                continue
+            rc, output = result
+            for line in output.strip().splitlines():
+                # a bare "[host]" prefix would be swallowed as rich markup
+                self._log(f"  [cyan]{rich_escape(_host_label(host))}[/cyan]  {rich_escape(line)}")
+            if rc == 0:
+                stopped[session_id].add(host)
+                self._log(f"[green]Stop command completed for collection session '{session_id}' on {where}.[/green]")
+            else:
+                self._log(f"[red]Collection stop on {where} did not finish cleanly (exit {rc}): see the lines "
+                          f"above.[/red]")
+        for session_id, hosts in stopped.items():
+            await self._end_session_unless_still_recording(session_id, hosts)
+        await self._reload_current_service_view()
+
+    async def _run_collection_logs(self, svc: ServiceDef) -> None:
+        """Logs on the card: the recorders alive on each of its hosts; each
+        prints into the terminal window it was started in."""
+        for host in self._collection_status_hosts():
+            if host == "local":
+                recorders = await asyncio.to_thread(_collection_recorders_local)
+            else:
+                profile = get_profile_by_name(host)
+                if profile is None:
+                    self._log(f"[yellow]SSH profile '{host}' not found.[/yellow]")
+                    continue
+                if TARGET_STATES.get(host) == "offline":
+                    self._log(f"[yellow]{host} is offline: its recorders cannot be listed.[/yellow]")
+                    continue
+                recorders = await asyncio.to_thread(_collection_recorders_remote, profile)
+            self._note_host_recorders(host, recorders)
+            self._log_collection_recorders(svc, recorders, "this machine" if host == "local" else host)
 
     def _launch_bash(self, svc: ServiceDef, params: dict) -> None:
         if not svc.components:
@@ -11006,19 +11342,7 @@ class ServicePanel(Widget):
 
     def _stop_service(self, svc: ServiceDef, params: dict | None = None) -> None:
         try:
-            if svc.launch_type == "collection":
-                stop_params = self._collection_params_for_action(svc, params or {}, "local")
-                session_id = self._collection_session_id(stop_params)
-                if not session_id:
-                    self._log("[yellow]No collection session has been started from this target yet.[/yellow]")
-                    return
-                self.run_worker(
-                    self._run_collection_local_stop(session_id),
-                    name=f"collection-local-stop:{session_id}",
-                    group=_LAUNCHER_COLLECTION_STOP_WORKER_GROUP,
-                    exclusive=False,
-                )
-            elif svc.launch_type in ("tmux", "vllm"):
+            if svc.launch_type in ("tmux", "vllm"):
                 if _is_stack_service(svc):
                     rel = _stack_compose_rel_file(svc)
                     if rel and os.path.isfile(os.path.join(self._root, rel)):
@@ -11190,55 +11514,6 @@ class ServicePanel(Widget):
                 else:
                     self._log("[yellow]Could not open remote MLLM terminal.[/yellow]")
 
-            elif svc.launch_type == "collection":
-                prepared = self._collection_launch_params(params, target=profile_name, service_name=svc.name)
-                if self._collection_requested_component_count(svc, prepared) <= 0:
-                    self._log("[yellow]No remote collection components launched.[/yellow]")
-                    return
-                if not self._ensure_collection_session_for_launch(prepared, target=profile_name):
-                    self._log("[red]Could not resolve a collection session id.[/red]")
-                    return
-                self._collection_last_params[(profile_name, svc.name)] = dict(prepared)
-                self._remember_collection_session(prepared.get("--session-id"))
-                self._remember_collection_launch(profile_name, prepared.get("--session-id"))
-                self._note_collection_wearers(prepared, profile_name)
-                self._log(f"  Session ID: {prepared['--session-id']}")
-                self._log("  Sync time: auto; manifest will use the earliest common replay time")
-                success, msg = ssh_test_connection(profile)
-                if not success:
-                    self._log(f"[red]SSH connection failed: {msg}[/red]")
-                    return
-                if not self._ensure_remote_collection_runtime(profile):
-                    return
-                if remote_platform(profile) == "darwin":
-                    self._log(
-                        f"  [yellow]{profile_name} is a Mac: its recorders start FFmpeg from a Terminal window "
-                        "on its own screen, as macOS lets nothing started over SSH use the camera or the "
-                        "microphone; the window closes by itself once FFmpeg runs. Someone has to be logged "
-                        "in there, with Terminal allowed under Privacy & Security (Camera, Microphone).[/yellow]"
-                    )
-                launched = 0
-                tab_cmds: list[tuple[str, str]] = []
-                for comp in svc.components:
-                    count = self._collection_count(prepared, comp.count_flag)
-                    for index in range(count):
-                        label = self._collection_session_name(svc, comp.role, index, count)
-                        command = self._collection_remote_component_command(comp, prepared)
-                        command = _with_instance_flags(command, self._instance_flag_parts(comp, prepared, index))
-                        ssh_cmd = self._collection_remote_terminal_command(profile, command)
-                        tab_cmds.append((label, ssh_cmd))
-                        self._log(rich_escape(f"    [{label}] ssh {profile.ssh_destination()} {command}"))
-                if tab_cmds and self._open_collection_terminal(tab_cmds):
-                    launched = len(tab_cmds)
-                    self._log(f"[green]{svc.display_name} launched in SSH terminal(s).[/green]")
-                    self.run_worker(
-                        self._reload_current_service_view(capture=False),
-                        group=_LAUNCHER_UI_WORKER_GROUP,
-                        exclusive=True,
-                    )
-                else:
-                    self._log("[yellow]No remote collection components launched.[/yellow]")
-
             elif svc.launch_type == "make":
                 # in the command session, as on Local: its shell has conda (a
                 # login shell over ssh does not reach the conda init of .bashrc),
@@ -11278,20 +11553,7 @@ class ServicePanel(Widget):
             return
         remote_root = profile.remote_project_path
         try:
-            if svc.launch_type == "collection":
-                stop_params = self._collection_params_for_action(svc, params or {}, profile_name)
-                session_id = self._collection_session_id(stop_params)
-                if not session_id:
-                    self._log("[yellow]No collection session has been started from this remote target yet.[/yellow]")
-                    return
-                self.run_worker(
-                    self._run_collection_remote_stop(profile_name, session_id),
-                    name=f"collection-remote-stop:{profile_name}:{session_id}",
-                    group=_LAUNCHER_REMOTE_STOP_WORKER_GROUP,
-                    exclusive=False,
-                )
-
-            elif svc.launch_type in ("tmux", "vllm"):
+            if svc.launch_type in ("tmux", "vllm"):
                 if _is_stack_service(svc):
                     rel = _stack_compose_rel_file(svc)
                     compose_cmd = _compose_command(rel, "down", ["nemo"])
