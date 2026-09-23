@@ -24,7 +24,8 @@ def get_parser():
     add_arg('window', float, 10.0, 'window length in seconds', shortname='-w')
     add_arg('step', float, 10.0, 'step between windows in seconds (equal to the window for no overlap)', shortname='-st')
     add_arg('participants', str, None,
-            'comma-separated tag ids to build columns for; if not set, the tags the events hold', shortname='-tags')
+            "comma-separated tag ids to build columns for, and the session's pupils; if not set, the tags the events "
+            "hold, and the pupils the session's manifest declares (else the tags up to 12)", shortname='-tags')
     add_arg('out', str, None,
             'where to write the table (.csv, else JSON lines); if not set, '
             'artifacts/<session>/analysis/features/<session>_window_features.csv', shortname='-o')
@@ -37,9 +38,9 @@ def main():
     from openmmla.utils.args import print_arguments
     print_arguments(args)
 
+    from openmmla.analytics.fusion import window_features as fusion
     from openmmla.analytics.fusion.window_features import (
-        export_files, load_events_from_export, load_events_from_influx, session_of_export, window_features,
-        write_table,
+        export_files, load_events_from_export, load_events_from_influx, session_of_export, write_table,
     )
     if args.window <= 0 or args.step <= 0:
         parser.error("-w/--window and -st/--step must be greater than 0")
@@ -62,25 +63,48 @@ def main():
         events = load_events_from_influx(session_id, InfluxDBClientWrapper(args.config_path))
 
     participants = [t.strip() for t in args.participants.split(',') if t.strip()] if args.participants else None
-    rows = window_features(events, window=args.window, step=args.step, participants=participants)
+    # the session's pupils, the in-group set whose faces and hands are a partner's: the -tags, else the
+    # pupils its manifest declares, else (None) the tags up to the IPS trust bound
+    from openmmla.analytics.interaction.layout import declared_pupils
+    from openmmla.utils.artifact_paths import session_artifact_dir
+    session_dir = session_artifact_dir(project_dir, session_id)
+    if participants is not None:
+        pupils, pupils_source = list(participants), 'tags'
+    else:
+        try:
+            pupils = declared_pupils(session_dir)
+        except ValueError as e:
+            parser.error(str(e))
+        pupils_source = 'manifest' if pupils is not None else 'trust bound'
+    rows = fusion.window_features(events, window=args.window, step=args.step, participants=participants, pupils=pupils)
     if not rows:
         print(f"No events found for session {session_id}: nothing to build a table from.")
         return
+    used_pupils = pupils if pupils is not None else fusion.default_pupils(fusion.participants_of(events))
+    print(f"Pupils ({pupils_source}): {', '.join(used_pupils) or 'none'}")
 
     out = args.out
     if not out:
-        from openmmla.utils.artifact_paths import session_artifact_dir
-        out = os.path.join(os.fspath(session_artifact_dir(project_dir, session_id)), 'analysis', 'features',
-                           f'{session_id}_window_features.csv')
+        out = os.path.join(os.fspath(session_dir), 'analysis', 'features', f'{session_id}_window_features.csv')
     path = write_table(rows, out)
     counts = {event_type: len(records) for event_type, records in events.items() if records}
     print(f"{len(rows)} windows of {args.window:g} s ({len(rows[0])} columns) from {counts} -> {path}")
 
     # what the table was made from and with, next to it
     try:
+        from openmmla.services.vfa.work_area import WORK_AREA_HIGH, WORK_AREA_LOW, WORK_AREA_MIN_HANDS
         from openmmla.utils.session_provenance import analysis_record, write_analysis_record
         record = analysis_record(session_id, inputs=inputs, outputs=[path], steps=['fusion.window_features'],
                                  parameters={'window': args.window, 'step': args.step, 'participants': participants,
+                                             'pupils': used_pupils, 'pupils_source': pupils_source,
+                                             'work_area': {'low': WORK_AREA_LOW, 'high': WORK_AREA_HIGH,
+                                                           'min_hands': WORK_AREA_MIN_HANDS,
+                                                           'pad': 'median hand radius + max(W,H)/64'},
+                                             'seat_partners': 'an untagged gaze target at the seat of a pupil '
+                                                              'missing from the frame is that pupil',
+                                             'joint_baseline': {'lags': list(fusion.JOINT_BASELINE_LAGS),
+                                                                'slack': fusion.JOINT_BASELINE_SLACK,
+                                                                'min': fusion.JOINT_BASELINE_MIN},
                                              'events': counts, 'source': args.measurements or 'influxdb'},
                                  root=project_dir, project_dir=project_dir)
         write_analysis_record(record, os.path.join(os.path.dirname(path), 'fusion'))

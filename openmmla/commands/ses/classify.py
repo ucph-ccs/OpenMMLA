@@ -43,7 +43,8 @@ def get_parser():
                         help="whose labels are the truth (default: the coder with the most windows over the DEV "
                              "sessions; required with --split test)")
     parser.add_argument('-m', '--models', default=DEFAULT_MODELS,
-                        help="comma list of r0 (a-priori rule), jev (zero-shot, from mmla ses-jev's answers), "
+                        help="comma list of r0 (a-priori rule), r0-v1 (its first version, kept for the record), jev "
+                             "(zero-shot, from mmla ses-jev's answers), "
                              "majority, stratified, r1 (fitted tree), jev-cal, lr, hgb, late-lr, late-hgb, pooled-net, "
                              f"net-notcn, net, net-pair (default {DEFAULT_MODELS})")
     parser.add_argument('--split', choices=('date', 'task', 'test'), default='date',

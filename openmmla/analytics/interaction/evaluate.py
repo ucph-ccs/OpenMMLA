@@ -80,7 +80,7 @@ from openmmla.analytics.interaction import tabular as TB
 
 # every model a run can name, with the group of the results table it sits in
 GROUPS = {
-    'r0': 'no labels', 'jev': 'no labels',
+    'r0': 'no labels', 'r0-v1': 'no labels', 'jev': 'no labels',
     'majority': 'label floors', 'stratified': 'label floors',
     'r1': 'few-label', 'jev-cal': 'few-label',
     'lr': 'tabular', 'hgb': 'tabular', 'late-lr': 'tabular', 'late-hgb': 'tabular',
@@ -90,7 +90,9 @@ MODELS = tuple(GROUPS)
 TABULAR = ('r1', 'lr', 'hgb', 'late-lr', 'late-hgb')
 NETWORKS = ('pooled-net', 'net-notcn', 'net', 'net-pair')
 # the models that read no label: they run even where a learned model is refused
-UNLEARNED = ('r0', 'jev')
+UNLEARNED = ('r0', 'r0-v1', 'jev')
+# the a-priori rule's versions by model name: r0 is the current rule, r0-v1 the first one, kept for the record
+RULE_MODELS = {'r0': TB.RULE_VERSION, 'r0-v1': 1}
 HEADLINE_MODELS = ('late-lr', 'late-hgb')
 TEMPORAL = ('T0', 'T1c', 'T2')
 HMM_MODES = ('none', 'fb', 'filter')
@@ -699,12 +701,12 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
     results, details, extras = {}, {}, {}
     n_test = sum(len(d) for d in fd.test)
     for model in plan['models']:
-        if model == 'r0':
+        if model in RULE_MODELS:
             # the rule reads the unscaled view: its thresholds are in the table's units
-            labels = np.concatenate([TB.rule_a_priori(d.raw) for d in fd.test])
+            labels = np.concatenate([TB.rule_a_priori(d.raw, version=RULE_MODELS[model]) for d in fd.test])
             binary = (labels > 0).astype(int)
-            results[_key('r0', 'T0', 'none')] = {'p': None, 'y_pred': labels if k == 3 else binary,
-                                                 'y_pred_binary': binary}
+            results[_key(model, 'T0', 'none')] = {'p': None, 'y_pred': labels if k == 3 else binary,
+                                                  'y_pred_binary': binary}
         elif model in ('majority', 'stratified'):
             y3 = np.where(L.scored(fd.y), fd.y, -1)
             p, labels = TB.majority_floor(y3, n_test)
@@ -1104,6 +1106,9 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
                      'values': {v.name: {'source': v.source, 'transform': v.transform, 'scale': v.tag, 'mask': v.mask,
                                          'modality': v.modality} for v in values},
                      'dropped': dict(LY.DROPPED)},
+        'rule': {'version': TB.RULE_VERSION, 'fixed': TB.RULES[TB.RULE_VERSION]['fixed'],
+                 'columns': {role: list(names) for role, names in TB.RULES[TB.RULE_VERSION]['columns'].items()},
+                 'thresholds': dict(TB.RULES[TB.RULE_VERSION]['thresholds'])},
         'rule_thresholds': dict(TB.RULE_THRESHOLDS),
         'presence_gate': dict(P.RULE),
         'grids': {'lr': plan['lr_grid'], 'hgb': plan['hgb_grid']},
@@ -1146,7 +1151,7 @@ def planned_variants(models, temporal=TEMPORAL, hmm=HMM_MODES, jev_variant: str 
     inputs. A model with an empty list would be trained on every fold for nothing."""
     out = {}
     for model in dict.fromkeys(models):
-        if model in ('r0', 'majority', 'stratified'):
+        if model in ('r0', 'r0-v1', 'majority', 'stratified'):
             out[model] = [_key(model, 'T0', 'none')]
             continue
         if model == 'jev':

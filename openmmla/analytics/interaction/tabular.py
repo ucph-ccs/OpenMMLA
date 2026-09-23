@@ -7,7 +7,7 @@ the masks as columns of their own) and labels as ints: 0 individual, 1 social, 2
 and -1 for a window that is not coded (or is unclear), which no fit and no score reads. What a
 model answers is a log-probability per class (its logits), so the calibrator, the stacker and the
 HMM all take one format. Nothing here knows the layout beyond the names it is handed: the experts
-get their block's columns from the caller, and the rule's names sit in RULE_COLUMNS.
+get their block's columns from the caller, and the rule's names sit in RULES.
 
 Selection, calibration and stacking all run on the same inner splits, which hold out whole
 lessons: windows ten seconds apart are near copies, so a split that scatters them (a random
@@ -28,30 +28,60 @@ LR_GRID = [{'C': c} for c in (0.01, 0.03, 0.1, 0.3, 1.0)]
 HGB_GRID = [{'max_iter': iterations, 'max_leaf_nodes': leaves, 'min_samples_leaf': leaf}
             for iterations in (100, 200, 400) for leaves in (8, 16) for leaf in (40, 100)]
 
-# the pooled columns the a-priori rule reads, by role (layout.pooled of unscaled tokens): the
-# thresholds are in the fusion table's units (shares, counts, frame widths), so the values must be
-# unscaled; a column named log_* holds log1p of the count and is turned back before the threshold
-RULE_COLUMNS = {
-    'speech_ratio': 'speech_ratio',
-    'words': 'log_words',
-    'dia_switches': 'log_dia_switches',
-    'm_dia': 'm_dia',
-    'partner_face': 'partner_face_mean',
-    'partner_hands': 'partner_hands_mean',
-    'own_hands': 'own_hands_mean',
-    'joint_attention': 'joint_attention_ratio_max',
-    'hand_dist_min': 'hand_dist_min_min',
+# the a-priori rule, by version: the pooled columns each role reads (layout.pooled of unscaled
+# tokens; a role sums its columns) and the thresholds, fixed from the codebook's wording before any
+# label was read and never tuned. The thresholds are in the fusion table's units (shares, counts,
+# frame widths), so the values must be unscaled; a column named log_* holds log1p of the count and
+# is turned back before the threshold
+RULES = {
+    1: {'fixed': '2026-09-23 (ff81d73), layout version 2, before any label was read',
+        'columns': {
+            'speech_ratio': ('speech_ratio',),
+            'words': ('log_words',),
+            'dia_switches': ('log_dia_switches',),
+            'm_dia': ('m_dia',),
+            # partner gaze counted every other person before layout version 3: partner + other
+            'partner_face': ('partner_face_mean', 'other_face_mean'),
+            'hands': ('partner_hands_mean', 'other_hands_mean', 'own_hands_mean'),
+            'joint_attention': ('joint_attention_ratio_max',),
+            'hand_dist_min': ('hand_dist_min_min',),
+        },
+        'thresholds': {
+            'speech_ratio': 0.3,      # talk: at least this share of the window held speech
+            'dia_switches': 1,        # ... and the turn passed at least once (diarized windows)
+            'words': 5,               # ... or at least this many words (no diarization)
+            'partner_face': 0.2,      # look: mean share of readable gaze on a partner's face
+            'joint_attention': 0.3,   # shared focus: the best pair's joint-attention share
+            'hand_dist_min': 0.05,    # ... or two pairs of hands this close, in frame widths
+            'hands': 0.4,             # collaborative: mean share of gaze on hands (own or a partner's)
+        }},
+    2: {'fixed': '2026-09-23, layout version 3, from the codebook wording, before any label was read',
+        'columns': {
+            'speech_ratio': ('speech_ratio',),
+            'words': ('log_words',),
+            'dia_switches': ('log_dia_switches',),
+            'm_dia': ('m_dia',),
+            'partner_face': ('partner_face_mean',),
+            'task_gaze': ('partner_hands_mean', 'own_hands_mean', 'work_area_mean'),
+            'watching': ('partner_hands_max',),
+            'joint_attention': ('joint_attention_excess_max',),
+            'hand_dist_min': ('hand_dist_min_min',),
+        },
+        'thresholds': {
+            'speech_ratio': 0.3,      # talk ("Members interact (talk, ...)"): v1's thresholds
+            'dia_switches': 1,
+            'words': 5,
+            'partner_face': 0.2,      # look ("look at each other"): v1's glance bound, the partner in-group
+            'joint_attention': 0.3,   # shared focus: joint attention this far above the pair's own rate 20-40 s earlier
+            'hand_dist_min': 0.05,    # ... or two pairs of hands this close ("handing over"), in frame widths
+            'task_gaze': 0.4,         # collaborative: gaze on the task (hands, and the work area around them)
+            'watching': 0.5,          # a pupil watching a partner's hands for most of the window
+        }},
 }
-# fixed from the codebook's wording before any label was read; never tuned
-RULE_THRESHOLDS = {
-    'speech_ratio': 0.3,      # talk: at least this share of the window held speech
-    'dia_switches': 1,        # ... and the turn passed at least once (diarized windows)
-    'words': 5,               # ... or at least this many words (no diarization)
-    'partner_face': 0.2,      # look: mean share of readable gaze on a partner's face
-    'joint_attention': 0.3,   # shared focus: the best pair's joint-attention share
-    'hand_dist_min': 0.05,    # ... or two pairs of hands this close, in frame widths
-    'hands': 0.4,             # collaborative: mean share of gaze on hands (own or a partner's)
-}
+RULE_VERSION = 2
+# the current rule's columns and thresholds, by their older names
+RULE_COLUMNS = RULES[RULE_VERSION]['columns']
+RULE_THRESHOLDS = RULES[RULE_VERSION]['thresholds']
 
 
 # ---- labels and priors ----
@@ -116,31 +146,59 @@ def _logsumexp(z: np.ndarray) -> np.ndarray:
 
 def _column(pooled, name: str) -> np.ndarray:
     if name not in pooled.columns:
-        raise KeyError(f"the pooled view has no column {name!r} (see RULE_COLUMNS)")
+        raise KeyError(f"the pooled view has no column {name!r} (see RULES)")
     values = pooled[name].to_numpy(dtype=float)
     # a log1p column goes back to its count, so the threshold keeps the codebook's unit
     return np.expm1(values) if name.startswith('log_') else values
 
 
-def rule_a_priori(pooled, columns: dict | None = None) -> np.ndarray:
+def _role(pooled, names) -> np.ndarray:
+    """a role's value: the sum of its columns. The first keeps its NaN (a condition on it is then
+    false); an added one counts 0 where it is NaN (a table fused before layout version 3 has no
+    other_* shares)."""
+    names = (names,) if isinstance(names, str) else tuple(names)
+    total = _column(pooled, names[0]).copy()
+    for name in names[1:]:
+        total = total + np.nan_to_num(_column(pooled, name), nan=0.0)
+    return total
+
+
+def rule_a_priori(pooled, columns: dict | None = None, version: int = RULE_VERSION) -> np.ndarray:
     """R0, the no-label rule (the peer of zero-shot Jev), from thresholds fixed by the codebook's
-    wording: talk, look or a shared focus make an interaction, and a shared focus or eyes on the
-    hands make it collaborative. A condition on something unobserved (NaN) is false, so a window
-    nobody could see or hear is individual. It gives hard labels only (0, 1, 2)."""
-    names = dict(RULE_COLUMNS, **(columns or {}))
-    th = RULE_THRESHOLDS
+    wording (RULES). A condition on something unobserved (NaN) is false, so a window nobody could
+    see or hear is individual. It gives hard labels only (0, 1, 2). `columns` overrides a role's
+    columns (a name or a tuple of names).
+
+    Version 2 (layout version 3): talk (speech, and a change of speaker or enough words), look (an
+    in-group partner's face), a shared focus (joint attention above the pair's own rate 20-40 s
+    earlier, or hands close enough to hand over) or watching (a pupil's gaze on a partner's hands
+    for most of the window, silent or not) make an interaction; a shared focus or watching make it
+    collaborative, as does an interaction with the gaze on the task (hands and the work area).
+    Version 1 (layout version 2): talk, look or the raw joint attention or near hands make an
+    interaction, and a shared focus or eyes on the hands make it collaborative; on a version 3
+    view it reads partner + other, the partner gaze of layout version 2."""
+    if version not in RULES:
+        raise ValueError(f"unknown rule version {version!r}: one of {sorted(RULES)}")
+    names = dict(RULES[version]['columns'], **(columns or {}))
+    th = RULES[version]['thresholds']
     with np.errstate(invalid='ignore'):
-        speech = _column(pooled, names['speech_ratio'])
-        words = _column(pooled, names['words'])
-        switches = _column(pooled, names['dia_switches'])
-        diarized = np.nan_to_num(_column(pooled, names['m_dia'])) > 0
+        speech = _role(pooled, names['speech_ratio'])
+        words = _role(pooled, names['words'])
+        switches = _role(pooled, names['dia_switches'])
+        diarized = np.nan_to_num(_role(pooled, names['m_dia'])) > 0
         talk = (speech >= th['speech_ratio']) & np.where(diarized, switches >= th['dia_switches'], words >= th['words'])
-        look = _column(pooled, names['partner_face']) >= th['partner_face']
-        shared = (_column(pooled, names['joint_attention']) >= th['joint_attention']) \
-            | (_column(pooled, names['hand_dist_min']) <= th['hand_dist_min'])
-        hands = _column(pooled, names['partner_hands']) + _column(pooled, names['own_hands'])
-        interaction = talk | look | shared
-        collaborative = interaction & (shared | (hands >= th['hands']))
+        look = _role(pooled, names['partner_face']) >= th['partner_face']
+        shared = (_role(pooled, names['joint_attention']) >= th['joint_attention']) \
+            | (_role(pooled, names['hand_dist_min']) <= th['hand_dist_min'])
+        if version == 1:
+            hands = _role(pooled, names['hands'])
+            interaction = talk | look | shared
+            collaborative = interaction & (shared | (hands >= th['hands']))
+        else:
+            watching = _role(pooled, names['watching']) >= th['watching']
+            task = _role(pooled, names['task_gaze']) >= th['task_gaze']
+            interaction = talk | look | shared | watching
+            collaborative = shared | watching | (interaction & task)
     return np.where(collaborative, 2, np.where(interaction, 1, 0)).astype(int)
 
 

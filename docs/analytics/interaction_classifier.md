@@ -39,6 +39,9 @@ Code what the video shows, not what the sensors show. With both video and audio 
 !!! note "Two-camera sessions need a re-fuse"
     Tables fused before the camera fix put the frames of two cameras with the same angle into one sequence. Their wrist speed, gaze switches and yaw spread measure camera flips, not movement. Re-fuse every session (`mmla ses-fuse -md artifacts/<session>/measurements`) before training or asking Jev. A re-fused table has `p<tag>_frame_sets` and `p<tag>_cameras`, and `data_checks.json` then compares one-camera with two-camera windows.
 
+!!! note "Layout version 3: re-fuse after the fusion fixes of 2026-09-23"
+    The fusion of 2026-09-23 (fixed before any label was read) makes partner gaze in-group: `partner_face` and `partner_hands` are another pupil of the session, and the faces and hands of anyone else (the teacher, another group, a misread badge) are `other_face` and `other_hands`. It calls an `elsewhere` gaze inside the camera's work area (the region of the pupils' hands) `work_area`, and it adds the joint-attention baseline and excess (see [window features](../pipelines/vfa/index.md#window-features-the-fusion-table)). Layout version 3 reads them: `other_face` and `other_hands` under mask m_other, `work_area` under m_wa (on only where at least half of the person's gaze frames had a ready area, `p<tag>_work_area_ready_ratio` ≥ 0.5), and `joint_attention_excess` under m_jexcess (off where the baseline had fewer than 10 comparisons). The lag column `joint_attention_excess_max` replaces `joint_attention_ratio_max`: the lags carry the dynamics of the interaction, while proximity changes slowly and stays in the current window's raw value. A table fused before the split has no `p<tag>_gaze_other_face_ratio`: its m_other and m_wa are off, its excess is NaN, and its partner gaze still counts every other person. It is not refused, as a table from before the camera fix is not; `data_checks.json` lists it under `fusion_check` as `split: false`. For every re-fused session `fusion_check` gives the fusion's pupils, whether the roster's persons are among them, each kept person's mean work-area readiness, the share of co-visible roster pair-windows with a finite excess, and the gaze frames whose untagged target the fusion named a pupil because it stood at that pupil's seat (`seat_partner_frames`).
+
 **Roster.** Tag ids group columns and nothing else. No feature name, value or slot carries a tag id, a session id or a column position. The rules below run in order, and each drop is written to `roster.json` with its reason:
 
 | Rule | Drops |
@@ -60,26 +63,28 @@ Slots follow descending coverage. A duplicate-skeleton gate masks a person's cam
 |---|---|---|
 | group G | 11 | speech_ratio, silence_ratio, log words, dia_speakers, log dia_switches, dia_overlap_ratio, dia_share_entropy; masks m_asr, m_transcription, m_dia; group size / 3 |
 | availability a | 3 | speech ran, IPS ran, VFA ran |
-| person slots | 3 × 19 | present_ratio, log path, seen share, head-turn mean and spread / 90, log wrist speed, gaze switch rate, gaze on a partner's face, a partner's hands, own hands, elsewhere, out of frame (each over the readable share), readable share; masks m_ips, m_path, m_vfa, m_yaw, m_wrist, m_gaze |
-| pair slots | 3 × 13 | distance mean and min, face_any = max(ab, ba), co-seen share, hand distance min and mean, gaze distance, joint attention; masks m_dist, m_face, m_covis, m_hand, m_gazepair |
+| person slots | 3 × 24 | present_ratio, log path, seen share, head-turn mean and spread / 90, log wrist speed, gaze switch rate, gaze on a partner's face, a partner's hands, someone else's face (`other_face`), someone else's hands (`other_hands`), own hands, the work area, elsewhere, out of frame (each over the readable share), readable share; masks m_ips, m_path, m_vfa, m_yaw, m_wrist, m_gaze (partner, own, elsewhere, out of frame), m_other (the two other shares), m_wa (the work area) |
+| pair slots | 3 × 15 | distance mean and min, face_any = max(ab, ba), co-seen share, hand distance min and mean, gaze distance, joint attention, joint-attention excess over the pair's own rate 20–40 s earlier; masks m_dist, m_face, m_covis, m_hand, m_gazepair, m_jexcess |
 
 Every pair value is symmetric in a and b. A value is scaled either as [g], a robust z-score over the training sessions' non-empty windows, or as [s], one within its own session. Per-camera units such as frame widths, words and path use [s]. The result is clipped to ±5.
 
-**Pooled view.** Each person value becomes its (min, mean, max) over the slots that observed it, and each pair value the same over pairs. Masks, shares of slots observed and the group size are added, for 82 columns in four blocks: speech 10, space 18, body and gaze 53, roster 1. For at most three persons, (min, mean, max) gives back the sorted values exactly. The pooled view therefore loses only which values belong to one person, and that binding is what the network's set encoders can add. The rule, LR, HGB, late fusion and PooledNet all read this view.
+**Pooled view.** Each person value becomes its (min, mean, max) over the slots that observed it, and each pair value the same over pairs. Masks, shares of slots observed and the group size are added, for 94 columns in four blocks: speech 10, space 18, body and gaze 65 (14 person values and 6 pair values, each as min, mean and max, and the 5 share columns), roster 1. For at most three persons, (min, mean, max) gives back the sorted values exactly. The pooled view therefore loses only which values belong to one person, and that binding is what the network's set encoders can add. The rule, LR, HGB, late fusion and PooledNet all read this view.
 
 **Temporal context** for the tabular models, over each session's whole grid (coded or not):
 
 | Mode | Adds | Columns |
 |---|---|---|
-| T0 | nothing | 82 |
-| T1c (causal) | 12 key columns at t−1 and t−2, and their mean over t−4..t | 118 |
-| T2 (centred) | the same at t−1 and t+1, and their mean over t−2..t+2 | 118 |
+| T0 | nothing | 94 |
+| T1c (causal) | 12 key columns at t−1 and t−2, and their mean over t−4..t | 130 |
+| T2 (centred) | the same at t−1 and t+1, and their mean over t−2..t+2 | 130 |
 
 The dropped columns, with a reason each (`layout.DROPPED`), include:
 
 - `spk_*_ratio`, `n_speakers_named` and the spurt counters;
 - `yaw_mean`, whose sign depends on the seat;
-- `face_ab`/`face_ba`, replaced by face_any, and the near-dead mutual gaze and mutual facing;
+- `face_ab`/`face_ba`, replaced by face_any, and the near-dead mutual gaze (> 0 in 3.8 % of co-visible pair-windows, mean 0.006) and mutual facing (`face_mutual`, > 0 in 0.06 % of IPS pair-windows). face_any stays: it is measured in 43.7 % of IPS pair-windows and > 0 in 10.7 % of those, sparse but persistent (lag-1 r 0.62) and a property of the pair (85 % of its variance within pairs);
+- `gaze_zone`, 0 everywhere since no zones are configured (the automatic work area is `gaze_work_area`);
+- `work_area_ready_ratio`, a coverage counter read only by the m_wa mask; `in_group`, the fusion's pupil set, read only by `fusion_check`; and `joint_attention_baseline`, the proximity baseline, which the raw share and the excess carry;
 - every coverage counter (`n_*`, `*_frames`, `*_frame_sets`, `*_cameras`). Camera count is a session fingerprint, so these are only masks and normalisers;
 - the seat trace (`p<tag>_untagged_at_seat_ratio`, `n_untagged_at_seats`): untagged bodies at the persons' seats, read by the presence gate only and never a model input. `data_checks.json` gives its support and, per session, `seat_check`: how often the trace could be read, how often a body sat at a missing person's seat, and how many present_ratio zeros the camera made unobserved;
 - the action columns, reserved for a semantic block once the VLM runs.
@@ -88,7 +93,8 @@ The dropped columns, with a reason each (`layout.DROPPED`), include:
 
 | Model | What it is |
 |---|---|
-| `r0` | The a-priori rule, from thresholds fixed by the codebook's wording before any label. Talk is speech ≥ 30 % with a change of speaker, or ≥ 5 words when not diarized. Look is ≥ 20 % of readable gaze on a partner's face. Shared focus is joint attention ≥ 30 %, or hands ≤ 0.05 frame widths apart. Any of the three makes an interaction. Shared focus, or ≥ 40 % of gaze on hands, makes it collaborative. It gives hard labels only. |
+| `r0` | The a-priori rule, version 2 (fixed 2026-09-23 for layout version 3, from the codebook's wording, before any label was read). Talk is speech ≥ 30 % with a change of speaker, or ≥ 5 words when not diarized ("members interact (talk, ...)"; version 1's thresholds). Look is ≥ 20 % of readable gaze on an in-group partner's face ("look at each other"; version 1's glance bound). Shared focus is joint attention ≥ 30 % above the pair's own rate 20–40 s earlier (`joint_attention_excess_max`), or hands ≤ 0.05 frame widths apart ("joint attention on the shared artifact", "handing over, working on one thing together"): sitting close is not a shared focus, so the raw share no longer counts. Watching is a pupil's share of gaze on a partner's hands ≥ 50 % (`partner_hands_max`; "one member following another's work on the shared artifact for most of the window counts, even in silence; a glance does not"). Any of the four makes an interaction. Shared focus or watching makes it collaborative, and so does an interaction with ≥ 40 % of gaze on the task: a partner's hands, own hands and the work area (`partner_hands_mean + own_hands_mean + work_area_mean`; "interact about the task", version 1's 0.4 with the shared artifact's region added). A role that sums columns keeps the first column's NaN (the condition is then false) and counts an added one as 0 where it is NaN. It gives hard labels only. Expected, and reported rather than tuned: social becomes rarer, and the pre-registered rare-social policy applies. The near-hands clause alone fires in 39 % of the unlabelled windows; it stays, because the codebook names handing over. |
+| `r0-v1` | Version 1 of the rule (fixed 2026-09-23 with layout version 2), kept for the record. Talk, look (≥ 20 % on any other person's face: partner + other), or a shared focus (the raw joint attention ≥ 30 %, or near hands) make an interaction, and a shared focus or ≥ 40 % of gaze on hands (a partner's, someone else's or own) makes it collaborative. On a version 3 view it reproduces version 1 exactly, and on a table fused before the split the other shares are NaN and count 0. |
 | `majority`, `stratified` | The label floors: the training prior, and labels drawn from it (averaged over five seeds). |
 | `r1` | A fitted two-level tree (at most four leaves, ≥ 100 windows each) on the T0 pooled view, then calibrated. |
 | `lr`, `hgb` | Early fusion: logistic regression (median imputation, standardising, balanced multinomial, C ∈ {0.01, 0.03, 0.1, 0.3, 1}) and gradient boosting (12-point grid, native NaN, no early stopping) on the whole view. |
@@ -104,7 +110,7 @@ The dropped columns, with a reason each (`layout.DROPPED`), include:
 **HMM** (`--hmm`). The states are the classes. The transitions are counts of adjacent coded pairs in the training sessions, plus 1 on every cell and 10 more on the diagonal. The emission is (p / π)^γ, with γ ∈ {0.5, 0.75, 1} chosen on the inner out-of-fold NLL. A window where no modality ran gets a flat emission. The modes are:
 
 - `fb`: forward-backward, offline. It also gives the Viterbi path, which is used for run lengths only.
-- `filter`: the causal forward filter, the online answer. It is run only for inputs that never read a later window (T0, T1c, the network without its temporal blocks, Jev). For these rows the held-out session's [s] values are scaled by a running median and spread over the windows so far, with the training statistics until 30 values are seen. Nothing in an online row reads a later window of the held-out session.
+- `filter`: the causal forward filter, the online answer. It is run only for inputs that never read a later window (T0, T1c, the network without its temporal blocks, Jev). For these rows the held-out session's [s] values are scaled by a running median and spread over the windows so far, with the training statistics until 30 values are seen. Nothing in an online row reads a later window of the held-out session. The fusion table under it is built offline, though: the tags carried along the tracks and the seats read the whole session, so a later badge read can rename a person in an earlier window (see [window features](../pipelines/vfa/index.md#window-features-the-fusion-table)). An online row is causal in its windows, not in who each person is.
 - `none`: no smoothing.
 
 A 2-state HMM on the derived binary posteriors is reported next to each `fb` variant as a check.
@@ -132,11 +138,13 @@ InteractionNet reads the tokens of a whole session as one sequence.
 
 | Variant | Parameters |
 |---|---|
-| `net` (default) | 13,625 |
-| small configuration (used when a fold has fewer than 3,000 coded training windows; `--small`) | 6,673 |
-| `net-pair` (pair encoder conditioned on both persons' states) | 14,777 |
-| `net-notcn` (no temporal blocks) | 8,153 |
-| `pooled-net` (the 82-column pooled view through the same fusion, temporal blocks and head) | 9,767 |
+| `net` (default) | 13,793 |
+| small configuration (used when a fold has fewer than 3,000 coded training windows; `--small`) | 6,785 |
+| `net-pair` (pair encoder conditioned on both persons' states) | 14,945 |
+| `net-notcn` (no temporal blocks) | 8,321 |
+| `pooled-net` (the 94-column pooled view through the same fusion, temporal blocks and head) | 10,367 |
+
+These are the counts of layout version 3 (person tokens of 24, pair tokens of 15, a pooled view of 94); version 2 gave 13,625, 6,673, 14,777, 8,153 and 9,767.
 
 The recipe was fixed before any result, and only the epoch count is tuned.
 
@@ -232,6 +240,8 @@ The `_analysis` prefix keeps `ses-code` from taking the folder for a session.
 
 The command applies the inclusion rule S1 first: a session the rule leaves out fits no tertiles and is asked about nothing, and the command says so. The tertile edges are part of the template. The first run fits them and freezes them in `artifacts/_analysis/interaction/jev/bins.json`. A pilot uses `bins_pilot.json` instead, since its tables predate the camera fix. Every later run reads the frozen file, or the one `--bins` names. Only `--fit-bins` fits them again, and the command then says that every state is new.
 
+The camera part names where each gaze landed as a partner's face or hands (another member of the group), someone else's face or hands (the teacher, other groups), own hands, the work area around the hands, elsewhere and out of frame, and each pair's joint attention with its baseline: "gaze points close together (joint attention) in 60% of shared frames, 25% when compared 20 to 40 s apart". The work area is said only where at least half of the person's gaze frames had a ready area, and the baseline only where it exists; a table fused before 2026-09-23 has neither the other shares nor the work area nor the baseline, and its state leaves them out. The sensor note tells Jev that a partner is another member of the group (also one with an unread badge in their own seat), that anyone else's face and hands are named apart (now and then a member away from their seat with an unread badge among them), and that the work area is the table region around the members' hands. The re-fused tables and this wording both miss the cache, so every Jev map must be asked again (`--dry-run` gives the cost).
+
 A missing modality is said in words ("not measured", "C not in view"), never as 0. No tag id, session id, date, task name or transcript text is in the state, so nothing said leaves the machine. The question is the coder's codebook, plus a note on what the sensors can and cannot tell. `unclear` is offered only in J2. `absent` is never offered, and J2 skips windows coded absent.
 
 | Variant | What Jev sees |
@@ -267,7 +277,8 @@ pip install torch
 Then, in order:
 
 ```bash
-# 1. re-fuse every session after the camera fix
+# 1. re-fuse every session after the 2026-09-23 fusion fixes (in-group partners, the work area, the joint-attention
+#    baseline; the camera fix before them): the pupils come from the manifest, else the tags up to 12
 mmla ses-fuse -md artifacts/<session>/measurements
 
 # 2. the Jev pilot: plumbing, wording and cost, on dev sessions, never scored
@@ -282,7 +293,7 @@ OPENROUTER_API_KEY=... mmla ses-jev --variant j1
 mmla ses-code --sample 0.3 --block 300 --seed 1
 
 # 5. dev: leave one date out
-mmla ses-classify -m r0,jev,majority,stratified,r1,jev-cal,lr,hgb,late-lr,late-hgb --split date --jobs 4
+mmla ses-classify -m r0,r0-v1,jev,majority,stratified,r1,jev-cal,lr,hgb,late-lr,late-hgb --split date --jobs 4
 mmla ses-classify -m pooled-net,net-notcn,net,net-pair --split date --jobs 4
 
 # 6. once every choice is frozen: the TEST sessions, exactly once
@@ -292,7 +303,7 @@ mmla ses-classify -m <headline model>,<compared models> --split test --confirm-f
 | `ses-classify` flag | Does |
 |---|---|
 | `-a`, `-s`, `-o` | artifacts root, a session-id filter, the run folder |
-| `-m` | comma list of models (default `r0,r1,lr,hgb,late-lr,late-hgb`) |
+| `-m` | comma list of models (default `r0,r1,lr,hgb,late-lr,late-hgb`; `r0-v1` is the first version of the rule, kept for the record) |
 | `--split date` / `test` | leave one dev date out, every session of it together (the default), or score TEST once (needs `--confirm-frozen` and `--coder`; each start and finish is appended to `artifacts/_analysis/interaction/test_runs.jsonl`) |
 | `--temporal`, `--hmm` | comma lists, or `all` (the default for both); a model the two give no variant, such as `lr` with `--temporal T2 --hmm filter`, is refused before anything is read |
 | `--target binary` | the two-class fallback |

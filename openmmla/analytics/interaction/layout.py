@@ -1,6 +1,6 @@
 """The input layout of the 10 s interaction classifier: a fused table (mmla ses-fuse) becomes, per
 window, a group token, three availability bits and two small sets, one of at most three persons and
-one of at most three pairs. The 82-column pooled view every tabular model reads is made from those
+one of at most three pairs. The 94-column pooled view every tabular model reads is made from those
 sets, so every model sees the same information.
 
 Tag ids only group a table's columns and run the roster. No feature name, value or slot carries a
@@ -18,6 +18,16 @@ Version 1 read it as 0. The seat trace of window_features (p<t>_untagged_at_seat
 n_untagged_at_seats) is auxiliary: parse_columns sets it apart, no token reads it, and the presence
 gate reads it where the table has it.
 
+Layout version 3 (2026-09-23, before any label was read): partner gaze is in-group (another pupil
+of the session); the faces and hands of anyone else are other_face and other_hands (mask m_other),
+an `elsewhere` gaze inside the camera's work area is work_area (mask m_wa, on where most of the
+person's gaze frames had a ready area), and joint attention above the pair's own rate 20-40 s
+earlier is joint_attention_excess (mask m_jexcess). The lag column joint_attention_excess_max
+replaces joint_attention_ratio_max. A table fused before the split has no p<t>_gaze_other_face_ratio:
+its m_other and m_wa are off, its excess is NaN, and its partner gaze still counts every other
+person. data_checks' fusion_check lists it as split: false; it is not refused, as a table fused
+before the camera fix is not.
+
 Tables fused before the camera fix have no frame-set or camera counts (p<t>_frame_sets,
 p<t>_cameras, pair<a>_<b>_frame_sets, n_vfa_cameras). Their frame counts stand in for them there,
 and a second camera inflates those: the seen share is clipped at 1 and the switch rate runs over
@@ -28,7 +38,7 @@ front when it is log-transformed (`p5_yaw_std` -> `yaw_std`, `p5_wrist_speed` ->
 `log_wrist_speed`); the values the layout derives have names of their own (seen_share,
 switch_rate, known_share, the gaze shares of readable gaze, face_any, co_seen_share). A pooled
 column is `<value>_<min|mean|max>` for a person or pair value and the value's own name for a group
-one; POOLED_COLUMNS lists all 82, and a lag column is `<pooled column>_<suffix>` (LAGS).
+one; POOLED_COLUMNS lists all 94, and a lag column is `<pooled column>_<suffix>` (LAGS).
 """
 from __future__ import annotations
 
@@ -43,7 +53,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-LAYOUT_VERSION = 2
+from openmmla.services.vfa.work_area import WORK_AREA_READY_MIN
+
+LAYOUT_VERSION = 3
 # the IPS trust bound: a higher tag id is a mis-decoded badge
 MAX_TAG = 12
 N_SLOTS = 3
@@ -76,13 +88,19 @@ DROPPED = {
     r'^n_speakers_named$': 'a 0/1 copy of speech > 0',
     r'^(n_spurts|mean_spurt_seconds)$': 'artifacts of the 30 s transcription chunk cap',
     r'^p\d+_yaw_mean$': 'its sign depends on which side of the camera the seat is',
-    r'^p\d+_gaze_zone_ratio$': '0 everywhere (no zones configured)',
+    r'^p\d+_gaze_zone_ratio$': '0 everywhere (no zones configured); the automatic work area is p<t>_gaze_work_area_ratio',
+    r'^p\d+_work_area_ready_ratio$': 'a coverage counter: the m_wa mask only, never a feature',
+    r'^p\d+_in_group$': "the fusion's pupil set: data_checks' fusion_check only",
+    r'^pair\d+_\d+_joint_attention_baseline$': 'the proximity baseline of joint attention: the raw share and the excess carry it',
+    r'^p[\w-]+_words$': "a pupil's words from the worn microphone that won the bucket: only sessions with worn microphones "
+                        'have it (none of the test sessions, whose audio is the group microphone alone)',
     r'^pair\d+_\d+_face_(ab|ba)_ratio$': 'replaced by face_any = max(ab, ba), since ab and ba follow the arbitrary tag order',
     # face_both = min(ab, ba) is never built: > 0 in 0-0.6 % of windows
-    r'^pair\d+_\d+_face_mutual_ratio$': 'near-dead (> 0 in 0-0.3 % of windows); its support is in data_checks.json',
-    r'^pair\d+_\d+_mutual_gaze_ratio$': 'near-dead (> 0 in 0-2.5 % of windows); its support is in data_checks.json',
+    r'^pair\d+_\d+_face_mutual_ratio$': 'near-dead (> 0 in 0.06 % of IPS pair-windows); its support is in data_checks.json',
+    r'^pair\d+_\d+_mutual_gaze_ratio$': 'near-dead (> 0 in 3.8 % of co-visible pair-windows, mean 0.006); its support is in '
+                                         'data_checks.json',
     r'^(n_asr_recognition|n_asr_transcription|n_ips|n_ips_relation|n_vfa_features|n_vfa_angles|n_vfa_cameras'
-    r'|n_vfa_incomplete|n_vfa_propagated)$': _COUNTER,
+    r'|n_vfa_incomplete|n_vfa_propagated|n_vfa_seat_partners)$': _COUNTER,
     r'^p\d+_(cameras|frames|frame_sets)$': _COUNTER,
     r'^pair\d+_\d+_(frames|frame_sets)$': _COUNTER,
     # the reserved block `semantic`, not built: it joins MODALITIES with --with-actions once the VLM runs
@@ -94,8 +112,9 @@ DROPPED = {
 USED = (
     r'^(speech_ratio|silence_ratio|words|dia_speakers|dia_switches|dia_overlap_ratio|dia_share_entropy)$',
     r'^p\d+_(present_ratio|path_m|yaw_abs_mean|yaw_std|wrist_speed|gaze_switches'
-    r'|gaze_(partner_face|partner_hands|own_hands|elsewhere|out_of_frame|unknown)_ratio)$',
-    r'^pair\d+_\d+_(dist_mean_m|dist_min_m|hand_dist_min|hand_dist_mean|gaze_dist_mean|joint_attention_ratio)$',
+    r'|gaze_(partner_face|partner_hands|other_face|other_hands|own_hands|work_area|elsewhere|out_of_frame|unknown)_ratio)$',
+    r'^pair\d+_\d+_(dist_mean_m|dist_min_m|hand_dist_min|hand_dist_mean|gaze_dist_mean|joint_attention_ratio'
+    r'|joint_attention_excess)$',
 )
 
 # a token value: its name, what it is made from, the transform (before scaling), the scaling tag
@@ -113,7 +132,12 @@ GROUP_VALUES = (
     Value('dia_overlap_ratio', 'dia_overlap_ratio', 'none', 'g', 'm_dia', 'speech'),
     Value('dia_share_entropy', 'dia_share_entropy', 'none', 'g', 'm_dia', 'speech'),
 )
-GAZE_SHARES = ('partner_face', 'partner_hands', 'own_hands', 'elsewhere', 'out_of_frame')
+# the gaze shares of readable gaze: partner_* is another pupil, other_* anyone else (the teacher,
+# another group), work_area an elsewhere inside the camera's work area
+GAZE_SHARES = ('partner_face', 'partner_hands', 'other_face', 'other_hands', 'own_hands', 'work_area', 'elsewhere',
+               'out_of_frame')
+# the mask of each gaze share: the split shares have their own, off on a table fused before the split
+SHARE_MASKS = {'other_face': 'm_other', 'other_hands': 'm_other', 'work_area': 'm_wa'}
 PERSON_VALUES = (
     Value('present_ratio', 'p<t>_present_ratio', 'none', 'g', 'm_ips', 'space'),
     Value('log_path_m', 'p<t>_path_m', 'log1p', 's', 'm_path', 'space'),
@@ -122,8 +146,8 @@ PERSON_VALUES = (
     Value('yaw_std', 'p<t>_yaw_std (within camera)', '/ 90', 'g', 'm_yaw', 'body_gaze'),
     Value('log_wrist_speed', 'p<t>_wrist_speed', 'log(x + 1e-3)', 's', 'm_wrist', 'body_gaze'),
     Value('switch_rate', 'p<t>_gaze_switches / max(p<t>_frames / p<t>_cameras - 1, 1)', 'none', 'g', 'm_vfa', 'body_gaze'),
-) + tuple(Value(share, f'p<t>_gaze_{share}_ratio / known_share', 'none', 'g', 'm_gaze', 'body_gaze')
-          for share in GAZE_SHARES) + (
+) + tuple(Value(share, f'p<t>_gaze_{share}_ratio / known_share', 'none', 'g', SHARE_MASKS.get(share, 'm_gaze'),
+                'body_gaze') for share in GAZE_SHARES) + (
     Value('known_share', '1 - p<t>_gaze_unknown_ratio', 'none', 'g', 'm_vfa', 'body_gaze'),
 )
 PAIR_VALUES = (
@@ -136,14 +160,17 @@ PAIR_VALUES = (
     Value('hand_dist_mean', 'pair<a>_<b>_hand_dist_mean', 'none', 's', 'm_hand', 'body_gaze'),
     Value('gaze_dist_mean', 'pair<a>_<b>_gaze_dist_mean', 'none', 's', 'm_gazepair', 'body_gaze'),
     Value('joint_attention_ratio', 'pair<a>_<b>_joint_attention_ratio', 'none', 'g', 'm_gazepair', 'body_gaze'),
+    # the joint attention above the pair's own rate 20-40 s earlier (the proximity baseline)
+    Value('joint_attention_excess', 'pair<a>_<b>_joint_attention_excess', 'none', 'g', 'm_jexcess', 'body_gaze'),
 )
 GROUP_MASKS = ('m_asr', 'm_transcription', 'm_dia')
-PERSON_MASKS = ('m_ips', 'm_path', 'm_vfa', 'm_yaw', 'm_wrist', 'm_gaze')
-PAIR_MASKS = ('m_dist', 'm_face', 'm_covis', 'm_hand', 'm_gazepair')
+PERSON_MASKS = ('m_ips', 'm_path', 'm_vfa', 'm_yaw', 'm_wrist', 'm_gaze', 'm_other', 'm_wa')
+PAIR_MASKS = ('m_dist', 'm_face', 'm_covis', 'm_hand', 'm_gazepair', 'm_jexcess')
 MASK_MODALITY = {'m_asr': 'speech', 'm_transcription': 'speech', 'm_dia': 'speech',
                  'm_ips': 'space', 'm_path': 'space', 'm_dist': 'space', 'm_face': 'space',
                  'm_vfa': 'body_gaze', 'm_yaw': 'body_gaze', 'm_wrist': 'body_gaze', 'm_gaze': 'body_gaze',
-                 'm_covis': 'body_gaze', 'm_hand': 'body_gaze', 'm_gazepair': 'body_gaze'}
+                 'm_other': 'body_gaze', 'm_wa': 'body_gaze',
+                 'm_covis': 'body_gaze', 'm_hand': 'body_gaze', 'm_gazepair': 'body_gaze', 'm_jexcess': 'body_gaze'}
 # the availability bits, one per modality in MODALITIES order
 AVAILABILITY = ('speech_ran', 'ips_ran', 'vfa_ran')
 
@@ -176,7 +203,7 @@ def _pooled_names(values, modality: str) -> tuple:
     return tuple(f'{v.name}_{stat}' for v in values if v.modality == modality for stat in _STATS)
 
 
-# the pooled view, block by block (10 + 18 + 53 + 1 = 82 columns)
+# the pooled view, block by block (10 + 18 + 65 + 1 = 94 columns)
 POOLED_BLOCKS = {
     'speech': tuple(v.name for v in GROUP_VALUES) + GROUP_MASKS,
     'space': _pooled_names(PERSON_VALUES, 'space') + _pooled_names(PAIR_VALUES, 'space')
@@ -190,7 +217,7 @@ POOLED_COLUMNS = tuple(column for block in POOLED_BLOCKS.values() for column in 
 # the pooled columns the tabular models also see at their neighbours' windows
 LAG_COLUMNS = ('speech_ratio', 'log_words', 'log_dia_switches', 'dia_overlap_ratio',
                'present_ratio_mean', 'dist_mean_m_min', 'face_any_max',
-               'partner_face_mean', 'partner_hands_mean', 'own_hands_mean', 'joint_attention_ratio_max',
+               'partner_face_mean', 'partner_hands_mean', 'own_hands_mean', 'joint_attention_excess_max',
                'log_wrist_speed_mean')
 # per temporal mode, each derived column as (suffix, first offset, last offset): one offset is a
 # neighbour's value, a range the nanmean over the neighbours in it that exist
@@ -477,8 +504,8 @@ def duplicate_gate(table: pd.DataFrame, kept) -> np.ndarray:
 @dataclass(eq=False)
 class Tokens:
     """one session's tokens, window by window: G (T, 11) the group values, masks and group size / 3;
-    avail (T, 3) whether speech, IPS and VFA ran; P (T, 3, 19) the person slots and P_exists (T, 3);
-    Q (T, 3, 13) the pair slots, pair_index (3, 2) the slots of each pair, and Q_exists (T, 3);
+    avail (T, 3) whether speech, IPS and VFA ran; P (T, 3, 24) the person slots and P_exists (T, 3);
+    Q (T, 3, 15) the pair slots, pair_index (3, 2) the slots of each pair, and Q_exists (T, 3);
     window_start (T,); empty (T,) no speech, nobody positioned, nobody seen. `positioned` (T, 3)
     keeps whether IPS placed each slot (share_present needs it after scaling), `window_index` (T,)
     the table's grid index. Unscaled, an unobserved value is NaN; scaled, it is 0."""
@@ -522,6 +549,8 @@ def _person(table, tag, ips_ran, n_vfa, gated):
     frame_sets = _frame_sets(table, tag)
     frames = _column(table, f'p{tag}_frames')
     known = 1.0 - _column(table, f'p{tag}_gaze_unknown_ratio')
+    # the share of the person's gaze frames on a camera whose work area was ready (NaN before the split)
+    ready = _column(table, f'p{tag}_work_area_ready_ratio')
     with np.errstate(divide='ignore', invalid='ignore'):
         seen = (frame_sets > 0) & ~gated
         values = np.column_stack([
@@ -537,7 +566,11 @@ def _person(table, tag, ips_ran, n_vfa, gated):
         ])
         # present_ratio 0 is an observation where IPS ran and no camera saw the person; where one did,
         # IPS lost the badge and the 0 is unobserved. Camera values need the person seen
-        masks = np.column_stack([ips_ran & ~_ips_missed(present, frame_sets, gated), ips_ran, seen, seen, seen, seen & (known >= MIN_KNOWN_SHARE)])
+        readable = seen & (known >= MIN_KNOWN_SHARE)
+        # the other shares are NaN on a table fused before the split, which _settle turns off; the work
+        # area needs most of the person's gaze frames on a camera whose area was ready
+        masks = np.column_stack([ips_ran & ~_ips_missed(present, frame_sets, gated), ips_ran, seen, seen, seen, readable,
+                                 readable, readable & (ready >= WORK_AREA_READY_MIN)])
     values, masks = _settle(values, masks, PERSON_VALUES, PERSON_MASKS)
     return values, masks, present, frame_sets
 
@@ -556,9 +589,11 @@ def _pair(table, a, b, both_present, n_vfa, gated):
             _pair_column(table, a, b, 'hand_dist_mean'),
             _pair_column(table, a, b, 'gaze_dist_mean'),
             _pair_column(table, a, b, 'joint_attention_ratio'),
+            _pair_column(table, a, b, 'joint_attention_excess'),
         ])
-        # distances and facing exist only when both were positioned
-        masks = np.column_stack([both_present, both_present, covisible, covisible, covisible])
+        # distances and facing exist only when both were positioned; the excess has its own mask, off
+        # where the baseline had too few comparisons (or the table has none)
+        masks = np.column_stack([both_present, both_present, covisible, covisible, covisible, covisible])
     return _settle(values, masks, PAIR_VALUES, PAIR_MASKS)
 
 
@@ -791,7 +826,7 @@ def _share(hit: np.ndarray, exists: np.ndarray, ran: np.ndarray) -> np.ndarray:
 
 
 def pooled(tokens: Tokens) -> pd.DataFrame:
-    """the 82-column pooled view (POOLED_COLUMNS), indexed by window_index: the group values and
+    """the 94-column pooled view (POOLED_COLUMNS), indexed by window_index: the group values and
     masks, each person value's (min, mean, max) over the slots that observed it, each pair
     value's over the pairs, the availability bits, the shares of slots and pairs that observed a
     modality, and the group size. For at most three slots (min, mean, max) gives back the sorted
@@ -1032,10 +1067,43 @@ def seat_check(table: pd.DataFrame, roster: Roster) -> dict:
             'n_untagged_at_seats_mean': round(float(np.nanmean(n)), 4) if trace and np.isfinite(n).any() else None}
 
 
+def fusion_check(table: pd.DataFrame, roster: Roster) -> dict:
+    """what the fusion of 2026-09-23 gave the table: `split` (it has the other_face columns; a table
+    fused before has not, and its partner gaze counts every other person), `pupils` (the tags the
+    fusion took for pupils, p<t>_in_group = 1; None before the split), `roster_in_group` (every kept
+    person is one of them), `work_area_ready` (per kept person, the mean share of gaze frames on a
+    camera whose work area was ready), `joint_baseline_share` (the share of the co-visible
+    roster pair-windows with a joint-attention excess) and `seat_partner_frames` (the gaze frames
+    whose untagged target the fusion named a pupil by the seat, n_vfa_seat_partners summed; None
+    without the column)."""
+    parsed = parse_columns(table.columns)
+    split = any('gaze_other_face_ratio' in features for features in parsed['persons'].values())
+    in_group = {tag: _column(table, column) for tag, features in parsed['persons'].items()
+                for name, column in features.items() if name == 'in_group'}
+    pupils = sorted(str(tag) for tag, x in in_group.items() if (x == 1).any()) if in_group else None
+    ready = {}
+    for tag in roster.kept:
+        x = _column(table, f'p{tag}_work_area_ready_ratio')
+        ready[str(tag)] = round(float(np.nanmean(x)), 4) if np.isfinite(x).any() else None
+    covisible, finite = 0, 0
+    for a, b in combinations(roster.kept, 2):
+        with np.errstate(invalid='ignore'):
+            together = _pair_frame_sets(table, a, b) > 0
+        covisible += int(together.sum())
+        finite += int((together & np.isfinite(_pair_column(table, a, b, 'joint_attention_excess'))).sum())
+    return {'split': bool(split), 'pupils': pupils,
+            'roster_in_group': None if pupils is None else {str(tag) for tag in roster.kept} <= set(pupils),
+            'work_area_ready': ready,
+            'joint_baseline_share': round(finite / covisible, 4) if covisible else None,
+            'seat_partner_frames': int(np.nansum(_column(table, 'n_vfa_seat_partners')))
+            if 'n_vfa_seat_partners' in table.columns else None}
+
+
 def data_checks(tables: dict, rosters: dict, threshold: float = 0.2, n: int = 10, seed: int = 0) -> dict:
     """what data_checks.json holds, before any training: the low-speech sessions with windows to
-    listen to, the support of every kept and dropped column per session, the camera check, and the
-    present_ratio rule and the seat trace."""
+    listen to, the support of every kept and dropped column per session, the camera check, the
+    present_ratio rule and the seat trace, and the fusion check (in-group gaze, work area,
+    joint-attention baseline)."""
     low = low_speech(tables, threshold)
     return {
         'layout_version': LAYOUT_VERSION,
@@ -1046,6 +1114,8 @@ def data_checks(tables: dict, rosters: dict, threshold: float = 0.2, n: int = 10
                          if session in rosters},
         'seat_check': {session: seat_check(table, rosters[session]) for session, table in tables.items()
                        if session in rosters},
+        'fusion_check': {session: fusion_check(table, rosters[session]) for session, table in tables.items()
+                         if session in rosters},
     }
 
 

@@ -19,7 +19,12 @@ fused table's and the template's (the tertile edges') digests, and a later run f
 and template adds to it rather than replacing it, so a --limit run never cuts a full map down.
 
 The input is a slot table (`slot_table`), built here from a fused table and the roster's kept tags
-in slot order, so this module needs nothing from the layout but those tags. The criteria-order and
+in slot order, so this module needs nothing from the layout but those tags and its gaze shares.
+
+The fusion of 2026-09-23 (layout version 3) named a partner's gaze in-group, the work area and the
+joint-attention baseline, and the state says them: a re-fused table (another digest) and the new
+wording both miss the cache, so every Jev map must be asked again (ses-jev --dry-run estimates the
+cost). A table fused before says what it has and leaves the rest out. The criteria-order and
 rerun checks of the design are deferred: the criteria keep CODEBOOK's order, and a rerun is a run
 without the cache.
 """
@@ -39,7 +44,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from openmmla.analytics.interaction.layout import GAZE_SHARES as GAZE_SHARES_OF_LAYOUT
 from openmmla.commands.ses.code import CODEBOOK
+from openmmla.services.vfa.work_area import WORK_AREA_READY_MIN
 
 # where Jev is asked: OpenRouter serves TypeSafe's model at its own price through a dedicated
 # endpoint (the chat-completions endpoint does not), and any other host that speaks TypeSafe's
@@ -86,8 +93,11 @@ SENSOR_NOTE = (
     "You cannot see or hear the group. The description comes from sensors: one microphone for the whole group "
     "(how much speech, how many words, how many anonymous voices, never what was said), badges that give "
     "positions in metres and whether one person faced another, and cameras that give where each person's gaze "
-    "landed when it could be read and how far apart hands were, in shares of the frame width. A part that says "
-    "'not measured' had no data; do not read it as zero or as silence."
+    "landed when it could be read and how far apart hands were, in shares of the frame width. A partner is another "
+    "member of the group, also when their badge was not read but they sat in their own seat; the faces and hands "
+    "of anyone else (the teacher, other groups, now and then a member away from their seat with an unread badge) "
+    "are named apart. The work area is the table region around the members' hands. A part that says 'not measured' "
+    "had no data; do not read it as zero or as silence."
 )
 # the least probability a class keeps after renormalising Jev's answer
 PROBA_FLOOR = 1e-4
@@ -96,9 +106,10 @@ CHARS_PER_TOKEN = 4
 
 SLOT_NAMES = ('A', 'B', 'C')
 PAIR_SLOTS = ((0, 1), (0, 2), (1, 2))
-GAZE_SHARES = ('partner_face', 'partner_hands', 'own_hands', 'elsewhere', 'out_of_frame')
-GAZE_WORDS = {'partner_face': "a partner's face", 'partner_hands': "a partner's hands", 'own_hands': 'own hands',
-              'elsewhere': 'elsewhere', 'out_of_frame': 'out of frame'}
+GAZE_SHARES = GAZE_SHARES_OF_LAYOUT
+GAZE_WORDS = {'partner_face': "a partner's face", 'partner_hands': "a partner's hands",
+              'other_face': "someone else's face", 'other_hands': "someone else's hands", 'own_hands': 'own hands',
+              'work_area': 'the work area around the hands', 'elsewhere': 'elsewhere', 'out_of_frame': 'out of frame'}
 # a person's gaze shares are read only when at least this share of their frames had a readable gaze
 MIN_KNOWN_SHARE = 0.05
 # metres between two badges: close below the first edge, far above the second
@@ -163,10 +174,11 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
     X_present_ratio (NaN when IPS did not run), X_seen_share (frame sets the person was in over
     the window's, 0 when not seen, NaN when the cameras did not run), X_known_share (share of the
     person's frames with a readable gaze), X_<gaze share> for each of GAZE_SHARES (of the readable
-    frames; NaN below MIN_KNOWN_SHARE), X_yaw_abs_mean, X_yaw_std, X_wrist_speed, X_gaze_switches
-    (NaN when not seen). Per pair XY: XY_dist_mean_m, XY_dist_min_m (NaN unless both located),
+    frames; NaN below MIN_KNOWN_SHARE; X_other_face and X_other_hands NaN on a table fused before
+    the split, X_work_area NaN unless most of the person's gaze frames had a ready work area),
+    X_yaw_abs_mean, X_yaw_std, X_wrist_speed, X_gaze_switches (NaN when not seen). Per pair XY: XY_dist_mean_m, XY_dist_min_m (NaN unless both located),
     XY_face_any (either faced the other), XY_co_seen_share, XY_hand_dist_min, XY_hand_dist_mean,
-    XY_joint_attention_ratio (NaN unless both seen together)."""
+    XY_joint_attention_ratio, XY_joint_attention_baseline (NaN unless both seen together)."""
     slots = [str(tag) for tag in slots][:len(SLOT_NAMES)]
     n = len(table)
     out: dict[str, np.ndarray] = {}
@@ -199,9 +211,12 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
         known = np.where(seen[i], 1.0 - _column(table, f'p{tag}_gaze_unknown_ratio'), np.nan)
         out[f'{x}_known_share'] = known
         readable = seen[i] & (np.nan_to_num(known) >= MIN_KNOWN_SHARE)
+        # the work area is said only where most of the person's gaze frames had a ready area
+        ready = np.nan_to_num(_column(table, f'p{tag}_work_area_ready_ratio')) >= WORK_AREA_READY_MIN
         with np.errstate(divide='ignore', invalid='ignore'):
             for category in GAZE_SHARES:
-                out[f'{x}_{category}'] = np.where(readable, _column(table, f'p{tag}_gaze_{category}_ratio') / known, np.nan)
+                where = readable & ready if category == 'work_area' else readable
+                out[f'{x}_{category}'] = np.where(where, _column(table, f'p{tag}_gaze_{category}_ratio') / known, np.nan)
         for name in ('yaw_abs_mean', 'yaw_std', 'wrist_speed', 'gaze_switches'):
             out[f'{x}_{name}'] = np.where(seen[i], _column(table, f'p{tag}_{name}'), np.nan)
 
@@ -219,7 +234,7 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
         sets = _first_column(table, (prefix + 'frame_sets', prefix + 'frames'))
         together = vfa & (np.nan_to_num(sets) > 0) & ~masked[:, i] & ~masked[:, j]
         out[f'{xy}_co_seen_share'] = np.where(vfa, np.where(together, _share(sets, n_vfa), 0.0), np.nan)
-        for name in ('hand_dist_min', 'hand_dist_mean', 'joint_attention_ratio'):
+        for name in ('hand_dist_min', 'hand_dist_mean', 'joint_attention_ratio', 'joint_attention_baseline'):
             out[f'{xy}_{name}'] = np.where(together, _column(table, prefix + name), np.nan)
     return pd.DataFrame(out, index=pd.RangeIndex(n))
 
@@ -425,7 +440,9 @@ def _person_on_camera(row: dict, x: str, bins: Bins, pilot: bool) -> str:
     if known is None or known < MIN_KNOWN_SHARE:
         bits.append("gaze not readable")
     else:
-        shares = ', '.join(f"{GAZE_WORDS[c]} {_pct(_num(row.get(f'{x}_{c}')) or 0.0)}" for c in GAZE_SHARES)
+        # a share the table does not have (fused before the split) or may not say (no ready work area) is left out
+        shares = ', '.join(f"{GAZE_WORDS[c]} {_pct(_num(row.get(f'{x}_{c}')))}" for c in GAZE_SHARES
+                           if _num(row.get(f'{x}_{c}')) is not None)
         bits.append(f"gaze readable in {_pct(known)} of frames: {shares}")
     yaw = _num(row.get(f'{x}_yaw_abs_mean'))
     if yaw is None:
@@ -473,8 +490,14 @@ def _camera_pairs(row: dict, pairs: list[tuple[str, str]], bins: Bins, pilot: bo
         bits = [] if pilot else \
             ["in view together " + ("all the window" if together >= WHOLE_WINDOW else f"{_pct(together)} of the window")]
         joint = _num(row.get(f'{x}{y}_joint_attention_ratio'))
-        bits.append("gaze points not measured" if joint is None
-                    else f"gaze points close together (joint attention) in {_pct(joint)} of shared frames")
+        baseline = _num(row.get(f'{x}{y}_joint_attention_baseline'))
+        if joint is None:
+            bits.append("gaze points not measured")
+        else:
+            text = f"gaze points close together (joint attention) in {_pct(joint)} of shared frames"
+            if baseline is not None:
+                text += f", {_pct(baseline)} when compared 20 to 40 s apart"
+            bits.append(text)
         hand = _num(row.get(f'{x}{y}_hand_dist_min'))
         hand = None if hand is None else _rounded(hand, 2)
         bits.append("hands not measured" if hand is None
