@@ -19,7 +19,7 @@ The coder presses one key per window in `mmla ses-code`, from a codebook both th
 | 2 | social | members interact (talk, gesture, look at each other), but not about the task |
 | 3 | collaborative | members interact about the task: talk about it, joint attention on the shared artifact, pointing, handing over, working on one thing together; one member following another's work on the artifact for most of the window, even in silence (a glance does not count) |
 | 4 | absent | fewer than two members at the group's place for most of the window (everyone away, or one of a pair); a triad with one away is coded normally |
-| 0 | unclear | the group is at its place but its state cannot be told: members out of frame and inaudible, or a transition with no dominant state |
+| 0 | unclear | the group is at its place but its state cannot be told: members out of frame and inaudible; a window two states share is not unclear (the state that fills more of it is coded, and a coder may add the other as the also-state) |
 
 The rule is to label the group as a whole with the state that fills most of the ten seconds. Two members collaborating while a third works alone is still collaborative. The teacher's talk does not make a window social or collaborative: members looking at the shared artifact while the teacher talks, with no member working on it, is individual work, and one member working on it while another follows is collaborative. Coders add the note `teacher` when the teacher talks to the group or the class for most of the window; Jev's question leaves that instruction out.
 
