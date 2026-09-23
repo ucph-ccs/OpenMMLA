@@ -53,7 +53,8 @@ _SECRET_KEY = re.compile(r"(token|api[_-]?key|secret|passw(or)?d|subscription[_-
 
 def component_key(pipeline: str, role: str, component_id=None) -> str:
     """one entry per component of a pipeline: `asr:base:1`, `ips:synchronizer`,
-    `asr:synchronizer:Jabra` (the base type it merges), `ips:visualizer`."""
+    `asr:synchronizer`, `ips:visualizer` (an ASR synchronizer of an older
+    session is `asr:synchronizer:<base type>`)."""
     key = f"{pipeline}:{role}"
     if component_id is None or str(component_id).strip() == "":
         return key

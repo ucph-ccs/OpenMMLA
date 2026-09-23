@@ -3,18 +3,19 @@ import json
 import os
 import threading
 
-from openmmla.bases.asr.attribution import ENERGY_MARGIN_DB, ENERGY_TIE_DB, as_decibels, as_energy, attribute_bucket
+from openmmla.bases.asr.attribution import ENERGY_MARGIN_DB, ENERGY_TIE_DB, as_decibels, as_energy, as_number, attribute_bucket
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
+from openmmla.utils.config import asr_segment_durations, shared_segment_duration
 from openmmla.utils.input import select_or_create_session, get_number_of_bases, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.sync_strategy import TimeBucketSynchronizer, SyncStrategy
 from .enums import BLUE, ENDC
-from .input import get_function_synchronizer, get_base_type, get_synchronizer_mode, get_base_types, \
-    default_base_type, default_number_of_bases, explain_cannot_start
+from .input import get_function_synchronizer, get_synchronizer_mode, get_base_types, default_number_of_bases, \
+    explain_cannot_start
 
 
 def start_asr_synchronizer(
@@ -36,7 +37,9 @@ def start_asr_synchronizer(
         dominant: Whether to select the dominant speaker
         sp: Whether the audio bases do speech separation
         session_id: Session to synchronize; given, the synchronizer starts at once and exits when the run ends
-        base_type: Key of the config's Base section the bases use
+        base_type: A block of the config's Base section whose segment length is the default of the
+            Synchronizer's bucket_duration and match_tolerance; if omitted, the length the config's
+            bases share
         num_bases: Number of bases to wait for in each time bucket
     """
     # Restart loop - allows restarting the entire process
@@ -94,8 +97,11 @@ class ASRSynchronizer(Synchronizer):
             sp: tag of whether the audio bases do speech separation (default: False)
             session_id: the session to synchronize; given, the synchronizer was launched from the
                 console: it asks nothing, starts at once and exits when the run ends (default: None)
-            base_type: key of the config's Base section; if omitted, the only key when launched from
-                the console, else picked from a menu (default: None)
+            base_type: a block of the config's Base section whose segment length (recognize_duration,
+                or recognize_sp_duration with speech separation) is the default of the Synchronizer's
+                bucket_duration and match_tolerance; if omitted, the length the base types of the
+                config's Bases entries share. Neither counts when the Synchronizer section sets
+                them (default: None)
             num_bases: number of bases to wait for; if omitted, the entries of the config's Bases list
                 when launched from the console, else asked at Start (default: None)
         """
@@ -115,36 +121,30 @@ class ASRSynchronizer(Synchronizer):
         self.latest_time = None  # Record start time of the most recent received frame
         self.time_bucket_buffer = {}  # Buffer for {time_bucket_key: {base_id: {<speakers>, <similarities>, <durations>, <segment_start_times>}}}
 
-        self.base_type = self._choose_base_type(base_type)
-
         self._setup_yaml()
         self._setup_directories()
         self._setup_objects()
 
-    def _choose_base_type(self, base_type: str | None) -> str:
-        """The Base section key to take: -bt when it names one; launched from the
-        console without -bt, the only key there is; else picked from the menu,
-        as a synchronizer started by hand always has."""
-        base_types = get_base_types(self.config)
-        if base_type is not None:
-            if str(base_type) in base_types:
-                return str(base_type)
-            explain_cannot_start(
-                "ASR Synchronizer",
-                f"-bt {base_type} is not an entry of the config's Base section "
-                f"({', '.join(base_types) or 'it has none'}).",
-                "Pick the base type below; the entries are the blocks under Base on the ASR Base card's Config tab.",
-                wait=True)  # the base type menu clears the screen
-            return get_base_type(self.config)
-        if not self.launch_session_id:
-            return get_base_type(self.config)
-        chosen, why = default_base_type(self.config)
-        if chosen:
-            self.logger.info(f"Base type: {chosen} (the only entry of the config's Base section).")
-            return chosen
-        explain_cannot_start("ASR Synchronizer", why, "Pick the base type below, or start it with -bt <base type>.",
-                             wait=True)  # the base type menu clears the screen
-        return get_base_type(self.config)
+    def _segment_duration(self) -> tuple[float, dict[str, float]]:
+        """how long the bases' segments are, the default of bucket_duration and match_tolerance: the
+        -bt block's when one is given, else the length the base types of the config's Bases entries
+        share (every Base block's, when it lists none); with the segment length of each type."""
+        types = None
+        if self._base_type_arg is not None:
+            if str(self._base_type_arg) in get_base_types(self.config):
+                types = [str(self._base_type_arg)]
+            else:
+                self.logger.warning(f"-bt {self._base_type_arg} is not a block of the config's Base section: "
+                                    f"the segment length of its Bases entries is taken instead.")
+        durations = asr_segment_durations(self.config, self.sp, types)
+        if not durations:
+            durations = asr_segment_durations(self.config, self.sp, get_base_types(self.config))
+        shared = shared_segment_duration(durations)
+        if shared is None:
+            key = 'recognize_sp_duration' if self.sp else 'recognize_duration'
+            raise ValueError(f"No block of the config's Base section has a {key}, and the Synchronizer section "
+                             f"sets no bucket_duration: set one of them on the ASR Base card's Config tab.")
+        return shared, durations
 
     def _choose_number_of_bases(self) -> int:
         """The number of bases to wait for: -nb when it is positive; launched from
@@ -170,10 +170,19 @@ class ASRSynchronizer(Synchronizer):
         """Set up attributes from YAML configuration."""
         sync_config = self.config['Synchronizer']
         self.buffer_expiry_time = float(sync_config['result_expiry_time'])  # Expiry time of retained results
-        recognize_duration = float(self.config['Base'][self.base_type]['recognize_sp_duration']) if self.sp else int(
-            self.config['Base'][self.base_type]['recognize_duration'])
-        self.bucket_duration = float(sync_config.get('bucket_duration', recognize_duration))
-        self.match_tolerance = float(sync_config.get('match_tolerance', recognize_duration))
+        # a bucket is as long as the segments the bases send, unless the Synchronizer section says
+        bucket = as_number(sync_config.get('bucket_duration'), float('nan'))
+        tolerance = as_number(sync_config.get('match_tolerance'), float('nan'))
+        if bucket != bucket or tolerance != tolerance:  # one of them is not set: the bases' segment length
+            segment, durations = self._segment_duration()
+            if bucket != bucket and len(set(durations.values())) > 1:
+                lengths = ', '.join(f"{name} {value:g} s" for name, value in durations.items())
+                self.logger.warning(f"The base types record segments of different lengths ({lengths}): the "
+                                    f"buckets are {segment:g} s. Set Synchronizer.bucket_duration to choose.")
+            bucket = segment if bucket != bucket else bucket
+            tolerance = segment if tolerance != tolerance else tolerance
+        self.bucket_duration = float(bucket)
+        self.match_tolerance = float(tolerance)
         # the energy vote over personal microphones (Bases.participant); a blank keeps the default
         self.energy_margin_db = as_decibels(sync_config.get('energy_margin_db'), ENERGY_MARGIN_DB)
         self.energy_tie_db = as_decibels(sync_config.get('energy_tie_db'), ENERGY_TIE_DB)
@@ -223,7 +232,7 @@ class ASRSynchronizer(Synchronizer):
         make, leaves it at the menu in the same window, as a synchronizer started
         by hand always is.
         """
-        print(f'\033]0;ASR Synchronizer for {self.base_type}\007')
+        print('\033]0;ASR Synchronizer\007')
         func_map = {1: self._start_synchronization, 2: self._switch_mode, 3: self._reset}
         start_at_once = bool(self.launch_session_id)
         ended = False
@@ -317,14 +326,12 @@ class ASRSynchronizer(Synchronizer):
         """Reset the ASR synchronizer.
         
         Reinitialize the ASR synchronizer by calling the constructor with the current configuration,
-        logs the reset status, and performs garbage collection. It keeps the session, base type and
+        logs the reset status, and performs garbage collection. It keeps the session, -bt and
         number of bases it was started with; without them it asks again, as before.
         """
-        keep_base_type = self.launch_session_id or self._base_type_arg is not None
         self.__init__(project_dir=self.project_dir, config_path=self.config_path, mode=self.mode,
                       dominant=self.dominant, sp=self.sp, session_id=self.launch_session_id,
-                      base_type=self.base_type if keep_base_type else None,
-                      num_bases=self._num_bases_arg)
+                      base_type=self._base_type_arg, num_bases=self._num_bases_arg)
         self.logger.info(f"ASR Synchronizer reset successfully.")
         gc.collect()
 
@@ -335,11 +342,11 @@ class ASRSynchronizer(Synchronizer):
             return
         try:
             entry = session_provenance.component_entry(
-                'asr', 'synchronizer', self.base_type,
+                'asr', 'synchronizer',
                 arguments={'mode': self.mode, 'dominant': self.dominant, 'sp': self.sp,
                            'session_id': self.launch_session_id, 'base_type': self._base_type_arg,
                            'num_bases': self._num_bases_arg},
-                parameters={'base_type': self.base_type, 'number_of_bases': self.number_of_bases,
+                parameters={'number_of_bases': self.number_of_bases,
                             'buffer_expiry_time': self.buffer_expiry_time, 'bucket_duration': self.bucket_duration,
                             'match_tolerance': self.match_tolerance,
                             'energy_margin_db': self.energy_margin_db, 'energy_tie_db': self.energy_tie_db},
@@ -357,7 +364,7 @@ class ASRSynchronizer(Synchronizer):
         copy_config_snapshot(self.config_path, self.project_dir, self.session_id, 'asr-base')
         self.logger = get_logger(f'synchronizer-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir,
-                                              f'asr_synchronizer_{self.base_type}.log'))
+                                              'asr_synchronizer.log'))
 
     def _handle_base_result(self, client, userdata, message):
         """Handle the received base recognition result from MQTT message.

@@ -20,8 +20,9 @@ def get_parser():
             'session id to use; if set, start at once without the menu and exit when the run ends (STOP); '
             'if not set, choose/create one interactively', shortname='-sid')
     add_arg('base_type', str, None,
-            "key of the config's Base section the bases use; if not set, the only key when started with -sid, "
-            "else choose from a menu", shortname='-bt')
+            "a block of the config's Base section whose segment length (recognize_duration) is the default of "
+            "Synchronizer.bucket_duration and match_tolerance; if not set, the length the base types of the "
+            "config's Bases entries share. Neither counts when the Synchronizer section sets them", shortname='-bt')
     add_arg('num_bases', int, None,
             "number of bases to synchronize; if not set, the number of entries in the config's Bases list "
             "when started with -sid, else asked at Start", shortname='-nb')

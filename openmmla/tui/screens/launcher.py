@@ -84,7 +84,10 @@ from openmmla.utils.artifact_paths import (
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source, stream_kind
-from openmmla.utils.config import get_bases, get_base_by_id, decrypt_config_values, load_yaml_config
+from openmmla.utils.config import (
+    asr_segment_durations, decrypt_config_values, get_base_by_id, get_bases, load_yaml_config,
+    shared_segment_duration,
+)
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
@@ -1078,14 +1081,6 @@ def _base_choices(pipeline: str, config: dict) -> list[tuple[str, str]]:
     order (value: the id, as -b takes it), then asking in the base's window."""
     options = [(_base_choice_label(pipeline, base, config), str(base.get("id"))) for base in get_bases(config)]
     return options + [(_ASK_BASE_LABEL, "")]
-
-
-def _asr_base_types(config: dict) -> list[str]:
-    """the device types of an ASR config: the keys of its Base section."""
-    section = (config or {}).get("Base")
-    if not isinstance(section, dict):
-        return []
-    return [str(key) for key, value in section.items() if isinstance(value, dict) and _shown_base_value(key)]
 
 
 def _matrix_file_ids(names: list[str]) -> list[str]:
@@ -2421,7 +2416,6 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             # for a base whose Participant is Speakers
             ParamDef("--speakers", "Speakers", "speakers", None, per_instance="-nb", under="-b",
                      shown_by=_ASR_PARTICIPANT_FLAG, shown_when=_asr_takes_speakers),
-            ParamDef("-bt", "Synchronizer Base Type", "choice", "", follows="-b"),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-s", "Store Audio", "bool", True),
             ParamDef("-vad", "VAD", "bool", True),
@@ -2440,7 +2434,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                          ["-sid", "-b", "--speakers", _ASR_PARTICIPANT_FLAG, "-m", "-s", "-vad", "-nr", "-tr",
                           "-lang", "-dia", "-sp", "-hsr"]),
             ComponentDef("synchronizer", "mmla asr-sync", "-ns",
-                         ["-sid", _SYNC_WAIT_FLAG, "-bt", "-d", "-sp"]),
+                         ["-sid", _SYNC_WAIT_FLAG, "-d", "-sp"]),
         ],
         artifact_pipeline="asr-base",
     ))
@@ -5663,8 +5657,7 @@ class ServicePanel(Widget):
     def _service_with_base_choices(self, svc: ServiceDef, target: str) -> ServiceDef:
         """what a base card's dropdowns offer on the card's host: its config's
         Bases entries for each Base (-b), the matrix files for the IPS
-        synchronizer's Main Camera (-mc), the Base keys for the ASR
-        synchronizer's base type (-bt), which follows Base 1.
+        synchronizer's Main Camera (-mc).
 
         A remote host is asked nothing from here: this also runs on the UI
         thread (Start, a config Save). Its config comes from the config cache
@@ -5682,22 +5675,11 @@ class ServicePanel(Widget):
         except Exception:
             config = None  # an unreadable config offers nothing but asking in the window
         config = config if isinstance(config, dict) else {}
-        bases = get_bases(config)
         base_options = _base_choices(pipeline, config)
         params = []
         for param in svc.params:
             if param.flag == "-b" and param.per_instance:
                 params.append(replace(param, choices=base_options, default=[value for _, value in base_options if value]))
-            elif param.flag == "-bt" and pipeline == "asr":
-                types = _asr_base_types(config)
-                follow = {
-                    str(base.get("id")): str(base.get("base_type"))
-                    for base in bases if str(base.get("base_type") or "") in types
-                }
-                first = str(bases[0].get("id")) if bases else ""
-                default = follow.get(first) or (types[0] if len(types) == 1 else "")
-                params.append(replace(param, choices=[(name, name) for name in types], default=default,
-                                      follow_values=follow))
             elif param.flag == "-mc" and pipeline == "ips":
                 options, default = _main_camera_choices(self._transform_matrix_ids(target) or [], config)
                 params.append(replace(param, choices=options, default=default))
@@ -5999,6 +5981,39 @@ class ServicePanel(Widget):
             return
         key = self._asr_participant_key(card.collect_params(), target, entry_id)
         self.__dict__.setdefault("_asr_participant_picks", {})[key] = card.instance_values(_ASR_PARTICIPANT_FLAG)[index]
+
+    def _asr_bucket_notes(self, params: dict, target: str) -> list[str]:
+        """what a Start of the ASR Base card says when the config's
+        Synchronizer sets no bucket_duration and its buckets will not fit the
+        bases it starts: they record segments of different lengths, or of
+        another length than the one the synchronizer takes (the one the base
+        types of the config's Bases entries share)."""
+        if _coerce_int(params.get("-ns"), 0) <= 0:
+            return []
+        config = self._asr_card_config(target)
+        sync = config.get("Synchronizer") if isinstance(config.get("Synchronizer"), dict) else {}
+        try:
+            float(sync.get("bucket_duration"))
+            return []  # set: the buckets are that long
+        except (TypeError, ValueError):
+            pass
+        sp = bool(params.get("-sp"))
+        types = []
+        for index in range(_coerce_int(params.get("-nb"), 0)):
+            entry_id = self._base_entry_id(params, target, index)
+            entry = get_base_by_id(config, entry_id) if entry_id else None
+            if entry is not None and entry.get("base_type") is not None:
+                types.append(str(entry.get("base_type")))
+        durations = asr_segment_durations(config, sp, types)
+        segment = shared_segment_duration(asr_segment_durations(config, sp))
+        lengths = set(durations.values())
+        if not lengths or segment is None or lengths == {segment}:
+            return []
+        shown = ", ".join(f"{name} {value:g} s" for name, value in durations.items())
+        return [f"  [yellow]The bases of this Start record segments of {shown}, and the config's Synchronizer "
+                f"sets no bucket_duration: its buckets are {segment:g} s, the length the base types of its Bases "
+                f"share. Set Synchronizer.bucket_duration on the Config tab to the length the buckets should "
+                f"have.[/yellow]"]
 
     def _asr_participant_problem(self, params: dict) -> str:
         """why a Start of the ASR Base card is refused for its Participant
@@ -8975,7 +8990,8 @@ class ServicePanel(Widget):
         for note in self._base_card_start_notes(svc, event.params):
             self._log(note)
         if svc.name == _ASR_BASE_CARD:
-            for note in self._speakers_start_notes(event.params, target):
+            for note in self._speakers_start_notes(event.params, target) + self._asr_bucket_notes(
+                    event.params, target):
                 self._log(note)
 
         if not is_remote and svc.launch_type != "make" and svc.conda_env:

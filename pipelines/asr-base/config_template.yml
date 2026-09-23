@@ -88,8 +88,8 @@ Bases:
 # synchronizer settings
 Synchronizer:
   result_expiry_time: 10        # cleanup timeout (seconds)
-  bucket_duration: 3            # time bucket duration (seconds) for synchronized result (default: recognize_duration)
-  match_tolerance: 1.5          # matching tolerance (seconds) for incoming result to time buckets (default: ~bucket_duration/2)
+  bucket_duration: 3            # time bucket duration (seconds) for synchronized result; empty = the recognize_duration the base types of Bases share (the most common one when they differ)
+  match_tolerance: 1.5          # matching tolerance (seconds) for incoming result to time buckets (~bucket_duration/2); empty = that recognize_duration too
   energy_margin_db: 6           # personal microphones: how far above its own noise floor (dB) a channel's speech must be to be attributed to its wearer
   energy_tie_db: 3              # personal microphones: channels within this many dB of the loudest also count as speaking (overlapping speech)
 

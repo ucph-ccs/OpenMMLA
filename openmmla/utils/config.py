@@ -35,6 +35,37 @@ def get_bases(config: dict) -> list[dict]:
     return result
 
 
+
+def asr_segment_durations(config: dict, sp: bool = False, base_types=None) -> dict[str, float]:
+    """how long the segments are that each ASR base type records: its recognize_duration, or
+    recognize_sp_duration with speech separation. For `base_types`, else for the types the
+    config's Bases entries use; a type without a number is left out."""
+    blocks = (config or {}).get("Base")
+    blocks = blocks if isinstance(blocks, dict) else {}
+    if base_types is None:
+        base_types = [str(entry.get("base_type")) for entry in get_bases(config)
+                      if entry.get("base_type") is not None]
+    key = "recognize_sp_duration" if sp else "recognize_duration"
+    durations: dict[str, float] = {}
+    for name in base_types:
+        block = blocks.get(str(name))
+        if not isinstance(block, dict) or str(name) in durations:
+            continue
+        try:
+            durations[str(name)] = float(block.get(key))
+        except (TypeError, ValueError):
+            continue
+    return durations
+
+
+def shared_segment_duration(durations: dict) -> float | None:
+    """the segment length most of these base types share (on a tie, the first one's); None for
+    none."""
+    values = list(durations.values())
+    if not values:
+        return None
+    return max(values, key=lambda value: (values.count(value), -values.index(value)))
+
 def get_base_by_id(config: dict, base_id) -> dict | None:
     """Return the base entry whose id matches, or None."""
     for base in get_bases(config):
