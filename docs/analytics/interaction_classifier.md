@@ -156,6 +156,8 @@ These sessions never reach a scaler, the Jev word bins or a pilot, and a LOSO ru
 
 **DEV** is the other sessions.
 
+**Inclusion rule S1** (fixed before any label is read, in `layout.session_inclusion`): a session enters a run only when its roster keeps at least two persons and two of them are observed together (positioned by IPS or seen by a camera) in at least 30 % of its windows. A session that fails is left out whole, DEV or TEST: it trains nothing and is scored nowhere. The run names it and the reason in `roster.json` (`included: false`), and refuses when nothing is left.
+
 - **Lessons.** The unit is the lesson: the session id without its start suffix, so the two 2025-05-13 takes are one lesson.
 - **Outer folds.** `--split loso` holds out one lesson with coded windows at a time.
 - **Inner folds.** Grouped by lesson, the same way.
@@ -201,7 +203,7 @@ A contrast is computed only when both of its variants answered every coded held-
 | `results.csv` | the results table: one row per variant with its coverage, grouped as no labels, label floors, few-label, tabular, neural, online and ceiling |
 | `per_session.csv`, `confusion.csv` | per-session scores and pooled confusion cells of every variant |
 | `label_counts.csv` | coded windows per class and session, written before any training |
-| `roster.json`, `data_checks.json` | each session's roster with reasons, and the data checks: low-speech sessions with windows to listen to, the support of every column, the one- against two-camera check |
+| `roster.json`, `data_checks.json` | each session's roster with reasons and whether the inclusion rule S1 kept it (`included`, `reason`), and the data checks: low-speech sessions with windows to listen to, the support of every column, the one- against two-camera check |
 | `config.json` | the truth coder and how it was chosen, feature lists, the layout version, grids, seeds, the sha256 of every fusion table and label file, software and git commit (secrets masked) |
 | `coefficients.csv` | the LR weights per modality block and fold |
 

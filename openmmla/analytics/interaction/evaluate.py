@@ -1128,9 +1128,19 @@ def run(config, log=None) -> Path:
                                 f"run mmla ses-fuse")
     # the truth coder is chosen on the DEV sessions in every split, so TEST labels never decide it
     coder = cfg.coder or primary_coder([path.parents[2] for s, path in found if s not in S.TEST_SESSIONS])
-    data, tables = {}, {}
+    data, tables, excluded = {}, {}, {}
     for session, path in found:
-        data[session], tables[session] = load_session(session, path, coder, cfg.join, cfg.target)
+        loaded, table = load_session(session, path, coder, cfg.join, cfg.target)
+        # S1, the inclusion rule: a session that never shows two persons together is left out whole
+        included, reason = LY.session_inclusion(table, loaded.roster)
+        if not included:
+            excluded[session] = {**loaded.roster.record(), 'included': False, 'reason': reason}
+            say(f"{session} left out: {reason}")
+            continue
+        data[session], tables[session] = loaded, table
+    if not data:
+        raise Refused("every session is left out by the inclusion rule S1: "
+                      + '; '.join(f"{s} ({r['reason']})" for s, r in excluded.items()))
     if any(m in JEV_MODELS for m in plan['models']):
         for d in data.values():
             d.jev, d.jev_note = jev_log_proba(d, cfg.jev_variant)
@@ -1141,7 +1151,7 @@ def run(config, log=None) -> Path:
     counts = label_counts(data)
     counts.to_csv(run_dir / 'label_counts.csv')
     say(f"labels of coder {coder or '(none)'}, windows per class and session:\n{counts.to_string()}")
-    write_json(run_dir / 'roster.json', {s: d.roster.record() for s, d in data.items()})
+    write_json(run_dir / 'roster.json', {**{s: {**d.roster.record(), 'included': True} for s, d in data.items()}, **excluded})
     write_json(run_dir / 'data_checks.json', LY.data_checks(tables, {s: d.roster for s, d in data.items()}))
 
     folds = make_folds(cfg.split, data)

@@ -356,6 +356,31 @@ def roster(table: pd.DataFrame, max_tag: int = MAX_TAG, vfa_only_cover: float = 
                   gate_counts={tag: int(gate[:, i].sum()) for i, tag in enumerate(kept)}, cover=cover)
 
 
+MIN_TWO_VISIBLE = 0.3  # S1: the share of windows two roster persons must be observed together in
+
+
+def two_visible(table: pd.DataFrame, kept) -> np.ndarray:
+    """per window, whether at least two of the kept persons were observed: positioned by IPS or
+    seen by a camera."""
+    if len(kept) < 2 or len(table) == 0:
+        return np.zeros(len(table), dtype=bool)
+    with np.errstate(invalid='ignore'):
+        seen = [(_column(table, f'p{tag}_present_ratio') > 0) | (_frame_sets(table, tag) > 0) for tag in kept]
+    return np.sum(seen, axis=0) >= 2
+
+
+def session_inclusion(table: pd.DataFrame, ros: Roster, min_two_visible: float = MIN_TWO_VISIBLE) -> tuple[bool, str]:
+    """S1, the inclusion rule of a session, fixed before any label is read: its roster keeps at
+    least two persons, and two of them are observed together in at least `min_two_visible` of its
+    windows. (included, the reason). A session left out trains nothing and is scored nowhere."""
+    if len(ros.kept) < 2:
+        return False, f"S1 the roster keeps {len(ros.kept)} person(s); two are needed"
+    share = float(two_visible(table, ros.kept).mean()) if len(table) else 0.0
+    if share < min_two_visible:
+        return False, f"S1 two persons observed together in {share:.2f} of the windows, under {min_two_visible:.2f}"
+    return True, f"S1 two persons observed together in {share:.2f} of the windows"
+
+
 def duplicate_gate(table: pd.DataFrame, kept) -> np.ndarray:
     """(windows, kept persons): where a person's camera values are masked because the pose model
     gave one body two tags. Two kept persons seen in the same frames with their hands under
