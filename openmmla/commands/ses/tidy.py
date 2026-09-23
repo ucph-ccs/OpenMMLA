@@ -9,6 +9,10 @@ tree at the end (a host's recordings under collection/<host>/{audio,video}/, raw
 kept but not replayed), so a relabel is a move and nothing else. --prune-legacy keeps a
 session's speaker profiles (as collection/<host>/profiles/) and its meta.txt, and deletes the
 rest of legacy/ and the folders an earlier run's analysis produced.
+
+Every audio recording of the manifests says whose voice it holds (`scope`: personal or group)
+and, for a worn microphone, who wore it (`participant`, a tag id): the device name gives the
+scope, and --scope, --participant and --participants-in-order set them.
 """
 import argparse
 import json
@@ -84,25 +88,134 @@ def _recording_keys(record: dict[str, Any]) -> set[tuple]:
     return {(modality, start, slot) for slot in slots if slot}
 
 
+def audio_scope_of(record: dict) -> str | None:
+    """a manifest audio record's scope: its own when it says personal or group, else the default
+    of its device (default_audio_scope, with its import method and host)."""
+    from openmmla.collection.recording import AUDIO_SCOPES, default_audio_scope
+    scope = record.get('scope')
+    if scope in AUDIO_SCOPES:
+        return scope
+    return default_audio_scope(record.get('device'), (record.get('imported') or {}).get('method'), record.get('host'))
+
+
+def parse_device_values(values, what: str, allowed: tuple[str, ...] | None = None
+                        ) -> list[tuple[str | None, str, str | None]]:
+    """[HOST/]DEVICE=VALUE flags as (host or None, device, value); a VALUE of none (any case) is
+    None; raises ValueError naming `what` for a malformed one or a value outside `allowed`."""
+    wanted = f"[HOST/]DEVICE={'|'.join(allowed)}" if allowed else "[HOST/]DEVICE=VALUE"
+    parsed = []
+    for value in values or ():
+        host_device, _, text = str(value).partition('=')
+        host, _, device = host_device.rpartition('/')
+        text = text.strip()
+        if not device or not text:
+            raise ValueError(f"{what} wants {wanted}, not {value!r}")
+        if text.lower() == 'none':
+            parsed.append((host or None, device, None))
+            continue
+        if allowed and text not in allowed:
+            raise ValueError(f"{what} wants {wanted}, not {text!r}")
+        parsed.append((host or None, device, text))
+    return parsed
+
+
+def assign_audio_roles(records: list[dict], participants=(), scopes=(), in_order: bool = False,
+                       session: str = '', log=print) -> None:
+    """give every audio record its scope and participant, in place: the defaults first (a record
+    keeps a valid scope it has), then --scope, then tags in natural device order for the personal
+    ones (--participants-in-order), then --participant; a participant makes a record personal,
+    and a group record has none. A flag that names no audio of the session says so."""
+    from openmmla.collection.recording import natural_device_key
+
+    def matching(host, device):
+        found = [r for r in records if r.get('device') == device and (host is None or r.get('host') == host)]
+        if not found:
+            log(f"    [no audio of {session} records {f'{host}/' if host else ''}{device}]")
+        return found
+
+    for record in records:
+        record['scope'] = audio_scope_of(record)
+        record.setdefault('participant', None)
+    for host, device, scope in scopes:
+        for record in matching(host, device):
+            record['scope'] = scope
+    if in_order:
+        pairs = sorted({(r.get('host'), r.get('device')) for r in records if r.get('scope') == 'personal'},
+                       key=lambda pair: (natural_device_key(pair[1]), str(pair[0])))
+        tags = {pair: str(i) for i, pair in enumerate(pairs)}
+        for record in records:
+            pair = (record.get('host'), record.get('device'))
+            if pair in tags:
+                record['participant'] = tags[pair]
+    for host, device, tag in participants:
+        for record in matching(host, device):
+            record['participant'] = tag
+            if tag is not None:
+                record['scope'] = 'personal'  # a wearer makes it one person's microphone
+    for record in records:
+        if record.get('scope') == 'group':
+            record['participant'] = None
+    holders: dict[str, list[tuple]] = {}
+    for record in records:
+        tag = record.get('participant')
+        pair = (record.get('host'), record.get('device'))
+        if tag is not None and pair not in holders.setdefault(tag, []):
+            holders[tag].append(pair)
+    for tag, pairs in holders.items():
+        if len(pairs) > 1:
+            log(f"    [{session}: tag {tag} is on both {pairs[0][1]} and {pairs[1][1]}]")
+
+
+def _moved_entries(known: dict[tuple, list[dict[str, Any]]], present: set[tuple]) -> list[dict[str, Any]]:
+    """the old manifest entries no file of the tree starts at any more (ses-align renamed it to a
+    new start), one per recording"""
+    moved, seen = [], set()
+    for entries in known.values():
+        for r in entries:
+            keys = _recording_keys(r)
+            ident = (r.get('host'), r.get('modality'), round(float(r.get('start_time') or 0), 3), r.get('device'))
+            if keys & present or ident in seen:
+                continue
+            seen.add(ident)
+            moved.append(r)
+    return moved
+
+
+def _claim_moved(moved: list[dict[str, Any]], parsed: dict[str, Any], host: str) -> dict[str, Any]:
+    """the moved entry of this recording, taken out of `moved`: the same kind and device slot, this
+    machine's before another's, the nearest start first; its duration and end left to the probe
+    (a trim changed them). {} when none is left."""
+    slots = lambda r: {r.get('device'), r.get('channel'), r.get('camera_label')}
+    fits = [r for r in moved if r.get('modality') == parsed['modality'] and parsed['device'] in slots(r)]
+    if not fits:
+        return {}
+    best = min(fits, key=lambda r: (r.get('host') != host, abs(float(r.get('start_time') or 0) - parsed['start'])))
+    moved.remove(best)
+    return {k: v for k, v in best.items() if k not in ('duration', 'stopped_at')}
+
+
 def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group_id: str | None = None,
-                      notes: list[str] | None = None, log=print) -> dict[str, Any]:
+                      notes: list[str] | None = None, log=print, participants=None, scopes=None,
+                      participants_in_order: bool = False) -> dict[str, Any]:
     """the host manifests and the session manifest written again from what collection/ holds,
-    keeping what the old manifests knew about each recording (duration, how it was imported)"""
+    keeping what the old manifests knew about each recording (duration, how it was imported, its
+    scope and participant); `participants`, `scopes` and `participants_in_order` set the scope and
+    wearer of audio recordings (assign_audio_roles)"""
     from openmmla.collection.recording import format_epoch_ms
     from openmmla.commands.ses.imp import probe
 
     old = _read(session_dir / 'manifest.json')
-    known: dict[tuple, dict[str, Any]] = {}
+    known: dict[tuple, list[dict[str, Any]]] = {}
     manifests = [old] + [_read(path) for path in sorted((session_dir / 'collection').glob('*/manifest.json'))]
     for manifest in manifests:
         for r in manifest.get('recordings', []):
             if isinstance(r, dict):
                 for key in _recording_keys(r):
-                    known.setdefault(key, r)
+                    known.setdefault(key, []).append(r)
     parts = split_session_id(session_dir.name)
     session_id = session_dir.name
     now = format_epoch_ms()
-    hosts: dict[str, list[dict[str, Any]]] = {}
+    files = []
     for path in sorted((session_dir / 'collection').glob('*/*/*')):
         if not path.is_file() or path.parent.name not in ('audio', 'video') or path.suffix.lower() not in MEDIA_EXTS:
             continue
@@ -110,8 +223,19 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
         if not parsed:
             log(f"  {path.relative_to(session_dir)}: not <kind>_<host>_<device>_<start>.<ext>, left out of the manifest")
             continue
+        files.append((path, parsed))
+    moved = _moved_entries(known, {(parsed['modality'], round(parsed['start'], 3), parsed['device']) for _, parsed in files})
+    hosts: dict[str, list[dict[str, Any]]] = {}
+    for path, parsed in files:
         host = path.parent.parent.name
-        record = dict(known.get((parsed['modality'], round(parsed['start'], 3), parsed['device']), {}))
+        # the entry of this machine when two recorded the same device at the same moment, else the
+        # first (a relabelled host's entry still names the old one)
+        candidates = known.get((parsed['modality'], round(parsed['start'], 3), parsed['device']), [])
+        record = dict(next((r for r in candidates if r.get('host') == host), candidates[0] if candidates else {}))
+        if not candidates:
+            # a recording whose start moved (ses-align shifted or trimmed it) keeps what its old
+            # entry knew, its length probed again
+            record = _claim_moved(moved, parsed, host)
         if not record.get('duration'):
             record['duration'] = round(float(probe(str(path)).get('duration') or 0), 3) or None
         record.update({'id': path.stem, 'modality': parsed['modality'], 'status': 'stopped', 'path': str(path),
@@ -130,6 +254,9 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
         hosts.setdefault(host, []).append(record)
 
     all_records = [r for records in hosts.values() for r in records]
+    # the same dicts as the host manifests', so both say the same
+    assign_audio_roles([r for r in all_records if r['modality'] == 'audio'], participants or (), scopes or (),
+                       participants_in_order, session_id, log)
     sync = max((r['start_time'] for r in all_records), default=float(old.get('initial_sync_time') or 0))
     for host, records in hosts.items():
         host_dir = session_dir / 'collection' / host
@@ -248,6 +375,7 @@ def relabel_device(session_dir: Path, old: str, new: str, host: str | None = Non
     placeholders become the device that recorded: `video0` -> `c920-01`,
     `ch1` -> `vimo-0-ch1`. Nothing moves between folders: the machine is the
     folder (relabel_host) and the device is in the name."""
+    from openmmla.collection.recording import default_audio_scope
     collection = session_dir / 'collection'
     hosts = [collection / host] if host else sorted(p for p in collection.glob('*') if p.is_dir())
     if host and not hosts[0].is_dir():
@@ -285,6 +413,9 @@ def relabel_device(session_dir: Path, old: str, new: str, host: str | None = Non
         if not entries:
             continue
         for record in entries:
+            if record.get('modality') == 'audio' and record.get('scope') == default_audio_scope(
+                    old, (record.get('imported') or {}).get('method'), record.get('host')):
+                record.pop('scope', None)  # only the old name's default: the rebuild works it out for the new name
             record['device'] = new
             record.pop('camera_label', None)
             if record.get('modality') == 'audio':
@@ -428,6 +559,14 @@ def get_parser():
     parser.add_argument('--device', action='append', default=[], metavar='[HOST/]OLD=NEW',
                         help="rename the device in the file names (video0=c920-01, ch1=vimo-0-ch1); "
                              "HOST/ limits it to one machine's files (repeatable)")
+    parser.add_argument('--participant', action='append', default=[], metavar='[HOST/]DEVICE=TAG',
+                        help="the participant (tag id) wearing a personal microphone (vimo-0=0, vimo-0-ch1=2); "
+                             "none unbinds it (repeatable)")
+    parser.add_argument('--participants-in-order', action='store_true',
+                        help="tag the personal microphones 0, 1, 2 ... in natural device order "
+                             "(vimo-0-ch0 < vimo-0-ch1 < vimo-1 < vimo-10); --participant overrides")
+    parser.add_argument('--scope', action='append', default=[], metavar='[HOST/]DEVICE=personal|group',
+                        help="whether a microphone is one person's or the group's (repeatable)")
     parser.add_argument('--crop', action='append', default=[], metavar='HOST=NEW:X,Y,W,H',
                         help="cut a region of a host's videos out as the videos of NEW (a quadrant of a mosaic)")
     parser.add_argument('--crop-fps', type=int, default=None, help="frame rate of the cropped videos (default: the source's)")
@@ -476,6 +615,11 @@ def main(argv=None):
             if not host or not new or len(numbers) != 4:
                 raise ValueError(f"--crop wants HOST=NEW:X,Y,W,H, not {value!r}")
             crops.append((host, new, numbers))
+        from openmmla.collection.recording import AUDIO_SCOPES
+        participants = parse_device_values(args.participant, '--participant')
+        scopes = parse_device_values(args.scope, '--scope', AUDIO_SCOPES)
+        if any(scope is None for _, _, scope in scopes):
+            raise ValueError("--scope wants [HOST/]DEVICE=personal|group, not 'none'")
     except ValueError as error:
         print(error)
         return 1
@@ -510,7 +654,8 @@ def main(argv=None):
         data = _read(session_dir / 'manifest.json')
         data['tag_size'] = args.tag_size
         _write(session_dir / 'manifest.json', data)
-    rebuild_manifests(session_dir, notes=notes)
+    rebuild_manifests(session_dir, notes=notes, participants=participants, scopes=scopes,
+                      participants_in_order=args.participants_in_order)
     session_dir = rename_session(session_dir, args.experiment, args.group)
     print(f"-> {session_dir}  ({time.time() - started:.0f} s)")
     return 0

@@ -44,6 +44,44 @@ DEFAULT_VIDEO_BUFSIZE_LINUX = "10M"
 DEFAULT_VIDEO_PRESET = "veryfast"
 
 
+# whose voice an audio recording holds: one person's (a worn microphone) or the group's (a room microphone)
+AUDIO_SCOPES = ("personal", "group")
+_GROUP_AUDIO_PREFIXES = ("jabra",)
+_PERSONAL_AUDIO_PREFIXES = ("vimo", "badge")
+
+
+def _scope_by_name(name: str | None) -> str | None:
+    text = str(name or "").strip().lower()
+    if text.startswith(_GROUP_AUDIO_PREFIXES):
+        return "group"
+    if text.startswith(_PERSONAL_AUDIO_PREFIXES):
+        return "personal"
+    return None
+
+
+def default_audio_scope(device: str | None, method: str | None = None, host: str | None = None) -> str | None:
+    """the scope an audio recording has when nothing else says: a jabra room microphone and the
+    audio track of a camera (imported with method 'extract') are the group's, a vimo or badge
+    microphone a person's (also an imported base folder, base-vimo-0); None for a device of
+    unknown kind (mic, mix, chN)."""
+    scope = _scope_by_name(device)
+    if scope:
+        return scope
+    if str(method or "").strip().lower() == "extract":
+        return "group"
+    machine = str(host or "").strip().lower()
+    if machine.startswith("base-"):
+        machine = machine[len("base-"):]
+    return _scope_by_name(machine)
+
+
+def natural_device_key(device: str | None) -> tuple:
+    """a sort key under which vimo-0 < vimo-0-ch0 < vimo-0-ch1 < vimo-1 < vimo-10: runs of
+    digits compare as numbers."""
+    return tuple((0, int(part), "") if part.isdigit() else (1, 0, part)
+                 for part in re.split(r"(\d+)", str(device or "").lower()) if part)
+
+
 def short_hostname() -> str:
     return socket.gethostname().split(".", 1)[0] or "host"
 
@@ -688,6 +726,9 @@ def record_audio(
         "input_device": device,
         "channels": detected_channels,
         "channel": "mono" if channel_label == "mix" else f"ch{channel_label}",
+        # whose voice it is: a room microphone's or one person's; the wearer is bound later (mmla ses-tidy)
+        "scope": default_audio_scope(slot),
+        "participant": None,
         "sample_rate": sample_rate,
         "format": fmt,
     }

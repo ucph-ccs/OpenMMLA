@@ -20,6 +20,11 @@ in the frame set when several cameras share it. How many cameras and frame sets 
 counted beside the values (`_cameras`, `_frame_sets`), since frame counts double with a second
 camera, and a frame set that lost or gained a frame is counted in `n_vfa_incomplete`, because
 numbering by place can then give one camera's frame to another.
+
+A session with personal microphones (transcripts that carry a `participant`) counts each
+wearer's words only in the 3 s buckets the synchronizer's energy vote gave them
+(`p<tag>_words`); its spurts, words and turns stay the group microphone's. A session without
+them gives the same table as before.
 """
 from __future__ import annotations
 
@@ -28,9 +33,12 @@ import csv
 import json
 import math
 import os
+from bisect import bisect_right
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Iterable
 
+from openmmla.utils.asr_scope import participant_of
 from openmmla.utils.constants import (
     EVENT_TYPE_ASR_RECOGNITION, EVENT_TYPE_ASR_TRANSCRIPTION, EVENT_TYPE_IPS_RELATION,
     EVENT_TYPE_IPS_ROTATION, EVENT_TYPE_IPS_TRANSLATION, EVENT_TYPE_VFA_ACTION, EVENT_TYPE_VFA_FEATURES,
@@ -284,7 +292,12 @@ def participants_of(events: dict[str, list[dict]]) -> list[str]:
             for person in frame.get('persons', []):
                 if person.get('tag_id') is not None:
                     tags.add(str(person['tag_id']))
-    return sorted(tags, key=lambda tag: (not tag.lstrip('-').isdigit(), int(tag) if tag.lstrip('-').isdigit() else 0, tag))
+    return sorted(tags, key=_tag_key)
+
+
+def _tag_key(tag: str) -> tuple:
+    """tags sorted numerically where they are numbers, the others after them by name."""
+    return (not tag.lstrip('-').isdigit(), int(tag) if tag.lstrip('-').isdigit() else 0, tag)
 
 
 def _pairs(participants: list[str]) -> list[tuple[str, str]]:
@@ -303,12 +316,166 @@ def _frames_of(record: dict) -> list[dict]:
 
 # ---- speech ----
 
+def _speaker_names(record: dict) -> list[str]:
+    """a record's `speakers` as a list of text: one name is a list of it, none is empty."""
+    names = record.get('speakers')
+    if names is None:
+        return []
+    if isinstance(names, str):
+        return [names]
+    if isinstance(names, (list, tuple)):
+        return [str(name) for name in names]
+    return [str(names)]
+
+
+def _count_words(chunks: list[tuple[dict, float, float]], ws: float, we: float) -> int:
+    """the words of the chunks said in [ws, we)."""
+    # a word counts in the window it was spoken in when the transcriber stamped it (word_level:
+    # seconds from the chunk's start); a chunk without stamps gives its words to the window it
+    # started in, and a chunk of minutes would otherwise give them all to one window
+    words = 0
+    for record, start, _ in chunks:
+        stamps = _word_stamps(record)
+        if stamps is None:
+            if ws <= start < we:
+                words += len(str(record.get('text') or '').split())
+        else:
+            words += sum(1 for stamp in stamps if ws <= start + stamp < we)
+    return words
+
+
+def _diarization_features(chunks: list[tuple[dict, float, float]], ws: float, we: float, length: float) -> dict:
+    """the anonymous turns of the diarized chunks in the window (dia_*)."""
+    out: dict[str, Any] = {}
+    # the anonymous turns: labels hold within a chunk, so the counts are per chunk; the entropy
+    # is averaged over the chunks, the switches and the overlap summed
+    entropies, overlap_time, switches, most_speakers = [], 0.0, 0, 0
+    for record, start, end in chunks:
+        turns = record.get('diarization')
+        if isinstance(turns, str):
+            try:
+                turns = json.loads(turns)
+            except json.JSONDecodeError:
+                turns = None
+        if not isinstance(turns, list) or not turns:
+            continue
+        clipped, chunk_time = [], defaultdict(float)
+        for turn in turns:
+            try:
+                t0, t1 = start + float(turn['start']), start + float(turn['end'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            inside = _overlap(ws, we, t0, t1)
+            if inside > 0:
+                clipped.append((max(t0, ws), min(t1, we), str(turn.get('speaker'))))
+                chunk_time[str(turn.get('speaker'))] += inside
+        if not clipped:
+            continue
+        clipped.sort()
+        most_speakers = max(most_speakers, len(chunk_time))
+        switches += sum(1 for (_, _, la), (_, _, lb) in zip(clipped, clipped[1:]) if la != lb)
+        overlap_time += _union_overlap([(a0, a1) for a0, a1, _ in clipped])
+        entropies.append(_entropy(chunk_time))
+    diarized = bool(entropies)
+    out['dia_speakers'] = most_speakers if diarized else None
+    out['dia_switches'] = switches if diarized else None
+    out['dia_overlap_ratio'] = _round(min(overlap_time / length, 1.0)) if diarized else None
+    out['dia_share_entropy'] = _round(_mean(entropies)) if diarized else None
+    return out
+
+
+@dataclass
+class PersonalSpeech:
+    """the personal microphones of a session: who wore one, the buckets each won, and whether a
+    group microphone transcribed too."""
+    participants: list[str]
+    won: dict[str, tuple[list[float], list[float]]]  # per participant: sorted bucket starts, their ends
+    has_group: bool
+
+    def won_at(self, participant: str, moment: float) -> bool:
+        """whether `moment` falls in a bucket the participant won."""
+        starts, ends = self.won.get(participant, ([], []))
+        i = bisect_right(starts, moment) - 1
+        return i >= 0 and moment < ends[i]
+
+
+def _energies_of(record: dict) -> dict | None:
+    """a merged bucket's energies ({participant: snr}), None when it carries none."""
+    energies = record.get('energies')
+    if isinstance(energies, str):
+        try:
+            energies = json.loads(energies)
+        except json.JSONDecodeError:
+            return None
+    return energies if isinstance(energies, dict) else None
+
+
+def won_buckets(recognitions: list[dict]) -> dict[str, list[tuple[float, float]]]:
+    """for each participant, the [start, end) of the merged buckets that list them among the
+    speakers and, when the bucket carries energies, among those too."""
+    won: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for record in recognitions:
+        try:
+            start = float(record.get('window_start_time'))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start):
+            continue
+        try:
+            end = float(record.get('window_end_time'))
+        except (TypeError, ValueError):
+            end = start + ASR_BUCKET
+        if not end > start:
+            end = start + ASR_BUCKET
+        energies = _energies_of(record)
+        voted = {str(tag) for tag in energies} if energies is not None else None
+        for name in set(_speaker_names(record)):
+            if name in SILENT_LABELS:
+                continue
+            if voted is not None and name not in voted:
+                continue
+            won[name].append((start, end))
+    return {name: sorted(spans) for name, spans in won.items()}
+
+
+def word_times(record: dict, start: float, end: float) -> list[float]:
+    """when each word of a chunk was said, in seconds from the chunk's start: its stamp when the
+    transcriber gave one, else the words spread evenly over the chunk."""
+    stamps = _word_stamps(record)
+    if stamps is not None:
+        return stamps
+    n = len(str(record.get('text') or '').split())
+    return [(end - start) * i / n for i in range(n)]
+
+
+def personal_speech(recognitions: list[dict], transcriptions: list[dict]) -> PersonalSpeech | None:
+    """the session's personal microphones, None when no transcript carries a participant (every
+    older session)."""
+    tags = {participant_of(t.get('participant')) for t in transcriptions} - {None}
+    if not tags:
+        return None
+    spans = won_buckets(recognitions)
+    voted: set[str] = set()
+    for record in recognitions:
+        energies = _energies_of(record)
+        if energies:
+            voted.update(str(tag) for tag in energies)
+    participants = sorted(tags | voted, key=_tag_key)
+    won = {tag: ([s for s, _ in spans.get(tag, [])], [e for _, e in spans.get(tag, [])]) for tag in participants}
+    has_group = any(participant_of(t.get('participant')) is None for t in transcriptions)
+    return PersonalSpeech(participants=participants, won=won, has_group=has_group)
+
+
 def speech_features(recognition: EventIndex, transcription: EventIndex, ws: float, we: float,
-                    speakers: list[str]) -> dict:
+                    speakers: list[str], personal: PersonalSpeech | None = None) -> dict:
     """what was said in the window: how much of it held speech, by whom when the speakers are
     named, the talk spurts and words that started in it, and the anonymous turns of its
     diarized chunks. A bucket several microphones reported the same speaker in counts that
-    speaker once, and no bucket counts for more than the time it covers."""
+    speaker once, and no bucket counts for more than the time it covers.
+
+    With personal microphones (`personal`), each wearer's words count only in the buckets they
+    won (`p<tag>_words`), and the spurts, words and turns are the group microphone's; without
+    one, `words` is the wearers' sum and the spurts and turns come from every chunk."""
     length = we - ws
     out: dict[str, Any] = {}
     buckets = recognition.between(ws, we)
@@ -345,57 +512,37 @@ def speech_features(recognition: EventIndex, transcription: EventIndex, ws: floa
         out[f'spk_{name}_ratio'] = _round(min(by_speaker.get(name, 0.0) / length, 1.0)) if buckets else None
 
     chunks = transcription.between(ws, we)
-    out['n_asr_transcription'] = len(chunks)
-    started = [(record, start, end) for record, start, end in chunks if ws <= start < we]
+    if personal is None:
+        out['n_asr_transcription'] = len(chunks)
+        started = [(record, start, end) for record, start, end in chunks if ws <= start < we]
+        out['n_spurts'] = len(started)
+        out['mean_spurt_seconds'] = _round(_mean(end - start for _, start, end in started))
+        out['words'] = _count_words(chunks, ws, we)
+        out.update(_diarization_features(chunks, ws, we, length))
+        return out
+
+    # personal microphones: the spurts and turns are the group microphone's when there is one
+    group = [c for c in chunks if participant_of(c[0].get('participant')) is None]
+    basis = group if personal.has_group else chunks
+    out['n_asr_transcription'] = len(basis)
+    started = [(record, start, end) for record, start, end in basis if ws <= start < we]
     out['n_spurts'] = len(started)
     out['mean_spurt_seconds'] = _round(_mean(end - start for _, start, end in started))
-    # a word counts in the window it was spoken in when the transcriber stamped it (word_level:
-    # seconds from the chunk's start); a chunk without stamps gives its words to the window it
-    # started in, and a chunk of minutes would otherwise give them all to one window
-    words = 0
-    for record, start, _ in chunks:
-        stamps = _word_stamps(record)
-        if stamps is None:
-            if ws <= start < we:
-                words += len(str(record.get('text') or '').split())
-        else:
-            words += sum(1 for stamp in stamps if ws <= start + stamp < we)
-    out['words'] = words
-
-    # the anonymous turns: labels hold within a chunk, so the counts are per chunk; the entropy
-    # is averaged over the chunks, the switches and the overlap summed
-    entropies, overlap_time, switches, most_speakers = [], 0.0, 0, 0
-    for record, start, end in chunks:
-        turns = record.get('diarization')
-        if isinstance(turns, str):
-            try:
-                turns = json.loads(turns)
-            except json.JSONDecodeError:
-                turns = None
-        if not isinstance(turns, list) or not turns:
-            continue
-        clipped, chunk_time = [], defaultdict(float)
-        for turn in turns:
-            try:
-                t0, t1 = start + float(turn['start']), start + float(turn['end'])
-            except (KeyError, TypeError, ValueError):
+    # a wearer's word counts when it was said in a bucket the energy vote gave them
+    worn: dict[str, int] = {}
+    for tag in personal.participants:
+        count = 0
+        for record, start, end in chunks:
+            if participant_of(record.get('participant')) != tag:
                 continue
-            inside = _overlap(ws, we, t0, t1)
-            if inside > 0:
-                clipped.append((max(t0, ws), min(t1, we), str(turn.get('speaker'))))
-                chunk_time[str(turn.get('speaker'))] += inside
-        if not clipped:
-            continue
-        clipped.sort()
-        most_speakers = max(most_speakers, len(chunk_time))
-        switches += sum(1 for (_, _, la), (_, _, lb) in zip(clipped, clipped[1:]) if la != lb)
-        overlap_time += _union_overlap([(a0, a1) for a0, a1, _ in clipped])
-        entropies.append(_entropy(chunk_time))
-    diarized = bool(entropies)
-    out['dia_speakers'] = most_speakers if diarized else None
-    out['dia_switches'] = switches if diarized else None
-    out['dia_overlap_ratio'] = _round(min(overlap_time / length, 1.0)) if diarized else None
-    out['dia_share_entropy'] = _round(_mean(entropies)) if diarized else None
+            for offset in word_times(record, start, end):
+                moment = start + offset
+                if ws <= moment < we and personal.won_at(tag, moment):
+                    count += 1
+        worn[f'p{tag}_words'] = count
+    out['words'] = _count_words(group, ws, we) if personal.has_group else sum(worn.values())
+    out.update(worn)
+    out.update(_diarization_features(basis, ws, we, length))
     return out
 
 
@@ -663,10 +810,12 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     features = EventIndex(events.get(EVENT_TYPE_VFA_FEATURES, []), instant=True)
     layout = frame_set_layout(features.records)
     actions = EventIndex(events.get(EVENT_TYPE_VFA_ACTION, []), instant=True)
+    # the personal microphones and the buckets each wearer won; None for a session without them
+    personal = personal_speech(events.get(EVENT_TYPE_ASR_RECOGNITION, []), events.get(EVENT_TYPE_ASR_TRANSCRIPTION, []))
     rows = []
     for index, ws, we in windows(span[0], span[1], window, step):
         row: dict[str, Any] = {'window_index': index, 'window_start': round(ws, 3), 'window_end': round(we, 3)}
-        row.update(speech_features(recognition, transcription, ws, we, speakers))
+        row.update(speech_features(recognition, transcription, ws, we, speakers, personal=personal))
         row.update(space_features(translations, relations, ws, we, participants))
         row.update(body_gaze_features(features, ws, we, participants, layout))
         row.update(action_features(actions, ws, we, participants))

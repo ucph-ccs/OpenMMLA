@@ -149,7 +149,10 @@ class Item:
         record['device'] = self.device
         if self.modality == 'audio':
             from openmmla.commands.ses.tidy import channel_of_device
-            record.update({'channel': channel_of_device(self.device), 'channels': 1, 'sample_rate': SEGMENT_RATE})
+            from openmmla.collection.recording import default_audio_scope
+            record.update({'channel': channel_of_device(self.device), 'channels': 1, 'sample_rate': SEGMENT_RATE,
+                           # whose voice it is; the wearer of a personal microphone is bound with mmla ses-tidy
+                           'scope': default_audio_scope(self.device, self.method, self.host), 'participant': None})
         if self.pipeline_hint:
             record['pipeline_hint'] = self.pipeline_hint
         if self.notes:

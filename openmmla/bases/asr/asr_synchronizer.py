@@ -3,6 +3,7 @@ import json
 import os
 import threading
 
+from openmmla.bases.asr.attribution import ENERGY_MARGIN_DB, ENERGY_TIE_DB, as_decibels, as_energy, attribute_bucket
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
@@ -70,6 +71,8 @@ class ASRSynchronizer(Synchronizer):
     """ASRSynchronizer class for synchronizing speaker recognition results from ASRBases among the same session and
     uploading the segment result to InfluxDB."""
     logger = get_logger('asr-synchronizer')
+    energy_margin_db = ENERGY_MARGIN_DB  # how far over its floor a worn microphone's speech must be to win a bucket
+    energy_tie_db = ENERGY_TIE_DB  # worn microphones this close to the loudest also count as speaking
 
     def __init__(
         self,
@@ -171,6 +174,9 @@ class ASRSynchronizer(Synchronizer):
             self.config['Base'][self.base_type]['recognize_duration'])
         self.bucket_duration = float(sync_config.get('bucket_duration', recognize_duration))
         self.match_tolerance = float(sync_config.get('match_tolerance', recognize_duration))
+        # the energy vote over personal microphones (Bases.participant); a blank keeps the default
+        self.energy_margin_db = as_decibels(sync_config.get('energy_margin_db'), ENERGY_MARGIN_DB)
+        self.energy_tie_db = as_decibels(sync_config.get('energy_tie_db'), ENERGY_TIE_DB)
 
     def _setup_directories(self):
         """Set up required directories."""
@@ -335,7 +341,8 @@ class ASRSynchronizer(Synchronizer):
                            'num_bases': self._num_bases_arg},
                 parameters={'base_type': self.base_type, 'number_of_bases': self.number_of_bases,
                             'buffer_expiry_time': self.buffer_expiry_time, 'bucket_duration': self.bucket_duration,
-                            'match_tolerance': self.match_tolerance},
+                            'match_tolerance': self.match_tolerance,
+                            'energy_margin_db': self.energy_margin_db, 'energy_tie_db': self.energy_tie_db},
                 config=self.config, config_path=self.config_path, project_dir=self.project_dir)
             session_provenance.record_component(self.mongo_client, self.session_id, entry, self.project_dir,
                                                 'asr-base', log=self.logger)
@@ -440,9 +447,21 @@ class ASRSynchronizer(Synchronizer):
             self._stop_threads()
         else:
             self.logger.info("All threads stopped.")
+            self.mqtt_client.loop_stop()  # no late callback during the flush
+            self._flush_buckets()
 
         clear_directory(self.temp_dir)
         self._clean_up()
+
+    def _flush_buckets(self):
+        """merge and upload every bucket still open, oldest first: at STOP a bucket some base never
+        reported to would otherwise be lost."""
+        for key in sorted(self.time_bucket_buffer):
+            frame_set = self.time_bucket_buffer.pop(key)
+            if frame_set:
+                merged = self._merge_base_results(frame_set)
+                merged['window_start_time'] = key
+                self._upload_merged_result(merged)
 
     def _send_start_regularly(self):
         """Send periodic START signals to ASR bases.
@@ -486,6 +505,15 @@ class ASRSynchronizer(Synchronizer):
             'durations': json.loads(latest_base_result['durations']),
             'segment_start_time': latest_base_result['segment_start_time'],
         }
+        # a worn microphone's result names its wearer and carries its level, which the energy vote
+        # reads; a legacy or group result keeps its four keys
+        entry = self.time_bucket_buffer[time_bucket_key][base_id]
+        participant = latest_base_result.get('participant')
+        if participant not in (None, ''):
+            entry['participant'] = str(participant)
+        energy = as_energy(latest_base_result.get('energy'))
+        if energy:
+            entry['energy'] = energy
 
     def _merge_base_results(self, frame_results: dict) -> dict:
         """Merge ASR results from multiple bases for a single time bucket.
@@ -506,6 +534,9 @@ class ASRSynchronizer(Synchronizer):
             - durations: List of corresponding audio durations
             - segment_start_times: List of corresponding segment start times
         """
+        # the personal microphones that lost the energy vote are silent before anything is merged
+        frame_results, energies = attribute_bucket(frame_results, self.energy_margin_db, self.energy_tie_db,
+                                                   float(self.bucket_duration))
         speakers, similarities, durations, segment_start_times = [], [], [], []
 
         if self.dominant:
@@ -534,12 +565,15 @@ class ASRSynchronizer(Synchronizer):
                 similarities.append(best_result['similarities'][i])
                 durations.append(best_result['durations'][i])
 
-        return {
+        merged = {
             'speakers': speakers,
             'similarities': similarities,
             'durations': durations,
             'segment_start_times': segment_start_times,
         }
+        if energies:
+            merged['energies'] = energies  # {participant: snr in dB} of the worn microphones that voted
+        return merged
 
     def _upload_merged_result(self, merged_result: dict):
         """Log and upload the merged ASR segment result to InfluxDB.
@@ -566,6 +600,8 @@ class ASRSynchronizer(Synchronizer):
             "durations": json.dumps(merged_result['durations']),
             "segment_start_times": json.dumps(merged_result['segment_start_times']),
         }
+        if merged_result.get('energies'):
+            fields["energies"] = json.dumps(merged_result['energies'])  # a JSON string: write_event would str() a dict
         print(f"{BLUE}[Speaker Recognition]{ENDC}{window_start}: "
               f"{BLUE}{fields['speakers']}{ENDC}, "
               f"similarity: {fields['similarities']}")

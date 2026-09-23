@@ -499,6 +499,20 @@ def _move_file_dir(holder: dict, where: str, entries: list[dict]) -> list[str]:
     return [f"{where}.file_dir ({folder}) goes: no file base names a file in it without its folder"]
 
 
+def _tidy_participants(entries) -> None:
+    """a Bases entry's participant saved as text: a blank one goes, 0 is '0'."""
+    from openmmla.utils.asr_scope import participant_of
+
+    for entry in entries:
+        if not isinstance(entry, dict) or "participant" not in entry:
+            continue
+        value = participant_of(entry["participant"])
+        if value is None:
+            del entry["participant"]
+        else:
+            entry["participant"] = value
+
+
 def move_source_settings(config) -> list[str]:
     """move out of Base what only some sources use, into the Bases entries that
     use it: an ASR base type's stream_kwargs.host and packet_format go to its
@@ -513,6 +527,7 @@ def move_source_settings(config) -> list[str]:
     base = config["Base"]
     bases = config.get("Bases")
     entries = [entry for entry in bases if isinstance(entry, dict)] if isinstance(bases, list) else []
+    _tidy_participants(entries)
     notes: list[str] = []
     if "file_dir" in base:  # IPS and VFA: one Base for every base
         notes += _move_file_dir(base, "Base", entries)

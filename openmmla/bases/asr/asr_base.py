@@ -24,7 +24,8 @@ from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir, session_artifact_dir
 from openmmla.utils import session_provenance
-from openmmla.utils.asr_scope import chunk_cap, normalize_asr_scope, resolve_speaker_verification as _resolve_speaker_verification
+from openmmla.utils.asr_scope import chunk_cap, normalize_asr_scope, participant_of, resolve_speaker_verification as _resolve_speaker_verification
+from openmmla.bases.asr.attribution import NoiseFloor, energy_record, segment_energy, transcript_time
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
@@ -87,6 +88,8 @@ class ASRBase(Base):
     """ASRBase class for automatic speech recognition with speaker diarization."""
 
     logger = get_logger(f'asr-base')
+    participant: str | None = None  # the tag of whoever wears this base's microphone (Bases.participant)
+    _noise_floor = None  # the base's running noise floor (NoiseFloor), fresh each run
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'capture', store: bool = True,
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
@@ -243,8 +246,15 @@ class ASRBase(Base):
             base_config.get('speaker_verification', 'auto'),
             self.asr_scope,
         )
+        # a microphone worn by one participant (Bases.participant): its speech is theirs, told apart
+        # from the neighbours' by the synchronizer's energy vote, never by speaker verification; it
+        # chunks like a group microphone
+        self.participant = participant_of(self._base_entry.get('participant'))
+        if self.participant is not None:
+            self.speaker_verification = False
         # the longest a chunk of one speaker may grow (30 s for a group microphone unless set)
-        self.max_chunk_duration = chunk_cap(base_config.get('max_chunk_duration'), self.asr_scope)
+        self.max_chunk_duration = chunk_cap(base_config.get('max_chunk_duration'),
+                                            'group' if self.participant is not None else self.asr_scope)
 
         self.register_duration = int(base_config['register_duration'])
         self.recognize_duration = int(base_config['recognize_sp_duration']) if self.sp else int(
@@ -921,7 +931,11 @@ class ASRBase(Base):
             print(f"\n{GREEN}Total speakers: {len(self.selected_speakers) if self.selected_speakers else 0}{ENDC}")
         else:
             print(f"{PURPLE}Speaker verification disabled.{ENDC}")
-            print(f"{GREEN}ASR chunks will be attributed at group scope.{ENDC}")
+            if self.participant is not None:
+                print(f"{GREEN}ASR chunks are attributed to participant {self.participant} when their channel is "
+                      f"the loudest (energy attribution).{ENDC}")
+            else:
+                print(f"{GREEN}ASR chunks will be attributed at group scope.{ENDC}")
         
         # select or create bucket
         launch_session_id = session_id or self.launch_session_id
@@ -934,6 +948,7 @@ class ASRBase(Base):
 
         # reset attributes
         self.last_speaker = None
+        self._noise_floor = NoiseFloor()
         self.audio_queue = queue.Queue()
         self.transcription_queue = queue.Queue()
         self.speaker_frames_dict = {}
@@ -1008,6 +1023,8 @@ class ASRBase(Base):
 
     def _resolve_group_speaker_id(self):
         """Prefer the selected session group id for group-level ASR attribution."""
+        if self.participant is not None:
+            return  # a worn microphone is labelled with its wearer, never the group
         if self.asr_scope != "group" or not self.session_id:
             return
         try:
@@ -1055,6 +1072,8 @@ class ASRBase(Base):
                     'speaker_verification': self.speaker_verification, 'max_chunk_duration': self.max_chunk_duration,
                     'selected_speakers': list(self.selected_speakers or []),
                     'group_speaker_id': self.group_speaker_id, 'language': self.language,
+                    'participant': self.participant,
+                    'attribution': 'energy' if self.participant is not None else None,
                     'register_duration': self.register_duration, 'recognize_duration': self.recognize_duration,
                     'rms_threshold': self.rms_threshold, 'rms_peak_threshold': self.rms_peak_threshold,
                     'recognize_threshold': self.threshold, 'keep_threshold': self.keep_threshold,
@@ -1272,6 +1291,20 @@ class ASRBase(Base):
         except Exception as e:
             raise RecordingError(f'RecordingError occurred when continuous file reading: {e}') from e
 
+    def _speech_label(self) -> str:
+        """the name a segment with speech takes without speaker verification: the wearer's
+        participant id, else the group's id."""
+        return self.participant if self.participant is not None else self.group_speaker_id
+
+    def _segment_energy(self, segment_start_time: float, frames: bytes) -> dict:
+        """the level of a segment's raw frames and the base's noise floor at that moment, as a
+        recognition carries it."""
+        if self._noise_floor is None:
+            self._noise_floor = NoiseFloor()
+        rms, peak = segment_energy(frames)
+        floor = self._noise_floor.update(segment_start_time, rms)
+        return energy_record(rms, peak, floor)
+
     def _continuous_recognizing(self):
         """Continuously process and recognize audio segments from the audio queue.
 
@@ -1290,6 +1323,8 @@ class ASRBase(Base):
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
                 segment_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
+                # the level of the raw segment, before any gain, against this base's noise floor
+                energy = self._segment_energy(segment_start_time, frames)
                 write_bytes_to_wav(segment_audio_path, frames)  # default: 16000 Hz, 16-bit, mono
 
                 # audio pre-processing
@@ -1307,7 +1342,7 @@ class ASRBase(Base):
                 similarity = 0
 
                 if speaker == 'unknown' and not self.speaker_verification:
-                    speaker = self.group_speaker_id
+                    speaker = self._speech_label()
                     similarity = 1.0
                     duration = calculate_audio_duration(segment_audio_path)
                 elif speaker == 'unknown':  # voice detected
@@ -1329,7 +1364,7 @@ class ASRBase(Base):
 
                 self._assemble_chunk_with_hsr(speaker, segment_start_time, frames)
                 self._publish_recognition(segment_start_time, recognize_start_time, [speaker],
-                                          [np.round(np.float64(similarity), 4)], [duration])
+                                          [np.round(np.float64(similarity), 4)], [duration], energy=energy)
 
                 if self.store:
                     shutil.move(segment_audio_path,
@@ -1754,10 +1789,18 @@ class ASRBase(Base):
         heard = f" ({len({turn.get('speaker') for turn in turns})} speakers, {len(turns)} turns)" if turns else ""
         print(f"{GREEN}[Speaker Transcription]{ENDC}{chunk_start_time}: "
               f"{GREEN}{speaker} : {transcribe_result.get('text', 'N/A')}{heard}{ENDC}")
-        self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_TRANSCRIPTION, fields)
+        if self.participant is not None:
+            # a worn microphone's transcript: whose it is, and a point of its own (several bases' chunks end together)
+            fields["participant"] = self.participant
+            fields["attribution"] = "energy"
+            self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_TRANSCRIPTION, fields,
+                                           timestamp=transcript_time(chunk_end_time,
+                                                                     f'{self.base_type.lower()}_{self.id}'))
+        else:
+            self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_TRANSCRIPTION, fields)
 
     def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],
-                             similarities: list[float], durations: list[float]):
+                             similarities: list[float], durations: list[float], energy: dict | None = None):
         """Log and publish speaker recognition results via MQTT.
 
         Constructs a JSON record with recognition details and publishes it on the designated MQTT channel.
@@ -1769,6 +1812,8 @@ class ASRBase(Base):
             speakers: list of recognized speakers.
             similarities: list of similarity scores (0.0-1.0) corresponding to speakers.
             durations: list of audio durations in seconds for each speaker segment.
+            energy: the segment's level and this base's noise floor (rms_db, peak_db, floor_db), which
+                the synchronizer's energy vote reads (default: None, sent without).
         """
         base_recognition_result = {
             'base_id': f'{self.base_type.lower()}_{self.id}',
@@ -1777,9 +1822,16 @@ class ASRBase(Base):
             'durations': json.dumps(durations),
             'segment_start_time': segment_start_time
         }
+        if energy is not None:
+            base_recognition_result['energy'] = energy  # a JSON object inside the payload
+        if self.participant is not None:
+            base_recognition_result['participant'] = self.participant
+        worn = ""
+        if self.participant is not None and energy is not None:
+            worn = f" [{self.participant}, {energy['rms_db']:.1f} dB, floor {energy['floor_db']:.1f}]"
         print(f"{BLUE}[Speaker Recognition]{ENDC}{base_recognition_result['segment_start_time']}: "
               f"{BLUE}{base_recognition_result['speakers']}{ENDC}, similarity: {base_recognition_result['similarities']},"
-              f"processed time: {time.time() - recognize_start_time} seconds")
+              f"processed time: {time.time() - recognize_start_time} seconds{worn}")
         result_str = json.dumps(base_recognition_result)
         self.mqtt_client.publish(f'{self.session_id}/asr', result_str)
 

@@ -28,8 +28,8 @@ Create the `asr-base` environment from the TUI's Environment tab or by hand (`co
 | Section | What it holds |
 |---|---|
 | `Base.<device>` | one block per **kind** of microphone (a table speakerphone, a badge, a laptop mic), named as you like: how its audio is processed (`asr_scope`, recognition thresholds and durations, gain, VAD thresholds, `max_chunk_duration`) and the format the base works in, whatever the source (`stream_kwargs`: `channels`, `rate`, `format`, chunk size). Add one with `+ Add Base`. |
-| `Bases` | one entry per **microphone**, that is per base process you start: its `id`, its `base_type` (a block of `Base`), its `source`, and the fields that source needs: `source_index` (a device index, a stream name, the full path of a file), `channel_select` (pyaudio), or `port`, `host` and `packet_format` (udp/tcp); the Config tab shows only those, see [Input sources](#input-sources). The card's Base dropdowns offer these entries. |
-| `Synchronizer` | `bucket_duration`, `match_tolerance`, `result_expiry_time` |
+| `Bases` | one entry per **microphone**, that is per base process you start: its `id`, its `base_type` (a block of `Base`), its `source`, and the fields that source needs: `source_index` (a device index, a stream name, the full path of a file), `channel_select` (pyaudio), or `port`, `host` and `packet_format` (udp/tcp); the Config tab shows only those, see [Input sources](#input-sources). `participant` (the tag id of the person wearing a personal microphone, any source) is shown for every entry, see [Personal microphones](#personal-microphones-and-energy-attribution). The card's Base dropdowns offer these entries. |
+| `Synchronizer` | `bucket_duration`, `match_tolerance`, `result_expiry_time`, `energy_margin_db` (6) and `energy_tie_db` (3) for personal microphones |
 | `Streams` | managed and external streams, see below |
 | `Server.asr` | the six service endpoints, either through the gateway (`http://<gateway>:8080/transcribe`) or direct (`http://<server>:5005/transcribe`) |
 | `InfluxDB`, `MongoDB`, `MQTT`, `Redis`, `Gateway` | mirrored from System Settings, see [System Services](../system_services.md) |
@@ -123,6 +123,27 @@ Modes: `live` recognizes and transcribes the stream in real time (the TUI defaul
 
 When a base joins a session it notes in the session's MongoDB document which `Bases` entry it is and the stream it takes, and notes when it leaves, first thing on its way out, before it finishes its last audio chunks. A `stream` base names its `Streams` entry (also when it was picked from the menu); a `udp` or `tcp` base is matched to the `Streams` entry whose `target` has its port; a `pyaudio`, `lsl` or `file` base takes no stream. **Sessions → Export Streams** reads this, so it fetches the session's own streams, the Stream Server's copy and the capture host's, without being told which. Sessions from before this, or ones no base joined, have no such note: they have nothing to export, and the console says so.
 
+## Personal microphones and energy attribution
+
+**Why.** A classroom group can wear one microphone each (a Vimo or badge channel per student) beside a Jabra room microphone, and nobody enrolls a voice. On synchronized channels worn by one person each, the wearer is the loudest voice on their own channel, and the neighbours reach it only as cross-talk. The level of each channel is what tells them apart.
+
+**Config.** Set `participant` on the `Bases` entry of each personal channel to the tag id of its wearer (the Participant field of the Bases form, for any source). Such a base verifies no speaker, labels every speech segment with the tag, and chunks like a group microphone (`max_chunk_duration`, 30 s by default), whatever its `asr_scope`. A group base is configured as before, with no participant. Two `Synchronizer` keys set the vote: `energy_margin_db` (6), how far above its own noise floor a channel's speech must be to be its wearer's, and `energy_tie_db` (3), how close to the loudest another channel must be to count as speaking too. A blank or placeholder keeps the default.
+
+**What the events carry.**
+
+- Every recognition a base publishes on `<sid>/asr` carries `energy`: `rms_db`, `peak_db` and `floor_db`, in dBFS, of the raw segment before any gain. The floor is the 10th percentile of the base's segment levels over the last 60 s; digital silence is left out, and a longer gap starts the floor again.
+- A wearer's recognition also carries `participant`.
+- For each bucket the synchronizer takes the personal channels with speech, and their snr: `rms_db - floor_db`. The loudest wins when it is at least `energy_margin_db` up, and the others within `energy_tie_db` of it speak too. The losers are made silent before the merge, so they never come back as a fallback. The group microphone never votes, and its speech passes as before.
+- `asr_recognition` gains `energies`, a JSON `{tag: snr_db}` of the personal channels that voted. Its other fields are unchanged.
+- A wearer's `asr_transcription` carries `participant` and `attribution: energy`. It is stored a few microseconds after its chunk end, so the chunks of several bases that end together stay apart.
+- Buckets still open at STOP are merged and uploaded, since a bucket some base never reported to would otherwise be lost.
+
+**How the fusion counts words.** `mmla ses-fuse` adds a `p<tag>_words` column per wearer: their words whose time falls in a 3 s bucket that lists the tag (and its `energies`, when the bucket has them). Words without stamps are spread evenly over their chunk. `words`, the spurts and `dia_*` stay the group microphone's. Without one, `words` is the sum of the wearers' won words, and the spurts and `dia_*` come from every chunk. Sessions without personal microphones fuse as before.
+
+**Binding tags.** Every audio recording of a session's manifests has a `scope` (`personal` or `group`) and a `participant`. `mmla ses-tidy --scope`, `--participant` and `--participants-in-order` set them (see the [TUI guide](../tui.md#collection)). A live Collection recording notes only the default scope of its device; the Collection form has no Participant choice, so the wearer is bound afterwards with `ses-tidy`.
+
+**Replay.** `scripts/replay_sessions.py` gives each personal recording of a session with several microphones its own `Vimo` base, bound to its participant (the device name when none is bound), beside the group base. The personal bases run without `-dia`, and the synchronizer runs with `-bt Vimo -nb <count>`.
+
 ## Manual CLI
 
 ```bash
@@ -131,6 +152,8 @@ conda activate asr-base
 mmla asr-base -p pipelines/asr-base -c pipelines/asr-base/config.yml -m live -sid <session-id> -b <base-id> -spk Alice,Bob
 # one per session; -bt the Base block the bases use, -nb how many bases to wait for
 mmla asr-sync -p pipelines/asr-base -c pipelines/asr-base/config.yml -sid <session-id> -bt <base-type> -nb 2
+# a room microphone and three worn ones (Bases entries with a participant)
+mmla asr-sync -c <cfg> -sid <sid> -bt Vimo -nb 4
 ```
 
 With `-sid` a process runs as it does from the TUI: it asks nothing, starts at once and exits when the run ends with STOP. A flag left out then takes its default: `-b` the only `Bases` entry, `-bt` the only block of `Base`, `-nb` the number of `Bases` entries; when there is no single one to take, the window says so and asks. Without `-sid` each process shows its menu and asks for the session and for whatever its flags leave out, as before.

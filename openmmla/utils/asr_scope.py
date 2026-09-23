@@ -51,3 +51,18 @@ def chunk_cap(value, asr_scope: str) -> float | None:
     except ValueError:
         return default
     return seconds if seconds > 0 else None
+
+
+def participant_of(value) -> str | None:
+    """the tag id a Bases entry's participant names, as text: 0 and '0' are '0', a whole float
+    is its integer (2.0 is '2'); nothing, a blank, an unfilled placeholder or a yes/no is None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if value != value or value in (float('inf'), float('-inf')):
+            return None
+        return str(int(value)) if value.is_integer() else str(value)
+    text = str(value).strip()
+    if not text or (text.startswith("<") and text.endswith(">")):
+        return None
+    return text

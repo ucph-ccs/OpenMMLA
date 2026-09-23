@@ -23,6 +23,9 @@ tmux session `replay-<session>` (each in its pipeline's conda environment, loggi
 pipeline's control channel once all of them wait for it, watches the logs until every video was
 read to its end (and the ASR queue drained), sends STOP, ends the session in MongoDB and runs
 `mmla ses-fuse`. A pipeline whose events the session already has is skipped unless `--force`.
+
+A session with several microphones replays each personal one (vimo, badge) through its own Vimo
+base, bound to its participant, beside the group microphone.
 """
 from __future__ import annotations
 
@@ -35,12 +38,25 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import defaultdict
 
 import yaml
 
+from openmmla.collection.recording import default_audio_scope, natural_device_key
+
 AUDIO_PREFERENCE = ('jabra-0', 'vimo-0-ch0', 'vimo-0', 'badge-0')
+PERSONAL_BASE_TYPE = 'Vimo'
+VIMO_BLOCK = {  # the Vimo block of the local pipelines/asr-base/config.yml, added when the template has none
+    'asr_scope': 'participant', 'speaker_verification': 'auto', 'register_duration': 10, 'recognize_duration': 3,
+    'recognize_sp_duration': 4, 'recognize_threshold': 0.2, 'recognize_sp_threshold': 0.2, 'keep_threshold': 0.2,
+    'keep_sp_threshold': 0.1, 'rms_threshold': 1000, 'rms_peak_threshold': 5000, 'update_threshold': 0.8,
+    'gain': 10, 'score_amplified': 'True',
+    'stream_kwargs': {'rate': 16000, 'format': 'int16', 'chunk_size': 512, 'buffer_duration': 5.0,
+                      'resample_method': 'audio_librosa'}}
+REPLAY_EXPIRY_SECONDS = 86400.0  # session seconds: unpaced file bases drift apart, so no bucket expires before STOP flushes it
 CAMERA_ANGLE = 'front-top-45'
 ENVS = {'asr': 'asr-base', 'vfa': 'vfa-base', 'ips': 'ips-base'}
+SYNC_PROGRESS = {'asr': 'Speaker Recognition', 'vfa': 'Features of time bucket', 'ips': 'Uploaded bucket'}  # a synchronizer's log line per bucket
 EVENT_OF = {'asr': 'asr_transcription', 'vfa': 'vfa_features', 'ips': 'ips_translation'}
 EVENTS_OF = {'asr': ['asr_recognition', 'asr_transcription'], 'vfa': ['vfa_features'],
              'ips': ['ips_translation', 'ips_rotation', 'ips_relation']}  # what --force clears before a pipeline runs again
@@ -79,13 +95,44 @@ def calibration_for(session_id: str, cameras: list[str]) -> tuple[str | None, st
     return 'microbit-2025-06-12', main, cameras
 
 
+def audio_scope(record: dict) -> str | None:
+    """a manifest record's scope when it says personal or group, else its device's default."""
+    if record.get('scope') in ('personal', 'group'):
+        return record['scope']
+    return default_audio_scope(record.get('device'), (record.get('imported') or {}).get('method'), record.get('host'))
+
+
 def plan_session(manifest: dict) -> dict:
-    """what a session's replay takes, from its manifest: the group microphone, the videos, the
-    tag size, the sync time and the IPS calibration."""
+    """what a session's replay takes, from its manifest: the group microphone, the personal
+    microphones of a session with several (a base each, bound to its participant), the videos,
+    the tag size, the sync time and the IPS calibration."""
     recordings = manifest.get('recordings') or []
     audio = {r['device']: r['path'] for r in recordings if '/audio/' in str(r.get('path'))}
     videos = {r['device']: r['path'] for r in recordings if '/video/' in str(r.get('path'))}
     microphone = next((device for device in AUDIO_PREFERENCE if device in audio), None)
+    audio_records = [r for r in recordings if '/audio/' in str(r.get('path'))]
+    personal: list[dict] = []
+    mine = [r for r in audio_records if audio_scope(r) == 'personal']
+    # the microphones of known scope, not the files: one recorded in two takes, or beside a file
+    # of unknown kind, is still one microphone and replays as before
+    microphones = {(r.get('host'), r['device']) for r in audio_records if audio_scope(r) in ('personal', 'group')}
+    if len(microphones) >= 2 and mine:  # several microphones and a worn one: a base each
+        mine.sort(key=lambda r: (natural_device_key(r.get('device')), str(r.get('host'))))
+        hosts_of = defaultdict(set)
+        for r in mine:
+            hosts_of[r['device']].add(r.get('host'))
+        seen = set()
+        for r in mine:
+            # the host names the base only when the same device was worn on two machines
+            pid = r['device'] if len(hosts_of[r['device']]) == 1 else f"{r.get('host')}-{r['device']}"
+            if pid in seen:  # the same device and host twice: the first recording is replayed
+                continue
+            seen.add(pid)
+            tag = r.get('participant')
+            personal.append({'id': pid, 'device': r['device'], 'path': r['path'],
+                             'participant': str(tag) if tag not in (None, '') else pid})
+        groups = sorted({r['device'] for r in audio_records if audio_scope(r) == 'group'}, key=natural_device_key)
+        microphone = next((d for d in AUDIO_PREFERENCE if d in groups), None) or next(iter(groups), None)
     calibration, main, ips_cameras = calibration_for(manifest['session_id'], list(videos)) if videos else (None, None, [])
     return {
         'session_id': manifest['session_id'],
@@ -95,6 +142,7 @@ def plan_session(manifest: dict) -> dict:
         'tag_size': float(manifest.get('tag_size') or 0.08),
         'microphone': microphone,
         'audio_path': audio.get(microphone),
+        'personal': personal,
         'videos': videos,
         'calibration': calibration,
         'ips_main': main,
@@ -104,10 +152,27 @@ def plan_session(manifest: dict) -> dict:
 
 
 def asr_config(template: dict, plan: dict) -> dict:
+    if not plan.get('personal'):
+        config = json.loads(json.dumps(template))
+        base_type = next(iter(config['Base']))
+        config['Base'][base_type]['initial_sync_time'] = plan['sync_time']
+        config['Bases'] = [{'id': plan['microphone'], 'base_type': base_type, 'source': 'file', 'source_index': plan['audio_path']}]
+        return config
+    # the group microphone on the template's own block, every personal one on a Vimo block
     config = json.loads(json.dumps(template))
-    base_type = next(iter(config['Base']))
-    config['Base'][base_type]['initial_sync_time'] = plan['sync_time']
-    config['Bases'] = [{'id': plan['microphone'], 'base_type': base_type, 'source': 'file', 'source_index': plan['audio_path']}]
+    blocks = config.setdefault('Base', {})
+    group_type = next((k for k in blocks if k != PERSONAL_BASE_TYPE), None)
+    vimo = blocks.setdefault(PERSONAL_BASE_TYPE, json.loads(json.dumps(VIMO_BLOCK)))
+    vimo['initial_sync_time'] = plan['sync_time']
+    bases = []
+    if plan['microphone'] and group_type:
+        blocks[group_type]['initial_sync_time'] = plan['sync_time']
+        vimo['recognize_duration'] = blocks[group_type].get('recognize_duration', vimo.get('recognize_duration', 3))  # one segment grid
+        bases.append({'id': plan['microphone'], 'base_type': group_type, 'source': 'file', 'source_index': plan['audio_path']})
+    bases += [{'id': p['id'], 'base_type': PERSONAL_BASE_TYPE, 'source': 'file', 'source_index': p['path'],
+               'participant': p['participant']} for p in plan['personal']]
+    config['Bases'] = bases
+    config.setdefault('Synchronizer', {})['result_expiry_time'] = REPLAY_EXPIRY_SECONDS
     return config
 
 
@@ -173,10 +238,20 @@ def commands(plan: dict, pipelines: list[str], configs: dict[str, str]) -> dict[
     """{pipeline: {window: command}} of a session: every base and the synchronizer."""
     out: dict[str, dict[str, str]] = {}
     sid = plan['session_id']
-    if 'asr' in pipelines and plan['microphone']:
+    if 'asr' in pipelines and (plan['microphone'] or plan.get('personal')):
         cfg = configs['asr']
-        out['asr'] = {'sync': f"mmla asr-sync -c {cfg} -sid {sid} -nb 1",
-                      plan['microphone']: f"mmla asr-base -c {cfg} -sid {sid} -b {plan['microphone']} -m live -dia true -s false"}
+        if not plan.get('personal'):
+            out['asr'] = {'sync': f"mmla asr-sync -c {cfg} -sid {sid} -nb 1",
+                          plan['microphone']: f"mmla asr-base -c {cfg} -sid {sid} -b {plan['microphone']} -m live -dia true -s false"}
+        else:
+            # -bt Vimo: the recognize_duration of both blocks is one, so the buckets are right
+            group = [plan['microphone']] if plan['microphone'] else []
+            n = len(group) + len(plan['personal'])
+            out['asr'] = {'sync': f"mmla asr-sync -c {cfg} -sid {sid} -bt {PERSONAL_BASE_TYPE} -nb {n}"}
+            for mic in group:
+                out['asr'][mic] = f"mmla asr-base -c {cfg} -sid {sid} -b {mic} -m live -dia true -s false"
+            for p in plan['personal']:
+                out['asr'][p['id']] = f"mmla asr-base -c {cfg} -sid {sid} -b {p['id']} -m live -s false"  # no -dia: dia_* are the group's
     if 'vfa' in pipelines and plan['videos']:
         cfg = configs['vfa']
         out['vfa'] = {'sync': f"mmla vfa-sync -c {cfg} -sid {sid} -nb {len(plan['videos'])} -a false -pose true -gaze true"}
@@ -239,9 +314,12 @@ class Runner:
         manifest = json.load(open(os.path.join(self.project, 'artifacts', sid, 'manifest.json')))
         plan = plan_session(manifest)
         wanted = [p for p in self.pipelines if self.force or self.events(sid, EVENT_OF[p]) == 0] if not self.dry_run else list(self.pipelines)
+        personal = [p['id'] for p in plan.get('personal', [])]
         summary = {'session': sid, 'minutes': round(plan['minutes'], 1), 'videos': len(plan['videos']), 'microphone': plan['microphone'],
+                   'personal': personal,
                    'calibration': plan['calibration'], 'ips_main': plan['ips_main'], 'pipelines': wanted, 'status': 'planned'}
-        log(f"{sid}: {plan['minutes']:.0f} min, {len(plan['videos'])} videos, mic {plan['microphone']}, IPS main {plan['ips_main']} "
+        log(f"{sid}: {plan['minutes']:.0f} min, {len(plan['videos'])} videos, mic {plan['microphone']}"
+            f"{f', {len(personal)} personal mics' if personal else ''}, IPS main {plan['ips_main']} "
             f"with {plan['calibration'] or 'no matrices'} over {plan['ips_cameras']}; pipelines {wanted}")
         if self.dry_run or not wanted:
             summary['status'] = 'dry-run' if self.dry_run else 'skipped (events exist)'
@@ -265,6 +343,11 @@ class Runner:
                 plan['ips_cameras'], plan['ips_matrices'] = [plan['ips_main']], {}
             summary['ips_cameras'], summary['ips_decisions'] = plan['ips_cameras'], plan.get('ips_decisions')
         configs = self.write_configs(plan, wanted)
+        if 'asr' in wanted and plan['microphone'] and plan.get('personal'):
+            written = asr_config(self.templates['asr'], plan)
+            if not any(b.get('id') == plan['microphone'] for b in written.get('Bases') or []):
+                log(f"{sid}: no group Base block in the ASR template, {plan['microphone']} left out")
+                plan['microphone'] = None
         launcher = os.path.join(self.project, 'artifacts', sid, 'pipelines', 'replay_run.sh')
         with open(launcher, 'w') as f:
             f.write(LAUNCHER.format(project=self.project))
@@ -396,14 +479,17 @@ class Runner:
                 bases = [w for w in windows if w != 'sync']
                 logs = {w: os.path.join(logs_of[pipeline], f'replay_{w}.log') for w in windows}
                 if pipeline == 'asr':
-                    base = logs[bases[0]]
-                    heard = self.count(base, 'Speaker Transcription')
-                    ended = self.count(base, 'Reach the end of the file') > 0 or self.count(base, 'exited at') > 0
-                    stable[pipeline] = stable.get(pipeline, 0) + 1 if ended and heard == stable.get('asr_heard') else 0
-                    stable['asr_heard'] = heard
-                    done = ended and stable[pipeline] >= 2
+                    heard = sum(self.count(logs[b], 'Speaker Transcription') for b in bases)
+                    ended = all(self.count(logs[b], 'Reach the end of the file') > 0 or self.count(logs[b], 'exited at') > 0
+                                for b in bases)
                 else:
-                    done = all(self.count(logs[b], 'Reached end of video file') > 0 or self.count(logs[b], 'exited at') > 0 for b in bases)
+                    # the video bases read their files faster than the server answers, so the frame sets still
+                    # queued at the end of the files are done only once the synchronizer's bucket count stops growing
+                    heard = self.count(logs['sync'], SYNC_PROGRESS[pipeline])
+                    ended = all(self.count(logs[b], 'Reached end of video file') > 0 or self.count(logs[b], 'exited at') > 0 for b in bases)
+                stable[pipeline] = stable.get(pipeline, 0) + 1 if ended and heard == stable.get(f'{pipeline}_heard') else 0
+                stable[f'{pipeline}_heard'] = heard
+                done = ended and stable[pipeline] >= 2
                 errors = self.count(logs['sync'], 'Traceback')
                 if done:
                     time.sleep(30)  # the last buckets
@@ -411,8 +497,8 @@ class Runner:
                     log(f"{plan['session_id']}: {pipeline} done, STOP ({receivers} receivers){f', {errors} tracebacks in its synchronizer log' if errors else ''}")
                     del pending[pipeline]
             if pending:
-                progress = ', '.join(f"{p}: {self.count(os.path.join(logs_of[p], 'replay_sync.log'), needle)}"
-                                     for p, needle in (('asr', 'Speaker Recognition'), ('vfa', 'Features of time bucket'), ('ips', 'Uploaded bucket')) if p in pending)
+                progress = ', '.join(f"{p}: {self.count(os.path.join(logs_of[p], 'replay_sync.log'), SYNC_PROGRESS[p])}"
+                                     for p in pending)
                 log(f"{plan['session_id']}: waiting ({progress})")
                 time.sleep(60)
         if pending:

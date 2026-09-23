@@ -82,12 +82,15 @@ Bases:
     port: 5001                  # udp/tcp only
     host: 0.0.0.0               # udp/tcp only: the address this base listens on
     packet_format: auto         # udp/tcp only: auto, timestamped or raw
+    participant:                # the tag id of the person wearing this microphone (e.g. 0): their channel's speech is theirs when it is the loudest (energy attribution); empty = a group or room microphone
  
 # synchronizer settings
 Synchronizer:
   result_expiry_time: 10        # cleanup timeout (seconds)
   bucket_duration: 3            # time bucket duration (seconds) for synchronized result (default: recognize_duration)
   match_tolerance: 1.5          # matching tolerance (seconds) for incoming result to time buckets (default: ~bucket_duration/2)
+  energy_margin_db: 6           # personal microphones: how far above its own noise floor (dB) a channel's speech must be to be attributed to its wearer
+  energy_tie_db: 3              # personal microphones: channels within this many dB of the loudest also count as speaking (overlapping speech)
 
 # post analyzer settings
 # streams settings
