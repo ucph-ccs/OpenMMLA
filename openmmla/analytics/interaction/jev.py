@@ -45,7 +45,7 @@ import numpy as np
 import pandas as pd
 
 from openmmla.analytics.interaction.layout import GAZE_SHARES as GAZE_SHARES_OF_LAYOUT
-from openmmla.commands.ses.code import CODEBOOK
+from openmmla.commands.ses.code import CODEBOOK, TEACHER_NOTE
 from openmmla.services.vfa.work_area import WORK_AREA_READY_MIN
 
 # where Jev is asked: OpenRouter serves TypeSafe's model at its own price through a dedicated
@@ -558,12 +558,12 @@ def labels_of(variant: str) -> tuple[str, ...]:
 
 
 def question(variant: str = 'j0') -> dict:
-    """the `questions` of a request, from the coder's codebook: its rule (without the sentence about
-    preceding windows when the state has none), SENSOR_NOTE, and each class's definition as its
-    criterion; j2 offers unclear as well."""
+    """the `questions` of a request, from the coder's codebook: its rule (without the note a coder
+    adds for teacher talk, and without the sentence about preceding windows when the state has
+    none), SENSOR_NOTE, and each class's definition as its criterion; j2 offers unclear as well."""
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}; one of {', '.join(VARIANTS)}")
-    rule = CODEBOOK['rule']
+    rule = CODEBOOK['rule'].replace(TEACHER_NOTE, '')
     if VARIANTS[variant] == 0:
         rule = ' '.join(rule.replace(CONTEXT_SENTENCE, '').split())
     definitions = {c['label']: c['definition'] for c in CODEBOOK['classes']}

@@ -5,9 +5,11 @@ at a time. This command serves the sessions under artifacts/: for every window i
 demand with ffmpeg (up to two cameras side by side with the group microphone, exact to the
 window's start), and the page plays it and takes one key per window (1 individual or parallel
 work, 2 social interaction, 3 collaborative interaction, 4 not at the table, 0 unclear, with an
-optional note). Labels go to artifacts/<session>/labels/<coder>.jsonl, one line per window, so a
-second coder writes a second file and the two are compared for agreement. Clips are cached under
-artifacts/<session>/labels/clips/ and can be deleted at any time.
+optional note). Labels go to artifacts/<session>/labels/<coder>.jsonl, one line per save (a
+re-saved note or an undo appends a line; the last line of a window counts), so a second coder
+writes a second file and the two are compared for agreement. The page counts a label as saved only
+when the server answers {"ok": true}, and /api/progress gives a coder's count per session. Clips
+are cached under artifacts/<session>/labels/clips/ and can be deleted at any time.
 
 The Transcript button shows what was said in the window, in Danish and in a local English
 translation (openmmla.commands.ses.code_text): the session's asr_transcription events from InfluxDB
@@ -35,8 +37,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from openmmla.collection.recording import default_audio_scope
 from openmmla.commands.ses.code_text import CONTEXT, DEFAULT_INFLUX_CONFIG, TextSource, Translator
 
+# the coder's instruction to mark teacher talk: a note only a person can add, left out of Jev's question
+TEACHER_NOTE = ', and add the note "teacher" when the teacher talks to the group or the class for most of the window'
 CODEBOOK = {
     'classes': [
         {'key': '1', 'label': 'individual', 'title': 'Individual or parallel work',
@@ -50,7 +55,7 @@ CODEBOOK = {
         {'key': '0', 'label': 'unclear', 'title': 'Unclear',
          'definition': "The group is at its place but you cannot tell its state: members are out of frame and inaudible, or the window is a transition with no dominant state."},
     ],
-    'rule': 'Label the group as a whole with the state that fills most of the ten seconds. Use the preceding windows as context. If two members collaborate while a third works alone, it is still collaborative interaction.',
+    'rule': 'Label the group as a whole with the state that fills most of the ten seconds. Use the preceding windows as context. If two members collaborate while a third works alone, it is still collaborative interaction. The teacher\'s talk does not make a window social or collaborative: code what the members do with each other and with the shared artifact' + TEACHER_NOTE + '. Members looking at the shared artifact while the teacher talks, with no member working on it, is individual work: they follow the teacher, not each other, so it is not the joint attention of collaborative interaction. One member working on it while another follows is collaborative.',
 }
 AUDIO_PREFERENCE = ('jabra-0', 'vimo-0-ch0', 'vimo-0', 'badge-0')
 CAMERA_PREFERENCE = ('c920-01', 'c920-04', 'c920-05', 'c920-06', 'c920-02', 'c920-03')
@@ -120,8 +125,11 @@ def load_sessions(artifacts: Path, pattern: str | None = None,
         audios.sort(key=lambda r: (AUDIO_PREFERENCE.index(r['device']) if r['device'] in AUDIO_PREFERENCE else 99, r['device']))
         start = max(r['start_time'] for r in recordings)
         end = min(r['start_time'] + (r.get('duration') or 0) for r in recordings if r.get('duration'))
+        audio = dict(audios[0]) if audios else None
+        if audio and not audio.get('scope'):  # the page says whose microphone the clip plays
+            audio['scope'] = default_audio_scope(audio.get('device'), audio.get('method'), audio.get('host'))
         sessions.append({'id': session_dir.name, 'dir': str(session_dir), 'start': start, 'end': end,
-                         'videos': videos[:2], 'audio': audios[0] if audios else None,
+                         'videos': videos[:2], 'audio': audio,
                          'experiment': manifest.get('experiment_id'), 'group': manifest.get('group_id'),
                          'included': included, 'inclusion': reason})
     return sessions, hidden
@@ -195,14 +203,20 @@ PAGE = r"""<!doctype html>
  header{display:flex;gap:16px;align-items:center;padding:10px 16px;background:#1b1b1b;flex-wrap:wrap}
  select,input,button{font:inherit;background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:6px 10px}
  button{cursor:pointer} button.active{background:#2d6cdf;border-color:#2d6cdf}
- main{display:grid;grid-template-columns:1fr 340px;gap:16px;padding:16px}
+ main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;padding:16px}
  video{width:100%;background:#000;border-radius:8px}
  .keys button{display:block;width:100%;text-align:left;margin:6px 0;padding:10px}
  .keys b{display:inline-block;width:26px;height:26px;line-height:26px;text-align:center;background:#333;border-radius:5px;margin-right:8px}
  .def{color:#aaa;font-size:13px;margin:2px 0 10px 34px}
- .meta{color:#aaa;font-size:13px} .bar{height:6px;background:#333;border-radius:3px;margin:8px 0} .bar div{height:6px;background:#2d6cdf;border-radius:3px}
+ .meta{color:#aaa;font-size:13px}
+ #coded{font-size:14px;margin:4px 0} #coded.none{color:#aaa}
+ .strip{display:flex;flex-wrap:wrap;gap:2px;margin:8px 0}
+ .cell{flex:0 0 9px;height:14px;background:#2e2e2e;border-radius:2px;cursor:pointer}
+ .cell.here{outline:2px solid #fff;outline-offset:1px;position:relative;z-index:1}
+ .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:8px}
+ .l-individual{background:#5b8def} .l-social{background:#e0a93b} .l-collaborative{background:#3fb66b} .l-absent{background:#a070d0} .l-unclear{background:#9a9a9a}
  textarea{width:100%;height:60px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:6px}
- #status{color:#8c8}
+ #status{color:#8c8} #status.fail{color:#f66;font-weight:600}
  #text{margin-top:12px;padding:10px 12px;background:#1b1b1b;border-radius:8px;font-size:14px}
  #text .line{margin:0 0 10px} #text .who{color:#8ab4f8;font-size:12px;margin-right:6px}
  #text .ctx{color:#777} #text .en{color:#bbb;font-style:italic;margin-top:2px}
@@ -213,36 +227,75 @@ PAGE = r"""<!doctype html>
  <label>Coder <input id="coder" size="10"></label>
  <label>Session <select id="session"></select></label>
  <button id="texttoggle" onclick="toggleText()">Transcript</button>
+ <button id="advancetoggle" onclick="toggleAdvance()">Auto-advance</button>
  <span id="progress" class="meta"></span><span id="status"></span>
 </header>
 <main>
  <div>
   <video id="video" controls autoplay playsinline></video>
   <div class="meta" id="when"></div>
-  <div class="bar"><div id="fill" style="width:0"></div></div>
-  <div class="meta">Keys: <b>1</b> <b>2</b> <b>3</b> <b>4</b> <b>0</b> label and go on · <b>space</b> replay · <b>←</b> <b>→</b> move · <b>n</b> note · <b>u</b> undo the last label · <b>t</b> transcript</div>
+  <div id="coded"></div>
+  <div class="strip" id="strip"></div>
+  <div class="meta">Keys: <b>1</b> <b>2</b> <b>3</b> <b>4</b> <b>0</b> label (and move on when Auto-advance is on) · <b>a</b> auto-advance · <b>space</b> replay · <b>←</b> <b>→</b> move · <b>n</b> note · <b>u</b> undo · <b>t</b> transcript</div>
   <div id="text" style="display:none"></div>
  </div>
  <div class="keys">
   <div id="classes"></div>
   <div class="def" id="rule"></div>
-  <textarea id="note" placeholder="note (optional), then press Enter or the class key"></textarea>
-  <div class="meta" id="last"></div>
+  <textarea id="note" placeholder="note (optional), saved with the next class key; Enter re-saves the note of a coded window"></textarea>
  </div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
 let codebook, sessions, session, windows = [], labels = {}, index = 0, shownAt = 0, showText = false, textAbort = null, textRetry = null;
-async function api(path, options) { const r = await fetch(path, options); return r.json(); }
+let progress = {}, autoAdvance = true, saving = false, savingWindow = null, advancedAt = 0, undoStack = [], generation = 0;
+async function api(path, options) {
+  const r = await fetch(path, options);
+  if (!r.ok) { const data = await r.json().catch(() => ({})); throw new Error(`${r.status} ${data.error || r.statusText}`.trim()); }
+  return r.json();
+}
+// a save counts only when the server answers {ok: true}; one that hangs gives up after 30 s
+async function post(path, record) {
+  const data = await api(path, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record),
+                                signal: AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined});
+  if (!data || data.ok !== true) throw new Error('the server did not confirm it');
+}
+function why(e) { return e.name === 'TimeoutError' ? 'no answer in 30 s' : e instanceof TypeError ? 'the server cannot be reached' : e.message; }
+function said(text, failed) { $('status').textContent = text; $('status').classList.toggle('fail', !!failed); }
+function clock() { return new Date().toTimeString().slice(0, 8); }
 function key(w) { return w.start.toFixed(3); }
 function recall(name) { try { return localStorage.getItem(name); } catch (e) { return null; } }
 function remember(name, value) { try { localStorage.setItem(name, value); } catch (e) {} }
 function esc(text) { return String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function attr(text) { return esc(text).replace(/"/g, '&quot;'); }
 function part(text, cls) { return text ? `<span class="${cls}">${esc(text)}</span> ` : ''; }
+function classOf(l) { return codebook.classes.find(c => c.label === l.label) || {key: l.key, label: l.label, title: l.label}; }
+function coderName() { return $('coder').value.trim() || 'anonymous'; }
+// a pupil's line is what that pupil's worn mic transcribed, the partner and the teacher included; it names no speaker
+function speaker(s) { return /^pupil /.test(s) ? `${s}'s mic` : s; }
+// the clip's sound is the session's preferred microphone, a worn one when it has no group microphone
+function clipSound() { const a = session.audio; return !a ? 'the clip has no sound' : a.scope === 'group' ? 'the clip plays the group mic' : `the clip plays ${a.device}${a.scope === 'personal' ? ', a worn mic' : ''}`; }
+function s1(s) { return s.included === false ? ', left out by S1' : s.included === null ? ', S1 not checked' : ''; }
+function optionText(s) {
+  const p = progress[s.id];
+  return `${s.id} (${Math.round((s.end - s.start) / 60)} min, ${s.videos.length} cam${s.audio ? ', audio' : ', no audio'}${s1(s)})${p ? ` · ${p.coded}/${p.windows} coded` : ''}`;
+}
+function showProgress() { for (const o of $('session').options) { const s = sessions.find(x => x.id === o.value); if (s) o.textContent = optionText(s); } }
+async function loadProgress() {
+  const coder = coderName();
+  try { const data = await api(`/api/progress?coder=${encodeURIComponent(coder)}`); if (coder !== coderName()) return; progress = data.progress; }
+  catch (e) { progress = {}; }
+  if (session && windows.length) renderMarks(); else showProgress();
+}
 function toggleText() {
   showText = !showText; remember('showText', showText ? '1' : '0');
   $('texttoggle').classList.toggle('active', showText); $('texttoggle').blur();
   renderText();
+}
+function toggleAdvance() {
+  autoAdvance = !autoAdvance; remember('autoAdvance', autoAdvance ? '1' : '0');
+  $('advancetoggle').classList.toggle('active', autoAdvance); $('advancetoggle').blur();
+  said(`Auto-advance ${autoAdvance ? 'on' : 'off'}`);
 }
 async function renderText(again) {
   // a window left behind drops its requests, so they never hold the connections the clips need
@@ -254,13 +307,13 @@ async function renderText(again) {
   const at = w.start, id = session.id, abort = new AbortController(); textAbort = abort;
   let data;
   try { data = await api(`/api/text?session=${encodeURIComponent(id)}&start=${at}`, {signal: abort.signal}); }
-  catch (e) { if (abort.signal.aborted) return; data = {lines: [], note: 'transcript unavailable: the server did not answer'}; }
+  catch (e) { if (abort.signal.aborted) return; data = {lines: [], note: `transcript unavailable: ${why(e)}`}; }
   if (abort.signal.aborted || !showText || !windows[index] || windows[index].start !== at || session.id !== id) return;
   const lines = data.lines || [];
-  let html = `<div class="meta">Transcript of the window, <span class="ctx">grey: ${data.context ?? ''} s before and after</span></div>`;
+  let html = `<div class="meta">Transcript of the window, <span class="ctx">grey: ${data.context ?? ''} s before and after</span> · a pupil's mic picks up the others too; ${esc(clipSound())}</div>`;
   if (!lines.length && !data.note) html += '<div class="meta">nothing transcribed in the window</div>';
   for (const l of lines) {
-    html += `<div class="line"><div><span class="who">${esc(l.speaker)}</span>${l.approximate ? '<span class="approx">approximate: the chunk has no word times</span>' : ''}</div>`;
+    html += `<div class="line"><div><span class="who">${esc(speaker(l.speaker))}</span>${l.approximate ? '<span class="approx">approximate: the chunk has no word times</span>' : ''}</div>`;
     html += `<div>${part(l.before, 'ctx')}${part(l.inside, 'in')}${part(l.after, 'ctx')}</div>`;
     if (l.en) html += `<div class="en${l.inside ? '' : ' ctx'}">${esc(l.en)}</div>`;
     html += '</div>';
@@ -272,73 +325,146 @@ async function renderText(again) {
   for (const next of windows.slice(index + 1, index + 3)) fetch(`/api/text?session=${encodeURIComponent(id)}&start=${next.start}&prefetch=1`, {signal: abort.signal}).catch(() => {});
 }
 function render() {
-  const w = windows[index]; if (!w) return;
+  const w = windows[index]; if (!w) return renderMarks();
   const v = $('video'); v.src = `/clip?session=${session.id}&start=${w.start}`; v.load(); v.play().catch(() => {});
   shownAt = Date.now();
-  const at = new Date(w.start * 1000);
-  const done = Object.keys(labels).length;
-  $('when').textContent = `window ${index + 1} of ${windows.length} · ${at.toISOString().replace('T', ' ').slice(0, 19)}Z · ${Math.round(w.start - session.start)} s into the session`;
-  $('progress').textContent = `${done} of ${windows.length} coded`;
-  $('fill').style.width = `${100 * done / windows.length}%`;
   const current = labels[key(w)];
-  document.querySelectorAll('#classes button').forEach(b => b.classList.toggle('active', !!current && b.dataset.label === current.label));
   $('note').value = current ? (current.note || '') : '';
   for (const next of windows.slice(index + 1, index + 4)) fetch(`/clip?session=${session.id}&start=${next.start}&prefetch=1`);
+  renderMarks();
   renderText();
+}
+// what the codes show: the buttons, the coded line, the strip and the counts; the clip and the transcript stay
+function renderMarks() {
+  const w = windows[index], current = w && labels[key(w)];
+  const done = windows.filter(x => labels[key(x)]).length;
+  progress[session.id] = {coded: done, windows: windows.length}; showProgress();
+  $('progress').textContent = `${done} of ${windows.length} coded`;
+  $('when').textContent = w ? `window ${index + 1} of ${windows.length} · ${new Date(w.start * 1000).toISOString().replace('T', ' ').slice(0, 19)}Z · ${Math.round(w.start - session.start)} s into the session` : 'no windows to code in this session';
+  const c = current && classOf(current);
+  $('coded').innerHTML = current ? `<i class="sw l-${attr(c.label)}"></i>${esc(`coded: ${c.key} ${c.title}${current.note ? ` · note: ${current.note}` : ''}`)}` : w ? 'not coded yet' : '';
+  $('coded').classList.toggle('none', !current);
+  document.querySelectorAll('#classes button').forEach(b => b.classList.toggle('active', !!current && b.dataset.label === current.label));
+  $('strip').innerHTML = windows.map((x, i) => {
+    const l = labels[key(x)], title = l ? `window ${i + 1} · ${classOf(l).title}${l.note ? ` · ${l.note}` : ''}` : `window ${i + 1} · not coded`;
+    return `<span class="cell${l ? ` l-${attr(l.label)}` : ''}${i === index ? ' here' : ''}" data-i="${i}" title="${attr(title)}"></span>`;
+  }).join('');
+}
+function remembered(record) {
+  // the undo history holds each window once, at the place of its latest save
+  undoStack = undoStack.filter(u => !(u.session === record.session && u.window_start === record.window_start));
+  undoStack.push({session: record.session, window_start: record.window_start});
 }
 async function label(cls) {
   const w = windows[index]; if (!w) return;
-  const coder = $('coder').value.trim(); if (!coder) { $('status').textContent = 'type your name as coder first'; return; }
-  localStorage.setItem('coder', coder);
+  // a second press on the window being saved is dropped; on another window it is said, not dropped unseen
+  if (saving) { if (savingWindow !== w) said('NOT saved: the previous save is still waiting for the server — try again', true); return; }
+  // nor does a double press land on the window auto-advance has just opened
+  if (Date.now() - advancedAt < 400) return;
+  const coder = $('coder').value.trim(); if (!coder) { said('type your name as coder first', true); return; }
+  remember('coder', coder);
   const record = {session: session.id, window_start: w.start, window_end: w.end, label: cls.label, key: cls.key,
                   note: $('note').value.trim(), coder, coded_at: new Date().toISOString(), seconds_spent: Math.round((Date.now() - shownAt) / 100) / 10};
+  const gen = generation, at = index;
+  saving = true; savingWindow = w; said('saving…');
+  try { await post('/api/label', record); }
+  catch (e) { said(`NOT saved: ${why(e)} — try again`, true); return; }
+  finally { saving = false; savingWindow = null; }
+  said(`saved ✓ ${clock()} · ${index !== at ? `window ${at + 1} · ` : ''}${cls.title}`);
+  if (coder === $('coder').value.trim()) remembered(record);
+  // another session or coder was loaded while the save was out
+  if (gen !== generation || session.id !== record.session) return;
   labels[key(w)] = record;
-  await api('/api/label', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)});
-  $('last').textContent = `saved: ${cls.title}`;
-  index = Math.min(index + 1, windows.length - 1);
-  while (index < windows.length - 1 && labels[key(windows[index])]) index++;
-  render();
+  if (autoAdvance && index === at) {
+    // the next window after it not yet coded, else simply the next one
+    const next = windows.findIndex((x, i) => i > at && !labels[key(x)]);
+    index = next >= 0 ? next : Math.min(at + 1, windows.length - 1);
+    if (index !== at) { advancedAt = Date.now(); return render(); }
+  }
+  renderMarks();
+}
+async function saveNote() {
+  const w = windows[index], current = w && labels[key(w)], note = $('note').value.trim();
+  if (!current || note === (current.note || '')) return;
+  if (saving) { said('NOT saved: the previous save is still waiting for the server — try again', true); return; }
+  const coder = $('coder').value.trim(); if (!coder) { said('type your name as coder first', true); return; }
+  const record = {...current, note, coder, edited_at: new Date().toISOString()}, gen = generation;
+  saving = true; said('saving…');
+  try { await post('/api/label', record); }
+  catch (e) { said(`NOT saved: ${why(e)} — try again`, true); return; }
+  finally { saving = false; }
+  said(`saved ✓ ${clock()} · ${classOf(record).title} · note`);
+  if (gen === generation && session.id === record.session) { labels[key(w)] = record; renderMarks(); }
+}
+async function undo() {
+  if (saving || !session) return;
+  const coder = $('coder').value.trim(); if (!coder) { said('type your name as coder first', true); return; }
+  // a window of this session whose label is gone already has nothing left to undo
+  undoStack = undoStack.filter(u => u.session !== session.id || labels[u.window_start.toFixed(3)]);
+  const last = undoStack[undoStack.length - 1], w = windows[index];
+  if (last && last.session !== session.id) { said(`the last label is in ${last.session}: open that session to undo it`); return; }
+  const target = last || (w && labels[key(w)] ? {session: session.id, window_start: w.start} : null);
+  if (!target) { said('nothing to undo'); return; }
+  const k = target.window_start.toFixed(3), old = labels[k], gen = generation;
+  saving = true; said('undoing…');
+  try { await post('/api/unlabel', {session: target.session, window_start: target.window_start, coder}); }
+  catch (e) { said(`NOT undone: ${why(e)} — try again`, true); return; }
+  finally { saving = false; }
+  undoStack = undoStack.filter(u => !(u.session === target.session && u.window_start === target.window_start));
+  if (gen !== generation || session.id !== target.session) { said(`undone ✓ ${clock()}`); return; }
+  const i = windows.findIndex(x => key(x) === k);
+  said(`undone ✓ ${clock()} · window ${i + 1}${old ? `, was ${classOf(old).title}` : ''}`);
+  delete labels[k];
+  if (i >= 0 && i !== index) { index = i; render(); } else renderMarks();
 }
 async function loadSession(id) {
-  session = sessions.find(s => s.id === id);
-  const coder = $('coder').value.trim() || 'anonymous';
-  const data = await api(`/api/windows?session=${id}&coder=${encodeURIComponent(coder)}`);
-  windows = data.windows; labels = {}; for (const l of data.labels) labels[l.window_start.toFixed(3)] = l;
+  const gen = ++generation, next = sessions.find(s => s.id === id), coder = coderName();
+  let data;
+  try { data = await api(`/api/windows?session=${encodeURIComponent(id)}&coder=${encodeURIComponent(coder)}`); }
+  // the list goes back to the session still on screen, so it names what is coded and a second pick retries
+  catch (e) { if (gen === generation) { said(`session not loaded: ${why(e)}`, true); if (session) $('session').value = session.id; } return; }
+  if (gen !== generation) return;
+  session = next; windows = data.windows; labels = {}; for (const l of data.labels) labels[l.window_start.toFixed(3)] = l;
   index = windows.findIndex(w => !labels[key(w)]); if (index < 0) index = 0;
-  localStorage.setItem('session', id);
+  remember('session', id);
   render();
 }
 document.addEventListener('keydown', e => {
-  if (e.target === $('note') && e.key !== 'Enter') return;
-  if (e.target === $('note') && e.key === 'Enter') { e.preventDefault(); $('note').blur(); return; }
-  if (e.target === $('coder')) return;
+  if (e.target === $('note')) { if (e.key === 'Enter') { e.preventDefault(); $('note').blur(); saveNote(); } return; }
+  // Enter commits the name: the blur fires its change event, and the keys reach the page again
+  if (e.target === $('coder')) { if (e.key === 'Enter') { e.preventDefault(); $('coder').blur(); } return; }
+  if (!codebook || e.metaKey || e.ctrlKey || e.altKey) return;
   const cls = codebook.classes.find(c => c.key === e.key);
+  // a held key repeats: only the arrows may, so holding 3 or u never codes or undoes a run of windows
+  if (e.repeat && (cls || [' ', 'a', 'n', 't', 'u'].includes(e.key))) { e.preventDefault(); return; }
   if (cls) { e.preventDefault(); label(cls); return; }
   if (e.key === ' ') { e.preventDefault(); $('video').currentTime = 0; $('video').play(); }
-  if (e.key === 'ArrowLeft') { index = Math.max(0, index - 1); render(); }
-  if (e.key === 'ArrowRight') { index = Math.min(windows.length - 1, index + 1); render(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); if (index > 0) { index--; render(); } }
+  if (e.key === 'ArrowRight') { e.preventDefault(); if (index < windows.length - 1) { index++; render(); } }
+  if (e.key === 'a') { e.preventDefault(); toggleAdvance(); }
   if (e.key === 'n') { e.preventDefault(); $('note').focus(); }
   if (e.key === 't') { e.preventDefault(); toggleText(); }
-  if (e.key === 'u') { const prev = index - 1; if (prev >= 0) { const w = windows[prev]; delete labels[key(w)]; api('/api/unlabel', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({session: session.id, window_start: w.start, coder: $('coder').value.trim()})}); index = prev; render(); } }
+  if (e.key === 'u') { e.preventDefault(); undo(); }
 });
 (async () => {
   const boot = await api('/api/boot'); codebook = boot.codebook; sessions = boot.sessions;
-  $('classes').innerHTML = codebook.classes.map(c => `<button data-label="${c.label}" onclick="label(codebook.classes.find(x=>x.key==='${c.key}'))"><b>${c.key}</b>${c.title}</button><div class="def">${c.definition}</div>`).join('');
+  $('classes').innerHTML = codebook.classes.map(c => `<button data-label="${c.label}" onclick="this.blur(); label(codebook.classes.find(x=>x.key==='${c.key}'))"><b>${c.key}</b><i class="sw l-${c.label}"></i>${c.title}</button><div class="def">${c.definition}</div>`).join('');
   $('rule').textContent = codebook.rule;
-  $('coder').value = localStorage.getItem('coder') || '';
+  $('coder').value = recall('coder') || '';
   showText = recall('showText') === '1'; $('texttoggle').classList.toggle('active', showText);
-  const s1 = s => s.included === false ? ', left out by S1' : s.included === null ? ', S1 not checked' : '';
-  $('session').innerHTML = sessions.map(s => `<option value="${s.id}" title="${(s.inclusion || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}">${s.id} (${Math.round((s.end - s.start) / 60)} min, ${s.videos.length} cam${s.audio ? ', audio' : ', no audio'}${s1(s)})</option>`).join('');
+  autoAdvance = recall('autoAdvance') !== '0'; $('advancetoggle').classList.toggle('active', autoAdvance);
+  $('session').innerHTML = sessions.map(s => `<option value="${attr(s.id)}" title="${attr(s.inclusion)}"></option>`).join(''); showProgress();
   if (boot.hidden.length) {
     $('hidden').textContent = `${boot.hidden.length} session${boot.hidden.length === 1 ? '' : 's'} hidden: left out of the analysis by the inclusion rule S1`;
     $('hidden').title = boot.hidden.map(h => `${h.id}: ${h.reason}`).join('\n');
     $('hidden').style.display = '';
   }
-  $('session').onchange = e => loadSession(e.target.value);
-  $('coder').onchange = () => loadSession($('session').value);
-  const remembered = localStorage.getItem('session');
-  if (remembered && sessions.some(s => s.id === remembered)) $('session').value = remembered;
-  loadSession($('session').value);
+  $('session').onchange = e => { e.target.blur(); loadSession(e.target.value); };
+  $('coder').onchange = () => { const coder = $('coder').value.trim(); if (coder) remember('coder', coder); undoStack = []; loadProgress(); loadSession($('session').value); };
+  $('strip').onclick = e => { const i = e.target.dataset.i; if (i !== undefined && +i !== index) { index = +i; render(); } };
+  const last = recall('session');
+  if (last && sessions.some(s => s.id === last)) $('session').value = last;
+  loadProgress(); loadSession($('session').value);
 })();
 </script></body></html>"""
 
@@ -348,7 +474,8 @@ class Handler(BaseHTTPRequestHandler):
     sessions: list[dict[str, Any]] = []
     hidden: list[dict[str, Any]] = []
     text_source: Any = None  # a code_text.TextSource; None: no transcripts on the page
-    lock = threading.Lock()
+    lock = threading.Lock()  # one clip cut at a time
+    write_lock = threading.Lock()  # label writes, apart from the clips so a save never waits for ffmpeg
 
     def log_message(self, format, *args):  # quiet
         pass
@@ -387,6 +514,11 @@ class Handler(BaseHTTPRequestHandler):
             coder = (query.get('coder') or ['anonymous'])[0]
             labels = self._labels(session, coder)
             self._json({'windows': windows, 'labels': list(labels.values())})
+        elif url.path == '/api/progress':
+            coder = (query.get('coder') or [''])[0].strip()
+            if not coder:
+                return self._json({'error': 'give coder=<name>'}, 400)
+            self._json({'progress': self._progress(coder)})
         elif url.path == '/api/text':
             session = self._session(query)
             if not session:
@@ -431,33 +563,65 @@ class Handler(BaseHTTPRequestHandler):
         path = self._labels_path(session, coder)
         labels: dict[str, dict[str, Any]] = {}
         if path.exists():
-            for line in path.read_text(encoding='utf-8').splitlines():
-                if line.strip():
+            for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+                if not line.strip():
+                    continue
+                try:
                     record = json.loads(line)
                     key = f"{float(record['window_start']):.3f}"
-                    if record.get('label') is None:
-                        labels.pop(key, None)  # an undo line
-                    else:
-                        labels[key] = record
+                except (ValueError, KeyError, TypeError):  # a line cut short by a crash, skipped as labels._read_coder does
+                    continue
+                if record.get('label') is None:
+                    labels.pop(key, None)  # an undo line
+                else:
+                    labels[key] = record
         return labels
+
+    def _progress(self, coder: str) -> dict[str, dict[str, int]]:
+        """per listed session, its listed windows and how many of them `coder` has a label for now
+        (after the undo lines); a label of a window no longer listed is not counted."""
+        s = self.settings
+        progress = {}
+        for session in self.sessions:
+            windows = windows_of(session, s['window'], s['step'], s['sample'], s['block'], s['seed'])
+            labels = self._labels(session, coder)
+            progress[session['id']] = {'coded': sum(f"{w['start']:.3f}" in labels for w in windows),
+                                       'windows': len(windows)}
+        return progress
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
         length = int(self.headers.get('content-length') or 0)
-        record = json.loads(self.rfile.read(length) or b'{}')
+        try:
+            record = json.loads(self.rfile.read(length) or b'{}')
+            float(record['window_start'])
+        except (ValueError, KeyError, TypeError):
+            return self._json({'error': 'the body is not a record with a window_start'}, 400)
         session = next((s for s in self.sessions if s['id'] == record.get('session')), None)
         if not session:
             return self._json({'error': 'no such session'}, 404)
         if url.path == '/api/label':
+            # a record without a known label would read back as an undo line
+            if record.get('label') not in [c['label'] for c in CODEBOOK['classes']]:
+                return self._json({'error': f"unknown label {record.get('label')!r}"}, 400)
             path = self._labels_path(session, record.get('coder', ''))
         elif url.path == '/api/unlabel':
             path = self._labels_path(session, record.get('coder', ''))
             record = {'session': session['id'], 'window_start': record['window_start'], 'label': None, 'undone_at': time.strftime('%Y-%m-%dT%H:%M:%S%z')}
         else:
             return self._json({'error': 'not found'}, 404)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with self.lock, path.open('a', encoding='utf-8') as file:
-            file.write(json.dumps(record, ensure_ascii=False) + '\n')
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with self.write_lock, path.open('a+b') as file:
+                # a line cut short by a crash is ended first, so a confirmed record is always a line of its own
+                end = file.seek(0, os.SEEK_END)
+                if end:
+                    file.seek(end - 1)
+                    if file.read(1) != b'\n':
+                        file.write(b'\n')
+                file.write((json.dumps(record, ensure_ascii=False) + '\n').encode('utf-8'))
+        except OSError as error:  # the page says NOT saved and keeps the window as it was
+            return self._json({'error': f'the labels cannot be written: {error.strerror or error}'}, 500)
         self._json({'ok': True})
 
 

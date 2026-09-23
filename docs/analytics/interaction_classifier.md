@@ -21,7 +21,7 @@ The coder presses one key per window in `mmla ses-code`, from a codebook both th
 | 4 | absent | fewer than two members at the group's place for most of the window (everyone away, or one of a pair); a triad with one away is coded normally |
 | 0 | unclear | the group is at its place but its state cannot be told: members out of frame and inaudible, or a transition with no dominant state |
 
-The rule is to label the group as a whole with the state that fills most of the ten seconds. Two members collaborating while a third works alone is still collaborative.
+The rule is to label the group as a whole with the state that fills most of the ten seconds. Two members collaborating while a third works alone is still collaborative. The teacher's talk does not make a window social or collaborative: members looking at the shared artifact while the teacher talks, with no member working on it, is individual work, and one member working on it while another follows is collaborative. Coders add the note `teacher` when the teacher talks to the group or the class for most of the window; Jev's question leaves that instruction out.
 
 Code what the video shows, not what the sensors show. With both video and audio missing, code unclear unless the video shows the seats empty. For a pair with one member away, absent is the pre-registered code, not individual.
 
