@@ -388,6 +388,13 @@ exec sleep 3600
 """
 
 
+def calibration_written(out_dir: str, main: str, started: float) -> bool:
+    """whether ses-calibrate wrote this run's report and matrices (both files, modified since
+    `started`), whatever its exit code; a report left from an earlier run does not count."""
+    paths = [os.path.join(out_dir, 'calibration_report.json'), os.path.join(out_dir, f'transformation_matrices_{main}.json')]
+    return all(os.path.isfile(path) and os.path.getmtime(path) >= started - 1.0 for path in paths)
+
+
 class Runner:
     def __init__(self, project: str, pipelines: list[str], templates: dict[str, str], force: bool, dry_run: bool):
         self.project, self.pipelines, self.force, self.dry_run = project, pipelines, force, dry_run
@@ -537,12 +544,17 @@ class Runner:
                    f"-nw {NEAR_WINDOW_S} -nb {MIN_INLIERS}"
                    + (f" -v {given_path}" if given else ''))
         log(f"{sid}: calibrating from the recordings ({len(plan['ips_cameras'])} cameras)")
+        started = time.time()
         result = subprocess.run(['bash', '-c', command], capture_output=True, text=True)
         with open(os.path.join(self.project, 'artifacts', sid, 'pipelines', 'ips-base', 'logs', 'replay_calibrate.log'), 'w') as f:
             f.write(result.stdout + result.stderr)
         report_path = os.path.join(out_dir, 'calibration_report.json')
-        if result.returncode or not os.path.isfile(report_path):
-            raise RuntimeError(f"ses-calibrate failed: {result.stderr.strip()[-200:]}")
+        written = calibration_written(out_dir, main, started)
+        if not written:
+            raise RuntimeError(f"ses-calibrate failed (exit {result.returncode}): {result.stderr.strip()[-200:]}")
+        if result.returncode:
+            # the AprilTag detector can crash the interpreter at exit, after every result is written
+            log(f"{sid}: ses-calibrate exited {result.returncode} after writing its results; they are used")
         report = json.load(open(report_path))
         own = json.load(open(os.path.join(out_dir, f'transformation_matrices_{main}.json')))
         near_path = os.path.join(out_dir, 'near_pairs.json')
