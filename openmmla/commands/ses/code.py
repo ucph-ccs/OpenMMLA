@@ -9,6 +9,12 @@ optional note). Labels go to artifacts/<session>/labels/<coder>.jsonl, one line 
 second coder writes a second file and the two are compared for agreement. Clips are cached under
 artifacts/<session>/labels/clips/ and can be deleted at any time.
 
+The Transcript button shows what was said in the window, in Danish and in a local English
+translation (openmmla.commands.ses.code_text): the session's asr_transcription events from InfluxDB
+(--influx-config), the words of the window with --context seconds around them, translated on the
+CPU by a MarianMT model and cached under artifacts/<session>/analysis/transcripts/. --prepare-text
+translates every listed window ahead of time and exits.
+
 Sessions the interaction classifier leaves out are hidden, so nobody codes windows no model will
 read: a session whose fused table (artifacts/<session>/analysis/features/<session>_window_features.csv)
 fails the inclusion rule S1 (openmmla.analytics.interaction.layout.session_inclusion) is not listed.
@@ -28,6 +34,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from openmmla.commands.ses.code_text import CONTEXT, DEFAULT_INFLUX_CONFIG, TextSource, Translator
 
 CODEBOOK = {
     'classes': [
@@ -195,11 +203,16 @@ PAGE = r"""<!doctype html>
  .meta{color:#aaa;font-size:13px} .bar{height:6px;background:#333;border-radius:3px;margin:8px 0} .bar div{height:6px;background:#2d6cdf;border-radius:3px}
  textarea{width:100%;height:60px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:6px}
  #status{color:#8c8}
+ #text{margin-top:12px;padding:10px 12px;background:#1b1b1b;border-radius:8px;font-size:14px}
+ #text .line{margin:0 0 10px} #text .who{color:#8ab4f8;font-size:12px;margin-right:6px}
+ #text .ctx{color:#777} #text .en{color:#bbb;font-style:italic;margin-top:2px}
+ #text .approx{color:#d9a441;font-size:12px;margin-left:6px}
 </style></head><body>
 <header>
  <div id="hidden" class="meta" style="flex-basis:100%;display:none"></div>
  <label>Coder <input id="coder" size="10"></label>
  <label>Session <select id="session"></select></label>
+ <button id="texttoggle" onclick="toggleText()">Transcript</button>
  <span id="progress" class="meta"></span><span id="status"></span>
 </header>
 <main>
@@ -207,7 +220,8 @@ PAGE = r"""<!doctype html>
   <video id="video" controls autoplay playsinline></video>
   <div class="meta" id="when"></div>
   <div class="bar"><div id="fill" style="width:0"></div></div>
-  <div class="meta">Keys: <b>1</b> <b>2</b> <b>3</b> <b>4</b> <b>0</b> label and go on · <b>space</b> replay · <b>←</b> <b>→</b> move · <b>n</b> note · <b>u</b> undo the last label</div>
+  <div class="meta">Keys: <b>1</b> <b>2</b> <b>3</b> <b>4</b> <b>0</b> label and go on · <b>space</b> replay · <b>←</b> <b>→</b> move · <b>n</b> note · <b>u</b> undo the last label · <b>t</b> transcript</div>
+  <div id="text" style="display:none"></div>
  </div>
  <div class="keys">
   <div id="classes"></div>
@@ -218,9 +232,45 @@ PAGE = r"""<!doctype html>
 </main>
 <script>
 const $ = id => document.getElementById(id);
-let codebook, sessions, session, windows = [], labels = {}, index = 0, shownAt = 0;
+let codebook, sessions, session, windows = [], labels = {}, index = 0, shownAt = 0, showText = false, textAbort = null, textRetry = null;
 async function api(path, options) { const r = await fetch(path, options); return r.json(); }
 function key(w) { return w.start.toFixed(3); }
+function recall(name) { try { return localStorage.getItem(name); } catch (e) { return null; } }
+function remember(name, value) { try { localStorage.setItem(name, value); } catch (e) {} }
+function esc(text) { return String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function part(text, cls) { return text ? `<span class="${cls}">${esc(text)}</span> ` : ''; }
+function toggleText() {
+  showText = !showText; remember('showText', showText ? '1' : '0');
+  $('texttoggle').classList.toggle('active', showText); $('texttoggle').blur();
+  renderText();
+}
+async function renderText(again) {
+  // a window left behind drops its requests, so they never hold the connections the clips need
+  if (textAbort) textAbort.abort();
+  clearTimeout(textRetry);
+  const box = $('text'); box.style.display = showText ? '' : 'none';
+  const w = windows[index]; if (!showText || !w) return;
+  if (!again) box.innerHTML = '<div class="meta">…</div>';
+  const at = w.start, id = session.id, abort = new AbortController(); textAbort = abort;
+  let data;
+  try { data = await api(`/api/text?session=${encodeURIComponent(id)}&start=${at}`, {signal: abort.signal}); }
+  catch (e) { if (abort.signal.aborted) return; data = {lines: [], note: 'transcript unavailable: the server did not answer'}; }
+  if (abort.signal.aborted || !showText || !windows[index] || windows[index].start !== at || session.id !== id) return;
+  const lines = data.lines || [];
+  let html = `<div class="meta">Transcript of the window, <span class="ctx">grey: ${data.context ?? ''} s before and after</span></div>`;
+  if (!lines.length && !data.note) html += '<div class="meta">nothing transcribed in the window</div>';
+  for (const l of lines) {
+    html += `<div class="line"><div><span class="who">${esc(l.speaker)}</span>${l.approximate ? '<span class="approx">approximate: the chunk has no word times</span>' : ''}</div>`;
+    html += `<div>${part(l.before, 'ctx')}${part(l.inside, 'in')}${part(l.after, 'ctx')}</div>`;
+    if (l.en) html += `<div class="en${l.inside ? '' : ' ctx'}">${esc(l.en)}</div>`;
+    html += '</div>';
+  }
+  if (data.note) html += `<div class="meta">${esc(data.note)}</div>`;
+  box.innerHTML = html;
+  // the model is still loading: ask again for this window, and prefetch nothing until it is ready
+  if (data.pending) { textRetry = setTimeout(() => renderText(true), 3000); return; }
+  for (const next of windows.slice(index + 1, index + 3)) fetch(`/api/text?session=${encodeURIComponent(id)}&start=${next.start}&prefetch=1`, {signal: abort.signal}).catch(() => {});
+}
 function render() {
   const w = windows[index]; if (!w) return;
   const v = $('video'); v.src = `/clip?session=${session.id}&start=${w.start}`; v.load(); v.play().catch(() => {});
@@ -234,6 +284,7 @@ function render() {
   document.querySelectorAll('#classes button').forEach(b => b.classList.toggle('active', !!current && b.dataset.label === current.label));
   $('note').value = current ? (current.note || '') : '';
   for (const next of windows.slice(index + 1, index + 4)) fetch(`/clip?session=${session.id}&start=${next.start}&prefetch=1`);
+  renderText();
 }
 async function label(cls) {
   const w = windows[index]; if (!w) return;
@@ -267,6 +318,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') { index = Math.max(0, index - 1); render(); }
   if (e.key === 'ArrowRight') { index = Math.min(windows.length - 1, index + 1); render(); }
   if (e.key === 'n') { e.preventDefault(); $('note').focus(); }
+  if (e.key === 't') { e.preventDefault(); toggleText(); }
   if (e.key === 'u') { const prev = index - 1; if (prev >= 0) { const w = windows[prev]; delete labels[key(w)]; api('/api/unlabel', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({session: session.id, window_start: w.start, coder: $('coder').value.trim()})}); index = prev; render(); } }
 });
 (async () => {
@@ -274,6 +326,7 @@ document.addEventListener('keydown', e => {
   $('classes').innerHTML = codebook.classes.map(c => `<button data-label="${c.label}" onclick="label(codebook.classes.find(x=>x.key==='${c.key}'))"><b>${c.key}</b>${c.title}</button><div class="def">${c.definition}</div>`).join('');
   $('rule').textContent = codebook.rule;
   $('coder').value = localStorage.getItem('coder') || '';
+  showText = recall('showText') === '1'; $('texttoggle').classList.toggle('active', showText);
   const s1 = s => s.included === false ? ', left out by S1' : s.included === null ? ', S1 not checked' : '';
   $('session').innerHTML = sessions.map(s => `<option value="${s.id}" title="${(s.inclusion || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}">${s.id} (${Math.round((s.end - s.start) / 60)} min, ${s.videos.length} cam${s.audio ? ', audio' : ', no audio'}${s1(s)})</option>`).join('');
   if (boot.hidden.length) {
@@ -294,6 +347,7 @@ class Handler(BaseHTTPRequestHandler):
     settings: dict[str, Any] = {}
     sessions: list[dict[str, Any]] = []
     hidden: list[dict[str, Any]] = []
+    text_source: Any = None  # a code_text.TextSource; None: no transcripts on the page
     lock = threading.Lock()
 
     def log_message(self, format, *args):  # quiet
@@ -333,6 +387,17 @@ class Handler(BaseHTTPRequestHandler):
             coder = (query.get('coder') or ['anonymous'])[0]
             labels = self._labels(session, coder)
             self._json({'windows': windows, 'labels': list(labels.values())})
+        elif url.path == '/api/text':
+            session = self._session(query)
+            if not session:
+                return self._json({'error': 'no such session'}, 404)
+            try:
+                start = float(query['start'][0])
+            except (KeyError, IndexError, ValueError):
+                return self._json({'error': 'give start=<window start>'}, 400)
+            if self.text_source is None:
+                return self._json({'start': start, 'lines': [], 'note': 'transcripts are not served by this page'})
+            self._json(self.text_source.text(session, start, prefetch=bool(query.get('prefetch'))))
         elif url.path == '/clip':
             session = self._session(query)
             if not session:
@@ -396,6 +461,27 @@ class Handler(BaseHTTPRequestHandler):
         self._json({'ok': True})
 
 
+def prepare_text(source: TextSource, sessions: list[dict[str, Any]], settings: dict[str, Any]) -> int:
+    """translate every listed window of every session into the cache; 1 when the model or a
+    session's transcripts cannot be had."""
+    error = source.translator.load()
+    if error:
+        print(error)
+        return 1
+    failed = 0
+    for session in sessions:
+        starts = [w['start'] for w in windows_of(session, settings['window'], settings['step'], settings['sample'],
+                                                 settings['block'], settings['seed'])]
+        try:
+            done, kept = source.prepare(session, starts)
+        except Exception as error:  # one session's missing transcripts must not stop the others
+            print(f"{session['id']}: not prepared ({type(error).__name__}: {error})")
+            failed += 1
+            continue
+        print(f"{session['id']}: {done} windows translated, {kept} cached already or silent")
+    return 1 if failed else 0
+
+
 def get_parser():
     parser = argparse.ArgumentParser(prog='mmla ses-code', description="Code a session's windows by hand in the browser.")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
@@ -407,6 +493,13 @@ def get_parser():
     parser.add_argument('--seed', type=int, default=1, help="sampling seed, the same for every coder (default 1)")
     parser.add_argument('--all', dest='show_all', action='store_true',
                         help="list every session, also those the inclusion rule S1 leaves out of the analysis")
+    parser.add_argument('--influx-config', default=None,
+                        help=f"config whose InfluxDB section holds the transcripts (default <cwd>/{DEFAULT_INFLUX_CONFIG})")
+    parser.add_argument('--context', type=float, default=CONTEXT,
+                        help=f"seconds of speech shown before and after the window (default {CONTEXT:g})")
+    parser.add_argument('--prepare-text', action='store_true',
+                        help="translate the transcript of every listed window into the cache, then exit")
+    parser.add_argument('--threads', type=int, default=4, help="CPU threads of the translation model (default 4)")
     parser.add_argument('-p', '--port', type=int, default=8765)
     parser.add_argument('--bind', default='127.0.0.1', help="address to listen on (default 127.0.0.1: this machine only; a Tailscale address or 0.0.0.0 lets others in, mind who can reach it)")
     return parser
@@ -417,6 +510,8 @@ def main(argv=None):
     artifacts = Path(args.artifacts or os.path.join(os.getcwd(), 'artifacts')).resolve()
     Handler.sessions, Handler.hidden = load_sessions(artifacts, args.sessions, args.show_all)
     Handler.settings = {'window': args.window, 'step': args.step, 'sample': args.sample, 'block': args.block, 'seed': args.seed}
+    influx_config = args.influx_config or os.path.join(os.getcwd(), DEFAULT_INFLUX_CONFIG)
+    Handler.text_source = TextSource(args.window, args.context, influx_config, Translator(threads=args.threads))
     for s in Handler.hidden:
         print(f"hidden: {s['id']}: {s['reason']}")
     for s in Handler.sessions:
@@ -430,6 +525,8 @@ def main(argv=None):
         else:
             print(f"no sessions with video under {artifacts}")
         return 1
+    if args.prepare_text:
+        return prepare_text(Handler.text_source, Handler.sessions, Handler.settings)
     total = sum(len(windows_of(s, args.window, args.step, args.sample, args.block, args.seed)) for s in Handler.sessions)
     print(f"{len(Handler.sessions)} sessions ({len(Handler.hidden)} hidden by S1), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/  (Ctrl-C stops)")
     server = ThreadingHTTPServer((args.bind, args.port), Handler)

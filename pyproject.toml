@@ -33,6 +33,10 @@ uber-server = [ "celery[redis]==5.4.0", "cryptography>=42.0.0", "flask-cors==4.0
 # mmla ses-classify and ses-jev; the network variants (-m pooled-net,net,...) also need torch, which is
 # left out on purpose (a large install most runs do not need): pip install torch
 analysis = [ "numpy>=1.24", "pandas>=2.0", "requests>=2.31", "scikit-learn>=1.4", "scipy>=1.10",]
+# the English translation of the transcript on the mmla ses-code page (Helsinki-NLP/opus-mt-da-en on
+# the CPU); install the CPU build of torch first, or pip pulls the CUDA one:
+# pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install -e ".[coding]"
+coding = [ "sacremoses>=0.1.1", "sentencepiece>=0.2.0", "torch>=2.2", "transformers>=4.40",]
 tui = [ "cryptography>=42.0.0", "influxdb-client==1.44.0", "pymongo>=4.6.0", "redis==5.0.7", "textual>=0.80.0", "pyyaml==6.0.2",]
 
 [project.urls]
