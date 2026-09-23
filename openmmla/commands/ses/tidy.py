@@ -11,8 +11,12 @@ session's speaker profiles (as collection/<host>/profiles/) and its meta.txt, an
 rest of legacy/ and the folders an earlier run's analysis produced.
 
 Every audio recording of the manifests says whose voice it holds (`scope`: personal or group)
-and, for a worn microphone, who wore it (`participant`, a tag id): the device name gives the
-scope, and --scope, --participant and --participants-in-order set them.
+and, for a worn microphone, who wore it (`participant`, a tag id): what the Collection form's
+Participant noted is kept, the device name gives the scope otherwise, and --scope, --participant
+and --participants-in-order set them. --participants-in-order hands the session group's tag ids
+in config/experiments.yaml, lowest first, to the personal microphones in natural device order,
+and 0, 1, 2 ... when the file does not list the group; a microphone already bound to one of those
+tags keeps it, and any beyond the list is left unbound.
 """
 import argparse
 import json
@@ -119,12 +123,31 @@ def parse_device_values(values, what: str, allowed: tuple[str, ...] | None = Non
     return parsed
 
 
+def _experiments_root(session_dir: Path) -> str | None:
+    """the project root an artifacts/<session> folder sits in, when its config/experiments.yaml is
+    there; None to read the repository's own."""
+    root = session_dir.parent.parent
+    return str(root) if (root / 'config' / 'experiments.yaml').is_file() else None
+
+
+def group_tags(experiment_id: str, group_id: str, project_root: str | None = None) -> list[str]:
+    """the tag ids of a group's participants in config/experiments.yaml, lowest first (tag 10
+    after tag 9); [] for a group the file does not list"""
+    from openmmla.collection.recording import participant_roster
+    from openmmla.utils.experiments import load_experiments
+    return [tag for _, tag in participant_roster(load_experiments(project_root), experiment_id, group_id)]
+
+
 def assign_audio_roles(records: list[dict], participants=(), scopes=(), in_order: bool = False,
-                       session: str = '', log=print) -> None:
+                       session: str = '', log=print, order_tags: list[str] | None = None,
+                       order_group: str = '') -> None:
     """give every audio record its scope and participant, in place: the defaults first (a record
     keeps a valid scope it has), then --scope, then tags in natural device order for the personal
-    ones (--participants-in-order), then --participant; a participant makes a record personal,
-    and a group record has none. A flag that names no audio of the session says so."""
+    ones (--participants-in-order: `order_tags`, the group's tags lowest first, else 0, 1, 2 ...;
+    a microphone already bound to one of them keeps it, the others take the rest one each and any
+    beyond them are left unbound, and every binding it changes is said), then --participant; a
+    participant makes a record personal, and a group record has none. A flag that names no audio
+    of the session says so."""
     from openmmla.collection.recording import natural_device_key
 
     def matching(host, device):
@@ -142,7 +165,33 @@ def assign_audio_roles(records: list[dict], participants=(), scopes=(), in_order
     if in_order:
         pairs = sorted({(r.get('host'), r.get('device')) for r in records if r.get('scope') == 'personal'},
                        key=lambda pair: (natural_device_key(pair[1]), str(pair[0])))
-        tags = {pair: str(i) for i, pair in enumerate(pairs)}
+        order = [str(tag) for tag in order_tags] if order_tags else [str(i) for i in range(len(pairs))]
+        bound: dict[tuple, str] = {}
+        for record in records:
+            pair = (record.get('host'), record.get('device'))
+            if pair in pairs and record.get('participant') is not None:
+                bound.setdefault(pair, str(record['participant']))
+        # a microphone already bound to one of the tags keeps it (the Collection form's pick, an
+        # earlier --participant); the others take the tags left, in natural device order
+        tags: dict[tuple, str | None] = {}
+        for pair in pairs:
+            if bound.get(pair) in order and bound[pair] not in tags.values():
+                tags[pair] = bound[pair]
+        free = [tag for tag in order if tag not in tags.values()]
+        rest = [pair for pair in pairs if pair not in tags]
+        for i, pair in enumerate(rest):
+            tags[pair] = free[i] if i < len(free) else None
+        kept = [f"{device} tag {tags[(host, device)]}" for host, device in pairs if (host, device) not in rest]
+        if kept:
+            log(f"    [{session}: already bound, kept: {', '.join(kept)}]")
+        for host, device in rest:
+            before, after = bound.get((host, device)), tags[(host, device)]
+            if before is not None and before != after:
+                log(f"    [{session}: {device} was tag {before}, now {f'tag {after}' if after else 'unbound'}]")
+        if len(rest) > len(free):
+            devices = [device for _, device in rest[len(free):]]
+            log(f"    [{session}: more personal microphones than {order_group or 'the group'} has tags: "
+                f"{', '.join(devices)} left unbound]")
         for record in records:
             pair = (record.get('host'), record.get('device'))
             if pair in tags:
@@ -196,11 +245,15 @@ def _claim_moved(moved: list[dict[str, Any]], parsed: dict[str, Any], host: str)
 
 def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group_id: str | None = None,
                       notes: list[str] | None = None, log=print, participants=None, scopes=None,
-                      participants_in_order: bool = False) -> dict[str, Any]:
+                      participants_in_order: bool = False,
+                      order_group: tuple[str | None, str | None] = (None, None),
+                      project_root: str | None = None) -> dict[str, Any]:
     """the host manifests and the session manifest written again from what collection/ holds,
     keeping what the old manifests knew about each recording (duration, how it was imported, its
     scope and participant); `participants`, `scopes` and `participants_in_order` set the scope and
-    wearer of audio recordings (assign_audio_roles)"""
+    wearer of audio recordings (assign_audio_roles), in order with the tags of the group
+    `order_group` names (-e/-g), else the session's, in the experiments.yaml of `project_root`
+    (default: the one beside artifacts/, else the repository's)"""
     from openmmla.collection.recording import format_epoch_ms
     from openmmla.commands.ses.imp import probe
 
@@ -254,9 +307,22 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
         hosts.setdefault(host, []).append(record)
 
     all_records = [r for records in hosts.values() for r in records]
+    order_tags: list[str] = []
+    order_name = ''
+    if participants_in_order:
+        experiment = order_group[0] or experiment_id or old.get('experiment_id') or parts['experiment']
+        group = order_group[1] or group_id or old.get('group_id') or parts['group']
+        order_name = f"{experiment}/{group}"
+        order_tags = group_tags(experiment, group, project_root or _experiments_root(session_dir))
+        if order_tags:
+            log(f"    [{session_id}: personal microphones tagged in natural device order with {experiment}/{group}'s "
+                f"tags {', '.join(order_tags)}]")
+        else:
+            log(f"    [{session_id}: {experiment}/{group} has no participants in config/experiments.yaml: "
+                f"personal microphones tagged 0, 1, 2 ... in natural device order]")
     # the same dicts as the host manifests', so both say the same
     assign_audio_roles([r for r in all_records if r['modality'] == 'audio'], participants or (), scopes or (),
-                       participants_in_order, session_id, log)
+                       participants_in_order, session_id, log, order_tags=order_tags, order_group=order_name)
     sync = max((r['start_time'] for r in all_records), default=float(old.get('initial_sync_time') or 0))
     for host, records in hosts.items():
         host_dir = session_dir / 'collection' / host
@@ -563,8 +629,10 @@ def get_parser():
                         help="the participant (tag id) wearing a personal microphone (vimo-0=0, vimo-0-ch1=2); "
                              "none unbinds it (repeatable)")
     parser.add_argument('--participants-in-order', action='store_true',
-                        help="tag the personal microphones 0, 1, 2 ... in natural device order "
-                             "(vimo-0-ch0 < vimo-0-ch1 < vimo-1 < vimo-10); --participant overrides")
+                        help="tag the personal microphones, in natural device order (vimo-0-ch0 < vimo-0-ch1 "
+                             "< vimo-1 < vimo-10), with the tag ids of the session group's participants in "
+                             "config/experiments.yaml, lowest first; 0, 1, 2 ... when the group has none; "
+                             "one already bound to one of them keeps it; --participant overrides")
     parser.add_argument('--scope', action='append', default=[], metavar='[HOST/]DEVICE=personal|group',
                         help="whether a microphone is one person's or the group's (repeatable)")
     parser.add_argument('--crop', action='append', default=[], metavar='HOST=NEW:X,Y,W,H',
@@ -655,7 +723,7 @@ def main(argv=None):
         data['tag_size'] = args.tag_size
         _write(session_dir / 'manifest.json', data)
     rebuild_manifests(session_dir, notes=notes, participants=participants, scopes=scopes,
-                      participants_in_order=args.participants_in_order)
+                      participants_in_order=args.participants_in_order, order_group=(args.experiment, args.group))
     session_dir = rename_session(session_dir, args.experiment, args.group)
     print(f"-> {session_dir}  ({time.time() - started:.0f} s)")
     return 0

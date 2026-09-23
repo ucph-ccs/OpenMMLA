@@ -108,7 +108,12 @@ from openmmla.collection.recording import (
     DEFAULT_VIDEO_SIZE,
     DEFAULT_VIDEO_SOURCE_FORMAT_LINUX,
     DEFAULT_VIDEO_SOURCE_FORMAT_MACOS,
+    default_audio_scope,
+    natural_device_key,
+    participant_roster,
+    sanitize_label,
 )
+from openmmla.utils.asr_scope import normalize_asr_scope
 from openmmla.utils.experiments import (
     get_active_experiments, get_groups_for_experiment, get_participant_aliases,
     load_experiments,
@@ -214,6 +219,91 @@ _COLLECTION_DEVICE_EXAMPLES = {
     "audio": "a microphone, e.g. badge-0 or vimo-0",
     "video": "a camera, e.g. c920-01",
 }
+# who wears a Collection microphone: one Participant row under each recorder's
+# Device Label. The launcher turns each pick into that recorder's own
+# --audio-participant and --audio-scope; the scope is never a card field
+_COLLECTION_PARTICIPANT_FLAG = "--audio-participant"
+_COLLECTION_SCOPE_FLAG = "--audio-scope"
+_COLLECTION_GROUP_PICK = "group"
+_COLLECTION_GROUP_OPTION = "Group (room microphone)"
+_COLLECTION_BIND_LATER_OPTION = "bind later"
+# the session document's map of Device Label to the tag of whoever wears it
+_COLLECTION_WEARERS_FIELD = "wearers"
+
+
+def _collection_wants_wearer(label: object) -> bool:
+    """whether a microphone of this Device Label may be worn, and so asks who
+    wears it: anything but a room microphone (jabra), a name of unknown kind
+    (nicla-0, a Mac) or none included."""
+    return default_audio_scope(str(label or "").strip()) != "group"
+
+
+def _collection_participant_choices(roster) -> list[tuple[str, str]]:
+    """the Participant options: the group's participants by tag, then Group
+    and bind later (a blank)."""
+    return [(f"{name} (tag {tag})", tag) for name, tag in roster] + [
+        (_COLLECTION_GROUP_OPTION, _COLLECTION_GROUP_PICK),
+        (_COLLECTION_BIND_LATER_OPTION, ""),
+    ]
+
+
+def _collection_wearer_prefill(labels: list[str], tags: list[str], group_labels: set[str],
+                               fixed: dict[int, str]) -> list[str]:
+    """what each recorder's Participant opens on: a kept pick stays, a room
+    microphone has none, a label a group base pulls is Group, and the other
+    worn microphones take the tags no kept pick holds, lowest first, in
+    natural device order (vimo-0-ch0 < vimo-0-ch1 < vimo-1); none once the
+    tags run out."""
+    values = [""] * len(labels)
+    wanting: list[int] = []
+    for index, label in enumerate(labels):
+        name = str(label or "").strip()
+        if index in fixed:
+            values[index] = fixed[index]
+        elif not _collection_wants_wearer(name):
+            values[index] = ""
+        elif name in group_labels:
+            values[index] = _COLLECTION_GROUP_PICK
+        else:
+            wanting.append(index)
+    held = {value for value in fixed.values() if value}
+    free = [tag for tag in tags if tag not in held]
+    for index in sorted(wanting, key=lambda i: (natural_device_key(labels[i]), i)):
+        values[index] = free.pop(0) if free else ""
+    return values
+
+
+def _collection_wearer_keys(labels: list) -> list[str]:
+    """the key each row's Participant pick is kept under: its Device Label,
+    and for a label more rows share (the channels of one receiver) which of
+    them it is too (vimo-0, vimo-0#2)."""
+    seen: dict[str, int] = {}
+    keys: list[str] = []
+    for label in labels:
+        name = sanitize_label(label, "")
+        seen[name] = seen.get(name, 0) + 1
+        keys.append(name if seen[name] == 1 else f"{name}#{seen[name]}")
+    return keys
+
+
+def _collection_wearer_flags(picks: list) -> tuple[list[str], list[str]]:
+    """each recorder's Participant pick as its --audio-participant and
+    --audio-scope: a tag is that person's microphone, Group the room's, and
+    bind later says nothing."""
+    participants: list[str] = []
+    scopes: list[str] = []
+    for pick in picks:
+        text = str(pick if pick is not None else "").strip()
+        if not text:
+            participants.append("")
+            scopes.append("")
+        elif text == _COLLECTION_GROUP_PICK:
+            participants.append("")
+            scopes.append("group")
+        else:
+            participants.append(text)
+            scopes.append("personal")
+    return participants, scopes
 _LAUNCHER_UI_WORKER_GROUP = "launcher-ui"
 _LAUNCHER_STATUS_WORKER_GROUP = "launcher-status"
 _LAUNCHER_DOWNLOAD_WORKER_GROUP = "launcher-downloads"
@@ -2401,7 +2491,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 [
                     "--session-id", "--output-root", "--host-label",
                     "--audio-interactive", "--sample-rate", "--audio-format",
-                    "--audio-device-label",
+                    "--audio-device-label", "--audio-participant", "--audio-scope",
                 ],
             ),
             ComponentDef(
@@ -3971,6 +4061,15 @@ class ServicePanel(Widget):
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "svc-target-select":
+            card = next((node for node in event.select.ancestors if isinstance(node, ServiceCard)), None)
+            if card is not None and card.service_def.launch_type == "collection" and event.select.id in {
+                card._collection_param_id(role, "select", flag)
+                for role in ("audio", "video") for flag in ("--session-id", "--experiment-group")
+            }:
+                # the session's group decides whom the Participant rows offer
+                self.call_after_refresh(self._refresh_collection_participants)
+                return
         if event.select.id != "svc-target-select" and any(
                 isinstance(node, ServiceCard) and node.service_def.name == _ASR_BASE_CARD
                 for node in event.select.ancestors):
@@ -4701,6 +4800,8 @@ class ServicePanel(Widget):
             shared_flags = self._collection_session_scoped_flags(card.service_def)
             target_values = self._collection_target_sticky.setdefault(target, {})
             for flag, value in (snapshot.get("values") or {}).items():
+                if flag in (_COLLECTION_PARTICIPANT_FLAG, _COLLECTION_SCOPE_FLAG):
+                    continue  # kept per session, host and device (_note_collection_wearer_snapshot)
                 if flag == "--session-id":
                     # "" records an explicit "Create MongoDB Session" pick, which
                     # must survive a host switch just like a real session id does
@@ -4714,6 +4815,7 @@ class ServicePanel(Widget):
                     self._collection_sticky[flag] = value
                 else:
                     target_values[flag] = value
+            self._note_collection_wearer_snapshot(target, snapshot.get("values") or {}, card)
             break
 
     def _note_host_recorders(self, target: str, recorders: list) -> bool:
@@ -4856,7 +4958,21 @@ class ServicePanel(Widget):
                 # (ServiceCard._instance_default)
                 if not isinstance(default, (list, tuple)):
                     default = []
+            elif param.flag == _COLLECTION_PARTICIPANT_FLAG:
+                default = []  # set below, once the Device Labels are known
             params.append(replace(param, default=default, choices=choices))
+        by_flag = {param.flag: param for param in params}
+        device = by_flag.get("--audio-device-label")
+        wearer = by_flag.get(_COLLECTION_PARTICIPANT_FLAG)
+        if device is not None and wearer is not None:
+            count = self._collection_count({"-na": by_flag["-na"].default} if "-na" in by_flag else {}, "-na")
+            device_default = device.default if isinstance(device.default, (list, tuple)) else []
+            rows = max(count, len(device.choices), len(device_default))
+            labels = [ServiceCard._instance_default(device, index) for index in range(rows)]
+            session = by_flag["--session-id"].default if "--session-id" in by_flag else ""
+            experiment_group = by_flag["--experiment-group"].default if "--experiment-group" in by_flag else ""
+            wearer = self._collection_participant_param(wearer, target, session, experiment_group, labels)
+            params = [wearer if param.flag == _COLLECTION_PARTICIPANT_FLAG else param for param in params]
         return replace(svc, params=params)
 
     @staticmethod
@@ -4906,7 +5022,22 @@ class ServicePanel(Widget):
                     flag in existing
                     or flag in {"--session-id", "--experiment-group", "--output-root"}
                     or flag in _COLLECTION_HIDDEN_PRESET_FLAGS
+                    or flag == _COLLECTION_SCOPE_FLAG
                 ):
+                    continue
+                if flag == _COLLECTION_PARTICIPANT_FLAG:
+                    # who wears each microphone, under its Device Label; a room
+                    # microphone's row stays hidden. The options come from the
+                    # session's group (_collection_participant_param)
+                    params.append(ParamDef(
+                        flag, "Participant", "choice", [],
+                        choices=_collection_participant_choices([]),
+                        per_instance="-na",
+                        under="--audio-device-label",
+                        shown_when=_collection_wants_wearer,
+                        fill=False,
+                    ))
+                    existing.add(flag)
                     continue
                 if flag in _COLLECTION_DEVICE_LABEL_FLAGS:
                     # one Select per recorder, following that role's counter:
@@ -4964,6 +5095,329 @@ class ServicePanel(Widget):
                 if entry_kind == kind and name not in names:
                     names.append(name)
         return sorted(names)
+
+    # ── who wears each Collection microphone ─────────────────────
+
+    def _collection_all_experiment_groups(self) -> list[str]:
+        """every exp/group of config/experiments.yaml, an inactive
+        experiment's too: an older session still names its group."""
+        data = load_experiments(self._root)
+        assignments = data.get("assignments") if isinstance(data, dict) else None
+        if not isinstance(assignments, dict):
+            return []
+        choices: list[str] = []
+        for exp_id in assignments:
+            for group_id in get_groups_for_experiment(exp_id, data):
+                choice = f"{exp_id}/{group_id}"
+                if choice not in choices:
+                    choices.append(choice)
+        return choices
+
+    def _collection_roster(self, session: object, experiment_group: object) -> tuple[str, str, list[tuple[str, str]]]:
+        """the key a card's wearer picks are kept under, its "exp/group" ("" for
+        none) and that group's (name, tag) pairs, lowest tag first. The group is
+        the Experiment Group for Create MongoDB Session, else the picked
+        session's: found among the active groups, then among every group of
+        config/experiments.yaml, then (once per session) in its MongoDB
+        document, whose participants make the list."""
+        new = _is_new_collection_session_choice(session) or not _safe_session_id(session)
+        session_id = "" if new else _safe_session_id(session)
+        found = None
+        roster: list[tuple[str, str]] = []
+        try:
+            found = asr_speakers.session_group(
+                new, session_id, experiment_group, self._collection_experiment_group_choices())
+            if found is None and not new:
+                found = asr_speakers.session_group(False, session_id, "", self._collection_all_experiment_groups())
+            if found is not None:
+                roster = participant_roster(load_experiments(self._root), found[0], found[1])
+            elif session_id:
+                cache = self.__dict__.setdefault("_collection_session_groups", {})
+                if session_id not in cache:
+                    cache[session_id] = self._collection_session_doc_group(session_id)
+                if cache[session_id] is not None:
+                    experiment, group, roster = cache[session_id]
+                    found = (experiment, group)
+        except Exception:
+            roster = []
+        group_text = "/".join(found) if found else ""
+        if new:
+            return f"new:{group_text}", group_text, list(roster)
+        return session_id, group_text, list(roster)
+
+    def _collection_session_doc_group(self, session_id: str) -> tuple[str, str, list[tuple[str, str]]] | None:
+        """the experiment, group and participants a session's MongoDB document
+        names, for a session config/experiments.yaml does not know; None when
+        it has none. The databases are shared, so this machine's config asks."""
+        doc = self._session_record(session_id, "local")
+        if not isinstance(doc, dict):
+            return None
+        experiment = str(doc.get("experiment_id") or "").strip()
+        group = str(doc.get("group_id") or "").strip()
+        if not experiment or not group:
+            return None
+        roster: list[tuple[str, str]] = []
+        for person in doc.get("participants") or []:
+            if not isinstance(person, dict):
+                continue
+            tag = str(person.get("tag_id") if person.get("tag_id") is not None else "").strip()
+            if not tag or tag.lower() == _COLLECTION_GROUP_PICK or (tag.startswith("<") and tag.endswith(">")):
+                continue
+            roster.append((str(person.get("participant_id") or tag), tag))
+        roster.sort(key=lambda pair: (natural_device_key(pair[1]), pair[0]))
+        return experiment, group, roster
+
+    def _collection_group_streams(self) -> set[str]:
+        """the Streams names a group base of this checkout's ASR config pulls:
+        a Participant row of that Device Label opens on Group. Read again only
+        once the file has been written."""
+        path = os.path.join(self._root, "pipelines/asr-base/config.yml")
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            return set()
+        cached = self.__dict__.get("_collection_group_stream_cache")
+        if cached and cached[0] == stamp:
+            return set(cached[1])
+        names: set[str] = set()
+        try:
+            config = load_yaml_config(path) or {}
+            blocks = config.get("Base") if isinstance(config.get("Base"), dict) else {}
+            for entry in get_bases(config):
+                block = blocks.get(entry.get("base_type")) if entry.get("base_type") is not None else None
+                block = block if isinstance(block, dict) else {}
+                if normalize_source(entry.get("source") or block.get("source")) != "stream":
+                    continue
+                name = str(entry.get("source_index") or "").strip()
+                if not name:
+                    continue
+                try:
+                    if normalize_asr_scope(block.get("asr_scope")) == "group":
+                        names.add(name)
+                except ValueError:
+                    continue
+        except Exception:
+            names = set()
+        self.__dict__["_collection_group_stream_cache"] = (stamp, set(names))
+        return names
+
+    def _collection_participant_param(self, param: ParamDef, target: str, session: object,
+                                      experiment_group: object, labels: list[str]) -> ParamDef:
+        """the Participant rows for these Device Labels: the session group's
+        participants, Group and bind later; each row opens on the pick kept for
+        its session, host and device, else on the pre-fill."""
+        scope_key, _group, roster = self._collection_roster(session, experiment_group)
+        choices = _collection_participant_choices(roster)
+        legal = {value for _, value in choices}
+        picks = self.__dict__.setdefault("_collection_wearer_picks", {})
+        keys = _collection_wearer_keys(labels)
+        fixed: dict[int, str] = {}
+        for index, key in enumerate(keys):
+            kept = picks.get((scope_key, target, key))
+            if kept is not None and kept in legal:
+                fixed[index] = kept
+        tags = [tag for _, tag in roster]
+        group_labels = self._collection_group_streams()
+        prefill = _collection_wearer_prefill(labels, tags, group_labels, {})
+        noted = dict(zip(keys, prefill))
+        self.__dict__.setdefault("_collection_wearer_prefills", {})[(scope_key, target)] = noted
+        self.__dict__["_collection_wearer_scope"] = (scope_key, target)
+        default = _collection_wearer_prefill(labels, tags, group_labels, fixed)
+        return replace(param, choices=choices, default=default)
+
+    def _remember_collection_wearers(self, scope_key: str, target: str, labels: list, picks: list,
+                                     prefills: dict | None = None) -> None:
+        """keep each row's Participant pick under (session, host, device; the
+        row's place among those of one Device Label when more share it): a
+        pick that differs from what the row was pre-filled with is kept, one
+        that matches it is dropped so the row keeps following the pre-fill.
+        Without pre-fills every pick is kept (the picks a Start launched)."""
+        store = self.__dict__.setdefault("_collection_wearer_picks", {})
+        for index, (label, name) in enumerate(zip(labels, _collection_wearer_keys(labels))):
+            if index >= len(picks):
+                break
+            pick = str(picks[index] or "").strip() if _collection_wants_wearer(label) else ""
+            key = (scope_key, target, name)
+            if prefills is None or pick != prefills.get(name, ""):
+                store[key] = pick
+            else:
+                store.pop(key, None)
+
+    def _note_collection_wearer_snapshot(self, target: str, values: dict, card: ServiceCard) -> None:
+        """the capture before a rebuild: keep the Participant picks of the card
+        on screen under its session, host and device."""
+        try:
+            labels = card.instance_values("--audio-device-label")
+            picks = card.instance_values(_COLLECTION_PARTICIPANT_FLAG)
+        except Exception:
+            return
+        if not picks:
+            return
+        scope_key, _group, _roster = self._collection_roster(
+            values.get("--session-id"), values.get("--experiment-group"))
+        prefills = self.__dict__.get("_collection_wearer_prefills", {}).get((scope_key, target), {})
+        self._remember_collection_wearers(scope_key, target, labels, picks, prefills)
+
+    def _refresh_collection_participants(self) -> None:
+        """the Session or the Experiment Group changed on the Collection card:
+        its Participant rows take that group's participants. The picks made for
+        the group before are kept under it, and the rows open on the picks kept
+        for the new one."""
+        try:
+            card = next(card for card in self.query(ServiceCard) if card.service_def.launch_type == "collection")
+        except Exception:
+            return
+        params = {param.flag: param for param in card.service_def.params}
+        wearer = params.get(_COLLECTION_PARTICIPANT_FLAG)
+        device = params.get("--audio-device-label")
+        if wearer is None or device is None:
+            return
+        target = self._get_panel_target()
+        values = (card.collection_snapshot() or {}).get("values") or {}
+        labels = card.instance_values("--audio-device-label")
+        before = self.__dict__.get("_collection_wearer_scope")
+        if before and before[1] == target:
+            prefills = self.__dict__.get("_collection_wearer_prefills", {}).get(before, {})
+            self._remember_collection_wearers(
+                before[0], target, labels, card.instance_values(_COLLECTION_PARTICIPANT_FLAG), prefills)
+        # as many rows as a + may add with a device of their own (as when the card was built)
+        device_default = device.default if isinstance(device.default, (list, tuple)) else []
+        rows = max(len(labels), len(card._param_values.get(_COLLECTION_PARTICIPANT_FLAG) or []),
+                   self._collection_count(values, "-na"), len(device.choices), len(device_default))
+        labels = labels + [ServiceCard._instance_default(device, index) for index in range(len(labels), rows)]
+        fresh = self._collection_participant_param(
+            wearer, target, values.get("--session-id"), values.get("--experiment-group"), labels)
+        # a pick belongs to the group it was made for: every row takes the new one's
+        card._picked_instances.pop(_COLLECTION_PARTICIPANT_FLAG, None)
+        card.set_instance_choices(_COLLECTION_PARTICIPANT_FLAG, fresh.choices, fresh.default)
+
+    def _collection_wearer_problem(self, params: dict) -> str:
+        """why a Collection Start is refused for its Participant picks: one tag
+        on two rows of the card; "" when there is none."""
+        count = self._collection_count(params, "-na")
+        picks = params.get(_COLLECTION_PARTICIPANT_FLAG)
+        if not isinstance(picks, (list, tuple)):
+            return ""
+        rows: dict[str, list[int]] = {}
+        for index, pick in enumerate(list(picks)[:count], 1):
+            tag = str(pick if pick is not None else "").strip()
+            if not tag or tag == _COLLECTION_GROUP_PICK:
+                continue
+            rows.setdefault(tag, []).append(index)
+        for tag, where in rows.items():
+            if len(where) > 1:
+                return (f"[red]Tag {tag} is picked on Participant {where[0]} and {where[1]}: one person wears "
+                        f"one microphone. Pick another, Group, or bind later.[/red]")
+        return ""
+
+    def _collection_wearer_notes(self, params: dict, target: str) -> list[str]:
+        """what a Collection Start says about its Participant rows before it
+        goes ahead: that there is no participant list to pick from."""
+        count = self._collection_count(params, "-na")
+        labels = params.get("--audio-device-label")
+        labels = list(labels) if isinstance(labels, (list, tuple)) else []
+        if not any(_collection_wants_wearer(labels[index] if index < len(labels) else "") for index in range(count)):
+            return []
+        _scope_key, group, roster = self._collection_roster(
+            params.get("--session-id"), params.get("--experiment-group"))
+        if roster:
+            return []
+        return [
+            f"[yellow]No participant list for {group or 'the session'}: its personal microphones are recorded "
+            f"unbound; bind them afterwards with mmla ses-tidy --participant.[/yellow]"
+        ]
+
+    def _note_collection_wearers(self, prepared: dict, target: str) -> None:
+        """after a Collection Start resolved its session: keep the launched
+        picks under that session, and note in its MongoDB document who wears
+        each Device Label (wearers), which a live ASR base pulling that stream
+        reads. A tag another label holds is warned about; a failure only says
+        so, since the recordings' manifests carry the picks too."""
+        session_id = self._collection_session_id(prepared)
+        count = self._collection_count(prepared, "-na")
+        tags = prepared.get(_COLLECTION_PARTICIPANT_FLAG)
+        if not session_id or count <= 0 or not isinstance(tags, (list, tuple)):
+            return
+        labels = prepared.get("--audio-device-label")
+        labels = list(labels) if isinstance(labels, (list, tuple)) else []
+        scopes = prepared.get(_COLLECTION_SCOPE_FLAG)
+        scopes = list(scopes) if isinstance(scopes, (list, tuple)) else []
+        rows = []
+        for index in range(count):
+            label = str(labels[index] if index < len(labels) else "").strip()
+            tag = str(tags[index] if index < len(tags) and tags[index] is not None else "").strip()
+            scope = str(scopes[index] if index < len(scopes) else "").strip()
+            rows.append((label, tag, scope))
+        self._remember_collection_wearers(
+            session_id, target, [label for label, _, _ in rows],
+            [tag or (_COLLECTION_GROUP_PICK if scope == "group" else "") for _, tag, scope in rows])
+        set_fields: dict[str, str] = {}
+        unset_fields: dict[str, str] = {}
+        # the stream of a Device Label that more rows share (the channels of one receiver) has
+        # one wearer only when those rows agree
+        by_key: dict[str, set[str]] = {}
+        for label, tag, _scope in rows:
+            by_key.setdefault(sanitize_label(label, ""), set()).add(tag)
+        for label, tag, _scope in rows:
+            key = sanitize_label(label, "")
+            if not key or key.startswith("$") or "." in key:
+                if tag:
+                    self._log(f"[yellow]Tag {tag} is on a microphone whose Device Label "
+                              f"'{label}' cannot name a MongoDB field: its manifest carries it, "
+                              f"the session's wearers do not.[/yellow]")
+                continue
+            field = f"{_COLLECTION_WEARERS_FIELD}.{key}"
+            if len(by_key[key]) > 1:
+                if field not in unset_fields:
+                    worn = ", ".join(f"tag {t}" if t else "nobody" for t in sorted(by_key[key]))
+                    self._log(f"[yellow]The recorders labelled {key} have different wearers ({worn}): "
+                              f"each recording's manifest carries its own, the session's wearers note "
+                              f"none for {key}.[/yellow]")
+                unset_fields[field] = ""
+                continue
+            if tag:
+                set_fields[f"{_COLLECTION_WEARERS_FIELD}.{key}"] = tag
+            else:
+                unset_fields[f"{_COLLECTION_WEARERS_FIELD}.{key}"] = ""
+        if not set_fields and not unset_fields:
+            return
+        try:
+            mongo_config, _ = self._collection_mongodb_config(target)
+            if not mongo_config:
+                return
+            from pymongo import MongoClient
+            from openmmla.utils.constants import MONGODB_DEFAULT_DB
+            client = MongoClient(
+                str(mongo_config.get("url") or "").strip(),
+                serverSelectionTimeoutMS=1500, connectTimeoutMS=1500,
+            )
+            try:
+                sessions = client[str(mongo_config.get("db") or MONGODB_DEFAULT_DB)]["sessions"]
+                doc = sessions.find_one({"session_id": session_id}) or {}
+                held = doc.get(_COLLECTION_WEARERS_FIELD)
+                held = held if isinstance(held, dict) else {}
+                touched = {field.split(".", 1)[1] for field in (*set_fields, *unset_fields)}
+                for field, tag in set_fields.items():
+                    label = field.split(".", 1)[1]
+                    for other, other_tag in held.items():
+                        if other not in touched and str(other_tag) == tag:
+                            self._log(f"[yellow]Tag {tag} is also bound to {other} in session {session_id}: "
+                                      f"one person, two microphones? Check the Participant picks on each "
+                                      f"host.[/yellow]")
+                    if held.get(label) is not None and str(held.get(label)) != tag:
+                        self._log(f"[yellow]{label} was worn by tag {held.get(label)} in session {session_id}: "
+                                  f"now by tag {tag}.[/yellow]")
+                update: dict[str, dict] = {}
+                if set_fields:
+                    update["$set"] = set_fields
+                if unset_fields:
+                    update["$unset"] = unset_fields
+                sessions.update_one({"session_id": session_id}, update)
+            finally:
+                client.close()
+        except Exception as e:
+            self._log(f"[yellow]Could not note the wearers in MongoDB ({e}); the recordings' manifests "
+                      f"still carry them.[/yellow]")
 
     def _service_for_current_target(self, svc: ServiceDef) -> ServiceDef:
         return self._service_for_target(svc, self._get_panel_target())
@@ -8217,6 +8671,13 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
                 return
 
+        if svc.launch_type == "collection" and self._collection_count(event.params, "-na") > 0:
+            problem = self._collection_wearer_problem(event.params)
+            if problem:
+                self._log(problem)
+                return
+            for note in self._collection_wearer_notes(event.params, target):
+                self._log(note)
         if svc.launch_type == "collection" and not self._confirm_start_into_ended_session(event.params, target):
             return
 
@@ -8289,6 +8750,8 @@ class ServicePanel(Widget):
             return
         self._invalidate_session_choice_cache(self._get_panel_target())
         if svc.launch_type == "collection":
+            # a session's group is looked up in MongoDB again
+            self.__dict__.pop("_collection_session_groups", None)
             self.run_worker(
                 self._reload_current_service_view(),
                 group=_LAUNCHER_UI_WORKER_GROUP,
@@ -9372,6 +9835,14 @@ class ServicePanel(Widget):
         if self._is_default_collection_output_root(output_root):
             prepared["--output-root"] = self._collection_default_output_root(target)
         prepared.pop("--initial-sync-time", None)
+        # each recorder's Participant pick as its own flags, from what the card
+        # sent now (the last launch's are already translated)
+        prepared.pop(_COLLECTION_SCOPE_FLAG, None)
+        picks = params.get(_COLLECTION_PARTICIPANT_FLAG)
+        if isinstance(picks, (list, tuple)):
+            prepared[_COLLECTION_PARTICIPANT_FLAG], prepared[_COLLECTION_SCOPE_FLAG] = _collection_wearer_flags(picks)
+        else:
+            prepared.pop(_COLLECTION_PARTICIPANT_FLAG, None)
         return prepared
 
     def _collection_params_for_action(self, svc: ServiceDef, params: dict, target: str) -> dict:
@@ -10099,6 +10570,7 @@ class ServicePanel(Widget):
         self._collection_last_params[(self._get_panel_target(), svc.name)] = dict(prepared)
         self._remember_collection_session(prepared.get("--session-id"))
         self._remember_collection_launch("local", prepared.get("--session-id"))
+        self._note_collection_wearers(prepared, "local")
         launched = 0
         self._log(f"  Session ID: {prepared['--session-id']}")
         self._log("  Sync time: auto; manifest will use the earliest common replay time")
@@ -10725,6 +11197,7 @@ class ServicePanel(Widget):
                 self._collection_last_params[(profile_name, svc.name)] = dict(prepared)
                 self._remember_collection_session(prepared.get("--session-id"))
                 self._remember_collection_launch(profile_name, prepared.get("--session-id"))
+                self._note_collection_wearers(prepared, profile_name)
                 self._log(f"  Session ID: {prepared['--session-id']}")
                 self._log("  Sync time: auto; manifest will use the earliest common replay time")
                 success, msg = ssh_test_connection(profile)

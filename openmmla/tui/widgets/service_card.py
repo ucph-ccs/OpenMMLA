@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Callable
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
@@ -83,6 +83,17 @@ class ParamDef:
     # with this as its placeholder (a Collection recorder's Device Label, for a
     # device no pipeline config names). Empty: the options are all there is.
     free_text: str = ""
+    # the per-instance flag (same counter) whose rows this param's rows sit
+    # under, row by row, in that param's container (a recorder's Participant
+    # under its Device Label); honoured on collection cards only
+    under: str = ""
+    # with `under`: whether row i shows, given the value of row i of `under`
+    # (its typed text on "type another…"); None shows every row. A hidden row
+    # passes ""
+    shown_when: Callable[[str], bool] | None = None
+    # whether an instance with no default of its own takes the next option
+    # that has a value (True), or none (False)
+    fill: bool = True
 
 
 # the last option of a Select that takes a typed value too (ParamDef.free_text)
@@ -594,14 +605,22 @@ class ServiceCard(Widget):
 
         with Vertical(classes="card-params"):
             for param in self._collection_params_for_role(role):
+                if param.under:
+                    continue  # its rows sit under the rows of the param it names
                 if param.per_instance:
                     # one row per recorder of this role; its + and - show, hide
                     # and add rows (_sync_instances). The flag belongs to this
                     # tab alone, so the rows take the plain ids _sync_instances
                     # and collect_params look for, not the role-scoped ones.
+                    paired = self._paired_params(param.flag)
                     with Vertical(id=self._param_id("instances", param.flag), classes="param-instances"):
                         for index in range(len(self._param_values[param.flag])):
                             yield self._instance_row(param, index)
+                            for other in paired:
+                                if index < len(self._param_values.get(other.flag) or []):
+                                    row = self._instance_row(other, index)
+                                    row.display = self._instance_shown(other, index)
+                                    yield row
                     continue
                 with Horizontal(classes="param-row"):
                     for widget in self._param_widgets(
@@ -722,6 +741,8 @@ class ServiceCard(Widget):
             wanted = str(param.default[index] if param.default[index] is not None else "")
             if wanted in legal or (param.free_text and wanted):
                 return wanted
+        if not param.fill:
+            return ""
         valued = [value for _, value in options if value]
         return valued[index] if index < len(valued) else ""
 
@@ -792,9 +813,60 @@ class ServiceCard(Widget):
             classes="param-row",
         )
 
+    def _instance_value(self, param: ParamDef, index: int) -> str:
+        """what row `index` of `param` shows now: its Select's value, the typed
+        text when that is on "type another…", else (not mounted) what was
+        noted; "" for none."""
+        try:
+            sel = self.query_one(f"#{self._instance_select_id(param.flag, index)}", Select)
+        except Exception:
+            values = self._param_values.get(param.flag)
+            if not isinstance(values, list) or index >= len(values):
+                return ""
+            return str(values[index] if values[index] is not None else "")
+        value = "" if sel.value is Select.NULL else str(sel.value)
+        if value == TYPE_ANOTHER:
+            try:
+                return self.query_one(f"#{self._instance_input_id(param.flag, index)}", Input).value.strip()
+            except Exception:
+                return ""
+        return value
+
+    def _instance_shown(self, param: ParamDef, index: int) -> bool:
+        """whether row `index` of a param that sits under another shows, going
+        by that other row's value; always for any other param."""
+        if not param.under or param.shown_when is None:
+            return True
+        host = next((other for other in self.service_def.params if other.flag == param.under), None)
+        if host is None:
+            return True
+        return bool(param.shown_when(self._instance_value(host, index)))
+
+    def _paired_params(self, flag: str) -> list[ParamDef]:
+        """the params whose rows sit under the rows of `flag`."""
+        return [param for param in self.service_def.params if param.under == flag]
+
+    def _show_paired_rows(self, flag: str, index: int) -> None:
+        """row `index` of `flag` changed: the rows under it show or hide along."""
+        for param in self._paired_params(flag):
+            try:
+                row = self.query_one(f"#{self._instance_row_id(param.flag, index)}")
+            except Exception:
+                continue
+            row.display = index < self._instance_count(param) and self._instance_shown(param, index)
+
+    def instance_values(self, flag: str) -> list[str]:
+        """every noted instance of a per-instance param, shown or not, as its
+        row shows it now (not cut to the count)."""
+        param = next((other for other in self.service_def.params if other.flag == flag), None)
+        if param is None:
+            return []
+        return [self._instance_value(param, index) for index in range(len(self._param_values.get(flag) or []))]
+
     def _collect_instances(self, param: ParamDef) -> list[str]:
         """the values of the instances the counter asks for; what a Select
-        on screen says wins over what was noted."""
+        on screen says wins over what was noted. A hidden row passes "", while
+        its pick stays noted for when it shows again."""
         count = self._instance_count(param)
         values = list(self._param_values.get(param.flag) or [])
         while len(values) < count:
@@ -813,27 +885,53 @@ class ServiceCard(Widget):
                     value = ""
             values[index] = value
         self._param_values[param.flag] = values
-        return values[:count]
+        return [value if self._instance_shown(param, index) else "" for index, value in enumerate(values[:count])]
 
     def _sync_instances(self, count_flag: str) -> None:
         """the counter `count_flag` changed: one row per instance it asks for.
         Rows above the count are hidden, not removed, so a choice survives a
         - followed by a +; a new instance gets a row of its own."""
-        for param in self.service_def.params:
-            if param.per_instance != count_flag:
-                continue
-            count = self._instance_count(param)
+        params = [param for param in self.service_def.params if param.per_instance == count_flag]
+        for param in params:
             # notes a default for every new instance, which its row starts on
             self._collect_instances(param)
+        for param in params:
+            if param.under:
+                continue  # its rows go along with the rows it sits under
+            count = self._instance_count(param)
             try:
                 container = self.query_one(f"#{self._param_id('instances', param.flag)}", Vertical)
             except Exception:
                 continue
-            rows = list(container.children)
-            for index, row in enumerate(rows):
+            paired = [other for other in self._paired_params(param.flag) if other.per_instance == count_flag]
+            values = self._param_values.get(param.flag) or []
+            for index in range(max(count, len(values))):
+                try:
+                    row = self.query_one(f"#{self._instance_row_id(param.flag, index)}")
+                except Exception:
+                    row = None
+                if row is None:
+                    if index >= count:
+                        continue
+                    row = self._instance_row(param, index)
+                    container.mount(row)
+                    for other in paired:
+                        other_row = self._instance_row(other, index)
+                        other_row.display = self._instance_shown(other, index)
+                        container.mount(other_row)
+                    continue
                 row.display = index < count
-            for index in range(len(rows), count):
-                container.mount(self._instance_row(param, index))
+                after = row
+                for other in paired:
+                    try:
+                        other_row = self.query_one(f"#{self._instance_row_id(other.flag, index)}")
+                    except Exception:
+                        if index >= count:
+                            continue
+                        other_row = self._instance_row(other, index)
+                        container.mount(other_row, after=after)
+                    other_row.display = index < count and self._instance_shown(other, index)
+                    after = other_row
 
     def _initial_param_value(self, param: ParamDef) -> Any:
         if param.param_type == "bool":
@@ -1218,7 +1316,63 @@ class ServiceCard(Widget):
                     self._show_typed_box(param, index, value == TYPE_ANOTHER)
                 if index == 0:
                     self._follow_first_instance(param.flag, value)
+                self._show_paired_rows(param.flag, index)
                 return
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """text typed on a row on "type another…": the rows under it show or
+        hide along. The event goes on up."""
+        for param in self.service_def.params:
+            if not param.per_instance or not param.free_text:
+                continue
+            for index in range(len(self._param_values.get(param.flag) or [])):
+                if event.input.id == self._instance_input_id(param.flag, index):
+                    self._show_paired_rows(param.flag, index)
+                    return
+
+    def set_instance_choices(self, flag: str, choices: list, default: list) -> None:
+        """fresh options and defaults for one per-instance param of a
+        collection card (a recorder's Participant when the session or the
+        experiment group changes): a row the user picked keeps its pick while
+        it is still an option; every other row takes its new default."""
+        param = next((other for other in self.service_def.params if other.flag == flag), None)
+        if param is None:
+            return
+        new_param = replace(param, choices=list(choices), default=list(default or []))
+        self.service_def = replace(
+            self.service_def,
+            params=[new_param if other.flag == flag else other for other in self.service_def.params],
+        )
+        options = self._instance_options(new_param)
+        legal = {value for _, value in options}
+        values = list(self._param_values.get(flag) or [])
+        picked = self._picked_instances.setdefault(flag, set())
+        card_shown = self._card_shown.setdefault(flag, {})
+        for index in range(len(values)):
+            try:
+                sel = self.query_one(f"#{self._instance_select_id(flag, index)}", Select)
+            except Exception:
+                sel = None
+            current = values[index] if sel is None else ("" if sel.value is Select.NULL else str(sel.value))
+            if index in picked and current in legal:
+                keep = current
+            else:
+                picked.discard(index)
+                keep = self._instance_default(new_param, index)
+            values[index] = keep
+            card_shown[index] = keep
+            if sel is not None:
+                with sel.prevent(Select.Changed):
+                    sel.set_options(options)
+                    sel.value = keep if keep in legal else Select.NULL
+        self._param_values[flag] = values
+        count = self._instance_count(new_param)
+        for index in range(len(values)):
+            try:
+                row = self.query_one(f"#{self._instance_row_id(flag, index)}")
+            except Exception:
+                continue
+            row.display = index < count and self._instance_shown(new_param, index)
 
     def _show_typed_box(self, param: ParamDef, index: int, wanted: bool) -> None:
         """the text box of a row on "type another…": shown and focused while

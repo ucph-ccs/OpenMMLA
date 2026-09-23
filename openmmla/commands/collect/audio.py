@@ -2,6 +2,7 @@ import argparse
 import sys
 
 from openmmla.collection.recording import (
+    AUDIO_SCOPES,
     DEFAULT_AUDIO_CHANNEL,
     DEFAULT_AUDIO_DEVICE_LINUX,
     DEFAULT_AUDIO_DEVICE_MACOS,
@@ -58,6 +59,19 @@ def get_parser():
         help="the device this records, as the pipeline config's Streams name it (jabra-1); "
              "the device slot of the output file name, a single channel appended as -chN",
     )
+    parser.add_argument(
+        "--participant", "--audio-participant",
+        dest="participant",
+        default=None,
+        help="the tag id of whoever wears this microphone; its recording is personal",
+    )
+    parser.add_argument(
+        "--scope", "--audio-scope",
+        dest="scope",
+        choices=list(AUDIO_SCOPES),
+        default=None,
+        help="personal or group; default: from the device name (jabra group, vimo and badge personal)",
+    )
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_AUDIO_SAMPLE_RATE, help="output sample rate")
     parser.add_argument("--format", "--audio-format", dest="audio_format", choices=["wav", "flac", "aac"], default=DEFAULT_AUDIO_FORMAT, help="output audio format")
     parser.add_argument(
@@ -100,6 +114,13 @@ def main():
         args.audio_format = selected["audio_format"]
         args.device_label = selected["device_label"]
 
+    if args.participant and args.scope == "group":
+        parser.error("a group microphone has no participant")
+    if args.participant:
+        print(f"Participant: tag {args.participant} (personal microphone)")
+    elif args.scope:
+        print(f"Scope: {args.scope}")
+
     raise SystemExit(record_audio(
         project_dir=args.project_dir,
         output_root=args.output_root,
@@ -113,6 +134,8 @@ def main():
         sample_rate=args.sample_rate,
         audio_format=args.audio_format,
         device_label=args.device_label,
+        participant=args.participant,
+        scope=args.scope,
     ))
 
 

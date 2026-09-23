@@ -82,6 +82,49 @@ def natural_device_key(device: str | None) -> tuple:
                  for part in re.split(r"(\d+)", str(device or "").lower()) if part)
 
 
+def _is_placeholder(text: str) -> bool:
+    return text.startswith("<") and text.endswith(">")
+
+
+def participant_roster(experiments: Any, experiment_id: str, group_id: str) -> list[tuple[str, str]]:
+    """the (name, tag) pairs of one experiment group in config/experiments.yaml, lowest tag first
+    (natural order, so tag 10 comes after tag 9). A participant without a tag is left out, and so
+    is a tag that reads group or an unfilled <placeholder>."""
+    if not isinstance(experiments, dict):
+        return []
+    assignments = experiments.get("assignments")
+    if not isinstance(assignments, dict):
+        return []
+    members = assignments.get(str(experiment_id or ""))
+    if not isinstance(members, dict):
+        return []
+    roster: list[tuple[str, str]] = []
+    for name, entry in members.items():
+        if not isinstance(entry, dict) or str(entry.get("group_id") or "").strip() != str(group_id or "").strip():
+            continue
+        tag = entry.get("tag_id")
+        text = "" if tag is None else str(tag).strip()
+        if not text or text.lower() == "group" or _is_placeholder(text):
+            continue
+        roster.append((str(name), text))
+    return sorted(roster, key=lambda pair: (natural_device_key(pair[1]), pair[0]))
+
+
+def live_audio_role(slot: str, participant: str | None, scope: str | None) -> tuple[str | None, str | None]:
+    """the (scope, participant) a live recording notes: a named wearer makes it personal, else the
+    scope given, else the default scope of its device."""
+    wearer = None if participant is None else str(participant).strip()
+    if not wearer or wearer.lower() == "none":
+        wearer = None
+    if wearer is not None:
+        if scope == "group":
+            raise ValueError("a group microphone has no participant")
+        return "personal", wearer
+    if scope in AUDIO_SCOPES:
+        return scope, None
+    return default_audio_scope(slot), None
+
+
 def short_hostname() -> str:
     return socket.gethostname().split(".", 1)[0] or "host"
 
@@ -670,7 +713,11 @@ def record_audio(
     sample_rate: int,
     audio_format: str,
     device_label: str | None,
+    participant: str | None = None,
+    scope: str | None = None,
 ) -> int:
+    # a participant on a group microphone fails before anything else
+    live_audio_role("", participant, scope)
     ensure_command("ffmpeg")
     fmt = audio_format.lower()
     codecs = {
@@ -690,6 +737,7 @@ def record_audio(
     host = sanitize_label(host_label, short_hostname())
     label = sanitize_label(device_label, _device_label_from_device(device, "mic"))
     slot = _audio_device_slot(label, channel_label)
+    audio_scope, wearer = live_audio_role(slot, participant, scope)
     filename = f"audio_{host}_{slot}_{start_text}.{extension}"
     session_dir, output_file, session, sync_time, host = prepare_recording_paths(
         modality="audio",
@@ -726,9 +774,10 @@ def record_audio(
         "input_device": device,
         "channels": detected_channels,
         "channel": "mono" if channel_label == "mix" else f"ch{channel_label}",
-        # whose voice it is: a room microphone's or one person's; the wearer is bound later (mmla ses-tidy)
-        "scope": default_audio_scope(slot),
-        "participant": None,
+        # whose voice it is: a room microphone's or one person's; the wearer comes from the
+        # Collection form's Participant, else is bound later by mmla ses-tidy
+        "scope": audio_scope,
+        "participant": wearer,
         "sample_rate": sample_rate,
         "format": fmt,
     }

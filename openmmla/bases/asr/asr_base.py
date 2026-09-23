@@ -25,7 +25,7 @@ from openmmla.utils.audio.properties import get_energy_level, calculate_audio_du
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir, session_artifact_dir
 from openmmla.utils import session_provenance
 from openmmla.utils.asr_scope import chunk_cap, normalize_asr_scope, participant_of, resolve_speaker_verification as _resolve_speaker_verification
-from openmmla.bases.asr.attribution import NoiseFloor, energy_record, segment_energy, transcript_time
+from openmmla.bases.asr.attribution import SPEECH_GATE_SNR_DB, NoiseFloor, as_decibels, as_number, energy_record, relative_speech, segment_energy, snr_db, speech_gate_of, transcript_time
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
@@ -90,6 +90,8 @@ class ASRBase(Base):
     logger = get_logger(f'asr-base')
     participant: str | None = None  # the tag of whoever wears this base's microphone (Bases.participant)
     _noise_floor = None  # the base's running noise floor (NoiseFloor), fresh each run
+    speech_gate = 'absolute'  # absolute: rms/peak thresholds after gain; relative: raw snr over the base's floor
+    speech_gate_snr_db = SPEECH_GATE_SNR_DB  # the relative gate's dB over the floor
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'capture', store: bool = True,
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
@@ -255,12 +257,24 @@ class ASRBase(Base):
         # the longest a chunk of one speaker may grow (30 s for a group microphone unless set)
         self.max_chunk_duration = chunk_cap(base_config.get('max_chunk_duration'),
                                             'group' if self.participant is not None else self.asr_scope)
+        # what the Bases entry says, which a session's noted wearer overrides for one run only
+        self._configured_wearer = (self.participant, self.speaker_verification, self.max_chunk_duration)
+        self.wearer_source = 'config' if self.participant is not None else None
 
         self.register_duration = int(base_config['register_duration'])
         self.recognize_duration = int(base_config['recognize_sp_duration']) if self.sp else int(
             base_config['recognize_duration'])
-        self.rms_threshold = int(base_config['rms_threshold'])
-        self.rms_peak_threshold = int(base_config['rms_peak_threshold'])
+        # speech_gate: absolute (default) compares the level after gain, NR and VAD with rms_threshold and
+        # rms_peak_threshold; relative compares the raw level with this base's own noise floor
+        self.speech_gate = speech_gate_of(base_config.get('speech_gate'))
+        self.speech_gate_snr_db = as_decibels(base_config.get('speech_gate_snr_db'), SPEECH_GATE_SNR_DB)
+        if self.speech_gate == 'relative':
+            # unused by the gate, so they may be left blank
+            self.rms_threshold = int(as_number(base_config.get('rms_threshold'), 0))
+            self.rms_peak_threshold = int(as_number(base_config.get('rms_peak_threshold'), 0))
+        else:
+            self.rms_threshold = int(base_config['rms_threshold'])
+            self.rms_peak_threshold = int(base_config['rms_peak_threshold'])
         self.threshold = float(base_config['recognize_sp_threshold']) if self.sp else float(
             base_config['recognize_threshold'])
         self.keep_threshold = float(base_config['keep_sp_threshold']) if self.sp else float(
@@ -519,6 +533,43 @@ class ASRBase(Base):
         self.transcription_queue = None
         self.speaker_frames_dict = None
         gc.collect()
+        self._restore_configured_wearer()
+
+    def _restore_configured_wearer(self):
+        """Put back the wearer, speaker verification and chunk cap the Bases entry gives."""
+        configured = getattr(self, '_configured_wearer', None)
+        if configured is None:
+            return
+        self.participant, self.speaker_verification, self.max_chunk_duration = configured
+        self.wearer_source = 'config' if self.participant is not None else None
+
+    def _apply_session_wearer(self, session_id):
+        """A base whose Bases entry names no participant and that pulls a stream takes the wearer the
+        session's Collection Start noted for that stream (the session document's wearers), for this
+        run only; the Bases config is left as it is."""
+        self._restore_configured_wearer()
+        if self.participant is not None or getattr(self, 'source', None) != 'stream':
+            return
+        if not getattr(self, 'stream_name', None) or not session_id:
+            return
+        try:
+            session = self.mongo_client.get_session(session_id) or {}
+        except Exception as e:
+            self.logger.warning(f"Could not read the wearers of session {session_id}: {e}")
+            return
+        wearers = session.get('wearers') if isinstance(session, dict) else None
+        tag = participant_of(wearers.get(self.stream_name)) if isinstance(wearers, dict) else None
+        if tag is None:
+            return
+        base_blocks = (getattr(self, 'config', None) or {}).get('Base')
+        base_config = base_blocks.get(getattr(self, 'base_type', None)) if isinstance(base_blocks, dict) else None
+        base_config = base_config if isinstance(base_config, dict) else {}
+        self.participant = tag
+        self.speaker_verification = False
+        self.max_chunk_duration = chunk_cap(base_config.get('max_chunk_duration'), 'group')
+        self.wearer_source = 'session'
+        self.logger.info(f"Stream '{self.stream_name}' is worn by participant {tag} in session {session_id} "
+                         f"(its Collection Start): wearer mode for this run.")
 
     def _close_clients(self):
         """Close the connections to MQTT, Redis, InfluxDB and MongoDB before the process exits."""
@@ -903,6 +954,8 @@ class ASRBase(Base):
             True when the run ended with STOP, False when it ended with an error, and None when it
             could not start (speaker verification without a selected speaker profile).
         """
+        # a stream the session's Collection Start noted a wearer for is that person's, for this run
+        self._apply_session_wearer(session_id or self.launch_session_id)
         # check if any speakers are selected for individual-level recognition
         if self.speaker_verification and (not self.selected_speakers or len(self.selected_speakers) == 0):
             print("------------------------------------------------")
@@ -936,10 +989,14 @@ class ASRBase(Base):
                       f"the loudest (energy attribution).{ENDC}")
             else:
                 print(f"{GREEN}ASR chunks will be attributed at group scope.{ENDC}")
+        print(f"{GREEN}{self._speech_gate_text()}{ENDC}")
         
         # select or create bucket
         launch_session_id = session_id or self.launch_session_id
         self.session_id = select_or_create_session(self.mongo_client) if not launch_session_id else launch_session_id
+        if self.session_id != (session_id or self.launch_session_id):
+            # picked in the menu just now: its wearer is known only from here on
+            self._apply_session_wearer(self.session_id)
         self._join_session()
         self._resolve_group_speaker_id()
         self._create_bucket_logger()
@@ -1073,9 +1130,11 @@ class ASRBase(Base):
                     'selected_speakers': list(self.selected_speakers or []),
                     'group_speaker_id': self.group_speaker_id, 'language': self.language,
                     'participant': self.participant,
+                    'wearer_source': getattr(self, 'wearer_source', None),
                     'attribution': 'energy' if self.participant is not None else None,
                     'register_duration': self.register_duration, 'recognize_duration': self.recognize_duration,
                     'rms_threshold': self.rms_threshold, 'rms_peak_threshold': self.rms_peak_threshold,
+                    'speech_gate': self.speech_gate, 'speech_gate_snr_db': self.speech_gate_snr_db,
                     'recognize_threshold': self.threshold, 'keep_threshold': self.keep_threshold,
                     'update_threshold': self.update_threshold, 'gain': self.gain,
                     'score_amplified': self.score_amplified,
@@ -1305,6 +1364,50 @@ class ASRBase(Base):
         floor = self._noise_floor.update(segment_start_time, rms)
         return energy_record(rms, peak, floor)
 
+    def _is_speech(self, processed_audio_path, rms_value, peak_value, energy) -> bool:
+        """whether a segment is speech: VAD kept speech in it and, with the absolute gate, its level
+        after gain, noise reduction and VAD is over rms_threshold and rms_peak_threshold; with the
+        relative gate, its raw level stands speech_gate_snr_db over this base's noise floor (its
+        energy)."""
+        if not processed_audio_path:
+            return False
+        if self.speech_gate == 'relative':
+            return relative_speech(energy, self.speech_gate_snr_db)
+        return bool(rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold)
+
+    def _amplification(self, rms_value, energy) -> float:
+        """the factor score_amplified multiplies a recognized speaker's similarity by: log(rms) /
+        log(rms_threshold) with the absolute gate, the segment's snr over speech_gate_snr_db with
+        the relative one (1.0 when that has no meaning)."""
+        if self.speech_gate == 'relative':
+            snr = snr_db(energy)
+            if snr is None or self.speech_gate_snr_db <= 0:
+                return 1.0
+            return snr / self.speech_gate_snr_db
+        return np.log(rms_value) / np.log(self.rms_threshold)
+
+    def _energy_ratio(self, rms_value, peak_value, energy) -> float:
+        """how far over the gate an unrecognized segment stands, 0-1, which scales its similarity
+        below the threshold: (rms + peak) / (rms + peak + rms_threshold + rms_peak_threshold) with
+        the absolute gate, snr / (snr + speech_gate_snr_db) with the relative one (0.5 when that has
+        no meaning)."""
+        if self.speech_gate == 'relative':
+            snr = snr_db(energy)
+            if snr is None or snr <= 0 or self.speech_gate_snr_db <= 0:
+                return 0.5
+            return snr / (snr + self.speech_gate_snr_db)
+        c1 = rms_value + peak_value
+        c2 = self.rms_threshold + self.rms_peak_threshold
+        return c1 / (c1 + c2)
+
+    def _speech_gate_text(self) -> str:
+        """how this base tells speech from silence, in one line."""
+        if self.speech_gate == 'relative':
+            return (f"Speech gate: relative, {self.speech_gate_snr_db:g} dB or more over this base's own noise "
+                    f"floor, before gain (rms_threshold and rms_peak_threshold unused).")
+        return (f"Speech gate: absolute, rms over {self.rms_threshold} and peak over {self.rms_peak_threshold} "
+                f"after {self.gain:g} dB gain.")
+
     def _continuous_recognizing(self):
         """Continuously process and recognize audio segments from the audio queue.
 
@@ -1333,7 +1436,7 @@ class ASRBase(Base):
 
                 # evaluate energy levels for quality check
                 rms_value, peak_value = get_energy_level(segment_audio_path, verbose=True)
-                if processed_audio_path and rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
+                if self._is_speech(processed_audio_path, rms_value, peak_value, energy):
                     speaker = 'unknown'
                 else:
                     speaker = 'silent'
@@ -1354,13 +1457,9 @@ class ASRBase(Base):
                     if similarity > self.threshold:
                         speaker = name
                         if self.score_amplified:
-                            energy_level_factor = np.log(rms_value) / np.log(self.rms_threshold)
-                            similarity = min(similarity * energy_level_factor, 1)
+                            similarity = min(similarity * self._amplification(rms_value, energy), 1)
                     else:
-                        c1 = rms_value + peak_value
-                        c2 = self.rms_threshold + self.rms_peak_threshold
-                        ratio = c1 / (c1 + c2)
-                        similarity = self.threshold * ratio
+                        similarity = self.threshold * self._energy_ratio(rms_value, peak_value, energy)
 
                 self._assemble_chunk_with_hsr(speaker, segment_start_time, frames)
                 self._publish_recognition(segment_start_time, recognize_start_time, [speaker],
@@ -1396,6 +1495,8 @@ class ASRBase(Base):
                 segment_audio_path, frames = self.audio_queue.get(timeout=1)
                 segment_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
+                # the relative gate needs the raw segment's level against this base's floor
+                energy = self._segment_energy(segment_start_time, frames) if self.speech_gate == 'relative' else None
                 write_bytes_to_wav(segment_audio_path, frames)
 
                 # audio pre-processing
@@ -1410,7 +1511,7 @@ class ASRBase(Base):
                 best_separate_frames = None
 
                 resample_audio(segment_audio_path, 8000)
-                if processed_audio_path and rms_value > self.rms_threshold and peak_value > self.rms_peak_threshold:
+                if self._is_speech(processed_audio_path, rms_value, peak_value, energy):
                     sp_result = self._separate_speech(segment_audio_path)
 
                     # recognize separated audio streams
@@ -1444,8 +1545,7 @@ class ASRBase(Base):
                             os.remove(save_file)
 
                     if similarity > self.threshold and self.score_amplified:
-                        energy_level_factor = np.log(rms_value) / np.log(self.rms_threshold)
-                        similarity = min(similarity * energy_level_factor, 1)
+                        similarity = min(similarity * self._amplification(rms_value, energy), 1)
 
                 if speaker == 'unknown' and similarity == 0:
                     speaker = 'silent'

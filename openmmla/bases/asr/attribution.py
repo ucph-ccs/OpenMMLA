@@ -5,7 +5,8 @@ A microphone worn by one participant (a Bases entry with `participant`) hears it
 and the neighbours as cross-talk. Every base measures the level of each raw segment in dBFS and
 keeps its own noise floor; the synchronizer compares, per bucket, how far each worn microphone's
 speech stands above its floor, and only the loudest (and those within a tie of it) keep their
-speech. A group or room microphone never votes.
+speech. A group or room microphone never votes. A base may also gate its speech on that snr
+(speech_gate: relative).
 """
 from __future__ import annotations
 
@@ -21,6 +22,8 @@ MIN_DB = -100.0
 FULL_SCALE = 32768.0
 FLOOR_SECONDS, FLOOR_PERCENTILE, FLOOR_MIN_COUNT = 60.0, 10.0, 5
 ENERGY_MARGIN_DB, ENERGY_TIE_DB = 6.0, 3.0
+SPEECH_GATES = ('absolute', 'relative')
+SPEECH_GATE_SNR_DB = 6.0
 SILENT_SPEAKERS = ('silent', 'unknown')
 
 
@@ -125,8 +128,35 @@ def snr_db(energy) -> float | None:
 
 def as_decibels(value, default: float) -> float:
     """a dB setting from a config: a number, else the default (None, blank, <...>, text)."""
+    return as_number(value, default)
+
+
+def as_number(value, default: float) -> float:
+    """a number from a config: the value as a float, else the default (None, blank, <...>, text,
+    a yes/no)."""
     number = _finite(value.strip() if isinstance(value, str) else value)
     return float(default) if number is None else number
+
+
+def speech_gate_of(value) -> str:
+    """the speech gate a Base block names: 'absolute' (the default: nothing, a blank or an unfilled
+    placeholder) or 'relative'; case and spaces do not matter; anything else is an error."""
+    if value is None:
+        return 'absolute'
+    text = str(value).strip()
+    if not text or (text.startswith('<') and text.endswith('>')):
+        return 'absolute'
+    gate = text.lower()
+    if gate in SPEECH_GATES:
+        return gate
+    raise ValueError(f"speech_gate must be 'absolute' or 'relative', not '{value}'.")
+
+
+def relative_speech(energy, min_snr_db: float) -> bool:
+    """whether a segment's raw level stands at least min_snr_db over its base's noise floor (snr_db
+    of its energy); False when the energy is not usable."""
+    snr = snr_db(energy)
+    return snr is not None and snr >= float(min_snr_db)
 
 
 def energy_vote(snrs: dict[str, float], margin_db: float = ENERGY_MARGIN_DB,
