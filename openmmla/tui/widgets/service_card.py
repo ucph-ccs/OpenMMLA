@@ -85,12 +85,14 @@ class ParamDef:
     free_text: str = ""
     # the per-instance flag (same counter) whose rows this param's rows sit
     # under, row by row, in that param's container (a recorder's Participant
-    # under its Device Label); honoured on collection cards only
+    # under its Device Label, a base's Participant under its Base)
     under: str = ""
     # with `under`: whether row i shows, given the value of row i of `under`
-    # (its typed text on "type another…"); None shows every row. A hidden row
+    # (its typed text on "type another…"), or of `shown_by` when that names
+    # another row of the same instance; None shows every row. A hidden row
     # passes ""
     shown_when: Callable[[str], bool] | None = None
+    shown_by: str = ""
     # with `under`: its rows sit above the rows of `under` rather than below
     # (a recorder's Host above its Device Label)
     above: bool = False
@@ -520,12 +522,20 @@ class ServiceCard(Widget):
                 if option_params:
                     with Vertical(classes="card-params"):
                         for p in option_params:
+                            if p.under:
+                                continue  # its rows sit with the rows of the param it names
                             if p.per_instance:
                                 # one row per instance; + and - of its counter
                                 # show, hide or add rows (_sync_instances)
+                                paired = self._paired_params(p.flag)
                                 with Vertical(id=self._param_id("instances", p.flag), classes="param-instances"):
                                     for index in range(len(self._param_values[p.flag])):
                                         yield self._instance_row(p, index)
+                                        for other in paired:
+                                            if index < len(self._param_values.get(other.flag) or []):
+                                                row = self._instance_row(other, index)
+                                                row.display = self._instance_shown(other, index)
+                                                yield row
                                 continue
                             with Horizontal(classes="param-row"):
                                 for widget in self._param_widgets(p):
@@ -849,10 +859,12 @@ class ServiceCard(Widget):
 
     def _instance_shown(self, param: ParamDef, index: int) -> bool:
         """whether row `index` of a param that sits under another shows, going
-        by that other row's value; always for any other param."""
+        by the value of that other row (or of the row `shown_by` names);
+        always for any other param."""
         if not param.under or param.shown_when is None:
             return True
-        host = next((other for other in self.service_def.params if other.flag == param.under), None)
+        source = param.shown_by or param.under
+        host = next((other for other in self.service_def.params if other.flag == source), None)
         if host is None:
             return True
         return bool(param.shown_when(self._instance_value(host, index)))
@@ -862,8 +874,11 @@ class ServiceCard(Widget):
         return [param for param in self.service_def.params if param.under == flag]
 
     def _show_paired_rows(self, flag: str, index: int) -> None:
-        """row `index` of `flag` changed: the rows under it show or hide along."""
-        for param in self._paired_params(flag):
+        """row `index` of `flag` changed: the rows under it, and those whose
+        showing it decides, show or hide along."""
+        for param in self.service_def.params:
+            if not param.under or flag not in (param.under, param.shown_by):
+                continue
             try:
                 row = self.query_one(f"#{self._instance_row_id(param.flag, index)}")
             except Exception:
@@ -1402,6 +1417,8 @@ class ServiceCard(Widget):
             except Exception:
                 continue
             row.display = index < count and self._instance_shown(new_param, index)
+            # the rows whose showing this one decides (a base's Speakers)
+            self._show_paired_rows(flag, index)
 
     def _show_typed_box(self, param: ParamDef, index: int, wanted: bool) -> None:
         """the text box of a row on "type another…": shown and focused while

@@ -30,6 +30,11 @@ def get_parser():
     add_arg('speakers', str, None,
             "comma-separated speaker profiles to recognize (see mmla asr-speakers --list); if not set, every "
             "registered one", shortname='-spk')
+    add_arg('participant', str, None,
+            "whom this base's speech is attributed to: a participant's tag id (a microphone they wear), "
+            "'group' (the session's group) or 'speakers' (speaker verification among -spk); if not set, the "
+            "config decides (asr_scope, the Bases entry's participant, the wearer the session's Collection Start "
+            "picked for its stream)", shortname='-pt')
     add_arg('language', str, None,
             "language to transcribe this base's speech in ('en', 'da', 'zh-CN'): sent with every request and "
             "taken for it alone, whatever the speech transcriber is configured for; if not set, that "
@@ -66,6 +71,7 @@ def main():
         session_id=args.session_id,
         base=args.base,
         speakers=args.speakers,
+        participant=args.participant,
         language=args.language,
         diarize=args.diarize
     )

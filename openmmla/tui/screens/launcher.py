@@ -113,7 +113,9 @@ from openmmla.collection.recording import (
     participant_roster,
     sanitize_label,
 )
-from openmmla.utils.asr_scope import normalize_asr_scope
+from openmmla.utils.asr_scope import (
+    LAUNCH_GROUP, LAUNCH_SPEAKERS, normalize_asr_scope, participant_of, resolve_speaker_verification,
+)
 from openmmla.utils.experiments import (
     get_active_experiments, get_groups_for_experiment, get_participant_aliases,
     load_experiments,
@@ -932,6 +934,55 @@ _BASE_CARD_PIPELINES = {"ASR Base": "asr", "VFA Base": "vfa", "IPS Base": "ips"}
 
 # the card whose bases recognize speakers from the profiles of its host (Speakers)
 _ASR_BASE_CARD = "ASR Base"
+# whom each base of that card attributes its speech to (--participant): a
+# participant's tag, Group or Speakers, in a row under its Base; its Speakers
+# row shows only for Speakers (or while nothing is picked, and the config decides)
+_ASR_PARTICIPANT_FLAG = "--participant"
+
+
+def _asr_takes_speakers(pick: object) -> bool:
+    """whether a base with this Participant pick recognizes speakers by
+    their profiles, and so has a Speakers row."""
+    return str(pick or "").strip() in ("", LAUNCH_SPEAKERS)
+
+
+def _asr_participant_choices(roster) -> list[tuple[str, str]]:
+    """a base's Participant options: the session group's participants by
+    tag, then Group and Speakers."""
+    return [(f"{name} (tag {tag})", tag) for name, tag in roster] + [
+        ("Group", LAUNCH_GROUP),
+        ("Speakers (speaker verification)", LAUNCH_SPEAKERS),
+    ]
+
+
+def _asr_attribution_default(config: dict, entry_id: str, wearers: dict, legal: set) -> str | None:
+    """what a base's Participant row opens on when nobody picked one for it:
+    the wearer its Bases entry names, else the one the session's Collection
+    Start picked for its stream, else by its base type's asr_scope: None for
+    wearer (a free participant of the group), Speakers when it verifies
+    speakers, else Group; "" when the config does not say (the base decides)."""
+    entry = get_base_by_id(config, entry_id) if entry_id and config else None
+    if entry is None:
+        return ""
+    blocks = config.get("Base") if isinstance(config.get("Base"), dict) else {}
+    block = blocks.get(str(entry.get("base_type")))
+    block = block if isinstance(block, dict) else {}
+    worn = participant_of(entry.get("participant"))
+    if worn is not None and worn in legal:
+        return worn
+    if normalize_source(entry.get("source") or block.get("source")) == "stream":
+        tag = participant_of(wearers.get(str(entry.get("source_index") or "").strip()))
+        if tag is not None and tag in legal:
+            return tag
+    try:
+        scope = normalize_asr_scope(block.get("asr_scope"))
+    except ValueError:
+        return ""
+    if scope == "wearer":
+        return None
+    if resolve_speaker_verification(block.get("speaker_verification", "auto"), scope):
+        return LAUNCH_SPEAKERS
+    return LAUNCH_GROUP
 
 # the synchronizer's own count of the bases it merges each time slice from
 # (the long form of -nb of mmla asr-sync and vfa-sync): Sync Waits For on the
@@ -2359,9 +2410,17 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             # choices, defaults and follow_values come from the card host's
             # config (_service_with_base_choices)
             ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
+            # whom each base's speech is (--participant): a participant of the
+            # session's group (a microphone they wear), the group, or speakers
+            # told apart by verification. The options and what each row opens
+            # on follow the session's group and the base (_refresh_asr_participants)
+            ParamDef(_ASR_PARTICIPANT_FLAG, "Participant", "choice", [], per_instance="-nb", under="-b",
+                     fill=False),
             # the speaker profiles each base recognizes (-spk): a line per base,
-            # which the launcher writes and Manage changes (_put_speakers)
-            ParamDef("--speakers", "Speakers", "speakers", None, per_instance="-nb"),
+            # which the launcher writes and Manage changes (_put_speakers); only
+            # for a base whose Participant is Speakers
+            ParamDef("--speakers", "Speakers", "speakers", None, per_instance="-nb", under="-b",
+                     shown_by=_ASR_PARTICIPANT_FLAG, shown_when=_asr_takes_speakers),
             ParamDef("-bt", "Synchronizer Base Type", "choice", "", follows="-b"),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-s", "Store Audio", "bool", True),
@@ -2378,7 +2437,8 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         ],
         components=[
             ComponentDef("base", "mmla asr-base", "-nb",
-                         ["-sid", "-b", "--speakers", "-m", "-s", "-vad", "-nr", "-tr", "-lang", "-dia", "-sp", "-hsr"]),
+                         ["-sid", "-b", "--speakers", _ASR_PARTICIPANT_FLAG, "-m", "-s", "-vad", "-nr", "-tr",
+                          "-lang", "-dia", "-sp", "-hsr"]),
             ComponentDef("synchronizer", "mmla asr-sync", "-ns",
                          ["-sid", _SYNC_WAIT_FLAG, "-bt", "-d", "-sp"]),
         ],
@@ -4095,10 +4155,13 @@ class ServicePanel(Widget):
                 # a recorder moved to another host: the status probes ask that one too
                 self._note_collection_card_hosts(self._collection_card_values())
                 return
-        if event.select.id != "svc-target-select" and any(
-                isinstance(node, ServiceCard) and node.service_def.name == _ASR_BASE_CARD
-                for node in event.select.ancestors):
-            # the Session, the Bases and the Mode decide the card's Speakers line
+        asr_card = None if event.select.id == "svc-target-select" else next(
+            (node for node in event.select.ancestors
+             if isinstance(node, ServiceCard) and node.service_def.name == _ASR_BASE_CARD), None)
+        if asr_card is not None:
+            self._note_asr_participant_pick(asr_card, event.select.id or "")
+            # the Session, the Bases, the Participants and the Mode decide the
+            # card's Participant options and Speakers lines
             self.call_after_refresh(self._show_speakers_summary)
             return
         if event.select.id == "svc-target-select":
@@ -5638,6 +5701,11 @@ class ServicePanel(Widget):
             elif param.flag == "-mc" and pipeline == "ips":
                 options, default = _main_camera_choices(self._transform_matrix_ids(target) or [], config)
                 params.append(replace(param, choices=options, default=default))
+            elif param.flag == _ASR_PARTICIPANT_FLAG:
+                # the options the card was last given (_refresh_asr_participants):
+                # fresh Bases must not take them away
+                stored = self.__dict__.get("_asr_participant_options")
+                params.append(replace(param, choices=list(stored[0]), default=list(stored[1])) if stored else param)
             else:
                 params.append(param)
         return replace(svc, params=params)
@@ -5807,9 +5875,22 @@ class ServicePanel(Widget):
         picked = self._speaker_picks().get(self._speaker_key(params, target, index))
         return replace(frame, choice=asr_speakers.choose(picked, frame.listing, frame.participants))
 
+    @staticmethod
+    def _asr_participant_pick(params: dict, index: int) -> str:
+        """base `index`'s Participant pick: a tag, group, speakers, or "" (none:
+        the config decides)."""
+        picks = params.get(_ASR_PARTICIPANT_FLAG)
+        if not isinstance(picks, (list, tuple)) or index >= len(picks):
+            return ""
+        return str(picks[index] if picks[index] is not None else "").strip()
+
     def _base_verifies(self, params: dict, target: str, index: int, svc: ServiceDef | None = None) -> bool | None:
-        """whether base `index` recognizes speakers (its base type is asr_scope
-        individual); None when the host's config is not known."""
+        """whether base `index` recognizes speakers: its Participant is
+        Speakers, or with none picked its base type verifies them (asr_scope
+        individual); None when neither says."""
+        pick = self._asr_participant_pick(params, index)
+        if pick:
+            return pick == LAUNCH_SPEAKERS
         config = self._asr_card_config(target, svc)
         if not config:
             return None
@@ -5821,17 +5902,125 @@ class ServicePanel(Widget):
         if str(params.get("-m") or "live") == "capture":
             return "capture mode records only"
         if self._base_verifies(params, target, index) is False:
+            pick = self._asr_participant_pick(params, index)
+            if pick == LAUNCH_GROUP:
+                return f"Participant {index + 1} is Group"
+            if pick:
+                return f"Participant {index + 1} wears it"
             ids = self._base_ids(params)
             return (asr_speakers.unverified_reason(self._asr_card_config(target),
                                                    ids[index] if index < len(ids) else "")
                     or "this base verifies no speakers")
         return ""
 
+    # ── whom each base of the ASR Base card attributes its speech to ──
+
+    def _base_row_entry(self, rows: list, index: int, config: dict) -> str:
+        """the Bases entry of Base row `index`: its pick, else the config's
+        only entry (what a base given no -b takes); "" when it asks."""
+        entry = str(rows[index] if index < len(rows) and rows[index] else "").strip()
+        if not entry:
+            entries = get_bases(config)
+            if len(entries) == 1:
+                entry = str(entries[0].get("id"))
+        return entry
+
+    def _session_wearers(self, session: object) -> dict:
+        """who wears what in a session, as its Collection Start noted it (the
+        MongoDB document's wearers: Device Label or stream -> tag), read once
+        per session; {} for a new session, or when it has none or MongoDB
+        cannot be asked."""
+        if _is_new_collection_session_choice(session):
+            return {}
+        session_id = _safe_session_id(session)
+        if not session_id:
+            return {}
+        cache = self.__dict__.setdefault("_asr_session_wearers", {})
+        if session_id not in cache:
+            doc = self._session_record(session_id, "local")
+            held = doc.get(_COLLECTION_WEARERS_FIELD) if isinstance(doc, dict) else None
+            cache[session_id] = dict(held) if isinstance(held, dict) else {}
+        return cache[session_id]
+
+    def _asr_participant_key(self, params: dict, target: str, entry_id: str) -> tuple[str, str, str]:
+        """what a Participant pick is kept under: the host, the session's
+        experiment group (the people it can be) and the Bases entry (the
+        microphone), so it holds for every session of that group."""
+        _scope_key, group, _roster = self._collection_roster(params.get("-sid"), params.get("--experiment-group"))
+        return target, group, entry_id
+
+    def _refresh_asr_participants(self) -> None:
+        """the Participant rows of the ASR Base card: the participants of the
+        session's group, Group and Speakers. A row opens on the pick kept for
+        its group and Bases entry, else on the wearer the entry names, else on
+        the one the session's Collection Start picked for its stream, else on
+        what its base type's asr_scope says: the group's participants in row
+        order for wearer, Speakers for a base that verifies speakers, Group
+        for the rest."""
+        card = next((card for card in self.query(ServiceCard) if card.service_def.name == _ASR_BASE_CARD), None)
+        if card is None or not any(param.flag == _ASR_PARTICIPANT_FLAG for param in card.service_def.params):
+            return
+        target = self._get_panel_target()
+        params = card.collect_params()
+        _scope_key, _group, roster = self._collection_roster(params.get("-sid"), params.get("--experiment-group"))
+        choices = _asr_participant_choices(roster)
+        legal = {value for _, value in choices}
+        config = self._asr_card_config(target)
+        wearers = self._session_wearers(params.get("-sid"))
+        picks = self.__dict__.setdefault("_asr_participant_picks", {})
+        rows = card.instance_values("-b")
+        values: list[str | None] = []
+        held: set[str] = set()
+        for index in range(max(len(rows), len(card._param_values.get(_ASR_PARTICIPANT_FLAG) or []))):
+            entry_id = self._base_row_entry(rows, index, config)
+            kept = picks.get(self._asr_participant_key(params, target, entry_id)) if entry_id else None
+            value = kept if kept is not None and kept in legal else _asr_attribution_default(
+                config, entry_id, wearers, legal)
+            values.append(value)
+            if value and value not in (LAUNCH_GROUP, LAUNCH_SPEAKERS):
+                held.add(value)
+        free = [tag for _, tag in roster if tag not in held]
+        defaults = [value if value is not None else (free.pop(0) if free else "") for value in values]
+        self.__dict__["_asr_participant_options"] = (choices, defaults)
+        # every row takes its default, a kept pick included
+        card._picked_instances.pop(_ASR_PARTICIPANT_FLAG, None)
+        card.set_instance_choices(_ASR_PARTICIPANT_FLAG, choices, defaults)
+
+    def _note_asr_participant_pick(self, card: ServiceCard, select_id: str) -> None:
+        """a Participant row of the ASR Base card was picked by hand: keep it
+        for that group and Bases entry."""
+        count = len(card._param_values.get(_ASR_PARTICIPANT_FLAG) or [])
+        index = next((i for i in range(count) if select_id == card._instance_select_id(_ASR_PARTICIPANT_FLAG, i)), None)
+        if index is None or index not in card._picked_instances.get(_ASR_PARTICIPANT_FLAG, set()):
+            return
+        target = self._get_panel_target()
+        entry_id = self._base_row_entry(card.instance_values("-b"), index, self._asr_card_config(target))
+        if not entry_id:
+            return
+        key = self._asr_participant_key(card.collect_params(), target, entry_id)
+        self.__dict__.setdefault("_asr_participant_picks", {})[key] = card.instance_values(_ASR_PARTICIPANT_FLAG)[index]
+
+    def _asr_participant_problem(self, params: dict) -> str:
+        """why a Start of the ASR Base card is refused for its Participant
+        picks: one tag on two bases; "" when there is none."""
+        rows: dict[str, list[int]] = {}
+        for index in range(_coerce_int(params.get("-nb"), 0)):
+            pick = self._asr_participant_pick(params, index)
+            if pick and pick not in (LAUNCH_GROUP, LAUNCH_SPEAKERS):
+                rows.setdefault(pick, []).append(index + 1)
+        for tag, where in rows.items():
+            if len(where) > 1:
+                return (f"[red]Tag {tag} is picked on Participant {where[0]} and {where[1]}: one person wears one "
+                        f"microphone. Pick another, Group, or Speakers.[/red]")
+        return ""
+
     def _show_speakers_summary(self) -> None:
-        """write the Speakers line of every base of the ASR Base card."""
+        """write the Participant options and the Speakers line of every base
+        of the ASR Base card."""
         card = next((card for card in self.query(ServiceCard) if card.service_def.name == _ASR_BASE_CARD), None)
         if card is None:
             return
+        self._refresh_asr_participants()
         target = self._get_panel_target()
         params = card.collect_params()
         where = "this machine" if target == "local" else target
@@ -5903,6 +6092,9 @@ class ServicePanel(Widget):
         frame = self._speaker_frame(params, target)
         speakers = []
         for index in range(count):
+            if not _asr_takes_speakers(self._asr_participant_pick(params, index)):
+                speakers.append("")  # worn by one participant, or the group's: nobody to verify
+                continue
             choice = self._speaker_context(params, target, index, frame).choice
             speakers.append(join_speakers(choice.names) if choice.names else "")
         params["--speakers"] = speakers
@@ -5922,20 +6114,21 @@ class ServicePanel(Widget):
         where = "this machine" if target == "local" else f"'{target}'"
         ids = self._base_ids(params)
         for index in range(count):
-            if not asr_speakers.verifies_speakers(config, ids[index]):
+            if not self._base_verifies(params, target, index, svc):
                 continue
             base = f"base {index + 1}" + (f" ({ids[index]})" if ids[index] else "")
             choice = self._speaker_context(params, target, index, frame).choice
             if choice.names == []:
                 return (f"[yellow]No speaker is ticked under Speakers {index + 1} → Manage, and {base} recognizes "
-                        f"speakers (asr_scope: individual) in {mode} mode. Tick them there, or press Use Group there "
-                        f"to let the session's group decide, or switch Mode to capture.[/yellow]")
+                        f"speakers (Participant {index + 1}: Speakers) in {mode} mode. Tick them there, or press "
+                        f"Use Group there to let the session's group decide, or switch Mode to capture.[/yellow]")
             if listing is None:
                 return ""   # the host did not say: the bases decide, and ask in their window if they must
             if not listing.names:
                 return (f"[yellow]No speaker profile is registered on {where}, and {base} recognizes speakers "
-                        f"(asr_scope: individual) in {mode} mode. Register them under Speakers → Manage; or switch "
-                        f"Mode to capture, or set asr_scope: group for its base type on the Config tab.[/yellow]")
+                        f"(Participant {index + 1}: Speakers) in {mode} mode. Register them under Speakers → "
+                        f"Manage; or pick a participant or Group as Participant {index + 1}, or switch Mode to "
+                        f"capture.[/yellow]")
             if choice.names and not any(name in listing.names for name in choice.names):
                 return (f"[yellow]None of the speakers ticked under Speakers {index + 1} → Manage "
                         f"({rich_escape(', '.join(choice.names))}) is registered on {where}. Tick others there, "
@@ -6059,7 +6252,7 @@ class ServicePanel(Widget):
                     f"lower Num Bases.[/yellow]"
                 )
         if svc.name == _ASR_BASE_CARD:
-            problem = self._speakers_start_problem(params, target, svc)
+            problem = self._asr_participant_problem(params) or self._speakers_start_problem(params, target, svc)
             if problem:
                 return problem
         if svc.name != "IPS Base" or _coerce_int(params.get("-ns"), 0) <= 0 or str(params.get("-mc") or "").strip():
@@ -7051,6 +7244,7 @@ class ServicePanel(Widget):
             service = self._svc_map.get(card.service_def.name)
             if service is not None:
                 card.update_service_def(self._service_for_current_target(service))
+        self._show_speakers_summary()  # the ASR Base card's Participant options, if it is up
 
     def _apply_shared_section_to_local_configs(self, section_name: str) -> int:
         section_data = self._shared_section_data(section_name)
@@ -8897,6 +9091,8 @@ class ServicePanel(Widget):
             )
             self._reprobe_form_devices()
         if svc.name == _ASR_BASE_CARD:
+            # a session's Collection wearers are looked up in MongoDB again
+            self.__dict__.pop("_asr_session_wearers", None)
             self._list_speakers(target)
 
     def _port_conflict(self, svc: ServiceDef, target: str) -> str:

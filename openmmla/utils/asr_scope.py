@@ -60,6 +60,23 @@ def chunk_cap(value, asr_scope: str) -> float | None:
     return seconds if seconds > 0 else None
 
 
+# what the Launch tab can pick for a base besides a participant's tag (-pt): its
+# speech is the group's, or its speakers are told apart by verification
+LAUNCH_GROUP = "group"
+LAUNCH_SPEAKERS = "speakers"
+
+
+def launch_attribution(value) -> str | None:
+    """whom a base launched with --participant attributes its speech to: 'group', 'speakers'
+    (speaker verification) or a participant's tag; None when the flag names nothing, and the
+    config decides (asr_scope, the Bases entry's participant, the session's Collection pick)."""
+    text = participant_of(value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    return lowered if lowered in (LAUNCH_GROUP, LAUNCH_SPEAKERS) else text
+
+
 def participant_of(value) -> str | None:
     """the tag id a Bases entry's participant names, as text: 0 and '0' are '0', a whole float
     is its integer (2.0 is '2'); nothing, a blank, an unfilled placeholder or a yes/no is None."""

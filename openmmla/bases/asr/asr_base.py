@@ -24,7 +24,7 @@ from openmmla.utils.audio.io import read_bytes_from_wav, write_bytes_to_wav
 from openmmla.utils.audio.properties import get_energy_level, calculate_audio_duration
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir, session_artifact_dir
 from openmmla.utils import session_provenance
-from openmmla.utils.asr_scope import chunk_cap, normalize_asr_scope, participant_of, resolve_speaker_verification as _resolve_speaker_verification
+from openmmla.utils.asr_scope import LAUNCH_GROUP, LAUNCH_SPEAKERS, chunk_cap, launch_attribution, normalize_asr_scope, participant_of, resolve_speaker_verification as _resolve_speaker_verification
 from openmmla.bases.asr.attribution import SPEECH_GATE_SNR_DB, NoiseFloor, as_decibels, as_number, energy_record, relative_speech, segment_energy, snr_db, speech_gate_of, transcript_time
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
@@ -43,7 +43,8 @@ from openmmla.utils.config import get_bases, get_base_by_id
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = True,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                    hsr: bool = True, session_id: str | None = None, base: str | None = None,
-                   speakers: str | None = None, language: str | None = None, diarize: bool = False):
+                   speakers: str | None = None, language: str | None = None, diarize: bool = False,
+                   participant: str | None = None):
     """Start ASR Base with restart capability.
     
     Args:
@@ -60,6 +61,8 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
         base: Id of the config 'Bases' entry this base is
         speakers: Comma-separated speaker profiles to recognize; if omitted, every registered one
         language: Language to transcribe in, whatever the speech transcriber is configured for
+        participant: Whom the base's speech is attributed to: a participant's tag, 'group' or
+            'speakers'; if omitted, the config decides
         diarize: Whether to ask the speech transcriber for anonymous speaker turns with every chunk
     """
     # restart loop - allows restarting the entire process
@@ -68,7 +71,7 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
             asr_base = ASRBase(project_dir=project_dir, config_path=config_path, mode=mode,
                               vad=vad, nr=nr, tr=tr, sp=sp, store=store, hsr=hsr,
                               session_id=session_id, base=base, speakers=speakers, language=language,
-                              diarize=diarize)
+                              diarize=diarize, participant=participant)
             asr_base.run()
             break  # run() returns only once a run launched from the console has ended with STOP
         except KeyboardInterrupt as e:
@@ -97,7 +100,7 @@ class ASRBase(Base):
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                  hsr: bool = True, session_id: str | None = None, base: str | None = None,
                  speakers: str | list[str] | None = None, registration: str | None = None,
-                 language: str | None = None, diarize: bool = False):
+                 language: str | None = None, diarize: bool = False, participant: str | None = None):
         """Initialize the ASRBase class.
 
         Args:
@@ -127,6 +130,11 @@ class ASRBase(Base):
                 carries as `diarization`; a group-level base (asr_scope: group) gets who-of-how-many
                 spoke when without any speaker profile. Only a local WhisperX transcriber can
                 (default: False)
+            participant: whom this base's speech is attributed to, as the Launch tab picked it: a
+                participant's tag (a microphone they wear: wearer mode with that tag), 'group' (the
+                session's group) or 'speakers' (speaker verification); it wins over asr_scope, the
+                Bases entry's participant and the session's Collection pick. If omitted, those
+                decide (default: None)
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
 
@@ -140,6 +148,7 @@ class ASRBase(Base):
         self.hsr = hsr
         self.launch_session_id = session_id
         self.launch_speakers = parse_speakers(speakers)
+        self.launch_participant = launch_attribution(participant)
         self.registration = registration
         self.language = str(language).strip() if language and str(language).strip() else None
         self.diarize = bool(diarize)
@@ -256,12 +265,24 @@ class ASRBase(Base):
         self.participant = participant_of(self._base_entry.get('participant'))
         if self.participant is not None:
             self.speaker_verification = False
+        self._wearer_source = 'config' if self.participant is not None else None
+        # what the Launch tab picked for this base (--participant) wins over all of that, for every run
+        launched = getattr(self, 'launch_participant', None)
+        if launched == LAUNCH_GROUP:
+            self.asr_scope, self.participant, self.speaker_verification = 'group', None, False
+        elif launched == LAUNCH_SPEAKERS:
+            self.asr_scope, self.participant, self.speaker_verification = 'individual', None, True
+        elif launched is not None:
+            self.asr_scope, self.participant, self.speaker_verification = 'wearer', launched, False
+        if launched is not None:
+            self._wearer_source = 'launch' if self.participant is not None else None
         # the longest a chunk of one speaker may grow (30 s for a group microphone unless set)
         self.max_chunk_duration = chunk_cap(base_config.get('max_chunk_duration'),
                                             'group' if self.participant is not None else self.asr_scope)
-        # what the Bases entry says, which a session's noted wearer overrides for one run only
+        # what the Bases entry and the Launch tab say, which a session's noted wearer overrides for
+        # one run only (never a Launch pick)
         self._configured_wearer = (self.participant, self.speaker_verification, self.max_chunk_duration)
-        self.wearer_source = 'config' if self.participant is not None else None
+        self.wearer_source = self._wearer_source
 
         self.register_duration = int(base_config['register_duration'])
         self.recognize_duration = int(base_config['recognize_sp_duration']) if self.sp else int(
@@ -543,13 +564,15 @@ class ASRBase(Base):
         if configured is None:
             return
         self.participant, self.speaker_verification, self.max_chunk_duration = configured
-        self.wearer_source = 'config' if self.participant is not None else None
+        self.wearer_source = getattr(self, '_wearer_source', 'config' if self.participant is not None else None)
 
     def _apply_session_wearer(self, session_id):
         """A base whose Bases entry names no participant and that pulls a stream takes the wearer the
         session's Collection Start noted for that stream (the session document's wearers), for this
         run only; the Bases config is left as it is."""
         self._restore_configured_wearer()
+        if getattr(self, 'launch_participant', None) is not None:
+            return  # picked on the Launch tab: that is who it is
         if self.participant is not None or getattr(self, 'source', None) != 'stream':
             return
         if not getattr(self, 'stream_name', None) or not session_id:
