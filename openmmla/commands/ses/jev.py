@@ -9,7 +9,8 @@ whose tables predate the camera fix). Every later run reads them from there, or 
 --fit-bins fits them again, and then says so. Answers are cached by the sha256 of the request
 under artifacts/_analysis/interaction/jev/cache/, so a rerun costs nothing; each session gets
 artifacts/<session>/analysis/interaction/jev_<variant>.jsonl (window -> request hash, with the
-fused table's and the template's digests; a --limit run adds to it), and the run folder gets
+fused table's, the template's and the roster's digests; a --limit run adds to it, after dropping
+the answers asked about another roster than the session has now), and the run folder gets
 predictions.csv, bins.json and sanity.json.
 
 The key is read from the provider's environment variable only (OPENROUTER_API_KEY by default), and the command refuses to call
@@ -81,12 +82,13 @@ def _read(path: Path):
     return read_table(path)
 
 
-def _roster(table):
+def _roster(table, session_dir=None):
     """the kept tags in slot order, the group size and the duplicate-skeleton gate (windows, slots),
-    from the classifier's own roster, so Jev's A, B and C are the persons the models see and a
-    masked copy is not in view for either."""
-    from openmmla.analytics.interaction.layout import duplicate_gate, roster
-    kept = roster(table)
+    from the classifier's own roster (the pupils `session_dir`'s manifest declares, else the
+    rules), so Jev's A, B and C are the persons the models see and a masked copy is not in view
+    for either."""
+    from openmmla.analytics.interaction.layout import duplicate_gate, session_roster
+    kept = session_roster(table, session_dir)
     return [str(tag) for tag in kept.kept], int(kept.group_size), duplicate_gate(table, kept.kept)
 
 
@@ -133,14 +135,67 @@ def _included(table, slots) -> tuple[bool, str]:
 
 
 def _load(path: Path):
-    """the slot table of a session, or None with the reason when the inclusion rule leaves it out."""
+    """(the slot table of a session, '', its roster digests), or (None, the reason, None) when the
+    inclusion rule leaves it out. The digests are those of the roster the slots come from and of
+    the rules roster (layout.roster_digest, rules_roster_digest), which say whether a Jev map was
+    asked about the persons the session has now."""
     from openmmla.analytics.interaction import jev as J
+    from openmmla.analytics.interaction.layout import roster_digest, rules_roster_digest
     table = _read(path)
-    slots, group_size, gate = _roster(table)
+    # the table sits at <session>/analysis/features/
+    slots, group_size, gate = _roster(table, Path(path).parents[2])
     included, reason = _included(table, slots)
     if not included:
-        return None, reason
-    return J.slot_table(table, slots, group_size, vfa_mask=gate), ''
+        return None, reason, None
+    digests = {'roster': roster_digest(slots, group_size), 'rules': rules_roster_digest(table)}
+    return J.slot_table(table, slots, group_size, vfa_mask=gate), '', digests
+
+
+def _write_lines(path: Path, lines: list[dict]):
+    """a session map's lines, written aside and moved into place so a crash never leaves half a map."""
+    temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with open(temp, 'w', encoding='utf-8') as handle:
+        for line in lines:
+            handle.write(json.dumps(line, ensure_ascii=False) + '\n')
+    temp.replace(path)
+
+
+def _asked_roster(line: dict, digests: dict) -> str:
+    """the roster digest a map line was asked about: its own, or the rules roster's for a line
+    written before ses-jev recorded one (the rules were all it read then)."""
+    return line.get('roster_sha256') or digests['rules']
+
+
+def drop_stale_answers(session: dict, variant: str, pilot: bool) -> int:
+    """drop the lines of a session's Jev map that were asked about another roster than the one it
+    has now (it has since declared its pupils, see mmla ses-tidy --pupils), before a run adds to
+    the map: a --limit run keeps the lines of the windows it does not draw, and those would mix two
+    rosters in one map. A map left with no line is removed. Returns how many lines were dropped."""
+    from openmmla.analytics.interaction import jev as J
+    if not session.get('out_dir'):
+        return 0
+    path = J.session_map_path(session['out_dir'], variant, pilot)
+    lines = J.read_session_map(path)
+    keep = [line for line in lines if _asked_roster(line, session['roster_digests']) == session['roster_sha256']]
+    if len(keep) == len(lines):
+        return 0
+    if keep:
+        _write_lines(path, keep)
+    else:
+        path.unlink()
+    return len(lines) - len(keep)
+
+
+def stamp_roster(session: dict, variant: str, pilot: bool):
+    """write the session's roster digest on every line of its Jev map that has none: the lines
+    this run added, and the earlier ones drop_stale_answers kept."""
+    from openmmla.analytics.interaction import jev as J
+    if not session.get('out_dir'):
+        return
+    path = J.session_map_path(session['out_dir'], variant, pilot)
+    lines = J.read_session_map(path)
+    if lines and any(line.get('roster_sha256') != session['roster_sha256'] for line in lines):
+        _write_lines(path, [dict(line, roster_sha256=session['roster_sha256']) for line in lines])
 
 
 def _frozen_bins(path: Path):
@@ -207,9 +262,9 @@ def main(argv=None):
     frozen = bins_path.exists() and not args.fit_bins
     if args.bins and not bins_path.exists() and not args.fit_bins:
         parser.error(f"no bins at {bins_path}: give the bins.json a run froze, or --fit-bins to fit them there")
-    slot_tables, left_out = {}, {}
+    slot_tables, left_out, digests = {}, {}, {}
     for session, path in everything:
-        slots, reason = _load(path)
+        slots, reason, digests[session] = _load(path)
         if slots is None:
             left_out[session] = reason
             print(f"{session} left out: {reason}")
@@ -238,7 +293,8 @@ def main(argv=None):
     for session, path in chosen:
         slots = slot_tables[session]
         entry = {'session': session, 'slots': slots, 'table_sha256': file_digest(path),
-                 'out_dir': str(artifacts / session / 'analysis' / 'interaction')}
+                 'out_dir': str(artifacts / session / 'analysis' / 'interaction'),
+                 'roster_sha256': digests[session]['roster'], 'roster_digests': digests[session]}
         if args.variant == 'j2':
             entry['only'] = _coded_windows(artifacts / session, args.coder)
         sessions.append(entry)
@@ -282,8 +338,15 @@ def main(argv=None):
         if done % PROGRESS_EVERY == 0 or done == total:
             print(f"asked {done} of {total}")
 
+    for session in sessions:
+        dropped = drop_stale_answers(session, args.variant, args.pilot)
+        if dropped:
+            print(f"{session['session']}: {dropped} answers in its {J.session_map_path('', args.variant, args.pilot).name} "
+                  f"were asked about another roster and are dropped")
     predictions = J.run_jev(sessions, args.variant, bins, client=client, cache=cache, limit=args.limit,
                             pilot=args.pilot, progress=progress, model=provider['model'])
+    for session in sessions:
+        stamp_roster(session, args.variant, args.pilot)
     run_dir = Path(args.out) if args.out else \
         artifacts / '_analysis' / 'interaction' / 'jev' / f"{args.variant}{'_pilot' if args.pilot else ''}"
     run_dir.mkdir(parents=True, exist_ok=True)

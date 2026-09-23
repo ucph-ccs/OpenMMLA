@@ -21,6 +21,11 @@ tags keeps it, and any beyond the list is left unbound.
 --same-class-as marks two sessions of different pupils from one school class: each manifest lists
 the other under `same_class_as`, which the interaction classifier's folds keep together (the
 2025-05-13 takes carry it too). The links survive every rebuild and follow a renamed session.
+
+--pupils declares who the pupils of a session were, as tag ids (`pupils` in the manifest, e.g.
+["0", "1"]). The interaction classifier's roster takes them in place of its rules, so a spare badge
+lying on the table for a few seconds is not counted as a third pupil. --pupils '' or none clears
+them; they survive every rebuild, and each change is noted in the manifest.
 """
 import argparse
 import json
@@ -39,7 +44,8 @@ KEEP_IN_LEGACY_ROOT = ('meta.txt',)
 OUTPUT_FOLDERS = ('legacy', 'analysis', 'exports', 'measurements', 'pipelines', 'visualizations', '.staging')
 MEDIA_EXTS = ('.wav', '.mp4', '.mov', '.mkv', '.m4a', '.avi', '.webm', '.flac', '.mp3')
 CLUTTER = ('.DS_Store', 'Thumbs.db', '.manifest.lock', 'manifest.json', 'manifest.yml')  # never a reason to keep a folder
-KEPT_KEYS = ('legacy_meta', 'imported_from', 'tag_size', 'same_class_as', 'origin_session')  # session manifest keys a rebuild keeps
+MAX_PUPILS = 3  # the interaction classifier's slots (layout.N_SLOTS)
+KEPT_KEYS = ('legacy_meta', 'imported_from', 'tag_size', 'same_class_as', 'origin_session', 'pupils')  # session manifest keys a rebuild keeps
 
 
 def _remove_if_empty(folder: Path) -> bool:
@@ -402,6 +408,43 @@ def rename_session(session_dir: Path, experiment_id: str | None = None, group_id
     return target
 
 
+def parse_pupils(value: str) -> list[str] | None:
+    """--pupils as the manifest keeps it: tag ids as text, in the order given ('0,1' -> ['0', '1']);
+    None for '' or none, which clears them. Raises ValueError on anything but distinct tag ids, or
+    more than MAX_PUPILS of them (the classifier holds at most that many persons)."""
+    text = value.strip()
+    if text.lower() in ('', 'none'):
+        return None
+    tags = [part.strip() for part in text.split(',')]
+    if any(not tag.isdigit() for tag in tags):
+        raise ValueError(f"--pupils wants tag ids separated by commas (0,1), or none, not {value!r}")
+    tags = [str(int(tag)) for tag in tags]
+    if len(set(tags)) != len(tags):
+        raise ValueError(f"--pupils names a tag twice: {value!r}")
+    if len(tags) > MAX_PUPILS:
+        raise ValueError(f"--pupils names {len(tags)} tags; the classifier holds at most {MAX_PUPILS} persons")
+    return tags
+
+
+def set_pupils(session_dir: Path, pupils: list[str] | None) -> str | None:
+    """the session manifest's `pupils` set to `pupils` (None removes them); returns the note that
+    says so, or None when nothing changed."""
+    path = session_dir / 'manifest.json'
+    data = _read(path)
+    if (data.get('pupils') or None) == (list(pupils) if pupils else None):
+        return None
+    # dated, so setting the same pupils again after a clear is noted again, in order
+    stamp = time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime())
+    if pupils:
+        data['pupils'] = list(pupils)
+        note = f"{stamp} pupils: tags {', '.join(pupils)} (ses-tidy --pupils; the classifier's roster takes them in place of its rules)"
+    else:
+        data.pop('pupils', None)
+        note = f"{stamp} pupils cleared (ses-tidy --pupils none; the classifier's roster rules apply again)"
+    _write(path, data)
+    return note
+
+
 def _same_class(data: dict[str, Any]) -> list[str]:
     linked = data.get('same_class_as') or []
     return [linked] if isinstance(linked, str) else [str(s) for s in linked if s]
@@ -692,6 +735,9 @@ def get_parser():
     parser.add_argument('--same-class-as', action='append', default=[], metavar='SESSION',
                         help="another session of different pupils from the same school class: both manifests list each "
                              "other under same_class_as, so the classifier's folds keep them together (repeatable)")
+    parser.add_argument('--pupils', default=None, metavar='TAGS',
+                        help="the tag ids of the session's pupils, separated by commas (0,1), noted in the manifest; "
+                             "the classifier's roster takes them in place of its rules; '' or none clears them")
     parser.add_argument('--prune-legacy', action='store_true', help="keep speaker profiles and meta.txt, delete legacy/ and the old analysis folders")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
     return parser
@@ -737,6 +783,7 @@ def main(argv=None):
         scopes = parse_device_values(args.scope, '--scope', AUDIO_SCOPES)
         if any(scope is None for _, _, scope in scopes):
             raise ValueError("--scope wants [HOST/]DEVICE=personal|group, not 'none'")
+        pupils = parse_pupils(args.pupils) if args.pupils is not None else None
         # checked before anything changes: each named session must be there
         for other in args.same_class_as:
             other_dir = Path(other).expanduser()
@@ -780,6 +827,11 @@ def main(argv=None):
         data = _read(session_dir / 'manifest.json')
         data['tag_size'] = args.tag_size
         _write(session_dir / 'manifest.json', data)
+    if args.pupils is not None:
+        note = set_pupils(session_dir, pupils)
+        if note:
+            notes.append(note)
+            print(f"    {note}")
     rebuild_manifests(session_dir, notes=notes, participants=participants, scopes=scopes,
                       participants_in_order=args.participants_in_order, order_group=(args.experiment, args.group))
     session_dir = rename_session(session_dir, args.experiment, args.group)

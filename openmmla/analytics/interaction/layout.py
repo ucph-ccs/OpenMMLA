@@ -32,10 +32,13 @@ one; POOLED_COLUMNS lists all 82, and a lag column is `<pooled column>_<suffix>`
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass, field, replace
 from itertools import combinations
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -289,21 +292,24 @@ def _pair_frame_sets(table: pd.DataFrame, a, b) -> np.ndarray:
 @dataclass(eq=False)
 class Roster:
     """who gets a slot: `kept` in slot order, `dropped` tag -> reason, `group_size` (persons who
-    were there, observed or not, at most 3), `degraded` (someone was never observed), and how often
-    the duplicate-skeleton gate masked each kept person's camera values."""
+    were there, observed or not, at most 3), `degraded` (someone was never observed), how often
+    the duplicate-skeleton gate masked each kept person's camera values, and where the persons came
+    from (`source`: 'rules', 'tags' for a command's -tags, 'manifest' for the session's declared
+    pupils)."""
     kept: list
     dropped: dict
     group_size: int
     degraded: bool
     gate_counts: dict
     cover: dict = field(default_factory=dict)
+    source: str = 'rules'
 
     def record(self) -> dict:
         """the roster as roster.json holds it (tag ids as text)."""
         return {'kept': [str(tag) for tag in self.kept], 'dropped': {str(t): r for t, r in self.dropped.items()},
                 'group_size': self.group_size, 'degraded': self.degraded,
                 'gate_counts': {str(t): n for t, n in self.gate_counts.items()},
-                'cover': {str(t): c for t, c in self.cover.items()}}
+                'cover': {str(t): c for t, c in self.cover.items()}, 'source': self.source}
 
 
 def _cover(table: pd.DataFrame, tag) -> dict:
@@ -318,13 +324,16 @@ def _cover(table: pd.DataFrame, tag) -> dict:
 
 
 def roster(table: pd.DataFrame, max_tag: int = MAX_TAG, vfa_only_cover: float = 0.25, min_cover: float = 0.05,
-           max_group: int = N_SLOTS, tags=None) -> Roster:
+           max_group: int = N_SLOTS, tags=None, source: str = 'tags') -> Roster:
     """the persons of a session, by rules applied in order: R1 a tag above the IPS trust bound is
     a mis-decoded id; R2 a tag only cameras saw, in under a quarter of the windows, and IPS never
     positioned, in a session where IPS positioned someone, is a mis-decoded low id; R3 a person
     observed in under 5 % of the windows gets no slot but still counts in the group size (and the
     session is flagged degraded); R4 at most three, the best-covered. Slots follow descending
-    cover, tag id breaking ties. A `tags` roster (the command's -tags) replaces the rules."""
+    cover, tag id breaking ties. A `tags` roster replaces the rules: the command's -tags, or the
+    pupils a session's manifest declares (`source` 'manifest', see session_roster). Every given
+    person keeps a slot, however rarely observed; one the table never names was there but never
+    observed (counted in the group size, the session flagged degraded)."""
     parsed = parse_columns(table.columns)
     all_tags = sorted(set(parsed['persons']) | {tag for pair in parsed['pairs'] for tag in pair})
     cover = {tag: _cover(table, tag) for tag in all_tags}
@@ -337,9 +346,10 @@ def roster(table: pd.DataFrame, max_tag: int = MAX_TAG, vfa_only_cover: float = 
         wanted = [int(tag) for tag in tags]
         if len(wanted) > max_group:
             raise ValueError(f"a roster holds at most {max_group} persons, got {len(wanted)}")
+        why = 'not a pupil of this session (manifest pupils)' if source == 'manifest' else 'not in the given roster (-tags)'
         for tag in all_tags:
             if tag not in wanted:
-                dropped[tag] = 'not in the given roster (-tags)'
+                dropped[tag] = why
         kept = sorted((tag for tag in wanted if tag in cover), key=order)
         # a given person the table never names was there but never observed
         unobserved = [tag for tag in wanted if tag not in cover]
@@ -367,7 +377,58 @@ def roster(table: pd.DataFrame, max_tag: int = MAX_TAG, vfa_only_cover: float = 
         group_size = min(len(kept) + len(unobserved), max_group)
     gate = duplicate_gate(table, kept)
     return Roster(kept=kept, dropped=dropped, group_size=group_size, degraded=bool(unobserved),
-                  gate_counts={tag: int(gate[:, i].sum()) for i, tag in enumerate(kept)}, cover=cover)
+                  gate_counts={tag: int(gate[:, i].sum()) for i, tag in enumerate(kept)}, cover=cover,
+                  source='rules' if tags is None else source)
+
+
+def declared_pupils(session_dir) -> list | None:
+    """the pupils a session's manifest declares (`pupils`, tag ids as text, written by mmla ses-tidy
+    --pupils), or None when it declares none, has no manifest or the manifest cannot be read. A
+    session declares them when its video shows who the pupils were and the roster rules would guess
+    wrong (a spare badge on the table read for a few seconds is no third pupil). Raises ValueError
+    when an entry is not a tag id."""
+    try:
+        declared = json.loads((Path(session_dir) / 'manifest.json').read_text(encoding='utf-8')).get('pupils')
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(declared, (str, int)):
+        declared = str(declared).split(',')
+    if not isinstance(declared, list):
+        return None
+    pupils = [str(tag).strip() for tag in declared if str(tag).strip()]
+    if any(not tag.isdigit() for tag in pupils):
+        raise ValueError(f"{Path(session_dir) / 'manifest.json'}: pupils are tag ids, not {declared!r}")
+    return pupils or None
+
+
+def session_roster(table: pd.DataFrame, session_dir=None, tags=None) -> Roster:
+    """the roster of a session: a command's own `tags` (-tags) first, then the pupils its manifest
+    declares (declared_pupils), else the rules of roster()."""
+    if tags is not None:
+        return roster(table, tags=tags)
+    declared = declared_pupils(session_dir) if session_dir is not None else None
+    if declared is not None:
+        return roster(table, tags=declared, source='manifest')
+    return roster(table)
+
+
+
+def roster_digest(kept, group_size) -> str:
+    """the sha256 of who holds a slot, in slot order, and the group size: everything a Jev state
+    says about who was there. ses-jev writes it on each line of a session's Jev map, so a map asked
+    about another roster (the session has since declared its pupils) is known to be stale."""
+    body = json.dumps({'kept': [str(tag) for tag in kept], 'group_size': int(group_size)},
+                      sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(body.encode('utf-8')).hexdigest()
+
+
+def rules_roster_digest(table: pd.DataFrame, ros: Roster | None = None) -> str:
+    """the roster digest of the rules roster of `table` (`ros` itself when it is one): what a Jev
+    map line without a roster digest was asked about, since ses-jev read the rules roster before
+    a session could declare its pupils."""
+    if ros is None or ros.source != 'rules':
+        ros = roster(table)
+    return roster_digest(ros.kept, ros.group_size)
 
 
 MIN_TWO_VISIBLE = 0.3  # S1: the share of windows two roster persons must be observed together in

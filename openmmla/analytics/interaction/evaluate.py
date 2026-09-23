@@ -196,6 +196,7 @@ class SessionData:
     presence_gated: np.ndarray | None = None
     gaze_readable: np.ndarray | None = None
     same_class_as: tuple = ()
+    rules_roster_sha256: str | None = None
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -269,16 +270,18 @@ def link_lessons(data: dict) -> None:
 
 def load_session(session: str, table_path, coder: str | None = None, join: str = 'exact',
                  target: str = '3class') -> tuple[SessionData, pd.DataFrame]:
-    """a session and its fused table: roster, unscaled tokens and pooled view, and the coder's
-    labels joined to the table's grid (a join that leaves more than 1 % of labels without a window
-    raises labels.LabelJoinError, which aborts the run). The other coders' labels are joined too,
+    """a session and its fused table: roster (the manifest's pupils when it declares them),
+    unscaled tokens and pooled view, and the coder's labels joined to the table's grid (a join
+    that leaves more than 1 % of labels without a window raises labels.LabelJoinError, which
+    aborts the run). The other coders' labels are joined too,
     for the inter-coder kappa; one of theirs that does not join is left out, not fatal."""
     from openmmla.utils.session_provenance import file_digest
     table_path = Path(table_path)
     table = LY.read_table(table_path)
-    ros = LY.roster(table)
-    tokens = LY.window_tokens(table, ros)
     directory = table_path.parents[2]
+    # the pupils the session's manifest declares, else the roster rules
+    ros = LY.session_roster(table, directory)
+    tokens = LY.window_tokens(table, ros)
     truth = L.load_labels(directory, coder=coder)
     if len(truth):
         y, report = L.join_labels(table, truth, mode=join)
@@ -303,7 +306,8 @@ def load_session(session: str, table_path, coder: str | None = None, join: str =
                        raw=LY.pooled(tokens), y=y, target=L.to_binary(y) if target == 'binary' else y.copy(),
                        join=report, label_files=label_files, others=others, n_observed=n_observed,
                        presence_gated=n_observed < P.MIN_OBSERVED, gaze_readable=P.gaze_readable(tokens),
-                       same_class_as=same_class_of(directory))
+                       same_class_as=same_class_of(directory),
+                       rules_roster_sha256=LY.rules_roster_digest(table, ros))
     return data, table
 
 
@@ -311,7 +315,8 @@ def jev_log_proba(data: SessionData, variant: str = 'j0') -> tuple[np.ndarray | 
     """the session's cached Jev answers (mmla ses-jev's artifacts/<session>/analysis/interaction/
     jev_<variant>.jsonl) as (T, 3) log-probabilities over the three classes (an unclear share, J2,
     is left out and the rest renormalised), NaN where a window has none; None and why when there
-    is no map, or it was made from another version of the fused table (its states would differ)."""
+    is no map, or it was made from another version of the fused table or asked about another
+    roster (the session has since declared its pupils): its states would differ."""
     path = data.directory / 'analysis' / 'interaction' / f'jev_{variant}.jsonl'
     if not path.exists():
         return None, f'no {path.name}: run mmla ses-jev --variant {variant} first'
@@ -327,6 +332,10 @@ def jev_log_proba(data: SessionData, variant: str = 'j0') -> tuple[np.ndarray | 
         digest = record.get('table_sha256')
         if digest and data.table_sha256 and digest != data.table_sha256:
             return None, f'{path.name} was made from another version of the fused table: rerun mmla ses-jev'
+        # a line without a roster digest was asked about the rules roster (see LY.rules_roster_digest)
+        asked = record.get('roster_sha256') or data.rules_roster_sha256
+        if asked and asked != LY.roster_digest(data.roster.kept, data.roster.group_size):
+            return None, f'{path.name} was asked about another roster than the session now has: rerun mmla ses-jev'
         if t is None or not np.isfinite(p).all() or p.sum() <= 0:
             continue
         p = np.maximum(p / p.sum(), 1e-4)
@@ -348,9 +357,9 @@ def jev_template(data: SessionData, variant: str = 'j0') -> str | None:
 
 def jev_gaps(folds, data: dict, models, variant: str = 'j0') -> dict:
     """the Jev models a run has to leave out, each with why: zero-shot Jev needs a usable map
-    (jev_log_proba's: made from the session's current fused table) for every session with coded
-    windows it is scored on, and jev-cal also for every one it is trained on, all written with one
-    frozen template. Scored anyway, each coded window of a session without one would count as a
+    (jev_log_proba's: made from the session's current fused table, asked about its current roster)
+    for every session with coded windows it is scored on, and jev-cal also for every one it is
+    trained on, all written with one frozen template. Scored anyway, each coded window of a session without one would count as a
     miss and C3 would set the headline against nothing."""
     scored = {s for fold in folds for s in fold.test if data[s].n_coded}
     trained = {s for fold in folds for s in fold.train if data[s].n_coded}
@@ -364,7 +373,7 @@ def jev_gaps(folds, data: dict, models, variant: str = 'j0') -> dict:
         if missing:
             shown = ', '.join(missing[:3]) + (f" and {len(missing) - 3} more" if len(missing) > 3 else '')
             out[model] = (f"no usable jev_{variant}.jsonl for {len(missing)} session(s) with coded windows ({shown}); "
-                          f"run mmla ses-jev --variant {variant} on the current fused tables")
+                          f"run mmla ses-jev --variant {variant} on the current fused tables and rosters")
         elif len(templates) > 1:
             out[model] = (f"the jev_{variant}.jsonl maps were written with {len(templates)} different templates "
                           f"(bins_sha256); rerun mmla ses-jev --variant {variant} on every session with one "

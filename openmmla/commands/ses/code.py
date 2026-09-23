@@ -65,7 +65,8 @@ def _inclusion_rule():
 
 def inclusion(session_dir: Path, rule=None) -> tuple[bool | None, str]:
     """S1 for one session, as the classifier applies it: (True, reason) or (False, reason) from its
-    fused table, or (None, why it cannot be judged) when there is no table or it cannot be read.
+    fused table and its roster (the pupils its manifest declares, else the rules), or (None, why
+    it cannot be judged) when there is no table or it cannot be read.
     `rule` is the layout module (None: import it here)."""
     path = fused_table(session_dir)
     if not path.exists():
@@ -76,7 +77,7 @@ def inclusion(session_dir: Path, rule=None) -> tuple[bool | None, str]:
         return None, f'the analytics package cannot be imported ({error}), so S1 is not checked'
     try:
         table = layout.read_table(path)
-        return layout.session_inclusion(table, layout.roster(table))
+        return layout.session_inclusion(table, layout.session_roster(table, session_dir))
     except Exception as error:  # a broken table must not stop the coding page
         return None, f'the fused table cannot be read ({type(error).__name__}: {error}), so S1 is not checked'
 
