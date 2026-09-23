@@ -16,8 +16,8 @@ from pupil_apriltags import Detector
 from retinaface import RetinaFace
 
 from openmmla.services.server import Server
-from openmmla.services.vfa.features import (face_from_result, fallback_head_boxes, frame_features,
-                                            head_box_detections, pose_faces_from_results)
+from openmmla.services.vfa.features import (HAND_CIRCLE_VERSION, HAND_NUDGE, face_from_result, fallback_head_boxes,
+                                            frame_features, head_box_detections, pose_faces_from_results)
 from openmmla.services.vfa.tracking import DEFAULT_BUFFER_FRAMES, DEFAULT_IDLE_SECONDS, PersonTracker
 from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
@@ -451,6 +451,10 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                          'pose_confidence': self.pose_confidence if self.features_enabled else None,
                          'keypoint_confidence': self.keypoint_confidence if self.features_enabled else None,
                          'inout_threshold': self.features_inout_threshold if self.features_enabled else None,
+                         # the hand circle the gaze targets and pair hand distances are scored against
+                         # (every answer also says it, in its frames' `scoring`)
+                         'hand_circle': HAND_CIRCLE_VERSION if self.features_enabled else None,
+                         'hand_nudge': HAND_NUDGE if self.features_enabled else None,
                          'tracking': self._tracking_info() if self.features_enabled else None},
         }
         return {name: value for name, value in info.items() if value is not None}

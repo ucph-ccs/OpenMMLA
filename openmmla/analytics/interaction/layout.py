@@ -1,6 +1,6 @@
 """The input layout of the 10 s interaction classifier: a fused table (mmla ses-fuse) becomes, per
 window, a group token, three availability bits and two small sets, one of at most three persons and
-one of at most three pairs. The 94-column pooled view every tabular model reads is made from those
+one of at most three pairs. The 118-column pooled view every tabular model reads is made from those
 sets, so every model sees the same information.
 
 Tag ids only group a table's columns and run the roster. No feature name, value or slot carries a
@@ -28,17 +28,28 @@ its m_other and m_wa are off, its excess is NaN, and its partner gaze still coun
 person. data_checks' fusion_check lists it as split: false; it is not refused, as a table fused
 before the camera fix is not.
 
+Layout version 4 (2026-09-24, before any label was read): the hands in body units. The fusion's
+hand columns follow each pupil's wrists in the image, in their own shoulder widths
+(window_features.wrist_moves): the share of 1 s steps with the hands active or still, the wrist
+speed in shoulder widths, and the hands of a body outside the group near theirs (masks m_hands
+and m_ohands); per pair, the steps with one active and the other still, both active or both still,
+and how often the still one's gaze was on the active one's hands, given three such steps (m_steps,
+m_follow), and the hand distance in shoulder widths with the share within one hand length (m_hand).
+The frame-width wrist speed and hand distances are dropped: a pupil near the camera, or a camera
+nearer the group or with a narrower field of view, moves them. A table fused before the hand
+columns has none of these: its masks are off.
+
 Tables fused before the camera fix have no frame-set or camera counts (p<t>_frame_sets,
 p<t>_cameras, pair<a>_<b>_frame_sets, n_vfa_cameras). Their frame counts stand in for them there,
 and a second camera inflates those: the seen share is clipped at 1 and the switch rate runs over
 interleaved frames. A re-fused table uses the real counts with no change here.
 
 Names: a value is called after the table feature it comes from, without the tag, with `log_` in
-front when it is log-transformed (`p5_yaw_std` -> `yaw_std`, `p5_wrist_speed` ->
-`log_wrist_speed`); the values the layout derives have names of their own (seen_share,
+front when it is log-transformed (`p5_yaw_std` -> `yaw_std`, `p5_wrist_speed_sw` ->
+`log_wrist_speed_sw`); the values the layout derives have names of their own (seen_share,
 switch_rate, known_share, the gaze shares of readable gaze, face_any, co_seen_share). A pooled
 column is `<value>_<min|mean|max>` for a person or pair value and the value's own name for a group
-one; POOLED_COLUMNS lists all 94, and a lag column is `<pooled column>_<suffix>` (LAGS).
+one; POOLED_COLUMNS lists all 118, and a lag column is `<pooled column>_<suffix>` (LAGS).
 """
 from __future__ import annotations
 
@@ -55,7 +66,7 @@ import pandas as pd
 
 from openmmla.services.vfa.work_area import WORK_AREA_READY_MIN
 
-LAYOUT_VERSION = 3
+LAYOUT_VERSION = 4
 # the IPS trust bound: a higher tag id is a mis-decoded badge
 MAX_TAG = 12
 N_SLOTS = 3
@@ -65,7 +76,11 @@ MODALITIES = ('speech', 'space', 'body_gaze')
 MIN_KNOWN_SHARE = 0.05
 # two skeletons whose hands are this close (frame widths) on average are one person seen twice
 DUPLICATE_HAND_WIDTH = 0.01
-WRIST_FLOOR = 1e-3
+# the wrist speed is logged above this floor, in shoulder widths a second: under half a still arm's
+# median wrist jitter (0.024-0.027 a step) and under every setup's 10th percentile of a window's mean
+# speed (0.036-0.061 on the 20 replayed sessions), so the log spreads the still windows without running
+# off to minus infinity
+WRIST_SW_FLOOR = 1e-2
 CLIP = 5.0
 # a session's own statistics need this many observed values; before that the global ones serve
 MIN_SESSION_VALUES = 30
@@ -88,6 +103,10 @@ DROPPED = {
     r'^n_speakers_named$': 'a 0/1 copy of speech > 0',
     r'^(n_spurts|mean_spurt_seconds)$': 'artifacts of the 30 s transcription chunk cap',
     r'^p\d+_yaw_mean$': 'its sign depends on which side of the camera the seat is',
+    r'^p\d+_wrist_speed$': "in frame widths a second: the camera's distance and field of view move it (a pupil near "
+                           'the camera moves faster); p<t>_wrist_speed_sw, in shoulder widths a second, replaces it',
+    r'^pair\d+_\d+_hand_dist_(min|mean)$': "in frame widths: the camera's distance and field of view move it; "
+                                          'hand_dist_sw_* replace it (the duplicate-skeleton gate still reads hand_dist_mean)',
     r'^p\d+_gaze_zone_ratio$': '0 everywhere (no zones configured); the automatic work area is p<t>_gaze_work_area_ratio',
     r'^p\d+_work_area_ready_ratio$': 'a coverage counter: the m_wa mask only, never a feature',
     r'^p\d+_in_group$': "the fusion's pupil set: data_checks' fusion_check only",
@@ -101,8 +120,8 @@ DROPPED = {
                                          'data_checks.json',
     r'^(n_asr_recognition|n_asr_transcription|n_ips|n_ips_relation|n_vfa_features|n_vfa_angles|n_vfa_cameras'
     r'|n_vfa_incomplete|n_vfa_propagated|n_vfa_seat_partners)$': _COUNTER,
-    r'^p\d+_(cameras|frames|frame_sets)$': _COUNTER,
-    r'^pair\d+_\d+_(frames|frame_sets)$': _COUNTER,
+    r'^p\d+_(cameras|frames|frame_sets|hand_steps)$': _COUNTER,
+    r'^pair\d+_\d+_(frames|frame_sets|hand_steps)$': _COUNTER,
     # the reserved block `semantic`, not built: it joins MODALITIES with --with-actions once the VLM runs
     r'^(n_vfa_action|p\d+_action|pair\d+_\d+_co_manipulating)$': 'empty in this batch; the reserved semantic block',
     AUXILIARY_RE.pattern: _AUXILIARY,
@@ -111,10 +130,11 @@ DROPPED = {
 # the table columns the tokens are made from
 USED = (
     r'^(speech_ratio|silence_ratio|words|dia_speakers|dia_switches|dia_overlap_ratio|dia_share_entropy)$',
-    r'^p\d+_(present_ratio|path_m|yaw_abs_mean|yaw_std|wrist_speed|gaze_switches'
+    r'^p\d+_(present_ratio|path_m|yaw_abs_mean|yaw_std|wrist_speed_sw|hands_active_ratio|hands_still_ratio'
+    r'|other_hands_near_ratio|gaze_switches'
     r'|gaze_(partner_face|partner_hands|other_face|other_hands|own_hands|work_area|elsewhere|out_of_frame|unknown)_ratio)$',
-    r'^pair\d+_\d+_(dist_mean_m|dist_min_m|hand_dist_min|hand_dist_mean|gaze_dist_mean|joint_attention_ratio'
-    r'|joint_attention_excess)$',
+    r'^pair\d+_\d+_(dist_mean_m|dist_min_m|hand_dist_sw_min|hand_dist_sw_mean|hands_close_ratio|gaze_dist_mean'
+    r'|joint_attention_ratio|joint_attention_excess|one_active_ratio|both_active_ratio|both_still_ratio|follow_ratio)$',
 )
 
 # a token value: its name, what it is made from, the transform (before scaling), the scaling tag
@@ -144,7 +164,11 @@ PERSON_VALUES = (
     Value('seen_share', 'p<t>_frame_sets / n_vfa_features', 'clip to [0, 1]', 'g', 'm_vfa', 'body_gaze'),
     Value('yaw_abs_mean', 'p<t>_yaw_abs_mean', '/ 90', 'g', 'm_yaw', 'body_gaze'),
     Value('yaw_std', 'p<t>_yaw_std (within camera)', '/ 90', 'g', 'm_yaw', 'body_gaze'),
-    Value('log_wrist_speed', 'p<t>_wrist_speed', 'log(x + 1e-3)', 's', 'm_wrist', 'body_gaze'),
+    # the hands in the body's own units, shoulder widths, so one scale serves every camera
+    Value('log_wrist_speed_sw', 'p<t>_wrist_speed_sw', 'log(x + 1e-2)', 'g', 'm_hands', 'body_gaze'),
+    Value('hands_active_ratio', 'p<t>_hands_active_ratio', 'none', 'g', 'm_hands', 'body_gaze'),
+    Value('hands_still_ratio', 'p<t>_hands_still_ratio', 'none', 'g', 'm_hands', 'body_gaze'),
+    Value('other_hands_near_ratio', 'p<t>_other_hands_near_ratio', 'none', 'g', 'm_ohands', 'body_gaze'),
     Value('switch_rate', 'p<t>_gaze_switches / max(p<t>_frames / p<t>_cameras - 1, 1)', 'none', 'g', 'm_vfa', 'body_gaze'),
 ) + tuple(Value(share, f'p<t>_gaze_{share}_ratio / known_share', 'none', 'g', SHARE_MASKS.get(share, 'm_gaze'),
                 'body_gaze') for share in GAZE_SHARES) + (
@@ -155,22 +179,30 @@ PAIR_VALUES = (
     Value('dist_min_m', 'pair<a>_<b>_dist_min_m', 'none', 'g', 'm_dist', 'space'),
     Value('face_any', 'max(pair<a>_<b>_face_ab_ratio, pair<a>_<b>_face_ba_ratio)', 'none', 'g', 'm_face', 'space'),
     Value('co_seen_share', 'pair<a>_<b>_frame_sets / n_vfa_features', 'clip to [0, 1]', 'g', 'm_covis', 'body_gaze'),
-    # frame widths depend on the camera, so hand and gaze distances are scaled within the session
-    Value('hand_dist_min', 'pair<a>_<b>_hand_dist_min', 'none', 's', 'm_hand', 'body_gaze'),
-    Value('hand_dist_mean', 'pair<a>_<b>_hand_dist_mean', 'none', 's', 'm_hand', 'body_gaze'),
+    # the hand distance in shoulder widths: one scale serves every camera
+    Value('hand_dist_sw_min', 'pair<a>_<b>_hand_dist_sw_min', 'none', 'g', 'm_hand', 'body_gaze'),
+    Value('hand_dist_sw_mean', 'pair<a>_<b>_hand_dist_sw_mean', 'none', 'g', 'm_hand', 'body_gaze'),
+    Value('hands_close_ratio', 'pair<a>_<b>_hands_close_ratio', 'none', 'g', 'm_hand', 'body_gaze'),
+    # frame widths depend on the camera, so the gaze distance is scaled within the session
     Value('gaze_dist_mean', 'pair<a>_<b>_gaze_dist_mean', 'none', 's', 'm_gazepair', 'body_gaze'),
     Value('joint_attention_ratio', 'pair<a>_<b>_joint_attention_ratio', 'none', 'g', 'm_gazepair', 'body_gaze'),
     # the joint attention above the pair's own rate 20-40 s earlier (the proximity baseline)
     Value('joint_attention_excess', 'pair<a>_<b>_joint_attention_excess', 'none', 'g', 'm_jexcess', 'body_gaze'),
+    # the pair's hands step by step: one working while the other is still, and whether the still one watches
+    Value('one_active_ratio', 'pair<a>_<b>_one_active_ratio', 'none', 'g', 'm_steps', 'body_gaze'),
+    Value('both_active_ratio', 'pair<a>_<b>_both_active_ratio', 'none', 'g', 'm_steps', 'body_gaze'),
+    Value('both_still_ratio', 'pair<a>_<b>_both_still_ratio', 'none', 'g', 'm_steps', 'body_gaze'),
+    Value('follow_ratio', 'pair<a>_<b>_follow_ratio', 'none', 'g', 'm_follow', 'body_gaze'),
 )
 GROUP_MASKS = ('m_asr', 'm_transcription', 'm_dia')
-PERSON_MASKS = ('m_ips', 'm_path', 'm_vfa', 'm_yaw', 'm_wrist', 'm_gaze', 'm_other', 'm_wa')
-PAIR_MASKS = ('m_dist', 'm_face', 'm_covis', 'm_hand', 'm_gazepair', 'm_jexcess')
+PERSON_MASKS = ('m_ips', 'm_path', 'm_vfa', 'm_yaw', 'm_hands', 'm_ohands', 'm_gaze', 'm_other', 'm_wa')
+PAIR_MASKS = ('m_dist', 'm_face', 'm_covis', 'm_hand', 'm_gazepair', 'm_jexcess', 'm_steps', 'm_follow')
 MASK_MODALITY = {'m_asr': 'speech', 'm_transcription': 'speech', 'm_dia': 'speech',
                  'm_ips': 'space', 'm_path': 'space', 'm_dist': 'space', 'm_face': 'space',
-                 'm_vfa': 'body_gaze', 'm_yaw': 'body_gaze', 'm_wrist': 'body_gaze', 'm_gaze': 'body_gaze',
-                 'm_other': 'body_gaze', 'm_wa': 'body_gaze',
-                 'm_covis': 'body_gaze', 'm_hand': 'body_gaze', 'm_gazepair': 'body_gaze', 'm_jexcess': 'body_gaze'}
+                 'm_vfa': 'body_gaze', 'm_yaw': 'body_gaze', 'm_hands': 'body_gaze', 'm_ohands': 'body_gaze',
+                 'm_gaze': 'body_gaze', 'm_other': 'body_gaze', 'm_wa': 'body_gaze',
+                 'm_covis': 'body_gaze', 'm_hand': 'body_gaze', 'm_gazepair': 'body_gaze', 'm_jexcess': 'body_gaze',
+                 'm_steps': 'body_gaze', 'm_follow': 'body_gaze'}
 # the availability bits, one per modality in MODALITIES order
 AVAILABILITY = ('speech_ran', 'ips_ran', 'vfa_ran')
 
@@ -203,7 +235,7 @@ def _pooled_names(values, modality: str) -> tuple:
     return tuple(f'{v.name}_{stat}' for v in values if v.modality == modality for stat in _STATS)
 
 
-# the pooled view, block by block (10 + 18 + 65 + 1 = 94 columns)
+# the pooled view, block by block (10 + 18 + 89 + 1 = 118 columns)
 POOLED_BLOCKS = {
     'speech': tuple(v.name for v in GROUP_VALUES) + GROUP_MASKS,
     'space': _pooled_names(PERSON_VALUES, 'space') + _pooled_names(PAIR_VALUES, 'space')
@@ -218,7 +250,7 @@ POOLED_COLUMNS = tuple(column for block in POOLED_BLOCKS.values() for column in 
 LAG_COLUMNS = ('speech_ratio', 'log_words', 'log_dia_switches', 'dia_overlap_ratio',
                'present_ratio_mean', 'dist_mean_m_min', 'face_any_max',
                'partner_face_mean', 'partner_hands_mean', 'own_hands_mean', 'joint_attention_excess_max',
-               'log_wrist_speed_mean')
+               'log_wrist_speed_sw_mean')
 # per temporal mode, each derived column as (suffix, first offset, last offset): one offset is a
 # neighbour's value, a range the nanmean over the neighbours in it that exist
 LAGS = {
@@ -504,8 +536,8 @@ def duplicate_gate(table: pd.DataFrame, kept) -> np.ndarray:
 @dataclass(eq=False)
 class Tokens:
     """one session's tokens, window by window: G (T, 11) the group values, masks and group size / 3;
-    avail (T, 3) whether speech, IPS and VFA ran; P (T, 3, 24) the person slots and P_exists (T, 3);
-    Q (T, 3, 15) the pair slots, pair_index (3, 2) the slots of each pair, and Q_exists (T, 3);
+    avail (T, 3) whether speech, IPS and VFA ran; P (T, 3, 28) the person slots and P_exists (T, 3);
+    Q (T, 3, 22) the pair slots, pair_index (3, 2) the slots of each pair, and Q_exists (T, 3);
     window_start (T,); empty (T,) no speech, nobody positioned, nobody seen. `positioned` (T, 3)
     keeps whether IPS placed each slot (share_present needs it after scaling), `window_index` (T,)
     the table's grid index. Unscaled, an unobserved value is NaN; scaled, it is 0."""
@@ -559,18 +591,22 @@ def _person(table, tag, ips_ran, n_vfa, gated):
             np.clip(frame_sets / n_vfa, 0.0, 1.0),
             _column(table, f'p{tag}_yaw_abs_mean') / 90.0,
             _column(table, f'p{tag}_yaw_std') / 90.0,
-            np.log(_column(table, f'p{tag}_wrist_speed') + WRIST_FLOOR),
+            np.log(_column(table, f'p{tag}_wrist_speed_sw') + WRIST_SW_FLOOR),
+            _column(table, f'p{tag}_hands_active_ratio'),
+            _column(table, f'p{tag}_hands_still_ratio'),
+            _column(table, f'p{tag}_other_hands_near_ratio'),
             _column(table, f'p{tag}_gaze_switches') / np.maximum(frames / _cameras(table, tag) - 1.0, 1.0),
             *[_column(table, f'p{tag}_gaze_{share}_ratio') / known for share in GAZE_SHARES],
             known,
         ])
         # present_ratio 0 is an observation where IPS ran and no camera saw the person; where one did,
-        # IPS lost the badge and the 0 is unobserved. Camera values need the person seen
+        # IPS lost the badge and the 0 is unobserved. Camera values need the person seen; the hand values
+        # need steps (or frames) with the wrists and shoulders seen, which _settle reads off their NaN
         readable = seen & (known >= MIN_KNOWN_SHARE)
         # the other shares are NaN on a table fused before the split, which _settle turns off; the work
         # area needs most of the person's gaze frames on a camera whose area was ready
-        masks = np.column_stack([ips_ran & ~_ips_missed(present, frame_sets, gated), ips_ran, seen, seen, seen, readable,
-                                 readable, readable & (ready >= WORK_AREA_READY_MIN)])
+        masks = np.column_stack([ips_ran & ~_ips_missed(present, frame_sets, gated), ips_ran, seen, seen, seen, seen,
+                                 readable, readable, readable & (ready >= WORK_AREA_READY_MIN)])
     values, masks = _settle(values, masks, PERSON_VALUES, PERSON_MASKS)
     return values, masks, present, frame_sets
 
@@ -585,15 +621,23 @@ def _pair(table, a, b, both_present, n_vfa, gated):
             # symmetric in a <-> b: ab and ba follow the tag order, which means nothing
             np.fmax(_pair_column(table, a, b, 'face_ab_ratio'), _pair_column(table, a, b, 'face_ba_ratio')),
             np.clip(co_seen / n_vfa, 0.0, 1.0),
-            _pair_column(table, a, b, 'hand_dist_min'),
-            _pair_column(table, a, b, 'hand_dist_mean'),
+            _pair_column(table, a, b, 'hand_dist_sw_min'),
+            _pair_column(table, a, b, 'hand_dist_sw_mean'),
+            _pair_column(table, a, b, 'hands_close_ratio'),
             _pair_column(table, a, b, 'gaze_dist_mean'),
             _pair_column(table, a, b, 'joint_attention_ratio'),
             _pair_column(table, a, b, 'joint_attention_excess'),
+            _pair_column(table, a, b, 'one_active_ratio'),
+            _pair_column(table, a, b, 'both_active_ratio'),
+            _pair_column(table, a, b, 'both_still_ratio'),
+            _pair_column(table, a, b, 'follow_ratio'),
         ])
         # distances and facing exist only when both were positioned; the excess has its own mask, off
-        # where the baseline had too few comparisons (or the table has none)
-        masks = np.column_stack([both_present, both_present, covisible, covisible, covisible, covisible])
+        # where the baseline had too few comparisons (or the table has none); the step shares need steps
+        # both had a status in, and following three steps with one active and the other still
+        # (window_features.FOLLOW_MIN_STEPS)
+        masks = np.column_stack([both_present, both_present, covisible, covisible, covisible, covisible, covisible,
+                                 covisible])
     return _settle(values, masks, PAIR_VALUES, PAIR_MASKS)
 
 
@@ -826,7 +870,7 @@ def _share(hit: np.ndarray, exists: np.ndarray, ran: np.ndarray) -> np.ndarray:
 
 
 def pooled(tokens: Tokens) -> pd.DataFrame:
-    """the 94-column pooled view (POOLED_COLUMNS), indexed by window_index: the group values and
+    """the 118-column pooled view (POOLED_COLUMNS), indexed by window_index: the group values and
     masks, each person value's (min, mean, max) over the slots that observed it, each pair
     value's over the pairs, the availability bits, the shares of slots and pairs that observed a
     modality, and the group size. For at most three slots (min, mean, max) gives back the sorted
@@ -1006,10 +1050,10 @@ def listening_sample(table: pd.DataFrame, n: int = 10, seed: int = 0) -> list:
 
 
 def camera_check(table: pd.DataFrame, roster: Roster) -> dict:
-    """after the re-fuse: per kept person, the median wrist speed, yaw spread and switch rate in
-    windows one camera saw them in against windows two or more did, and the ratio (two / one),
-    which should be near 1 once each camera is followed on its own. Unavailable for a table fused
-    before the fix (no p<t>_cameras)."""
+    """after the re-fuse: per kept person, the median wrist speed (shoulder widths), yaw spread and
+    switch rate in windows one camera saw them in against windows two or more did, and the ratio
+    (two / one), which should be near 1 once each camera is followed on its own. Unavailable for a
+    table fused before the fix (no p<t>_cameras)."""
     if not any(f'p{tag}_cameras' in table.columns for tag in roster.kept):
         return {'available': False, 'reason': 'the table has no p<t>_cameras (fused before the camera fix)'}
     persons, ratios = {}, defaultdict(list)
@@ -1018,7 +1062,7 @@ def camera_check(table: pd.DataFrame, roster: Roster) -> dict:
         frames = _column(table, f'p{tag}_frames')
         with np.errstate(divide='ignore', invalid='ignore'):
             features = {
-                'wrist_speed': _column(table, f'p{tag}_wrist_speed'),
+                'wrist_speed_sw': _column(table, f'p{tag}_wrist_speed_sw'),
                 'yaw_std': _column(table, f'p{tag}_yaw_std'),
                 'switch_rate': _column(table, f'p{tag}_gaze_switches') / np.maximum(frames / cameras - 1.0, 1.0),
             }
@@ -1068,8 +1112,9 @@ def seat_check(table: pd.DataFrame, roster: Roster) -> dict:
 
 
 def fusion_check(table: pd.DataFrame, roster: Roster) -> dict:
-    """what the fusion of 2026-09-23 gave the table: `split` (it has the other_face columns; a table
-    fused before has not, and its partner gaze counts every other person), `pupils` (the tags the
+    """what the fusion of 2026-09-23 and 2026-09-24 gave the table: `split` (it has the other_face
+    columns; a table fused before has not, and its partner gaze counts every other person), `hands`
+    (it has the body-normalised hand columns of layout version 4), `pupils` (the tags the
     fusion took for pupils, p<t>_in_group = 1; None before the split), `roster_in_group` (every kept
     person is one of them), `work_area_ready` (per kept person, the mean share of gaze frames on a
     camera whose work area was ready), `joint_baseline_share` (the share of the co-visible
@@ -1091,7 +1136,8 @@ def fusion_check(table: pd.DataFrame, roster: Roster) -> dict:
             together = _pair_frame_sets(table, a, b) > 0
         covisible += int(together.sum())
         finite += int((together & np.isfinite(_pair_column(table, a, b, 'joint_attention_excess'))).sum())
-    return {'split': bool(split), 'pupils': pupils,
+    hands = any('hands_active_ratio' in features for features in parsed['persons'].values())
+    return {'split': bool(split), 'hands': bool(hands), 'pupils': pupils,
             'roster_in_group': None if pupils is None else {str(tag) for tag in roster.kept} <= set(pupils),
             'work_area_ready': ready,
             'joint_baseline_share': round(finite / covisible, 4) if covisible else None,

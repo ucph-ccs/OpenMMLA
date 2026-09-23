@@ -92,6 +92,8 @@ NETWORKS = ('pooled-net', 'net-notcn', 'net', 'net-pair')
 # the models that read no label: they run even where a learned model is refused
 UNLEARNED = ('r0', 'r0-v1', 'jev')
 # the a-priori rule's versions by model name: r0 is the current rule, r0-v1 the first one, kept for the record
+# (version 2 is no model of its own: on a layout version 4 view it reads version 3's hand distance, and so
+# is version 3)
 RULE_MODELS = {'r0': TB.RULE_VERSION, 'r0-v1': 1}
 HEADLINE_MODELS = ('late-lr', 'late-hgb')
 TEMPORAL = ('T0', 'T1c', 'T2')

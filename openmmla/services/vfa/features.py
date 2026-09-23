@@ -26,7 +26,18 @@ GAZE_UNKNOWN = 'unknown'  # no face found for the person, or the gaze model gave
 # a hand region: this fraction of the shoulder width around a point nudged past the wrist along
 # the forearm, so that it covers the fingers rather than the wrist bone
 HAND_RADIUS_SHOULDERS = 0.4
-HAND_NUDGE = 0.35
+# how far past the wrist the circle's centre sits, in radii, by version of the hand circle. A
+# whole-body hand model (DWPose-l on the YOLO boxes of 128 classroom frames, 334 confident hands)
+# puts the hand's centroid a median 0.33 shoulder widths past the YOLO wrist (IQR 0.25-0.40). Version
+# 1 (0.35 radii, 0.14 shoulder widths) held 72 % of that model's fingertips (77 % on the 42 hands
+# judged plausible); a circle of the same radius centred at 0.33 holds 94 % (96 %). Version 2 centres
+# it there: 0.825 radii of 0.4 shoulder widths is 0.33
+HAND_NUDGES = {1: 0.35, 2: 0.825}
+HAND_CIRCLE_VERSION = 2
+HAND_NUDGE = HAND_NUDGES[HAND_CIRCLE_VERSION]
+# the circle every vfa_features event stored before the server's image was rebuilt with version 2:
+# those frames carry no `scoring` (frame_features), and a frame without one was made with version 1
+HAND_NUDGE_V1 = HAND_NUDGES[1]
 # a head: the widest of the ear span, 2.3 times the distance between the eyes, and this
 # fraction of the shoulder width
 HEAD_WIDTH_SHOULDERS = 0.32
@@ -356,9 +367,11 @@ def assign_faces(persons: list[dict], faces: list[dict], min_confidence: float,
             persons[index]['face'] = _face(face, FACE_SOURCE_POSE)
 
 
-def hand_regions(person: dict, min_confidence: float) -> list[tuple[tuple[float, float], float]]:
+def hand_regions(person: dict, min_confidence: float, nudge: float | None = None) -> list[tuple[tuple[float, float], float]]:
     """where a person's hands are: for each wrist seen, a circle around a point nudged past the
-    wrist along the forearm (when the elbow is seen), with a radius from the shoulder width."""
+    wrist along the forearm (when the elbow is seen) by `nudge` radii (HAND_NUDGE when not
+    given), with a radius from the shoulder width."""
+    nudge = HAND_NUDGE if nudge is None else float(nudge)
     radius = HAND_RADIUS_SHOULDERS * shoulder_width(person, min_confidence)
     regions = []
     for side in ('left', 'right'):
@@ -369,8 +382,8 @@ def hand_regions(person: dict, min_confidence: float) -> list[tuple[tuple[float,
         centre = wrist
         if elbow is not None and distance(elbow, wrist) > 1e-6:
             length = distance(elbow, wrist)
-            centre = (wrist[0] + HAND_NUDGE * radius * (wrist[0] - elbow[0]) / length,
-                      wrist[1] + HAND_NUDGE * radius * (wrist[1] - elbow[1]) / length)
+            centre = (wrist[0] + nudge * radius * (wrist[0] - elbow[0]) / length,
+                      wrist[1] + nudge * radius * (wrist[1] - elbow[1]) / length)
         regions.append((centre, radius))
     return regions
 
@@ -395,13 +408,13 @@ def _box_distance(point, box) -> float:
 
 
 def gaze_target(person: dict, persons: list[dict], zones: dict, min_confidence: float,
-                inout_threshold: float, tolerance: float = 0.0) -> dict:
+                inout_threshold: float, tolerance: float = 0.0, nudge: float | None = None) -> dict:
     """what a person's gaze lands on: {category, person_id, zone}. Everything within reach is
     scored and the best taken: a partner's face (the grown face box, else around their nose)
     beats any hands; the nearest hands, the person's own or a partner's, beat a zone; a named
     zone beats nothing in particular. `tolerance` widens every target by what the gaze model
-    cannot resolve. out_of_frame when the model puts the gaze outside the image, unknown when
-    there is no gaze for the person."""
+    cannot resolve; `nudge` places the hand circles (hand_regions). out_of_frame when the model
+    puts the gaze outside the image, unknown when there is no gaze for the person."""
     face = person.get('face')
     if not face or face.get('gaze_point') is None or face.get('inout') is None:
         return {'category': GAZE_UNKNOWN, 'person_id': None, 'zone': None}
@@ -424,7 +437,7 @@ def gaze_target(person: dict, persons: list[dict], zones: dict, min_confidence: 
             if gap <= tolerance:
                 candidates.append((0, max(gap, 0.0), {'category': GAZE_PARTNER_FACE, 'person_id': other['person_id'], 'zone': None}))
     for other in persons:
-        for centre, radius in hand_regions(other, min_confidence):
+        for centre, radius in hand_regions(other, min_confidence, nudge):
             gap = distance(point, centre) - radius
             if gap <= tolerance:
                 target = {'category': GAZE_OWN_HANDS, 'person_id': None, 'zone': None} if other is person \
@@ -447,22 +460,115 @@ def _gaze_in_frame(person: dict, inout_threshold: float):
     return tuple(point) if point and inout is not None and inout >= inout_threshold else None
 
 
-def pairwise(persons: list[dict], min_confidence: float, inout_threshold: float = 0.5) -> dict:
+def pairwise(persons: list[dict], min_confidence: float, inout_threshold: float = 0.5,
+             nudge: float | None = None) -> dict:
     """for every two persons, how far their gazes land apart (a joint-attention proxy) and how
-    close their hands come, in pixels; None when either side lacks the data, which for the gazes
-    includes one the model puts out of the frame (below `inout_threshold`)."""
+    close their hands come (the centres of their hand circles, placed by `nudge`), in pixels; None
+    when either side lacks the data, which for the gazes includes one the model puts out of the
+    frame (below `inout_threshold`)."""
     pairs = {}
     for i, a in enumerate(persons):
         for b in persons[i + 1:]:
             gazes = [_gaze_in_frame(p, inout_threshold) for p in (a, b)]
             gaze_distance = round(distance(gazes[0], gazes[1]), 1) if all(gazes) else None
-            hands_a = [centre for centre, _ in hand_regions(a, min_confidence)]
-            hands_b = [centre for centre, _ in hand_regions(b, min_confidence)]
+            hands_a = [centre for centre, _ in hand_regions(a, min_confidence, nudge)]
+            hands_b = [centre for centre, _ in hand_regions(b, min_confidence, nudge)]
             hand_distance = round(min(distance(x, y) for x in hands_a for y in hands_b), 1) \
                 if hands_a and hands_b else None
             pairs[f'{a["person_id"]}|{b["person_id"]}'] = {'gaze_distance': gaze_distance,
                                                             'hand_distance': hand_distance}
     return pairs
+
+
+def _stored_person(entry: dict) -> dict:
+    """a person of a stored answer as gaze_target and pairwise read one: the keypoints, box and
+    name as stored, and the face rebuilt from face_bbox and the gaze's point and inout (None
+    without a face box, as the server had it)."""
+    if not isinstance(entry.get('keypoints'), list) or len(entry.get('bbox') or []) < 4 or entry.get('person_id') is None:
+        raise ValueError("a person without keypoints, box or name")
+    gaze = entry.get('gaze') or {}
+    face = None
+    if entry.get('face_bbox') is not None:
+        point, inout = gaze.get('point'), gaze.get('inout')
+        face = {'bbox': [float(v) for v in entry['face_bbox'][:4]],
+                'gaze_point': [float(point[0]), float(point[1])] if point else None,
+                'inout': float(inout) if inout is not None else None}
+    return {'person_id': entry['person_id'], 'bbox': [float(v) for v in entry['bbox'][:4]],
+            'keypoints': entry['keypoints'], 'face': face}
+
+
+def hand_circle_of(frame: dict) -> int | None:
+    """the version of the hand circle a /features answer was made with: the one its `scoring`
+    names, 1 for an answer without one (every answer before version 2), None for a version this
+    code does not know."""
+    scoring = frame.get('scoring') if isinstance(frame, dict) else None
+    if not isinstance(scoring, dict) or scoring.get('hand_circle') is None:
+        return 1
+    try:
+        version = int(scoring['hand_circle'])
+    except (TypeError, ValueError):
+        return None
+    return version if version in HAND_NUDGES else None
+
+
+def relabel_answer(frame: dict, min_confidence: float = 0.3, inout_threshold: float = 0.5,
+                   nudge: float | None = None) -> dict:
+    """a /features answer (a frame of a vfa_features event) with every person's gaze target and
+    every listed pair's hand_distance made again, from what the answer stores (keypoints, box,
+    face_bbox, the gaze's point and inout, zones, width and height), with the hand circles placed by
+    `nudge` (hand_regions): what the server would have answered with that circle. The keypoint
+    confidence and inout threshold are the answer's own (its `scoring`); `min_confidence` and
+    `inout_threshold` stand in for an answer that does not state them (every answer before version
+    2), and must then be the server's (its keypoint_confidence and inout_threshold, 0.3 and 0.5 by
+    default). The stored numbers are rounded (0.1 px, 3 decimals), which is all that can make a
+    remade target differ from the server's with the server's own circle. The rest is kept as
+    stored, `scoring` too (what the server made the answer with), and the gaze distances, which no
+    hand circle touches. A frame that cannot be remade (no width or height, a person without
+    keypoints, a box or a name) comes back as it was, as does the target of a person with a gaze
+    point but no face box (no face the server had could give it). The input is never changed; a
+    frame nothing changed in is returned as it was."""
+    entries = frame.get('persons')
+    scoring = frame.get('scoring') if isinstance(frame.get('scoring'), dict) else {}
+    try:
+        width, height = float(frame.get('width') or 0.0), float(frame.get('height') or 0.0)
+        if scoring.get('keypoint_confidence') is not None:
+            min_confidence = float(scoring['keypoint_confidence'])
+        if scoring.get('inout_threshold') is not None:
+            inout_threshold = float(scoring['inout_threshold'])
+    except (TypeError, ValueError):
+        return frame
+    if not isinstance(entries, list) or not width or not height:
+        return frame
+    try:
+        persons = [_stored_person(entry) for entry in entries]
+        zones = {str(name): [(float(x), float(y)) for x, y in polygon] for name, polygon in (frame.get('zones') or {}).items()}
+        tolerance = gaze_tolerance(width, height)
+        targets = [gaze_target(person, persons, zones, min_confidence, inout_threshold, tolerance, nudge)
+                   for person in persons]
+        pairs = frame.get('pairs')
+        remade_pairs = pairwise(persons, min_confidence, inout_threshold, nudge) if isinstance(pairs, dict) else {}
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+        return frame
+    changed = False
+    out_persons = []
+    for entry, person, target in zip(entries, persons, targets):
+        gaze = entry.get('gaze')
+        if isinstance(gaze, dict) and not (person['face'] is None and gaze.get('point') is not None) \
+                and gaze.get('target') != target:
+            entry = dict(entry, gaze=dict(gaze, target=target))
+            changed = True
+        out_persons.append(entry)
+    out = dict(frame, persons=out_persons)
+    if remade_pairs:
+        out_pairs = {}
+        for key, value in frame['pairs'].items():
+            remade = remade_pairs.get(key)
+            if isinstance(value, dict) and remade is not None and value.get('hand_distance') != remade['hand_distance']:
+                value = dict(value, hand_distance=remade['hand_distance'])
+                changed = True
+            out_pairs[key] = value
+        out['pairs'] = out_pairs
+    return out if changed else frame
 
 
 # a polygon whose coordinates all lie within this band is in [0, 1] units (a little overshoot
@@ -497,7 +603,9 @@ def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: di
     keypoints (left out with `keypoints=False`), head_yaw, face_bbox, gaze {point, inout,
     target} and face_source ('pose' on a person whose face is a head box made from their pose,
     absent otherwise); `tags` as seen; `zones` as resolved, in pixels; `pairs`; and the frame's
-    angle, width and height. `tags` maps tag id -> (x, y) pixel centre; `faces` are [{bbox,
+    angle, width and height; and `scoring`, what the targets and pairs were made with (the hand
+    circle's version, the keypoint confidence and the inout threshold), so a later relabel can
+    score as this answer did. `tags` maps tag id -> (x, y) pixel centre; `faces` are [{bbox,
     gaze_point, inout}] from the gaze model; `pose_faces` are {index into `persons`: face} the
     gaze model found in the head boxes made for persons the face detector missed. `remember`,
     given, runs on the persons once the tags are matched (PersonTracker.assign: a tracked person
@@ -544,4 +652,6 @@ def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: di
         'zones': {name: [[round(x, 1), round(y, 1)] for x, y in polygon] for name, polygon in zones_px.items()},
         'persons': answer,
         'pairs': pairwise(persons, min_confidence, inout_threshold),
+        'scoring': {'hand_circle': HAND_CIRCLE_VERSION, 'keypoint_confidence': float(min_confidence),
+                    'inout_threshold': float(inout_threshold)},
     }

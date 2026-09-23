@@ -14,7 +14,12 @@ the whole session so far. Cameras are fixed within a session; a rig moved betwee
 its own area.
 
 Only the pupils' hands teach it, by the tag the server gave (read, or kept on its track), never a
-tag the fusion carried along a track, so a track carried to the wrong person cannot stretch it.
+tag the fusion carried along a track, so a track carried to the wrong person cannot stretch it. It
+learns from the hand circles the gaze targets were made with (features.hand_regions, `nudge`): the
+version 2 circle of 2026-09-24 sits 0.19 shoulder widths further along the forearm than version 1,
+which grew the area of the 38 cameras of the 20 replayed sessions by a median 2.6 % (p10 -3 %, p90
++7 %); with the gazes the larger reach of the circle now gives to hands, a pupil's work-area share of
+a window fell by 0.06 on average.
 
 In 2D the area is not free of faces (a partner's face often lies inside it, above the table); the
 relabel works because faces and hands are scored first. Pure functions on plain dicts, like
@@ -104,10 +109,11 @@ class WorkArea:
         return {'hands': self.n, 'ready': self.ready, 'box': list(box) if box is not None else None}
 
 
-def pupil_hands(persons, pupils, min_confidence: float = WORK_AREA_KEYPOINT_CONFIDENCE) -> list:
-    """the hand circles (features.hand_regions) of every person whose server tag is one of the
-    `pupils`; a person without keypoints, or whose tag the fusion carried along a track, gives
-    none."""
+def pupil_hands(persons, pupils, min_confidence: float = WORK_AREA_KEYPOINT_CONFIDENCE,
+                nudge: float | None = None) -> list:
+    """the hand circles (features.hand_regions, placed by `nudge`, features.HAND_NUDGE when not
+    given) of every person whose server tag is one of the `pupils`; a person without keypoints, or
+    whose tag the fusion carried along a track, gives none."""
     wanted = {str(tag) for tag in pupils or ()}
     hands = []
     for person in persons or []:
@@ -117,7 +123,7 @@ def pupil_hands(persons, pupils, min_confidence: float = WORK_AREA_KEYPOINT_CONF
         if not person.get('keypoints'):
             continue
         try:
-            hands.extend(features.hand_regions(person, min_confidence))
+            hands.extend(features.hand_regions(person, min_confidence, nudge))
         except (KeyError, TypeError, ValueError, IndexError):
             # a body without a box to fall back on for the shoulder width gives no hands
             continue
@@ -132,13 +138,14 @@ def label(target, point, area: WorkArea) -> dict:
     return target
 
 
-def apply_work_area(frame: dict, area: WorkArea, pupils) -> dict:
+def apply_work_area(frame: dict, area: WorkArea, pupils, nudge: float | None = None) -> dict:
     """a copy of a frame (a /features answer, or a frame of a vfa_features event) with every
-    person's gaze target passed through label(): the frame's pupils' hands are added to the area
-    first, since the present frame counts. frame['work_area'] is the box used (a list), None while
-    the area is not ready. The input is never changed."""
+    person's gaze target passed through label(): the frame's pupils' hands (their circles placed by
+    `nudge`, the circle the targets were made with) are added to the area first, since the present
+    frame counts. frame['work_area'] is the box used (a list), None while the area is not ready.
+    The input is never changed."""
     persons = frame.get('persons') or []
-    area.update(pupil_hands(persons, pupils))
+    area.update(pupil_hands(persons, pupils, nudge=nudge))
     box = area.box()
     out = dict(frame)
     if box is not None:

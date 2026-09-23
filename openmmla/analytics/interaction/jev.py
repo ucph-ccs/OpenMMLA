@@ -3,9 +3,10 @@ a window's sensor features and picks individual, social or collaborative without
 
 The description (the state) is written from the per-slot numbers of the fused table before any
 scaling. Persons are A, B and C in slot order and pairs are named by their two letters. Every
-number is rounded and given a word: physical bins for badge distances in metres, and tertiles
-fitted once on the dev sessions' windows (label-free, never a test session) for speech, words,
-head turn, hand movement and hand distance. A modality that did not run is said in words ("not
+number is rounded and a quantity is given a word: physical bins for badge distances in metres, and
+tertiles fitted once on the dev sessions' windows (label-free, never a test session) for speech,
+words, head turn, gaze switches and hand distance; shares (of gaze, of the seconds the hands moved)
+go without one. A modality that did not run is said in words ("not
 measured in this window", "C not in view"), never as 0. No tag id, session id, date, task name or
 transcript text reaches the state, so Jev cannot tell sessions apart and nothing said leaves the
 machine. The question is the coder's own codebook (`openmmla.commands.ses.code.CODEBOOK`), so the
@@ -24,7 +25,16 @@ in slot order, so this module needs nothing from the layout but those tags and i
 The fusion of 2026-09-23 (layout version 3) named a partner's gaze in-group, the work area and the
 joint-attention baseline, and the state says them: a re-fused table (another digest) and the new
 wording both miss the cache, so every Jev map must be asked again (ses-jev --dry-run estimates the
-cost). A table fused before says what it has and leaves the rest out. The criteria-order and
+cost). A table fused before says what it has and leaves the rest out.
+
+The fusion of 2026-09-24 (layout version 4) measures the hands in body units: how often each
+person's hands moved (in the image, in their own shoulder widths) or stayed still from one second
+to the next,
+the hands of someone outside the group near theirs, and per pair how often one moved while the
+other was still (and how often the still one's gaze was on the moving hands, given three such
+seconds), with the hand distance in hand lengths. The state says those
+instead of the hand speed and distance in frame widths, which moved with the camera; the sensor
+note changes with it, so every map must be asked again. The criteria-order and
 rerun checks of the design are deferred: the criteria keep CODEBOOK's order, and a rerun is a run
 without the cache.
 """
@@ -44,6 +54,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from openmmla.analytics.fusion.window_features import HAND_LENGTH_SW
 from openmmla.analytics.interaction.layout import GAZE_SHARES as GAZE_SHARES_OF_LAYOUT
 from openmmla.commands.ses.code import CODEBOOK, TEACHER_NOTE
 from openmmla.services.vfa.work_area import WORK_AREA_READY_MIN
@@ -93,7 +104,8 @@ SENSOR_NOTE = (
     "You cannot see or hear the group. The description comes from sensors: one microphone for the whole group "
     "(how much speech, how many words, how many anonymous voices, never what was said), badges that give "
     "positions in metres and whether one person faced another, and cameras that give where each person's gaze "
-    "landed when it could be read and how far apart hands were, in shares of the frame width. A partner is another "
+    "landed when it could be read, whether each person's hands moved or stayed still from one second to the next, "
+    "and how far apart hands were, in hand lengths. A partner is another "
     "member of the group, also when their badge was not read but they sat in their own seat; the faces and hands "
     "of anyone else (the teacher, other groups, now and then a member away from their seat with an unread badge) "
     "are named apart. The work area is the table region around the members' hands. A part that says 'not measured' "
@@ -117,17 +129,18 @@ DISTANCE_EDGES = (0.6, 1.0)
 DISTANCE_WORDS = ('close', 'normal', 'far')
 # quantity -> (slot-table column, level, whether 0 has its own words and stays out of the fit, tertile words).
 # speech, words and gaze switches are 0 in a quarter of the windows or more, which would pile the lower
-# edges on 0; those windows say "no speech detected", "no words transcribed", "gaze stayed on one target"
+# edges on 0; those windows say "no speech detected", "no words transcribed", "gaze stayed on one target".
+# The hands' movement is said as shares of the seconds (active, still), which need no word
 TERTILES = {
     'speech': ('speech_ratio', 'group', True, ('low', 'medium', 'high')),
     'words': ('words', 'group', True, ('few', 'some', 'many')),
     'head_turn': ('yaw_abs_mean', 'person', False, ('low', 'medium', 'high')),
     'head_variability': ('yaw_std', 'person', False, ('steady', 'shifting', 'restless')),
-    'hand_movement': ('wrist_speed', 'person', False, ('still', 'slow', 'fast')),
     'gaze_switches': ('gaze_switches', 'person', True, ('few', 'some', 'many')),
-    'hand_distance': ('hand_dist_min', 'pair', False, ('close', 'medium', 'far')),
+    # in hand lengths: a template frozen before 2026-09-24 has only 'hand_distance', in frame widths, and
+    # so no edges for this one (ses-jev then asks for --fit-bins)
+    'hand_distance_hl': ('hand_dist_min_hl', 'pair', False, ('close', 'medium', 'far')),
 }
-HAND_PHRASES = {'still': 'hands still', 'slow': 'hands moving slowly', 'fast': 'hands moving fast'}
 # at least this seen share reads as the whole window
 WHOLE_WINDOW = 0.95
 
@@ -176,9 +189,13 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
     person's frames with a readable gaze), X_<gaze share> for each of GAZE_SHARES (of the readable
     frames; NaN below MIN_KNOWN_SHARE; X_other_face and X_other_hands NaN on a table fused before
     the split, X_work_area NaN unless most of the person's gaze frames had a ready work area),
-    X_yaw_abs_mean, X_yaw_std, X_wrist_speed, X_gaze_switches (NaN when not seen). Per pair XY: XY_dist_mean_m, XY_dist_min_m (NaN unless both located),
-    XY_face_any (either faced the other), XY_co_seen_share, XY_hand_dist_min, XY_hand_dist_mean,
-    XY_joint_attention_ratio, XY_joint_attention_baseline (NaN unless both seen together)."""
+    X_yaw_abs_mean, X_yaw_std, X_gaze_switches, X_hands_active_ratio, X_hands_still_ratio,
+    X_other_hands_near_ratio (NaN when not seen). Per pair XY: XY_dist_mean_m, XY_dist_min_m (NaN
+    unless both located), XY_face_any (either faced the other), XY_co_seen_share,
+    XY_hand_dist_min_hl (the closest hands in hand lengths, the fused shoulder widths over
+    HAND_LENGTH_SW), XY_hands_close_ratio, XY_joint_attention_ratio, XY_joint_attention_baseline,
+    XY_one_active_ratio, XY_both_active_ratio, XY_both_still_ratio, XY_follow_ratio (NaN unless both
+    seen together)."""
     slots = [str(tag) for tag in slots][:len(SLOT_NAMES)]
     n = len(table)
     out: dict[str, np.ndarray] = {}
@@ -217,7 +234,8 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
             for category in GAZE_SHARES:
                 where = readable & ready if category == 'work_area' else readable
                 out[f'{x}_{category}'] = np.where(where, _column(table, f'p{tag}_gaze_{category}_ratio') / known, np.nan)
-        for name in ('yaw_abs_mean', 'yaw_std', 'wrist_speed', 'gaze_switches'):
+        for name in ('yaw_abs_mean', 'yaw_std', 'gaze_switches', 'hands_active_ratio', 'hands_still_ratio',
+                     'other_hands_near_ratio'):
             out[f'{x}_{name}'] = np.where(seen[i], _column(table, f'p{tag}_{name}'), np.nan)
 
     for i, j in PAIR_SLOTS:
@@ -234,7 +252,10 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
         sets = _first_column(table, (prefix + 'frame_sets', prefix + 'frames'))
         together = vfa & (np.nan_to_num(sets) > 0) & ~masked[:, i] & ~masked[:, j]
         out[f'{xy}_co_seen_share'] = np.where(vfa, np.where(together, _share(sets, n_vfa), 0.0), np.nan)
-        for name in ('hand_dist_min', 'hand_dist_mean', 'joint_attention_ratio', 'joint_attention_baseline'):
+        out[f'{xy}_hand_dist_min_hl'] = np.where(together, _column(table, prefix + 'hand_dist_sw_min') / HAND_LENGTH_SW,
+                                                 np.nan)
+        for name in ('hands_close_ratio', 'joint_attention_ratio', 'joint_attention_baseline', 'one_active_ratio',
+                     'both_active_ratio', 'both_still_ratio', 'follow_ratio'):
             out[f'{xy}_{name}'] = np.where(together, _column(table, prefix + name), np.nan)
     return pd.DataFrame(out, index=pd.RangeIndex(n))
 
@@ -456,12 +477,11 @@ def _person_on_camera(row: dict, x: str, bins: Bins, pilot: bool) -> str:
             text += f", {steady}" if steady else ''
         bits.append(text)
     if not pilot:
-        speed = _num(row.get(f'{x}_wrist_speed'))
-        if speed is None:
+        active, still = _num(row.get(f'{x}_hands_active_ratio')), _num(row.get(f'{x}_hands_still_ratio'))
+        if active is None or still is None:
             bits.append("hand movement not measured")
         else:
-            word = bins.word('hand_movement', speed)
-            bits.append(HAND_PHRASES[word] if word else f"hands moving {speed:.2f} frame widths a second")
+            bits.append(f"hands moving in {_pct(active)} of the seconds, still in {_pct(still)}")
         switches = _num(row.get(f'{x}_gaze_switches'))
         if switches is not None:
             if switches <= 0:
@@ -470,6 +490,9 @@ def _person_on_camera(row: dict, x: str, bins: Bins, pilot: bool) -> str:
                 n = max(1, _half_up(switches))
                 bits.append(("gaze changed target once" if n == 1 else f"gaze changed target {n} times")
                             + _tag(bins, 'gaze_switches', n))
+    near = _num(row.get(f'{x}_other_hands_near_ratio'))
+    if near is not None and near > 0:
+        bits.append(f"the hands of someone outside the group within a hand length of theirs in {_pct(near)} of frames")
     return "; ".join(bits) + "."
 
 
@@ -498,10 +521,29 @@ def _camera_pairs(row: dict, pairs: list[tuple[str, str]], bins: Bins, pilot: bo
             if baseline is not None:
                 text += f", {_pct(baseline)} when compared 20 to 40 s apart"
             bits.append(text)
-        hand = _num(row.get(f'{x}{y}_hand_dist_min'))
-        hand = None if hand is None else _rounded(hand, 2)
-        bits.append("hands not measured" if hand is None
-                    else f"hands {hand:.2f} frame widths apart at the closest{_tag(bins, 'hand_distance', hand)}")
+        hand = _num(row.get(f'{x}{y}_hand_dist_min_hl'))
+        hand = None if hand is None else _rounded(hand, 1)
+        if hand is None:
+            bits.append("hands not measured")
+        else:
+            text = f"hands {hand:.1f} hand lengths apart at the closest{_tag(bins, 'hand_distance_hl', hand)}"
+            close = _num(row.get(f'{x}{y}_hands_close_ratio'))
+            if close is not None:
+                text += f", within one hand length in {_pct(close)} of shared frames"
+            bits.append(text)
+        if not pilot:
+            # the steps follow one camera's frames in time, like the hand movement of a person
+            one = _num(row.get(f'{x}{y}_one_active_ratio'))
+            if one is None:
+                bits.append("hand movement together not measured")
+            else:
+                text = f"one's hands moving while the other's were still in {_pct(one)} of the seconds"
+                follow = _num(row.get(f'{x}{y}_follow_ratio'))
+                if follow is not None:
+                    text += f", the still one's gaze on the moving hands in {_pct(follow)} of those"
+                both_active, both_still = _num(row.get(f'{x}{y}_both_active_ratio')), _num(row.get(f'{x}{y}_both_still_ratio'))
+                text += f", both moving in {_pct(both_active or 0.0)}, both still in {_pct(both_still or 0.0)}"
+                bits.append(text)
         items.append(f"{x} and {y}: " + "; ".join(bits) + ".")
     return "Pairs on camera: " + (" ".join(items) if items else "no two students in view together.")
 
@@ -544,7 +586,7 @@ def describe_window(slots: pd.DataFrame, t: int, bins: Bins, context: int = 0, p
     """the plain-text state of window t (a position in the slot table): deterministic, rounded,
     every number with its word, a modality that did not run said in words. `context` preceding
     windows are summarised after it (j1: 2); `pilot` leaves out head-turn variability, gaze
-    switches, hand movement and the frame-count shares."""
+    switches, the hands' movement (a person's and a pair's) and the frame-count shares."""
     if not 0 <= t < len(slots):
         raise IndexError(f"window {t} is outside a table of {len(slots)} windows")
     rows = {i: slots.iloc[i].to_dict() for i in range(max(0, t - context), t + 1)}

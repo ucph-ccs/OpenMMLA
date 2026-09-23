@@ -7,15 +7,15 @@ layout.py (a value whose mask is 0 is already 0 there):
 
     G           (T, 11)     the group token: 7 speech values, m_asr, m_transcription, m_dia, group_size / 3
     avail       (T, 3)      speech_ran, ips_ran, vfa_ran (the order of MODALITIES)
-    P           (T, 3, 24)  the person slots: 16 values, then 8 masks (P_COLUMNS)
+    P           (T, 3, 28)  the person slots: 19 values, then 9 masks (P_COLUMNS)
     P_exists    (T, 3)      1 where a slot holds a kept person
-    Q           (T, 3, 15)  the pair slots: 9 values symmetric in a<->b, then 6 masks (Q_COLUMNS)
+    Q           (T, 3, 22)  the pair slots: 14 values symmetric in a<->b, then 8 masks (Q_COLUMNS)
     Q_exists    (T, 3)      1 where a slot holds a kept pair
     pair_index  (3, 2)      the person slots of each pair slot: (0, 1), (0, 2), (1, 2)
 
 with a label per window: 0 individual, 1 social, 2 collaborative, anything else (uncoded, unclear,
 None, NaN) none. `session_tensors` turns a session into the dict every other function reads; the
-pooled control (PooledNet) reads the 94-column pooled view instead of the tokens.
+pooled control (PooledNet) reads the 118-column pooled view instead of the tokens.
 
 The training part follows the recipe fixed before any result: tempered class weights,
 cross-entropy with label smoothing on coded windows only (uncoded and unclear windows are context),
@@ -32,7 +32,7 @@ import torch.nn.functional as F
 
 from openmmla.analytics.interaction import layout as _layout
 
-# the token widths come from the layout, so the two cannot drift apart (11, 24, 15 in layout version 3)
+# the token widths come from the layout, so the two cannot drift apart (11, 28, 22 in layout version 4)
 D_G, D_P, D_Q = len(_layout.G_COLUMNS), len(_layout.P_COLUMNS), len(_layout.Q_COLUMNS)
 N_AVAIL, N_CLASSES = 3, 3
 
@@ -106,7 +106,7 @@ class InteractionNet(nn.Module):
 
 
 class PooledNet(nn.Module):
-    """the control: the 94-column pooled view through the same window, temporal and head layers."""
+    """the control: the 118-column pooled view through the same window, temporal and head layers."""
 
     def __init__(self, d_in=len(_layout.POOLED_COLUMNS), d_window=48, kernel=5, dilations=(1, 2), causal=False):
         super().__init__()
@@ -189,8 +189,8 @@ def use_small(n_coded, small='auto'):
 
 
 def count_parameters(model):
-    """the trainable parameters: 13,793 default and 6,785 small in layout version 3 (13,625 and 6,673
-    in version 2)."""
+    """the trainable parameters: 14,057 default and 6,961 small in layout version 4 (13,793 and 6,785
+    in version 3, 13,625 and 6,673 in version 2)."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
@@ -244,7 +244,7 @@ def _position(names, column):
 def session_tensors(tokens, y=None, pooled=None, blocks=None, session=None):
     """one session as tensors named after the model's arguments (g, avail, persons, person_exists,
     pairs, pair_exists, pair_index) plus y, the class index per window with -1 for no label.
-    `tokens` is layout's Tokens (or a dict with its field names); with `pooled` (the 94-column
+    `tokens` is layout's Tokens (or a dict with its field names); with `pooled` (the 118-column
     view, a DataFrame or array, NaN where no slot qualified) the dict also holds the PooledNet
     input, NaN as 0, and `blocks` (modality -> its pooled columns, names or positions, as
     layout.block_columns gives them) tells modality dropout where each modality sits in it."""

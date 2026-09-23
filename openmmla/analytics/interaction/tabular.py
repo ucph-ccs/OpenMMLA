@@ -77,8 +77,37 @@ RULES = {
             'task_gaze': 0.4,         # collaborative: gaze on the task (hands, and the work area around them)
             'watching': 0.5,          # a pupil watching a partner's hands for most of the window
         }},
+    # version 2 with the hands measured on the body: layout version 4 has no hand distance in frame
+    # widths, whose scale changed with the camera's distance and field of view
+    3: {'fixed': '2026-09-24, layout version 4, version 2 with the hand distance in shoulder widths, before any '
+                 'label was read',
+        'columns': {
+            'speech_ratio': ('speech_ratio',),
+            'words': ('log_words',),
+            'dia_switches': ('log_dia_switches',),
+            'm_dia': ('m_dia',),
+            'partner_face': ('partner_face_mean',),
+            'task_gaze': ('partner_hands_mean', 'own_hands_mean', 'work_area_mean'),
+            'watching': ('partner_hands_max',),
+            'joint_attention': ('joint_attention_excess_max',),
+            'hand_dist_min': ('hand_dist_sw_min_min',),
+        },
+        'thresholds': {
+            'speech_ratio': 0.3,
+            'dia_switches': 1,
+            'words': 5,
+            'partner_face': 0.2,
+            'joint_attention': 0.3,
+            # ... or two pairs of hands within one hand length ("handing over"), in shoulder widths: a hand
+            # is a median 0.46 shoulder widths long (window_features.HAND_LENGTH_SW), and version 2's 0.05
+            # frame widths was 0.50, 0.53 and 0.38 shoulder widths at the median seat of the 540p micro:bit,
+            # 1080p micro:bit and 1080p microscope cameras, the same bound in body units
+            'hand_dist_min': 0.46,
+            'task_gaze': 0.4,
+            'watching': 0.5,
+        }},
 }
-RULE_VERSION = 2
+RULE_VERSION = 3
 # the current rule's columns and thresholds, by their older names
 RULE_COLUMNS = RULES[RULE_VERSION]['columns']
 RULE_THRESHOLDS = RULES[RULE_VERSION]['thresholds']
@@ -169,6 +198,8 @@ def rule_a_priori(pooled, columns: dict | None = None, version: int = RULE_VERSI
     see or hear is individual. It gives hard labels only (0, 1, 2). `columns` overrides a role's
     columns (a name or a tuple of names).
 
+    Version 3 (layout version 4): version 2, with hands close enough to hand over measured in
+    shoulder widths (within one hand length) rather than frame widths.
     Version 2 (layout version 3): talk (speech, and a change of speaker or enough words), look (an
     in-group partner's face), a shared focus (joint attention above the pair's own rate 20-40 s
     earlier, or hands close enough to hand over) or watching (a pupil's gaze on a partner's hands
@@ -176,11 +207,18 @@ def rule_a_priori(pooled, columns: dict | None = None, version: int = RULE_VERSI
     collaborative, as does an interaction with the gaze on the task (hands and the work area).
     Version 1 (layout version 2): talk, look or the raw joint attention or near hands make an
     interaction, and a shared focus or eyes on the hands make it collaborative; on a version 3
-    view it reads partner + other, the partner gaze of layout version 2."""
+    view it reads partner + other, the partner gaze of layout version 2. On a version 4 view, which
+    has no hand distance in frame widths, versions 1 and 2 read version 3's hand distance and bound
+    (version 2 is then version 3)."""
     if version not in RULES:
         raise ValueError(f"unknown rule version {version!r}: one of {sorted(RULES)}")
     names = dict(RULES[version]['columns'], **(columns or {}))
-    th = RULES[version]['thresholds']
+    th = dict(RULES[version]['thresholds'])
+    proximity = (names['hand_dist_min'],) if isinstance(names['hand_dist_min'], str) else tuple(names['hand_dist_min'])
+    if version < 3 and 'hand_dist_min' not in (columns or {}) and not all(name in pooled.columns for name in proximity):
+        # a layout version 4 view has no hand distance in frame widths: the older versions read version
+        # 3's, the same bound in shoulder widths
+        names['hand_dist_min'], th['hand_dist_min'] = RULES[3]['columns']['hand_dist_min'], RULES[3]['thresholds']['hand_dist_min']
     with np.errstate(invalid='ignore'):
         speech = _role(pooled, names['speech_ratio'])
         words = _role(pooled, names['words'])
