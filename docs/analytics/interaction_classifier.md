@@ -15,9 +15,9 @@ The coder presses one key per window in `mmla ses-code`, from a codebook both th
 
 | Key | Class | Meaning |
 |---|---|---|
-| 1 | individual | nobody interacts with another member for most of the window: working alone, waiting, watching the teacher |
+| 1 | individual | nobody interacts with another member for most of the window: working alone, waiting, watching the teacher; one member looking elsewhere while another works |
 | 2 | social | members interact (talk, gesture, look at each other), but not about the task |
-| 3 | collaborative | members interact about the task: talk about it, joint attention on the shared artifact, pointing, handing over, working on one thing together |
+| 3 | collaborative | members interact about the task: talk about it, joint attention on the shared artifact, pointing, handing over, working on one thing together; one member following another's work on the artifact for most of the window, even in silence (a glance does not count) |
 | 4 | absent | fewer than two members at the group's place for most of the window (everyone away, or one of a pair); a triad with one away is coded normally |
 | 0 | unclear | the group is at its place but its state cannot be told: members out of frame and inaudible, or a transition with no dominant state |
 

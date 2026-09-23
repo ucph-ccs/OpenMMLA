@@ -32,11 +32,11 @@ from typing import Any
 CODEBOOK = {
     'classes': [
         {'key': '1', 'label': 'individual', 'title': 'Individual or parallel work',
-         'definition': 'Nobody in the group interacts with another member during most of the window: each works alone, waits, or watches the teacher. Glances without exchange do not count.'},
+         'definition': 'Nobody in the group interacts with another member during most of the window: each works alone, waits, or watches the teacher. A member looking elsewhere while another works is individual. Glances without exchange do not count.'},
         {'key': '2', 'label': 'social', 'title': 'Social interaction',
          'definition': 'Members interact (talk, gesture, look at each other) but not about the task: chat, jokes, phones, waiting together.'},
         {'key': '3', 'label': 'collaborative', 'title': 'Collaborative interaction',
-         'definition': 'Members interact about the task: talking about it, joint attention on the shared artifact (micro:bit, microscope, tablet, sheet), pointing, handing over, working on one thing together, explaining or asking.'},
+         'definition': 'Members interact about the task: talking about it, joint attention on the shared artifact (micro:bit, microscope, tablet, sheet), pointing, handing over, working on one thing together, explaining or asking. One member following another\'s work on the shared artifact for most of the window counts, even in silence; a glance does not.'},
         {'key': '4', 'label': 'absent', 'title': 'Not at the table',
          'definition': "Fewer than two group members are at the group's place for most of the window: everyone is away, or one of a pair is. In a group of three with one member away two remain, so code the window normally. Code what the video shows, not what the sensors show."},
         {'key': '0', 'label': 'unclear', 'title': 'Unclear',
@@ -119,9 +119,22 @@ def load_sessions(artifacts: Path, pattern: str | None = None,
     return sessions, hidden
 
 
+def _test_sessions() -> set[str]:
+    """the classifier's TEST sessions, which are coded in full whatever the sampling; empty when
+    the analytics package cannot be imported."""
+    try:
+        from openmmla.analytics.interaction.splits import TEST_SESSIONS
+    except Exception:
+        return set()
+    return set(TEST_SESSIONS)
+
+
 def windows_of(session: dict[str, Any], window: float, step: float, sample: float, block: float, seed: int) -> list[dict[str, float]]:
     """the windows to code, in time order; `sample` < 1 keeps that share of `block`-second blocks,
-    drawn with a fixed seed so two coders see the same windows"""
+    drawn with a fixed seed so two coders see the same windows. A TEST session is always coded in
+    full, since it is scored on every window."""
+    if session['id'] in _test_sessions():
+        sample = 1.0
     starts = []
     t = session['start']
     while t + window <= session['end']:
