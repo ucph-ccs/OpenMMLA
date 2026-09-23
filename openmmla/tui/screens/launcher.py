@@ -922,9 +922,10 @@ _ASR_BASE_CARD = "ASR Base"
 
 # the synchronizer's own count of the bases it merges each time slice from
 # (the long form of -nb of mmla asr-sync and vfa-sync): Sync Waits For on the
-# card, apart from the card's Num Bases, since bases of the session may run on
-# other hosts. Too high, a slice waits for bases that never report and is
-# merged only when it expires; too low, it is merged before the rest report.
+# card. It goes along with the card's Num Bases until it is set by hand, which
+# it is when bases of the session run on other hosts. Too high, a slice waits
+# for bases that never report and is merged only when it expires; too low, it
+# is merged before the rest report.
 _SYNC_WAIT_FLAG = "--num_bases"
 _SYNC_WAIT_CARDS = ("ASR Base", "VFA Base")
 
@@ -2338,8 +2339,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
             # how many bases the synchronizer merges each time slice from, on
-            # every host: the Bases entries of the card host's config
-            # (_service_with_base_choices), else (None) Num Bases
+            # every host: Num Bases (None) until it is set by hand
             ParamDef(_SYNC_WAIT_FLAG, "Sync Waits For", "int", None, follows="-nb"),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
@@ -5481,9 +5481,6 @@ class ServicePanel(Widget):
         synchronizer's Main Camera (-mc), the Base keys for the ASR
         synchronizer's base type (-bt), which follows Base 1.
 
-        The ASR and VFA synchronizers' Sync Waits For starts on the number of
-        Bases entries.
-
         A remote host is asked nothing from here: this also runs on the UI
         thread (Start, a config Save). Its config comes from the config cache
         and its matrix files from _transform_matrix_ids, both read when the
@@ -5519,10 +5516,6 @@ class ServicePanel(Widget):
             elif param.flag == "-mc" and pipeline == "ips":
                 options, default = _main_camera_choices(self._transform_matrix_ids(target) or [], config)
                 params.append(replace(param, choices=options, default=default))
-            elif param.flag == _SYNC_WAIT_FLAG:
-                # every base of the session, wherever it runs, is a Bases
-                # entry; with none listed, the card's Num Bases (None)
-                params.append(replace(param, default=len(bases) or None))
             else:
                 params.append(param)
         return replace(svc, params=params)
