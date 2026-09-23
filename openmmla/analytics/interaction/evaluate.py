@@ -13,6 +13,10 @@ What is fit where; nothing ever reads the held-out lesson's labels:
 - the HMM's transitions and the prior: the outer-training labels;
 - the final model: every outer-training session, applied once to the held-out lesson.
 
+A lesson here is the unit of splits.class_units: lessons of one school class (a manifest's
+same_class_as) are held out, grouped in the inner folds and resampled together, and a run whose
+links join a TEST session to a DEV one is refused.
+
 Every model ends in one format: calibrated p(individual), p(social), p(collaborative), the hard
 label by the balanced decision argmax p / pi under the outer-training prior (pre-declared, never
 tuned), and the binary target derived as p_social + p_collaborative. The a-priori rule gives hard
@@ -184,6 +188,7 @@ class SessionData:
     n_observed: np.ndarray | None = None
     presence_gated: np.ndarray | None = None
     gaze_readable: np.ndarray | None = None
+    same_class_as: tuple = ()
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -234,6 +239,27 @@ def primary_coder(directories) -> str | None:
     return L.primary_coder(pd.concat(frames, ignore_index=True)) if frames else None
 
 
+def same_class_of(directory) -> tuple:
+    """the session ids a session's manifest marks as the same school class (`same_class_as`,
+    written by mmla ses-tidy --same-class-as); () when it names none or has no manifest."""
+    try:
+        linked = json.loads((Path(directory) / 'manifest.json').read_text(encoding='utf-8')).get('same_class_as')
+    except (OSError, ValueError, AttributeError):
+        return ()
+    if isinstance(linked, str):
+        linked = [linked]
+    return tuple(str(s) for s in linked or () if s)
+
+
+def link_lessons(data: dict) -> None:
+    """every session's lesson widened to its class unit (splits.class_units over the loaded
+    sessions' same_class_as), so predictions, the bootstrap and the refusal group what the folds
+    group."""
+    units = S.class_units(list(data), {s: d.same_class_as for s, d in data.items()})
+    for session, d in data.items():
+        d.lesson = units[session]
+
+
 def load_session(session: str, table_path, coder: str | None = None, join: str = 'exact',
                  target: str = '3class') -> tuple[SessionData, pd.DataFrame]:
     """a session and its fused table: roster, unscaled tokens and pooled view, and the coder's
@@ -269,7 +295,8 @@ def load_session(session: str, table_path, coder: str | None = None, join: str =
                        table_path=table_path, table_sha256=file_digest(table_path), roster=ros, tokens=tokens,
                        raw=LY.pooled(tokens), y=y, target=L.to_binary(y) if target == 'binary' else y.copy(),
                        join=report, label_files=label_files, others=others, n_observed=n_observed,
-                       presence_gated=n_observed < P.MIN_OBSERVED, gaze_readable=P.gaze_readable(tokens))
+                       presence_gated=n_observed < P.MIN_OBSERVED, gaze_readable=P.gaze_readable(tokens),
+                       same_class_as=same_class_of(directory))
     return data, table
 
 
@@ -345,12 +372,14 @@ def class_names(k: int) -> tuple:
 
 
 def make_folds(split: str, data: dict) -> list:
-    """the outer folds: one per DEV lesson with coded windows (loso), or the one scoring of the
-    TEST sessions (test)."""
+    """the outer folds: one per DEV lesson with coded windows (loso), lessons of one school class
+    (same_class_as) together, or the one scoring of the TEST sessions (test). Raises
+    splits.SplitError when a same_class_as link joins a TEST session to a DEV one."""
     sessions = list(data)
+    links = {s: d.same_class_as for s, d in data.items()}
     if split == 'loso':
-        return S.loso_folds(sessions, coded={s: d.n_coded for s, d in data.items()})
-    fold = S.final_fold(sessions)
+        return S.loso_folds(sessions, coded={s: d.n_coded for s, d in data.items()}, same_class=links)
+    fold = S.final_fold(sessions, same_class=links)
     return [fold] if fold.test else []
 
 
@@ -388,14 +417,18 @@ def label_counts(data: dict) -> pd.DataFrame:
 
 def absent_class_policy(data: dict) -> dict:
     """the pre-registered policy: with fewer than 200 coded social windows on dev, or social at
-    least 5 times in fewer than 6 lessons, the confirmatory target becomes the binary one."""
+    least 5 times in fewer than 6 lessons, the confirmatory target becomes the binary one. The
+    lessons are counted as registered, by splits.lesson_key, not by the same-class units the folds
+    hold out, so a same_class_as link never changes the target."""
     social, by_lesson = 0, {}
     for d in data.values():
         if d.session in S.TEST_SESSIONS:
             continue
         n = int((d.y == 1).sum())
         social += n
-        by_lesson[d.lesson] = by_lesson.get(d.lesson, 0) + n
+        # d.lesson is the class unit after link_lessons; the policy counts the lesson itself
+        lesson = S.lesson_key(d.session)
+        by_lesson[lesson] = by_lesson.get(lesson, 0) + n
     lessons = sum(1 for n in by_lesson.values() if n >= POLICY_SOCIAL_PER_LESSON)
     binary = social < POLICY_SOCIAL_WINDOWS or lessons < POLICY_SOCIAL_LESSONS
     return {'social_windows': social, 'lessons_with_social': lessons,
@@ -428,10 +461,13 @@ class _Fold:
         self.at = {'train': _offsets(self.train), 'test': _offsets(self.test)}
         self.y = np.concatenate([d.target for d in self.train])
         sessions = np.concatenate([np.full(len(d), d.session, dtype=object) for d in self.train])
-        self.groups = np.concatenate([np.full(len(d), d.lesson, dtype=object) for d in self.train])
+        # lessons of one school class are one group, as in the outer folds
+        links = {d.session: d.same_class_as for d in self.train}
+        self.units = S.class_units(fold.train, links)
+        self.groups = np.concatenate([np.full(len(d), self.units[d.session], dtype=object) for d in self.train])
         # the rule and zero-shot Jev choose nothing, so they need no inner folds (nor two coded lessons)
-        self.inner = S.inner_folds(fold.train, k=INNER_FOLDS, sizes={d.session: d.n_coded for d in self.train}) \
-            if learned else []
+        self.inner = S.inner_folds(fold.train, k=INNER_FOLDS, sizes={d.session: d.n_coded for d in self.train},
+                                   same_class=links) if learned else []
         self.pairs = [S.fold_indices(inner, sessions) for inner in self.inner]
         self.prior = TB.class_prior(self.y, k)
         self.A = H.transitions({d.session: d.series() for d in self.train}, n_states=k)
@@ -688,7 +724,7 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
             for key in [key for key in results if key.startswith('jev-cal:')]:
                 _unanswered(results[key], ~np.isfinite(held).all(axis=1))
     return {'name': fold.name, 'train': list(fold.train), 'test': list(fold.test),
-            'inner': [sorted({S.lesson_key(s) for s in inner.test}) for inner in fd.inner],
+            'inner': [sorted({fd.units[s] for s in inner.test}) for inner in fd.inner],
             'prior': fd.prior.tolist(), 'transitions': fd.A.tolist(), 'models': details, 'results': results,
             'coefficients': extras.get('coefficients'), 'seconds': round(time.time() - started, 1)}
 
@@ -1178,6 +1214,7 @@ def run(config, log=None) -> Path:
     if not data:
         raise Refused("every session is left out by the inclusion rule S1: "
                       + '; '.join(f"{s} ({r['reason']})" for s, r in excluded.items()))
+    link_lessons(data)
     if any(m in JEV_MODELS for m in plan['models']):
         for d in data.values():
             d.jev, d.jev_note = jev_log_proba(d, cfg.jev_variant)
@@ -1191,7 +1228,10 @@ def run(config, log=None) -> Path:
     write_json(run_dir / 'roster.json', {**{s: {**d.roster.record(), 'included': True} for s, d in data.items()}, **excluded})
     write_json(run_dir / 'data_checks.json', LY.data_checks(tables, {s: d.roster for s, d in data.items()}))
 
-    folds = make_folds(cfg.split, data)
+    try:
+        folds, split_error = make_folds(cfg.split, data), None
+    except S.SplitError as error:
+        folds, split_error = [], str(error)
     notes = {s: d.jev_note for s, d in data.items() if d.jev_note}
     dropped = jev_gaps(folds, data, plan['models'], cfg.jev_variant)
     if dropped:
@@ -1202,7 +1242,9 @@ def run(config, log=None) -> Path:
     problems = label_refusal(folds, data, k, cfg.min_class_windows) if learned else []
     held = sum(data[s].n_coded for fold in folds for s in fold.test)
     why = None
-    if not plan['models']:
+    if split_error:
+        why = split_error
+    elif not plan['models']:
         why = f"every model named was left out ({', '.join(dropped)}: no usable Jev maps, see left_out and notes)"
     elif not folds:
         why = 'no TEST session has a fused table' if cfg.split == 'test' else 'no lesson has coded windows to hold out'

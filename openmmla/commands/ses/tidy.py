@@ -17,6 +17,10 @@ and --participants-in-order set them. --participants-in-order hands the session 
 in config/experiments.yaml, lowest first, to the personal microphones in natural device order,
 and 0, 1, 2 ... when the file does not list the group; a microphone already bound to one of those
 tags keeps it, and any beyond the list is left unbound.
+
+--same-class-as marks two sessions of different pupils from one school class: each manifest lists
+the other under `same_class_as`, which the interaction classifier's folds keep together (the
+2025-05-13 takes carry it too). The links survive every rebuild and follow a renamed session.
 """
 import argparse
 import json
@@ -35,6 +39,7 @@ KEEP_IN_LEGACY_ROOT = ('meta.txt',)
 OUTPUT_FOLDERS = ('legacy', 'analysis', 'exports', 'measurements', 'pipelines', 'visualizations', '.staging')
 MEDIA_EXTS = ('.wav', '.mp4', '.mov', '.mkv', '.m4a', '.avi', '.webm', '.flac', '.mp3')
 CLUTTER = ('.DS_Store', 'Thumbs.db', '.manifest.lock', 'manifest.json', 'manifest.yml')  # never a reason to keep a folder
+KEPT_KEYS = ('legacy_meta', 'imported_from', 'tag_size', 'same_class_as', 'origin_session')  # session manifest keys a rebuild keeps
 
 
 def _remove_if_empty(folder: Path) -> bool:
@@ -357,7 +362,7 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
         'file_sources': {k: v for k, v in file_sources.items() if v},
         'recordings': all_records,
     }
-    for key in ('legacy_meta', 'imported_from', 'tag_size'):
+    for key in KEPT_KEYS:
         if old.get(key) is not None:
             data[key] = old[key]
     raw = session_dir / 'raw'
@@ -386,6 +391,7 @@ def rename_session(session_dir: Path, experiment_id: str | None = None, group_id
         raise FileExistsError(f"{target} exists")
     log(f"  session {session_dir.name} -> {new_id}")
     shutil.move(str(session_dir), str(target))
+    _relink(target, session_dir.name, log=log)
     report = target / 'import_report.json'
     if report.exists():
         data = _read(report)
@@ -394,6 +400,46 @@ def rename_session(session_dir: Path, experiment_id: str | None = None, group_id
         report.write_text(json.dumps(data, indent=2) + "\n", encoding='utf-8')
     rebuild_manifests(target, experiment_id or parts['experiment'], group_id or parts['group'], log=log)
     return target
+
+
+def _same_class(data: dict[str, Any]) -> list[str]:
+    linked = data.get('same_class_as') or []
+    return [linked] if isinstance(linked, str) else [str(s) for s in linked if s]
+
+
+def link_same_class(session_dir: Path, other: str | Path, log=print) -> Path:
+    """two sessions of different pupils from one school class marked as such: each manifest lists
+    the other under same_class_as (symmetric; a link already there is kept once). `other` is a
+    session folder or an id beside this one. Returns the other session's folder."""
+    other_dir = Path(other).expanduser()
+    if not other_dir.is_dir():
+        other_dir = session_dir.parent / str(other)
+    if not (other_dir / 'manifest.json').is_file():
+        raise FileNotFoundError(f"no session manifest at {other_dir}")
+    other_dir = other_dir.resolve()
+    if other_dir == session_dir.resolve():
+        raise ValueError("a session is not the same class as itself")
+    for here, there in ((session_dir, other_dir), (other_dir, session_dir)):
+        path = here / 'manifest.json'
+        data = _read(path)
+        linked = _same_class(data)
+        if there.name not in linked:
+            data['same_class_as'] = linked + [there.name]
+            _write(path, data)
+        log(f"  {here.name}: same_class_as {', '.join(_same_class(data))}")
+    return other_dir
+
+
+def _relink(session_dir: Path, old_id: str, log=print) -> None:
+    """the sessions a renamed one is linked to name it by its new id"""
+    for other in _same_class(_read(session_dir / 'manifest.json')):
+        path = session_dir.parent / other / 'manifest.json'
+        data = _read(path)
+        linked = _same_class(data)
+        if old_id in linked:
+            data['same_class_as'] = [session_dir.name if s == old_id else s for s in linked]
+            _write(path, data)
+            log(f"  {other}: same_class_as follows the rename to {session_dir.name}")
 
 
 def _rename_in_place(path: Path, old_host: str, new_host: str) -> Path:
@@ -643,6 +689,9 @@ def get_parser():
     parser.add_argument('--delete-host', action='append', default=[], metavar='HOST', help="delete a host's files")
     parser.add_argument('--tag-size', type=float, default=None, help="the AprilTag size of the session, in metres, noted in the manifest")
     parser.add_argument('--note', action='append', default=[], help="a note kept in the session manifest (repeatable)")
+    parser.add_argument('--same-class-as', action='append', default=[], metavar='SESSION',
+                        help="another session of different pupils from the same school class: both manifests list each "
+                             "other under same_class_as, so the classifier's folds keep them together (repeatable)")
     parser.add_argument('--prune-legacy', action='store_true', help="keep speaker profiles and meta.txt, delete legacy/ and the old analysis folders")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
     return parser
@@ -688,6 +737,15 @@ def main(argv=None):
         scopes = parse_device_values(args.scope, '--scope', AUDIO_SCOPES)
         if any(scope is None for _, _, scope in scopes):
             raise ValueError("--scope wants [HOST/]DEVICE=personal|group, not 'none'")
+        # checked before anything changes: each named session must be there
+        for other in args.same_class_as:
+            other_dir = Path(other).expanduser()
+            if not other_dir.is_dir():
+                other_dir = session_dir.parent / other
+            if not (other_dir / 'manifest.json').is_file():
+                raise ValueError(f"--same-class-as: no session manifest at {other_dir}")
+            if other_dir.resolve() == session_dir:
+                raise ValueError("--same-class-as names the session itself")
     except ValueError as error:
         print(error)
         return 1
@@ -725,6 +783,8 @@ def main(argv=None):
     rebuild_manifests(session_dir, notes=notes, participants=participants, scopes=scopes,
                       participants_in_order=args.participants_in_order, order_group=(args.experiment, args.group))
     session_dir = rename_session(session_dir, args.experiment, args.group)
+    for other in args.same_class_as:
+        link_same_class(session_dir, other)
     print(f"-> {session_dir}  ({time.time() - started:.0f} s)")
     return 0
 

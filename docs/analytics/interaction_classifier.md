@@ -165,7 +165,8 @@ These sessions never reach a scaler, the Jev word bins or a pilot, and a LOSO ru
 **Presence gate** (pre-registered, fixed before any label is read, in `presence.py`): a window is gated absent when fewer than two (`MIN_OBSERVED`) of the roster's kept persons are observed in it. A person is observed when IPS positioned them (present_ratio > 0), a camera saw their tag (frame sets > 0), or, where the table has the seat trace, an untagged body stood at their seat in at least half of the window's frame sets (`p<tag>_untagged_at_seat_ratio` ≥ 0.5). The gate never makes a label. `metrics.json` `presence_gate` scores it against the coder's absent on the held-out coded windows (absent against the three classes, unclear left out): precision, recall, F1, κ and the counts, overall, by observed persons and by session. The gate is scored on the held-out rows, so a lesson with no class-coded window (all absent or unclear) gets no fold and is in neither the gate's nor the state shares' rows.
 
 - **Lessons.** The unit is the lesson: the session id without its start suffix, so the two 2025-05-13 takes are one lesson.
-- **Outer folds.** `--split loso` holds out one lesson with coded windows at a time.
+- **Same class.** Sessions of different pupils from one school class are not independent either. A session manifest's `same_class_as` (written by `mmla ses-tidy --same-class-as`, both ways) links them, and the lessons the links reach, transitively, are one unit, named by its lessons joined with `+` (`exp_20250520_microbit_group_01+exp_20250520_microbit_group_02`). The unit is what the outer and inner folds hold out, what the bootstrap resamples and the `lesson` column of `predictions.csv`. The absent-class policy still counts lessons one by one, so a link never changes the confirmatory target. A link between a TEST and a DEV session refuses the run, in either split, since the TEST scoring would train on that class; two TEST sessions may be linked.
+- **Outer folds.** `--split loso` holds out one lesson (unit) with coded windows at a time.
 - **Inner folds.** Grouped by lesson, the same way.
 - **Refusal.** A run refuses to train any learned model when a class has fewer than 30 coded windows in an outer-training fold. It prints the class × session counts first. `--target binary` then trains individual against interaction, labelled as a fallback.
 
@@ -200,7 +201,7 @@ The R0 rule has no posterior, so its NLL, ECE and AUROC are n/a.
 
 A contrast is computed only when both of its variants answered every coded held-out window, so C3 never compares the headline with a partial Jev. A contrast the run cannot compute is listed with the reason and left out of the Holm correction.
 
-**Absent-class policy** (this concerns a rare social class, not the absent code). With fewer than 200 coded social windows on dev, or social at least 5 times in fewer than 6 lessons, the confirmatory target becomes binary macro-F1, and the three-class results are exploratory.
+**Absent-class policy** (this concerns a rare social class, not the absent code). With fewer than 200 coded social windows on dev, or social at least 5 times in fewer than 6 lessons (each lesson counted on its own, even when `same_class_as` links it to another), the confirmatory target becomes binary macro-F1, and the three-class results are exploratory.
 
 **The run folder**, `artifacts/_analysis/interaction/<split>-<time>/` (or `-o`):
 

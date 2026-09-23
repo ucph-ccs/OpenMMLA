@@ -9,6 +9,16 @@ that much. --trim then cuts every recording to the session's common start, the l
 among them: audio to the sample, video at the last keyframe before it (a stream copy, nothing
 re-encoded), and names every file with its exact start. Nothing is kept: what came before the
 common start is gone.
+
+--end SECONDS cuts the other side: every recording ends SECONDS after the common start (the
+latest start, what the manifest's initial_sync_time says after a rebuild, the reference --trim
+uses). Audio is cut to the sample, video by stream copy, which needs no keyframe at an end: the
+copy stops in decode order, so a video with B-frames keeps one or two frames past the cut (a
+30 fps test cut at 4.30 s ended at 4.37 s) and its own audio track ends within one packet of it;
+the manifest takes the length ffprobe reads. A recording that already ends by then (or within
+END_SLACK after, so a second run cuts nothing again) is left as is. This one is reversible: the
+full-length originals move under raw/<host>/<audio|video>/ (their paths under collection/, out
+of the sources), the manifests are rebuilt with the new lengths and a note naming the cut.
 """
 import argparse
 import json
@@ -24,6 +34,7 @@ import numpy as np
 
 ENVELOPE_RATE = 100          # bins per second the audio is reduced to before correlating
 MIC_DEVICES = ('vimo', 'badge')   # per-person microphones (device label prefix): the clock the others are aligned to
+END_SLACK = 0.25             # seconds past --end a recording may run and count as ended (a stream-copied video does)
 
 
 def envelope(path: str, offset: float, duration: float) -> np.ndarray:
@@ -187,6 +198,119 @@ def trim_session(session_dir: Path, log=print, cut_video_fn=cut_video, cut_audio
     return {'common_start': audio_start, 'cut': report}
 
 
+def cut_video_end(source: str, destination: str, seconds: float) -> float | None:
+    """the video's first `seconds`, streams copied (it ends within a few frames after the cut, the
+    copy stopping in decode order); returns the new length ffprobe reads"""
+    from openmmla.commands.ses.imp import probe
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', source, '-map', '0', '-c', 'copy', '-t', f'{seconds:.3f}',
+                    destination], check=True, timeout=3600)
+    return probe(destination).get('duration')
+
+
+AUDIO_DTYPES = {'PCM_16': 'int16', 'PCM_24': 'int32', 'PCM_32': 'int32', 'FLOAT': 'float32', 'DOUBLE': 'float64'}
+
+
+def cut_audio_end(source: str, destination: str, seconds: float) -> float:
+    """the audio's first `seconds`, to the sample, every channel and the sample format kept;
+    returns the new length"""
+    import soundfile as sf
+    with sf.SoundFile(source) as f:
+        rate, subtype, fmt = f.samplerate, f.subtype, f.format
+        data = f.read(min(f.frames, int(round(seconds * rate))), dtype=AUDIO_DTYPES.get(subtype, 'float64'), always_2d=True)
+    sf.write(destination, data, rate, subtype=subtype, format=fmt)
+    return len(data) / rate
+
+
+def _iso(epoch: float) -> str:
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(epoch))
+
+
+def _set_durations(session_dir: Path, durations: dict[tuple, float]) -> None:
+    """the new length of each cut recording (by modality, start and device) in every manifest, so
+    the rebuild keeps it instead of the full length"""
+    from openmmla.commands.ses.tidy import _read, _recording_keys, _write
+    for path in [session_dir / 'manifest.json'] + sorted((session_dir / 'collection').glob('*/manifest.json')):
+        data = _read(path)
+        changed = False
+        for r in data.get('recordings', []):
+            if not isinstance(r, dict):
+                continue
+            hit = next((durations[key] for key in _recording_keys(r) if key in durations), None)
+            if hit is not None:
+                r['duration'] = round(hit, 3)
+                r['stopped_at'] = round(float(r.get('start_time') or 0) + hit, 3)
+                changed = True
+        if changed:
+            _write(path, data)
+
+
+def end_session(session_dir: Path, seconds: float, dry_run: bool = False, log=print, cut_video_fn=cut_video_end,
+                cut_audio_fn=cut_audio_end) -> dict[str, Any]:
+    """every recording cut to end `seconds` after the session's common start, the full-length
+    originals kept under raw/; with dry_run only what would change is said"""
+    from openmmla.commands.ses.imp import probe
+    from openmmla.commands.ses.tidy import parse_recording_name, rebuild_manifests
+    if seconds <= 0:
+        raise ValueError(f"--end wants a positive number of seconds, not {seconds}")
+    recordings = _recordings(session_dir)
+    if not recordings:
+        return {'common_start': None, 'end': None, 'cut': [], 'dry_run': dry_run}
+    start = max(r['start_time'] for r in recordings)
+    end = start + seconds
+    plan = []
+    for r in recordings:
+        path = Path(r['path'])
+        duration = r.get('duration') or probe(str(path)).get('duration')
+        if not duration:
+            log(f"  {path.name}: length unknown, left as is")
+            continue
+        if r['start_time'] + duration <= end + END_SLACK:
+            continue
+        # every recording starts by the common start, so something of each is kept
+        keep = end - r['start_time']
+        raw = session_dir / 'raw' / path.relative_to(session_dir / 'collection')
+        if raw.exists():
+            raise FileExistsError(f"{raw} exists: an earlier cut's original is there")
+        plan.append((r, path, raw, keep, duration))
+    verb = 'would be' if dry_run else 'is'
+    log(f"  common start {_iso(start)}, end {_iso(end)} ({seconds:g} s later)")
+    for r, path, raw, keep, duration in plan:
+        log(f"  {path.name} {verb} cut from {duration:.2f} s to {keep:.2f} s; the original under {raw.relative_to(session_dir)}")
+    if not plan:
+        log("  every recording already ends by then, nothing cut")
+    report = [{'host': r['host'], 'modality': r['modality'], 'device': r.get('device'), 'file': path.name,
+               'kept_seconds': round(keep, 3), 'dropped_seconds': round(duration - keep, 3),
+               'raw': str(raw.relative_to(session_dir))} for r, path, raw, keep, duration in plan]
+    if dry_run or not plan:
+        return {'common_start': start, 'end': end, 'cut': report, 'dry_run': dry_run}
+    durations, done = {}, []
+    try:
+        for r, path, raw, keep, duration in plan:
+            raw.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(raw))
+            temp = path.with_name(f".{path.stem}.cutting{path.suffix}")
+            try:
+                cut = (cut_video_fn if r['modality'] == 'video' else cut_audio_fn)(str(raw), str(temp), keep)
+            except BaseException:
+                # the original goes back where it was, nothing half-cut is left
+                temp.unlink(missing_ok=True)
+                shutil.move(str(raw), str(path))
+                raise
+            temp.rename(path)
+            parsed = parse_recording_name(path.name)
+            durations[(r['modality'], round(parsed['start'], 3), parsed['device'])] = float(cut or keep)
+            done.append(path.name)
+    finally:
+        # what was cut before a failure is in the manifests too, so a second run skips it
+        if done:
+            _set_durations(session_dir, durations)
+            rebuild_manifests(session_dir, notes=[f"recordings cut to end {seconds:g} s after the common start {_iso(start)}, "
+                                                  f"at {_iso(end)} (audio to the sample, video by stream copy, within a few "
+                                                  f"frames after): {', '.join(done)}; the full-length originals under raw/"],
+                              log=log)
+    return {'common_start': start, 'end': end, 'cut': report, 'dry_run': False}
+
+
 def get_parser():
     parser = argparse.ArgumentParser(
         prog='mmla ses-align',
@@ -198,6 +322,9 @@ def get_parser():
     parser.add_argument('--tolerance', type=float, default=0.25, help="seconds of offset left alone (default 0.25)")
     parser.add_argument('--min-confidence', type=float, default=8.0, help="how far the correlation peak must stand above the rest (default 8)")
     parser.add_argument('--trim', action='store_true', help="cut every recording to the session's common start")
+    parser.add_argument('--end', type=float, default=None, metavar='SECONDS',
+                        help="cut every recording to end SECONDS after the common start, the originals kept under raw/")
+    parser.add_argument('--dry-run', action='store_true', help="with --end: say what would be cut, change nothing")
     parser.add_argument('--window', type=float, default=1200.0, help="seconds of audio compared (default 1200)")
     parser.add_argument('--max-lag', type=float, default=120.0, help="largest offset looked for, in seconds (default 120)")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
@@ -213,11 +340,19 @@ def main(argv=None):
         print(f"no session at {session_dir}")
         return 1
     session_dir = session_dir.resolve()
+    if args.dry_run and (args.end is None or args.apply or args.trim):
+        print("--dry-run goes with --end alone")
+        return 1
+    if args.end is not None and args.end <= 0:
+        print(f"--end wants a positive number of seconds, not {args.end}")
+        return 1
     print(session_dir.name)
-    measured = measure_session(session_dir, args.reference, args.window, args.max_lag)
-    if measured['reference'] is None:
+    # --end alone needs no measuring
+    measured = measure_session(session_dir, args.reference, args.window, args.max_lag) \
+        if args.end is None or args.apply else {'reference': None, 'results': [], 'reason': None}
+    if measured['reference'] is None and measured['reason']:
         print(f"  {measured['reason']}")
-    else:
+    elif measured['reference'] is not None:
         print(f"  reference: {measured['reference']}")
         for r in measured['results']:
             lag = 'no result' if r['lag'] is None else f"{r['lag']:+.2f} s"
@@ -236,6 +371,8 @@ def main(argv=None):
         result = trim_session(session_dir)
         if not result['cut']:
             print("  already on one start, nothing cut")
+    if args.end is not None:
+        end_session(session_dir, args.end, dry_run=args.dry_run)
     return 0
 
 
