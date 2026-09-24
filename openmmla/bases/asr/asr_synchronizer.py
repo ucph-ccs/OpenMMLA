@@ -3,7 +3,7 @@ import json
 import os
 import threading
 
-from openmmla.bases.asr.attribution import ENERGY_MARGIN_DB, ENERGY_TIE_DB, as_decibels, as_energy, as_number, attribute_bucket
+from openmmla.bases.asr.attribution import ENERGY_MARGIN_DB, ENERGY_TIE_DB, as_decibels, as_energy, as_levels, as_number, attribute_bucket
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
@@ -513,7 +513,8 @@ class ASRSynchronizer(Synchronizer):
             'segment_start_time': latest_base_result['segment_start_time'],
         }
         # a worn microphone's result names its wearer and carries its level, which the energy vote
-        # reads; a legacy or group result keeps its four keys
+        # reads, and its level every 100 ms, which the bucket keeps; a legacy or group result keeps
+        # its four keys
         entry = self.time_bucket_buffer[time_bucket_key][base_id]
         participant = latest_base_result.get('participant')
         if participant not in (None, ''):
@@ -521,6 +522,9 @@ class ASRSynchronizer(Synchronizer):
         energy = as_energy(latest_base_result.get('energy'))
         if energy:
             entry['energy'] = energy
+        levels = as_levels(latest_base_result.get('levels')) if participant not in (None, '') else None
+        if levels:
+            entry['levels'] = levels
 
     def _merge_base_results(self, frame_results: dict) -> dict:
         """Merge ASR results from multiple bases for a single time bucket.
@@ -541,6 +545,13 @@ class ASRSynchronizer(Synchronizer):
             - durations: List of corresponding audio durations
             - segment_start_times: List of corresponding segment start times
         """
+        # the level trace of every worn microphone in the bucket, speech or silence, from its segment's start:
+        # the fusion decides each wearer's words from them
+        levels = {}
+        for result in frame_results.values():
+            if result.get('levels') and result.get('participant') not in (None, ''):
+                levels.setdefault(str(result['participant']),
+                                  {'start': float(result['segment_start_time']), **result['levels']})
         # the personal microphones that lost the energy vote are silent before anything is merged
         frame_results, energies = attribute_bucket(frame_results, self.energy_margin_db, self.energy_tie_db,
                                                    float(self.bucket_duration))
@@ -580,6 +591,8 @@ class ASRSynchronizer(Synchronizer):
         }
         if energies:
             merged['energies'] = energies  # {participant: snr in dB} of the worn microphones that voted
+        if levels:
+            merged['levels'] = levels  # {participant: {start, hop, floor_db, db}} of every worn microphone
         return merged
 
     def _upload_merged_result(self, merged_result: dict):
@@ -609,6 +622,8 @@ class ASRSynchronizer(Synchronizer):
         }
         if merged_result.get('energies'):
             fields["energies"] = json.dumps(merged_result['energies'])  # a JSON string: write_event would str() a dict
+        if merged_result.get('levels'):
+            fields["levels"] = json.dumps(merged_result['levels'])
         print(f"{BLUE}[Speaker Recognition]{ENDC}{window_start}: "
               f"{BLUE}{fields['speakers']}{ENDC}, "
               f"similarity: {fields['similarities']}")

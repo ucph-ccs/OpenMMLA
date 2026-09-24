@@ -1,6 +1,7 @@
 """Transcriber classes for transcribing audio files using Hugging Face and OpenAI Whisper models."""
 import contextlib
 import inspect
+import math
 import os
 import zlib
 from abc import ABC, abstractmethod
@@ -104,6 +105,33 @@ def _terminal_diarize_error(error: Exception) -> bool:
         status = getattr(getattr(error, 'response', None), 'status_code', None)
         return status in (401, 403, 404)
     return False
+
+
+def _takes(function, name: str) -> bool:
+    """whether `function` (or a callable object) names the parameter `name` in its signature; one
+    that only takes **kwargs does not count, as it may pass the name on to what rejects it."""
+    try:
+        return name in inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def speaker_embeddings(embeddings) -> dict[str, list[float]] | None:
+    """the speaker embeddings of a diarized file as {speaker: [float]}, rounded to 5 decimals, the
+    speakers whose vector is empty, not finite or all zero (pyannote pads a speaker it has no
+    centroid for with zeros, and has NaN for one it had no clean window of) left out; None when
+    the pipeline returned none."""
+    if not isinstance(embeddings, dict):
+        return None
+    out = {}
+    for speaker, vector in embeddings.items():
+        try:
+            values = [float(value) for value in vector]
+        except (TypeError, ValueError):
+            continue
+        if values and all(math.isfinite(value) for value in values) and any(values):
+            out[str(speaker)] = [round(value, 5) for value in values]
+    return out
 
 
 @contextlib.contextmanager
@@ -277,16 +305,23 @@ class WhisperXTranscriber(Transcriber):
         return self.diarize_pipeline
 
     def _diarize(self, audio, segments):
-        """the speaker turns of `audio` and the segments with their speakers: (turns, segments), the
-        turns None when the pipeline could not be made, [] when it heard no one."""
+        """the speaker turns of `audio`, the segments with their speakers, and one embedding per
+        speaker: (turns, segments, embeddings), the turns None when the pipeline could not be made,
+        [] when it heard no one; the embeddings {speaker: [float]} (speaker_embeddings) when this
+        WhisperX can return them, else None."""
         pipeline = self._diarize_pipeline()
         if pipeline is None:
-            return None, segments
+            return None, segments, None
         kwargs = {key: value for key, value in (('min_speakers', self.min_speakers),
                                                 ('max_speakers', self.max_speakers)) if value}
+        if _takes(pipeline, 'return_embeddings'):
+            # a WhisperX whose pipeline takes return_embeddings (3.8.6 does): pyannote's centroid of
+            # each speaker of the file comes along
+            kwargs['return_embeddings'] = True
         try:
             with _torch_load_full():
-                diarization = pipeline(audio, **kwargs)
+                answer = pipeline(audio, **kwargs)
+            diarization, embeddings = answer if isinstance(answer, tuple) else (answer, None)
             turns = [{'start': round(float(row.start), 3), 'end': round(float(row.end), 3),
                       'speaker': str(row.speaker)} for row in diarization.itertuples()]
             if segments:
@@ -300,8 +335,8 @@ class WhisperXTranscriber(Transcriber):
             self.diarize_failed = f"{type(e).__name__}: {e}"
             print(f"WhisperX could not diarize this file ({self.diarize_failed}): its transcript comes "
                   f"without speaker turns.")
-            return None, segments
-        return turns, segments
+            return None, segments, None
+        return turns, segments, speaker_embeddings(embeddings)
 
     def transcribe(self, audio_path, language=None, diarize=None):
         """Transcribe audio with optional alignment for word-level timestamps.
@@ -312,9 +347,11 @@ class WhisperXTranscriber(Transcriber):
             diarize: whether to diarize this file; None keeps the configured `diarize`
             
         Returns:
-            (text, words, turns, segments): the words empty unless self.word_level; the turns the
-            speaker turns [{start, end, speaker}] in seconds from the start of the file, None when
-            not diarized; the segments WhisperX's, each with its speaker when diarized
+            (text, words, turns, segments, embeddings): the words empty unless self.word_level; the
+            turns the speaker turns [{start, end, speaker}] in seconds from the start of the file,
+            None when not diarized; the segments WhisperX's, each with its speaker when diarized; the
+            embeddings one vector per speaker of the turns ({speaker: [float]}), None when the file
+            was not diarized or this WhisperX returns none
         """
         audio = whisperx.load_audio(audio_path)
         # the language is always named, as the pipeline keeps the one of its last call otherwise, and
@@ -350,10 +387,10 @@ class WhisperXTranscriber(Transcriber):
         else:
             segments = result.get("segments", [])
             text = ''.join([segment["text"] for segment in segments])
-        turns = None
+        turns, embeddings = None, None
         if self.diarize if diarize is None else diarize:
             if segments:
-                turns, segments = self._diarize(audio, segments)
+                turns, segments, embeddings = self._diarize(audio, segments)
                 if words:
                     words = [word for segment in segments for word in segment.get("words", [])]
             elif self._diarize_pipeline() is not None:
@@ -362,7 +399,7 @@ class WhisperXTranscriber(Transcriber):
                 turns = []
         if self.device == "cuda":
             torch.cuda.empty_cache()
-        return text, words, turns, segments
+        return text, words, turns, segments, embeddings
 
 
 class WhisperTranscriber(Transcriber):

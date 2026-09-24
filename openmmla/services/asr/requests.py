@@ -84,8 +84,8 @@ def request_speech_transcription(
         diarize: bool = False,
 ) -> dict | None:
     def process_response(response):
-        # {text: str, words: list[dict], language: str, diarization: list[dict], diarized: bool},
-        # all but the text optional
+        # {text: str, words: list[dict], language: str, diarization: list[dict], diarized: bool,
+        # speaker_embeddings: dict[str, list[float]]}, all but the text optional
         response_dict = response.json()
         return response_dict
 

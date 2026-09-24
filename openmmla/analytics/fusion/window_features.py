@@ -41,7 +41,16 @@ bodies per frame set. A table of a session without VFA has neither.
 
 A session with personal microphones (transcripts that carry a `participant`) counts each
 wearer's words only in the 3 s buckets the synchronizer's energy vote gave them
-(`p<tag>_words`); its spurts, words and turns stay the group microphone's, and so, since
+(`p<tag>_words`). When the worn microphones left level traces (`levels` in the buckets and their
+transcripts, since 2026-09-24) each word is decided on its own instead, from the levels of every
+worn microphone while it was said (attribution.attribute_word): it counts for the wearer when their
+microphone led every other by the margin, and not when another wearer's microphone led (cross-talk)
+or none did (the teacher, or wearers talking over each other), and a word two microphones
+transcribed counts once (attribution.count_once). The bucket vote's counts stay beside it in
+`p<tag>_vote_words` (and `vote_words`, their sum, without a group microphone), which the layout
+drops. Without a group microphone, `words` is then every word the worn microphones transcribed,
+each spoken word once whoever said it (attribution.once_across), as a group microphone counts every
+word it hears. Its spurts, words and turns stay the group microphone's, and so, since
 2026-09-24, do its speech_ratio, silence_ratio and n_speakers_named: they read only the group
 microphone's entries of each bucket, as in a session with the group microphone alone (a bucket of
 wearers' entries is the group's silence only while the group microphone was naming speech around
@@ -116,6 +125,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from openmmla.bases.asr.attribution import ENERGY_MARGIN_DB, WORD_WEARER, as_levels, attribute_word, count_once, once_across, power_db, span_powers, word_lead
 from openmmla.services.vfa import features as vfa_features
 from openmmla.services.vfa.work_area import WorkArea, apply_work_area
 from openmmla.utils.asr_scope import participant_of
@@ -524,38 +534,72 @@ def _count_words(chunks: list[tuple[dict, float, float]], ws: float, we: float) 
     return words
 
 
+def _json_field(record: dict, name: str):
+    value = record.get(name)
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def _voice_stream(record: dict) -> str:
+    """the microphone and registry whose session voices a linked chunk's are: a wearer's, else the
+    chunk's speaker (the group id of a group-level base), and the base's voice registry
+    (`voice_registry`: a base launched again into the session numbers its voices anew)."""
+    tag = participant_of(record.get('participant'))
+    stream = f'participant {tag}' if tag is not None else f'speaker {record.get("speaker")}'
+    return f'{stream} {record.get("voice_registry") or ""}'.rstrip()
+
+
 def _diarization_features(chunks: list[tuple[dict, float, float]], ws: float, we: float, length: float) -> dict:
-    """the anonymous turns of the diarized chunks in the window (dia_*)."""
+    """the anonymous turns of the diarized chunks in the window (dia_*).
+
+    A chunk whose speakers the base linked into the voices of its session (a `voices` field, each
+    turn its `voice`) is read by voice, together with the other linked chunks of its microphone and
+    voice registry: the speakers, switches, overlap and shares are then the window's, across its
+    chunks. A speaker the base left without a voice (no usable embedding, or too little speech to
+    start a voice) is a speaker of its own chunk only, as every speaker of a chunk from before the
+    linking is. The speakers are the most any one reading has, the switches and the overlap are
+    summed, the entropy averaged."""
     out: dict[str, Any] = {}
-    # the anonymous turns: labels hold within a chunk, so the counts are per chunk; the entropy
-    # is averaged over the chunks, the switches and the overlap summed
-    entropies, overlap_time, switches, most_speakers = [], 0.0, 0, 0
-    for record, start, end in chunks:
-        turns = record.get('diarization')
-        if isinstance(turns, str):
-            try:
-                turns = json.loads(turns)
-            except json.JSONDecodeError:
-                turns = None
+    readings: list[list[tuple[float, float, str]]] = []
+    linked: dict[str, list[tuple[float, float, str]]] = defaultdict(list)
+    for index, (record, start, end) in enumerate(chunks):
+        turns = _json_field(record, 'diarization')
         if not isinstance(turns, list) or not turns:
             continue
-        clipped, chunk_time = [], defaultdict(float)
+        voices = isinstance(_json_field(record, 'voices'), dict)
+        clipped = []
         for turn in turns:
             try:
                 t0, t1 = start + float(turn['start']), start + float(turn['end'])
             except (KeyError, TypeError, ValueError):
                 continue
-            inside = _overlap(ws, we, t0, t1)
-            if inside > 0:
-                clipped.append((max(t0, ws), min(t1, we), str(turn.get('speaker'))))
-                chunk_time[str(turn.get('speaker'))] += inside
+            if _overlap(ws, we, t0, t1) > 0:
+                if voices and turn.get('voice') is not None:
+                    label = f'voice {turn["voice"]}'
+                else:
+                    label = f'chunk {index} {turn.get("speaker")}'  # a label holds within its chunk only
+                clipped.append((max(t0, ws), min(t1, we), label))
         if not clipped:
             continue
+        if voices:
+            linked[_voice_stream(record)].extend(clipped)
+        else:
+            readings.append(clipped)
+    readings.extend(linked.values())
+    entropies, overlap_time, switches, most_speakers = [], 0.0, 0, 0
+    for clipped in readings:
         clipped.sort()
-        most_speakers = max(most_speakers, len(chunk_time))
+        time = defaultdict(float)
+        for a0, a1, label in clipped:
+            time[label] += a1 - a0
+        most_speakers = max(most_speakers, len(time))
         switches += sum(1 for (_, _, la), (_, _, lb) in zip(clipped, clipped[1:]) if la != lb)
         overlap_time += _union_overlap([(a0, a1) for a0, a1, _ in clipped])
-        entropies.append(_entropy(chunk_time))
+        entropies.append(_entropy(time))
     diarized = bool(entropies)
     out['dia_speakers'] = most_speakers if diarized else None
     out['dia_switches'] = switches if diarized else None
@@ -564,10 +608,53 @@ def _diarization_features(chunks: list[tuple[dict, float, float]], ws: float, we
     return out
 
 
+class LevelTraces:
+    """one worn microphone's level traces (attribution.levels_record, each from its start), found by
+    moment: the synchronizer's buckets hold one for each of its segments, speech or silence, its
+    transcripts one for each of its chunks; a moment is read from a bucket's, and from a
+    transcript's where no bucket's holds it (a base run without a synchronizer, a bucket the
+    synchronizer lost)."""
+
+    def __init__(self):
+        self._sources: dict[str, list[tuple[float, dict]]] = {'bucket': [], 'chunk': []}
+        self._index: dict[str, tuple[list[float], list[tuple[float, dict]], float]] | None = None
+
+    def add(self, source: str, start: float, levels: dict):
+        self._sources[source].append((float(start), levels))
+        self._index = None
+
+    def __bool__(self) -> bool:
+        return any(self._sources.values())
+
+    def has(self, source: str) -> bool:
+        """whether any trace came from `source` ('bucket' or 'chunk')."""
+        return bool(self._sources.get(source))
+
+    def at(self, moment: float) -> tuple[float, dict] | None:
+        """(start, levels) of the trace holding `moment`, a bucket's before a transcript's; None
+        when none does."""
+        if self._index is None:
+            self._index = {}
+            for source, held in self._sources.items():
+                held = sorted(held, key=lambda pair: pair[0])
+                longest = max((len(levels['db']) * levels['hop'] for _, levels in held), default=0.0)
+                self._index[source] = ([start for start, _ in held], held, longest)
+        for source in ('bucket', 'chunk'):
+            starts, held, longest = self._index[source]
+            i = bisect_right(starts, moment) - 1
+            while i >= 0 and starts[i] >= moment - longest:
+                start, levels = held[i]
+                if moment < start + len(levels['db']) * levels['hop']:
+                    return start, levels
+                i -= 1
+        return None
+
+
 @dataclass
 class PersonalSpeech:
     """the personal microphones of a session: who wore one, the buckets each won, whether a
-    group microphone transcribed too, and when that one named speech."""
+    group microphone transcribed too, when that one named speech, and the level traces of the worn
+    microphones (from the buckets and their transcripts), which decide their words one by one."""
     participants: list[str]
     won: dict[str, tuple[list[float], list[float]]]  # per participant: sorted bucket starts, their ends
     has_group: bool
@@ -575,12 +662,105 @@ class PersonalSpeech:
     # named after a wearer); None without a group microphone, or when its speech is named after a
     # wearer too, so that its entries cannot be told from the worn ones'
     group_speech: list[float] | None = None
+    # per participant: the level traces of their microphone, from the buckets and their transcripts
+    traces: dict[str, LevelTraces] | None = None
+    # whether the words are decided one by one: every wearer who left transcripts left level traces,
+    # and the buckets carry them wherever a synchronizer voted (a session transcribed before 2026-09-24
+    # has none, and one whose synchronizer kept no levels keeps the bucket vote)
+    by_word: bool = False
+    margin_db: float = ENERGY_MARGIN_DB
+    # where the levels that decide the words come from: 'buckets' (the transcripts' fill the gaps) or
+    # 'transcripts' (a base run without a synchronizer); None when the words are not decided one by one
+    levels_from: str | None = None
+
+    def __post_init__(self):
+        self._classes: dict[int, list[str] | None] = {}
+        self._counted: dict[int, list[bool]] = {}  # per worn transcript: its words that count once across microphones
+        # every microphone with a level: a worn one that never passed its speech gate still leads
+        self._level_tags = sorted(set(self.participants) | set(self.traces or {}), key=_tag_key)
 
     def won_at(self, participant: str, moment: float) -> bool:
         """whether `moment` falls in a bucket the participant won."""
         starts, ends = self.won.get(participant, ([], []))
         i = bisect_right(starts, moment) - 1
         return i >= 0 and moment < ends[i]
+
+    def snr(self, participant: str, first: float, last: float) -> float | None:
+        """how far the participant's microphone stood over its floor from `first` to `last` (session
+        time): the power mean of the steps of theirs the span covers, from the trace that holds
+        `first` (LevelTraces.at) and from the ones that follow it where the span runs past its end,
+        less the floor of the first; None when no trace holds `first` (attribute_word then counts the
+        microphone as at its floor)."""
+        traces = (self.traces or {}).get(participant)
+        if not traces:
+            return None
+        powers, floor, moment = [], None, first
+        for _ in range(64):  # a word covers a few traces at most
+            found = traces.at(moment)
+            if found is None:
+                break
+            start, levels = found
+            floor = levels['floor_db'] if floor is None else floor
+            until = start + len(levels['db']) * levels['hop']
+            powers += span_powers(levels['db'], levels['hop'], moment - start, last - start)
+            if last <= until or until <= moment:
+                break
+            moment = until + 1e-6  # the next trace of this microphone, a bucket's or a transcript's
+        level = power_db(powers)
+        return None if level is None else level - floor
+
+    def _judge(self, record: dict, start: float, end: float) -> list[tuple[float, float, str, str, float]]:
+        """(start, end, wearer, class, lead) of each word of a worn microphone's transcript, in the
+        order of word_times: attribute_word and word_lead over the levels of every worn microphone
+        while it was said."""
+        wearer = participant_of(record.get('participant'))
+        judged = []
+        for first, last in word_spans(record, start, end):
+            t0, t1 = start + first, start + last
+            snrs = {tag: self.snr(tag, t0, t1) for tag in self._level_tags}
+            judged.append((t0, t1, wearer, attribute_word(wearer, snrs, self.margin_db), word_lead(wearer, snrs)))
+        return judged
+
+    def decide_words(self, transcriptions: list[dict]):
+        """decides every word of the session's worn transcripts at once (by_word), so that a word two
+        worn microphones transcribed counts for one wearer at most (count_once), and once among all
+        the words spoken (once_across)."""
+        if not self.by_word:
+            return
+        judged, owners = [], []
+        for record in transcriptions:
+            if participant_of(record.get('participant')) is None:
+                continue
+            start = _time(record)
+            if start <= 0:
+                continue
+            words = self._judge(record, start, _end_time(record, 1.0))  # as window_features indexes a transcript
+            owners.append((id(record), len(judged), len(words)))
+            judged.extend(words)
+        classes = count_once(judged)
+        counted = once_across(judged, classes)
+        for key, first, n in owners:
+            self._classes[key] = classes[first:first + n]
+            self._counted[key] = counted[first:first + n]
+
+    def words_counted(self, record: dict) -> list[bool] | None:
+        """which words of a worn microphone's transcript count when every spoken word counts once,
+        whichever microphones transcribed it (decide_words, once_across), in the order of word_times;
+        None when the words are not decided one by one."""
+        return self._counted.get(id(record)) if self.by_word else None
+
+    def word_classes(self, record: dict, start: float, end: float) -> list[str] | None:
+        """whose each word of a worn microphone's transcript is (attribution.attribute_word), in the
+        order of word_times, from the levels of every worn microphone while it was said, a word two
+        microphones transcribed counted once (decide_words); None when the words are not decided one
+        by one (by_word)."""
+        key = id(record)
+        if key not in self._classes:
+            classes = None
+            if self.by_word and participant_of(record.get('participant')) is not None:
+                classes = [judged[3] for judged in self._judge(record, start, end)]
+            self._classes[key] = classes
+        return self._classes[key]
 
     def group_near(self, moment: float) -> bool:
         """whether the group microphone named speech within GROUP_SILENCE_REACH seconds before
@@ -642,9 +822,41 @@ def word_times(record: dict, start: float, end: float) -> list[float]:
     return [(end - start) * i / n for i in range(n)]
 
 
+# a word the aligner gave a start and no end lasts this long
+WORD_SECONDS = 0.3
+
+
+def word_spans(record: dict, start: float, end: float) -> list[tuple[float, float]]:
+    """from when to when each word of word_times was said, in seconds from the chunk's start: its
+    start and end when the transcriber gave them (WORD_SECONDS when it gave no end), the span of the
+    word before it for a word the aligner could not place; the even share of the chunk each word of
+    an unstamped chunk has."""
+    stamps = _word_stamps(record)
+    if stamps is None:
+        n = len(str(record.get('text') or '').split())
+        share = (end - start) / n if n else 0.0
+        return [(share * i, share * (i + 1)) for i in range(n)]
+    entries = _json_field(record, 'words')
+    spans, last = [], None
+    for entry in entries if isinstance(entries, list) else []:
+        try:
+            first = float(entry['start'])
+        except (KeyError, TypeError, ValueError):
+            if last is not None:
+                spans.append(last)
+            continue
+        try:
+            until = float(entry['end'])
+        except (KeyError, TypeError, ValueError):
+            until = first + WORD_SECONDS
+        last = (first, until if until > first else first + WORD_SECONDS)
+        spans.append(last)
+    return spans
+
+
 def personal_speech(recognitions: list[dict], transcriptions: list[dict]) -> PersonalSpeech | None:
     """the session's personal microphones, None when no transcript carries a participant (every
-    older session)."""
+    older session); with level traces, every worn word is decided here (decide_words)."""
     tags = {participant_of(t.get('participant')) for t in transcriptions} - {None}
     if not tags:
         return None
@@ -657,6 +869,24 @@ def personal_speech(recognitions: list[dict], transcriptions: list[dict]) -> Per
     participants = sorted(tags | voted, key=_tag_key)
     won = {tag: ([s for s, _ in spans.get(tag, [])], [e for _, e in spans.get(tag, [])]) for tag in participants}
     has_group = any(participant_of(t.get('participant')) is None for t in transcriptions)
+    # the level traces of the worn microphones: every segment's in the buckets, every chunk's in the transcripts
+    traces: dict[str, LevelTraces] = defaultdict(LevelTraces)
+    for record in recognitions:
+        held = _json_field(record, 'levels')
+        for tag, value in (held.items() if isinstance(held, dict) else ()):
+            levels, start = as_levels(value), value.get('start') if isinstance(value, dict) else None
+            try:
+                start = float(start) if start is not None else _time(record)
+            except (TypeError, ValueError):
+                continue
+            if levels is not None and start > 0 and math.isfinite(start):
+                traces[str(tag)].add('bucket', start, levels)
+    for record in transcriptions:
+        tag, levels = participant_of(record.get('participant')), as_levels(record.get('levels'))
+        start = _time(record)
+        if tag is not None and levels is not None and start > 0:
+            traces[tag].add('chunk', start, levels)
+    traces = {tag: held for tag, held in traces.items() if held}
     # the names the group microphone gave its own chunks: its entries are told from the worn ones'
     # by name, so a group microphone that names speech after a wearer (speaker verification with
     # profiles named after the tags) cannot be read apart, and its session keeps the pooled speech
@@ -667,7 +897,16 @@ def personal_speech(recognitions: list[dict], transcriptions: list[dict]) -> Per
         group_speech = sorted({_time(record) for record in recognitions
                                if any(name not in SILENT_LABELS and name not in participants
                                       for name in _speaker_names(record))})
-    return PersonalSpeech(participants=participants, won=won, has_group=has_group, group_speech=group_speech)
+    # the words are decided one by one when every wearer left level traces; where a synchronizer voted
+    # (energies) its buckets must carry them too, since a transcript's trace covers only its own speech,
+    # so that another microphone would stand at its floor between its chunks
+    bucket_levels = any(held.has('bucket') for held in traces.values())
+    by_word = bool(traces) and tags <= set(traces) and (bucket_levels or not voted)
+    personal = PersonalSpeech(participants=participants, won=won, has_group=has_group, group_speech=group_speech,
+                              traces=traces or None, by_word=by_word,
+                              levels_from=('buckets' if bucket_levels else 'transcripts') if by_word else None)
+    personal.decide_words(transcriptions)
+    return personal
 
 
 def _heard(entries: list[tuple[str, float, Any]], bucket: float) -> dict[tuple[str, Any], float]:
@@ -711,8 +950,13 @@ def speech_features(recognition: EventIndex, transcription: EventIndex, ws: floa
     speaker once, and no bucket counts for more than the time it covers.
 
     With personal microphones (`personal`), each wearer's words count only in the buckets they
-    won (`p<tag>_words`), and the spurts, words and turns are the group microphone's; without
-    one, `words` is the wearers' sum and the spurts and turns come from every chunk.
+    won (`p<tag>_words`), or, when the worn microphones left level traces (personal.by_word), only
+    the words their microphone led on (the bucket vote's count then stays in `p<tag>_vote_words`),
+    and the spurts, words and turns are the group microphone's. Without one the spurts and turns
+    come from every chunk, and `words` is, with level traces, every word the worn microphones
+    transcribed, each spoken word once whoever said it (PersonalSpeech.words_counted), as a group
+    microphone counts every word it hears (the vote's sum stays in `vote_words`); before level
+    traces it is the wearers' sum.
 
     With a group microphone beside the worn ones whose entries can be told apart
     (`personal.group_speech`), speech_ratio, silence_ratio and n_speakers_named read only its entries
@@ -784,20 +1028,37 @@ def speech_features(recognition: EventIndex, transcription: EventIndex, ws: floa
     started = [(record, start, end) for record, start, end in basis if ws <= start < we]
     out['n_spurts'] = len(started)
     out['mean_spurt_seconds'] = _round(_mean(end - start for _, start, end in started))
-    # a wearer's word counts when it was said in a bucket the energy vote gave them
+    # a wearer's word counts when their microphone led while it was said, and, before level traces,
+    # when it was said in a bucket the energy vote gave them
     worn: dict[str, int] = {}
+    voted: dict[str, int] = {}
+    spoken = 0  # every worn word, each spoken word once (with level traces)
     for tag in personal.participants:
-        count = 0
+        count = by_vote = 0
         for record, start, end in chunks:
             if participant_of(record.get('participant')) != tag:
                 continue
-            for offset in word_times(record, start, end):
+            classes = personal.word_classes(record, start, end)
+            counted = personal.words_counted(record)
+            for i, offset in enumerate(word_times(record, start, end)):
                 moment = start + offset
-                if ws <= moment < we and personal.won_at(tag, moment):
-                    count += 1
+                if not ws <= moment < we:
+                    continue
+                won = personal.won_at(tag, moment)
+                by_vote += won
+                count += won if classes is None or i >= len(classes) else classes[i] == WORD_WEARER
+                spoken += counted[i] if counted is not None and i < len(counted) else 1
         worn[f'p{tag}_words'] = count
-    out['words'] = _count_words(group, ws, we) if personal.has_group else sum(worn.values())
+        voted[f'p{tag}_vote_words'] = by_vote
+    if personal.has_group:
+        out['words'] = _count_words(group, ws, we)
+    else:
+        out['words'] = spoken if personal.by_word else sum(worn.values())
     out.update(worn)
+    if personal.by_word:
+        if not personal.has_group:
+            out['vote_words'] = sum(voted.values())
+        out.update(voted)
     out.update(_diarization_features(basis, ws, we, length))
     return out
 

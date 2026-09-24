@@ -45,7 +45,10 @@ class SpeechTranscriber(Server):
     diarizes the file with pyannote and the answer carries `diarization`, [{start, end, speaker}]
     as SPEAKER_00, SPEAKER_01 ... in seconds from the start of the file, and `diarized`, which
     says whether it could (the other backends cannot). `diarize` in the local config does it for
-    every file."""
+    every file. With the turns come `speaker_embeddings`, pyannote's embedding of each speaker of
+    the file ({speaker: [float]}, from a WhisperX whose pipeline returns them, as 3.8.6 does), from
+    which a base links the speakers of its chunks into the voices of its session
+    (openmmla.bases.asr.voices)."""
 
     def __init__(self, project_dir: str | None, config_path: str):
         """Initialize the speech transcriber.
@@ -340,24 +343,28 @@ class SpeechTranscriber(Server):
             
         Returns:
             Dict with the transcribed text, its words when word_level, and when diarized its
-            speaker turns (`diarization`) and `diarized: True`
+            speaker turns (`diarization`), `diarized: True` and, when the pipeline gives them, one
+            embedding per speaker of the turns (`speaker_embeddings`, {speaker: [float]})
         """
         if isinstance(self.transcriber, WhisperXTranscriber):
             result = self.transcriber.transcribe(audio_file_path, language=language_code(language), diarize=diarize)
         else:
             result = self.transcriber.transcribe(audio_file_path, language=language_code(language))
-        # WhisperX answers (text, words, turns, segments), the other transcribers the text alone
+        # WhisperX answers (text, words, turns, segments, embeddings), the other transcribers the text alone
         if isinstance(result, tuple):
-            text, words, turns = (tuple(result) + (None, None, None))[:3]
+            text, words, turns, _, embeddings = (tuple(result) + (None,) * 5)[:5]
             words = words or []
         else:
-            text, words, turns = result, [], None
+            text, words, turns, embeddings = result, [], None, None
         response = {"text": text}
         if self.word_level:
             response["words"] = words
         if turns is not None:
             response["diarization"] = turns
             response["diarized"] = True
+            if embeddings is not None:
+                # a base links the chunk's speakers to the voices of its session with them
+                response["speaker_embeddings"] = embeddings
         return response
 
     def _transcribe_with_azure(self, audio_file_path, language=None):

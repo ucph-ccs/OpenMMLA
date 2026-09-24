@@ -111,8 +111,11 @@ DROPPED = {
     r'^p\d+_work_area_ready_ratio$': 'a coverage counter: the m_wa mask only, never a feature',
     r'^p\d+_in_group$': "the fusion's pupil set: data_checks' fusion_check only",
     r'^pair\d+_\d+_joint_attention_baseline$': 'the proximity baseline of joint attention: the raw share and the excess carry it',
-    r'^p[\w-]+_words$': "a pupil's words from the worn microphone that won the bucket: only sessions with worn microphones "
+    r'^p[\w-]+_words$': "a pupil's words from their worn microphone (the words it led on, or those in buckets it won; "
+                        "p<t>_vote_words the bucket vote's beside the first): only sessions with worn microphones "
                         'have it (none of the test sessions, whose audio is the group microphone alone)',
+    r'^vote_words$': "the worn microphones' words by the bucket vote, beside `words` in a session without a group "
+                     'microphone whose words are decided one by one: a comparison, never a feature',
     r'^pair\d+_\d+_face_(ab|ba)_ratio$': 'replaced by face_any = max(ab, ba), since ab and ba follow the arbitrary tag order',
     # face_both = min(ab, ba) is never built: > 0 in 0-0.6 % of windows
     r'^pair\d+_\d+_face_mutual_ratio$': 'near-dead (> 0 in 0.06 % of IPS pair-windows); its support is in data_checks.json',

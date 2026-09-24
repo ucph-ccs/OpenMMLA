@@ -133,6 +133,14 @@ def main():
             speech['group_apart'] = False
         if personal is not None and personal.group_speech is not None:
             speech['group_silence_reach'] = fusion.GROUP_SILENCE_REACH
+        if personal is not None:
+            # how p<tag>_words (and words without a group microphone) were counted: word by word from
+            # the worn microphones' levels (at a fixed margin, from the buckets' traces or, without a
+            # synchronizer, the transcripts'), or by the bucket vote of a session without levels
+            speech['worn_words'] = 'per word' if personal.by_word else 'bucket vote'
+            if personal.by_word:
+                speech['word_margin_db'] = personal.margin_db
+                speech['levels_from'] = personal.levels_from
         from openmmla.utils.session_provenance import analysis_record, write_analysis_record
         record = analysis_record(session_id, inputs=inputs, outputs=[path], steps=['fusion.window_features'],
                                  parameters={'window': args.window, 'step': args.step, 'participants': participants,

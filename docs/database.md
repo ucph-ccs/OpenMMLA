@@ -22,8 +22,8 @@ Organization (default: admin)
 
 | `event_type` | Written by | Fields |
 |---|---|---|
-| `asr_transcription` | ASR base | `window_start_time`, `window_end_time`, `text`, `words`, `speaker`, and `diarization` when the chunk came back with speaker turns (the base's `-dia`, or the transcriber's own `SpeechTranscriber.local.diarize`): `[{start, end, speaker}]` in seconds from `window_start_time`, the speakers `SPEAKER_00`, `SPEAKER_01` ... within the chunk |
-| `asr_recognition` | ASR synchronizer | `window_start_time`, `window_end_time`, `speakers`, `similarities`, `durations`, `segment_start_times` |
+| `asr_transcription` | ASR base | `window_start_time`, `window_end_time`, `text`, `words`, `speaker`, and `diarization` when the chunk came back with speaker turns (the base's `-dia`, or the transcriber's own `SpeechTranscriber.local.diarize`): `[{start, end, speaker}]` in seconds from `window_start_time`, the speakers `SPEAKER_00`, `SPEAKER_01` ... within the chunk; when the base linked them into the voices of its session (see [voices across chunks](pipelines/asr.md#voices-across-chunks)), each turn and diarized word also carries its `voice` (1, 2, 3 ...) and the record `voices` (`{SPEAKER_NN: {voice, similarity}}`) and `voice_registry` (the registry the voices are numbered in); a worn microphone's also `participant`, `attribution: energy` and `levels` (the chunk's raw level every 100 ms and its floor; see [personal microphones](pipelines/asr.md#personal-microphones-and-energy-attribution)) |
+| `asr_recognition` | ASR synchronizer | `window_start_time`, `window_end_time`, `speakers`, `similarities`, `durations`, `segment_start_times`; with worn microphones also `energies` (the vote's `{tag: snr_db}`) and `levels` (every worn microphone's segment level every 100 ms and its floor) |
 | `ips_translation` | IPS synchronizer | `window_start_time`, `window_end_time`, `translations` |
 | `ips_rotation` | IPS synchronizer | `window_start_time`, `window_end_time`, `rotations` |
 | `ips_relation` | IPS synchronizer | `window_start_time`, `window_end_time`, `graph` |

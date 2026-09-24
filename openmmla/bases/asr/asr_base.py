@@ -25,7 +25,9 @@ from openmmla.utils.audio.properties import get_energy_level, calculate_audio_du
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir, session_artifact_dir
 from openmmla.utils import session_provenance
 from openmmla.utils.asr_scope import LAUNCH_GROUP, LAUNCH_SPEAKERS, chunk_cap, launch_attribution, normalize_asr_scope, participant_of, resolve_speaker_verification as _resolve_speaker_verification
-from openmmla.bases.asr.attribution import SPEECH_GATE_SNR_DB, NoiseFloor, as_decibels, as_number, energy_record, relative_speech, segment_energy, snr_db, speech_gate_of, transcript_time
+from openmmla.bases.asr.attribution import LEVEL_HOP_SECONDS, SPEECH_GATE_SNR_DB, NoiseFloor, as_decibels, as_number, energy_record, level_trace, levels_record, relative_speech, segment_energy, snr_db, speech_gate_of, transcript_time
+from openmmla.bases.asr.chunking import QUIET_CUT_SECONDS, quiet_cut
+from openmmla.bases.asr.voices import VOICE_LINK_THRESHOLD, VOICE_MIN_SECONDS, VoiceRegistry, speaker_seconds, with_voices
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
@@ -93,6 +95,14 @@ class ASRBase(Base):
     logger = get_logger(f'asr-base')
     participant: str | None = None  # the tag of whoever wears this base's microphone (Bases.participant)
     _noise_floor = None  # the base's running noise floor (NoiseFloor), fresh each run
+    # the voices this base heard in its session (VoiceRegistry): kept while the session stays, so a run
+    # restarted after a recording error goes on numbering them; the session it is of, and its key
+    # (voice_registry in the transcripts), which a base launched again into the session changes
+    _voice_registry = None
+    _voice_session = None
+    _voice_key = None
+    _voice_lock = threading.Lock()  # a transcription thread that outlived its stop may link beside the final chunks
+    _embeddings_told = False  # whether a transcriber that diarized without speaker embeddings was named
     speech_gate = 'absolute'  # absolute: rms/peak thresholds after gain; relative: raw snr over the base's floor
     speech_gate_snr_db = SPEECH_GATE_SNR_DB  # the relative gate's dB over the floor
 
@@ -170,6 +180,7 @@ class ASRBase(Base):
         self.stream_name = None  # the Streams entry a 'stream' source pulls
         self._language_told = False  # whether a transcriber that did not take our language was named
         self._diarize_told = False  # whether a transcriber that did not diarize for us was named
+        self._embeddings_told = False  # whether a transcriber that diarized without speaker embeddings was named
         self.url = None
         self._joined_session = None  # (session id, source key) this base noted itself in (session sources)
 
@@ -1038,6 +1049,7 @@ class ASRBase(Base):
         # reset attributes
         self.last_speaker = None
         self._noise_floor = NoiseFloor()
+        self._voices_for_session()
         self.audio_queue = queue.Queue()
         self.transcription_queue = queue.Queue()
         self.speaker_frames_dict = {}
@@ -1160,11 +1172,20 @@ class ASRBase(Base):
                 parameters={
                     'base_type': self.base_type, 'id': self.id, 'asr_scope': self.asr_scope,
                     'speaker_verification': self.speaker_verification, 'max_chunk_duration': self.max_chunk_duration,
+                    # how far before its cap a chunk may be cut at its quietest moment (None: at the cap)
+                    'quiet_cut_seconds': QUIET_CUT_SECONDS if self._quiet_cuts() else None,
+                    # how the speakers of a diarized chunk are linked into the voices of the session (a
+                    # base that asks for turns; one whose transcriber diarizes every file links too, and
+                    # its transcripts say so by their voices)
+                    'voice_link_threshold': VOICE_LINK_THRESHOLD if self.diarize else None,
+                    'voice_min_seconds': VOICE_MIN_SECONDS if self.diarize else None,
                     'selected_speakers': list(self.selected_speakers or []),
                     'group_speaker_id': self.group_speaker_id, 'language': self.language,
                     'participant': self.participant,
                     'wearer_source': getattr(self, 'wearer_source', None),
                     'attribution': 'energy' if self.participant is not None else None,
+                    # the step of the level trace a worn microphone's transcripts and recognitions carry
+                    'level_hop_seconds': LEVEL_HOP_SECONDS if self._keeps_levels() else None,
                     'register_duration': self.register_duration, 'recognize_duration': self.recognize_duration,
                     'rms_threshold': self.rms_threshold, 'rms_peak_threshold': self.rms_peak_threshold,
                     'speech_gate': self.speech_gate, 'speech_gate_snr_db': self.speech_gate_snr_db,
@@ -1390,12 +1411,35 @@ class ASRBase(Base):
 
     def _segment_energy(self, segment_start_time: float, frames: bytes) -> dict:
         """the level of a segment's raw frames and the base's noise floor at that moment, as a
-        recognition carries it."""
+        recognition carries it (no floor for the first segment of a run: NoiseFloor)."""
         if self._noise_floor is None:
             self._noise_floor = NoiseFloor()
         rms, peak = segment_energy(frames)
         floor = self._noise_floor.update(segment_start_time, rms)
         return energy_record(rms, peak, floor)
+
+    def _segment_levels(self, frames: bytes, energy: dict | None) -> dict | None:
+        """a worn microphone's segment level every 100 ms and its floor (levels_record), which its
+        recognition carries so that the synchronizer's bucket holds every worn microphone's levels,
+        speech or silence; None for a base that keeps none."""
+        if not self._keeps_levels() or energy is None:
+            return None
+        return levels_record(level_trace(frames, 16000), energy.get('floor_db'))
+
+    def _keeps_levels(self) -> bool:
+        """whether this base's transcripts and recognitions carry their level trace: a worn
+        microphone's (its words are decided from the levels of every worn microphone), whose chunks
+        are its raw 16 kHz frames."""
+        return self.participant is not None and not getattr(self, 'sp', False)
+
+    def _chunk_levels(self, frames: bytes) -> dict | None:
+        """a finished chunk's level every 100 ms from its start and this base's noise floor as it
+        stood when the chunk ended (levels_record), taken then, in the order the segments arrived,
+        so a live run and a replay give the same; None for a base that keeps none."""
+        if not self._keeps_levels():
+            return None
+        floor = self._noise_floor.last if self._noise_floor is not None else None
+        return levels_record(level_trace(frames, 16000), floor)
 
     def _is_speech(self, processed_audio_path, rms_value, peak_value, energy) -> bool:
         """whether a segment is speech: VAD kept speech in it and, with the absolute gate, its level
@@ -1496,7 +1540,8 @@ class ASRBase(Base):
 
                 self._assemble_chunk_with_hsr(speaker, segment_start_time, frames)
                 self._publish_recognition(segment_start_time, recognize_start_time, [speaker],
-                                          [np.round(np.float64(similarity), 4)], [duration], energy=energy)
+                                          [np.round(np.float64(similarity), 4)], [duration], energy=energy,
+                                          levels=self._segment_levels(frames, energy))
 
                 if self.store:
                     shutil.move(segment_audio_path,
@@ -1644,9 +1689,10 @@ class ASRBase(Base):
         frame_rate = 8000 if self.sp and self.speaker_verification else 16000
         while not self.stop_event.is_set():
             try:
-                frames, speaker, chunk_start_time, chunk_end_time = self.transcription_queue.get(timeout=2)
+                frames, speaker, chunk_start_time, chunk_end_time, levels = self.transcription_queue.get(timeout=2)
                 transcribe_result = self._transcribe(frames, frame_rate)
-                self._upload_transcription(speaker, transcribe_result, chunk_start_time, chunk_end_time)
+                self._upload_transcription(speaker, transcribe_result, chunk_start_time, chunk_end_time,
+                                           levels=levels)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -1678,10 +1724,24 @@ class ASRBase(Base):
                 last_speaker_frames += frames
                 chunk_end_time = segment_start_time + self.recognize_duration
                 if self.max_chunk_duration and chunk_end_time - chunk_start_time >= self.max_chunk_duration:
-                    # the chunk has grown to its cap: it goes on its own, and the next segment of
-                    # this speaker starts a new one
-                    self._finish_chunk(speaker, chunk_start_time, chunk_end_time, last_speaker_frames, fr)
-                    self.speaker_frames_dict[speaker] = (chunk_end_time, b'')
+                    # the chunk has grown to its cap: it goes on its own. without speaker verification
+                    # (group, wearer) it is cut at its quietest moment before the cap and the rest
+                    # starts the next chunk (_quiet_cuts); else, with too little audio for that, or when
+                    # that moment ends the chunk, it goes whole, and the next segment of this speaker
+                    # starts a new one
+                    cut = quiet_cut(last_speaker_frames, fr, self.max_chunk_duration) if self._quiet_cuts() else None
+                    if cut is None or 2 * cut >= len(last_speaker_frames):
+                        self._finish_chunk(speaker, chunk_start_time, chunk_end_time, last_speaker_frames, fr)
+                        self.speaker_frames_dict[speaker] = (chunk_end_time, b'')
+                    else:
+                        # the rest ends with this segment's audio, so its start is counted back from this
+                        # segment's stamp rather than on from the chunk's start: audio a live stream lost
+                        # in an earlier segment shifts no later chunk
+                        rest = last_speaker_frames[2 * cut:]
+                        cut_time = segment_start_time + (len(frames) - len(rest)) / (2 * fr)
+                        cut_time = min(max(cut_time, chunk_start_time), chunk_end_time)
+                        self._finish_chunk(speaker, chunk_start_time, cut_time, last_speaker_frames[:2 * cut], fr)
+                        self.speaker_frames_dict[speaker] = (cut_time, rest)
                 else:
                     self.speaker_frames_dict[speaker] = (chunk_start_time, last_speaker_frames)
             else:
@@ -1728,6 +1788,16 @@ class ASRBase(Base):
                 self.speaker_frames_dict[speaker] = (segment_start_time, frames)
 
         self.last_speaker = speaker
+
+    def _quiet_cuts(self) -> bool:
+        """whether a chunk that reaches its cap is cut at its quietest moment before it
+        (chunking.quiet_cut): a base without speaker verification (group, wearer) that separates no
+        speech, with a cap of at least two segments. The cut never falls before half the cap, so the
+        rest it leaves is shorter than half the cap plus a segment, which such a cap keeps below the
+        cap: rests cannot pile up from one chunk to the next."""
+        cap = self.max_chunk_duration
+        return (bool(cap) and not self.speaker_verification and not self.sp
+                and float(cap) >= 2 * float(self.recognize_duration or 0))
 
     def _finish_chunk(self, speaker: str, chunk_start_time: float, chunk_end_time: float, chunk_frames: bytes,
                       framerate: int):
@@ -1786,7 +1856,8 @@ class ASRBase(Base):
     def _enqueue_transcription(self, frames: bytes, speaker: str, chunk_start_time: float, chunk_end_time: float):
         """Add an audio chunk to the transcription queue.
 
-        If transcription is enabled (self.tr), enqueues the audio frames along with speaker and timing details.
+        If transcription is enabled (self.tr), enqueues the audio frames along with speaker and timing
+        details, and, for a worn microphone, the chunk's level trace and floor as they are now.
 
         Args:
             frames: audio frames (bytes) to be transcribed.
@@ -1795,7 +1866,8 @@ class ASRBase(Base):
             chunk_end_time: end time of the audio chunk.
         """
         if self.tr:
-            self.transcription_queue.put((frames, speaker, chunk_start_time, chunk_end_time))
+            self.transcription_queue.put((frames, speaker, chunk_start_time, chunk_end_time,
+                                          self._chunk_levels(frames)))
 
     def _process_final_chunks(self):
         """Process any remaining audio chunks when recording ends.
@@ -1823,7 +1895,8 @@ class ASRBase(Base):
             if self.tr and speaker not in ['silent', 'unknown']:
                 try:
                     transcribe_result = self._transcribe(chunk_frames, fr)
-                    self._upload_transcription(speaker, transcribe_result, chunk_start_time, chunk_end_time)
+                    self._upload_transcription(speaker, transcribe_result, chunk_start_time, chunk_end_time,
+                                               levels=self._chunk_levels(chunk_frames))
                     self.logger.info(f"Final chunk transcription completed for speaker {speaker}")
                 except Exception as e:
                     self.logger.warning(f"Failed to transcribe final chunk for speaker {speaker}: {e}")
@@ -1864,6 +1937,15 @@ class ASRBase(Base):
         its backend cannot (only a local WhisperX model diarizes), its pyannote pipeline could not
         be made (no Hugging Face token, terms not accepted), or it runs code from before a request
         could ask."""
+        if response.get("diarized") and response.get("diarization") and not self._embeddings_told \
+                and not isinstance(response.get("speaker_embeddings"), dict):
+            # turns without embeddings: a service built before it returned them, whose chunks go unlinked
+            self._embeddings_told = True
+            self.logger.warning(
+                "The speech transcriber diarized this chunk without speaker embeddings, so its speakers are not "
+                "linked into the voices of the session: its service runs code from before it returned them (or a "
+                "WhisperX whose pipeline cannot). Transcripts keep each chunk's own SPEAKER_NN until the speech "
+                "transcriber image is built anew and started again.")
         if not self.diarize or self._diarize_told:
             return
         if response.get("diarized"):
@@ -1894,7 +1976,8 @@ class ASRBase(Base):
             f"may run code from before a request could name a language. Start the ASR Server card again, "
             f"which builds the speech transcriber anew.")
 
-    def _upload_transcription(self, speaker: str, transcribe_result: dict, chunk_start_time: float, chunk_end_time: float):
+    def _upload_transcription(self, speaker: str, transcribe_result: dict, chunk_start_time: float, chunk_end_time: float,
+                              levels: dict | None = None):
         """Upload the transcribed speech chunk to the database.
 
         Constructs a transcription record with speaker, text content, and timing information,
@@ -1906,34 +1989,82 @@ class ASRBase(Base):
             transcribe_result: the result of the transcription, including text and words.
             chunk_start_time: start timestamp of the audio chunk.
             chunk_end_time: end timestamp of the audio chunk.
+            levels: a worn microphone's level trace of the chunk and its floor (levels_record), which
+                decides its words (default: None, stored without).
         """
         from openmmla.utils.constants import EVENT_TYPE_ASR_TRANSCRIPTION
+        words = transcribe_result.get("words", [])
+        turns = transcribe_result.get("diarization")
+        voices = self._link_voices(transcribe_result)
+        if voices is not None:
+            # each diarized word and turn carries the session voice of its speaker beside its SPEAKER_NN
+            words, turns = with_voices(words, voices), with_voices(turns, voices)
         fields = {
             "window_start_time": chunk_start_time,
             "window_end_time": chunk_end_time,
             "text": transcribe_result.get("text", ""),
-            "words": json.dumps(transcribe_result.get("words", [])),
+            "words": json.dumps(words),
             "speaker": speaker,
         }
-        turns = transcribe_result.get("diarization")
         if turns is not None:
             # the anonymous speaker turns of the chunk, in seconds from its start, as the words are
             fields["diarization"] = json.dumps(turns)
+        if voices is not None:
+            # {SPEAKER_NN: {voice, similarity}}: which voice of the session each speaker of the chunk is,
+            # and the registry that numbered them (a base launched again into the session numbers anew)
+            fields["voices"] = json.dumps(voices)
+            fields["voice_registry"] = self._voice_key
         heard = f" ({len({turn.get('speaker') for turn in turns})} speakers, {len(turns)} turns)" if turns else ""
+        if voices:
+            heard += f" voices {', '.join(str(voice) for voice in sorted(link['voice'] for link in voices.values()))}"
         print(f"{GREEN}[Speaker Transcription]{ENDC}{chunk_start_time}: "
               f"{GREEN}{speaker} : {transcribe_result.get('text', 'N/A')}{heard}{ENDC}")
         if self.participant is not None:
             # a worn microphone's transcript: whose it is, and a point of its own (several bases' chunks end together)
             fields["participant"] = self.participant
             fields["attribution"] = "energy"
+            if levels is not None:
+                # the chunk's level every 100 ms from its start and its floor: a JSON string, as write_event
+                # would str() a dict
+                fields["levels"] = json.dumps(levels)
             self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_TRANSCRIPTION, fields,
                                            timestamp=transcript_time(chunk_end_time,
                                                                      f'{self.base_type.lower()}_{self.id}'))
         else:
             self.influx_client.write_event(self.session_id, EVENT_TYPE_ASR_TRANSCRIPTION, fields)
 
+    def _voices_for_session(self):
+        """keeps the voice registry while the session is the one it is of (a run restarted after a
+        recording error goes on numbering the same voices) and starts a new one otherwise."""
+        if self._voice_registry is None or self._voice_session != self.session_id:
+            self._new_voice_registry()
+
+    def _new_voice_registry(self):
+        """a registry for the voices of this base's session, with the key its transcripts name it by
+        (voice_registry: the base and the moment the registry began)."""
+        self._voice_registry = VoiceRegistry()
+        self._voice_session = self.session_id
+        self._voice_key = f"{str(getattr(self, 'base_type', 'base')).lower()}_{getattr(self, 'id', None)}@{time.time():.3f}"
+
+    def _link_voices(self, transcribe_result: dict) -> dict | None:
+        """the session voices of a diarized chunk's speakers, {SPEAKER_NN: {voice, similarity}}
+        (openmmla.bases.asr.voices): the chunks reach here one at a time and in order, live and in
+        replay alike, so each is linked only to the voices of the chunks before it (under a lock: a
+        transcription thread that outlived its stop may still link while the final chunks are). None
+        when the chunk has no turns or the speech transcriber returned no speaker embeddings (a
+        backend or a WhisperX that cannot, or a service from before it could)."""
+        embeddings = transcribe_result.get("speaker_embeddings")
+        turns = transcribe_result.get("diarization")
+        if not turns or not isinstance(embeddings, dict):
+            return None
+        with self._voice_lock:
+            if self._voice_registry is None:
+                self._new_voice_registry()
+            return self._voice_registry.link(embeddings, speaker_seconds(turns))
+
     def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],
-                             similarities: list[float], durations: list[float], energy: dict | None = None):
+                             similarities: list[float], durations: list[float], energy: dict | None = None,
+                             levels: dict | None = None):
         """Log and publish speaker recognition results via MQTT.
 
         Constructs a JSON record with recognition details and publishes it on the designated MQTT channel.
@@ -1947,6 +2078,8 @@ class ASRBase(Base):
             durations: list of audio durations in seconds for each speaker segment.
             energy: the segment's level and this base's noise floor (rms_db, peak_db, floor_db), which
                 the synchronizer's energy vote reads (default: None, sent without).
+            levels: a worn microphone's segment level every 100 ms and its floor (levels_record), which
+                the synchronizer keeps in the bucket (default: None, sent without).
         """
         base_recognition_result = {
             'base_id': f'{self.base_type.lower()}_{self.id}',
@@ -1957,11 +2090,15 @@ class ASRBase(Base):
         }
         if energy is not None:
             base_recognition_result['energy'] = energy  # a JSON object inside the payload
+        if levels is not None:
+            base_recognition_result['levels'] = levels  # a JSON object inside the payload
         if self.participant is not None:
             base_recognition_result['participant'] = self.participant
         worn = ""
         if self.participant is not None and energy is not None:
-            worn = f" [{self.participant}, {energy['rms_db']:.1f} dB, floor {energy['floor_db']:.1f}]"
+            floor = energy.get('floor_db')
+            worn = (f" [{self.participant}, {energy['rms_db']:.1f} dB, "
+                    f"{'no floor yet' if floor is None else f'floor {floor:.1f}'}]")
         print(f"{BLUE}[Speaker Recognition]{ENDC}{base_recognition_result['segment_start_time']}: "
               f"{BLUE}{base_recognition_result['speakers']}{ENDC}, similarity: {base_recognition_result['similarities']},"
               f"processed time: {time.time() - recognize_start_time} seconds{worn}")

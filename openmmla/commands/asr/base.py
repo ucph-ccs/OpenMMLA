@@ -42,7 +42,8 @@ def get_parser():
     add_arg('diarize', bool, False,
             "whether every chunk is sent for its anonymous speaker turns (pyannote diarization on the speech "
             "transcriber, local WhisperX models only): the transcript record then carries who-of-how-many spoke "
-            "when as SPEAKER_00, SPEAKER_01 ..., without names or profiles", shortname='-dia')
+            "when as SPEAKER_00, SPEAKER_01 ..., without names or profiles, each linked to a voice of the "
+            "session (1, 2, 3 ...) by its speaker embedding", shortname='-dia')
     return parser
 
 

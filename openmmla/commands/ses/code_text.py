@@ -2,7 +2,11 @@
 
 The Danish comes from the session's asr_transcription events: the words stamped inside the window,
 with a little context before and after it, grouped by who said them (the group microphone, one of
-its anonymous diarized voices, or the worn microphone of a pupil). A chunk without word stamps
+its anonymous diarized voices, or the worn microphone of a pupil). A voice is the session voice the
+base linked the chunk's speaker to ('voice 3' is the same voice in every chunk); a base launched
+again into the session numbers its voices anew, and those of such a later registry are named
+'voice 3 (set 2)'. A chunk from before the linking names its SPEAKER_NN, which holds within that
+chunk only. A chunk without word stamps
 gives its whole text, marked approximate. The English is a local MarianMT translation
 (Helsinki-NLP/opus-mt-da-en on the CPU): nothing leaves the machine. Translations are cached per
 session in artifacts/<session>/analysis/transcripts/windows_<window>s.json with the hash of the
@@ -50,9 +54,39 @@ def _chunk_span(record: dict) -> tuple[float, float] | None:
     return start, end if end is not None and end > start else start + 1.0
 
 
-def _words(record: dict) -> list[dict] | None:
-    """the chunk's words with a start in seconds from the chunk's start; None when none is
-    stamped. A word the aligner could not place takes the stamp of the word before it."""
+def _linked(record: dict) -> bool:
+    """whether the base linked the chunk's speakers into the voices of its session (`voices`)."""
+    voices = record.get('voices')
+    if isinstance(voices, str):
+        try:
+            voices = json.loads(voices)
+        except json.JSONDecodeError:
+            return False
+    return isinstance(voices, dict)
+
+
+def _voice_sets(records: list[dict]) -> dict[tuple[str, str], str]:
+    """what the voices of each voice registry of a microphone are named after their number: nothing
+    for the microphone's first registry (by its first chunk), ' (set 2)', ' (set 3)' ... for the
+    registries of a base launched again into the session."""
+    first: dict[tuple[str, str], float] = {}
+    for record in records:
+        span = _chunk_span(record)
+        if span is None or not _linked(record):
+            continue
+        key = (source_of(record), str(record.get('voice_registry') or ''))
+        first[key] = min(first.get(key, span[0]), span[0])
+    names, seen = {}, {}
+    for key in sorted(first, key=first.get):
+        seen[key[0]] = seen.get(key[0], 0) + 1
+        names[key] = '' if seen[key[0]] == 1 else f' (set {seen[key[0]]})'
+    return names
+
+
+def _words(record: dict, voice_set: str = '') -> list[dict] | None:
+    """the chunk's words with a start in seconds from the chunk's start and the name of their voice
+    (`voice_set` after the number of a linked one, _voice_sets); None when none is stamped. A word
+    the aligner could not place takes the stamp of the word before it."""
     entries = record.get('words')
     if isinstance(entries, str):
         try:
@@ -61,7 +95,7 @@ def _words(record: dict) -> list[dict] | None:
             return None
     if not isinstance(entries, list):
         return None
-    words, last = [], None
+    words, last, linked = [], None, _linked(record)
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -71,12 +105,17 @@ def _words(record: dict) -> list[dict] | None:
         text = str(entry.get('word') or entry.get('text') or '').strip()
         if last is None or not text:
             continue
-        words.append({'word': text, 'start': last, 'voice': entry.get('speaker')})
+        if linked:
+            # the session voice; a speaker the base could not link has none
+            voice = f"voice {entry['voice']}{voice_set}" if entry.get('voice') not in (None, '') else None
+        else:
+            voice = _voice(entry.get('speaker'))
+        words.append({'word': text, 'start': last, 'voice': voice})
     return words or None
 
 
 def _voice(label) -> str | None:
-    """an anonymous diarized voice as a short name: SPEAKER_01 is 'voice 1'."""
+    """a chunk's own diarized speaker as a short name: SPEAKER_01 is 'voice 1'."""
     if label in (None, ''):
         return None
     text = str(label)
@@ -99,6 +138,8 @@ def window_text(records: Iterable[dict], start: float, end: float, context: floa
     chunk without stamped words that overlaps the window is one approximate line holding its whole
     text as 'inside'."""
     lines = []
+    records = list(records)
+    voice_sets = _voice_sets(records)
     for record in records:
         span = _chunk_span(record)
         if span is None:
@@ -107,7 +148,7 @@ def window_text(records: Iterable[dict], start: float, end: float, context: floa
         if chunk_end <= start - context or chunk_start >= end + context:
             continue
         source = source_of(record)
-        words = _words(record)
+        words = _words(record, voice_sets.get((source, str(record.get('voice_registry') or '')), ''))
         if words is None:
             text = ' '.join(str(record.get('text') or '').split())
             if text and chunk_start < end and chunk_end > start:
@@ -128,7 +169,7 @@ def window_text(records: Iterable[dict], start: float, end: float, context: floa
                 part = 'after'
             if part is None:
                 continue
-            voice = _voice(word['voice'])
+            voice = word['voice']
             speaker = f'{source} · {voice}' if voice and source == 'group mic' else source
             if run is None or run['speaker'] != speaker:
                 run = {'speaker': speaker, 'start': round(moment, 3), 'approximate': False,
