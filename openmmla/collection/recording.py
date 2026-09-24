@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,22 @@ DEFAULT_AUDIO_CHANNEL = "0"
 DEFAULT_AUDIO_CHANNEL_COUNT_FALLBACK = 2
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
 DEFAULT_AUDIO_FORMAT = "wav"
+
+# the head of every audio filter path. A capture that drops a buffer leaves a jump in its
+# timestamps, and a WAV file keeps no timestamps: without this the file comes out shorter and
+# everything after the drop sits earlier than it was said. FFmpeg's AVFoundation input on a Mac
+# holds one buffer (512 frames, 10.7 ms at 48 kHz) and lets the next replace it when it has not
+# read it in time. aresample writes silence where the timestamps jump and cuts where they fall
+# behind (async=1: fill and trim, never stretch), for any jump over 10 ms (min_hard_comp; its
+# default of 0.1 s would fill ten dropped buffers at once, late), counted from 0 (first_pts)
+AUDIO_FILL_FILTER = "aresample=async=1:min_hard_comp=0.01:first_pts=0"
+# packets an input may queue ahead of the filters (-thread_queue_size, an input option): FFmpeg
+# before 7 then reads the device in a thread of its own; FFmpeg 7 accepts it and queues 8 anyway
+AUDIO_INPUT_QUEUE_PACKETS = 4096
+# a file shorter than the time FFmpeg wrote it by more than the larger of these gets a note
+AUDIO_SHORTFALL_MIN_SECONDS = 0.5
+AUDIO_SHORTFALL_MIN_FRACTION = 0.001
+
 DEFAULT_VIDEO_INPUT_FORMAT_MACOS = "avfoundation"
 DEFAULT_VIDEO_INPUT_FORMAT_LINUX = "v4l2"
 DEFAULT_VIDEO_DEVICE_MACOS = "0"
@@ -777,20 +794,107 @@ def audio_command(input_options: list[str], outputs: list[tuple[str | None, str]
     the one input: several channels of one device come out of one process, split by one filter
     graph, so they share every sample the device delivers and every one it drops. Two processes
     on one device each open it on their own and lose audio on their own (the 2025-10/11 vimo pairs
-    drifted 1.6-12.9 s apart that way)."""
-    command = ["ffmpeg", "-hide_banner", *input_options]
+    drifted 1.6-12.9 s apart that way). Every path starts with AUDIO_FILL_FILTER, so a buffer the
+    device dropped is silence in the file instead of a shift of everything after it."""
+    command = ["ffmpeg", "-hide_banner", "-thread_queue_size", str(AUDIO_INPUT_QUEUE_PACKETS), *input_options]
     if len(outputs) == 1:
         audio_filter, path = outputs[0]
-        command.extend(["-af", audio_filter] if audio_filter else ["-ac", "1"])
+        # a downmix is -ac 1 of the filled audio
+        command.extend(["-af", f"{AUDIO_FILL_FILTER},{audio_filter}"] if audio_filter
+                       else ["-af", AUDIO_FILL_FILTER, "-ac", "1"])
         return [*command, "-c:a", codec, "-ar", str(sample_rate), str(path)]
     if any(audio_filter is None for audio_filter, _ in outputs):
         raise ValueError("a downmix (mix) is recorded alone, not with other channels")
-    graph = [f"[0:a]asplit={len(outputs)}" + "".join(f"[s{i}]" for i in range(len(outputs)))]
+    # filled once, before the split: every channel gets the same silence
+    graph = [f"[0:a]{AUDIO_FILL_FILTER},asplit={len(outputs)}" + "".join(f"[s{i}]" for i in range(len(outputs)))]
     graph += [f"[s{i}]{audio_filter}[a{i}]" for i, (audio_filter, _) in enumerate(outputs)]
     command.extend(["-filter_complex", ";".join(graph)])
     for i, (_, path) in enumerate(outputs):
         command.extend(["-map", f"[a{i}]", "-c:a", codec, "-ar", str(sample_rate), str(path)])
     return command
+
+
+def _audio_file_seconds(path: str) -> float | None:
+    """the length of an audio file, from ffprobe; None when it cannot say"""
+    if shutil.which("ffprobe") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        info = json.loads(result.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    streams = info.get("streams") or []
+    for value in [*(stream.get("duration") for stream in streams), (info.get("format") or {}).get("duration")]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _file_times(path: str) -> tuple[float | None, float]:
+    """when a file was created (None where the file system keeps no creation time) and last written"""
+    info = os.stat(path)
+    return getattr(info, "st_birthtime", None), info.st_mtime
+
+
+def _watch_for_files(paths: list[str]) -> tuple[dict[str, float], threading.Event]:
+    """when each of `paths` first shows up, to 50 ms, noted by a thread until the event is set: the
+    creation time of a file where the file system keeps none (Linux)"""
+    appeared: dict[str, float] = {}
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.is_set() and len(appeared) < len(paths):
+            for path in paths:
+                if path not in appeared and os.path.exists(path):
+                    appeared[path] = time.time()
+            stop.wait(0.05)
+
+    threading.Thread(target=watch, name="audio-file-watch", daemon=True).start()
+    return appeared, stop
+
+
+def audio_length_check(path: str, start_time: float, stopped_at: float,
+                       appeared_at: float | None = None) -> dict[str, Any]:
+    """how long an audio file is against the time FFmpeg wrote it, as manifest fields: wall_seconds
+    from when FFmpeg created the file (it opens the device first; where the file system keeps no
+    creation time, when the recorder saw the file appear, else the start stamp) to when it closed
+    it (the stop time, if that is earlier), audio_seconds of samples in it, their difference
+    shortfall_seconds, and startup_seconds from the stamp to the file's creation when that is
+    known. The fill makes a file as long as the time its samples span, so a shortfall over
+    max(0.5 s, 0.1 %) is audio lost where the timestamps show no gap, and gets a note. {} when the
+    file cannot be read."""
+    if not os.path.isfile(path):
+        return {}
+    audio = _audio_file_seconds(path)
+    if audio is None:
+        return {}
+    created, modified = _file_times(path)
+    if created is None:
+        created = appeared_at
+    start = created if created is not None and start_time <= created <= stopped_at else start_time
+    end = min(stopped_at, modified) if modified >= start else stopped_at
+    wall = end - start
+    shortfall = wall - audio
+    # + 0.0: no -0.0 in the manifest
+    check: dict[str, Any] = {
+        "wall_seconds": round(wall, 3) + 0.0,
+        "audio_seconds": round(audio, 3) + 0.0,
+        "shortfall_seconds": round(shortfall, 3) + 0.0,
+    }
+    if start > start_time:
+        check["startup_seconds"] = round(start - start_time, 3)
+    if shortfall > max(AUDIO_SHORTFALL_MIN_SECONDS, AUDIO_SHORTFALL_MIN_FRACTION * wall):
+        check["notes"] = [
+            f"{shortfall:.2f} s shorter than the {wall:.1f} s FFmpeg wrote it: audio lost where the timestamps "
+            f"show no gap (the device stopped delivering, or FFmpeg stopped reading it)"
+        ]
+    return check
 
 
 def record_audio(
@@ -890,7 +994,12 @@ def record_audio(
         input_options.extend(["-ac", str(channels)])
     input_options.extend(["-i", input_spec])
 
-    return_code = run_recording_process(audio_command(input_options, outputs, codec, sample_rate))
+    command = audio_command(input_options, outputs, codec, sample_rate)
+    appeared, stop_watching = _watch_for_files([path for _, path in outputs])
+    try:
+        return_code = run_recording_process(command)
+    finally:
+        stop_watching.set()
     stopped_at = float(format_epoch_ms())
     for recording in recordings:
         recording.update({
@@ -898,6 +1007,16 @@ def record_audio(
             "stopped_at": stopped_at,
             "returncode": return_code,
         })
+        try:
+            check = audio_length_check(recording["path"], recording["start_time"], stopped_at,
+                                       appeared.get(recording["path"]))
+        except Exception as error:  # the check never costs a recording
+            print(f"Could not compare the length of {recording['path']} with its recording time: {error}")
+            check = {}
+        for note in check.pop("notes", []):
+            print(f"{recording['device']}: {note}")
+            recording.setdefault("notes", []).append(note)
+        recording.update(check)
         update_manifest(session_dir, session, sync_time, recording)
     return return_code
 
