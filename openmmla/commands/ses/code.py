@@ -113,16 +113,20 @@ def inclusion(session_dir: Path, rule=None) -> tuple[bool | None, str]:
         return None, f'the fused table cannot be read ({type(error).__name__}: {error}), so S1 is not checked'
 
 
-def load_sessions(artifacts: Path, pattern: str | None = None,
-                  show_all: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def load_sessions(artifacts: Path, pattern: str | None = None, show_all: bool = False,
+                  hold: tuple[str, ...] = ()) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """(shown, hidden): every artifacts/exp_* session with video whose id contains `pattern`.
-    A session that fails S1 goes to `hidden` ({'id', 'reason'}) unless `show_all`; every shown
-    session carries 'included' (True, False, or None when it could not be judged) and its
-    'inclusion' reason."""
+    A session whose id contains one of `hold` goes to `hidden` ({'id', 'reason', 'by': 'hold'});
+    one that fails S1 goes there too ('by': 'S1') unless `show_all`; every shown session carries
+    'included' (True, False, or None when it could not be judged) and its 'inclusion' reason."""
     sessions, hidden = [], []
     rule = None
     for session_dir in sorted(artifacts.glob('exp_*')):
         if pattern and pattern not in session_dir.name:
+            continue
+        held = next((h for h in hold if h and h in session_dir.name), None)
+        if held:
+            hidden.append({'id': session_dir.name, 'reason': f'held back with --hold {held}', 'by': 'hold'})
             continue
         manifest = _read(session_dir / 'manifest.json')
         recordings = [r for r in manifest.get('recordings', []) if os.path.exists(r.get('path', ''))]
@@ -137,7 +141,7 @@ def load_sessions(artifacts: Path, pattern: str | None = None,
                 rule = False  # inclusion() says why, per session
         included, reason = inclusion(session_dir, rule or None)
         if included is False and not show_all:
-            hidden.append({'id': session_dir.name, 'reason': reason})
+            hidden.append({'id': session_dir.name, 'reason': reason, 'by': 'S1'})
             continue
         videos.sort(key=lambda r: (CAMERA_PREFERENCE.index(r['device']) if r['device'] in CAMERA_PREFERENCE else 99, r['device']))
         audios.sort(key=lambda r: (AUDIO_PREFERENCE.index(r['device']) if r['device'] in AUDIO_PREFERENCE else 99, r['device']))
@@ -810,7 +814,9 @@ document.addEventListener('keydown', e => {
   autoAdvance = recall('autoAdvance') !== '0'; $('advancetoggle').classList.toggle('active', autoAdvance);
   $('session').innerHTML = sessions.map(s => `<option value="${attr(s.id)}" title="${attr(s.inclusion)}"></option>`).join(''); showProgress();
   if (boot.hidden.length) {
-    $('hidden').textContent = `${boot.hidden.length} session${boot.hidden.length === 1 ? '' : 's'} hidden: left out of the analysis by the inclusion rule S1`;
+    const held = boot.hidden.filter(h => h.by === 'hold').length, byRule = boot.hidden.length - held;
+    $('hidden').textContent = [byRule ? `${byRule} session${byRule === 1 ? '' : 's'} hidden: left out of the analysis by the inclusion rule S1` : '',
+                               held ? `${held} session${held === 1 ? '' : 's'} held back for now` : ''].filter(Boolean).join(' · ');
     $('hidden').title = boot.hidden.map(h => `${h.id}: ${h.reason}`).join('\n');
     $('hidden').style.display = '';
   }
@@ -1278,6 +1284,8 @@ def get_parser():
     parser.add_argument('--seed', type=int, default=1, help="sampling seed, the same for every coder (default 1)")
     parser.add_argument('--all', dest='show_all', action='store_true',
                         help="list every session, also those the inclusion rule S1 leaves out of the analysis")
+    parser.add_argument('--hold', default='',
+                        help="sessions not to list for now, comma-separated (any id containing one of them)")
     parser.add_argument('--influx-config', default=None,
                         help=f"config whose InfluxDB section holds the transcripts (default <cwd>/{DEFAULT_INFLUX_CONFIG})")
     parser.add_argument('--context', type=float, default=CONTEXT,
@@ -1293,7 +1301,8 @@ def get_parser():
 def main(argv=None):
     args = get_parser().parse_args(argv)
     artifacts = Path(args.artifacts or os.path.join(os.getcwd(), 'artifacts')).resolve()
-    Handler.sessions, Handler.hidden = load_sessions(artifacts, args.sessions, args.show_all)
+    hold = tuple(h.strip() for h in args.hold.split(',') if h.strip())
+    Handler.sessions, Handler.hidden = load_sessions(artifacts, args.sessions, args.show_all, hold)
     Handler.settings = {'window': args.window, 'step': args.step, 'sample': args.sample, 'block': args.block, 'seed': args.seed}
     influx_config = args.influx_config or os.path.join(os.getcwd(), DEFAULT_INFLUX_CONFIG)
     Handler.text_source = TextSource(args.window, args.context, influx_config, Translator(threads=args.threads))
@@ -1306,14 +1315,15 @@ def main(argv=None):
             print(f"kept, not judged: {s['id']}: {s['inclusion']}")
     if not Handler.sessions:
         if Handler.hidden:
-            print(f"every session with video under {artifacts} is left out by S1; --all lists them")
+            print(f"every session with video under {artifacts} is left out by S1 or held back; --all lists what S1 leaves out")
         else:
             print(f"no sessions with video under {artifacts}")
         return 1
     if args.prepare_text:
         return prepare_text(Handler.text_source, Handler.sessions, Handler.settings)
     total = sum(len(windows_of(s, args.window, args.step, args.sample, args.block, args.seed)) for s in Handler.sessions)
-    print(f"{len(Handler.sessions)} sessions ({len(Handler.hidden)} hidden by S1), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/  (Ctrl-C stops)")
+    by_rule = sum(1 for h in Handler.hidden if h.get('by') != 'hold')
+    print(f"{len(Handler.sessions)} sessions ({by_rule} hidden by S1, {len(Handler.hidden) - by_rule} held back), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/  (Ctrl-C stops)")
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     try:
         server.serve_forever()
