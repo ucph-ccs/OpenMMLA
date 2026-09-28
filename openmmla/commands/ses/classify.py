@@ -73,6 +73,10 @@ def get_parser():
     parser.add_argument('--with-actions', action='store_true',
                         help="add the VLM action block (not built yet: the VLM has not run)")
     parser.add_argument('--jobs', type=int, default=1, help="outer folds run in parallel (default 1)")
+    parser.add_argument('--device', choices=('cpu', 'cuda', 'auto'), default='cpu',
+                        help="where the networks train: cpu (default, one thread per fold), cuda, or auto (cuda when "
+                             "torch sees a GPU); parallel folds share the GPU. A GPU run repeats itself, but differs from a "
+                             "CPU run by floating-point rounding and dropout draws")
     parser.add_argument('--quick', action='store_true',
                         help="two-point grids, 30 epochs, 200 bootstrap resamples: a plumbing check, never a result")
     parser.add_argument('--confirm-frozen', action='store_true',
@@ -173,13 +177,19 @@ def main(argv=None):
     if any(model in E.NETWORKS for model in models) and _missing(('torch',)):
         print("the network variants need torch: pip install torch")
         return 1
+    if args.device == 'cuda' and any(model in E.NETWORKS for model in models):
+        import torch
+        if not torch.cuda.is_available():
+            print(f"--device cuda, but this torch ({torch.__version__}) sees no CUDA GPU: install a CUDA build of "
+                  f"torch, or use --device cpu or auto")
+            return 1
 
     from openmmla.analytics.interaction.labels import LabelJoinError
     config = E.Config(artifacts=args.artifacts or os.path.join(os.getcwd(), 'artifacts'), sessions=args.sessions,
                       coder=args.coder, models=models, split=args.split, temporal=temporal, hmm=hmm,
                       target=args.target, join=args.join, seeds=args.seeds, small=args.small, epochs=args.epochs,
                       jobs=args.jobs, out=args.out, quick=args.quick, confirm_frozen=args.confirm_frozen,
-                      jev_variant=args.jev_variant)
+                      jev_variant=args.jev_variant, device=args.device)
     started = time.time()
     try:
         run_dir = E.run(config, log=print)

@@ -148,7 +148,8 @@ class Config:
     are lists; `coder` is the truth (default: the coder with the most windows over the DEV
     sessions; a test run must name it); `quick` swaps in the QUICK grids and training lengths;
     `epochs` fixes the network's E* (the median of the date folds' for the test model) instead of
-    the inner choice; `bootstrap` overrides the number of unit resamples."""
+    the inner choice; `bootstrap` overrides the number of unit resamples; `device` is where the
+    networks train: cpu (the default), cuda, or auto (cuda when torch sees a GPU)."""
     artifacts: str = 'artifacts'
     sessions: str | None = None
     coder: str | None = None
@@ -162,6 +163,7 @@ class Config:
     small: str = 'auto'
     epochs: int | None = None
     jobs: int = 1
+    device: str = 'cpu'
     out: str | None = None
     quick: bool = False
     confirm_frozen: bool = False
@@ -666,10 +668,11 @@ def _network(fd: _Fold, plan: dict, model: str, details: dict):
     train, test = [tensors(d) for d in fd.train], [tensors(d) for d in fd.test]
     small = N.use_small(sum(d.n_coded for d in fd.train), plan['small'])
     make = functools.partial(N.make_model, model, small=small, d_in=first.shape[1])
+    device = plan.get('device') or 'cpu'
     epochs, oof = N.select_epochs(train, [(inner.train, inner.test) for inner in fd.inner], make=make,
-                                  max_epochs=plan['max_epochs'], patience=plan['patience'], seed=0)
+                                  max_epochs=plan['max_epochs'], patience=plan['patience'], seed=0, device=device)
     used = plan['epochs'] or epochs
-    models = N.fit_ensemble(train, used, seeds=tuple(range(plan['seeds'])), make=make)
+    models = N.fit_ensemble(train, used, seeds=tuple(range(plan['seeds'])), make=make, device=device)
     details.update(epochs=epochs, epochs_used=used, small=small, parameters=N.count_parameters(models[0]))
     oof = np.vstack([o if o is not None else np.full((len(d), 3), np.nan) for o, d in zip(oof, fd.train)])
     online = np.vstack([N.predict_net(models, tensors(d, online=True)) for d in fd.test]) \
@@ -1115,7 +1118,8 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
         'presence_gate': dict(P.RULE),
         'grids': {'lr': plan['lr_grid'], 'hgb': plan['hgb_grid']},
         'network': {'max_epochs': plan['max_epochs'], 'patience': plan['patience'],
-                    'seeds': list(range(plan['seeds'])), 'small': plan['small'], 'epochs': plan['epochs']},
+                    'seeds': list(range(plan['seeds'])), 'small': plan['small'], 'epochs': plan['epochs'],
+                    'device': plan['device'], 'torch': plan.get('torch')},
         'hmm': {'gammas': list(H.GAMMAS), 'alpha': 1.0, 'diagonal': 10.0,
                 'filter_inputs': f"{', '.join(CAUSAL_INPUTS)}; the held-out sessions scaled by the running normaliser"},
         'min_class_windows': cfg.min_class_windows, 'bootstrap': plan['bootstrap'], 'inner_folds': INNER_FOLDS,
@@ -1199,19 +1203,36 @@ def _check(cfg: Config):
                          f"window ({', '.join(CAUSAL_INPUTS[:2])}, net-notcn, Jev)")
     if any(m in NETWORKS for m in cfg.models) and importlib.util.find_spec('torch') is None:
         raise ModuleNotFoundError("the network variants need torch: pip install torch")
+    if cfg.device not in ('cpu', 'cuda', 'auto'):
+        raise ValueError(f"device must be cpu, cuda or auto, not {cfg.device!r}")
+
+
+def _device(cfg: Config) -> tuple:
+    """(the device the networks train on, as the plan carries it, and torch's version with its CUDA
+    build, or None): cpu whenever no network runs, so a tabular run never imports torch; 'cuda' is
+    refused here, before anything is read, when torch sees no GPU."""
+    if not any(m in NETWORKS for m in cfg.models):
+        return 'cpu', None
+    import torch
+    from openmmla.analytics.interaction import network as N
+    device = N.resolve_device(cfg.device)
+    # the GPU's name would open a CUDA context in this process, which only hands folds out
+    return device.type, torch.__version__ + (f", CUDA {torch.version.cuda}" if device.type == 'cuda' else '')
 
 
 def _plan(cfg: Config) -> dict:
     """the settings every fold needs, as a plain dict a worker process receives."""
     quick = QUICK if cfg.quick else {}
     jobs = max(1, int(cfg.jobs))
+    device, build = _device(cfg)
     return {'k': 3 if cfg.target == '3class' else 2, 'models': list(dict.fromkeys(cfg.models)),
             'temporal': list(dict.fromkeys(cfg.temporal)), 'hmm': list(dict.fromkeys(cfg.hmm)),
             'lr_grid': quick.get('lr_grid', TB.LR_GRID), 'hgb_grid': quick.get('hgb_grid', TB.HGB_GRID),
             'max_epochs': quick.get('max_epochs', 300), 'patience': quick.get('patience', 25),
             'seeds': int(cfg.seeds), 'small': cfg.small, 'epochs': cfg.epochs, 'jev_variant': cfg.jev_variant,
             'bootstrap': cfg.bootstrap or quick.get('bootstrap', BOOTSTRAP), 'jobs': jobs,
-            'threads': max(1, (os.cpu_count() or 1) // jobs) if jobs > 1 else None}
+            'threads': max(1, (os.cpu_count() or 1) // jobs) if jobs > 1 else None,
+            'device': device, 'torch': build}
 
 
 def _run_folds(folds: list, data: dict, plan: dict, say) -> list:
@@ -1222,9 +1243,12 @@ def _run_folds(folds: list, data: dict, plan: dict, say) -> list:
             say(f"fold {n}/{len(folds)} {fold.name}: {outputs[-1]['seconds']} s")
         return outputs
     from joblib import Parallel, delayed
-    say(f"{len(folds)} folds on {plan['jobs']} workers")
-    # each worker gets only the sessions its fold reads
-    return Parallel(n_jobs=plan['jobs'])(
+    say(f"{len(folds)} folds on {plan['jobs']} workers" + (" sharing the GPU" if plan.get('device') == 'cuda' else ''))
+    # each worker gets only the sessions its fold reads. loky starts every worker as a fresh
+    # interpreter, never a fork of this one, so on cuda each worker opens its own CUDA context
+    # (about 500 MB of GPU memory each on server-01's RTX 4090, nearly all of it the context) and
+    # the folds share the GPU
+    return Parallel(n_jobs=plan['jobs'], backend='loky')(
         delayed(_fold_job)(fold, {s: data[s] for s in list(fold.train) + list(fold.test)}, plan) for fold in folds)
 
 

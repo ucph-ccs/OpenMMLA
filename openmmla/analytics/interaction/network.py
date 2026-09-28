@@ -22,6 +22,14 @@ cross-entropy with label smoothing on coded windows only (uncoded and unclear wi
 48-window crops around coded windows, run-wise modality dropout, person dropout and noise, AdamW.
 Only the epoch count is tuned (the median of the inner splits' best epochs), and the refit is a
 5-seed ensemble whose mean softmax is the prediction; no seed is ever picked.
+
+Training runs on the CPU, on one thread, unless a `device` says 'cuda' (or 'auto' finds a GPU).
+Crops, dropout draws and noise are still made on the CPU from the same numpy generator, and a
+model starts from the same weights on either device; only each batch, the model, the class
+weights and the loss move to the GPU. A GPU run repeats itself on the same GPU and software, but
+it matches a CPU run only up to floating-point differences and the dropout layers' draws (on a
+GPU they come from its own generator), not bit for bit: the two are equally valid runs of the
+recipe, never to be mixed within one reported comparison. Predictions come back as CPU numpy.
 """
 import math
 
@@ -188,6 +196,27 @@ def use_small(n_coded, small='auto'):
     return small == 'yes' or small is True or (small == 'auto' and n_coded < SMALL_BELOW)
 
 
+DEVICES = ('cpu', 'cuda', 'auto')
+
+
+def resolve_device(device=None):
+    """the torch device a run trains on: None or 'cpu' the CPU (the default), 'cuda' the GPU (an
+    error when torch sees none), 'auto' the GPU when torch sees one and the CPU otherwise."""
+    name = 'cpu' if device is None else str(device)
+    if name == 'auto':
+        name = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if name not in ('cpu', 'cuda') and not name.startswith('cuda:'):
+        raise ValueError(f"unknown device {device!r}: one of {', '.join(DEVICES)}")
+    if name != 'cpu' and not torch.cuda.is_available():
+        raise RuntimeError(f"device {name} asked for, but this torch ({torch.__version__}) sees no CUDA GPU")
+    return torch.device(name)
+
+
+def _model_device(model):
+    parameter = next(model.parameters(), None)
+    return parameter.device if parameter is not None else torch.device('cpu')
+
+
 def count_parameters(model):
     """the trainable parameters: 14,057 default and 6,961 small in layout version 4 (13,793 and 6,785
     in version 3, 13,625 and 6,673 in version 2)."""
@@ -286,6 +315,14 @@ def _single(session):
 
 def _slice(batch, part):
     return {key: (value[part] if key in SEQUENCES and torch.is_tensor(value) else value) for key, value in batch.items()}
+
+
+def _to(batch, device):
+    """a batch's tensors on `device` (unchanged on the CPU); pooled_blocks and the name stay as they are."""
+    if device.type == 'cpu':
+        return batch
+    return {key: (value.to(device) if torch.is_tensor(value) else value)
+            for key, value in batch.items()}
 
 
 def _forward(model, batch):
@@ -435,9 +472,10 @@ def _held_out_nll(model, sessions, weights):
     """the class-weighted NLL (no smoothing) of full-session predictions, pooled over the sessions'
     coded windows; NaN when none is coded."""
     model.eval()
+    device = _model_device(model)
     with torch.no_grad():
-        logits = torch.cat([_forward(model, _single(s))[0] for s in sessions])
-        y = torch.cat([s['y'] for s in sessions])
+        logits = torch.cat([_forward(model, _to(_single(s), device))[0] for s in sessions])
+        y = torch.cat([s['y'] for s in sessions]).to(device)
     if not bool(((y >= 0) & (y < N_CLASSES)).any()):
         return float('nan')
     return float(masked_loss(logits, y, weights, smoothing=0.0))
@@ -476,18 +514,27 @@ class AdamW:
 
 
 def train_epochs(model, train_sessions, epochs, seed, val_sessions=None, weights=None, patience=None,
-                 augment=True):
+                 augment=True, device=None):
     """train for `epochs` epochs of crops, in batches of 16, with AdamW and a clipped gradient;
-    seeded, and on one thread, so a reported run repeats. With `val_sessions` the held-out
+    seeded, and on one thread, so a reported run repeats. The model is moved to `device` (see
+    resolve_device; default the CPU) and stays there. With `val_sessions` the held-out
     class-weighted NLL is tracked after every epoch, training stops `patience` epochs after its
     best (when a patience is given), and the model is left at its best epoch. `weights` default to
     the training sessions' tempered class weights. The history holds the mean training loss and
     the held-out NLL per epoch, and the best epoch (counted from 1) with its NLL."""
+    device = resolve_device(device)
     torch.set_num_threads(1)
     torch.manual_seed(seed)
+    if device.type == 'cuda':
+        # torch.manual_seed seeds the GPU too; said here so the GPU's dropout draws are seeded in
+        # plain sight, and cuDNN keeps to its deterministic kernels so a GPU run repeats
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = True, False
     rng = np.random.default_rng(seed)
     if weights is None:
         weights = class_weights([s['y'] for s in train_sessions])
+    model.to(device)
+    weights = weights.to(device)
     optimizer = AdamW(model.parameters())
     history = {'loss': [], 'val_nll': [], 'best_epoch': None, 'best_val_nll': None}
     best_state, since_best = None, 0
@@ -499,6 +546,7 @@ def train_epochs(model, train_sessions, epochs, seed, val_sessions=None, weights
             batch = _slice(epoch_crops, slice(start, start + BATCH))
             if augment:
                 batch = _augment(batch, rng)
+            batch = _to(batch, device)
             loss = masked_loss(_forward(model, batch), batch['y'], weights)
             optimizer.zero_grad()
             loss.backward()
@@ -535,14 +583,15 @@ def _positions(sessions, part):
 
 
 def select_epochs(outer_train, inner_folds, make=None, max_epochs=MAX_EPOCHS, patience=PATIENCE, seed=0,
-                  weights=None):
+                  weights=None, device=None):
     """the one tuned hyperparameter, the epoch count. Seed 0 trains on each inner split for up to
     `max_epochs` epochs, tracking the held-out lessons' class-weighted NLL (patience 25), and E* is
     the median of the splits' best epochs. The inner models, each back at its best epoch, give the
     out-of-fold logits the calibrator and the HMM's gamma are fit on. `inner_folds` holds (train,
     held) pairs of positions in `outer_train` or of session names; `make` builds a fresh model
     (default InteractionNet); the class weights come from the whole outer-training fold. The
-    logits come back in `outer_train`'s order, (T, 3) arrays, None for a session no split held out."""
+    logits come back in `outer_train`'s order, (T, 3) arrays, None for a session no split held out;
+    the inner models train on `device`."""
     make = make or InteractionNet
     if weights is None:
         weights = class_weights([s['y'] for s in outer_train])
@@ -555,20 +604,23 @@ def select_epochs(outer_train, inner_folds, make=None, max_epochs=MAX_EPOCHS, pa
         torch.manual_seed(seed)
         model = make()
         history = train_epochs(model, [outer_train[i] for i in train_at], max_epochs, seed,
-                               val_sessions=[outer_train[i] for i in held_at], weights=weights, patience=patience)
+                               val_sessions=[outer_train[i] for i in held_at], weights=weights, patience=patience,
+                               device=device)
         best.append(history['best_epoch'])
+        at = _model_device(model)
         with torch.no_grad():
             for i in held_at:
-                oof[i] = _forward(model, _single(outer_train[i]))[0].numpy().astype(np.float64)
+                oof[i] = _forward(model, _to(_single(outer_train[i]), at))[0].cpu().numpy().astype(np.float64)
     if not best:
         raise ValueError("no inner split to select the epoch count on")
     # the median of an even count rounds half up
     return int(np.floor(np.median(best) + 0.5)), oof
 
 
-def fit_ensemble(outer_train, epochs, seeds=SEEDS, make=None, weights=None):
+def fit_ensemble(outer_train, epochs, seeds=SEEDS, make=None, weights=None, device=None):
     """the refit: every outer-training session, `epochs` (E*) epochs, one model per seed; the mean
-    of their softmaxes is the prediction, and no seed is ever picked over another."""
+    of their softmaxes is the prediction, and no seed is ever picked over another. The models
+    train and stay on `device`."""
     make = make or InteractionNet
     if weights is None:
         weights = class_weights([s['y'] for s in outer_train])
@@ -576,19 +628,20 @@ def fit_ensemble(outer_train, epochs, seeds=SEEDS, make=None, weights=None):
     for seed in seeds:
         torch.manual_seed(seed)
         model = make()
-        train_epochs(model, outer_train, epochs, seed, weights=weights)
+        train_epochs(model, outer_train, epochs, seed, weights=weights, device=device)
         models.append(model.eval())
     return models
 
 
 def predict_net(models, session):
     """the (T, 3) log-probabilities of a session: the mean of the models' softmaxes over the full
-    session (the temporal blocks are local, so this equals stitching crops), as its log."""
+    session (the temporal blocks are local, so this equals stitching crops), as its log. It runs
+    where the models are (fit_ensemble leaves them on its device) and returns CPU numpy."""
     models = [models] if isinstance(models, nn.Module) else list(models)
-    batch = _single(session)
+    batch = _to(_single(session), _model_device(models[0]))
     with torch.no_grad():
         probabilities = torch.stack([torch.softmax(_forward(model.eval(), batch)[0], -1) for model in models]).mean(0)
-    return torch.log(probabilities.clamp_min(1e-12)).numpy().astype(np.float64)
+    return torch.log(probabilities.clamp_min(1e-12)).cpu().numpy().astype(np.float64)
 
 
 def pretrain_masked_modality(model, sessions, epochs=50):

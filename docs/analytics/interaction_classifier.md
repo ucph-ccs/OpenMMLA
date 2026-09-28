@@ -317,6 +317,7 @@ mmla ses-classify -m <headline model>,<compared models> --split test --confirm-f
 | `--seeds`, `--small`, `--epochs` | the network's ensemble size, configuration, and fixed epoch count |
 | `--jev-variant` | which cached Jev answers `jev` and `jev-cal` read |
 | `--jobs` | outer folds in parallel |
+| `--device cpu` / `cuda` / `auto` | where the networks train: the CPU, one thread per fold (the default), the GPU, or the GPU when torch sees one. Parallel folds share the GPU, each in its own worker. A GPU run repeats itself but matches a CPU run only up to floating-point differences and dropout draws, not bit for bit, so compare variants trained on the same device; `config.json` records it under `network.device` |
 | `--quick` | two-point grids, 30 epochs, 200 resamples: a plumbing check, never a result |
 
 The full grids are costly: `late-hgb` takes about 70 s per outer fold and temporal mode, so give `--jobs`.
