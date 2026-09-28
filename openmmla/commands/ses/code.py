@@ -19,7 +19,10 @@ percent agreement, Cohen's kappa over the five codes, the three classes and two 
 lenient share that counts a match with the other's also-state, the confusion matrix and the
 disagreeing windows), and all coders at once with Krippendorff's alpha (/api/agreement?all=1), on
 the current labels or on those saved by a cutoff (asof=<ISO 8601 time>); /api/coders lists the
-coders, and the consensus file `adjudicated` apart.
+coders, and the consensus file `adjudicated` apart. A labels file a model or a script wrote (its
+lines carry the model's `confidence` or class probabilities `p_<class>`, and none was saved by the
+page) is no coder: it is left out of all of these, and its name is refused as a coder name, so a
+coder never sees those labels nor appends to them.
 
 The Transcript button shows what was said in the window, in Danish and in a local English
 translation (openmmla.commands.ses.code_text): the session's asr_transcription events from InfluxDB
@@ -243,6 +246,29 @@ def name_error(coder: str) -> str | None:
     if len(safe_name(coder).encode('utf-8')) > NAME_BYTES:
         return f'the coder name is too long for a file name (at most {NAME_BYTES} bytes)'
     return None
+
+
+# fields a model's labels carry and the page never writes
+MODEL_FIELDS = ('confidence', 'p_individual', 'p_social', 'p_collaborative')
+
+
+def file_kind(text: str) -> str | None:
+    """what wrote a labels file: 'page' when a line was saved by this page (every line the server
+    appends carries `saved_at`), else 'model' when a line carries a model's confidence or class
+    probabilities (the agent's, Jev's or a video model's labels written by a script), else None (a
+    coder's lines from before the server kept `saved_at`, or no line at all)"""
+    model = False
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if 'saved_at' in record:
+            return 'page'
+        model = model or any(field in record for field in MODEL_FIELDS)
+    return 'model' if model else None
 
 
 def secondary_error(record: dict[str, Any]) -> str | None:
@@ -1012,6 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
     text_source: Any = None  # a code_text.TextSource; None: no transcripts on the page
     lock = threading.Lock()  # one clip cut at a time
     write_lock = threading.Lock()  # label writes, apart from the clips so a save never waits for ffmpeg
+    kinds: dict[str, tuple[int, int, str | None]] = {}  # labels file -> (mtime_ns, size, file_kind), reread on change
 
     def log_message(self, format, *args):  # quiet
         pass
@@ -1056,7 +1083,7 @@ class Handler(BaseHTTPRequestHandler):
             a, b = ((query.get(name) or [''])[0].strip() for name in ('a', 'b'))
             if not a or not b or safe_name(a) == safe_name(b):
                 return self._json({'error': 'give two different coders: a=<name>&b=<name>'}, 400)
-            error = name_error(a) or name_error(b)
+            error = name_error(a) or name_error(b) or self._model_error(a) or self._model_error(b)
             if error:
                 return self._json({'error': error}, 400)
             self._json(self._agreement(a, b, only, asof))
@@ -1068,16 +1095,18 @@ class Handler(BaseHTTPRequestHandler):
             if not session:
                 return self._json({'error': 'no such session'}, 404)
             coder = (query.get('coder') or ['anonymous'])[0]
-            if name_error(coder):
-                return self._json({'error': name_error(coder)}, 400)
+            error = name_error(coder) or self._model_error(coder)
+            if error:
+                return self._json({'error': error}, 400)
             labels = self._labels(session, coder)
             self._json({'windows': self._windows(session), 'labels': list(labels.values())})
         elif url.path == '/api/progress':
             coder = (query.get('coder') or [''])[0].strip()
             if not coder:
                 return self._json({'error': 'give coder=<name>'}, 400)
-            if name_error(coder):
-                return self._json({'error': name_error(coder)}, 400)
+            error = name_error(coder) or self._model_error(coder)
+            if error:
+                return self._json({'error': error}, 400)
             self._json({'progress': self._progress(coder)})
         elif url.path == '/api/text':
             session = self._session(query)
@@ -1147,16 +1176,44 @@ class Handler(BaseHTTPRequestHandler):
             progress[session['id']] = {'coded': len(listed & set(labels)), 'windows': len(listed)}
         return progress
 
+    def _label_files(self, session: dict[str, Any]) -> list[Path]:
+        folder = Path(session['dir']) / 'labels'
+        return [path for path in sorted(folder.glob('*.jsonl')) if safe_name(path.stem) == path.stem] \
+            if folder.is_dir() else []  # a file of another name is not one this page writes
+
+    def _model_names(self) -> set[str]:
+        """the names whose labels files (in the listed sessions) a model or a script wrote: a line of
+        them carries a model's fields and none was saved by this page (file_kind)"""
+        kinds: dict[str, set[str | None]] = {}
+        for session in self.sessions:
+            for path in self._label_files(session):
+                try:
+                    stat = path.stat()
+                    cached = self.kinds.get(str(path))
+                    if cached is None or cached[:2] != (stat.st_mtime_ns, stat.st_size):
+                        cached = (stat.st_mtime_ns, stat.st_size, file_kind(path.read_text(encoding='utf-8', errors='replace')))
+                        self.kinds[str(path)] = cached
+                except OSError:
+                    continue
+                kinds.setdefault(path.stem, set()).add(cached[2])
+        return {name for name, found in kinds.items() if 'model' in found and 'page' not in found}
+
+    def _model_error(self, coder: str) -> str | None:
+        """why `coder` cannot be used as a coder name here because a model's labels hold it, or None"""
+        name = safe_name(coder)
+        if name in self._model_names():
+            return f"'{name}' holds a model's labels, not a coder's: give another coder name"
+        return None
+
     def _coders(self) -> list[dict[str, Any]]:
         """every coder with a labels file in a listed session, by the file's name (a name
         _labels_path makes), with how many listed windows they have a current label for (as
         /api/progress counts them) and in how many sessions, most windows first; the adjudicated
-        file is among them."""
+        file is among them, a model's labels (_model_names) are not."""
         found: dict[str, dict[str, int]] = {}
+        models = self._model_names()
         for session in self.sessions:
-            folder = Path(session['dir']) / 'labels'
-            files = [path for path in sorted(folder.glob('*.jsonl')) if safe_name(path.stem) == path.stem] \
-                if folder.is_dir() else []  # a file of another name is not one this page writes
+            files = [path for path in self._label_files(session) if path.stem not in models]
             listed = self._listed(session) if files else set()
             for path in files:
                 n = len(listed & set(self._labels(session, path.stem)))
@@ -1228,8 +1285,10 @@ class Handler(BaseHTTPRequestHandler):
         coder = record.get('coder', '')
         if not isinstance(coder, str):
             return self._json({'error': 'the coder is not a name'}, 400)
-        if url.path in ('/api/label', '/api/unlabel') and name_error(coder):
-            return self._json({'error': name_error(coder)}, 400)
+        if url.path in ('/api/label', '/api/unlabel'):
+            error = name_error(coder) or self._model_error(coder)
+            if error:
+                return self._json({'error': error}, 400)
         if url.path == '/api/label':
             # a record without a known label would read back as an undo line
             if record.get('label') not in [c['label'] for c in CODEBOOK['classes']]:
