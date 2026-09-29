@@ -169,7 +169,10 @@ class Config:
     `epochs` fixes the network's E* (the median of the date folds' for the test model) instead of
     the inner choice; `bootstrap` overrides the number of unit resamples; `device` is where the
     networks train: cpu (the default), cuda, or auto (cuda when torch sees a GPU); `ablate` 'modality'
-    adds the arms of MODALITY_ARMS to the run ('none', the default, runs the full arm only)."""
+    adds the arms of MODALITY_ARMS to the run ('none', the default, runs the full arm only); `scaling`
+    is layout.scale's scheme for every session, training and held-out alike: 'mix' (the default, by
+    each value's tag), 's' (every value within its own session), 'c' (centred within the session on the
+    global spread) or 'g' (every value globally)."""
     artifacts: str = 'artifacts'
     sessions: str | None = None
     coder: str | None = None
@@ -192,6 +195,7 @@ class Config:
     bootstrap: int | None = None
     min_class_windows: int = MIN_CLASS_WINDOWS
     ablate: str = 'none'
+    scaling: str = 'mix'
 
 
 # ---- sessions ----
@@ -514,12 +518,12 @@ class _Fold:
     lags, the rows of the training side with their units, the inner folds (as row positions for
     the tabular models, as session names for the network), the training prior and transitions."""
 
-    def __init__(self, fold, data: dict, k: int, learned: bool = True):
-        self.fold, self.k = fold, k
+    def __init__(self, fold, data: dict, k: int, learned: bool = True, scheme: str = 'mix'):
+        self.fold, self.k, self.scheme = fold, k, scheme
         self.train = [data[s] for s in fold.train]
         self.test = [data[s] for s in fold.test]
         self.stats = LY.fit_global_stats([d.tokens for d in self.train])
-        self.scaled = {d.session: LY.scale(d.tokens, self.stats) for d in self.train + self.test}
+        self.scaled = {d.session: LY.scale(d.tokens, self.stats, scheme=scheme) for d in self.train + self.test}
         self.views = {s: LY.pooled(t) for s, t in self.scaled.items()}
         self._online = None
         self.at = {'train': _offsets(self.train), 'test': _offsets(self.test)}
@@ -552,7 +556,8 @@ class _Fold:
         [s] value scaled by the running median and spread of the session's windows so far (the
         [g] statistics until 30 values are seen), never by the windows after it."""
         if self._online is None:
-            self._online = {d.session: LY.scale(d.tokens, self.stats, mode='causal') for d in self.test}
+            self._online = {d.session: LY.scale(d.tokens, self.stats, mode='causal', scheme=self.scheme)
+                            for d in self.test}
         return self._online
 
     def X_online(self, temporal: str) -> pd.DataFrame:
@@ -750,7 +755,8 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
     epochs)."""
     started = time.time()
     k = plan['k']
-    fd = _Fold(fold, data, k, learned=any(model not in UNLEARNED for model in plan['models']))
+    fd = _Fold(fold, data, k, learned=any(model not in UNLEARNED for model in plan['models']),
+               scheme=plan.get('scaling', 'mix'))
     results, details, extras = {}, {}, {}
     n_test = sum(len(d) for d in fd.test)
     for model in plan['models']:
@@ -1234,6 +1240,7 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
         'models_run': list(plan['models']),
         'ablation': {'grid': cfg.ablate,
                      'arms': {arm: list(removed) for arm, removed in ABLATIONS[cfg.ablate].items()}},
+        'scaling': cfg.scaling,
         'layout_version': LY.LAYOUT_VERSION,
         'features': {'pooled_columns': list(LY.POOLED_COLUMNS),
                      'pooled_blocks': {name: list(columns) for name, columns in LY.POOLED_BLOCKS.items()},
@@ -1277,7 +1284,7 @@ def _record_test_run(artifacts: Path, run_dir: Path, cfg: Config, status: str) -
     line = {'run': run_dir.name, 'run_dir': str(run_dir), 'status': status,
             'at': datetime.now(timezone.utc).isoformat(), 'models': list(cfg.models), 'coder': cfg.coder,
             'test_coder': cfg.test_coder or cfg.coder, 'confirm_frozen': bool(cfg.confirm_frozen),
-            'ablate': cfg.ablate}
+            'ablate': cfg.ablate, 'scaling': cfg.scaling}
     with open(path, 'a', encoding='utf-8') as handle:
         handle.write(json.dumps(line) + '\n')
     return earlier
@@ -1348,6 +1355,8 @@ def _check(cfg: Config):
     if cfg.ablate != 'none' and all(m in FEATURELESS for m in cfg.models):
         raise ValueError(f"the {cfg.ablate} ablation needs a model that reads features: "
                          f"{', '.join(dict.fromkeys(cfg.models))} run in the full arm only")
+    if cfg.scaling not in LY.SCHEMES:
+        raise ValueError(f"scaling must be one of {', '.join(LY.SCHEMES)}, not {cfg.scaling!r}")
 
 
 def _device(cfg: Config) -> tuple:
@@ -1373,7 +1382,7 @@ def _plan(cfg: Config) -> dict:
             'lr_grid': quick.get('lr_grid', TB.LR_GRID), 'hgb_grid': quick.get('hgb_grid', TB.HGB_GRID),
             'max_epochs': quick.get('max_epochs', 300), 'patience': quick.get('patience', 25),
             'seeds': int(cfg.seeds), 'small': cfg.small, 'epochs': cfg.epochs, 'jev_variant': cfg.jev_variant,
-            'bootstrap': cfg.bootstrap or quick.get('bootstrap', BOOTSTRAP), 'jobs': jobs,
+            'bootstrap': cfg.bootstrap or quick.get('bootstrap', BOOTSTRAP), 'jobs': jobs, 'scaling': cfg.scaling,
             'threads': max(1, (os.cpu_count() or 1) // jobs) if jobs > 1 else None,
             'device': device, 'torch': build}
 

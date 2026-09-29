@@ -324,6 +324,7 @@ mmla ses-classify -m <headline model>,<compared models> --split test --confirm-f
 | `--jobs` | outer folds in parallel |
 | `--device cpu` / `cuda` / `auto` | where the networks train: the CPU, one thread per fold (the default), the GPU, or the GPU when torch sees one. Parallel folds share the GPU, each in its own worker. A GPU run repeats itself but matches a CPU run only up to floating-point differences and dropout draws, not bit for bit, so compare variants trained on the same device; `config.json` records it under `network.device` |
 | `--ablate modality` | the modality ablation, in the same run: every learned model and the rule once more per arm with a modality (or two) not run in any session (see below); writes `ablation.csv`. `temporal`, `fusion`, `ladder`, `weights` and `all` are refused as not built |
+| `--scaling mix` / `s` / `c` / `g` | how the values are scaled, in every session alike (see [per-session scaling](#per-session-scaling)): `mix` (the default) as each value is tagged; `s` every value by its own session's median and spread; `c` every value centred on its session's median over the training spread; `g` every value by the training statistics. `config.json` records it under `scaling`, and a TEST run under `scaling` in `test_runs.jsonl` |
 | `--quick` | two-point grids, 30 epochs, 200 resamples: a plumbing check, never a result |
 
 The full grids are costly: `late-hgb` takes about 70 s per outer fold and temporal mode, so give `--jobs`.
@@ -354,6 +355,15 @@ The full grids are costly: `late-hgb` takes about 70 s per outer fold and tempor
 | `--bins PATH`, `--fit-bins` | read the frozen tertile words from another file; fit them again and freeze them in place of the old ones |
 | `--workers` | requests in flight (default 4) |
 | `--dry-run` | print and estimate, send nothing |
+
+### Per-session scaling
+
+`--scaling` changes only how the token values are scaled before any model reads them. The models, grids, seeds, inner folds, calibrators, the balanced decision and the headline rule stay as they are, and the rule reads the unscaled view, so its answers do not move.
+
+- **`s`** puts every value under the [s] tag: each session, training and held-out alike, is scaled by its own median and spread, the global ones where it observed a value fewer than 30 times. Nothing in it reads a label. It asks the model to read each window against its own lesson, not against the other lessons.
+- **`c`** centres every value on its own session's median but divides by the training spread. It removes a shift of level between lessons, such as a camera that sees gaze on a partner more often in one room, and keeps the spread the training sessions set.
+- **The held-out session is read whole.** Offline, the held-out session's statistics come from all of its windows, which is post-lesson analytics. The online rows (HMM `filter`) use the running normaliser for every value under `s` and `c`, as they do for the [s] values under `mix`.
+- **What it cannot fix.** A lesson with much more interaction than the others is centred like every other lesson, so its windows look less interactive than they are. Whether that costs more than the shift it removes is an empirical question, and it is answered on DEV.
 
 ## Not built yet
 

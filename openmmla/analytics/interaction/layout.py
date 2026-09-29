@@ -86,6 +86,9 @@ CLIP = 5.0
 MIN_SESSION_VALUES = 30
 # below this an IQR is treated as none (a value that is mostly one number, such as overlap)
 SPREAD_FLOOR = 1e-9
+# how scale() scales the values: 'mix' by each value's tag, 'g' and 's' every value globally or within its
+# session, 'c' every value centred within its session on the global spread
+SCHEMES = ('mix', 'g', 's', 'c')
 
 PERSON_RE = re.compile(r'^p(\d+)_(.+)$')
 PAIR_RE = re.compile(r'^pair(\d+)_(\d+)_(.+)$')
@@ -872,11 +875,12 @@ def scale(tokens: Tokens, stats: Stats | None = None, mode: str = 'offline', sch
     not observed (its mask says so). A [g] value uses the global statistics, a [s] value its
     session's own, which are label-free and so legitimate on a test session too; `mode` 'causal'
     makes those running (only windows up to the current one). `scheme` 'g' or 's' puts every value
-    under one tag (the scaling ablation)."""
+    under one tag (the scaling ablation); 'c' centres every value on its session's own median but
+    divides by the global spread (a shift of level between sessions, not of spread)."""
     if mode not in ('offline', 'causal'):
         raise ValueError(f"unknown scaling mode {mode!r}: 'offline' or 'causal'")
-    if scheme not in ('mix', 'g', 's'):
-        raise ValueError(f"unknown scaling scheme {scheme!r}: 'mix', 'g' or 's'")
+    if scheme not in SCHEMES:
+        raise ValueError(f"unknown scaling scheme {scheme!r}: {', '.join(repr(s) for s in SCHEMES)}")
     if tokens.scaled:
         raise ValueError("these tokens are scaled already")
     arrays = {'G': tokens.G.copy(), 'P': tokens.P.copy(), 'Q': tokens.Q.copy()}
@@ -895,6 +899,9 @@ def scale(tokens: Tokens, stats: Stats | None = None, mode: str = 'offline', sch
             else:
                 centers, spreads = _running_scale(x, stats, part, k, value.name)
                 center, spread = centers[:, None], spreads[:, None]
+            if tag == 'c':
+                # the session's centre (running or whole, the global one while it has too few values), the global spread
+                spread = _global(stats, part, k, value.name)[1]
             with np.errstate(invalid='ignore'):
                 z[..., k] = np.clip((x - center) / spread, -CLIP, CLIP)
         z[~observed] = 0.0

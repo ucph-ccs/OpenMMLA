@@ -71,6 +71,11 @@ def get_parser():
                         help="ablation grid: none (default), or modality (every learned model and the rule once more "
                              "without speech, space, body_gaze, speech+space and space+body_gaze, in every session; "
                              "writes ablation.csv); temporal, fusion, ladder, weights and all are not built yet")
+    parser.add_argument('--scaling', choices=('mix', 's', 'c', 'g'), default='mix',
+                        help="how the feature values are scaled, in every session alike: mix (default, as each "
+                             "value is tagged: most by the training sessions' statistics, a few within the session), "
+                             "s (every value by its own session's median and spread), c (every value centred on its "
+                             "session's median, on the training spread) or g (every value by the training statistics)")
     parser.add_argument('--target', choices=('3class', 'binary'), default='3class',
                         help="3class, or binary (individual against interaction): the fallback when a fold lacks "
                              "a class")
@@ -240,7 +245,8 @@ def main(argv=None):
                       temporal=temporal, hmm=hmm,
                       target=args.target, join=args.join, seeds=args.seeds, small=args.small, epochs=args.epochs,
                       jobs=args.jobs, out=args.out, quick=args.quick, confirm_frozen=args.confirm_frozen,
-                      jev_variant=args.jev_variant, device=args.device, ablate=args.ablate)
+                      jev_variant=args.jev_variant, device=args.device, ablate=args.ablate,
+                      scaling=args.scaling)
     started = time.time()
     try:
         run_dir = E.run(config, log=print)
