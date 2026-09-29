@@ -87,6 +87,34 @@ session (a track takes the tag of its nearest read, which can come later, and th
 from the whole session). A later badge read can therefore change an earlier window's values, and a
 server with only forward track memory would not reproduce them exactly.
 
+Where joint attention met (2026-09-29, `window_features(..., joint_split=True)`; off by default, since
+its DEV validation did not pass the pre-registered criteria). A
+pupil's gaze in a frame has a referent: `member` when it is on the group's own things (a partner's
+face or hands, the pupil's own hands, the work area), `outsider` when it is on the face or hands of
+a non-member of the frame or within reach of them (a hand circle grown by the gaze tolerance, or
+the face box grown by 20 % and the tolerance: the point gaze_target gave to a nearer pupil hand),
+and none otherwise (mark_referents, _referent). A non-member is a body that wears no pupil's tag,
+is no second skeleton or part of a pupil (_part_of_group, _outsiders' own tests), does not stand at
+the seat of a pupil the frame does not hold (a misread badge at its owner's seat included), is on
+no track that carried a pupil's tag within TRACK_GAP_SECONDS, and is at least NON_MEMBER_SCALE of
+the pupils' size (a smaller one is a far body, at the next table: neither member nor non-member);
+unlike _outsiders, a body at a present pupil's seat is not excused, since a teacher leaning in
+there is exactly who is meant (_body_roles, applied by mark_referents). The joint-attention frames of a pupil pair then split
+by where the two gazes met: `pair<a>_<b>_joint_member_ratio` (both member) and
+`_joint_outsider_ratio` (either outsider), over the frames joint_attention_ratio counts, so the
+two sum to at most the ratio; the rest met elsewhere, in a zone, or on a teacher the pose model
+missed. `_joint_member_baseline` is the old baseline's comparisons with a hit counting only when
+both referents were member, and `_joint_member_excess` the member ratio above it. There is no
+outsider baseline on purpose: a demonstration lasts minutes, so the gaze 20-40 s earlier is on the
+same teacher and a baseline would absorb exactly the episode it should show. The group columns
+`nm_at_table_ratio` and `nm_hands_in_table_ratio` are the shares of the window's frame sets in
+which some camera saw a non-member at the table (a hand circle inside the table box, or the body's
+box within TABLE_REACH_SW pupil shoulder widths of it) and with the hands in it
+(non_member_features). The table box is the camera's last ready work area of the session and the
+scale reference the pupils' median shoulder width (in the frame, else on the camera over the
+session), both offline over the whole session, as the seats are (table_boxes_of, pupil_scales_of).
+A teacher the pose model did not see, or one the rules above take for a pupil, reads 0, not empty.
+
 The hand circle, remade. The features endpoint scores a gaze against a circle around each hand and
 measures a pair's hands between the circles' centres (features.hand_regions). Version 2 of the
 circle (2026-09-24) sits 0.33 shoulder widths past the wrist, where the hand is, rather than 0.14;
@@ -244,6 +272,21 @@ CONTAINED_BODY_SHARE = 0.6
 # shoulder widths, a fifth of a hand's length) shares the pupil's wrist: a second skeleton of the
 # pupil; 9-15 % of those bodies had one, by setup
 DUPLICATE_HAND_SW = 0.1
+# a body outside the group is a non-member of the frame only when its shoulder width is at least this
+# share of the pupils' (its box width of the pupils' median box width when its shoulders are not seen):
+# a body at the group's depth reads about 1, and one about 1.7 times as far from the camera (the next
+# table) projects at 0.6 or less. Fixed from the geometry before any window was scored, no label read
+NON_MEMBER_SCALE = 0.6
+# a non-member is at the table when their box comes within this many pupil shoulder widths of the
+# table box: about two hand lengths (HAND_LENGTH_SW), an adult leaning in. Fixed like NON_MEMBER_SCALE
+TABLE_REACH_SW = 1.0
+# the face box of a non-member is grown by this share on every side before the gaze tolerance, as
+# gaze_target grows a face (features.FACE_MARGIN)
+REFERENT_FACE_MARGIN = vfa_features.FACE_MARGIN
+# the gaze labels whose referent is the group's own things; other_face and other_hands are ruled on
+# by who the target is, and the rest (elsewhere, zone) have none
+MEMBER_LABELS = ('partner_face', 'partner_hands', 'own_hands', 'work_area')
+MEMBER, OUTSIDER = 'member', 'outsider'
 # a pair's follow_ratio needs at least this many steps with one active and the other still: a share of
 # one or two steps can only be 0, 0.5 or 1, and 37-48 % of the windows with such a step had no more
 # than two, by setup
@@ -1247,10 +1290,7 @@ def _outsiders(bodies: list[dict], person: dict, pupils: set[str], seats_here: d
     group = [p for p in bodies if p.get('tag_id') is not None and str(p['tag_id']) in pupils]
     if not any(p is person for p in group):
         group.append(person)
-    # the group's hands, each with how close another's must come to be the same wrist: DUPLICATE_HAND_SW
-    # of the shoulder width the circle's radius was made from
-    hands = [(centre, DUPLICATE_HAND_SW / vfa_features.HAND_RADIUS_SHOULDERS * radius)
-             for p in group for centre, radius in _hand_circles(p, nudge)]
+    hands = _group_hands(group, nudge)
     seats = list((seats_here or {}).values())
     out = []
     for body in bodies:
@@ -1258,17 +1298,97 @@ def _outsiders(bodies: list[dict], person: dict, pupils: set[str], seats_here: d
             continue
         if body.get('track_id') is not None and body['track_id'] in tracks_here:
             continue
-        box = body.get('bbox')
-        if any(_box_iou(box, p.get('bbox')) >= DUPLICATE_BODY_IOU or _inside_share(box, p.get('bbox')) >= CONTAINED_BODY_SHARE
-               for p in group):
+        if _part_of_group(body, group, hands, nudge):
             continue
         centre = _box_centre(body)
         if centre is not None and any(_at_seat(centre, seat) for seat in seats):
             continue
-        if any(math.dist(mine, theirs) <= same for mine, _ in _hand_circles(body, nudge) for theirs, same in hands):
-            continue
         out.append(body)
     return out
+
+
+def _group_hands(group: list[dict], nudge: float | None) -> list:
+    """the group's hand circles, each centre with how close another's must come to be the same wrist:
+    DUPLICATE_HAND_SW of the shoulder width the circle's radius was made from."""
+    return [(centre, DUPLICATE_HAND_SW / vfa_features.HAND_RADIUS_SHOULDERS * radius)
+            for p in group for centre, radius in _hand_circles(p, nudge)]
+
+
+def _part_of_group(body: dict, group: list[dict], hands: list, nudge: float | None) -> bool:
+    """whether a body is a second skeleton or a part of one of the `group`'s bodies: its box overlaps
+    one of theirs by DUPLICATE_BODY_IOU or lies CONTAINED_BODY_SHARE inside it, or one of its hand
+    circles is centred within DUPLICATE_HAND_SW of one of theirs (`hands`, _group_hands), a shared
+    wrist."""
+    box = body.get('bbox')
+    if any(_box_iou(box, p.get('bbox')) >= DUPLICATE_BODY_IOU or _inside_share(box, p.get('bbox')) >= CONTAINED_BODY_SHARE
+           for p in group):
+        return True
+    return any(math.dist(mine, theirs) <= same for mine, _ in _hand_circles(body, nudge) for theirs, same in hands)
+
+
+# what the non-member rules made of a body outside the pupils' tags (_body_roles): a non-member, or
+# the group's own (a second skeleton or part of a pupil, a body at a missing pupil's seat, one on a
+# pupil's track), or a far body, or one whose size cannot be told
+NON_MEMBER, PART, SEAT, TRACK, FAR, UNSCALED = 'non_member', 'part', 'seat', 'track', 'far', 'unscaled'
+_GROUPS_OWN = (PART, SEAT, TRACK)
+
+
+def _on_pupil_span(track, moment: float, spans_here: dict | None) -> bool:
+    """whether the track carried a pupil's tag within TRACK_GAP_SECONDS of `moment` on this camera
+    (`spans_here`, pupil_track_spans_of's camera: track id -> sorted times of those tags)."""
+    times = (spans_here or {}).get(track)
+    if track is None or not times:
+        return False
+    i = bisect.bisect_left(times, moment)
+    return any(0 <= j < len(times) and abs(times[j] - moment) <= TRACK_GAP_SECONDS for j in (i - 1, i))
+
+
+def _frame_scale(group: list[dict], scale_here: tuple | None) -> float | None:
+    """the frame's scale reference: the median shoulder width of the pupils in the frame, else the
+    camera's median pupil shoulder width over the session (`scale_here`, pupil_scales_of); None when
+    neither is known."""
+    widths = [scale[1] for scale in (body_scale(p) for p in group) if scale]
+    if widths:
+        return statistics.median(widths)
+    return scale_here[0] if scale_here and scale_here[0] else None
+
+
+def _body_roles(persons: list[dict], pupils: set[str], seats_here: dict | None, spans_here: dict | None,
+                moment: float, ref_sw: float | None, ref_box: float | None, nudge: float | None) -> dict[int, str]:
+    """{index in `persons`: role} for every body of the frame that wears no pupil's tag, by the
+    non-member rules in order: PART (a second skeleton or part of a pupil in the frame,
+    _part_of_group), SEAT (its box centre at the seat of a pupil the frame does not hold, whatever tag
+    it wears, so a misread badge at its owner's seat is the owner), TRACK (on a track that carried a
+    pupil's tag within TRACK_GAP_SECONDS, _on_pupil_span), then by size against `ref_sw` (its shoulder
+    width) or, with its shoulders unseen, `ref_box` (its box width): NON_MEMBER from NON_MEMBER_SCALE
+    up, FAR below it, UNSCALED when neither can be measured. A body at a present pupil's seat is not
+    excused."""
+    group = [p for p in persons if p.get('tag_id') is not None and str(p['tag_id']) in pupils]
+    hands = _group_hands(group, nudge)
+    tagged = {str(p['tag_id']) for p in persons if p.get('tag_id') is not None}
+    missing = [seat for tag, seat in (seats_here or {}).items() if tag in pupils and tag not in tagged]
+    roles = {}
+    for index, body in enumerate(persons):
+        if any(body is p for p in group):
+            continue
+        centre = _box_centre(body)
+        if _part_of_group(body, group, hands, nudge):
+            roles[index] = PART
+        elif centre is not None and any(_at_seat(centre, seat) for seat in missing):
+            roles[index] = SEAT
+        elif _on_pupil_span(body.get('track_id'), moment, spans_here):
+            roles[index] = TRACK
+        else:
+            scale = body_scale(body)
+            if scale is not None and ref_sw:
+                ratio = scale[1] / ref_sw
+            elif centre is not None and ref_box:
+                ratio = centre[2] / ref_box
+            else:
+                roles[index] = UNSCALED
+                continue
+            roles[index] = NON_MEMBER if ratio >= NON_MEMBER_SCALE else FAR
+    return roles
 
 
 def _other_hands_near(person: dict, others: list[dict], nudge: float | None) -> bool | None:
@@ -1548,6 +1668,55 @@ def pupil_tracks_of(records: Iterable[dict], pupils: Iterable[str],
     return {camera: frozenset(ids) for camera, ids in tracks.items()}
 
 
+def pupil_track_spans_of(records: Iterable[dict], pupils: Iterable[str],
+                         layout: tuple[int | None, frozenset[str]] | None = None) -> dict[str, dict[Any, list[float]]]:
+    """camera -> track id -> the sorted times at which the server gave the track a pupil's tag (read,
+    or kept on the track). Unlike pupil_tracks_of, a body on such a track is the pupil's only within
+    TRACK_GAP_SECONDS of one of those times (_on_pupil_span), so an id handed out again after a
+    restart, or a switch to someone who brushed past, does not hide them for the whole session."""
+    records = list(records)
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    wanted = {str(tag) for tag in pupils}
+    spans: dict[str, dict[Any, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        moment = _time(record)
+        if moment <= 0:
+            continue
+        frames = _frames_of(record)
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            for person in frame.get('persons') or []:
+                if person.get('track_id') is not None and person.get('tag_id') is not None \
+                        and str(person['tag_id']) in wanted:
+                    spans[camera][person['track_id']].append(moment)
+    return {camera: {track: sorted(times) for track, times in by_track.items()} for camera, by_track in spans.items()}
+
+
+def pupil_scales_of(records: Iterable[dict], pupils: Iterable[str],
+                    layout: tuple[int | None, frozenset[str]] | None = None) -> dict[str, tuple[float | None, float | None]]:
+    """camera -> (the median shoulder width, the median box width) of the pupils' bodies on that camera
+    over the whole session, in pixels, from the tags the server gave (read or kept on the track), as
+    seats_of learns the seats; either is None when no pupil body gave one."""
+    records = list(records)
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    wanted = {str(tag) for tag in pupils}
+    shoulders: dict[str, list[float]] = defaultdict(list)
+    boxes: dict[str, list[float]] = defaultdict(list)
+    for record in records:
+        frames = _frames_of(record)
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            for person in frame.get('persons') or []:
+                if person.get('tag_id') is None or str(person['tag_id']) not in wanted:
+                    continue
+                scale, box = body_scale(person), _box_centre(person)
+                if scale is not None:
+                    shoulders[camera].append(scale[1])
+                if box is not None:
+                    boxes[camera].append(box[2])
+    return {camera: (statistics.median(shoulders[camera]) if shoulders[camera] else None,
+                     statistics.median(boxes[camera]) if boxes[camera] else None)
+            for camera in set(shoulders) | set(boxes)}
+
+
 def label_work_areas(records: Iterable[dict], pupils: Iterable[str],
                      layout: tuple[int | None, frozenset[str]] | None = None, nudge: float | None = None) -> list[dict]:
     """the vfa_features records with every camera's work area applied (work_area.apply_work_area):
@@ -1585,14 +1754,38 @@ def label_work_areas(records: Iterable[dict], pupils: Iterable[str],
     return out
 
 
+def table_boxes_of(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None) -> dict[str, list[float]]:
+    """camera -> the table box: the last work area label_work_areas (or a server that labels online)
+    stored on the camera's frames, [x1, y1, x2, y2] in pixels, the area once all of the session's
+    pupil hands have taught it. Offline over the whole session, like the seats, so the teacher's
+    introduction before the area is ready is judged too. A camera whose area was never ready has
+    none."""
+    records = sorted((record for record in records if _time(record) > 0), key=_time)
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    boxes: dict[str, list[float]] = {}
+    for record in records:
+        frames = _frames_of(record)
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            box = frame.get('work_area') if isinstance(frame, dict) else None
+            if box is not None:
+                try:
+                    boxes[camera] = [float(v) for v in box[:4]]
+                except (TypeError, ValueError, IndexError):
+                    continue
+    return {camera: box for camera, box in boxes.items() if len(box) == 4}
+
+
 # out of frame or unreadable: no point to compare, as the server's pairwise needs both gazes in frame
 _NO_POINT = ('unknown', 'out_of_frame')
 
 
-def gaze_points(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None) -> dict:
+def gaze_points(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None,
+                referents: dict | None = None) -> dict:
     """{(camera, tag): (times, points)}: every tagged person's gaze point in frame, by camera, in
     time order, with the frame's width beside it ((x, y, width)); a target that is unknown or
-    out_of_frame, or a frame without a width, gives none."""
+    out_of_frame, or a frame without a width, gives none. With `referents` (a dict, filled in place)
+    it also gets {(camera, tag): [referent, ...]}, aligned index by index with the points: the
+    person's `referent` as mark_referents left it (None where there is none)."""
     records = sorted(records, key=_time)
     _, shared = layout if layout is not None else frame_set_layout(records)
     index: dict[tuple[str, str], tuple[list[float], list[tuple[float, float, float]]]] = {}
@@ -1619,6 +1812,8 @@ def gaze_points(records: Iterable[dict], layout: tuple[int | None, frozenset[str
                 times, points = index.setdefault((camera, str(person['tag_id'])), ([], []))
                 times.append(moment)
                 points.append((float(point[0]), float(point[1]), width))
+                if referents is not None:
+                    referents.setdefault((camera, str(person['tag_id'])), []).append(person.get('referent'))
     return index
 
 
@@ -1641,7 +1836,23 @@ def joint_attention_baseline(gaze_index: dict, a: str, b: str, ws: float, we: fl
     within JOINT_ATTENTION_WIDTH of the frame's width. Only points before `ws` are compared, so a
     window longer than the smallest lag never meets itself. Hits over comparisons, pooled over
     cameras, lags and both directions; None below JOINT_BASELINE_MIN comparisons."""
-    comparisons, hits = 0, 0
+    comparisons, hits, _ = _baseline_counts(gaze_index, a, b, ws, we)
+    return hits / comparisons if comparisons >= JOINT_BASELINE_MIN else None
+
+
+def joint_member_baseline(gaze_index: dict, referents: dict, a: str, b: str, ws: float, we: float) -> float | None:
+    """the member part of joint_attention_baseline: its comparisons, with a hit counting only when
+    both gaze points' referents (`referents`, aligned with `gaze_index` by gaze_points) are member,
+    over all its comparisons; None below JOINT_BASELINE_MIN comparisons. At most the baseline."""
+    comparisons, _, member_hits = _baseline_counts(gaze_index, a, b, ws, we, referents)
+    return member_hits / comparisons if comparisons >= JOINT_BASELINE_MIN else None
+
+
+def _baseline_counts(gaze_index: dict, a: str, b: str, ws: float, we: float,
+                     referents: dict | None = None) -> tuple[int, int, int]:
+    """(comparisons, hits, member hits) of joint_attention_baseline; the member hits are counted only
+    with `referents`, else 0."""
+    comparisons, hits, member_hits = 0, 0, 0
     cameras = {camera for camera, _ in gaze_index}
     for camera in cameras:
         for x, y in ((a, b), (b, a)):
@@ -1650,6 +1861,8 @@ def joint_attention_baseline(gaze_index: dict, a: str, b: str, ws: float, we: fl
                 continue
             times, points = source
             other_times, other_points = other
+            own_refs = (referents or {}).get((camera, x)) or []
+            other_refs = (referents or {}).get((camera, y)) or []
             for i in range(bisect.bisect_left(times, ws), bisect.bisect_left(times, we)):
                 px, py, width = points[i]
                 for lag in JOINT_BASELINE_LAGS:
@@ -1659,8 +1872,12 @@ def joint_attention_baseline(gaze_index: dict, a: str, b: str, ws: float, we: fl
                         continue
                     comparisons += 1
                     qx, qy, _ = other_points[j]
-                    hits += math.dist((px, py), (qx, qy)) <= JOINT_ATTENTION_WIDTH * width
-    return hits / comparisons if comparisons >= JOINT_BASELINE_MIN else None
+                    hit = math.dist((px, py), (qx, qy)) <= JOINT_ATTENTION_WIDTH * width
+                    hits += hit
+                    if hit and referents is not None and i < len(own_refs) and j < len(other_refs) \
+                            and own_refs[i] == MEMBER and other_refs[j] == MEMBER:
+                        member_hits += 1
+    return comparisons, hits, member_hits
 
 
 def _seated_untagged(persons: list[dict], seats_here: dict | None, pupils: set[str]) -> frozenset[str]:
@@ -1697,10 +1914,137 @@ def _gaze_label(person: dict, pupils: set[str], work_area: bool = True,
     return category
 
 
+def _face_box(person: dict) -> list[float] | None:
+    """the stored `face_bbox` of a body, or None"""
+    try:
+        box = person.get('face_bbox')
+        if box is not None and len(box) >= 4:
+            return [float(v) for v in box[:4]]
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _within_reach(point: tuple[float, float], body: dict, tolerance: float, nudge: float | None) -> bool:
+    """whether a gaze point could have been scored as the body's, as gaze_target scores it: within the
+    gaze tolerance of one of its hand circles, of its stored face box grown by REFERENT_FACE_MARGIN,
+    or, without a face box, of the circle of half its head width around its nose"""
+    if any(math.dist(point, centre) - radius <= tolerance for centre, radius in _hand_circles(body, nudge)):
+        return True
+    face = _face_box(body)
+    if face is not None:
+        return vfa_features._box_distance(point, vfa_features._grown(face, REFERENT_FACE_MARGIN)) <= tolerance
+    try:
+        nose = vfa_features.keypoint(body, 'nose', VFA_KEYPOINT_CONFIDENCE)
+        if nose is None:
+            return False
+        return math.dist(point, nose) - vfa_features.head_width(body, VFA_KEYPOINT_CONFIDENCE) / 2.0 <= tolerance
+    except (KeyError, TypeError, ValueError, IndexError):
+        return False
+
+
+def _referent(person: dict, persons: list[dict], pupils: set[str], work_area: bool, seated: frozenset[str],
+              roles: dict[int, str] | None, tolerance: float | None, nudge: float | None) -> tuple[str | None, str, bool]:
+    """(referent, gaze label, by reach) of a pupil's gaze in a frame: what it met, `member`,
+    `outsider` or None, by these rules in order. (1) A gaze on someone else's face or hands (the
+    label _gaze_label gives, other_face or other_hands) is outsider when the target body is a
+    non-member of the frame, or when the frame cannot tell (`roles` None, no scale reference); member
+    when the target is the group's own (a pupil, a second skeleton or part of one, a body at a missing
+    pupil's seat, one on a pupil's track); none when it is a far body, one whose size cannot be told,
+    or not in the frame. (2) A gaze point within reach of a non-member (_within_reach, with the gaze
+    `tolerance`) is outsider whatever else it was, `by reach`: gaze_target gave that point to a nearer
+    hand. (3) Otherwise a partner's face or hands, the pupil's own hands or the work area are member.
+    (4) The rest (elsewhere, a zone) is none. A gaze with no point in frame (unknown, out_of_frame)
+    has no referent."""
+    gaze = person.get('gaze') or {}
+    target = gaze.get('target') or {}
+    label = _gaze_label(person, pupils, work_area, seated)
+    point = gaze.get('point')
+    if (target.get('category') or 'unknown') in _NO_POINT or not point or len(point) < 2:
+        return None, label, False
+    referent, ruled = None, False
+    if label in ('other_face', 'other_hands'):
+        ruled = True
+        if roles is None:
+            referent = OUTSIDER
+        else:
+            wanted = str(target.get('person_id'))
+            found = [index for index, body in enumerate(persons) if body is not person
+                     and body.get('person_id') is not None and str(body['person_id']) == wanted]
+            if found:
+                role = roles.get(found[0])
+                if role == NON_MEMBER:
+                    referent = OUTSIDER
+                elif role is None or role in _GROUPS_OWN:
+                    # no role: the target wears a pupil's tag
+                    referent = MEMBER
+    if referent != OUTSIDER and roles and tolerance is not None:
+        try:
+            where = (float(point[0]), float(point[1]))
+        except (TypeError, ValueError):
+            where = None
+        if where is not None and any(_within_reach(where, persons[index], tolerance, nudge)
+                                     for index, role in roles.items() if role == NON_MEMBER):
+            return OUTSIDER, label, True
+    if not ruled and label in MEMBER_LABELS:
+        referent = MEMBER
+    return referent, label, False
+
+
+def mark_referents(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None, pupils: Iterable[str],
+                   pupil_seats: dict | None, spans: dict | None, scales: dict | None, work_area: bool = True,
+                   nudge: float | None = None) -> list[dict]:
+    """copies of the vfa_features records (aligned to the input; the stored frames are never changed)
+    in which every frame carries its non-members and every tagged pupil the referent of their gaze.
+    Each frame gets `non_members`, the indices in its `persons` of the bodies _body_roles calls non-members
+    (None when the frame has no scale reference), and `nm_ref_sw`, that reference (the pupils' median
+    shoulder width in the frame, else on the camera over the session, _frame_scale). Each pupil's
+    person gets `referent` (member, outsider or None, _referent), `referent_label` (the gaze label it
+    was ruled from) and `referent_by_reach` (made outsider by the reach rule alone). `pupil_seats`
+    (seats_of for the pupils) gives the missing pupils' seats, `spans` (pupil_track_spans_of) the
+    pupils' tracks, `scales` (pupil_scales_of) the camera's references; no point, tag or box is
+    touched, so the gaze points and every other column read the same."""
+    records = list(records)
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    pupils = {str(tag) for tag in pupils}
+    out = []
+    for record in records:
+        moment = _time(record)
+        frames = _frames_of(record)
+        marked = []
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            persons = frame.get('persons') or []
+            group = [p for p in persons if p.get('tag_id') is not None and str(p['tag_id']) in pupils]
+            scale_here = (scales or {}).get(camera)
+            ref_sw = _frame_scale(group, scale_here)
+            ref_box = scale_here[1] if scale_here else None
+            seats_here = (pupil_seats or {}).get(camera)
+            roles = _body_roles(persons, pupils, seats_here, (spans or {}).get(camera), moment, ref_sw, ref_box, nudge) \
+                if ref_sw else None
+            try:
+                width, height = float(frame.get('width') or 0.0), float(frame.get('height') or 0.0)
+            except (TypeError, ValueError):
+                width, height = 0.0, 0.0
+            tolerance = vfa_features.gaze_tolerance(width, height) if width else None
+            seated = _seated_untagged(persons, seats_here, pupils)
+            named = []
+            for person in persons:
+                if any(person is p for p in group):
+                    referent, label, by_reach = _referent(person, persons, pupils, work_area, seated, roles, tolerance, nudge)
+                    person = dict(person, referent=referent, referent_label=label, referent_by_reach=by_reach)
+                named.append(person)
+            marked.append(dict(frame, persons=named, nm_ref_sw=ref_sw,
+                               non_members=None if roles is None else
+                               [index for index, role in sorted(roles.items()) if role == NON_MEMBER]))
+        out.append(dict(record, features=marked) if frames else record)
+    return out
+
+
 def body_gaze_features(features: EventIndex, ws: float, we: float, participants: list[str],
                        layout: tuple[int | None, frozenset[str]] | None = None, pupils: Iterable[str] | None = None,
                        gaze_index: dict | None = None, work_area: bool = True, seats: dict | None = None,
-                       nudge: float | None = None, pupil_tracks: dict | None = None) -> dict:
+                       nudge: float | None = None, pupil_tracks: dict | None = None,
+                       referents: dict | None = None) -> dict:
     """what the bodies and gazes did in the window, per person and per pair, from the frames the
     features endpoint answered. Every sequence (the wrist speed, following each hand from one
     frame to the next; the hand steps; the gaze switches; the yaw spread) is taken within one
@@ -1736,7 +2080,18 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
     both with a hand distance and both shoulder widths: hand_dist_sw_min and hand_dist_sw_mean (the
     hand distance over the mean of the two shoulder widths) and hands_close_ratio (the share of
     those frames with the hands within HAND_LENGTH_SW). A ratio with nothing to judge is None, never
-    0."""
+    0.
+
+    Where joint attention met. With `referents` (the aligned referents gaze_points filled from records
+    mark_referents marked; a table without the joint split passes none and has none of these
+    columns), every joint-attention frame of a pupil pair is split by its gazes' referents: member
+    when both are member, outsider when either is outsider (the outsider class wins), unplaced
+    otherwise. pair<a>_<b>_joint_member_ratio and _joint_outsider_ratio are those frames over the
+    frames joint_attention_ratio divides by, so the two sum to at most the ratio;
+    _joint_member_baseline is joint_member_baseline and _joint_member_excess the member ratio above
+    it; _joint_reach_ratio (joint frames outsider by the reach rule alone) and _joint_both_wa_ratio
+    (member joint frames with both gazes on the work area) are diagnostics over the same frames. All
+    are None for a pair with a non-pupil, and the ratios where joint_attention_ratio is."""
     out: dict[str, Any] = {}
     records = features.between(ws, we)
     out['n_vfa_features'] = len(records)
@@ -1848,6 +2203,9 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
 
     for a, b in _pairs(participants):
         hand, gaze_dist, joint, mutual, frame_sets, hand_sw = [], [], [], [], set(), []
+        # the joint frames by where the gazes met: member, outsider, outsider by reach alone, member on
+        # the work area both
+        split = Counter()
         for rows in frames_by_camera.values():
             for _, number, frame in rows:
                 width = float(frame.get('width') or 0.0)
@@ -1867,6 +2225,8 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
                     if pair.get('gaze_distance') is not None:
                         gaze_dist.append(float(pair['gaze_distance']) / width)
                         joint.append(1.0 if float(pair['gaze_distance']) / width <= JOINT_ATTENTION_WIDTH else 0.0)
+                        if referents is not None and joint[-1]:
+                            split.update(_joint_referent(persons[a], persons[b]))
                 targets = [((persons[x].get('gaze') or {}).get('target') or {}) for x in (a, b)]
                 mutual.append(1.0 if targets[0].get('category') == 'partner_face' and str(targets[0].get('person_id')) == b
                               and targets[1].get('category') == 'partner_face' and str(targets[1].get('person_id')) == a else 0.0)
@@ -1882,6 +2242,9 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
         baseline = _round(joint_attention_baseline(gaze_index, a, b, ws, we))
         out[f'pair{a}_{b}_joint_attention_baseline'] = baseline
         out[f'pair{a}_{b}_joint_attention_excess'] = _round(ratio - baseline) if ratio is not None and baseline is not None else None
+        if referents is not None:
+            out.update(_joint_split_columns(f'pair{a}_{b}', a in pupils and b in pupils, ratio, len(joint), split,
+                                            gaze_index, referents, a, b, ws, we))
         # the pair's hands step by step, on the cameras that saw both
         both, one, followed = [], 0, 0
         for camera, by_tag in statuses.items():
@@ -1903,6 +2266,42 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
         out[f'pair{a}_{b}_hands_close_ratio'] = _round(sum(1 for d in hand_sw if d <= HAND_LENGTH_SW) / len(hand_sw)) \
             if hand_sw else None
     return out
+
+
+def _joint_referent(first: dict, second: dict) -> list[str]:
+    """what a joint-attention frame of two pupils counts as, from their persons' referents
+    (mark_referents): ['outsider'] when either is outsider, with 'reach' when every outsider one was
+    made so by the reach rule alone; ['member'] when both are member, with 'both_wa' when both gazes
+    were on the work area; nothing (unplaced) otherwise."""
+    referents = [first.get('referent'), second.get('referent')]
+    if OUTSIDER in referents:
+        marks = [OUTSIDER]
+        if all(p.get('referent_by_reach') for p in (first, second) if p.get('referent') == OUTSIDER):
+            marks.append('reach')
+        return marks
+    if referents == [MEMBER, MEMBER]:
+        marks = [MEMBER]
+        if first.get('referent_label') == 'work_area' and second.get('referent_label') == 'work_area':
+            marks.append('both_wa')
+        return marks
+    return []
+
+
+def _joint_split_columns(prefix: str, pupil_pair: bool, ratio: float | None, frames: int, split: Counter,
+                         gaze_index: dict, referents: dict, a: str, b: str, ws: float, we: float) -> dict:
+    """the joint split of a pair (body_gaze_features): the member, outsider, reach and both-work-area
+    joint frames over the `frames` joint_attention_ratio divides by, None for a pair with a non-pupil
+    or where the ratio is None; the member baseline (None for a pair with a non-pupil, or below
+    JOINT_BASELINE_MIN comparisons) and the member ratio above it."""
+    judged = pupil_pair and ratio is not None and frames > 0
+    member = _round(split[MEMBER] / frames) if judged else None
+    baseline = _round(joint_member_baseline(gaze_index, referents, a, b, ws, we)) if pupil_pair else None
+    return {f'{prefix}_joint_member_ratio': member,
+            f'{prefix}_joint_outsider_ratio': _round(split[OUTSIDER] / frames) if judged else None,
+            f'{prefix}_joint_member_baseline': baseline,
+            f'{prefix}_joint_member_excess': _round(member - baseline) if member is not None and baseline is not None else None,
+            f'{prefix}_joint_reach_ratio': _round(split['reach'] / frames) if judged else None,
+            f'{prefix}_joint_both_wa_ratio': _round(split['both_wa'] / frames) if judged else None}
 
 
 # ---- the seats ----
@@ -2000,6 +2399,63 @@ def seat_features(features: EventIndex, ws: float, we: float, participants: list
     return out
 
 
+def _inside(point, box) -> bool:
+    return box[0] <= point[0] <= box[2] and box[1] <= point[1] <= box[3]
+
+
+def _boxes_meet(first, second) -> bool:
+    """whether two boxes [x1, y1, x2, y2] overlap (touching edges do not)."""
+    return min(first[2], second[2]) > max(first[0], second[0]) and min(first[3], second[3]) > max(first[1], second[1])
+
+
+def non_member_features(features: EventIndex, ws: float, we: float, table_boxes: dict,
+                        layout: tuple[int | None, frozenset[str]], nudge: float | None = None) -> dict:
+    """whether someone outside the group was at the group's table in the window, from the frames
+    mark_referents marked. A camera frame can judge when its camera has a table box (`table_boxes`,
+    table_boxes_of) and the frame has non-members (not None: a scale reference); it sees a non-member
+    at the table when one of them has a hand circle centred inside the box, or a box that meets the box
+    grown by TABLE_REACH_SW of the frame's scale reference on every side, and with the hands in it on
+    the first test alone. nm_at_table_ratio and nm_hands_in_table_ratio: the share of the window's frame
+    sets (all of them, as seat_features) in which some camera frame saw that; None when no frame set had
+    a frame that could judge. n_vfa_non_members: the non-members summed over the window's frames; None
+    when no frame had a scale reference."""
+    _, shared = layout
+    inside = features.between(ws, we)
+    judged, at_table, hands_in, count, counted = 0, 0, 0, 0, False
+    for record, _, _ in inside:
+        frames = _frames_of(record)
+        judging = at = hands = False
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            chosen = frame.get('non_members')
+            if chosen is None:
+                continue
+            counted = True
+            count += len(chosen)
+            box = table_boxes.get(camera)
+            if box is None:
+                continue
+            judging = True
+            persons = frame.get('persons') or []
+            reach = TABLE_REACH_SW * float(frame.get('nm_ref_sw') or 0.0)
+            grown = [box[0] - reach, box[1] - reach, box[2] + reach, box[3] + reach]
+            for index in chosen:
+                body = persons[index]
+                if any(_inside(centre, box) for centre, _ in _hand_circles(body, nudge)):
+                    at = hands = True
+                    break
+                try:
+                    bbox = [float(v) for v in body.get('bbox')[:4]]
+                except (TypeError, ValueError, IndexError):
+                    continue
+                at = at or (len(bbox) == 4 and _boxes_meet(bbox, grown))
+        judged += judging
+        at_table += at
+        hands_in += hands
+    return {'nm_at_table_ratio': _round(at_table / len(inside)) if judged else None,
+            'nm_hands_in_table_ratio': _round(hands_in / len(inside)) if judged else None,
+            'n_vfa_non_members': count if counted else None}
+
+
 # ---- semantic ----
 
 def action_features(actions: EventIndex, ws: float, we: float, participants: list[str]) -> dict:
@@ -2030,7 +2486,8 @@ def action_features(actions: EventIndex, ws: float, we: float, participants: lis
 def window_features(events: dict[str, list[dict]], window: float = 10.0, step: float = 10.0,
                     participants: list[str] | None = None, speakers: list[str] | None = None,
                     track_tags: bool = True, pupils: list[str] | None = None,
-                    work_area: bool = True, seat_partners: bool = True, hand_relabel: bool = True) -> list[dict]:
+                    work_area: bool = True, seat_partners: bool = True, hand_relabel: bool = True,
+                    joint_split: bool = False) -> list[dict]:
     """the fusion table: one row per window over the session's span. `pupils` are the session's
     pupils, the in-group set whose faces and hands are a partner's (default_pupils of the
     participants when not given). With `hand_relabel` (the default) every stored frame's gaze
@@ -2044,7 +2501,12 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     the tracks of the features endpoint (propagate_track_tags), and a session whose persons were
     tracked gets `n_vfa_propagated`. With `seat_partners` (the default) a gaze on an untagged body
     at the seat of a pupil the camera's frame does not hold counts as a partner's
-    (n_vfa_seat_partners)."""
+    (n_vfa_seat_partners). With `joint_split` (off by default) the frames are marked with their
+    non-members and the pupils' gaze referents (mark_referents), the pupil pairs' joint attention is
+    split by where it met (pair<a>_<b>_joint_member_ratio ..., body_gaze_features) and the group gets
+    nm_at_table_ratio, nm_hands_in_table_ratio and n_vfa_non_members (non_member_features, before the
+    seat trace, which stays last); without it the table is the one fused before 2026-09-29, byte for
+    byte."""
     if window <= 0 or step <= 0:
         raise ValueError("window and step must be greater than 0")
     span = session_span(events)
@@ -2076,8 +2538,6 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     # propagation column
     tracked = track_tags and _tracked(raw)
     features = EventIndex(propagate_track_tags(labelled, layout) if tracked else labelled, instant=True)
-    # every tagged gaze point in frame, by camera, for the joint-attention baseline
-    gaze_index = gaze_points(features.records, layout)
     # the seats of the participants, learned once from the whole session and from the tags the
     # server gave (read or kept on the track), not the propagated ones, so a track carried to the
     # wrong person cannot move a seat; None without VFA, so its table has no seat trace
@@ -2091,6 +2551,22 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
         pupil_seats = seats_of(raw, pupils, layout)
     # the tracks the server named a pupil on, whose bodies are never someone outside the group
     pupil_tracks = pupil_tracks_of(raw, pupils, layout) if len(features) else None
+    referents, table_boxes = None, None
+    if joint_split:
+        referents = {}
+        if len(features):
+            # the non-members of every frame and the referent of every pupil's gaze, from the pupils'
+            # tracks (within TRACK_GAP_SECONDS), their seats and their size on each camera, learned
+            # offline from the server's tags like the seats; the table box is each camera's last ready
+            # work area. It touches no point, tag or box, so every other column reads the same
+            spans = pupil_track_spans_of(raw, pupils, layout)
+            scales = pupil_scales_of(raw, pupils, layout)
+            table_boxes = table_boxes_of(labelled, layout)
+            features = EventIndex(mark_referents(features.records, layout, pupils, pupil_seats, spans, scales,
+                                                 work_area, nudge), instant=True)
+    # every tagged gaze point in frame, by camera, for the joint-attention baseline (with their
+    # referents beside them for the member baseline)
+    gaze_index = gaze_points(features.records, layout, referents=referents)
     actions = EventIndex(events.get(EVENT_TYPE_VFA_ACTION, []), instant=True)
     # the personal microphones and the buckets each wearer won; None for a session without them
     personal = personal_speech(events.get(EVENT_TYPE_ASR_RECOGNITION, []), events.get(EVENT_TYPE_ASR_TRANSCRIPTION, []))
@@ -2101,10 +2577,12 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
         row.update(space_features(translations, relations, ws, we, participants))
         row.update(body_gaze_features(features, ws, we, participants, layout, pupils=pupils, gaze_index=gaze_index,
                                       work_area=work_area, seats=pupil_seats, nudge=nudge,
-                                      pupil_tracks=pupil_tracks))
+                                      pupil_tracks=pupil_tracks, referents=referents))
         if tracked:
             row['n_vfa_propagated'] = _propagated_count(features, ws, we)
         row.update(action_features(actions, ws, we, participants))
+        if table_boxes is not None:
+            row.update(non_member_features(features, ws, we, table_boxes, layout, nudge))
         if seats is not None:
             row.update(seat_features(features, ws, we, participants, seats, layout))
         rows.append(row)

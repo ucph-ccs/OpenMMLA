@@ -37,6 +37,14 @@ instead of the hand speed and distance in frame widths, which moved with the cam
 note changes with it, so every map must be asked again. The criteria-order and
 rerun checks of the design are deferred: the criteria keep CODEBOOK's order, and a rerun is a run
 without the cache.
+
+The fusion of 2026-09-29 (exploratory: built after DEV labels were read) splits a pair's joint
+attention by where the two gazes met, on the group's own faces, hands or work area or on someone
+outside the group, with the first part's own rate 20-40 s earlier, and says per window whether a
+body outside the group was at the table, and with its hands in the work area. A table with those
+columns gets the split in the pair sentence, a group sentence opening the camera part, the split
+in the context of j1, and a longer sensor note (sensor_note, question(split=True)). A table without
+them is described, and asked, byte for byte as before, so its cached answers stay valid.
 """
 from __future__ import annotations
 
@@ -111,6 +119,19 @@ SENSOR_NOTE = (
     "are named apart. The work area is the table region around the members' hands. A part that says 'not measured' "
     "had no data; do not read it as zero or as silence."
 )
+# the sentence of SENSOR_NOTE the note of the joint split follows
+WORK_AREA_SENTENCE = "The work area is the table region around the members' hands."
+# said only to a table fused with the joint split and the non-member pass (2026-09-29)
+SPLIT_NOTE = (
+    "Joint attention means two members' gaze points were close together; it is split by what they met on: the "
+    "group's own faces, hands or work area, or someone outside the group (their face or hands, or right next to "
+    "them). Someone outside the group is at the table when a body about the members' size, not a member, has its "
+    "hands in the work area or stands at its edge; a person the cameras did not detect is not counted."
+)
+assert WORK_AREA_SENTENCE in SENSOR_NOTE
+# the slot-table columns of the joint split (per pair) and of the non-member pass (group)
+SPLIT_PAIR_COLUMNS = ('joint_member_ratio', 'joint_outsider_ratio', 'joint_member_baseline')
+NON_MEMBER_COLUMNS = ('nm_at_table_ratio', 'nm_hands_in_table_ratio')
 # the least probability a class keeps after renormalising Jev's answer
 PROBA_FLOOR = 1e-4
 # characters of the JSON sent per input token, for the estimate
@@ -195,6 +216,12 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
     XY_hand_dist_min_hl (the closest hands in hand lengths, the fused shoulder widths over
     HAND_LENGTH_SW), XY_hands_close_ratio, XY_joint_attention_ratio, XY_joint_attention_baseline,
     XY_one_active_ratio, XY_both_active_ratio, XY_both_still_ratio, XY_follow_ratio (NaN unless both
+    seen together).
+
+    Only for a table fused with the joint split and the non-member pass (2026-09-29; a table
+    without them gets none of these columns, so its slot table is as before): the group values
+    nm_at_table_ratio and nm_hands_in_table_ratio (NaN when the cameras did not run), and per pair
+    XY_joint_member_ratio, XY_joint_outsider_ratio and XY_joint_member_baseline (NaN unless both
     seen together)."""
     slots = [str(tag) for tag in slots][:len(SLOT_NAMES)]
     n = len(table)
@@ -214,6 +241,11 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
     n_vfa = _column(table, 'n_vfa_features')
     vfa = n_vfa > 0
     out['ips_ran'], out['vfa_ran'] = ips, vfa
+    # the non-member pass: added only when the table has it, so an older slot table keeps its columns
+    if any(name in table.columns for name in NON_MEMBER_COLUMNS):
+        for name in NON_MEMBER_COLUMNS:
+            out[name] = np.where(vfa, _column(table, name), np.nan)
+    split = any(c.startswith('pair') and c.endswith('_joint_member_ratio') for c in table.columns)
 
     masked = np.zeros((n, len(slots)), dtype=bool) if vfa_mask is None \
         else np.asarray(vfa_mask, dtype=bool).reshape(n, len(slots))
@@ -257,7 +289,16 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
         for name in ('hands_close_ratio', 'joint_attention_ratio', 'joint_attention_baseline', 'one_active_ratio',
                      'both_active_ratio', 'both_still_ratio', 'follow_ratio'):
             out[f'{xy}_{name}'] = np.where(together, _column(table, prefix + name), np.nan)
+        if split:
+            for name in SPLIT_PAIR_COLUMNS:
+                out[f'{xy}_{name}'] = np.where(together, _column(table, prefix + name), np.nan)
     return pd.DataFrame(out, index=pd.RangeIndex(n))
+
+
+def has_split(slots: pd.DataFrame) -> bool:
+    """whether a slot table comes from a table fused with the joint split or the non-member pass
+    (2026-09-29): its states may say them, and its question carries SPLIT_NOTE."""
+    return any(c in NON_MEMBER_COLUMNS or c.endswith('_joint_member_ratio') for c in slots.columns)
 
 
 def _persons(slots: pd.DataFrame) -> list[str]:
@@ -496,10 +537,29 @@ def _person_on_camera(row: dict, x: str, bins: Bins, pilot: bool) -> str:
     return "; ".join(bits) + "."
 
 
+def _non_members(row: dict) -> str | None:
+    """the group sentence of the non-member pass, or None for a table fused without it."""
+    if 'nm_at_table_ratio' not in row:
+        return None
+    at_table, hands = _num(row.get('nm_at_table_ratio')), _num(row.get('nm_hands_in_table_ratio'))
+    if at_table is None:
+        return "Whether someone outside the group was at the table: not measured."
+    if at_table <= 0:
+        return "Nobody outside the group seen at the table."
+    shown = max(1, _half_up(100 * at_table))
+    text = f"Someone outside the group at the table in {shown}% of the window"
+    if hands is not None:
+        # a nonzero share is shown as at least 1% and never above the at-table share it is part of
+        hands_shown = min(max(1, _half_up(100 * hands)), shown) if hands > 0 else 0
+        text += f", with their hands in the work area in {hands_shown}%"
+    return text + "."
+
+
 def _cameras(row: dict, persons: list[str], bins: Bins, pilot: bool) -> str:
     if not _flag(row.get('vfa_ran')):
         return "Cameras: not measured in this window."
-    return "Cameras: " + " ".join(_person_on_camera(row, x, bins, pilot) for x in persons)
+    group = _non_members(row)
+    return "Cameras: " + " ".join(([group] if group else []) + [_person_on_camera(row, x, bins, pilot) for x in persons])
 
 
 def _camera_pairs(row: dict, pairs: list[tuple[str, str]], bins: Bins, pilot: bool) -> str | None:
@@ -514,8 +574,11 @@ def _camera_pairs(row: dict, pairs: list[tuple[str, str]], bins: Bins, pilot: bo
             ["in view together " + ("all the window" if together >= WHOLE_WINDOW else f"{_pct(together)} of the window")]
         joint = _num(row.get(f'{x}{y}_joint_attention_ratio'))
         baseline = _num(row.get(f'{x}{y}_joint_attention_baseline'))
+        member, outsider = _num(row.get(f'{x}{y}_joint_member_ratio')), _num(row.get(f'{x}{y}_joint_outsider_ratio'))
         if joint is None:
             bits.append("gaze points not measured")
+        elif member is not None and outsider is not None:
+            bits.append(_joint_split(joint, member, outsider, _num(row.get(f'{x}{y}_joint_member_baseline'))))
         else:
             text = f"gaze points close together (joint attention) in {_pct(joint)} of shared frames"
             if baseline is not None:
@@ -548,6 +611,41 @@ def _camera_pairs(row: dict, pairs: list[tuple[str, str]], bins: Bins, pilot: bo
     return "Pairs on camera: " + (" ".join(items) if items else "no two students in view together.")
 
 
+def _parts_of(total: int, shares: tuple[float, ...]) -> list[int]:
+    """whole percentages of `shares` that add up to `total` (largest remainder, ties to the earlier
+    share)"""
+    raw = [100 * share for share in shares]
+    scale = total / sum(raw) if sum(raw) > 0 else 0.0
+    exact = [value * scale for value in raw]
+    parts = [int(math.floor(value)) for value in exact]
+    order = sorted(range(len(exact)), key=lambda k: (-(exact[k] - parts[k]), k))
+    for k in order[:max(0, total - sum(parts))]:
+        parts[k] += 1
+    return parts
+
+
+def _joint_split(joint: float, member: float, outsider: float, member_baseline: float | None) -> str:
+    """the joint-attention clause of a pair with the split: where the close gaze points met, the
+    rest being other things (elsewhere, or someone the cameras did not detect), and the group's own
+    rate 20-40 s earlier, which replaces the proximity baseline (that one also counted the teacher).
+    The three parts are rounded so that they add up to the total shown (largest remainder); a total
+    under half a percent is shown as under 1%."""
+    if joint <= 0:
+        text = "gaze points never close together"
+    else:
+        shown = _half_up(100 * joint)
+        if shown <= 0:
+            text = "gaze points close together (joint attention) in under 1% of shared frames"
+        else:
+            on_group, on_outsider, rest = _parts_of(shown, (member, outsider, max(0.0, joint - member - outsider)))
+            text = (f"gaze points close together (joint attention) in {shown}% of shared frames: on the group's own "
+                    f"faces, hands or work area in {on_group}%, on someone outside the group in {on_outsider}%, on "
+                    f"other things in {rest}%")
+    if member_baseline is not None:
+        text += f", on the group's own things in {_pct(member_baseline)} when compared 20 to 40 s apart"
+    return text
+
+
 def _context(rows: dict, t: int, pairs: list[tuple[str, str]], context: int, window_seconds: float) -> str:
     """the windows before t, oldest first (the codebook's rule reads the preceding windows, never the
     next ones)."""
@@ -559,10 +657,21 @@ def _context(rows: dict, t: int, pairs: list[tuple[str, str]], context: int, win
             continue
         row = rows[t - k]
         speech, words = _num(row.get('speech_ratio')), _num(row.get('words'))
-        joints = [v for v in (_num(row.get(f'{x}{y}_joint_attention_ratio')) for x, y in pairs) if v is not None]
+        joints = [(v, _num(row.get(f'{x}{y}_joint_member_ratio')))
+                  for v, x, y in ((_num(row.get(f'{x}{y}_joint_attention_ratio')), x, y) for x, y in pairs)
+                  if v is not None]
+        if not joints:
+            joint = "joint attention not measured"
+        else:
+            # the pair with the most joint attention (the first on a tie), with its share on the group's own
+            # things when the table has the split
+            most, member = max(joints, key=lambda item: item[0])
+            joint = f"joint attention {_pct(most)}"
+            if member is not None:
+                joint += f" ({_pct(member)} on the group's own things)"
         bits = ["speech not measured" if speech is None else f"speech {_pct(speech)}",
                 "words not measured" if words is None else "no words" if words <= 0 else _count(words, 'word', 'words'),
-                "joint attention not measured" if not joints else f"joint attention {_pct(max(joints))}"]
+                joint]
         parts.append(f"{when}: " + ", ".join(bits) + ".")
     return "Before this: " + " ".join(parts)
 
@@ -599,17 +708,26 @@ def labels_of(variant: str) -> tuple[str, ...]:
     return CLASSES + ((UNCLEAR,) if variant == 'j2' else ())
 
 
-def question(variant: str = 'j0') -> dict:
+def sensor_note(split: bool = False) -> str:
+    """SENSOR_NOTE, with SPLIT_NOTE after its work-area sentence when `split` (a table fused with
+    the joint split and the non-member pass)."""
+    if not split:
+        return SENSOR_NOTE
+    return SENSOR_NOTE.replace(WORK_AREA_SENTENCE, f"{WORK_AREA_SENTENCE} {SPLIT_NOTE}", 1)
+
+
+def question(variant: str = 'j0', split: bool = False) -> dict:
     """the `questions` of a request, from the coder's codebook: its rule (without the note a coder
     adds for teacher talk, and without the sentence about preceding windows when the state has
-    none), SENSOR_NOTE, and each class's definition as its criterion; j2 offers unclear as well."""
+    none), the sensor note (with SPLIT_NOTE when `split`), and each class's definition as its
+    criterion; j2 offers unclear as well. Without `split` the question is as before 2026-09-29."""
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}; one of {', '.join(VARIANTS)}")
     rule = CODEBOOK['rule'].replace(TEACHER_NOTE, '')
     if VARIANTS[variant] == 0:
         rule = ' '.join(rule.replace(CONTEXT_SENTENCE, '').split())
     definitions = {c['label']: c['definition'] for c in CODEBOOK['classes']}
-    return {'interaction': {'type': 'choice', 'instructions': f"{rule} {SENSOR_NOTE}",
+    return {'interaction': {'type': 'choice', 'instructions': f"{rule} {sensor_note(split)}",
                             'criteria': {label: definitions[label] for label in labels_of(variant)}}}
 
 
@@ -811,12 +929,13 @@ def build_requests(sessions: list[dict], variant: str = 'j0', bins: Bins | None 
                    model: str = JEV_MODEL) -> list[dict]:
     """one request per window to ask about: {session, window_index, window_start, state, body, hash},
     in session and window order. `limit` keeps that many windows drawn with a fixed seed across all
-    the sessions, so a pilot asks about the same windows every time (and hits the cache)."""
+    the sessions, so a pilot asks about the same windows every time (and hits the cache). A session
+    whose slot table has the joint split (has_split) is asked with SPLIT_NOTE in the sensor note."""
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}; one of {', '.join(VARIANTS)}")
     if bins is None:
         raise ValueError("fit the bins on the dev sessions first (fit_bins)")
-    questions = question(variant)
+    questions = {flag: question(variant, flag) for flag in (False, True)}
     picks = []
     for s, session in enumerate(sessions):
         starts = np.round(session['slots']['window_start'].to_numpy(dtype=float), 3)
@@ -828,13 +947,14 @@ def build_requests(sessions: list[dict], variant: str = 'j0', bins: Bins | None 
             picks.extend((s, t) for t, start in enumerate(starts) if start in wanted)
     if limit is not None and len(picks) > limit:
         picks = sorted(random.Random(seed).sample(picks, max(0, int(limit))))
-    records, persons, asks = {}, {}, []
+    records, persons, split, asks = {}, {}, {}, []
     for s, t in picks:
         if s not in records:
             slots = sessions[s]['slots']
             records[s], persons[s] = dict(enumerate(slots.to_dict('records'))), _persons(slots)
+            split[s] = has_split(slots)
         state = _describe(records[s], t, persons[s], bins, VARIANTS[variant], pilot, window_seconds)
-        body = request_body(state, questions, model)
+        body = request_body(state, questions[split[s]], model)
         row = records[s][t]
         asks.append({'session': sessions[s]['session'], 'window_index': int(row['window_index']),
                      'window_start': round(float(row['window_start']), 3), 'state': state, 'body': body,

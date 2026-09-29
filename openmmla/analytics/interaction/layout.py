@@ -129,6 +129,9 @@ DROPPED = {
     r'^(n_vfa_action|p\d+_action|pair\d+_\d+_co_manipulating)$': 'empty in this batch; the reserved semantic block',
     AUXILIARY_RE.pattern: _AUXILIARY,
     r'^(window_index|window_start|window_end)$': 'an index, not a feature',
+    # the joint split of 2026-09-29 (exploratory): its baseline, like joint_attention_baseline, lives in its excess
+    r'^pair\d+_\d+_joint_member_baseline$': 'the proximity baseline of joint attention: the raw share and the excess carry it',
+    r'^(pair\d+_\d+_joint_(reach|both_wa)_ratio|n_vfa_non_members)$': 'a diagnostic of the v5 joint split and non-member pass',
 }
 # the table columns the tokens are made from
 USED = (
@@ -137,7 +140,11 @@ USED = (
     r'|other_hands_near_ratio|gaze_switches'
     r'|gaze_(partner_face|partner_hands|other_face|other_hands|own_hands|work_area|elsewhere|out_of_frame|unknown)_ratio)$',
     r'^pair\d+_\d+_(dist_mean_m|dist_min_m|hand_dist_sw_min|hand_dist_sw_mean|hands_close_ratio|gaze_dist_mean'
-    r'|joint_attention_ratio|joint_attention_excess|one_active_ratio|both_active_ratio|both_still_ratio|follow_ratio)$',
+    r'|joint_attention_ratio|joint_attention_excess|one_active_ratio|both_active_ratio|both_still_ratio|follow_ratio'
+    # the v5 columns of 2026-09-29 (exploratory, after DEV labels were read): known here, but no token of
+    # layout version 4 reads them; extra_v5 gives them for the DEV checks
+    r'|joint_member_ratio|joint_outsider_ratio|joint_member_excess)$',
+    r'^(nm_at_table_ratio|nm_hands_in_table_ratio)$',
 )
 
 # a token value: its name, what it is made from, the transform (before scaling), the scaling tag
@@ -972,6 +979,51 @@ def temporal_context(pooled: pd.DataFrame, mode: str = 'T0') -> pd.DataFrame:
     lags = {f'{column}_{suffix}': derived[suffix][:, k]
             for k, column in enumerate(LAG_COLUMNS) for suffix, _, _ in LAGS[mode]}
     return pd.concat([out, pd.DataFrame(lags, index=pooled.index)], axis=1)
+
+
+# ---- the exploratory v5 columns (2026-09-29) ----
+
+# where joint attention met (per pair) and a body outside the group at the table (per window): fused since
+# 2026-09-29, after DEV labels were read, so exploratory. They are outside the pre-registered layout (no
+# token, no pooled column); extra_v5 pools them beside pooled() for the DEV checks only
+EXTRA_V5_PAIR = ('joint_member_ratio', 'joint_outsider_ratio', 'joint_member_excess')
+EXTRA_V5_GROUP = ('nm_at_table_ratio', 'nm_hands_in_table_ratio')
+EXTRA_V5_COLUMNS = tuple(f'{name}_{stat}' for name in EXTRA_V5_PAIR for stat in _STATS) + EXTRA_V5_GROUP
+
+
+def extra_v5(table: pd.DataFrame, roster: Roster) -> pd.DataFrame:
+    """the v5 columns of a fused table, indexed like pooled() (window_index), for exploratory DEV
+    checks only: per pair of the roster's kept slots, (min, mean, max) of joint_member_ratio,
+    joint_outsider_ratio and joint_member_excess, and the group's nm_at_table_ratio and
+    nm_hands_in_table_ratio. A pair value counts where the pair was seen together and neither is the
+    duplicate gate's copy (as m_covis); member and outsider are observed together or not at all (they
+    split one share). The group values need the cameras to have run. Unobserved is NaN, and a table
+    fused before 2026-09-29 gives NaN throughout. The fusion writes the pair values for pupil pairs
+    only, so a pair with a non-pupil is NaN."""
+    T = len(table)
+    kept = list(roster.kept)[:N_SLOTS]
+    gate = duplicate_gate(table, kept)
+    stacks = {name: np.full((T, N_SLOTS), np.nan) for name in EXTRA_V5_PAIR}
+    for q, (i, j) in enumerate(PAIR_INDEX):
+        if j >= len(kept):
+            continue
+        a, b = kept[i], kept[j]
+        with np.errstate(invalid='ignore'):
+            covisible = (_pair_frame_sets(table, a, b) > 0) & ~(gate[:, i] | gate[:, j])
+        values = {name: np.where(covisible, _pair_column(table, a, b, name), np.nan) for name in EXTRA_V5_PAIR}
+        split = np.isfinite(values['joint_member_ratio']) & np.isfinite(values['joint_outsider_ratio'])
+        for name in ('joint_member_ratio', 'joint_outsider_ratio'):
+            values[name] = np.where(split, values[name], np.nan)
+        for name in EXTRA_V5_PAIR:
+            stacks[name][:, q] = values[name]
+    columns = {f'{name}_{stat}': _pool(stacks[name], stat) for name in EXTRA_V5_PAIR for stat in _STATS}
+    with np.errstate(invalid='ignore'):
+        vfa_ran = _column(table, 'n_vfa_features') > 0
+    for name in EXTRA_V5_GROUP:
+        columns[name] = np.where(vfa_ran, _column(table, name), np.nan)
+    index = _column(table, 'window_index') if 'window_index' in table.columns else np.arange(T, dtype=float)
+    frame = pd.DataFrame(columns, index=pd.Index(index.astype(int), name='window_index'))
+    return frame[list(EXTRA_V5_COLUMNS)]
 
 
 # ---- data checks (data_checks.json) ----

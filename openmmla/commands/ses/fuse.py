@@ -31,6 +31,10 @@ def get_parser():
             '(features.HAND_NUDGE); false keeps what the server stored, and the work area and hand columns then use '
             'the circle the frames say they were made with (version 1 for a frame that says none, as every replay so '
             'far), for comparison', shortname='-hr')
+    add_arg('joint_split', bool, False,
+            "split each pupil pair's joint attention by where it met (the group's own faces, hands or work area, or "
+            'someone outside the group) and add the non-member columns (nm_at_table_ratio ...); false gives the table '
+            'fused before 2026-09-29 byte for byte, for comparison', shortname='-js')
     add_arg('out', str, None,
             'where to write the table (.csv, else JSON lines); if not set, '
             'artifacts/<session>/analysis/features/<session>_window_features.csv', shortname='-o')
@@ -82,7 +86,7 @@ def main():
             parser.error(str(e))
         pupils_source = 'manifest' if pupils is not None else 'trust bound'
     rows = fusion.window_features(events, window=args.window, step=args.step, participants=participants, pupils=pupils,
-                                  hand_relabel=args.hand_relabel)
+                                  hand_relabel=args.hand_relabel, joint_split=args.joint_split)
     if not rows:
         print(f"No events found for session {session_id}: nothing to build a table from.")
         return
@@ -141,6 +145,22 @@ def main():
             if personal.by_word:
                 speech['word_margin_db'] = personal.margin_db
                 speech['levels_from'] = personal.levels_from
+        # where joint attention met and who counts as someone outside the group (window_features'
+        # module doc); a table fused without the split says so and has neither
+        joint_split = {'on': bool(args.joint_split)}
+        if args.joint_split:
+            joint_split.update({
+                'member': list(fusion.MEMBER_LABELS),
+                'outsider': 'either gaze on or within reach of a non-member',
+                'reach': 'a hand circle, the stored face box grown by 20 %, or without one the nose circle of half the '
+                         'head width, within the gaze tolerance',
+                'baseline': 'member only; no outsider baseline',
+                'non_members': {'scale': fusion.NON_MEMBER_SCALE, 'table_reach_sw': fusion.TABLE_REACH_SW,
+                                'table_box': 'last ready work area of the session per camera',
+                                'track_gap': fusion.TRACK_GAP_SECONDS, 'seat_rule': 'missing pupil only',
+                                'duplicate_body_iou': fusion.DUPLICATE_BODY_IOU,
+                                'contained_body_share': fusion.CONTAINED_BODY_SHARE,
+                                'duplicate_hand_sw': fusion.DUPLICATE_HAND_SW}})
         from openmmla.utils.session_provenance import analysis_record, write_analysis_record
         record = analysis_record(session_id, inputs=inputs, outputs=[path], steps=['fusion.window_features'],
                                  parameters={'window': args.window, 'step': args.step, 'participants': participants,
@@ -154,6 +174,7 @@ def main():
                                                                 'slack': fusion.JOINT_BASELINE_SLACK,
                                                                 'min': fusion.JOINT_BASELINE_MIN},
                                              'hand_circle': hand_circle, 'hands': hands, 'speech': speech,
+                                             'joint_split': joint_split,
                                              'events': counts, 'source': args.measurements or 'influxdb'},
                                  root=project_dir, project_dir=project_dir)
         write_analysis_record(record, os.path.join(os.path.dirname(path), 'fusion'))
