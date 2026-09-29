@@ -7,17 +7,25 @@ one DEV date at a time, every session of it together (two groups of one class, a
 and WeGrow lessons, the two 2025-05-13 takes), with every choice (grid point, epoch count,
 calibrator, stacker, HMM gamma) made on inner folds over the other dates; --split test trains on
 every DEV session and scores the four TEST sessions, once, after every choice is frozen
-(--confirm-frozen and the truth --coder the date runs used; the run is recorded in
-artifacts/_analysis/interaction/test_runs.jsonl). --split loso, leave one lesson out, is gone: it
+(--confirm-frozen and the truth --coder the date runs used; --test-coder scores TEST against
+another coder, e.g. a model's DEV labels train and a human coder's TEST labels score; the run is
+recorded in artifacts/_analysis/interaction/test_runs.jsonl). --split loso, leave one lesson out, is gone: it
 put a group's two lessons of one morning on both sides.
 
 Every run lands in artifacts/_analysis/interaction/<split>-<time>/ (or -o): predictions.csv,
 metrics.json, results.csv, per_session.csv, confusion.csv, label_counts.csv, state_shares.csv,
-roster.json, data_checks.json, config.json (and coefficients.csv for lr). The label counts are printed first;
+roster.json, data_checks.json, config.json (and coefficients.csv for lr, ablation.csv with --ablate
+modality). The label counts are printed first;
 when a class has fewer than 30 coded windows in an outer-training fold, the run refuses to train
 any learned model and says which folds fall short. jev and jev-cal are left out, with the reason,
 when a session they need has no ses-jev map made from its current fused table; a variant is
 scored only on the windows it answered, and the coverage is printed when that is not all of them.
+
+--ablate modality fits and scores every learned model and the rule once more per arm (no_speech,
+no_space, no_body_gaze, only_body_gaze, only_speech), each with its modalities not run in any
+session, train and test alike; the floors and Jev run in the full arm only, the headline and the
+contrasts are the full arm's, and ablation.csv sets the arms side by side. It is one run, so with
+--split test one look at TEST.
 
 --quick swaps in two-point grids, 30 training epochs and 200 bootstrap resamples: for checking
 the plumbing end to end, never for a reported number.
@@ -42,6 +50,10 @@ def get_parser():
     parser.add_argument('--coder', default=None,
                         help="whose labels are the truth (default: the coder with the most windows over the DEV "
                              "sessions; required with --split test)")
+    parser.add_argument('--test-coder', default=None,
+                        help="with --split test: whose labels score the TEST sessions, when not --coder's (e.g. "
+                             "train on a model's DEV labels, score on a human coder's TEST labels; "
+                             "adjudicated.jsonl overrules it)")
     parser.add_argument('-m', '--models', default=DEFAULT_MODELS,
                         help="comma list of r0 (a-priori rule), r0-v1 (its first version, kept for the record), jev "
                              "(zero-shot, from mmla ses-jev's answers), "
@@ -55,7 +67,10 @@ def get_parser():
     parser.add_argument('--hmm', default='all',
                         help="comma list of none, fb (forward-backward), filter (causal, for T0 and T1c inputs), "
                              "or all (default all)")
-    parser.add_argument('--ablate', choices=ABLATIONS, default='none', help="ablation grid (only none is built yet)")
+    parser.add_argument('--ablate', choices=ABLATIONS, default='none',
+                        help="ablation grid: none (default), or modality (every learned model and the rule once more "
+                             "without speech, space, body_gaze, speech+space and space+body_gaze, in every session; "
+                             "writes ablation.csv); temporal, fusion, ladder, weights and all are not built yet")
     parser.add_argument('--target', choices=('3class', 'binary'), default='3class',
                         help="3class, or binary (individual against interaction): the fallback when a fold lacks "
                              "a class")
@@ -113,9 +128,39 @@ def _summary(run_dir) -> str:
     """the results table, one line per variant, as the run folder's results.csv holds it."""
     import pandas as pd
     table = pd.read_csv(run_dir / 'results.csv')
-    columns = [c for c in ('group', 'variant', 'n', 'macro_f1', 'macro_f1_lo', 'macro_f1_hi', 'binary_f1', 'kappa',
-                           'nll', 'ece', 'switches_per_hour_pred', 'switches_per_hour_true') if c in table.columns]
+    # the arm column only when the run has an ablated arm, so a run without one prints as before
+    arms = 'ablation' in table.columns and table['ablation'].dropna().ne('full').any()
+    names = ('group', 'variant') + (('ablation',) if arms else ()) + (
+        'n', 'macro_f1', 'macro_f1_lo', 'macro_f1_hi', 'binary_f1', 'kappa', 'nll', 'ece', 'switches_per_hour_pred',
+        'switches_per_hour_true')
+    columns = [c for c in names if c in table.columns]
     return table[columns].round(3).to_string(index=False, na_rep='n/a')
+
+
+def _ablation_summary(run_dir) -> str | None:
+    """ablation.csv condensed, one line per variant, one column per arm: the binary macro-F1 with
+    its interval and the three-class macro-F1; None when the run has no ablation."""
+    import pandas as pd
+    path = run_dir / 'ablation.csv'
+    if not path.exists():
+        return None
+    table = pd.read_csv(path)
+    if table.empty:
+        return None
+
+    def cell(row):
+        interval = '' if pd.isna(row['binary_macro_f1_lo']) else \
+            f" [{row['binary_macro_f1_lo']:.3f}, {row['binary_macro_f1_hi']:.3f}]"
+        binary = 'n/a' if pd.isna(row['binary_macro_f1']) else f"{row['binary_macro_f1']:.3f}"
+        three = 'n/a' if pd.isna(row['macro_f1']) else f"{row['macro_f1']:.3f}"
+        return f"{binary}{interval} / {three}"
+
+    table['cell'] = table.apply(cell, axis=1)
+    arms = list(dict.fromkeys(table['ablation']))
+    wide = table.pivot(index='variant', columns='ablation', values='cell')
+    wide = wide.reindex(index=list(dict.fromkeys(table['variant'])), columns=arms)
+    return ("modality ablation, binary macro-F1 [interval] / macro-F1 (exploratory):\n"
+            + wide.to_string(na_rep='-'))
 
 
 def _metrics(run_dir) -> dict:
@@ -154,8 +199,11 @@ def main(argv=None):
     models = _choices(parser, args.models, E.MODELS, '-m/--models')
     temporal = _choices(parser, args.temporal, E.TEMPORAL, '--temporal')
     hmm = _choices(parser, args.hmm, E.HMM_MODES, '--hmm')
-    if args.ablate != 'none':
-        parser.error("--ablate is not built yet: the ablations of section 4.6 are deferred")
+    if args.ablate not in ('none', 'modality'):
+        parser.error(f"--ablate {args.ablate} is not built yet: of the ablations of section 4.6 only modality is built")
+    if args.ablate == 'modality' and all(model in E.FEATURELESS for model in models):
+        parser.error(f"--ablate modality needs a model that reads features: {', '.join(models)} run in the full arm "
+                     f"only (the floors and Jev read none)")
     if args.with_actions:
         parser.error("--with-actions is not built yet: the semantic block waits for the VLM to run")
     if args.split == 'task':
@@ -165,6 +213,8 @@ def main(argv=None):
     if args.split == 'test' and not args.coder:
         parser.error("--split test names its truth: add --coder, the coder of the date runs "
                      "(their config.json 'coder')")
+    if args.test_coder and args.split != 'test':
+        parser.error("--test-coder names the truth of the TEST sessions: it goes with --split test")
     if args.seeds < 1 or args.jobs < 1 or (args.epochs is not None and args.epochs < 1):
         parser.error("--seeds, --jobs and --epochs must be at least 1")
     planned = E.planned_variants(models, temporal, hmm, args.jev_variant)
@@ -186,10 +236,11 @@ def main(argv=None):
 
     from openmmla.analytics.interaction.labels import LabelJoinError
     config = E.Config(artifacts=args.artifacts or os.path.join(os.getcwd(), 'artifacts'), sessions=args.sessions,
-                      coder=args.coder, models=models, split=args.split, temporal=temporal, hmm=hmm,
+                      coder=args.coder, test_coder=args.test_coder, models=models, split=args.split,
+                      temporal=temporal, hmm=hmm,
                       target=args.target, join=args.join, seeds=args.seeds, small=args.small, epochs=args.epochs,
                       jobs=args.jobs, out=args.out, quick=args.quick, confirm_frozen=args.confirm_frozen,
-                      jev_variant=args.jev_variant, device=args.device)
+                      jev_variant=args.jev_variant, device=args.device, ablate=args.ablate)
     started = time.time()
     try:
         run_dir = E.run(config, log=print)
@@ -212,6 +263,9 @@ def main(argv=None):
 
     metrics = _metrics(run_dir)
     print(_summary(run_dir))
+    ablation = _ablation_summary(run_dir)
+    if ablation:
+        print(ablation)
     if metrics.get('headline'):
         print(f"headline ({metrics['headline']['selected_on']}): {metrics['headline']['variant']}")
     for name, contrast in (metrics.get('contrasts') or {}).items():

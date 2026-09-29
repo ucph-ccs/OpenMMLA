@@ -549,8 +549,10 @@ class Tokens:
     avail (T, 3) whether speech, IPS and VFA ran; P (T, 3, 28) the person slots and P_exists (T, 3);
     Q (T, 3, 22) the pair slots, pair_index (3, 2) the slots of each pair, and Q_exists (T, 3);
     window_start (T,); empty (T,) no speech, nobody positioned, nobody seen. `positioned` (T, 3)
-    keeps whether IPS placed each slot (share_present needs it after scaling), `window_index` (T,)
-    the table's grid index. Unscaled, an unobserved value is NaN; scaled, it is 0."""
+    keeps whether IPS placed each slot (share_present needs it after scaling), `ips_missed` (T, 3)
+    where a slot's present_ratio 0 was left unobserved because a camera saw the person (the
+    modality ablation reads it), `window_index` (T,) the table's grid index. Unscaled, an
+    unobserved value is NaN; scaled, it is 0."""
     G: np.ndarray
     avail: np.ndarray
     P: np.ndarray
@@ -563,6 +565,7 @@ class Tokens:
     positioned: np.ndarray = None
     window_index: np.ndarray = None
     scaled: bool = False
+    ips_missed: np.ndarray = None
 
     def __len__(self) -> int:
         return len(self.window_start)
@@ -618,7 +621,7 @@ def _person(table, tag, ips_ran, n_vfa, gated):
         masks = np.column_stack([ips_ran & ~_ips_missed(present, frame_sets, gated), ips_ran, seen, seen, seen, seen,
                                  readable, readable, readable & (ready >= WORK_AREA_READY_MIN)])
     values, masks = _settle(values, masks, PERSON_VALUES, PERSON_MASKS)
-    return values, masks, present, frame_sets
+    return values, masks, present, frame_sets, ips_ran & _ips_missed(present, frame_sets, gated)
 
 
 def _pair(table, a, b, both_present, n_vfa, gated):
@@ -679,11 +682,13 @@ def window_tokens(table: pd.DataFrame, roster: Roster, speech_measured: bool = T
     P[:, :, len(PERSON_VALUES):] = 0.0
     P_exists = np.zeros((T, N_SLOTS))
     positioned = np.zeros((T, N_SLOTS), dtype=bool)
+    ips_missed = np.zeros((T, N_SLOTS), dtype=bool)
     seen_anyone = np.zeros(T, dtype=bool)
     for slot, tag in enumerate(kept):
-        values, masks, present, frame_sets = _person(table, tag, ips_ran, n_vfa, gate[:, slot])
+        values, masks, present, frame_sets, missed = _person(table, tag, ips_ran, n_vfa, gate[:, slot])
         P[:, slot, :] = np.column_stack([values, masks.astype(float)])
         P_exists[:, slot] = 1.0
+        ips_missed[:, slot] = missed
         with np.errstate(invalid='ignore'):
             positioned[:, slot] = present > 0
             seen_anyone |= frame_sets > 0
@@ -706,7 +711,53 @@ def window_tokens(table: pd.DataFrame, roster: Roster, speech_measured: bool = T
                   P=P, P_exists=P_exists, Q=Q, Q_exists=Q_exists, pair_index=np.array(PAIR_INDEX, dtype=int),
                   window_start=np.round(_column(table, 'window_start'), 3),
                   empty=~spoken & ~positioned.any(axis=1) & ~seen_anyone,
-                  positioned=positioned, window_index=window_index.astype(int))
+                  positioned=positioned, window_index=window_index.astype(int), ips_missed=ips_missed)
+
+
+def ablate(tokens: Tokens, modalities) -> Tokens:
+    """the unscaled tokens with these modalities not run in any window, as an outage writes them:
+    their values NaN (unobserved), their masks 0 and their availability bit 0 (and nobody
+    positioned without space), in the columns MODALITY_INDEX names, which are the ones modality
+    dropout zeroes. Everything else is kept, the empty flag and the grid included, so every arm of
+    the modality ablation is scored on the same windows and the other modalities' [g] statistics
+    are fitted on the same windows (a real outage would recompute `empty`). Without the cameras
+    (body_gaze removed, space kept) a present_ratio 0 that the cameras had made unobserved (the
+    badge lost while a camera saw the person, `ips_missed`) is an observation again, as a VFA
+    outage would leave it: the space block then carries nothing the cameras saw. The input is not
+    changed; no modality gives the same tokens back."""
+    modalities = tuple(dict.fromkeys(modalities))
+    unknown = [m for m in modalities if m not in MODALITIES]
+    if unknown:
+        raise ValueError(f"unknown modality {', '.join(map(str, unknown))}: one of {', '.join(MODALITIES)}")
+    if not modalities:
+        return tokens
+    if tokens.scaled:
+        raise ValueError("ablate the unscaled tokens: scaling reads the masks this sets")
+    arrays = {'G': tokens.G.copy(), 'P': tokens.P.copy(), 'Q': tokens.Q.copy()}
+    avail = tokens.avail.copy()
+    sizes = {'G': len(GROUP_VALUES), 'P': len(PERSON_VALUES), 'Q': len(PAIR_VALUES)}
+    for modality in modalities:
+        index = MODALITY_INDEX[modality]
+        avail[:, index['avail']] = 0.0
+        for part, array in arrays.items():
+            n = sizes[part]
+            values = [c for c in index[part] if c < n]
+            masks = [c for c in index[part] if c >= n]
+            if values:
+                array[..., values] = np.nan
+            if masks:
+                array[..., masks] = 0.0
+    positioned = tokens.positioned
+    if 'space' in modalities and positioned is not None:
+        positioned = np.zeros_like(positioned)
+    if 'body_gaze' in modalities and 'space' not in modalities and tokens.ips_missed is not None:
+        # the cameras never ran: IPS's 0 stands, observed
+        present = [i for i, v in enumerate(PERSON_VALUES) if v.name == 'present_ratio'][0]
+        m_ips = len(PERSON_VALUES) + PERSON_MASKS.index('m_ips')
+        where = tokens.ips_missed.astype(bool) & (tokens.P_exists > 0)
+        arrays['P'][where, present] = 0.0
+        arrays['P'][where, m_ips] = 1.0
+    return replace(tokens, G=arrays['G'], avail=avail, P=arrays['P'], Q=arrays['Q'], positioned=positioned)
 
 
 # ---- scaling ----

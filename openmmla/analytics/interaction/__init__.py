@@ -11,7 +11,7 @@ What reads and writes where:
   leave-one-date-out folds;
 - out, mmla ses-classify: artifacts/_analysis/interaction/<run>/ (predictions.csv, metrics.json,
   per_session.csv, confusion.csv, label_counts.csv, state_shares.csv, roster.json, data_checks.json,
-  config.json);
+  config.json, and ablation.csv with the modality ablation);
   the _analysis prefix keeps ses-code's glob('exp_*') from taking it for a session;
 - out, mmla ses-jev: its request cache under artifacts/_analysis/interaction/jev/cache/ and, per
   session, artifacts/<session>/analysis/interaction/jev_<variant>.jsonl.

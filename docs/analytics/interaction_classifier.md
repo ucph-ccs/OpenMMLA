@@ -28,7 +28,7 @@ Code what the video shows, not what the sensors show. With both video and audio 
 - **Binary target.** Interaction (social or collaborative) against individual. It is always derived, as p_interaction = p_social + p_collaborative, and never trained on its own. The exception is the `--target binary` fallback described below.
 - **Unclear and absent windows** are left out of the loss, the headline and every class metric. They stay in the sequence as context, break coded runs for the temporal metrics, and are counted per session (`label_counts.csv`, `metrics.json` labels). Absent windows are never scored as individual.
 - **Labels.** Each coder has an append-only file, `artifacts/<session>/labels/<coder>.jsonl`. A later line for a window replaces an earlier one, and a line with label `null` undoes it. The session list of `ses-code` marks each session `[TEST]` or `[DEV]` (`splits.TEST_SESSIONS`); a TEST session lists every window, since it is scored on all of them.
-- **Truth.** The truth is the primary coder: `--coder`, or by default the coder with the most windows over the dev sessions. TEST labels never decide it, and a `--split test` run must name the coder with `--coder`. Where `adjudicated.jsonl` exists, it overrules that coder for the windows it holds. `config.json` records the coder and how it was chosen.
+- **Truth.** The truth is the primary coder: `--coder`, or by default the coder with the most windows over the dev sessions, never a model's labels file (a model is the truth only when `--coder` names it). TEST labels never decide it, and a `--split test` run must name the coder with `--coder`. A test run may score the TEST sessions against another coder with `--test-coder`: a model's labels (the agent's or Jev's) then train on DEV and a human coder's labels score TEST, while DEV keeps reading `--coder`. A test run is refused, before it is recorded, when that coder has no labels of their own in a TEST session (a misspelt name, or a session not coded yet), so it is never scored on adjudicated windows alone. Where `adjudicated.jsonl` exists, it overrules the coder a session is read with for the windows it holds; the join report in `metrics.json` counts each session's truth rows from the coder's own file (`own`) and from adjudication (`adjudicated`). `config.json` records the coder, the TEST coder and how the coder was chosen. The inter-coder ceiling is computed on the sessions the run scores (the DEV sessions of a date run, the TEST sessions of a test run) against their truth coder, and leaves out labels files that a model or a script wrote (a name with lines carrying a `confidence` or `p_<class>` and none saved by the coding page, over all the sessions read, as ses-code decides it); when the truth coder itself is such a file there is no ceiling, and `metrics.json` says so in `inter_coder_note`.
 - **Second coder.** A second coder's overlapping windows give Cohen's κ, three-class and binary, and κ over all five codes (the three classes, unclear, absent) on every window both coded. It is reported as the ceiling. Labels are never averaged across coders.
 - **Join.** Labels join the table on the window start, to the millisecond, then on the nearest window within 0.5 s. A run aborts when more than 1 % of labels find no window. That happens when the coding grid moved because a recording was missing on the coding machine. `--join overlap` then maps each label to the window it overlaps by at least 5 s and reports the offsets.
 
@@ -226,15 +226,16 @@ A contrast is computed only when both of its variants answered every coded held-
 
 | File | Holds |
 |---|---|
-| `predictions.csv` | one row per held-out window and variant. Columns: session, lesson (the unit held out: its lessons joined with `+`), task, window_index, window_start, fold, model, variant, coded, empty_window, y_true (-1 unclear, -2 absent), the three probabilities, p_interaction, y_pred, y_pred_binary, temporal mode, HMM mode, the Viterbi state, n_observed, presence_gated and gaze_readable |
+| `predictions.csv` | one row per held-out window and variant. Columns: session, lesson (the unit held out: its lessons joined with `+`), task, window_index, window_start, fold, model, variant, ablation (the arm, `full` without `--ablate`), coded, empty_window, y_true (-1 unclear, -2 absent), the three probabilities, p_interaction, y_pred, y_pred_binary, temporal mode, HMM mode, the Viterbi state, n_observed, presence_gated and gaze_readable |
 | `metrics.json` | every metric of every variant with its interval and coverage, the headline and contrasts (with the reason for any left out), the models left out, the notes on each session's Jev map, the absent-class policy, inter-coder κ, label join reports, the presence gate, the strata, the state shares, and per fold the chosen parameters, calibrators, γ and epochs |
-| `results.csv` | the results table: one row per variant with its coverage, grouped as no labels, label floors, few-label, tabular, neural, online and ceiling |
-| `per_session.csv`, `confusion.csv` | per-session scores and pooled confusion cells of every variant |
+| `results.csv` | the results table: one row per variant with its coverage and ablation arm, grouped as no labels, label floors, few-label, tabular, neural, online and ceiling |
+| `per_session.csv`, `confusion.csv` | per-session scores and pooled confusion cells of every variant, with its ablation arm |
 | `label_counts.csv` | coded windows per class and session (unclear and absent included), written before any training |
 | `state_shares.csv` | per lesson, coder against predicted state shares with the gate's absent windows |
 | `roster.json`, `data_checks.json` | each session's roster with reasons and whether the inclusion rule S1 kept it (`included`, `reason`), and the data checks: low-speech sessions with windows to listen to, the support of every column, the one- against two-camera check |
 | `config.json` | the truth coder and how it was chosen, feature lists, the layout version, the presence-gate rule, grids, seeds, the sha256 of every fusion table and label file, software and git commit (secrets masked) |
-| `coefficients.csv` | the LR weights per modality block and fold |
+| `coefficients.csv` | the LR weights per modality block, fold and ablation arm |
+| `ablation.csv` | with `--ablate modality` only: per model variant and arm, macro-F1, binary macro-F1 and binary κ with their intervals, the three-class κ, and the change against the same variant's full arm |
 
 The `_analysis` prefix keeps `ses-code` from taking the folder for a session.
 
@@ -317,13 +318,33 @@ mmla ses-classify -m <headline model>,<compared models> --split test --confirm-f
 | `--temporal`, `--hmm` | comma lists, or `all` (the default for both); a model the two give no variant, such as `lr` with `--temporal T2 --hmm filter`, is refused before anything is read |
 | `--target binary` | the two-class fallback |
 | `--coder`, `--join overlap` | the truth coder (default: the most windows over the dev sessions); the overlap join |
+| `--test-coder` | with `--split test`: the coder whose labels score the TEST sessions when it is not `--coder` (adjudication overrules it) |
 | `--seeds`, `--small`, `--epochs` | the network's ensemble size, configuration, and fixed epoch count |
 | `--jev-variant` | which cached Jev answers `jev` and `jev-cal` read |
 | `--jobs` | outer folds in parallel |
 | `--device cpu` / `cuda` / `auto` | where the networks train: the CPU, one thread per fold (the default), the GPU, or the GPU when torch sees one. Parallel folds share the GPU, each in its own worker. A GPU run repeats itself but matches a CPU run only up to floating-point differences and dropout draws, not bit for bit, so compare variants trained on the same device; `config.json` records it under `network.device` |
+| `--ablate modality` | the modality ablation, in the same run: every learned model and the rule once more per arm with a modality (or two) not run in any session (see below); writes `ablation.csv`. `temporal`, `fusion`, `ladder`, `weights` and `all` are refused as not built |
 | `--quick` | two-point grids, 30 epochs, 200 resamples: a plumbing check, never a result |
 
 The full grids are costly: `late-hgb` takes about 70 s per outer fold and temporal mode, so give `--jobs`.
+
+### Modality ablation
+
+`--ablate modality` scores how much each modality carries. Every learned model (`r1`, `lr`, `hgb`, `late-lr`, `late-hgb`, the networks) and the rule run on the same folds under six arms:
+
+| Arm | Not run |
+|---|---|
+| `full` | nothing: the run without `--ablate` |
+| `no_speech`, `no_space`, `no_body_gaze` | that modality |
+| `only_body_gaze` | speech and space |
+| `only_speech` | space and body_gaze |
+
+- **Not run everywhere.** An arm's modalities are missing in every window of every session, on the training and the held-out side alike, as an outage writes them: values unobserved, masks 0, the availability bit 0. The scaling statistics, the pooled view the rule reads, the tabular columns and their lags, the networks' tokens and the HMM's flat windows all see the modality as absent. It is never removed window by window, which would tie its absence to what happens in the window.
+- **One difference from a real outage.** The empty-window flag and the scoring strata (observed persons, gaze readability) stay those of the full data, so every arm is scored on the same windows in the same strata and the remaining modalities are scaled as in the full arm. An arm's number is what the models make of the other modalities, not what the pipeline would give with that sensor switched off.
+- **Late fusion** drops the missing modality's expert; the stacker combines the ones left. A prior-only expert would hand the stacker the inner folds' class priors as a feature.
+- **Full arm only.** The floors (`majority`, `stratified`) read no feature and Jev reads text, so they run in the full arm alone. The headline, the contrasts C1-C3 and the state shares are the full arm's, as pre-registered, and equal those of the same run without `--ablate`.
+- **Files.** An ablated variant's key ends in the arm (`late-lr:T2:fb:no_speech`); a reader that splits a key into exactly three parts fails on it. Every file carries an `ablation` column, `metrics.json` an `ablation` block, and `ablation.csv` sets the arms side by side with the change against the full arm on paired resamples. The comparison is exploratory, without Holm correction.
+- **Cost.** About six times a plain run. With `--split test` it is still one run and one look at TEST, recorded with `ablate` in `test_runs.jsonl`; its TEST numbers must not feed back into any choice.
 
 | `ses-jev` flag | Does |
 |---|---|
@@ -338,7 +359,7 @@ The full grids are costly: `late-hgb` takes about 70 s per outer fold and tempor
 
 These were deferred by decision, and each has its place in the code:
 
-- the ablation grids (`--ablate`: modality, temporal, fusion, ladder, weights);
+- the other ablation grids (`--ablate`: temporal, fusion, ladder, weights);
 - the causal network row (a TCN padded on the left only; `network.TemporalBlock` takes `causal`);
 - task transfer (`--split task`; `splits.task_transfer` exists);
 - the `+lexicon` content feature;

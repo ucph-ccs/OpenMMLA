@@ -50,12 +50,21 @@ end-to-end state shares per lesson (state_shares.csv). A bootstrap interval or c
 least MIN_BOOTSTRAP_UNITS units; the TEST sessions fall on 2 dates, so a test run reports its
 estimates without intervals.
 
-Deferred by decision, with their places kept: the ablation grids of 4.6 (`--ablate`), the causal
-network row, the lexicon feature, masked-modality pretraining, and the task-transfer run
-(splits.task_transfer exists; the driver does not run it yet).
+The modality ablation of 4.6 (`ablate='modality'`) runs in the same run, on the same folds: every
+learned model and the rule are fitted and scored once per arm of MODALITY_ARMS, where an arm's
+modalities did not run in any window of any session, train and test alike (layout.ablate: values
+unobserved, masks and availability bit 0, as an outage writes them, the empty flag kept). The
+floors and Jev read no feature and run in the full arm only. The headline, the contrasts and the
+state shares are the full arm's, which is the run without the ablation; ablation.csv sets the arms
+side by side (exploratory, no Holm correction). An ablated arm's variant key ends in ':<arm>'.
+
+Deferred by decision, with their places kept: the other ablation grids of 4.6 (temporal, fusion,
+ladder, weights), the causal network row, the lexicon feature, masked-modality pretraining, and
+the task-transfer run (splits.task_transfer exists; the driver does not run it yet).
 """
 from __future__ import annotations
 
+import dataclasses
 import functools
 import importlib.util
 import json
@@ -107,6 +116,13 @@ NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair'
 # answer, and for it the held-out session is scaled by the running normaliser
 CAUSAL_INPUTS = ('T0', 'T1c', 'j0', 'j1')
 JEV_MODELS = ('jev', 'jev-cal')
+# the modality ablation (4.6): per arm, the modalities that did not run in any window of any session, train and
+# test alike; the full arm first, and it is the run without the ablation
+MODALITY_ARMS = {'full': (), 'no_speech': ('speech',), 'no_space': ('space',), 'no_body_gaze': ('body_gaze',),
+                 'only_body_gaze': ('speech', 'space'), 'only_speech': ('space', 'body_gaze')}
+ABLATIONS = {'none': {'full': ()}, 'modality': MODALITY_ARMS}
+# the models that read no feature: the floors and Jev run in the full arm only (an ablated arm would repeat them)
+FEATURELESS = ('majority', 'stratified') + JEV_MODELS
 
 MIN_CLASS_WINDOWS = 30
 INNER_FOLDS = 4
@@ -128,7 +144,7 @@ QUICK = {
     'max_epochs': 30, 'patience': 5, 'bootstrap': 200,
 }
 PREDICTION_COLUMNS = ('session', 'lesson', 'task', 'window_index', 'window_start', 'fold', 'model', 'variant',
-                      'coded', 'empty_window', 'y_true', 'p_individual', 'p_social', 'p_collaborative',
+                      'ablation', 'coded', 'empty_window', 'y_true', 'p_individual', 'p_social', 'p_collaborative',
                       'p_interaction', 'y_pred', 'y_pred_binary', 'temporal', 'hmm', 'y_viterbi',
                       'n_observed', 'presence_gated', 'gaze_readable')
 
@@ -146,13 +162,18 @@ class Refused(RuntimeError):
 class Config:
     """what a run does (mmla ses-classify fills it from its flags). `models`, `temporal` and `hmm`
     are lists; `coder` is the truth (default: the coder with the most windows over the DEV
-    sessions; a test run must name it); `quick` swaps in the QUICK grids and training lengths;
+    sessions; a test run must name it); `test_coder`, in a test run only, scores the TEST sessions
+    against another coder than the one that trains (a model's DEV labels train, the human coders'
+    TEST labels score; adjudication overrules it as it does any coder); `quick` swaps in the QUICK
+    grids and training lengths;
     `epochs` fixes the network's E* (the median of the date folds' for the test model) instead of
     the inner choice; `bootstrap` overrides the number of unit resamples; `device` is where the
-    networks train: cpu (the default), cuda, or auto (cuda when torch sees a GPU)."""
+    networks train: cpu (the default), cuda, or auto (cuda when torch sees a GPU); `ablate` 'modality'
+    adds the arms of MODALITY_ARMS to the run ('none', the default, runs the full arm only)."""
     artifacts: str = 'artifacts'
     sessions: str | None = None
     coder: str | None = None
+    test_coder: str | None = None
     models: tuple = ('r0', 'r1', 'lr', 'hgb', 'late-lr', 'late-hgb')
     split: str = 'date'
     temporal: tuple = TEMPORAL
@@ -170,6 +191,7 @@ class Config:
     jev_variant: str = 'j0'
     bootstrap: int | None = None
     min_class_windows: int = MIN_CLASS_WINDOWS
+    ablate: str = 'none'
 
 
 # ---- sessions ----
@@ -247,8 +269,12 @@ def primary_coder(directories) -> str | None:
     """the coder with the most windows over every given session, the truth of the whole run (a
     per-session majority could make the truth one coder here and another there). run() passes the
     DEV sessions only, in every split, so how many TEST windows someone coded never decides whose
-    labels the models learn from."""
+    labels the models learn from. A model's labels file (labels.model_names) is never picked: a
+    model is the truth only when --coder names it."""
+    directories = list(directories)
+    models = L.model_names(directories)
     frames = [L.load_labels(directory, all_coders=True) for directory in directories]
+    frames = [frame[~frame['coder'].isin(models)] for frame in frames]
     frames = [frame for frame in frames if len(frame)]
     return L.primary_coder(pd.concat(frames, ignore_index=True)) if frames else None
 
@@ -274,13 +300,25 @@ def link_lessons(data: dict) -> None:
         d.lesson = units[session]
 
 
+def ablated(d: SessionData, modalities) -> SessionData:
+    """the session with these modalities not run in any window (layout.ablate), and the rule's
+    unscaled pooled view made from those tokens. Labels, units, Jev answers and the scoring strata
+    (n_observed, presence_gated, gaze_readable, blocks) stay the full data's, so every arm is scored
+    on the same windows in the same strata; the arrays they share are never changed after loading."""
+    tokens = LY.ablate(d.tokens, modalities)
+    return dataclasses.replace(d, tokens=tokens, raw=LY.pooled(tokens))
+
+
 def load_session(session: str, table_path, coder: str | None = None, join: str = 'exact',
-                 target: str = '3class') -> tuple[SessionData, pd.DataFrame]:
+                 target: str = '3class', models: set | None = None) -> tuple[SessionData, pd.DataFrame]:
     """a session and its fused table: roster (the manifest's pupils when it declares them),
     unscaled tokens and pooled view, and the coder's labels joined to the table's grid (a join
     that leaves more than 1 % of labels without a window raises labels.LabelJoinError, which
     aborts the run). The other coders' labels are joined too,
-    for the inter-coder kappa; one of theirs that does not join is left out, not fatal."""
+    for the inter-coder kappa; one of theirs that does not join is left out, not fatal, and so is a
+    model's labels file (`models`, run() passes labels.model_names of every session; default: this
+    session's). The join report counts the truth's rows from the coder's own file and from
+    adjudicated.jsonl."""
     from openmmla.utils.session_provenance import file_digest
     table_path = Path(table_path)
     table = LY.read_table(table_path)
@@ -294,10 +332,14 @@ def load_session(session: str, table_path, coder: str | None = None, join: str =
         y = y.to_numpy(dtype=float)
     else:
         y, report = np.full(len(table), np.nan), {'mode': join, 'labels': 0}
-    report.update(coder=truth.attrs.get('coder'), skipped_lines=truth.attrs.get('skipped_lines', 0))
+    adjudicated = int((truth['source'] == L.ADJUDICATED).sum()) if len(truth) else 0
+    report.update(coder=truth.attrs.get('coder'), skipped_lines=truth.attrs.get('skipped_lines', 0),
+                  own=len(truth) - adjudicated, adjudicated=adjudicated)
     others = {}
     everyone = L.load_labels(directory, all_coders=True)
-    coders = sorted(set(everyone['coder']) - {L.ADJUDICATED}) if len(everyone) else []
+    # a model's labels file is no coder for the ceiling (it may still be the truth, loaded above)
+    models = L.model_coders(directory) if models is None else models
+    coders = sorted(set(everyone['coder']) - {L.ADJUDICATED} - models) if len(everyone) else []
     for name in coders:
         try:
             joined, _ = L.join_labels(table, everyone[everyone['coder'] == name], mode=join)
@@ -626,7 +668,12 @@ def _tabular(fd: _Fold, plan: dict, model: str, temporal: str, details: dict, ex
     X_online = fd.X_online(temporal) if _online_wanted(plan, temporal) else None
     if model in ('late-lr', 'late-hgb'):
         make, grid = (TB.make_lr, plan['lr_grid']) if model == 'late-lr' else (TB.make_hgb, plan['hgb_grid'])
-        fusion = TB.LateFusion(make, grid, LY.block_columns(X_train), inner=fd.pairs).fit(X_train, fd.y, fd.groups)
+        blocks = LY.block_columns(X_train)
+        # an ablated modality has no expert: its block is all unobserved, and a prior-only expert would
+        # hand the stacker the inner folds' priors as a feature
+        removed = plan.get('ablated') or ()
+        blocks = {modality: columns for modality, columns in blocks.items() if modality not in removed}
+        fusion = TB.LateFusion(make, grid, blocks, inner=fd.pairs).fit(X_train, fd.y, fd.groups)
         details['params'] = {modality: expert.params_ for modality, expert in fusion.experts_.items()}
         stacker = getattr(fusion.stacker_, 'coef_', None)
         if stacker is not None:
@@ -644,6 +691,7 @@ def _tabular(fd: _Fold, plan: dict, model: str, temporal: str, details: dict, ex
         coefficients = TB.lr_coefficients(fitted, list(X_train.columns), blocks)
         coefficients.insert(0, 'temporal', temporal)
         coefficients.insert(0, 'fold', fd.fold.name)
+        coefficients.insert(2, 'ablation', plan.get('ablation', 'full'))
         extras.setdefault('coefficients', []).append(coefficients)
     online = TB.log_proba(fitted, X_online) if X_online is not None else None
     return oof, TB.log_proba(fitted, X_test), True, online
@@ -910,7 +958,8 @@ def _result_row(key: str, variant: dict, report: dict) -> dict:
     ci = report['macro_f1_ci']
     group = 'online' if variant['hmm'] == 'filter' else GROUPS[variant['model']]
     row = {'group': group, 'variant': key, 'model': variant['model'], 'temporal': variant['temporal'],
-           'hmm': variant['hmm'], 'n': pooled['n'], 'coverage': (report.get('coverage') or {}).get('share'),
+           'hmm': variant['hmm'], 'ablation': variant.get('ablation', 'full'), 'n': pooled['n'],
+           'coverage': (report.get('coverage') or {}).get('share'),
            'macro_f1': pooled['macro_f1'], 'macro_f1_lo': ci['lo'], 'macro_f1_hi': ci['hi']}
     row.update({f'f1_{name}': value for name, value in pooled['f1'].items()})
     row.update({'balanced_accuracy': pooled['balanced_accuracy'], 'kappa': pooled['kappa'],
@@ -1003,9 +1052,87 @@ def contrasts(headline: str | None, variants: dict, base: pd.DataFrame, n_boot: 
     return out
 
 
+ABLATION_COLUMNS = ('ablation', 'removed', 'variant', 'model', 'temporal', 'hmm', 'group', 'n', 'coverage',
+                    'macro_f1', 'macro_f1_lo', 'macro_f1_hi', 'kappa',
+                    'binary_macro_f1', 'binary_macro_f1_lo', 'binary_macro_f1_hi',
+                    'binary_kappa', 'binary_kappa_lo', 'binary_kappa_hi',
+                    'delta_macro_f1', 'delta_macro_f1_lo', 'delta_macro_f1_hi',
+                    'delta_binary_macro_f1', 'delta_binary_macro_f1_lo', 'delta_binary_macro_f1_hi',
+                    'units', 'left_out')
+
+
+def ablation_frame(variants: dict, arm_of: dict, reports: dict, base: pd.DataFrame, n_boot: int,
+                   arms: dict = MODALITY_ARMS) -> pd.DataFrame:
+    """ablation.csv: per model variant (the floors and Jev left out) and arm, the pooled macro-F1
+    (three-class) and binary macro-F1 with their unit-bootstrap intervals as score_variant gives
+    them, Cohen's kappa and the binary kappa (with its interval on the same resamples), and the
+    change against the same variant's full arm, paired on the same unit resamples. Exploratory: no
+    Holm correction. Below MIN_BOOTSTRAP_UNITS units the intervals are left out, `left_out` says
+    why. `arm_of` maps a variant key to (arm, the full arm's key); a variant's arms sit together,
+    in the full arm's order, then the arms' order."""
+    truth_all = _labels_int(base['y_true'])
+    lessons_all = base['lesson'].to_numpy()
+
+    def rows_of(key):
+        # the coded windows the variant answered: what score_variant scores it on
+        return (truth_all >= 0) & (np.asarray(variants[key]['y_pred']) >= 0)
+
+    def scorer(key, rows, binary):
+        truth = (_binary_truth(truth_all) if binary else truth_all)[rows]
+        pred = np.asarray(variants[key]['y_pred_binary' if binary else 'y_pred'])[rows]
+        return lambda sample: M.macro_f1(truth[sample], pred[sample], n_classes=2 if binary else 3)
+
+    by_base = {}
+    for key, (arm, base_key) in arm_of.items():
+        if variants[key]['model'] not in FEATURELESS:
+            by_base.setdefault(base_key, {})[arm] = key
+    order = list(arms)
+    out = []
+    for base_key, keys in by_base.items():
+        full = keys.get('full')
+        for arm in sorted(keys, key=lambda name: order.index(name) if name in order else len(order)):
+            key = keys[arm]
+            variant, report = variants[key], reports[key]
+            pooled = report['pooled']
+            ci, binary_ci = report['macro_f1_ci'], report['binary_macro_f1_ci']
+            rows = rows_of(key)
+            truth, binary = _binary_truth(truth_all)[rows], np.asarray(variant['y_pred_binary'])[rows]
+            kappa_ci = _interval(lambda sample: M.kappa(truth[sample], binary[sample], n_classes=2),
+                                 lessons_all[rows], n_boot)
+            row = {'ablation': arm, 'removed': '+'.join(arms.get(arm, ())), 'variant': base_key,
+                   'model': variant['model'], 'temporal': variant['temporal'], 'hmm': variant['hmm'],
+                   'group': 'online' if variant['hmm'] == 'filter' else GROUPS[variant['model']],
+                   'n': pooled['n'], 'coverage': (report.get('coverage') or {}).get('share'),
+                   'macro_f1': pooled['macro_f1'], 'macro_f1_lo': ci['lo'], 'macro_f1_hi': ci['hi'],
+                   'kappa': pooled['kappa'], 'binary_macro_f1': binary_ci['estimate'],
+                   'binary_macro_f1_lo': binary_ci['lo'], 'binary_macro_f1_hi': binary_ci['hi'],
+                   'binary_kappa': kappa_ci['estimate'], 'binary_kappa_lo': kappa_ci['lo'],
+                   'binary_kappa_hi': kappa_ci['hi'], 'units': ci.get('units'), 'left_out': ci.get('left_out')}
+            if arm != 'full' and full is not None:
+                paired = rows_of(full)
+                if np.array_equal(paired, rows):
+                    few = _too_few_units(len(pd.unique(np.asarray(lessons_all[rows], dtype=object))))
+                    for name, binary_scale in (('delta_macro_f1', False), ('delta_binary_macro_f1', True)):
+                        a, b = scorer(key, rows, binary_scale), scorer(full, rows, binary_scale)
+                        if few:
+                            everything = np.arange(int(rows.sum()))
+                            delta = a(everything) - b(everything)
+                            row[name] = float(delta) if np.isfinite(delta) else None
+                        else:
+                            paired_delta = M.paired_delta(a, b, lessons_all[rows], n=n_boot)
+                            row[name], row[f'{name}_lo'], row[f'{name}_hi'] = \
+                                paired_delta['delta'], paired_delta['lo'], paired_delta['hi']
+                else:
+                    row['left_out'] = '; '.join(filter(None, [row['left_out'], "no paired change: the arm and the "
+                                                              "full arm answered different windows"]))
+            out.append(row)
+    return pd.DataFrame(out, columns=list(ABLATION_COLUMNS))
+
+
 def inter_coder(data: dict, primary: str | None) -> dict:
-    """Cohen's kappa of every other coder against the primary one, pooled over the windows both
-    coded (3-class and binary): the ceiling the results are read against."""
+    """Cohen's kappa of every other (human) coder against the primary one, pooled over the windows
+    both coded in the given sessions (3-class and binary): the ceiling the results are read
+    against. run() passes the sessions it scores and their truth coder."""
     out = {}
     others = sorted({name for d in data.values() for name in d.others} - {primary, None})
     for name in others:
@@ -1028,6 +1155,7 @@ def predictions_frame(base: pd.DataFrame, variants: dict, k: int) -> pd.DataFram
         frame = base.drop(columns=['block']).copy()
         frame['model'] = variant['model']
         frame['variant'] = f"{variant['temporal']}:{variant['hmm']}"
+        frame['ablation'] = variant.get('ablation', 'full')
         p = variant['p']
         n = len(frame)
         if p is None:
@@ -1050,16 +1178,19 @@ def predictions_frame(base: pd.DataFrame, variants: dict, k: int) -> pd.DataFram
     return out[list(PREDICTION_COLUMNS)]
 
 
-def confusion_frame(reports: dict, k: int) -> pd.DataFrame:
-    """confusion.csv: the pooled confusion of every variant, one row per (true, predicted) cell."""
+def confusion_frame(reports: dict, k: int, arms: dict | None = None) -> pd.DataFrame:
+    """confusion.csv: the pooled confusion of every variant, one row per (true, predicted) cell,
+    with the variant's ablation arm (`arms`, key -> arm; 'full' when a key has none)."""
     names = class_names(k)
     rows = []
     for key, report in reports.items():
         matrix = report['pooled']['confusion']
+        arm = (arms or {}).get(key, 'full')
         for i, row in enumerate(matrix[:k]):
             for j, count in enumerate(row[:k]):
-                rows.append({'variant': key, 'true': names[i], 'predicted': names[j], 'windows': int(count)})
-    return pd.DataFrame(rows, columns=['variant', 'true', 'predicted', 'windows'])
+                rows.append({'variant': key, 'ablation': arm, 'true': names[i], 'predicted': names[j],
+                             'windows': int(count)})
+    return pd.DataFrame(rows, columns=['variant', 'ablation', 'true', 'predicted', 'windows'])
 
 
 # ---- files ----
@@ -1099,7 +1230,10 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
     record = {
         'run': run_dir.name, 'created_at': datetime.now(timezone.utc).isoformat(), 'config': asdict(cfg),
         'coder': coder, 'coder_chosen_by': '--coder' if cfg.coder else 'the most windows over the DEV sessions',
+        'test_coder': (cfg.test_coder or coder) if cfg.split == 'test' else None,
         'models_run': list(plan['models']),
+        'ablation': {'grid': cfg.ablate,
+                     'arms': {arm: list(removed) for arm, removed in ABLATIONS[cfg.ablate].items()}},
         'layout_version': LY.LAYOUT_VERSION,
         'features': {'pooled_columns': list(LY.POOLED_COLUMNS),
                      'pooled_blocks': {name: list(columns) for name, columns in LY.POOLED_BLOCKS.items()},
@@ -1142,7 +1276,8 @@ def _record_test_run(artifacts: Path, run_dir: Path, cfg: Config, status: str) -
         if path.exists() else []
     line = {'run': run_dir.name, 'run_dir': str(run_dir), 'status': status,
             'at': datetime.now(timezone.utc).isoformat(), 'models': list(cfg.models), 'coder': cfg.coder,
-            'confirm_frozen': bool(cfg.confirm_frozen)}
+            'test_coder': cfg.test_coder or cfg.coder, 'confirm_frozen': bool(cfg.confirm_frozen),
+            'ablate': cfg.ablate}
     with open(path, 'a', encoding='utf-8') as handle:
         handle.write(json.dumps(line) + '\n')
     return earlier
@@ -1196,6 +1331,8 @@ def _check(cfg: Config):
     if cfg.split == 'test' and not cfg.coder:
         raise ValueError("the TEST scoring names its truth coder: pass the coder the date runs were chosen on "
                          "(their config.json 'coder')")
+    if cfg.test_coder and cfg.split != 'test':
+        raise ValueError("test_coder is the truth of the TEST sessions: it goes with split 'test' only")
     barren = _barren(cfg)
     if barren:
         raise ValueError(f"{', '.join(barren)} give(s) no variant with temporal {','.join(cfg.temporal)} and HMM "
@@ -1205,6 +1342,12 @@ def _check(cfg: Config):
         raise ModuleNotFoundError("the network variants need torch: pip install torch")
     if cfg.device not in ('cpu', 'cuda', 'auto'):
         raise ValueError(f"device must be cpu, cuda or auto, not {cfg.device!r}")
+    if cfg.ablate not in ABLATIONS:
+        raise ValueError(f"ablation {cfg.ablate!r} is not built: one of {', '.join(ABLATIONS)} (the temporal, fusion, "
+                         f"ladder and weights grids of 4.6 are deferred)")
+    if cfg.ablate != 'none' and all(m in FEATURELESS for m in cfg.models):
+        raise ValueError(f"the {cfg.ablate} ablation needs a model that reads features: "
+                         f"{', '.join(dict.fromkeys(cfg.models))} run in the full arm only")
 
 
 def _device(cfg: Config) -> tuple:
@@ -1252,6 +1395,31 @@ def _run_folds(folds: list, data: dict, plan: dict, say) -> list:
         delayed(_fold_job)(fold, {s: data[s] for s in list(fold.train) + list(fold.test)}, plan) for fold in folds)
 
 
+def _run_arms(folds: list, arm_data: dict, plans: dict, say) -> dict:
+    """every (arm, fold) of the modality ablation, the arms in their order and the folds in theirs:
+    one after another, or all of them on one pool of `jobs` workers (a test split has one fold, so
+    looping _run_folds per arm would run the arms one by one). Returns {arm: fold outputs in fold
+    order}."""
+    jobs = [(arm, n, fold) for arm in plans for n, fold in enumerate(folds, start=1)]
+    outputs = {arm: [] for arm in plans}
+    settings = next(iter(plans.values()))
+    if settings['jobs'] == 1 or len(jobs) == 1:
+        for arm, n, fold in jobs:
+            outputs[arm].append(_fold_job(fold, arm_data[arm], plans[arm]))
+            say(f"{arm} fold {n}/{len(folds)} {fold.name}: {outputs[arm][-1]['seconds']} s")
+        return outputs
+    from joblib import Parallel, delayed
+    say(f"{len(plans)} arms x {len(folds)} folds on {settings['jobs']} workers"
+        + (" sharing the GPU" if settings.get('device') == 'cuda' else ''))
+    # as in _run_folds: each job gets only the sessions its fold reads
+    done = Parallel(n_jobs=settings['jobs'], backend='loky')(
+        delayed(_fold_job)(fold, {s: arm_data[arm][s] for s in list(fold.train) + list(fold.test)}, plans[arm])
+        for arm, _, fold in jobs)
+    for (arm, _, _), out in zip(jobs, done):
+        outputs[arm].append(out)
+    return outputs
+
+
 def run(config, log=None) -> Path:
     """one evaluation run: load, count and check the labels, run every outer fold (in parallel
     with `jobs`), score every variant and write the run folder. Returns the run folder; raises
@@ -1274,9 +1442,13 @@ def run(config, log=None) -> Path:
                                 f"run mmla ses-fuse")
     # the truth coder is chosen on the DEV sessions in every split, so TEST labels never decide it
     coder = cfg.coder or primary_coder([path.parents[2] for s, path in found if s not in S.TEST_SESSIONS])
+    # a test run may score TEST against another coder than the one that trains; DEV always reads `coder`
+    test_coder = (cfg.test_coder or coder) if cfg.split == 'test' else coder
+    models = L.model_names([path.parents[2] for _, path in found])
     data, tables, excluded = {}, {}, {}
     for session, path in found:
-        loaded, table = load_session(session, path, coder, cfg.join, cfg.target)
+        loaded, table = load_session(session, path, test_coder if session in S.TEST_SESSIONS else coder,
+                                     cfg.join, cfg.target, models)
         # S1, the inclusion rule: a session that never shows two persons together is left out whole
         included, reason = LY.session_inclusion(table, loaded.roster)
         if not included:
@@ -1297,7 +1469,9 @@ def run(config, log=None) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     counts = label_counts(data)
     counts.to_csv(run_dir / 'label_counts.csv')
-    say(f"labels of coder {coder or '(none)'}, windows per class and session:\n{counts.to_string()}")
+    say(f"labels of coder {coder or '(none)'}"
+        + (f" (TEST sessions: coder {test_coder})" if test_coder != coder else '')
+        + f", windows per class and session:\n{counts.to_string()}")
     write_json(run_dir / 'roster.json', {**{s: {**d.roster.record(), 'included': True} for s, d in data.items()}, **excluded})
     write_json(run_dir / 'data_checks.json', LY.data_checks(tables, {s: d.roster for s, d in data.items()}))
 
@@ -1314,6 +1488,9 @@ def run(config, log=None) -> Path:
     learned = [m for m in plan['models'] if m not in UNLEARNED]
     problems = label_refusal(folds, data, k, cfg.min_class_windows) if learned else []
     held = sum(data[s].n_coded for fold in folds for s in fold.test)
+    # the TEST truth coder must have coded every TEST session scored with labels of their own: a
+    # misspelt or unfinished coder would otherwise be scored on adjudicated.jsonl alone and use up the look
+    unmet = sorted(s for s in data if cfg.split == 'test' and s in S.TEST_SESSIONS and not data[s].join.get('own'))
     why = None
     if split_error:
         why = split_error
@@ -1321,6 +1498,9 @@ def run(config, log=None) -> Path:
         why = f"every model named was left out ({', '.join(dropped)}: no usable Jev maps, see left_out and notes)"
     elif not folds:
         why = 'no TEST session has a fused table' if cfg.split == 'test' else 'no date has coded windows to hold out'
+    elif unmet:
+        why = (f"the TEST truth coder {test_coder!r} has no labels of their own in {', '.join(unmet)} "
+               f"(labels/{test_coder}.jsonl missing or empty there): check the name, or wait until they coded it")
     elif not held:
         why = 'the held-out sessions have no coded window to score'
     elif problems:
@@ -1338,25 +1518,48 @@ def run(config, log=None) -> Path:
             say(f"the TEST sessions were scored before ({len(earlier)} line(s) in test_runs.jsonl): "
                 f"this run is recorded as another look")
     say(f"{len(folds)} fold(s) over {len(data)} session(s): {', '.join(plan['models'])}")
-    outputs = _run_folds(folds, data, plan, say)
+    arms = ABLATIONS[cfg.ablate]
+    if len(arms) == 1:
+        # the run without an ablation: the full arm alone, on the loaded data and the plan as they are
+        outputs = {'full': _run_folds(folds, data, plan, say)}
+        arm_data, plans = {'full': data}, {'full': plan}
+    else:
+        # an ablated arm: its modalities not run in any session, train and test alike; the full arm is
+        # the loaded data and the plan untouched, so its numbers are those of a run without the ablation
+        arm_data = {arm: data if not removed else {s: ablated(d, removed) for s, d in data.items()}
+                    for arm, removed in arms.items()}
+        plans = {arm: plan if not removed else dict(plan, ablation=arm, ablated=list(removed),
+                                                     models=[m for m in plan['models'] if m not in FEATURELESS])
+                 for arm, removed in arms.items()}
+        alone = [m for m in plan['models'] if m in FEATURELESS]
+        say(f"modality ablation: {', '.join(arms)}; {', '.join(alone) or 'no model'} in the full arm only")
+        outputs = _run_arms(folds, arm_data, plans, say)
 
-    base = _base_rows(outputs, data)
-    variants = _variants(outputs, data, k)
+    # the rows are the same in every arm: an ablation keeps the grid, the empty flag, the labels and the strata
+    base = _base_rows(outputs['full'], data)
+    variants, arm_of = {}, {}
+    for arm in arms:
+        for key, variant in _variants(outputs[arm], arm_data[arm], k).items():
+            variant['ablation'] = arm
+            merged = key if arm == 'full' else f'{key}:{arm}'
+            variants[merged], arm_of[merged] = variant, (arm, key)
     if not variants:
         # _check refuses flags that give no variant; this guards the files below
         raise Refused("the folds gave no variant to score", [], run_dir)
+    # the headline, the contrasts and the state shares read the full arm only, as pre-registered
+    full = {key: variant for key, variant in variants.items() if variant['ablation'] == 'full'}
     reports, per_session = {}, []
     for key, variant in variants.items():
         reports[key], rows = score_variant(variant, base, k, plan['bootstrap'])
-        per_session += [dict(row, variant=key) for row in rows]
+        per_session += [dict(row, variant=key, ablation=variant['ablation']) for row in rows]
     policy = absent_class_policy(data)
     binary_confirmatory = policy['confirmatory_target'] == 'binary' or k == 2
-    headline = select_headline(variants, reports, binary_confirmatory) if cfg.split == 'date' else None
-    tests = contrasts(headline, variants, base, plan['bootstrap'], binary_confirmatory) if headline else {}
+    headline = select_headline(full, reports, binary_confirmatory) if cfg.split == 'date' else None
+    tests = contrasts(headline, full, base, plan['bootstrap'], binary_confirmatory) if headline else {}
     presence_gated = base['presence_gated'].to_numpy(dtype=bool)
     gate = P.evaluate_gate(base['y_true'].to_numpy(dtype=float), presence_gated, base['session'].to_numpy(),
                            base['n_observed'].to_numpy())
-    share_key = share_variant(headline, variants)
+    share_key = share_variant(headline, full)
     if share_key:
         # per lesson, not per unit: a unit's lessons would pool their share errors and cancel them
         frame = P.state_shares(base['y_true'].to_numpy(dtype=float), variants[share_key]['y_pred'], presence_gated,
@@ -1368,16 +1571,22 @@ def run(config, log=None) -> Path:
 
     predictions_frame(base, variants, k).to_csv(run_dir / 'predictions.csv', index=False)
     pd.DataFrame(per_session).to_csv(run_dir / 'per_session.csv', index=False)
-    confusion_frame(reports, k).to_csv(run_dir / 'confusion.csv', index=False)
+    confusion_frame(reports, k, {key: variant['ablation'] for key, variant in variants.items()}).to_csv(
+        run_dir / 'confusion.csv', index=False)
+    if cfg.ablate != 'none':
+        ablation_frame(variants, arm_of, reports, base, plan['bootstrap'], arms).to_csv(run_dir / 'ablation.csv',
+                                                                                       index=False)
     results = pd.DataFrame([_result_row(key, variants[key], reports[key]) for key in variants])
-    ceiling = inter_coder(data, coder)
+    # the ceiling is read on the sessions this run scores, against their truth coder
+    ceiling = inter_coder({s: d for s, d in data.items() if (s in S.TEST_SESSIONS) == (cfg.split == 'test')},
+                          test_coder if cfg.split == 'test' else coder)
     for name, agreement in ceiling.items():
         results = pd.concat([results, pd.DataFrame([{'group': 'ceiling', 'variant': f'inter-coder {name}',
                                                      'model': 'coder', 'n': agreement['windows'],
                                                      'kappa': agreement['kappa'],
                                                      'kappa_codes': agreement['kappa_codes']}])], ignore_index=True)
     results.to_csv(run_dir / 'results.csv', index=False)
-    coefficients = [frame for out in outputs for frame in (out['coefficients'] or [])]
+    coefficients = [frame for arm in arms for out in outputs[arm] for frame in (out['coefficients'] or [])]
     if coefficients:
         pd.concat(coefficients, ignore_index=True).to_csv(run_dir / 'coefficients.csv', index=False)
 
@@ -1385,20 +1594,34 @@ def run(config, log=None) -> Path:
     metrics = {
         'run': run_dir.name, 'split': cfg.split, 'target': cfg.target, 'classes': list(class_names(k)),
         'quick': cfg.quick, 'seconds': round(time.time() - started, 1),
-        'labels': {'coder': coder, 'coded': int(L.scored(scored).sum()), 'unclear': int((scored == L.UNCLEAR_Y).sum()),
+        'labels': {'coder': coder, 'test_coder': test_coder if cfg.split == 'test' else None,
+                   'coded': int(L.scored(scored).sum()), 'unclear': int((scored == L.UNCLEAR_Y).sum()),
                    'absent': int((scored == L.ABSENT_Y).sum()),
                    'join': {s: d.join for s, d in data.items()}},
-        'inter_coder': ceiling, 'absent_class_policy': policy,
+        'inter_coder': ceiling,
+        'inter_coder_note': (f"no ceiling: the truth coder {(test_coder if cfg.split == 'test' else coder)!r} is a "
+                             f"model's labels file") if (test_coder if cfg.split == 'test' else coder) in models else None,
+        'absent_class_policy': policy,
         'headline': {'variant': headline, 'selected_on': 'dev leave-one-date-out pooled '
                      + ('binary macro-F1' if binary_confirmatory else 'macro-F1'),
                      'strata': reports[headline].get('strata')} if headline else None,
         'contrasts': tests, 'presence_gate': gate, 'state_shares': shares, 'notes': notes, 'left_out': dropped,
         'folds': [{key: out[key] for key in ('name', 'train', 'test', 'inner', 'prior', 'transitions', 'models',
-                                             'seconds')} for out in outputs],
+                                             'seconds')} for out in outputs['full']],
         'variants': {key: dict(reports[key], model=variants[key]['model'], temporal=variants[key]['temporal'],
-                               hmm=variants[key]['hmm'], group=_result_row(key, variants[key], reports[key])['group'])
+                               hmm=variants[key]['hmm'], ablation=variants[key]['ablation'],
+                               group=_result_row(key, variants[key], reports[key])['group'])
                      for key in variants},
     }
+    if cfg.ablate != 'none':
+        metrics['ablation'] = {
+            'grid': cfg.ablate, 'arms': {arm: list(removed) for arm, removed in arms.items()},
+            'full_only': [m for m in plan['models'] if m in FEATURELESS],
+            'note': "exploratory: no Holm correction; an arm's modalities did not run in any session, train and test "
+                    "alike, and the empty flag and the scoring strata are the full data's",
+            # the full arm's folds are 'folds' above
+            'folds': {arm: [{key: out[key] for key in ('name', 'models', 'seconds')} for out in outputs[arm]]
+                      for arm in arms if arm != 'full'}}
     write_json(run_dir / 'metrics.json', metrics)
     write_json(run_dir / 'config.json', _config_record(cfg, plan, data, folds, artifacts, run_dir, coder))
     if cfg.split == 'test':

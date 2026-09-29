@@ -79,6 +79,46 @@ def _read_coder(path: Path, session: str) -> tuple[pd.DataFrame, int]:
     return frame.sort_values('window_start', kind='stable').reset_index(drop=True), skipped
 
 
+# fields a model's labels carry and the coding page never writes (ses-code's MODEL_FIELDS)
+MODEL_FIELDS = ('confidence', 'p_individual', 'p_social', 'p_collaborative')
+
+
+def file_kind(path) -> str | None:
+    """what wrote a labels file: 'page' when a line was saved by the coding page (saved_at), else
+    'model' when a line carries a model's confidence or class probabilities, else None (a coder's
+    lines from before the page kept saved_at, or no line); ses-code's file_kind"""
+    model = False
+    for line in Path(path).read_text(encoding='utf-8', errors='replace').splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if 'saved_at' in record:
+            return 'page'
+        model = model or any(field in record for field in MODEL_FIELDS)
+    return 'model' if model else None
+
+
+def model_names(session_dirs) -> set[str]:
+    """the coder names whose labels files a model or a script wrote (the agent's, Jev's, a video
+    model's), over the given sessions as ses-code decides it: a name with a 'model' file and no file
+    the page saved. They are no human coder: never the default truth, never in the inter-coder
+    ceiling; a run trains on one only when --coder names it."""
+    kinds: dict[str, set] = {}
+    for directory in session_dirs:
+        folder = Path(directory) / 'labels'
+        for path in sorted(folder.glob('*.jsonl')) if folder.is_dir() else []:
+            kinds.setdefault(path.stem, set()).add(file_kind(path))
+    return {name for name, found in kinds.items() if 'model' in found and 'page' not in found}
+
+
+def model_coders(session_dir) -> set[str]:
+    """model_names of one session"""
+    return model_names([session_dir])
+
+
 def primary_coder(labels: pd.DataFrame) -> str | None:
     """the coder with the most windows (adjudication aside; ties by name): the truth when no
     --coder is given. Pass every session's labels to pick one coder for the whole run."""
