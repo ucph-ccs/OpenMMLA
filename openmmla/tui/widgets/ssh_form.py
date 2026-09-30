@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.message import Message
@@ -32,6 +33,71 @@ def _profile_row_buttons(profile_name: str) -> tuple[Button, Button, Button]:
         Button("Edit", name=profile_name, classes="ssh-row-edit"),
         Button("Delete", variant="error", name=profile_name, classes="ssh-row-del"),
     )
+
+def _by_name(profiles: list[SSHProfile]) -> list[SSHProfile]:
+    """profiles in the order the list shows them: by name, case-insensitive
+    (the file keeps the order they were added in)."""
+    return sorted(profiles, key=lambda p: p.name.casefold())
+
+
+# rows a profile entry takes (its buttons are three high)
+_ROW_HEIGHT = 3
+
+
+class _Splitter(Static):
+    """the line between the profile list and the form; dragging it up or down
+    gives the list more or fewer rows."""
+
+    DEFAULT_CSS = """
+    _Splitter {
+        height: 1;
+        width: 1fr;
+        color: $surface-lighten-2;
+    }
+    _Splitter:hover, _Splitter.-dragging {
+        color: $accent;
+        background: $boost;
+    }
+    """
+
+    def __init__(self, target: str, **kwargs) -> None:
+        super().__init__("━" * 400, **kwargs)
+        self._target = target
+        self._grab_y: int | None = None
+        self._grab_height = 0
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        target = self.screen.query_one(self._target)
+        self._grab_y = event.screen_y
+        self._grab_height = target.outer_size.height
+        self.add_class("-dragging")
+        self.capture_mouse()
+        event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._grab_y is None:
+            return
+        target = self.screen.query_one(self._target)
+        # no taller than its entries, and a few rows of the form stay below the line
+        room = (self.parent.size.height if self.parent else 0) - 8
+        room = min(room, _ROW_HEIGHT * max(1, len(target.children)))
+        height = self._grab_height + event.screen_y - self._grab_y
+        height = max(_ROW_HEIGHT, min(height, max(room, _ROW_HEIGHT)))
+        target.styles.height = height
+        SSHForm.list_height = height
+        # the drag is no text selection
+        self.screen.clear_selection()
+        event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._grab_y is None:
+            return
+        self._grab_y = None
+        self.remove_class("-dragging")
+        self.release_mouse()
+        self.screen.clear_selection()
+        event.stop()
+
 
 class SSHForm(Widget):
     """form widget for creating / editing / deleting SSH profiles."""
@@ -85,15 +151,13 @@ class SSHForm(Widget):
     }
     SSHForm .ssh-profile-list {
         margin-top: 1;
-        height: 1fr;
-        min-height: 5;
-        border-bottom: solid $surface-lighten-1;
-        padding-bottom: 1;
+        height: auto;
         scrollbar-size: 1 1;
     }
     SSHForm .ssh-form-section {
-        height: auto;
+        height: 1fr;
         padding-top: 1;
+        scrollbar-size: 1 1;
     }
     SSHForm .profile-entry {
         layout: horizontal;
@@ -109,22 +173,36 @@ class SSHForm(Widget):
     }
     """
 
+    # the list's height once the splitter has been dragged; kept for the rest
+    # of the console's run so reopening SSH Profiles keeps it
+    list_height: int | None = None
+
     def __init__(self) -> None:
         super().__init__()
         self._profiles = load_ssh_profiles()
         self._editing: str | None = None
+
+    def on_mount(self) -> None:
+        profile_list = self.query_one("#ssh-profile-list")
+        if SSHForm.list_height is not None:
+            profile_list.styles.height = SSHForm.list_height
+        else:
+            # up to four entries before the list scrolls
+            profile_list.styles.height = _ROW_HEIGHT * max(1, min(len(self._profiles), 4))
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="ssh-root"):
             yield Static("[b]SSH Profiles[/b]", classes="ssh-title")
 
             with VerticalScroll(classes="ssh-profile-list", id="ssh-profile-list"):
-                for p in self._profiles:
+                for p in _by_name(self._profiles):
                     with Horizontal(classes="profile-entry"):
                         yield Static(_profile_row_text(p), classes="profile-entry-name")
                         yield from _profile_row_buttons(p.name)
 
-            with Vertical(classes="ssh-form-section"):
+            yield _Splitter("#ssh-profile-list", id="ssh-splitter")
+
+            with VerticalScroll(classes="ssh-form-section"):
                 yield Static("[b]Add / Edit Profile[/b]", classes="ssh-title")
 
                 with Horizontal(classes="ssh-actions"):
@@ -350,7 +428,7 @@ class SSHForm(Widget):
             container = self.query_one("#ssh-profile-list")
             await container.remove_children()
             shown = None
-            for p in self._profiles:
+            for p in _by_name(self._profiles):
                 h = Horizontal(
                     Static(_profile_row_text(p), classes="profile-entry-name"),
                     *_profile_row_buttons(p.name),
