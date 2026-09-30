@@ -8,7 +8,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.config import is_main_base
+from openmmla.utils.config import base_room, is_main_base
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .input import get_bases, get_function_synchronizer
@@ -60,6 +60,7 @@ class IPSSynchronizer(Synchronizer):
         self.session_id = None
         self.allowed_tag_ids = None
         self.unregistered_tag_ids = set()  # detected tags this session has no individual for, logged once each
+        self.unplaced_base_ids = set()  # bases the main camera's matrices do not place, logged once each
         self.time_bucket_key = None  # start timestamp of time bucket
         self.time_bucket_end = None
         self.alive = False
@@ -99,6 +100,7 @@ class IPSSynchronizer(Synchronizer):
         self.session_id = None
         self.allowed_tag_ids = None
         self.unregistered_tag_ids = set()
+        self.unplaced_base_ids = set()
         self.merged_relations = None
         self.merged_tags = None
         gc.collect()
@@ -383,10 +385,17 @@ class IPSSynchronizer(Synchronizer):
                           f"{self.project_dir} ({there}): run IPS Camera Sync and export the transformations, "
                           f"or pick another main camera on the IPS Base card.")
 
-        mains = [str(base.get('id')) for base in get_bases(self.config) if is_main_base(base)]
-        for main_id in mains:
-            if matrices_file_name(main_id) in exported:
-                return main_id, ''
+        main_bases = [base for base in get_bases(self.config) if is_main_base(base)]
+        mains = [str(base.get('id')) for base in main_bases]
+        with_file = [main_id for main_id in mains if matrices_file_name(main_id) in exported]
+        if len(with_file) == 1:
+            return with_file[0], ''
+        if len(with_file) > 1:
+            rooms = ', '.join(f"{base.get('id')} (room {base_room(base) or '-'})" for base in main_bases
+                              if str(base.get('id')) in with_file)
+            return None, (f"The IPS synchronizer has no main camera: the Bases have a main base per room ({rooms}), "
+                          f"and a session is one room's. Give it the main camera of that room (-mc, the Main Camera "
+                          f"of the IPS Base card).")
         if len(exported) == 1:
             return main_id_of(exported[0]), ''
         wanted = (f"the main base {mains[0]} has no camera_sync/{matrices_file_name(mains[0])}" if mains
@@ -476,6 +485,16 @@ class IPSSynchronizer(Synchronizer):
                     tags = self._filter_tags(base_result["tags"])
                     tag_relations = self._filter_relations(base_result["tag_relations"])
 
+                    if base_id != self.main_id and base_id not in self.transform_matrices_dict:
+                        # another room's base (or one never synced to this main): its tags are in a frame
+                        # this session cannot place, and its relations are about another room's people
+                        if base_id not in self.unplaced_base_ids:
+                            self.unplaced_base_ids.add(base_id)
+                            self.logger.warning(
+                                f"Base {base_id} has no matrix in camera_sync/{matrices_file_name(self.main_id)}: "
+                                f"it is in another room, or was not synced to main camera {self.main_id}. Its "
+                                f"detections are left out of this session.")
+                        return
                     if base_id != self.main_id:  # convert to main coordinates
                         R = self.transform_matrices_dict[base_id]['R']
                         T = self.transform_matrices_dict[base_id]['T']

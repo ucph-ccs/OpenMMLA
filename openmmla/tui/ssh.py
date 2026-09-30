@@ -202,10 +202,13 @@ def get_profile_by_name(name: str) -> SSHProfile | None:
     return None
 
 
-def ssh_run_sync(profile: SSHProfile, command: str, timeout: float = 10.0) -> subprocess.CompletedProcess:
-    """run a command on the remote host synchronously."""
+def ssh_run_sync(
+    profile: SSHProfile, command: str, timeout: float = 10.0, input_text: str | None = None,
+) -> subprocess.CompletedProcess:
+    """run a command on the remote host synchronously; `input_text`, when
+    given, is what the command reads on its stdin."""
     args = profile.base_ssh_args() + [command]
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(args, input=input_text, capture_output=True, text=True, timeout=timeout)
 
 
 async def ssh_run_async(

@@ -102,6 +102,11 @@ class ParamDef:
     # whether an instance with no default of its own takes the next option
     # that has a value (True), or none (False)
     fill: bool = True
+    # a Select whose options each set other params of the card: picking value v
+    # sets every flag of presets[v], a counter to its number, a per-instance
+    # param's rows to the list, a Select to its value when that is an option
+    # (the IPS Base card's Room: its bases, how many, and its main camera)
+    presets: dict = field(default_factory=dict)
 
 
 # the last option of a Select that takes a typed value too (ParamDef.free_text)
@@ -1149,8 +1154,13 @@ class ServiceCard(Widget):
     def _change_int_param(self, flag: str, delta: int) -> None:
         """- or + on a counter: the user set it, so it stays as set; a counter
         that follows it and was never set goes along."""
+        self._set_count(flag, int(self._param_values.get(flag, 0)) + delta)
+
+    def _set_count(self, flag: str, value: int) -> None:
+        """put a counter on `value` as set (by - or +, or a preset): it stays
+        so, and a counter that follows it and was never set goes along."""
         self._counts_set.add(flag)
-        self._show_count(flag, int(self._param_values.get(flag, 0)) + delta)
+        self._show_count(flag, value)
         for follower in self.service_def.params:
             if follower.param_type == "int" and follower.follows == flag and follower.flag not in self._counts_set:
                 self._show_count(follower.flag, self._count_default(follower))
@@ -1292,7 +1302,8 @@ class ServiceCard(Widget):
                 updated.append(param)
                 continue
             updated.append(replace(
-                param, choices=list(new.choices), default=new.default, follow_values=dict(new.follow_values)))
+                param, choices=list(new.choices), default=new.default, follow_values=dict(new.follow_values),
+                presets=dict(new.presets)))
         self.service_def = replace(self.service_def, params=updated)
         moved_first: list[tuple[str, str]] = []
         for param in updated:
@@ -1380,6 +1391,13 @@ class ServiceCard(Widget):
         if value != now:
             return  # the Select has moved on since (fresh choices): not a pick
         for param in self.service_def.params:
+            if param.presets and not param.per_instance and event.select.id == self._param_id("select", param.flag):
+                # a Select says it changed when it is mounted too, on what the card noted: not a pick
+                if value != str(self._param_values.get(param.flag) or ""):
+                    self._param_values[param.flag] = value
+                    self._apply_preset(param, value)
+                return
+        for param in self.service_def.params:
             if not param.per_instance:
                 continue
             for index in range(len(self._param_values.get(param.flag) or [])):
@@ -1398,6 +1416,55 @@ class ServiceCard(Widget):
                     self._follow_first_instance(param.flag, value)
                 self._show_paired_rows(param.flag, index)
                 return
+
+    def _apply_preset(self, param: ParamDef, value: str) -> None:
+        """set the params that `value` of `param` presets: the rows of a
+        per-instance param first (a row its counter adds is built on what they
+        note), then the counters, then the Selects."""
+        preset = param.presets.get(value) or {}
+        targets = [(other, preset[other.flag]) for other in self.service_def.params if other.flag in preset]
+        for target, wanted in targets:
+            if target.per_instance:
+                self._set_instance_values(target, [str(item) for item in wanted])
+        for target, wanted in targets:
+            if target.param_type == "int" and not target.per_instance:
+                self._set_count(target.flag, int(wanted))
+        for target, wanted in targets:
+            if target.per_instance or target.param_type == "int":
+                continue
+            wanted = str(wanted)
+            if wanted not in {option for _, option in _choice_options(target.choices)}:
+                continue
+            self._param_values[target.flag] = wanted
+            try:
+                self.query_one(f"#{self._param_id('select', target.flag)}", Select).value = wanted
+            except Exception:
+                pass
+
+    def _set_instance_values(self, param: ParamDef, values: list[str]) -> None:
+        """put the rows of a per-instance param on `values`, in turn, as the
+        card's choice (fresh options move them again): a row on screen now,
+        and the value a row not built yet starts on."""
+        legal = {option for _, option in self._instance_options(param)}
+        noted = list(self._param_values.get(param.flag) or [])
+        noted += [""] * (len(values) - len(noted))
+        picked = self._picked_instances.setdefault(param.flag, set())
+        card_shown = self._card_shown.setdefault(param.flag, {})
+        for index, value in enumerate(values):
+            value = value if value in legal else ""
+            noted[index] = value
+            picked.discard(index)
+            card_shown[index] = value
+            try:
+                sel = self.query_one(f"#{self._instance_select_id(param.flag, index)}", Select)
+            except Exception:
+                continue
+            with sel.prevent(Select.Changed):
+                sel.value = value if value else Select.NULL
+            if param.free_text:
+                self._show_typed_box(param, index, False)
+            self._show_paired_rows(param.flag, index)
+        self._param_values[param.flag] = noted
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """text typed on a row on "type another…": the rows under it show or

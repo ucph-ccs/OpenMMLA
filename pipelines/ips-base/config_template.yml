@@ -76,7 +76,8 @@ Bases:
     camera: <camera-name>       # calibrated camera profile name (from Cameras)
     source: stream              # source type (opencv/stream/lsl/file; rtmp is the old name of stream)
     source_index: 0             # opencv: camera index; stream: name of a Streams entry; lsl: stream name; file: the file to replay, by its full path (Browse… on the Config tab)
-    main: false                 # mark exactly one base as the main reference for sync
+    room:                       # the room its camera is in (A, B, ...) when one config serves several rooms; empty for one room
+    main: false                 # the main reference for sync: mark exactly one base per room
 
 Synchronizer:
   bucket_duration: 1                                # time bucket duration (seconds) for synchronized result

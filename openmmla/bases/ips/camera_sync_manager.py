@@ -14,7 +14,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
-from openmmla.utils.config import camera_sync_problem, is_main_base
+from openmmla.utils.config import base_room, camera_sync_problem, is_main_base
 
 from .input import get_base_by_id, get_bases, get_function_sync_manager
 from .transform import (
@@ -33,8 +33,8 @@ class CameraSyncManager(Synchronizer):
 
     def __init__(self, project_dir: str | None, config_path: str, sync: bool = True,
                  top_K: int = 5000, distance_threshold: float = 0.1, angle_threshold: float = 3.0,
-                 time_threshold_sync: float = 0.05, time_threshold_unsync: float = 0.1,
-                 base: str | None = None):
+                 time_threshold_sync: float = 0.2, time_threshold_unsync: float = 0.2,
+                 base: str | None = None, main: str | None = None):
         """Initialize the camera sync manager.
 
         Args:
@@ -44,14 +44,19 @@ class CameraSyncManager(Synchronizer):
             top_K: maximum number of matrices to keep (default: 5000)
             distance_threshold: threshold for point distance (default: 0.1)
             angle_threshold: threshold for rotation angle (default: 3.0)
-            time_threshold_sync: time threshold for sync mode (default: 0.05)
-            time_threshold_unsync: time threshold for unsync mode (default: 0.1)
+            time_threshold_sync: seconds apart the main and the alternative detection of a tag
+                may reach this manager and still be paired, in sync mode (default: 0.2)
+            time_threshold_unsync: the same in unsync (validation) mode (default: 0.2)
             base: alternative base id (from config 'Bases') to synchronize against
-                the main base. The main base is the one flagged ``main: true``.
+                the main base of its room (the base of that room flagged ``main: true``).
                 If omitted, the alternative is picked interactively.
+            main: the main base to synchronize against when the config has a main per
+                room; if omitted, the main of the room of `base`, the only main there
+                is, or picked interactively.
         """
         super().__init__(project_dir=project_dir, config_path=config_path)
         self.launch_base = base
+        self.launch_main = main
 
         """Synchronization parameters."""
         self.sync = sync
@@ -86,44 +91,68 @@ class CameraSyncManager(Synchronizer):
         self._setup_objects()
 
         # profile-driven: resolve main/alt base ids from the config 'Bases' list
-        # (main = the entry flagged main: true; alt = -b entry, else picked).
-        self._resolve_bases(base)
+        # (main = the entry of a room flagged main: true; alt = -b entry, else picked).
+        self._resolve_bases(base, main)
 
-    def _resolve_bases(self, base):
-        """Resolve main_id (the base flagged main) and alt_id (-b or picked)."""
+    def _resolve_bases(self, base, main=None):
+        """Resolve main_id and alt_id: the main base of a room (the room of -b, -m,
+        the only main there is, or picked) and another base of that room (-b or picked)."""
         problem = camera_sync_problem(self.config)
         if problem:
             raise ValueError(f"{problem} (config: {self.config_path})")
         bases = get_bases(self.config)
-        self.main_id = str(next(b for b in bases if is_main_base(b)).get('id'))
-        alts = [b for b in bases if str(b.get('id')) != self.main_id]
-
+        mains = [b for b in bases if is_main_base(b)]
+        alt = None
         if base is not None:
             alt = get_base_by_id(self.config, base)
-            if alt is None or str(alt.get('id')) == self.main_id:
-                raise ValueError(f"Alternative base '{base}' not found (or is the main base) in config 'Bases'.")
-        elif len(alts) == 1:
-            alt = alts[0]
+            if alt is None or is_main_base(alt):
+                raise ValueError(f"Alternative base '{base}' not found (or is a main base) in config 'Bases'.")
+            # camera_sync_problem saw to it that every room has one main
+            main_entry = next(m for m in mains if base_room(m) == base_room(alt))
+            if main is not None and str(main) != str(main_entry.get('id')):
+                raise ValueError(f"Base '{base}' is in room {base_room(alt) or '-'}, whose main base is "
+                                 f"'{main_entry.get('id')}', not '{main}'.")
+        elif main is not None:
+            main_entry = get_base_by_id(self.config, main)
+            if main_entry is None or not is_main_base(main_entry):
+                raise ValueError(f"Main base '{main}' not found (or not marked main: true) in config 'Bases'.")
+        elif len(mains) == 1:
+            main_entry = mains[0]
         else:
-            alt = self._pick_alt_interactively(alts)
+            main_entry = self._pick_interactively(
+                mains, "The config has a main base per room. Select the main base to synchronize to:",
+                "Main base number", lambda b: f"id={b.get('id')} (room: {base_room(b)}, camera: {b.get('camera')})")
+        self.main_id = str(main_entry.get('id'))
+        room = base_room(main_entry)
+
+        if alt is None:
+            alts = [b for b in bases if base_room(b) == room and not is_main_base(b)]
+            if not alts:
+                raise ValueError(f"Room {room} has its main base '{self.main_id}' alone: give another base "
+                                 f"room: {room} to sync it to this one.")
+            alt = alts[0] if len(alts) == 1 else self._pick_interactively(
+                alts, f"Main base is '{self.main_id}'. Select the alternative base to synchronize:",
+                "Alternative base number", lambda b: f"id={b.get('id')} (camera: {b.get('camera')})")
         self.alt_id = str(alt.get('id'))
 
-        self.logger.info(f"Camera sync: main={self.main_id}, alternative={self.alt_id}")
+        where = f" (room {room})" if room else ""
+        self.logger.info(f"Camera sync: main={self.main_id}, alternative={self.alt_id}{where}")
         print(f"\033]0;Camera Sync Manager: main:{self.main_id} - alternative:{self.alt_id}\007")
 
-    def _pick_alt_interactively(self, alts):
-        """Pick the alternative base from non-main entries (the only interaction)."""
-        print(f"Main base is '{self.main_id}'. Select the alternative base to synchronize:")
-        for idx, b in enumerate(alts):
-            print(f"  {idx}: id={b.get('id')} (camera: {b.get('camera')})")
+    @staticmethod
+    def _pick_interactively(entries, title, prompt, describe):
+        """Pick one of `entries` by its number (the only interaction)."""
+        print(title)
+        for idx, b in enumerate(entries):
+            print(f"  {idx}: {describe(b)}")
         while True:
-            sel = input("Alternative base number [0]: ").strip()
+            sel = input(f"{prompt} [0]: ").strip()
             try:
                 index = int(sel) if sel else 0
             except ValueError:
                 index = -1
-            if 0 <= index < len(alts):
-                return alts[index]
+            if 0 <= index < len(entries):
+                return entries[index]
             print("Invalid selection. Please enter a valid base number.")
 
     def _setup_directories(self):
@@ -153,7 +182,7 @@ class CameraSyncManager(Synchronizer):
 
     def _set_camera_id(self):
         """Re-resolve main/alt camera IDs from the config 'Bases' list (no input)."""
-        self._resolve_bases(self.launch_base)
+        self._resolve_bases(self.launch_base, self.launch_main)
 
     def _start_synchronization(self):
         try:
@@ -216,8 +245,14 @@ class CameraSyncManager(Synchronizer):
 
         base_id = message["base_id"]
         tags = message["tags"]
-        acquired_time = message["acquired_time"]
-        current_time = time.time()
+        # a detection counts as fresh by when it reached this manager, not by the
+        # acquired_time it carries: that stamp is in the capture side's clock, and
+        # the stream, the detection and the MQTT round trip through the broker put
+        # it behind this clock by the whole pipeline's delay (over 50 ms already
+        # when the broker is a relayed hop away), so compared with it nothing was
+        # ever fresh. Both cameras take the same way here, so the time between
+        # their arrivals is what tells whether their frames show the same moment.
+        current_time = time.monotonic()
 
         # Remove outdated positions for main camera
         for tag in list(self.main_translations.keys()):
@@ -238,11 +273,11 @@ class CameraSyncManager(Synchronizer):
             if base_id == self.main_id:
                 self.main_translations[tag_id] = position
                 self.main_rotations[tag_id] = rotation
-                self.main_last_update_time[tag_id] = acquired_time
+                self.main_last_update_time[tag_id] = current_time
             elif base_id == self.alt_id:
                 self.alt_translations[tag_id] = position
                 self.alt_rotations[tag_id] = rotation
-                self.alt_last_update_time[tag_id] = acquired_time
+                self.alt_last_update_time[tag_id] = current_time
 
             if tag_id in self.main_translations and tag_id in self.alt_translations:
                 color = self.tag_color_map.setdefault(tag_id, next(self.colors))

@@ -31,7 +31,7 @@ An alternative input path skips the cameras entirely: a Nicla Vision badge runni
 | Section | What it holds |
 |---|---|
 | `Base` | settings shared by every base: `tag_size` and `families` of the AprilTags, `resolution`, `rotate`, `fps`, the file-replay pacing (`keyframe_interval`, `processing_rate`, `enable_timing_sync`), and `stream_kwargs` |
-| `Bases` | one entry per camera position: `id`, `camera` (a calibrated profile from `Cameras`), `source`, `source_index`, and `main` (exactly one `true`). Camera sync, the bases and the transform matrices all key on these ids. |
+| `Bases` | one entry per camera position: `id`, `camera` (a calibrated profile from `Cameras`), `source`, `source_index`, `room` (optional, see [Several rooms](#several-rooms)) and `main` (exactly one `true`, one per room). Camera sync, the bases and the transform matrices all key on these ids. |
 | `Cameras` | the intrinsic parameters per camera model, written by the calibration tool (or filled in by hand); the template ships profiles for a Logitech C920, a MacBook Air camera and an iPhone |
 | `Synchronizer` | `bucket_duration` |
 | `Streams` | managed and external streams, see below |
@@ -96,7 +96,7 @@ One-time setup for a camera arrangement, done in this order from the leaves unde
 
 ### Synchronize the cameras
 
-Define the `Bases` entries first (one per camera position, exactly one `main: true`); the sync manager refuses to start without a main base. **IPS Camera Sync** starts `Num Tag Detectors` instances of `mmla ips-ctag` (one per camera, each asks which `Bases` entry it is) and one `mmla ips-csync` sync manager. The manager pairs the main base with one alternative base at a time (switch to the next alternative from its menu): show one AprilTag to both cameras and start the synchronization, and it computes the transform from that camera into the main camera's frame and accumulates the pairs in `pipelines/ips-base/camera_sync/transformation_matrices.json`. Choose **export transformations** in the manager's menu when every camera is done: it writes `transformation_matrices_<main-id>.json`, which is the file the bases load.
+Define the `Bases` entries first (one per camera position, exactly one `main: true`, or one per room, see [Several rooms](#several-rooms)); the sync manager refuses to start without a main base. **IPS Camera Sync** starts `Num Tag Detectors` instances of `mmla ips-ctag` (one per camera, each asks which `Bases` entry it is) and one `mmla ips-csync` sync manager. The manager pairs the main base with one alternative base at a time (switch to the next alternative from its menu): show one AprilTag to both cameras and start the synchronization, and it computes the transform from that camera into the main camera's frame from each pair of detections of the tag that reached it within 0.2 s of each other (`mmla ips-csync -t <seconds>` changes it). It goes by when the detections arrive, not by the capture stamps they carry, which lag its clock by the whole way from the camera through the stream, the detector and the MQTT broker: a slow network or a relayed broker makes the sync wait longer for a detection, but no longer keeps every pair out. It accumulates the pairs in `pipelines/ips-base/camera_sync/transformation_matrices.json`. Choose **export transformations** in the manager's menu when every camera is done: it writes `transformation_matrices_<main-id>.json`, which is the file the bases load.
 
 ### Distribute the matrices
 
@@ -118,10 +118,11 @@ The batch replay (`scripts/replay_sessions.py`) runs `ses-calibrate` for every m
 
 ## Run from the TUI
 
-1. **System services** running and reachable, and the setup above done: calibrated `Cameras`, `Bases` with one `main: true`, and the exported transform matrices on every base station.
+1. **System services** running and reachable, and the setup above done: calibrated `Cameras`, `Bases` with one `main: true` (one per room), and the exported transform matrices on every base station.
 2. **IPS Base**: `Launcher → Pipelines → IPS → IPS Base`, Host set to the base station. Choose the number of bases, synchronizers and visualizers, the **Session** (or `Create MongoDB Session` from an experiment group), and the toggles (`Graphics` shows the annotated frames, `Store` saves frames, `Verbose` prints debug output). Everything the windows used to ask is chosen on the card:
+    - with rooms in `Bases`, the **Room** of the session: picking one puts that room's bases on the card, sets **Num Bases** to their number and the main camera to the room's main (see [Several rooms](#several-rooms));
     - which `Bases` entry each base is, one dropdown per base (their number follows **Num Bases**);
-    - the synchronizer's **main camera**, the base whose `camera_sync/transformation_matrices_<id>.json` it loads. The dropdown lists the files exported on the card's host and starts on the `Bases` entry with `main: true` when its file is there, else on the first file; **Start** refuses to launch a synchronizer until one is picked (press Refresh on the card once the files are there);
+    - the synchronizer's **main camera**, the base whose `camera_sync/transformation_matrices_<id>.json` it loads. The dropdown lists the files exported on the card's host and starts on the `Bases` entry with `main: true` when its file is there, else on the first file, and follows Base 1 to the main of its room; **Start** refuses to launch a synchronizer until one is picked (press Refresh on the card once the files are there);
     - the visualizer's **2d** or **3d** plot.
 
     **Start** opens one terminal window per instance. Each process starts at once with those choices and waits for START; nothing is asked in the windows.
@@ -130,6 +131,22 @@ The batch replay (`scripts/replay_sessions.py`) runs `ses-calibrate` for every m
 When a choice from the card cannot be used (the synchronizer finds no `camera_sync/transformation_matrices_<id>.json` for its main camera, the visualizer gets a dimension other than 2d or 3d, or a base gets an id that is not in `Bases`), that window says why and what to do, then shows the process's own menu or base prompt, so it can be fixed there, or on the card before the next Start.
 
 Each base notes in the session's MongoDB document which `Bases` entry it is, the stream it pulls (for a `stream` source) and when it joined and left; it notes the leaving first on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads this note, so it takes the session's own streams, from the Stream Server and from the capture hosts, without being told which. A session without this note (one from before the bases wrote it, or one no base joined) has nothing to export, and the console says so.
+
+### Several rooms
+
+One config can serve several rooms, each with its own cameras and its own coordinates: give every `Bases` entry the `room` its camera is in (`A`, `B`, ...) and mark one base per room `main: true`. A config whose bases name no room is one room, as before.
+
+```yaml
+Bases:
+  - {id: 1, camera: logitechC920, source: stream, source_index: c920-01, room: A, main: true}
+  - {id: 2, camera: logitechC920, source: stream, source_index: c920-02, room: A, main: false}
+  - {id: 7, camera: logitechC920, source: stream, source_index: c920-07, room: B, main: true}
+  - {id: 8, camera: logitechC920, source: stream, source_index: c920-08, room: B, main: false}
+```
+
+- **Camera sync** pairs a room's cameras with its main. With a main per room, `mmla ips-csync` first asks for the main (or takes `-m <id>`, or the room of `-b <id>`) and then offers only that room's other bases. Export writes `transformation_matrices_<main>.json` per main, with that room's cameras only.
+- **Each base** loads the matrix file of its room's main.
+- **A session is one room's.** Two rooms at the same time are two sessions: start the IPS Base card with **Room** A and a new session, then again with **Room** B and another new session, and send START and STOP to each from Session Control. Each synchronizer takes its room's main as **Main Camera** (`-mc`); without one, a synchronizer facing a main per room says so instead of picking one. **Start** refuses a card whose bases are in different rooms, or whose main camera belongs to another room than its bases, and a synchronizer leaves out, with one warning, the detections of a base its main camera's matrices do not place.
 
 ## Manual CLI
 

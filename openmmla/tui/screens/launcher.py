@@ -85,8 +85,8 @@ from openmmla.utils.artifact_paths import (
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source, stream_kind
 from openmmla.utils.config import (
-    asr_segment_durations, decrypt_config_values, get_base_by_id, get_bases, load_yaml_config,
-    shared_segment_duration,
+    asr_segment_durations, base_room, bases_by_room, decrypt_config_values, get_base_by_id, get_bases,
+    load_yaml_config, main_of_base, room_main, shared_segment_duration,
 )
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -1033,6 +1033,10 @@ _ASR_LANGUAGES = [
 # coordinates, the one the IPS synchronizer takes as its main camera
 _MATRIX_FILE_PREFIX = "transformation_matrices_"
 
+# the IPS Base card's Room: which room's bases a session is. Passed to no
+# process: it sets the card's Bases, Num Bases and Main Camera (ParamDef.presets)
+_ROOM_FLAG = "--room"
+
 
 def _shown_base_value(value) -> str:
     """a Bases value worth showing on a dropdown: not empty, not a <placeholder>
@@ -1108,11 +1112,29 @@ def _main_camera_choices(ids: list[str], config: dict) -> tuple[list[tuple[str, 
             label = f"{base_id} · no Bases entry"
         else:
             camera = _shown_base_value(base.get("camera"))
-            label = " · ".join(part for part in (base_id, camera, "main" if _is_main_base(base) else "") if part)
+            room = base_room(base)
+            main = ("main of room " + room if room else "main") if _is_main_base(base) else ""
+            label = " · ".join(part for part in (base_id, camera, main) if part)
         options.append((label, base_id))
     main = next((base_id for base_id, base in bases.items() if _is_main_base(base)), None)
     default = main if main in ids else (ids[0] if ids else "")
     return options, default
+
+
+def _room_choices(config: dict) -> tuple[list[tuple[str, str]], dict[str, dict]]:
+    """the IPS Base card's Room: one option per room the Bases name, and what
+    picking it puts on the card, its bases in their order, how many, and its
+    main base as the Main Camera. The first option ("") sets nothing."""
+    rooms = {room: members for room, members in bases_by_room(config).items() if room}
+    options = [("- (the Bases below)" if rooms else "- (the Bases name no room)", "")]
+    presets = {}
+    for room, members in rooms.items():
+        ids = [str(base.get("id")) for base in members]
+        main = room_main(config, room)
+        label = f"{room} · bases {', '.join(ids)}" + (f" · main {main}" if main else " · no main")
+        options.append((label, room))
+        presets[room] = {"-nb": len(ids), "-b": ids, **({"-mc": main} if main else {})}
+    return options, presets
 
 
 _FILE_MISSING_SENTINEL = "__OPENMMLA_FILE_MISSING__"
@@ -2486,8 +2508,12 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-nv", "Num Visualizers", "int", 1),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
+            # the room of the session (the Bases' room): picking one puts its bases,
+            # how many, and its main camera on the card (_service_with_base_choices)
+            ParamDef(_ROOM_FLAG, "Room", "choice", ""),
             ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
-            ParamDef("-mc", "Main Camera", "choice", ""),
+            # follows Base 1: the main base of that base's room
+            ParamDef("-mc", "Main Camera", "choice", "", follows="-b"),
             ParamDef("-d", "Visualizer View", "str", "2d", ["2d", "3d"]),
             ParamDef("-g", "Graphics", "bool", True),
             ParamDef("-s", "Store Frames", "bool", True),
@@ -5654,18 +5680,10 @@ class ServicePanel(Widget):
             ],
         )
 
-    def _service_with_base_choices(self, svc: ServiceDef, target: str) -> ServiceDef:
-        """what a base card's dropdowns offer on the card's host: its config's
-        Bases entries for each Base (-b), the matrix files for the IPS
-        synchronizer's Main Camera (-mc).
-
-        A remote host is asked nothing from here: this also runs on the UI
-        thread (Start, a config Save). Its config comes from the config cache
-        and its matrix files from _transform_matrix_ids, both read when the
-        card was built (_service_view_state_sync) or refreshed, off it."""
-        pipeline = _BASE_CARD_PIPELINES.get(svc.name)
-        if pipeline is None:
-            return svc
+    def _base_card_config(self, svc: ServiceDef, target: str) -> dict:
+        """the config of a base card's host, without asking a remote host:
+        this machine's file, else what the config cache holds of that host's;
+        {} for one that cannot be read."""
         config_path = os.path.join(svc.config_dir, "config.yml")
         try:
             if target == "local":
@@ -5674,7 +5692,21 @@ class ServicePanel(Widget):
                 config = self._target_config_cache.get(self._config_cache_key(config_path, target))
         except Exception:
             config = None  # an unreadable config offers nothing but asking in the window
-        config = config if isinstance(config, dict) else {}
+        return config if isinstance(config, dict) else {}
+
+    def _service_with_base_choices(self, svc: ServiceDef, target: str) -> ServiceDef:
+        """what a base card's dropdowns offer on the card's host: its config's
+        Bases entries for each Base (-b), the matrix files for the IPS
+        synchronizer's Main Camera (-mc), and the IPS Base card's Room.
+
+        A remote host is asked nothing from here: this also runs on the UI
+        thread (Start, a config Save). Its config comes from the config cache
+        and its matrix files from _transform_matrix_ids, both read when the
+        card was built (_service_view_state_sync) or refreshed, off it."""
+        pipeline = _BASE_CARD_PIPELINES.get(svc.name)
+        if pipeline is None:
+            return svc
+        config = self._base_card_config(svc, target)
         base_options = _base_choices(pipeline, config)
         params = []
         for param in svc.params:
@@ -5682,7 +5714,12 @@ class ServicePanel(Widget):
                 params.append(replace(param, choices=base_options, default=[value for _, value in base_options if value]))
             elif param.flag == "-mc" and pipeline == "ips":
                 options, default = _main_camera_choices(self._transform_matrix_ids(target) or [], config)
-                params.append(replace(param, choices=options, default=default))
+                follow = {str(base.get("id")): main_of_base(config, base.get("id")) for base in get_bases(config)}
+                params.append(replace(param, choices=options, default=default,
+                                      follow_values={base_id: main for base_id, main in follow.items() if main}))
+            elif param.flag == _ROOM_FLAG and pipeline == "ips":
+                options, presets = _room_choices(config)
+                params.append(replace(param, choices=options, presets=presets))
             elif param.flag == _ASR_PARTICIPANT_FLAG:
                 # the options the card was last given (_refresh_asr_participants):
                 # fresh Bases must not take them away
@@ -6217,6 +6254,37 @@ class ServicePanel(Widget):
             )
         return notes
 
+    def _ips_room_problem(self, params: dict, picked: list[str], target: str, svc: ServiceDef) -> str:
+        """why the IPS Base card's bases cannot be one session, when its
+        config names rooms: a session is one room's, whose cameras share its
+        main base's coordinates, and its synchronizer takes that main."""
+        config = self._base_card_config(svc, target)
+        rooms = bases_by_room(config)
+        if not any(rooms):
+            return ""  # no room named: one room, as before
+        by_room: dict[str, list[str]] = {}
+        for base_id in picked:
+            base = get_base_by_id(config, base_id) if base_id else None
+            if base is not None:
+                by_room.setdefault(base_room(base), []).append(base_id)
+        if len(by_room) > 1:
+            listed = "; ".join(f"{room or 'no room'}: {', '.join(ids)}" for room, ids in by_room.items())
+            return (
+                f"[yellow]The bases picked are in different rooms ({listed}). A session is one room's, as each "
+                f"room has coordinates of its own: pick the bases of one room (Room puts them on the card), and "
+                f"start the other room as a session of its own.[/yellow]"
+            )
+        main = str(params.get("-mc") or "").strip()
+        if by_room and main and _coerce_int(params.get("-ns"), 0) > 0:
+            room = next(iter(by_room))
+            wanted = room_main(config, room)
+            if wanted and main != wanted:
+                return (
+                    f"[yellow]The Main Camera is {main}, but the bases are room {room or '(none)'}'s, whose main "
+                    f"base is {wanted}: pick {wanted} as the Main Camera.[/yellow]"
+                )
+        return ""
+
     def _base_card_start_problem(self, svc: ServiceDef, params: dict, target: str) -> str:
         """why a base card cannot start as it stands, said plainly; "" when it
         can. Every process the card opens takes its choices from the card and
@@ -6249,6 +6317,10 @@ class ServicePanel(Widget):
                     f"1.[/yellow]"
                 )
             seen[entry] = index
+        if svc.name == "IPS Base":
+            problem = self._ips_room_problem(params, picked, target, svc)
+            if problem:
+                return problem
         if svc.name in _SYNC_WAIT_CARDS and _coerce_int(params.get("-ns"), 0) > 0:
             waits = _coerce_int(params.get(_SYNC_WAIT_FLAG), 0)
             counted = waits or len(entries)

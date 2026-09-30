@@ -14,6 +14,7 @@ from pupil_apriltags import Detector
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
+from openmmla.utils.config import main_of_base
 from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
@@ -704,7 +705,9 @@ class IPSBase(Base):
         return tags, tag_relations
 
     def _load_transform_matrices(self):
-        """Load transformation matrices."""
+        """Load the transformation matrices of this base's room: the file camera sync exported for
+        the main base of its room, transformation_matrices_<main>.json (a config without rooms has
+        one main), else the first file there is."""
         transformation_choices = [d for d in os.listdir(self.camera_sync_dir) if
                                   d.startswith('transformation_matrices_')]
         for idx, choice in enumerate(transformation_choices):
@@ -713,9 +716,11 @@ class IPSBase(Base):
         if not transformation_choices:
             return None
 
-        # non-interactive: use the first transform matrix file; main_id is its
+        # non-interactive: the file of this base's room, else the first one; main_id is its
         # suffix (e.g. transformation_matrices_m.json -> main camera id 'm')
-        chosen_transformation = sorted(transformation_choices)[0]
+        room_main_id = main_of_base(self.config, self._base_id_override)
+        wanted = f'transformation_matrices_{room_main_id}.json' if room_main_id else None
+        chosen_transformation = wanted if wanted in transformation_choices else sorted(transformation_choices)[0]
         self.transform_matrices_file = chosen_transformation
         self.main_id = chosen_transformation.split('_')[-1].split('.')[0]
         self.logger.info(f"Using transform matrices '{chosen_transformation}' (main: {self.main_id})")

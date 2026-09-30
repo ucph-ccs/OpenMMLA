@@ -291,6 +291,9 @@ def export_main_transformations_json(input_file, output_file, main_system='m'):
         if start != main_system:
             # Find all paths leading to the main system
             paths = find_transformation_paths(data, start, main_system)
+            if not paths:
+                # a camera synced to another room's main: none of its pairs leads here
+                continue
             # Compute transformation matrices for these paths
             R, T = compute_paths_transformation(data, paths)
             results[start] = {'R': R, 'T': T}

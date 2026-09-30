@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import time
+import weakref
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -23,11 +24,11 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Static, Button, DataTable, Input, Label, OptionList
 
-from openmmla.tui import capture_recordings, recordings
+from openmmla.tui import capture_recordings, host_tools, recordings
 from openmmla.tui import devices as capture_devices
 from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, remote_platform, ssh_run_sync
-from openmmla.tui.system_services import stream_server_path
+from openmmla.tui.system_services import get_sudo_password, stream_server_path
 from openmmla.tui.widgets.stream_recordings import StreamRecordingsScreen
 from openmmla.utils.artifact_paths import (
     REMOTE_RECORD_ROOT, capture_day, capture_host_label, capture_record_dir, capture_record_root,
@@ -86,6 +87,52 @@ def _run_on_host(profile, command: str, timeout: float) -> subprocess.CompletedP
     return ssh_run_sync(profile, command, timeout=timeout)
 
 
+def _run_programs_command(
+    profile, command: str, timeout: float, password: str | None = None,
+) -> subprocess.CompletedProcess:
+    """run a command of host_tools on a stream's host (profile None: this
+    machine) with the stream PATH, which has Homebrew's, and `password` on its
+    stdin for the sudo -S it may start: never on a command line, where the
+    host's ps would show it."""
+    stdin = f"{password}\n" if password else ""
+    command = _with_stream_path(command)
+    if profile is None:
+        return subprocess.run(command, shell=True, input=stdin, capture_output=True, text=True, timeout=timeout)
+    return ssh_run_sync(profile, command, timeout=timeout, input_text=stdin)
+
+
+def _host_tools(profile, programs: list[str]) -> host_tools.HostTools | None:
+    """what a stream's host (profile None: this machine) lacks of `programs`,
+    None when it did not say."""
+    try:
+        result = _run_programs_command(profile, host_tools.check_command(programs), host_tools.CHECK_TIMEOUT)
+    except Exception:
+        return None
+    return host_tools.parse_check(result.stdout)
+
+
+# one install at a time on a host, whichever card's stream it is for: apt takes
+# one at a time, and a second stream there then finds the programs in place.
+# Per event loop, as an asyncio lock belongs to the one it was first used in
+_PROGRAM_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _programs_lock(host: str) -> asyncio.Lock:
+    locks = _PROGRAM_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return locks.setdefault(host, asyncio.Lock())
+
+
+def _by_name(streams: list[StreamDef]) -> list[StreamDef]:
+    """streams in the order of their names, a number in a name counted as one
+    (cam-2 before cam-10)."""
+    def key(stream: StreamDef):
+        # re.split with a group alternates text and digits, so the parts of two
+        # names are the same type wherever they meet
+        parts = re.split(r"(\d+)", stream.name)
+        return [int(part) if index % 2 else part.lower() for index, part in enumerate(parts)], stream.name
+    return sorted(streams, key=key)
+
+
 # what a managed stream's host says of it (_stream_state_cmd), and "unknown"
 # when the host did not answer
 STREAM_RUNNING = "running"
@@ -93,6 +140,8 @@ STREAM_STARTING = "starting"
 STREAM_EXITED = "exited"
 STREAM_STOPPED = "stopped"
 STREAM_UNKNOWN = "unknown"
+# the console's own: Start is installing what the host lacks (host_tools)
+STREAM_INSTALLING = "installing"
 
 
 def _noted_ffmpeg_cmd(session: str) -> str:
@@ -890,8 +939,8 @@ class StreamPanel(Widget):
 
     def _rows(self) -> list[StreamDef]:
         """what the table shows: this config's Streams, then the captures left
-        over from entries it no longer has."""
-        return self._streams + self._left_over
+        over from entries it no longer has, each by name."""
+        return _by_name(self._streams) + _by_name(self._left_over)
 
     def _is_left_over(self, stream: StreamDef) -> bool:
         return any(other.name == stream.name for other in self._left_over)
@@ -1203,6 +1252,8 @@ class StreamPanel(Widget):
                 status = "External"
             elif self._statuses.get(stream.name, False):
                 status = "Starting" if state == STREAM_STARTING else "Running"
+            elif state == STREAM_INSTALLING:
+                status = "Installing"
             elif state == STREAM_EXITED:
                 # the tmux session outlived its ffmpeg
                 status = "Exited"
@@ -1342,7 +1393,8 @@ class StreamPanel(Widget):
             options.append((f"{current}  (not found on {where})", current))
         options.append(("-  (none: Start takes the first)", ""))
         options.append(("type another…", TYPE_DEVICE))
-        row = next((i for i, s in enumerate(self._streams) if s.name == stream.name), 0)
+        # its row now: the table lists the streams by name, and may have changed while its host was asked
+        row = next((i for i, s in enumerate(self._rows()) if s.name == stream.name), 0)
         table = self.query_one("#stream-table", StreamTable)
         anchor = table.device_cell_region(row)
 
@@ -1448,7 +1500,7 @@ class StreamPanel(Widget):
             else:
                 self._log("[yellow]Select a stream row first.[/yellow]")
         elif btn == "stream-btn-start-all":
-            for s in self._streams:
+            for s in _by_name(self._streams):
                 if s.ssh_profile:
                     self._start_stream(s)
         elif btn == "stream-btn-stop-all":
@@ -1641,6 +1693,10 @@ class StreamPanel(Widget):
             # room first: what it recorded before and kept long enough goes
             await self._prune_recordings({stream.name})
         platform = await loop.run_in_executor(None, _stream_platform, stream, profile)
+        if not await self._ensure_programs(stream, profile, platform, where):
+            self._set_state(stream.name, STREAM_STOPPED)
+            self._rebuild_table()
+            return
         desktop = _needs_desktop_session(platform, is_local)
         record_dir = self._record_dir(stream)
         try:
@@ -1728,10 +1784,100 @@ class StreamPanel(Widget):
                 output = result.stdout.strip() if result.stdout else result.stderr.strip()
                 self._log(f"[red]Failed to start {stream.name}: {rich_escape(output)}[/red]")
                 self._set_state(stream.name, STREAM_STOPPED)
+        except subprocess.TimeoutExpired:
+            # its text is the ssh command line, which carries the profile's password
+            self._log(f"[red]{where} did not answer in time, so whether {stream.name} started is not known; "
+                      f"Refresh asks again.[/red]")
+            self._set_state(stream.name, None)
         except Exception as e:
             self._log(f"[red]Error starting {stream.name}: {rich_escape(str(e))}[/red]")
             self._set_state(stream.name, None)
         self._rebuild_table()
+
+    def _sudo_password(self, stream: StreamDef, profile) -> tuple[str | None, str]:
+        """the password sudo is answered with on a stream's host, and where it
+        comes from: the SSH profile's, or System Settings -> Sudo for this machine."""
+        if profile is None:
+            try:
+                password = get_sudo_password(self._project_dir)
+            except Exception:
+                password = None
+            return password, "System Settings → Sudo (local admin)"
+        return (getattr(profile, "password", "") or None), f"the SSH profile '{stream.ssh_profile}'"
+
+    # seconds a Start waits on another stream's check of the same host before
+    # it says so: a check takes a moment, so a longer wait is an install
+    PROGRAMS_WAIT_NOTE = 2.0
+
+    async def _ensure_programs(self, stream: StreamDef, profile, platform: str, where: str) -> bool:
+        """install what the stream's host lacks of the programs Start runs there
+        (host_tools). False when it still lacks tmux or ffmpeg, and Start
+        starts nothing; a host that did not say what it has is left to Start,
+        which tells what came of it."""
+        loop = asyncio.get_event_loop()
+        programs = host_tools.stream_programs(platform, self._kind(stream))
+        note = loop.call_later(self.PROGRAMS_WAIT_NOTE, self._log,
+                               f"[cyan]{stream.name}: waiting for the install on {where} to finish.[/cyan]")
+        try:
+            async with _programs_lock(stream.ssh_profile):
+                note.cancel()
+                tools = await loop.run_in_executor(None, _host_tools, profile, programs)
+                if tools is None or not tools.missing:
+                    return True
+                return await self._install_programs(stream, profile, programs, tools, where)
+        finally:
+            note.cancel()
+
+    async def _install_programs(self, stream: StreamDef, profile, programs: list[str],
+                                tools: host_tools.HostTools, where: str) -> bool:
+        """install what `tools` says the host lacks; whether the stream can start."""
+        loop = asyncio.get_event_loop()
+        lacking = ", ".join(tools.missing)
+        names = host_tools.packages(tools)
+        if not names:
+            self._log(f"[red]{where} lacks {lacking}, and has neither apt-get nor Homebrew to install "
+                      f"what it lacks with: that has to be done there by hand.[/red]")
+            return not tools.lacking_required
+        password, source = self._sudo_password(stream, profile)
+        self._log(
+            f"[yellow]{where} lacks {lacking}: installing {' '.join(names)} there with "
+            f"{'Homebrew' if tools.installer == 'brew' else 'apt-get'}, which may take a few minutes.[/yellow]"
+        )
+        self._set_state(stream.name, STREAM_INSTALLING)
+        self._rebuild_table()
+        command = host_tools.install_command(tools.installer, names)
+        result = None
+        try:
+            result = await loop.run_in_executor(
+                None, _run_programs_command, profile, command, host_tools.INSTALL_TIMEOUT, password)
+        except subprocess.TimeoutExpired:
+            self._log(f"[red]Installing on {where} took longer than "
+                      f"{int(host_tools.INSTALL_TIMEOUT // 60)} minutes and was given up.[/red]")
+        except Exception as e:
+            self._log(f"[red]Could not install on {where}: {rich_escape(str(e))}[/red]")
+        finally:
+            # whatever came of it, the stream is not installing any more; Start says what it is next
+            self._set_state(stream.name, STREAM_STOPPED)
+            self._rebuild_table()
+        installed = result is not None and result.returncode == 0
+        after = await loop.run_in_executor(None, _host_tools, profile, programs)
+        still = after.missing if after is not None else ([] if installed else tools.missing)
+        if not still:
+            self._log(f"[green]{where}: {' '.join(names)} installed.[/green]")
+            return True
+        if result is not None and not installed:
+            reason = host_tools.install_failure(f"{result.stdout or ''}\n{result.stderr or ''}", source)
+            self._log(f"[red]Installing on {where} failed: {rich_escape(reason)}.[/red]")
+        by_hand = host_tools.manual_command(
+            tools.installer, host_tools.packages(host_tools.HostTools(still, tools.installer)))
+        required = [program for program in still if program in host_tools.REQUIRED]
+        if required:
+            self._log(f"[red]{stream.name} was not started: {where} lacks {', '.join(required)}. "
+                      f"Install it there by hand ({by_hand}), then Start again.[/red]")
+            return False
+        self._log(f"[yellow]{where} still lacks {', '.join(still)}, which only its Device list needs "
+                  f"({by_hand}); {stream.name} starts all the same.[/yellow]")
+        return True
 
     async def _async_stop(self, stream: StreamDef) -> None:
         session = _tmux_session_name(stream.name)
@@ -1771,6 +1917,9 @@ class StreamPanel(Widget):
                     self._log(f"  Recording kept under {record_dir}/{self._on_host(stream)}")
             else:
                 self._log(f"[yellow]{stream.name} may still be running.[/yellow]")
+        except subprocess.TimeoutExpired:
+            # its text is the ssh command line, which carries the profile's password
+            self._log(f"[yellow]{stream.name}: its host did not answer in time; it may still be running.[/yellow]")
         except Exception as e:
             self._log(f"[red]Error stopping {stream.name}: {e}[/red]")
         self._rebuild_table()

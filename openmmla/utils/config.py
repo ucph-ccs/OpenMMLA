@@ -78,30 +78,81 @@ def is_main_base(base: dict) -> bool:
     return str(base.get("main")).lower() in ("true", "1", "yes")
 
 
+def base_room(base: dict) -> str:
+    """the room an IPS base's camera is in (its `room`), "" when it names none
+    or holds a <placeholder>: a config whose bases name no room is one room."""
+    text = str(base.get("room") if base.get("room") is not None else "").strip()
+    if text.startswith("<") and text.endswith(">"):
+        return ""
+    return text
+
+
+def bases_by_room(config: dict) -> dict[str, list[dict]]:
+    """the Bases entries by room, the rooms in the order they first appear;
+    the bases that name none are room "" (the only one of a config without rooms)."""
+    rooms: dict[str, list[dict]] = {}
+    for base in get_bases(config):
+        rooms.setdefault(base_room(base), []).append(base)
+    return rooms
+
+
+def room_main(config: dict, room: str) -> str | None:
+    """the id of the main base of `room`; None when it has none, or more than one."""
+    mains = [base for base in bases_by_room(config).get(room, []) if is_main_base(base)]
+    return str(mains[0].get("id")) if len(mains) == 1 else None
+
+
+def main_of_base(config: dict, base_id) -> str | None:
+    """the main base of the room base `base_id` is in (its own id for a main
+    one); None when the base is not listed, or its room has no single main."""
+    base = get_base_by_id(config, base_id)
+    return None if base is None else room_main(config, base_room(base))
+
+
 def camera_sync_problem(config: dict) -> str:
     """why IPS camera sync cannot run on this config's 'Bases', or "".
 
     Sync puts a second camera in the main one's coordinates: the two bases run
-    and both see the same tag, so it takes the base marked main: true (exactly
-    one) and at least one other. The console checks this before it starts the
-    sync, and the sync itself raises with the same words."""
+    and both see the same tag. Each room (the bases' `room`; a config that
+    names none is one room) has one base marked main: true, the reference of
+    its cameras, and the sync needs a room with at least one other base. Two
+    rooms are two coordinate systems, each run as sessions of its own. The
+    console checks this before it starts the sync, and the sync itself raises
+    with the same words."""
     bases = get_bases(config)
     listed = ", ".join(
         f"{base.get('id')} (camera {base.get('camera') or '?'}{', main' if is_main_base(base) else ''})"
         for base in bases
     )
-    mains = [base for base in bases if is_main_base(base)]
     if not bases:
         return ("No bases under 'Bases'. Camera sync needs two: the main one (main: true) and the one "
                 "whose camera is synced to it.")
-    if not mains:
-        return f"No base is marked main: true (Bases: {listed}); mark exactly one."
-    if len(mains) > 1:
-        return f"More than one base is marked main: true ({', '.join(str(m.get('id')) for m in mains)}); mark exactly one."
+    rooms = bases_by_room(config)
+    if list(rooms) == [""]:
+        mains = [base for base in bases if is_main_base(base)]
+        if not mains:
+            return f"No base is marked main: true (Bases: {listed}); mark exactly one."
+        if len(mains) > 1:
+            return (f"More than one base is marked main: true ({', '.join(str(m.get('id')) for m in mains)}); "
+                    f"mark exactly one, or give the bases of each room their room (room: A, room: B) with one "
+                    f"main each.")
+    else:
+        for room, members in rooms.items():
+            ids = ", ".join(str(base.get("id")) for base in members)
+            mains = [base for base in members if is_main_base(base)]
+            name = f"room {room}" if room else "the bases without a room"
+            if not mains:
+                return f"No base of {name} ({ids}) is marked main: true; mark exactly one of them."
+            if len(mains) > 1:
+                return (f"More than one base of {name} is marked main: true "
+                        f"({', '.join(str(m.get('id')) for m in mains)}); mark exactly one per room.")
     if len(bases) < 2:
         return (f"Only one base is defined (Bases: {listed}). Camera sync puts a second camera in the main "
                 f"one's coordinates: add a base for it under 'Bases' (IPS Base, Config tab, + Add Entry) with its "
                 f"camera and source and main: false, start both bases, then the sync.")
+    if not any(len(members) > 1 for members in rooms.values()):
+        return (f"Every room has its main base alone (Bases: {listed}). Camera sync puts a second camera of a "
+                f"room in its main one's coordinates: give another base the room of a main.")
     return ""
 
 

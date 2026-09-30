@@ -363,6 +363,8 @@ class DictListField(Widget):
                           "(stream_kwargs.channels is how many the device has)",
         "camera_angle": "→ what this camera sees, by a name of Base.angle_config (a new one is listed once the "
                         "Base is saved)",
+        "room": "→ the room this camera is in (A, B, …) when the config serves several: each room has one main "
+                "base and runs as sessions of its own; empty with one room",
     }
     # a field's earlier name: an entry that still holds it shows its value under
     # the new name, and Save writes the new name alone
