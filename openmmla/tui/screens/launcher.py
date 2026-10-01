@@ -111,6 +111,7 @@ from openmmla.collection.recording import (
     DEFAULT_VIDEO_SIZE,
     DEFAULT_VIDEO_SOURCE_FORMAT_LINUX,
     DEFAULT_VIDEO_SOURCE_FORMAT_MACOS,
+    audio_channel_selection,
     default_audio_scope,
     natural_device_key,
     participant_roster,
@@ -129,8 +130,11 @@ from openmmla.tui.widgets.recordings_panel import StreamServerRecordingsPanel
 from openmmla.tui.widgets.streams_overview import StreamServerStreamsPanel
 from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef, host_params
+from openmmla.tui.widgets.collection_table import CollectionTable, channel_picks, file_channels, joined_picks
 from openmmla.tui.widgets.ssh_form import SSHForm
-from openmmla.tui.widgets.stream_panel import StreamPanel, _with_stream_path
+from openmmla.tui.widgets.stream_panel import (
+    TYPE_DEVICE, StreamDeviceInput, StreamPanel, StreamProfileMenu, _with_stream_path,
+)
 from openmmla.tui.widgets.session_control import SessionControlPanel
 from openmmla.tui.widgets.speaker_profiles import SpeakerProfilesScreen
 from openmmla.tui import speakers as asr_speakers
@@ -187,20 +191,21 @@ _REMOTE_COLLECTION_FILES = (
 _NEW_COLLECTION_SESSION_CHOICE = "Create MongoDB Session"
 # the Session param of the base cards (ASR, IPS, VFA)
 _BASE_CARD_SESSION_FLAGS = ("-sid", "--session-id", "--artifact-session-id")
+# the host's own settings of a recorder, which the card does not show: every
+# Start sets them to that host's (_collection_defaults_for_target). A flag a
+# recorder has a value of its own for (a list, one per recorder) keeps it
 _COLLECTION_HIDDEN_PRESET_FLAGS = {
     # the recording machine's name in the files and folders: each host's own
     # (_collection_default_host_label), as each recorder picks its host
     "--host-label",
+    # whether the recorder asks for its device in its terminal: one with a
+    # Device picked in its row does not (_collection_recorder_devices)
     "--audio-interactive",
     "--audio-input-format",
-    "--audio-device",
-    "--audio-channels",
-    "--audio-channel",
     "--sample-rate",
     "--audio-format",
     "--video-interactive",
     "--video-input-format",
-    "--video-device",
     "--video-source-format",
     "--framerate",
     "--size",
@@ -208,6 +213,17 @@ _COLLECTION_HIDDEN_PRESET_FLAGS = {
     "--maxrate",
     "--bufsize",
     "--preset",
+}
+# what each Collection recorder opens, picked in its row of the card's table
+# (the Device and Channel columns): the recorder's own, never a host's preset,
+# and never a field of its own on the card. By flag: the counter it follows,
+# its name, and what "type another…" suggests. --audio-channels is the device's
+# input channel count, as its host said it ("" while not known)
+_COLLECTION_RECORDER_FLAGS = {
+    "--audio-device": ("-na", "Device", "hw:1,0 or :0"),
+    "--audio-channel": ("-na", "Channel", "channels, e.g. 0,2"),
+    "--audio-channels": ("-na", "Channel Count", "the device's input channel count"),
+    "--video-device": ("-nv", "Device", "/dev/video0 or 0"),
 }
 # the Collection card's Device Label, by role: the counter it follows and the
 # kind of stream whose names it offers. A recording's device slot should name
@@ -217,15 +233,19 @@ _COLLECTION_DEVICE_LABEL_FLAGS = {
     "--audio-device-label": ("-na", "audio"),
     "--video-device-label": ("-nv", "video"),
 }
-# where each Collection recorder runs: a Host row above its Device Label (this
-# machine, or an SSH profile), by role, with the counter it follows and the
-# Device Label it sits above. Start groups the recorders by host and starts each
-# group there, so the card has no use for the Host selector; the flag is the
-# card's alone and never reaches a recorder
+# where each Collection recorder runs: the Host column of its row in the
+# card's table (this machine, or an SSH profile), by role, with the counter it
+# follows and the Device Label of the same row. Start groups the recorders by
+# host and starts each group there, so the card has no use for the Host
+# selector; the flag is the card's alone and never reaches a recorder
 _COLLECTION_HOST_FLAGS = {
     "--audio-host": ("-na", "--audio-device-label"),
     "--video-host": ("-nv", "--video-device-label"),
 }
+# the cells of a recorder's row that picking its Device Label fills from that
+# name's Streams entry (its machine and its device), unless the user picked
+# them by hand
+_COLLECTION_FILLED_FLAGS = {"--audio-host", "--audio-device", "--video-host", "--video-device"}
 # the pipeline configs whose Streams entries make up that vocabulary, with the
 # kind a stream of each is when nothing else says (_card_stream_kind)
 _COLLECTION_DEVICE_CONFIGS = (
@@ -239,9 +259,11 @@ _COLLECTION_DEVICE_EXAMPLES = {
     "audio": "a microphone, e.g. badge-0 or vimo-0",
     "video": "a camera, e.g. c920-01",
 }
-# who wears a Collection microphone: one Participant row under each recorder's
-# Device Label. The launcher turns each pick into that recorder's own
-# --audio-participant and --audio-scope; the scope is never a card field
+# who wears a Collection microphone: the Participant column of each audio
+# recorder's row, and of each channel's row under a recorder that writes
+# several (its pick is then one per channel, 5,group,none). The launcher turns
+# each recorder's pick into its own --audio-participant and --audio-scope; the
+# scope is never a card field
 _COLLECTION_PARTICIPANT_FLAG = "--audio-participant"
 _COLLECTION_SCOPE_FLAG = "--audio-scope"
 _COLLECTION_GROUP_PICK = "group"
@@ -269,20 +291,19 @@ def _collection_participant_choices(roster) -> list[tuple[str, str]]:
 
 def _collection_wearer_prefill(labels: list[str], tags: list[str], group_labels: set[str],
                                fixed: dict[int, str]) -> list[str]:
-    """what each recorder's Participant opens on: a kept pick stays, a room
-    microphone has none, a label a group base pulls is Group, and the other
-    worn microphones take the tags no kept pick holds, lowest first, in
-    natural device order (vimo-0-ch0 < vimo-0-ch1 < vimo-1); none once the
-    tags run out."""
+    """what each slot's Participant opens on (a recorder of one file, or one
+    channel of a recorder that writes several: vimo-0-ch1): a kept pick
+    stays, a room microphone (jabra) and a slot a group base pulls are Group,
+    and the other worn microphones take the tags no kept pick holds, lowest
+    first, in natural device order (vimo-0-ch0 < vimo-0-ch1 < vimo-1); none
+    once the tags run out."""
     values = [""] * len(labels)
     wanting: list[int] = []
     for index, label in enumerate(labels):
         name = str(label or "").strip()
         if index in fixed:
             values[index] = fixed[index]
-        elif not _collection_wants_wearer(name):
-            values[index] = ""
-        elif name in group_labels:
+        elif not _collection_wants_wearer(name) or name in group_labels:
             values[index] = _COLLECTION_GROUP_PICK
         else:
             wanting.append(index)
@@ -294,9 +315,10 @@ def _collection_wearer_prefill(labels: list[str], tags: list[str], group_labels:
 
 
 def _collection_wearer_keys(labels: list) -> list[str]:
-    """the key each row's Participant pick is kept under: its Device Label,
-    and for a label more rows share (the channels of one receiver) which of
-    them it is too (vimo-0, vimo-0#2)."""
+    """the key each slot's Participant pick is kept under: its name (the
+    Device Label, or vimo-0-ch1 for a channel), and for a name more slots
+    share (two recorders of one receiver) which of them it is too (vimo-0,
+    vimo-0#2)."""
     seen: dict[str, int] = {}
     keys: list[str] = []
     for label in labels:
@@ -306,15 +328,72 @@ def _collection_wearer_keys(labels: list) -> list[str]:
     return keys
 
 
+def _collection_slots(labels: list, channel_lists: list | None = None) -> list[tuple[int, int | None, str]]:
+    """the places a Participant is picked for on the Collection card, as
+    (recorder, channel, slot) in recorder order: a recorder of one file is one
+    slot named by its Device Label, one that writes several channels of its
+    device a slot per channel, named the way its files are (vimo-0-ch1)."""
+    slots: list[tuple[int, int | None, str]] = []
+    for index, label in enumerate(labels):
+        name = str(label or "").strip()
+        channels = list(channel_lists[index]) if channel_lists and index < len(channel_lists) else []
+        if len(channels) > 1:
+            slots.extend((index, channel, f"{name}-ch{channel}") for channel in channels)
+        else:
+            slots.append((index, None, name))
+    return slots
+
+
+def _collection_slot_picks(picks: list, slots: list[tuple[int, int | None, str]]) -> list[str]:
+    """the pick of each slot out of each recorder's Participant: its own for
+    a recorder of one file, its channel's of one per channel (5,group,none)."""
+    widths: dict[int, int] = {}
+    for index, channel, _name in slots:
+        widths[index] = widths.get(index, 0) + (channel is not None)
+    seen: dict[int, int] = {}
+    values: list[str] = []
+    for index, channel, _name in slots:
+        pick = picks[index] if index < len(picks) and picks[index] is not None else ""
+        if channel is None:
+            values.append(channel_picks(pick, 1)[0])
+            continue
+        values.append(channel_picks(pick, widths[index])[seen.get(index, 0)])
+        seen[index] = seen.get(index, 0) + 1
+    return values
+
+
+def _collection_recorder_picks(slots: list[tuple[int, int | None, str]], values: list[str], count: int) -> list[str]:
+    """each recorder's Participant out of the pick of each of its slots: the
+    one pick of a recorder of one file, one per channel of one that writes
+    several (5,group,none)."""
+    by_recorder: dict[int, list[str]] = {}
+    several: set[int] = set()
+    for (index, channel, _name), value in zip(slots, values):
+        by_recorder.setdefault(index, []).append(value)
+        if channel is not None:
+            several.add(index)
+    picks: list[str] = []
+    for index in range(count):
+        own = by_recorder.get(index, [""])
+        picks.append(joined_picks(own) if index in several else own[0])
+    return picks
+
+
 def _collection_wearer_flags(picks: list) -> tuple[list[str], list[str]]:
     """each recorder's Participant pick as its --audio-participant and
     --audio-scope: a tag is that person's microphone, Group the room's, and
-    bind later says nothing."""
+    bind later says nothing. A recorder of several channels passes one pick
+    per channel (5,group,none), whose scope is each channel's own."""
     participants: list[str] = []
     scopes: list[str] = []
     for pick in picks:
         text = str(pick if pick is not None else "").strip()
-        if not text:
+        if "," in text:
+            entries = [entry.strip() for entry in text.split(",")]
+            entries = ["" if entry.lower() == "none" else entry for entry in entries]
+            participants.append(joined_picks(entries))
+            scopes.append("")
+        elif not text:
             participants.append("")
             scopes.append("")
         elif text == _COLLECTION_GROUP_PICK:
@@ -534,6 +613,51 @@ def _remote_path_join(root: str, *parts: str) -> str:
 def _host_label(host: str) -> str:
     """how a host reads on screen; 'local' is this machine."""
     return "Local" if host == "local" else host
+
+
+def _row_value(values: object, index: int) -> str:
+    """entry `index` of a per-recorder list of the card's values, as text ("" past
+    its end, or for a value that is no list)."""
+    values = list(values) if isinstance(values, (list, tuple)) else []
+    return str(values[index] if index < len(values) and values[index] is not None else "").strip()
+
+
+def _channel_count(value: object) -> int | None:
+    """a channel count noted as text ("2"), None when there is none."""
+    try:
+        count = int(str(value if value is not None else "").strip())
+    except ValueError:
+        return None
+    return count if count > 0 else None
+
+
+def _device_channels(answer, kind: str, value: str) -> int | None:
+    """the input channel count a host said its device `value` of `kind` has
+    (capture_devices.Devices), None when it did not say."""
+    if answer is None or not value:
+        return None
+    lookup = getattr(answer, "channels_of", None)
+    if callable(lookup):
+        try:
+            return _channel_count(lookup(kind, value))
+        except Exception:
+            return None
+    found = (getattr(answer, "found", None) or {}).get(kind) or []
+    return next((_channel_count(getattr(device, "channels", None)) for device in found
+                 if getattr(device, "value", None) == value), None)
+
+
+def _collection_channel_pick(text: object, count: int | None) -> str:
+    """a Channel typed into its cell as a recorder takes it (mix, each, 1,
+    0,2; ch0 reads as 0); ValueError, saying why, when the recorder would
+    refuse it."""
+    text = re.sub(r"\bch(?=\d)", "", str(text or "").strip().lower())
+    picked = audio_channel_selection(text or "mix", count)
+    if text in ("each", "every", "split"):
+        return "each"
+    if picked == ["mix"]:
+        return "mix"
+    return ",".join(str(channel) for channel in picked)
 
 
 async def _process_output(proc) -> str:
@@ -2649,7 +2773,8 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                 [
                     "--session-id", "--output-root", "--host-label",
                     "--audio-interactive", "--sample-rate", "--audio-format",
-                    "--audio-host", "--audio-device-label", "--audio-participant", "--audio-scope",
+                    "--audio-host", "--audio-device", "--audio-channel", "--audio-channels",
+                    "--audio-device-label", "--audio-participant", "--audio-scope",
                 ],
             ),
             ComponentDef(
@@ -2660,7 +2785,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                     "--session-id", "--output-root", "--host-label",
                     "--video-interactive",
                     "--framerate", "--size", "--bitrate", "--maxrate", "--bufsize",
-                    "--preset", "--video-host", "--video-device-label",
+                    "--preset", "--video-host", "--video-device", "--video-device-label",
                 ],
             ),
         ],
@@ -3062,7 +3187,7 @@ _LOCAL_SETTINGS_NOTES: dict[str, str] = {
                               "this address and the stream URLs it completed)",
 }
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
-_COLLECTION_HOST_NOTE = "Per recorder  (the Host row above each Device Label)"
+_COLLECTION_HOST_NOTE = "Per recorder  (the Host column of the table)"
 
 # the host each launcher node was last pointed at, kept across restarts
 _NODE_HOSTS_REL_PATH = os.path.join("config", "launcher_hosts.yml")
@@ -4236,15 +4361,8 @@ class ServicePanel(Widget):
                 card._collection_param_id(role, "select", flag)
                 for role in ("audio", "video") for flag in ("--session-id", "--experiment-group")
             }:
-                # the session's group decides whom the Participant rows offer
+                # the session's group decides whom the Participant column offers
                 self.call_after_refresh(self._refresh_collection_participants)
-                return
-            if card is not None and card.service_def.launch_type == "collection" and event.select.id in {
-                card._instance_select_id(flag, index)
-                for flag in _COLLECTION_HOST_FLAGS for index in range(len(card._param_values.get(flag) or []))
-            }:
-                # a recorder moved to another host: the status probes ask that one too
-                self._note_collection_card_hosts(self._collection_card_values())
                 return
         asr_card = None if event.select.id == "svc-target-select" else next(
             (node for node in event.select.ancestors
@@ -4843,6 +4961,8 @@ class ServicePanel(Widget):
                 svc,
                 is_running=is_running,
                 initial_collection_role=self._collection_role,
+                collection_picks=(self.__dict__.get("_collection_hand_picks")
+                                  if svc.launch_type == "collection" else None),
             ))
             # the cameras calibration made on this machine: their images, their
             # parameters, and the sync of those to the host that captures
@@ -5036,6 +5156,17 @@ class ServicePanel(Widget):
                     target_values[flag] = value
             self._note_collection_wearer_snapshot(target, snapshot.get("values") or {}, card)
             self._note_collection_card_hosts(snapshot.get("values") or {})
+            # the Hosts and Devices picked by hand, which a Device Label's
+            # Streams entry does not fill over on the card the rebuild makes
+            # of the recorders the counters keep, whose values the rebuild keeps too
+            hand_picks = getattr(card, "collection_hand_picks", None)
+            if callable(hand_picks):
+                values = snapshot.get("values") or {}
+                self.__dict__["_collection_hand_picks"] = {
+                    flag: {index for index in indices
+                           if index < self._collection_count(values, "-na" if flag.startswith("--audio") else "-nv")}
+                    for flag, indices in hand_picks().items() if flag in _COLLECTION_FILLED_FLAGS
+                }
             break
 
     def _note_host_recorders(self, target: str, recorders: list) -> bool:
@@ -5052,7 +5183,7 @@ class ServicePanel(Widget):
     # ── the hosts of the Collection card ─────────────────────────
 
     def _collection_host_choices(self) -> list[tuple[str, str]]:
-        """what a recorder's Host row offers: this machine, then every SSH
+        """what a recorder's Host cell offers: this machine, then every SSH
         profile but a Windows one (no recorder runs there)."""
         names = self.__dict__.get("_ssh_profile_names")
         if names is None:
@@ -5079,6 +5210,434 @@ class ServicePanel(Widget):
         """keep the hosts the card's recorders run on, for the status probes
         (which run off the UI thread and cannot read the card)."""
         self.__dict__["_collection_card_hosts"] = self._collection_hosts_of(values)
+
+    # ── the Collection card's table: what each cell offers ───────
+
+    def on_collection_table_cell_picked(self, event: CollectionTable.CellPicked) -> None:
+        """a cell of the Collection card's table was clicked, or Enter pressed
+        on it: its dropdown opens under it, and what is picked goes into the
+        card. A channel's row has only its Participant to pick."""
+        event.stop()
+        table = event.table
+        card = next((node for node in table.ancestors if isinstance(node, ServiceCard)), None)
+        if card is None or card.service_def.launch_type != "collection":
+            return
+        role, index, column = event.role, event.index, event.column
+        if event.channel is not None:
+            if column == "Participant":
+                self._collection_participant_menu(card, table, index, event.channel)
+            return
+        if column == "Host":
+            self._collection_host_menu(card, table, role, index)
+        elif column == "Device":
+            self._collection_device_menu(card, table, role, index, "Device")
+        elif column == "Channel":
+            self._collection_channel_menu(card, table, index)
+        elif column == "Device Label":
+            self._collection_label_menu(card, table, role, index)
+        elif column == "Participant":
+            self._collection_participant_menu(card, table, index, None)
+
+    @staticmethod
+    def _collection_cell(table: CollectionTable, index: int, channel: int | None, column: str):
+        """where the cell of a recorder (or of one of its channels) is now,
+        for its dropdown to open under; None once the row has gone."""
+        row, column_index = table.row_of(index, channel), table.column_of(column)
+        if row is None or column_index is None:
+            return None
+        return table.cell_region(row, column_index)
+
+    @staticmethod
+    def _collection_recorder_channels(card: ServiceCard, index: int) -> list[int]:
+        """the channels audio recorder `index` writes a file each for ([]
+        for one file)."""
+        return file_channels(card.collection_value("--audio-device", index),
+                             card.collection_value("--audio-channel", index),
+                             card.collection_value("--audio-channels", index))
+
+    def _collection_host_menu(self, card: ServiceCard, table: CollectionTable, role: str, index: int) -> None:
+        anchor = self._collection_cell(table, index, None, "Host")
+        if anchor is None:
+            return
+        current = card.collection_value(f"--{role}-host", index) or "local"
+
+        def picked(host: str | None) -> None:
+            if host is not None:
+                self._collection_set_host(card, role, index, host)
+
+        self.app.push_screen(StreamProfileMenu(self._collection_host_choices(), current, anchor), picked)
+
+    def _collection_set_host(self, card: ServiceCard, role: str, index: int, host: str,
+                             by_hand: bool = True, reshape: bool = True) -> None:
+        """recorder `index` of `role` runs on `host`: the device it had, with
+        its channels, was the old machine's, and goes (it asks in its
+        terminal until another is picked). Without `reshape` its Participant
+        keeps its shape, for a caller that fills a device and reshapes it
+        once, from what the recorder wrote before (a Device Label pick)."""
+        flag = f"--{role}-host"
+        current = card.collection_value(flag, index) or "local"
+        card.set_collection_value(flag, index, host, by_hand=by_hand)
+        if host != current:
+            device = card.collection_value(f"--{role}-device", index)
+            before = self._collection_recorder_channels(card, index) if role == "audio" else []
+            card.set_collection_value(f"--{role}-device", index, "", by_hand=False)
+            if role == "audio":
+                card.set_collection_value("--audio-channels", index, "")
+                card.set_collection_value("--audio-channel", index, "")
+                if before and reshape:
+                    self._collection_reshape_participant(card, index, before)
+            if device and by_hand:
+                self._log(f"{role.title()} {index + 1} records on {_host_label(host)} now: its Device {device} "
+                          f"was {_host_label(current)}'s, and is cleared.")
+        # the status probes ask the hosts the recorders run on
+        self._note_collection_card_hosts(self._collection_card_values())
+
+    async def _collection_ask_devices(self, host: str, kind: str, fresh: bool = False) -> capture_devices.Devices:
+        """what `host` says of its devices of `kind`: asked off the UI thread
+        the first time, then kept with what the hosts said before (the Config
+        tab's Bases form keeps its answers there too) until Refresh; asked
+        again with `fresh`."""
+        answers = self._device_answers()
+        known = answers.get(host)
+        if known is not None and not fresh and (kind in known.found or kind in known.problems):
+            return known
+        answer = await asyncio.to_thread(capture_devices.list_devices, host, {kind}, self._root)
+        known = answers.setdefault(host, answer)
+        if known is not answer:
+            for asked in set(answer.found) | set(answer.problems):
+                # what the host said now replaces what it said before, of each kind it was asked
+                known.found.pop(asked, None)
+                known.problems.pop(asked, None)
+            known.found.update(answer.found)
+            known.problems.update(answer.problems)
+            known.platform = known.platform or answer.platform
+        return known
+
+    def _collection_device_menu(self, card: ServiceCard, table: CollectionTable, role: str, index: int,
+                                column: str) -> None:
+        """the devices of the recorder's host, of its kind, under its Device
+        cell (or, with `column` Channel, its channels): the host is asked the
+        first time, off the UI thread."""
+        host = card.collection_value(f"--{role}-host", index) or "local"
+        answer = self._device_answers().get(host)
+        if answer is not None and (role in answer.found or role in answer.problems):
+            self._open_collection_menu(card, table, role, index, column, answer)
+            return
+        where = "this machine" if host == "local" else host
+        self._log(f"Asking {where} for its {'microphones' if role == 'audio' else 'cameras'}...")
+        self.run_worker(self._ask_and_open_collection_menu(card, table, role, index, column, host),
+                        group="collection-devices", exclusive=True)
+
+    async def _ask_and_open_collection_menu(self, card: ServiceCard, table: CollectionTable, role: str,
+                                            index: int, column: str, host: str) -> None:
+        answer = await self._collection_ask_devices(host, role)
+        # the card may have gone, or the row moved to another machine, while its host was asked
+        if not card.is_attached or not table.is_attached:
+            return
+        if (card.collection_value(f"--{role}-host", index) or "local") != host:
+            return
+        self._open_collection_menu(card, table, role, index, column, answer)
+
+    def _open_collection_menu(self, card: ServiceCard, table: CollectionTable, role: str, index: int,
+                              column: str, answer: capture_devices.Devices) -> None:
+        if column == "Channel":
+            self._open_collection_channel_menu(card, table, index, answer)
+        else:
+            self._open_collection_device_menu(card, table, role, index, answer)
+
+    def _open_collection_device_menu(self, card: ServiceCard, table: CollectionTable, role: str, index: int,
+                                     answer: capture_devices.Devices) -> None:
+        host = card.collection_value(f"--{role}-host", index) or "local"
+        where = "this machine" if host == "local" else host
+        options = list(answer.options(role))
+        if not options:
+            # nothing listed: why (the host could not be asked, or has none of that kind)
+            problem = answer.problems.get(role)
+            self._log(f"[yellow]{rich_escape(where)}: {rich_escape(problem)}[/yellow]" if problem else
+                      f"[yellow]No {role} device found on {rich_escape(where)}.[/yellow]")
+        flag = f"--{role}-device"
+        current = card.collection_value(flag, index)
+        if current and not any(value == current for _label, value in options):
+            options.append((f"{current}  (not found on {where})", current))
+        options.append(("-  (ask in its terminal)", ""))
+        options.append(("type another…", TYPE_DEVICE))
+        anchor = self._collection_cell(table, index, None, "Device")
+        if anchor is None:
+            return
+
+        def changed(device: str | None) -> None:
+            if device is not None:
+                self._collection_set_device(card, role, index, device, answer)
+
+        def picked(device: str | None) -> None:
+            if device == TYPE_DEVICE:
+                self.app.push_screen(StreamDeviceInput(current, anchor, _COLLECTION_RECORDER_FLAGS[flag][2]), changed)
+                return
+            changed(device)
+
+        self.app.push_screen(StreamProfileMenu(options, current, anchor), picked)
+
+    def _collection_set_device(self, card: ServiceCard, role: str, index: int, device: str,
+                               answer: capture_devices.Devices | None = None) -> None:
+        """recorder `index` of `role` opens `device`, picked by hand ("": it
+        asks in its terminal); a microphone takes the channel count its host
+        said and the Channel that suits it. The device it already had, picked
+        again, takes the count its host said when its own was not known (one a
+        Device Label filled in), and keeps its Channel otherwise."""
+        flag = f"--{role}-device"
+        current = card.collection_value(flag, index)
+        before = self._collection_recorder_channels(card, index) if role == "audio" else []
+        card.set_collection_value(flag, index, device, by_hand=True)
+        if role != "audio":
+            return
+        count = _device_channels(answer, "audio", device)
+        if device == current:
+            if not device or not count or _channel_count(card.collection_value("--audio-channels", index)):
+                return
+        self._collection_fill_channels(card, index, device, count)
+        if self._collection_recorder_channels(card, index) != before:
+            self._collection_reshape_participant(card, index, before)
+
+    def _collection_fill_channels(self, card: ServiceCard, index: int, device: str, count: int | None) -> None:
+        """the channel count of the device audio recorder `index` opens (None
+        when not known) and the Channel that suits it: mix for one channel or a
+        count not known; for more, each on a microphone that is worn (vimo,
+        badge), else mix. No device: neither."""
+        if not device:
+            card.set_collection_value("--audio-channels", index, "")
+            card.set_collection_value("--audio-channel", index, "")
+            return
+        worn = default_audio_scope(card.collection_value("--audio-device-label", index)) == "personal"
+        card.set_collection_value("--audio-channels", index, str(count) if count else "")
+        card.set_collection_value("--audio-channel", index, "each" if count and count > 1 and worn else "mix")
+
+    def _collection_channel_menu(self, card: ServiceCard, table: CollectionTable, index: int) -> None:
+        """what audio recorder `index` writes of its device's channels: a
+        device is picked first (without one, the recorder asks in its
+        terminal); a count not known yet is asked of its host first."""
+        device = card.collection_value("--audio-device", index)
+        if not device:
+            self._log(f"Audio {index + 1} has no Device: its recorder asks for its device and channel in its "
+                      f"terminal.")
+            return
+        if _channel_count(card.collection_value("--audio-channels", index)) is None:
+            self._collection_device_menu(card, table, "audio", index, "Channel")
+            return
+        self._open_collection_channel_menu(card, table, index, None)
+
+    def _open_collection_channel_menu(self, card: ServiceCard, table: CollectionTable, index: int,
+                                      answer: capture_devices.Devices | None) -> None:
+        device = card.collection_value("--audio-device", index)
+        if not device:
+            return
+        count = _channel_count(card.collection_value("--audio-channels", index))
+        if count is None and _device_channels(answer, "audio", device):
+            # its host says how many now
+            count = _device_channels(answer, "audio", device)
+            card.set_collection_value("--audio-channels", index, str(count))
+        if count and count > 1:
+            options = [(f"mix  (all {count} averaged into one file)", "mix"),
+                       (f"each  ({count} files, one per channel)", "each"),
+                       *[(f"ch{channel}", str(channel)) for channel in range(count)],
+                       ("type another…", TYPE_DEVICE)]
+        elif count == 1:
+            options = [("mix  (its one channel)", "mix")]
+        else:
+            options = [("mix", "mix"), ("ch0", "0"), ("ch1", "1"), ("type another…", TYPE_DEVICE)]
+        current = card.collection_value("--audio-channel", index) or "mix"
+        anchor = self._collection_cell(table, index, None, "Channel")
+        if anchor is None:
+            return
+
+        def changed(channel: str | None) -> None:
+            if channel is None:
+                return
+            before = self._collection_recorder_channels(card, index)
+            card.set_collection_value("--audio-channel", index, channel)
+            if self._collection_recorder_channels(card, index) != before:
+                self._collection_reshape_participant(card, index, before)
+
+        def typed(text: str | None) -> None:
+            if text is None:
+                return
+            try:
+                channel = _collection_channel_pick(text, count)
+            except ValueError as error:
+                self._log(f"[yellow]Audio {index + 1}: {rich_escape(str(error))}.[/yellow]")
+                return
+            changed(channel)
+
+        def picked(channel: str | None) -> None:
+            if channel == TYPE_DEVICE:
+                example = _COLLECTION_RECORDER_FLAGS["--audio-channel"][2]
+                self.app.push_screen(StreamDeviceInput(current, anchor, example), typed)
+                return
+            changed(channel)
+
+        self.app.push_screen(StreamProfileMenu(options, current, anchor), picked)
+
+    def _collection_label_menu(self, card: ServiceCard, table: CollectionTable, role: str, index: int) -> None:
+        anchor = self._collection_cell(table, index, None, "Device Label")
+        if anchor is None:
+            return
+        flag = f"--{role}-device-label"
+        param = next((param for param in card.service_def.params if param.flag == flag), None)
+        names = [str(choice) for choice in (param.choices if param is not None else [])]
+        current = card.collection_value(flag, index)
+        options = [(name, name) for name in names] + [("type another…", TYPE_DEVICE)]
+
+        def changed(label: str | None) -> None:
+            if label is not None:
+                self._collection_set_label(card, role, index, label)
+
+        def picked(label: str | None) -> None:
+            if label == TYPE_DEVICE:
+                self.app.push_screen(StreamDeviceInput(current, anchor, _COLLECTION_DEVICE_EXAMPLES[role]), changed)
+                return
+            changed(label)
+
+        self.app.push_screen(StreamProfileMenu(options, current, anchor), picked)
+
+    def _collection_set_label(self, card: ServiceCard, role: str, index: int, label: str) -> None:
+        """recorder `index` of `role` is `label`: where its Streams entry says
+        that device is captured fills its Host and Device (not a cell the user
+        picked by hand), and a microphone that becomes another kind (a room
+        microphone, a worn one) takes the Participant pre-fill of that kind."""
+        flag = f"--{role}-device-label"
+        current = card.collection_value(flag, index)
+        before = self._collection_recorder_channels(card, index) if role == "audio" else []
+        card.set_collection_value(flag, index, label)
+        self._collection_fill_from_streams(card, role, index, label)
+        if role != "audio":
+            return
+        relabelled = default_audio_scope(label) != default_audio_scope(current)
+        if relabelled or self._collection_recorder_channels(card, index) != before:
+            self._collection_reshape_participant(card, index, before, relabelled=relabelled)
+
+    def _collection_fill_from_streams(self, card: ServiceCard, role: str, index: int, label: str) -> None:
+        """the Host and Device of a recorder whose Device Label was just picked,
+        from the first Streams entry of that name and kind that names its
+        machine: a cell the user picked by hand stays (a Device picked by hand
+        keeps its Host too, as it is that machine's), and a machine that is no
+        SSH profile here is not put in. Says what it filled or kept, in one line."""
+        entry = self._collection_stream_entry(label, role) if label else None
+        if entry is None:
+            return
+        host_flag, device_flag = f"--{role}-host", f"--{role}-device"
+        profile, device = entry.get("ssh_profile") or "", entry.get("device") or ""
+        host_now = card.collection_value(host_flag, index) or "local"
+        device_now = card.collection_value(device_flag, index)
+        filled: list[str] = []
+        kept: list[str] = []
+        known = profile in {value for _label, value in self._collection_host_choices()}
+        if profile != host_now:
+            if card.collection_by_hand(host_flag, index) or (card.collection_by_hand(device_flag, index)
+                                                             and device_now):
+                kept.append(f"Host {_host_label(host_now)}")
+            elif not known:
+                where = f"{label} is on {profile}, which is no SSH profile here"
+                self._log(f"{role.title()} {index + 1}: {where}; its Host and Device stay as they are.")
+                return
+            else:
+                # the label pick reshapes the Participant once, from the channels before it
+                self._collection_set_host(card, role, index, profile, by_hand=False, reshape=False)
+                host_now, device_now = profile, ""
+                filled.append(f"Host {_host_label(profile)}")
+        if device and device != device_now and host_now == profile:
+            if card.collection_by_hand(device_flag, index):
+                kept.append(f"Device {device_now or '-'}")
+            else:
+                card.set_collection_value(device_flag, index, device, by_hand=False)
+                filled.append(f"Device {device}")
+                if role == "audio":
+                    # the count its host said, when it was asked, else the entry's
+                    count = (_device_channels(self._device_answers().get(profile), "audio", device)
+                             or _channel_count(entry.get("channels")))
+                    self._collection_fill_channels(card, index, device, count)
+        if not filled and not kept:
+            return
+        said = f"{label} is on {_host_label(profile)}" + (f" ({device})" if device else "")
+        parts = []
+        if filled:
+            parts.append("filled " + " and ".join(filled))
+        if kept:
+            parts.append("kept " + " and ".join(kept) + ", picked by hand")
+        self._log(f"{role.title()} {index + 1}: {said}; {'; '.join(parts)}.")
+
+    def _collection_participant_menu(self, card: ServiceCard, table: CollectionTable, index: int,
+                                     channel: int | None) -> None:
+        """whom audio recorder `index` records (or one of its channels): a
+        participant of the session's group, the group, or bind later. A
+        recorder that writes several channels has one per channel, on the
+        rows under it."""
+        flag = _COLLECTION_PARTICIPANT_FLAG
+        param = next((param for param in card.service_def.params if param.flag == flag), None)
+        if param is None:
+            return
+        channels = self._collection_recorder_channels(card, index)
+        value = card.collection_value(flag, index)
+        if channel is None:
+            if channels:
+                return  # one per channel, on the rows under it
+            picks, place = [channel_picks(value, 1)[0]], 0
+        elif channel in channels:
+            picks, place = channel_picks(value, len(channels)), channels.index(channel)
+        else:
+            return
+        anchor = self._collection_cell(table, index, channel, "Participant")
+        if anchor is None:
+            return
+        options = [(str(choice[0]), str(choice[1])) if isinstance(choice, (tuple, list)) and len(choice) == 2
+                   else (str(choice), str(choice)) for choice in param.choices]
+
+        def picked(pick: str | None) -> None:
+            if pick is None:
+                return
+            picks[place] = pick
+            card.set_collection_value(flag, index, joined_picks(picks) if channel is not None else pick)
+
+        self.app.push_screen(StreamProfileMenu(options, picks[place], anchor), picked)
+
+    def _collection_reshape_participant(self, card: ServiceCard, index: int, before: list[int],
+                                        relabelled: bool = False) -> None:
+        """audio recorder `index` writes other channels now than `before` (or,
+        `relabelled`, is another kind of microphone): its Participant takes
+        their shape. A channel it wrote before keeps its pick, and so does the
+        first channel of a recorder of one file before (and the one file of a
+        recorder of several before, its first channel's); the others take the
+        pre-fill, as does every channel of a relabelled one: the tags no other
+        slot holds, lowest first, Group for a room microphone."""
+        flag = _COLLECTION_PARTICIPANT_FLAG
+        if not any(param.flag == flag for param in card.service_def.params):
+            return
+        values_now = (card.collection_snapshot() or {}).get("values") or {}
+        # the recorders the card records with now: a hidden row's pick holds no tag
+        rows = max(self._collection_count(values_now, "-na"), index + 1)
+        labels = [card.collection_value("--audio-device-label", row) for row in range(rows)]
+        values = [card.collection_value(flag, row) for row in range(rows)]
+        channel_lists = [self._collection_recorder_channels(card, row) for row in range(rows)]
+        old = channel_picks(values[index], max(1, len(before)))
+        slots = _collection_slots(labels, channel_lists)
+        fixed: dict[int, str] = {}
+        own = 0
+        for place, ((row, channel, _name), pick) in enumerate(zip(slots, _collection_slot_picks(values, slots))):
+            if row != index:
+                fixed[place] = pick
+                continue
+            if not relabelled:
+                if channel is None:
+                    fixed[place] = old[0]
+                elif before and channel in before:
+                    fixed[place] = old[before.index(channel)]
+                elif not before and own == 0:
+                    fixed[place] = old[0]
+            own += 1
+        _scope_key, _group, roster = self._collection_roster(
+            values_now.get("--session-id"), values_now.get("--experiment-group"))
+        names = [name for _row, _channel, name in slots]
+        prefill = _collection_wearer_prefill(names, [tag for _name, tag in roster],
+                                             self._collection_group_slots(labels, slots), fixed)
+        card.set_collection_value(flag, index, _collection_recorder_picks(slots, prefill, rows)[index])
 
     def _collection_status_hosts(self) -> list[str]:
         """every host whose recorders the card reports on: this machine, the
@@ -5306,6 +5865,11 @@ class ServicePanel(Widget):
                 # recorder records on this machine (ParamDef.instance_default)
                 if not isinstance(default, (list, tuple)):
                     default = []
+            elif param.flag in _COLLECTION_RECORDER_FLAGS:
+                # what each recorder was last given in its row; never the
+                # host's preset, which the recorder takes when it has none
+                if not isinstance(default, (list, tuple)):
+                    default = []
             params.append(replace(param, default=default, choices=choices))
         by_flag = {param.flag: param for param in params}
         device = by_flag.get("--audio-device-label")
@@ -5315,9 +5879,18 @@ class ServicePanel(Widget):
             device_default = device.default if isinstance(device.default, (list, tuple)) else []
             rows = max(count, len(device.choices), len(device_default))
             labels = [ServiceCard._instance_default(device, index) for index in range(rows)]
+
+            def start(flag: str, index: int) -> str:
+                param = by_flag.get(flag)
+                return ServiceCard._instance_default(param, index) if param is not None else ""
+
+            # the channels of a recorder that writes several, each its own Participant
+            channel_lists = [file_channels(start("--audio-device", index), start("--audio-channel", index),
+                                           start("--audio-channels", index)) for index in range(rows)]
             session = by_flag["--session-id"].default if "--session-id" in by_flag else ""
             experiment_group = by_flag["--experiment-group"].default if "--experiment-group" in by_flag else ""
-            wearer = self._collection_participant_param(wearer, target, session, experiment_group, labels)
+            wearer = self._collection_participant_param(wearer, target, session, experiment_group, labels,
+                                                        channel_lists)
             params = [wearer if param.flag == _COLLECTION_PARTICIPANT_FLAG else param for param in params]
         return replace(svc, params=params)
 
@@ -5328,14 +5901,10 @@ class ServicePanel(Widget):
         labels = {
             "--audio-interactive": "Terminal Setup",
             "--audio-input-format": "Input Format",
-            "--audio-device": "Device",
-            "--audio-channels": "Channel Count",
-            "--audio-channel": "Channel",
             "--sample-rate": "Sample Rate",
             "--audio-format": "Audio Format",
             "--video-interactive": "Terminal Setup",
             "--video-input-format": "Input Format",
-            "--video-device": "Device",
             "--video-source-format": "Video Format",
             "--framerate": "Framerate",
             "--size": "Frame Size",
@@ -5353,7 +5922,6 @@ class ServicePanel(Widget):
         )
         choices = {
             "--audio-input-format": ["alsa", "avfoundation"],
-            "--audio-channel": ["mix", "0", "1", "2", "3"],
             "--sample-rate": ["8000", "16000", "22050", "24000", "44100", "48000"],
             "--audio-format": ["wav", "flac", "aac"],
             "--video-input-format": ["v4l2", "avfoundation"],
@@ -5371,38 +5939,46 @@ class ServicePanel(Widget):
                 ):
                     continue
                 if flag in _COLLECTION_HOST_FLAGS:
-                    # the machine the recorder runs on, in the row above its
-                    # Device Label: this machine unless picked; the SSH
+                    # the machine the recorder runs on, the Host column of its
+                    # row in the table: this machine unless picked; the SSH
                     # profiles are added with the card (_collection_host_choices)
-                    counter, device_flag = _COLLECTION_HOST_FLAGS[flag]
+                    counter, _device_flag = _COLLECTION_HOST_FLAGS[flag]
                     params.append(ParamDef(
                         flag, "Host", "choice", [],
                         choices=[(_host_label("local"), "local")],
                         per_instance=counter,
-                        under=device_flag,
-                        above=True,
                         fill=False,
                         instance_default="local",
                     ))
                     existing.add(flag)
                     continue
+                if flag in _COLLECTION_RECORDER_FLAGS:
+                    # the device the recorder opens and, for a microphone, which
+                    # of its channels: none until picked in its row (it then
+                    # asks in its terminal); a value of its own is kept
+                    counter, label, example = _COLLECTION_RECORDER_FLAGS[flag]
+                    params.append(ParamDef(
+                        flag, label, "str", [], per_instance=counter, fill=False, free_text=example,
+                    ))
+                    existing.add(flag)
+                    continue
                 if flag == _COLLECTION_PARTICIPANT_FLAG:
-                    # who wears each microphone, under its Device Label; a room
-                    # microphone's row stays hidden. The options come from the
-                    # session's group (_collection_participant_param)
+                    # who wears each microphone, a room microphone included
+                    # (Group, unless picked otherwise); one per channel for a
+                    # recorder that writes several (5,group,none). The options
+                    # come from the session's group (_collection_participant_param)
                     params.append(ParamDef(
                         flag, "Participant", "choice", [],
                         choices=_collection_participant_choices([]),
                         per_instance="-na",
-                        under="--audio-device-label",
-                        shown_when=_collection_wants_wearer,
                         fill=False,
+                        free_text="one per channel, e.g. 5,group,none",
                     ))
                     existing.add(flag)
                     continue
                 if flag in _COLLECTION_DEVICE_LABEL_FLAGS:
-                    # one Select per recorder, following that role's counter:
-                    # two microphones are two devices, and say so. The Streams
+                    # one per recorder, following that role's counter: two
+                    # microphones are two devices, and say so. The Streams
                     # entries are what a device is usually called; "type
                     # another…" names one no pipeline config has.
                     counter, kind = _COLLECTION_DEVICE_LABEL_FLAGS[flag]
@@ -5428,10 +6004,21 @@ class ServicePanel(Widget):
         here rather than asked of the card's host: this runs on the UI thread
         (a redraw, a Start), which asks a remote host nothing. Each file is read
         again only once it has been written."""
+        names: list[str] = []
+        for name, entry_kind, _entry in self._collection_stream_entries():
+            if entry_kind == kind and name not in names:
+                names.append(name)
+        return sorted(names)
+
+    def _collection_stream_entries(self) -> list[tuple[str, str, dict]]:
+        """the Streams entries of the pipeline configs of _COLLECTION_DEVICE_CONFIGS,
+        in that order, as (name, kind, what the entry says of its capture: its
+        ssh_profile, device and channels). Each file is read again only once it
+        has been written."""
         cache = getattr(self, "_collection_device_cache", None)
         if cache is None:
             cache = self._collection_device_cache = {}
-        names: list[str] = []
+        found: list[tuple[str, str, dict]] = []
         for relative, default_kind in _COLLECTION_DEVICE_CONFIGS:
             path = os.path.join(self._root, relative)
             try:
@@ -5447,15 +6034,26 @@ class ServicePanel(Widget):
                     config = {}
                 streams = config.get("Streams")
                 entries = streams.items() if isinstance(streams, dict) else ()
-                cached = (stamp, [
-                    (str(name).strip(), stream_kind(entry if isinstance(entry, dict) else {}, default_kind))
-                    for name, entry in entries if str(name or "").strip()
-                ])
+                rows = []
+                for name, entry in entries:
+                    if not str(name or "").strip():
+                        continue
+                    entry = entry if isinstance(entry, dict) else {}
+                    capture = {key: str(entry.get(key) if entry.get(key) is not None else "").strip()
+                               for key in ("ssh_profile", "device", "channels")}
+                    rows.append((str(name).strip(), stream_kind(entry, default_kind), capture))
+                cached = (stamp, rows)
                 cache[path] = cached
-            for name, entry_kind in cached[1]:
-                if entry_kind == kind and name not in names:
-                    names.append(name)
-        return sorted(names)
+            found.extend(cached[1])
+        return found
+
+    def _collection_stream_entry(self, name: str, kind: str) -> dict | None:
+        """what the Streams entries say of the capture of the device `name` of
+        `kind`: the first entry of that name and kind that names the machine
+        capturing it (its ssh_profile, device and channels); None when none does."""
+        name = str(name or "").strip()
+        return next((dict(capture) for entry_name, entry_kind, capture in self._collection_stream_entries()
+                     if entry_name == name and entry_kind == kind and capture.get("ssh_profile")), None)
 
     # ── who wears each Collection microphone ─────────────────────
 
@@ -5530,8 +6128,8 @@ class ServicePanel(Widget):
 
     def _collection_group_streams(self) -> set[str]:
         """the Streams names a group base of this checkout's ASR config pulls:
-        a Participant row of that Device Label opens on Group. Read again only
-        once the file has been written."""
+        the Participant of a recorder of that Device Label opens on Group. Read
+        again only once the file has been written."""
         path = os.path.join(self._root, "pipelines/asr-base/config.yml")
         try:
             stamp = os.path.getmtime(path)
@@ -5563,50 +6161,82 @@ class ServicePanel(Widget):
         return names
 
     def _collection_participant_param(self, param: ParamDef, target: str, session: object,
-                                      experiment_group: object, labels: list[str]) -> ParamDef:
-        """the Participant rows for these Device Labels: the session group's
-        participants, Group and bind later; each row opens on the pick kept for
-        its session, host and device, else on the pre-fill."""
+                                      experiment_group: object, labels: list[str],
+                                      channel_lists: list | None = None) -> ParamDef:
+        """the Participant of the recorders of these Device Labels (and, for
+        one that writes several channels, these channels): the session group's
+        participants, Group and bind later; each slot opens on the pick kept
+        for its session, host and slot, else on the pre-fill."""
         scope_key, _group, roster = self._collection_roster(session, experiment_group)
         choices = _collection_participant_choices(roster)
         legal = {value for _, value in choices}
         picks = self.__dict__.setdefault("_collection_wearer_picks", {})
-        keys = _collection_wearer_keys(labels)
+        slots = _collection_slots(labels, channel_lists)
+        names = [name for _index, _channel, name in slots]
+        keys = _collection_wearer_keys(names)
         fixed: dict[int, str] = {}
-        for index, key in enumerate(keys):
+        for place, key in enumerate(keys):
             kept = picks.get((scope_key, target, key))
             if kept is not None and kept in legal:
-                fixed[index] = kept
+                fixed[place] = kept
         tags = [tag for _, tag in roster]
-        group_labels = self._collection_group_streams()
-        prefill = _collection_wearer_prefill(labels, tags, group_labels, {})
+        group_slots = self._collection_group_slots(labels, slots)
+        prefill = _collection_wearer_prefill(names, tags, group_slots, {})
         noted = dict(zip(keys, prefill))
         self.__dict__.setdefault("_collection_wearer_prefills", {})[(scope_key, target)] = noted
         self.__dict__["_collection_wearer_scope"] = (scope_key, target)
-        default = _collection_wearer_prefill(labels, tags, group_labels, fixed)
+        default = _collection_recorder_picks(
+            slots, _collection_wearer_prefill(names, tags, group_slots, fixed), len(labels))
         return replace(param, choices=choices, default=default)
 
+    def _collection_group_slots(self, labels: list, slots: list[tuple[int, int | None, str]]) -> set[str]:
+        """the slots a group base of this checkout's ASR config pulls: the
+        stream it pulls is the device, every channel of it included."""
+        streams = self._collection_group_streams()
+        return {name for index, _channel, name in slots
+                if name in streams or str(labels[index] if index < len(labels) else "").strip() in streams}
+
     def _remember_collection_wearers(self, scope_key: str, target: str, labels: list, picks: list,
-                                     prefills: dict | None = None) -> None:
-        """keep each row's Participant pick under (session, host, device; the
-        row's place among those of one Device Label when more share it): a
-        pick that differs from what the row was pre-filled with is kept, one
-        that matches it is dropped so the row keeps following the pre-fill.
+                                     prefills: dict | None = None, channel_lists: list | None = None) -> None:
+        """keep each slot's Participant pick under (session, host, slot; the
+        slot's place among those of one name when more share it): a pick that
+        differs from what the slot was pre-filled with is kept, one that
+        matches it is dropped so the slot keeps following the pre-fill.
         Without pre-fills every pick is kept (the picks a Start launched)."""
         store = self.__dict__.setdefault("_collection_wearer_picks", {})
-        for index, (label, name) in enumerate(zip(labels, _collection_wearer_keys(labels))):
+        slots = _collection_slots(labels, channel_lists)
+        keys = _collection_wearer_keys([name for _index, _channel, name in slots])
+        for (index, _channel, _name), key, pick in zip(slots, keys, _collection_slot_picks(picks, slots)):
             if index >= len(picks):
                 break
-            pick = str(picks[index] or "").strip() if _collection_wants_wearer(label) else ""
-            key = (scope_key, target, name)
-            if prefills is None or pick != prefills.get(name, ""):
-                store[key] = pick
+            kept = (scope_key, target, key)
+            if prefills is None or pick != prefills.get(key, ""):
+                store[kept] = pick
             else:
-                store.pop(key, None)
+                store.pop(kept, None)
+
+    @staticmethod
+    def _collection_card_channels(card, count: int) -> list[list[int]]:
+        """the channels each of the first `count` audio recorders of a card
+        writes a file each for ([] for one file)."""
+        try:
+            values = {flag: card.instance_values(flag)
+                      for flag in ("--audio-device", "--audio-channel", "--audio-channels")}
+        except Exception:
+            return [[] for _ in range(count)]
+        return ServicePanel._collection_params_channels(values, count)
+
+    @staticmethod
+    def _collection_params_channels(params: dict, count: int) -> list[list[int]]:
+        """the channels each of the first `count` audio recorders of the card's
+        values (or a Start's) writes a file each for ([] for one file)."""
+        return [file_channels(_row_value(params.get("--audio-device"), index),
+                              _row_value(params.get("--audio-channel"), index),
+                              _row_value(params.get("--audio-channels"), index)) for index in range(count)]
 
     def _note_collection_wearer_snapshot(self, target: str, values: dict, card: ServiceCard) -> None:
         """the capture before a rebuild: keep the Participant picks of the card
-        on screen under its session, host and device."""
+        on screen under its session, host and slot."""
         try:
             labels = card.instance_values("--audio-device-label")
             picks = card.instance_values(_COLLECTION_PARTICIPANT_FLAG)
@@ -5617,13 +6247,14 @@ class ServicePanel(Widget):
         scope_key, _group, _roster = self._collection_roster(
             values.get("--session-id"), values.get("--experiment-group"))
         prefills = self.__dict__.get("_collection_wearer_prefills", {}).get((scope_key, target), {})
-        self._remember_collection_wearers(scope_key, target, labels, picks, prefills)
+        self._remember_collection_wearers(scope_key, target, labels, picks, prefills,
+                                          self._collection_card_channels(card, len(labels)))
 
     def _refresh_collection_participants(self) -> None:
         """the Session or the Experiment Group changed on the Collection card:
-        its Participant rows take that group's participants. The picks made for
-        the group before are kept under it, and the rows open on the picks kept
-        for the new one."""
+        its Participant column takes that group's participants. The picks made
+        for the group before are kept under it, and the slots open on the picks
+        kept for the new one."""
         try:
             card = next(card for card in self.query(ServiceCard) if card.service_def.launch_type == "collection")
         except Exception:
@@ -5636,43 +6267,50 @@ class ServicePanel(Widget):
         target = "local"  # the card's picks are kept under this machine's name
         values = (card.collection_snapshot() or {}).get("values") or {}
         labels = card.instance_values("--audio-device-label")
+        channel_lists = self._collection_card_channels(card, len(labels))
         before = self.__dict__.get("_collection_wearer_scope")
         if before and before[1] == target:
             prefills = self.__dict__.get("_collection_wearer_prefills", {}).get(before, {})
             self._remember_collection_wearers(
-                before[0], target, labels, card.instance_values(_COLLECTION_PARTICIPANT_FLAG), prefills)
+                before[0], target, labels, card.instance_values(_COLLECTION_PARTICIPANT_FLAG), prefills,
+                channel_lists)
         # as many rows as a + may add with a device of their own (as when the card was built)
         device_default = device.default if isinstance(device.default, (list, tuple)) else []
         rows = max(len(labels), len(card._param_values.get(_COLLECTION_PARTICIPANT_FLAG) or []),
                    self._collection_count(values, "-na"), len(device.choices), len(device_default))
         labels = labels + [ServiceCard._instance_default(device, index) for index in range(len(labels), rows)]
+        channel_lists = channel_lists + [[] for _ in range(len(channel_lists), rows)]
         fresh = self._collection_participant_param(
-            wearer, target, values.get("--session-id"), values.get("--experiment-group"), labels)
+            wearer, target, values.get("--session-id"), values.get("--experiment-group"), labels, channel_lists)
         # a pick belongs to the group it was made for: every row takes the new one's
         card._picked_instances.pop(_COLLECTION_PARTICIPANT_FLAG, None)
         card.set_instance_choices(_COLLECTION_PARTICIPANT_FLAG, fresh.choices, fresh.default)
 
     def _collection_wearer_problem(self, params: dict) -> str:
         """why a Collection Start is refused for its Participant picks: one tag
-        on two rows of the card; "" when there is none."""
+        on two slots of the card (two recorders, or two channels); "" when
+        there is none."""
         count = self._collection_count(params, "-na")
         picks = params.get(_COLLECTION_PARTICIPANT_FLAG)
         if not isinstance(picks, (list, tuple)):
             return ""
-        rows: dict[str, list[int]] = {}
-        for index, pick in enumerate(list(picks)[:count], 1):
-            tag = str(pick if pick is not None else "").strip()
+        picks = list(picks)[:count]
+        labels = [""] * len(picks)
+        slots = _collection_slots(labels, self._collection_params_channels(params, len(picks)))
+        where_of: dict[str, list[str]] = {}
+        for (index, channel, _name), pick in zip(slots, _collection_slot_picks(picks, slots)):
+            tag = str(pick or "").strip()
             if not tag or tag == _COLLECTION_GROUP_PICK:
                 continue
-            rows.setdefault(tag, []).append(index)
-        for tag, where in rows.items():
+            where_of.setdefault(tag, []).append(str(index + 1) if channel is None else f"{index + 1} ch{channel}")
+        for tag, where in where_of.items():
             if len(where) > 1:
                 return (f"[red]Tag {tag} is picked on Participant {where[0]} and {where[1]}: one person wears "
                         f"one microphone. Pick another, Group, or bind later.[/red]")
         return ""
 
     def _collection_wearer_notes(self, params: dict, target: str) -> list[str]:
-        """what a Collection Start says about its Participant rows before it
+        """what a Collection Start says about its Participant picks before it
         goes ahead: that there is no participant list to pick from."""
         count = self._collection_count(params, "-na")
         labels = params.get("--audio-device-label")
@@ -5692,29 +6330,40 @@ class ServicePanel(Widget):
         """after a Collection Start resolved its session: keep the launched
         picks under that session, and note in its MongoDB document who wears
         each Device Label (wearers), which a live ASR base pulling that stream
-        reads. A tag another label holds is warned about; a failure only says
-        so, since the recordings' manifests carry the picks too."""
+        reads; a recorder that writes several channels notes each channel
+        under its own slot (vimo-0-ch1). A tag another label holds is warned
+        about; a failure only says so, since the recordings' manifests carry
+        the picks too."""
         session_id = self._collection_session_id(prepared)
         count = self._collection_count(prepared, "-na")
         tags = prepared.get(_COLLECTION_PARTICIPANT_FLAG)
         if not session_id or count <= 0 or not isinstance(tags, (list, tuple)):
             return
         labels = prepared.get("--audio-device-label")
-        labels = list(labels) if isinstance(labels, (list, tuple)) else []
+        labels = [str(labels[index] if isinstance(labels, (list, tuple)) and index < len(labels) else "").strip()
+                  for index in range(count)]
         scopes = prepared.get(_COLLECTION_SCOPE_FLAG)
         scopes = list(scopes) if isinstance(scopes, (list, tuple)) else []
-        rows = []
+        picks = []
         for index in range(count):
-            label = str(labels[index] if index < len(labels) else "").strip()
             tag = str(tags[index] if index < len(tags) and tags[index] is not None else "").strip()
             scope = str(scopes[index] if index < len(scopes) else "").strip()
-            rows.append((label, tag, scope))
-        self._remember_collection_wearers(
-            session_id, target, [label for label, _, _ in rows],
-            [tag or (_COLLECTION_GROUP_PICK if scope == "group" else "") for _, tag, scope in rows])
+            # one pick per channel (5,group,none) for a recorder that writes several
+            picks.append(tag or (_COLLECTION_GROUP_PICK if scope == "group" else ""))
+        channel_lists = self._collection_params_channels(prepared, count)
+        self._remember_collection_wearers(session_id, target, labels, picks, channel_lists=channel_lists)
+        # one row per slot: a recorder of one file under its Device Label, each
+        # channel of one that writes several under its own (vimo-0-ch1)
+        slots = _collection_slots(labels, channel_lists)
+        rows = []
+        for (index, _channel, name), pick in zip(slots, _collection_slot_picks(picks, slots)):
+            group = pick == _COLLECTION_GROUP_PICK
+            # an unlabelled recorder's channels (-ch0) name no field either
+            name = name if labels[index] else ""
+            rows.append((name, "" if group else pick, "group" if group else ("personal" if pick else "")))
         set_fields: dict[str, str] = {}
         unset_fields: dict[str, str] = {}
-        # the stream of a Device Label that more rows share (the channels of one receiver) has
+        # the stream of a Device Label that more rows share (two recorders of one receiver) has
         # one wearer only when those rows agree
         by_key: dict[str, set[str]] = {}
         for label, tag, _scope in rows:
@@ -9357,8 +10006,10 @@ class ServicePanel(Widget):
             return
         self._invalidate_session_choice_cache(self._get_panel_target())
         if svc.launch_type == "collection":
-            # a session's group is looked up in MongoDB again
+            # a session's group is looked up in MongoDB again, and a Device
+            # menu asks its host for its devices again
             self.__dict__.pop("_collection_session_groups", None)
+            self._device_answers().clear()
             self.run_worker(
                 self._reload_current_service_view(),
                 group=_LAUNCHER_UI_WORKER_GROUP,
@@ -10422,6 +11073,9 @@ class ServicePanel(Widget):
         for flag in _COLLECTION_HIDDEN_PRESET_FLAGS:
             if flag in defaults:
                 prepared[flag] = defaults[flag]
+        # each recorder's own device, from what the card sent now; a recorder
+        # with one asks for nothing in its terminal
+        self._collection_recorder_devices(prepared, params)
         raw_session_id = str(prepared.get("--session-id") or "").strip()
         if raw_session_id:
             prepared["--session-id"] = _safe_session_id(raw_session_id)
@@ -10440,6 +11094,60 @@ class ServicePanel(Widget):
         else:
             prepared.pop(_COLLECTION_PARTICIPANT_FLAG, None)
         return prepared
+
+    @staticmethod
+    def _collection_recorder_devices(prepared: dict, params: dict) -> None:
+        """each recorder's own device, from the Device and Channel columns of
+        the card's table (`params`, what the card sent): one with a Device
+        picked opens it without asking (--audio-interactive false, the device,
+        its Channel, and the device's channel count when known), one without
+        asks for it in its terminal as before (--audio-interactive true). One
+        value per recorder, which its own flags carry after the shared ones; a
+        card that sends no Device column leaves every recorder asking."""
+        for role, counter in (("audio", "-na"), ("video", "-nv")):
+            device_flag = f"--{role}-device"
+            devices = params.get(device_flag)
+            if not isinstance(devices, (list, tuple)):
+                for flag, (flag_counter, _label, _example) in _COLLECTION_RECORDER_FLAGS.items():
+                    if flag_counter == counter:
+                        prepared.pop(flag, None)  # the last launch's, which this card did not send
+                continue
+            devices = [_row_value(devices, index) for index in range(len(devices))]
+            prepared[device_flag] = devices
+            prepared[f"--{role}-interactive"] = ["false" if device else "true" for device in devices]
+            if role == "audio":
+                # a device with no Channel picked records its downmix, as its cell shows
+                prepared["--audio-channel"] = [
+                    (_row_value(params.get("--audio-channel"), index) or "mix") if device else ""
+                    for index, device in enumerate(devices)]
+                prepared["--audio-channels"] = [
+                    _row_value(params.get("--audio-channels"), index) if device else ""
+                    for index, device in enumerate(devices)]
+
+    def _collection_device_problem(self, params: dict) -> str:
+        """why a Collection Start is refused for the devices of its rows: two
+        recorders of one role on one device of one host (one FFmpeg opens a
+        device; its several channels are one recorder's: each, or 0,1), or a
+        recorder on each whose device's channel count is not known; "" when
+        there is none."""
+        for role, counter in (("audio", "-na"), ("video", "-nv")):
+            seen: dict[tuple[str, str], int] = {}
+            for index in range(self._collection_count(params, counter)):
+                device = _row_value(params.get(f"--{role}-device"), index)
+                if not device:
+                    continue
+                host = _row_value(params.get(f"--{role}-host"), index) or "local"
+                if (host, device) in seen:
+                    return (f"[red]{role.title()} {seen[(host, device)] + 1} and {index + 1} both record {device} on "
+                            f"{_host_label(host)}: one device is one recorder. To record several channels of it, "
+                            f"pick each (or a list such as 0,1) in the Channel of one of them.[/red]")
+                seen[(host, device)] = index
+                each = _row_value(params.get("--audio-channel"), index).lower() in ("each", "every", "split")
+                if role == "audio" and each and not _row_value(params.get("--audio-channels"), index):
+                    return (f"[red]Audio {index + 1} records each channel of {device}, but how many channels "
+                            f"{device} has is not known: open its Channel, which asks its host, or type its "
+                            f"channels there (0,1).[/red]")
+        return ""
 
     def _collection_params_for_action(self, svc: ServiceDef, params: dict, target: str) -> dict:
         last = self._collection_last_params.get((target, svc.name), {})
@@ -11199,7 +11907,8 @@ class ServicePanel(Widget):
             params.pop(flag, None)
         defaults = self._collection_defaults_for_current_target(host)
         for flag in _COLLECTION_HIDDEN_PRESET_FLAGS:
-            if flag in defaults:
+            # a value per recorder (whether it asks in its terminal) is its own
+            if flag in defaults and not isinstance(params.get(flag), (list, tuple)):
                 params[flag] = defaults[flag]
         if self._is_default_collection_output_root(str(prepared.get("--output-root") or "").strip()):
             params["--output-root"] = self._collection_default_output_root(host)
@@ -11217,6 +11926,10 @@ class ServicePanel(Widget):
         if unknown:
             self._log(f"[red]No SSH profile is named {', '.join(repr(host) for host in unknown)}: pick another "
                       f"Host for its recorders.[/red]")
+            return
+        problem = self._collection_device_problem(params)
+        if problem:
+            self._log(problem)
             return
         if self._collection_count(params, "-na") > 0:
             problem = self._collection_wearer_problem(params)
@@ -11308,6 +12021,7 @@ class ServicePanel(Widget):
                     "microphone; the window closes by itself once FFmpeg runs. Someone has to be logged "
                     "in there, with Terminal allowed under Privacy & Security (Camera, Microphone).[/yellow]"
                 )
+        await self._collection_count_channels(params, host)
         tab_cmds: list[tuple[str, str]] = []
         for comp in svc.components:
             count = self._collection_count(params, comp.count_flag)
@@ -11324,6 +12038,38 @@ class ServicePanel(Widget):
                     tab_cmds.append((f"{label}@{host}", self._collection_remote_terminal_command(profile, command)))
                     self._log(rich_escape(f"    [{label}@{host}] ssh {profile.ssh_destination()} {command}"))
         return params, tab_cmds
+
+    async def _collection_count_channels(self, params: dict, host: str) -> None:
+        """the input channel count of each microphone of this host's recorders
+        that has a device but no count, asked of a Linux host once per Start:
+        ALSA opens a device with the count it is given, and FFmpeg's alsa input
+        asks for 2 when given none, which a one-channel hw: device refuses. A
+        host that does not say leaves its recorder without one, as before."""
+        devices = params.get("--audio-device")
+        if not isinstance(devices, (list, tuple)):
+            return
+        devices = [_row_value(devices, index) for index in range(len(devices))]
+        counts = [_row_value(params.get("--audio-channels"), index) for index in range(len(devices))]
+        missing = [index for index, device in enumerate(devices) if device and not counts[index]]
+        if not missing:
+            return
+        platform_name = await asyncio.to_thread(self._collection_platform_for_target, host)
+        if not str(platform_name or "").lower().startswith("linux"):
+            return
+        answer = self._device_answers().get(host)
+        if any(_device_channels(answer, "audio", devices[index]) is None for index in missing):
+            answer = await self._collection_ask_devices(host, "audio", fresh=True)
+        where = _host_label(host)
+        for index in missing:
+            device = devices[index]
+            count = _device_channels(answer, "audio", device)
+            if count:
+                counts[index] = str(count)
+                self._log(f"  {where}: {device} has {count} input channel{'s' if count > 1 else ''}.")
+            else:
+                self._log(f"  [yellow]{where} did not say how many channels {device} has: its recorder opens it "
+                          f"with FFmpeg's default.[/yellow]")
+        params["--audio-channels"] = counts
 
     def _collection_card_values(self, params: dict | None = None) -> dict:
         """what the Collection card on screen holds, both tabs (a button

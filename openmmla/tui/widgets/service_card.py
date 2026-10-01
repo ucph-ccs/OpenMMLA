@@ -10,6 +10,10 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, Button, Input, Rule, Select, TabbedContent, TabPane
 
+from openmmla.tui.widgets.collection_table import (
+    CollectionTable, TableRow, channel_picks, channel_text, file_channels,
+)
+
 
 def _safe_id(raw: str) -> str:
     """sanitize a string to be a valid textual widget id."""
@@ -80,12 +84,15 @@ class ParamDef:
     follow_values: dict = field(default_factory=dict)
     # a per-instance Select whose options are not the whole world: it gets a
     # "type another…" option, and picking it opens a text box in the same row
-    # with this as its placeholder (a Collection recorder's Device Label, for a
-    # device no pipeline config names). Empty: the options are all there is.
+    # with this as its placeholder. Empty: the options are all there is. The
+    # Collection card, whose recorders are the rows of a table, keeps a value
+    # of a row's own the same way (a Device Label no pipeline config names, a
+    # device, a channel list, one Participant per channel), and this is what
+    # the box under its cell suggests.
     free_text: str = ""
     # the per-instance flag (same counter) whose rows this param's rows sit
-    # under, row by row, in that param's container (a recorder's Participant
-    # under its Device Label, a base's Participant under its Base)
+    # under, row by row, in that param's container (a base's Participant under
+    # its Base)
     under: str = ""
     # with `under`: whether row i shows, given the value of row i of `under`
     # (its typed text on "type another…"), or of `shown_by` when that names
@@ -94,10 +101,10 @@ class ParamDef:
     shown_when: Callable[[str], bool] | None = None
     shown_by: str = ""
     # with `under`: its rows sit above the rows of `under` rather than below
-    # (a recorder's Host above its Device Label)
     above: bool = False
     # what an instance with no default of its own starts on, when that is one
-    # of the options (a recorder's Host: this machine); else `fill` decides
+    # of the options (a Collection recorder's Host: this machine); else `fill`
+    # decides
     instance_default: str = ""
     # whether an instance with no default of its own takes the next option
     # that has a value (True), or none (False)
@@ -324,8 +331,8 @@ class ServiceCard(Widget):
         height: 3;
     }
     /* the line that sets off the rows of one instance from the next (a
-       recorder's Host, Device Label and Participant; a base's Base,
-       Participant and Speakers), as wide as a label and its dropdown */
+       base's Base, Participant and Speakers), as wide as a label and its
+       dropdown */
     ServiceCard Rule.instance-sep {
         margin: 0;
         width: 66;
@@ -384,6 +391,7 @@ class ServiceCard(Widget):
         is_running: bool = False,
         stack_components: list[str] | None = None,
         initial_collection_role: str = "audio",
+        collection_picks: dict[str, set[int]] | None = None,
     ) -> None:
         super().__init__()
         self.service_def = service_def
@@ -399,9 +407,14 @@ class ServiceCard(Widget):
         }
         # what the card itself put on each per-instance Select (by flag, then
         # instance index), and the instances whose Select the user picked:
-        # only a row the card chose moves when fresh choices come
+        # only a row the card chose moves when fresh choices come. On the
+        # collection card, the cells of its table the user picked by hand (a
+        # recorder's Host, its Device), which the launcher hands back to the
+        # card a rebuild makes (collection_picks)
         self._card_shown: dict[str, dict[int, str]] = {}
-        self._picked_instances: dict[str, set[int]] = {}
+        self._picked_instances: dict[str, set[int]] = {
+            flag: set(indices) for flag, indices in (collection_picks or {}).items()
+        }
         # the counters the user has set with - or +: the others follow their default
         self._counts_set: set[str] = set()
         # a per-instance param starts with one value per instance of its counter
@@ -627,21 +640,18 @@ class ServiceCard(Widget):
 
         with Vertical(classes="card-params"):
             for param in self._collection_params_for_role(role):
-                if param.under:
-                    continue  # its rows sit under the rows of the param it names
-                if param.per_instance:
-                    # one row per recorder of this role; its + and - show, hide
-                    # and add rows (_sync_instances). The flag belongs to this
-                    # tab alone, so the rows take the plain ids _sync_instances
-                    # and collect_params look for, not the role-scoped ones.
-                    yield from self._compose_instances(param)
-                    continue
+                if param.under or param.per_instance:
+                    continue  # a recorder's own values are the cells of its row in the table
                 with Horizontal(classes="param-row"):
                     for widget in self._param_widgets(
                         param,
                         param_id=lambda kind, flag, role=role: self._collection_param_id(role, kind, flag),
                     ):
                         yield widget
+        if self._collection_recorder_params(role):
+            # one row per recorder of this role, its + and - adding and taking
+            # rows; a click on a cell asks the launcher for its dropdown
+            yield CollectionTable(role, self._collection_table_rows(role), id=self._collection_table_id(role))
 
     def _instance_sep(self, flag: str, key: str) -> Rule:
         """the line above the first instance of `flag` ("top") or below
@@ -1143,6 +1153,143 @@ class ServiceCard(Widget):
         params = {param.flag: param for param in self.service_def.params}
         return [params[flag] for flag in flags if flag in params]
 
+    # ── the recorders of the collection card: a table per tab ────
+
+    def _collection_table_id(self, role: str) -> str:
+        return _safe_id(f"collection_table__{self.service_def.name}__{role}")
+
+    def _collection_recorder_params(self, role: str) -> list[ParamDef]:
+        """the params a tab has once per recorder: the columns of its table."""
+        return [param for param in self._collection_params_for_role(role) if param.per_instance]
+
+    def _param_of(self, flag: str) -> ParamDef | None:
+        return next((param for param in self.service_def.params if param.flag == flag), None)
+
+    def _collection_role_of(self, flag: str) -> str:
+        """the tab whose recorders a per-recorder flag belongs to."""
+        param = self._param_of(flag)
+        counter = param.per_instance if param is not None else ""
+        return next((component.role for component in self.service_def.components
+                     if counter and component.count_flag == counter), "")
+
+    def collection_value(self, flag: str, index: int) -> str:
+        """what recorder `index` holds for a per-recorder flag of the
+        collection card ("" for none): what was noted for it, else what a
+        recorder in that place starts on."""
+        param = self._param_of(flag)
+        if param is None or not param.per_instance or index < 0:
+            return ""
+        values = self._param_values.get(flag) or []
+        if index < len(values):
+            return str(values[index] if values[index] is not None else "")
+        return self._instance_default(param, index)
+
+    def set_collection_value(self, flag: str, index: int, value: object, by_hand: bool | None = None) -> None:
+        """put recorder `index`'s value of a per-recorder flag, and redraw the
+        table it is in. `by_hand` says whether the user picked it (True) or the
+        card did (False): what fills a row by itself leaves a cell the user
+        picked alone (collection_by_hand); None leaves that as it was."""
+        param = self._param_of(flag)
+        if param is None or not param.per_instance or index < 0:
+            return
+        values = list(self._param_values.get(flag) or [])
+        while len(values) <= index:
+            values.append(self._instance_default(param, len(values)))
+        values[index] = str(value if value is not None else "").strip()
+        self._param_values[flag] = values
+        if by_hand is not None:
+            picked = self._picked_instances.setdefault(flag, set())
+            if by_hand:
+                picked.add(index)
+            else:
+                picked.discard(index)
+        self.refresh_collection_table(self._collection_role_of(flag))
+
+    def collection_by_hand(self, flag: str, index: int) -> bool:
+        """whether the user picked recorder `index`'s cell of `flag` by hand."""
+        return index in self._picked_instances.get(flag, set())
+
+    def collection_hand_picks(self) -> dict[str, set[int]]:
+        """the cells of the collection card's tables the user picked by hand,
+        by flag: what the launcher hands to the card a rebuild makes."""
+        return {flag: set(indices) for flag, indices in self._picked_instances.items() if indices}
+
+    def refresh_collection_table(self, role: str | None = None) -> None:
+        """draw a tab's table (with None, both) from what the card notes now."""
+        if self.service_def.launch_type != "collection":
+            return
+        for each in (role,) if role else ("audio", "video"):
+            try:
+                table = self.query_one(f"#{self._collection_table_id(each)}", CollectionTable)
+            except Exception:
+                continue
+            table.show(self._collection_table_rows(each))
+
+    def _collection_choice_text(self, flag: str, value: str) -> str:
+        """a cell's value as the options of its flag name it (Local for this
+        machine, a participant by name and tag); "-" for none."""
+        param = self._param_of(flag)
+        names = {option: label for label, option in _choice_options(param.choices)} if param is not None else {}
+        if value in names:
+            return names[value]
+        return value or "-"
+
+    def _collection_table_rows(self, role: str) -> list[TableRow]:
+        """the rows of a tab's table: one per recorder its counter asks for,
+        and under a recorder that writes several channels of its device one
+        per channel, which holds whose voice that channel is."""
+        params = {param.flag for param in self._collection_recorder_params(role)}
+        count_param = self._collection_count_param(role)
+        try:
+            count = max(0, int(self._param_values.get(count_param.flag, 0))) if count_param is not None else 0
+        except (TypeError, ValueError):
+            count = 0
+
+        def value(name: str, index: int) -> str:
+            flag = f"--{role}-{name}"
+            return self.collection_value(flag, index) if flag in params else ""
+
+        def shown(name: str, text: str) -> str:
+            # a column the card has no param for stays blank
+            return (text or "-") if f"--{role}-{name}" in params else ""
+
+        rows: list[TableRow] = []
+        for index in range(count):
+            device = value("device", index)
+            label = value("device-label", index)
+            menus = {column for column, name in (("Host", "host"), ("Device", "device"),
+                                                 ("Device Label", "device-label"))
+                     if f"--{role}-{name}" in params}
+            host = value("host", index) or "local"
+            cells = [str(index + 1), shown("host", self._collection_choice_text(f"--{role}-host", host)),
+                     shown("device", device)]
+            channels: list[int] = []
+            participant = ""
+            if role == "audio":
+                channel = value("channel", index)
+                channels = file_channels(device, channel, value("channels", index))
+                participant = value("participant", index)
+                if device and "--audio-channel" in params:
+                    menus.add("Channel")
+                if "--audio-participant" in params and not channels:
+                    menus.add("Participant")
+                # one file has one pick; several channels, one each (the rows below)
+                worn = "per channel" if channels else self._collection_choice_text(
+                    "--audio-participant", channel_picks(participant, 1)[0])
+                cells += [shown("channel", channel_text(channel) if device else ""), shown("device-label", label),
+                          shown("participant", worn)]
+            else:
+                cells.append(shown("device-label", label))
+            rows.append(TableRow(index, None, tuple(cells), frozenset(menus)))
+            for number, pick in zip(channels, channel_picks(participant, len(channels))):
+                rows.append(TableRow(
+                    index, number,
+                    (f"  ch{number}", "", "", f"ch{number}", "",
+                     self._collection_choice_text("--audio-participant", pick)),
+                    frozenset({"Participant"}),
+                ))
+        return rows
+
     @staticmethod
     def _bool_label(value: bool) -> str:
         return "true" if value else "false"
@@ -1173,8 +1320,9 @@ class ServiceCard(Widget):
             )
         except Exception:
             pass
-        # a recorder more or less is a Device Label row more or less
+        # a recorder more or less is a row of its tab's table more or less
         self._sync_instances(flag)
+        self.refresh_collection_table(role)
 
     def _toggle_bool_param(self, flag: str) -> None:
         self._param_values[flag] = not bool(self._param_values.get(flag, False))
@@ -1203,7 +1351,7 @@ class ServiceCard(Widget):
                 values[param.flag] = self._param_values[param.flag]
                 continue
             if param.per_instance:
-                # one value per instance, read off the rows themselves: a
+                # one value per recorder, as its row of the table holds it: a
                 # Device Label picked but not yet launched is still the pick
                 values[param.flag] = self._collect_instances(param)
                 continue
@@ -1273,6 +1421,8 @@ class ServiceCard(Widget):
                 params.append(param)
         self.service_def = replace(service_def, params=params)
         self.update_param_choices(host_params(params))
+        # the names a collection table gives its values (a participant's) may be new
+        self.refresh_collection_table()
         try:
             metas = list(self.query(".card-meta"))
             if metas:
@@ -1529,6 +1679,8 @@ class ServiceCard(Widget):
             row.display = index < count and self._instance_shown(new_param, index)
             # the rows whose showing this one decides (a base's Speakers)
             self._show_paired_rows(flag, index)
+        if self.service_def.launch_type == "collection":
+            self.refresh_collection_table(self._collection_role_of(flag))
 
     def _show_typed_box(self, param: ParamDef, index: int, wanted: bool) -> None:
         """the text box of a row on "type another…": shown and focused while
