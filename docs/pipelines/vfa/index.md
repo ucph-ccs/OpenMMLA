@@ -139,7 +139,7 @@ For every image sent (`images`, with `angles` naming each) the answer holds one 
 - **Pairs** give, for every two persons, how far apart their gazes land (a joint-attention proxy; `null` when either gaze is out of the frame or missing) and how close their hands come, in pixels. The frame also echoes the `zones` as resolved, in pixels, so a zone sent in the wrong units shows up at once; a zone that is not a polygon, or a frame that is not an image, is answered with 400 naming it.
 - **Privacy**: the answer holds boxes, keypoints and scalars, never pixels, and `/features` writes no frame to the server's `temp/` (where `/vllm` keeps its overlays); `keypoints=false` in the request leaves even the skeletons out.
 
-The endpoint keeps no state but the tracks: one request, one set of synchronized frames. The synchronizer sends every frame set to it when its **Pose** (or **Gaze**) is on and writes the answer as one `vfa_features` event (see the [Database Reference](../../database.md#influxdb)); with **Gaze** off the request carries `gaze=false` and the server answers the pose alone (its own `features.gaze` sets its default); `Synchronizer.pose_keypoints: false` keeps the skeletons out of the events, and `Synchronizer.feature_zones_file` names a JSON file of zones. It also publishes each answer to the bases (`<session>/vfa/features` on MQTT): a base with **Graphics** on draws its own angle's boxes, tags, head yaws, skeletons and gaze lines on its live window, with a note of how old they are (the window runs at the camera's rate, the pose at the bases' `keyframe_interval`). The `features` block of the server config turns it off (`enabled: false`), picks the model and the confidence thresholds; the client helper is `request_frame_features` in `openmmla/services/vfa/requests.py`, and the second [smoke test](#smoke-test) sends still frames to it.
+The endpoint keeps no state but the tracks: one request, one set of synchronized frames. The synchronizer sends every frame set to it when its **Pose** (or **Gaze**) is on and writes the answer as one `vfa_features` event (see the [Database Reference](../../database.md#influxdb)); with **Gaze** off the request carries `gaze=false` and the server answers the pose alone (its own `features.gaze` sets its default); `Synchronizer.pose_keypoints: false` keeps the skeletons out of the events, and `Synchronizer.feature_zones_file` names a JSON file of zones. It also publishes each answer to the bases (`<session>/vfa/features` on MQTT): a base with **Graphics** on draws its own angle's boxes, tags, head yaws, skeletons and gaze lines on its live window, with a note of how old they are (the window runs at the camera's rate, the pose at the bases' `keyframe_interval`). The `features` block of the server config turns it off (`enabled: false`), picks the model and the confidence thresholds; the client helper is `request_frame_features` in `openmmla/services/vfa/requests.py`, and `pipelines/vfa-base/examples/frame_features.py` sends still frames to it.
 
 ## Configuration
 
@@ -246,23 +246,6 @@ gunicorn -k gevent -w 1 -b 0.0.0.0:5007 openmmla.services.vfa.apps.serve_multi_a
 ```
 
 The server also answers `GET /vllm/info` (through the gateway too) with what it runs — the backend, its VLM and LLM models and their addresses, the prompt profile, the action schema, the temperature, the gaze backend and model, and under `features` the pose model, its thresholds, the hand circle and the tracking — and the VFA synchronizer asks and notes the answer in the session's document, so that a session's action labels and features can be traced to the models, prompts and settings that produced them (see [Databases](../../database.md#mongodb)). A server running an older openmmla has no `/info`, and the session says so instead.
-
-## Smoke test
-
-With the VFA Server running, send still frames straight to it without starting any base. The action labels, from the VLM (`/vllm`):
-
-```bash
-python pipelines/vfa-base/examples/analyze_video_frame.py front.jpg side.jpg \
-  --angles front,side \
-  --participant-descriptions '{"1": "person with red shirt"}'
-```
-
-The pose and the gaze, from the [features endpoint](#features-endpoint-skeletons-and-gazes):
-
-```bash
-python pipelines/vfa-base/examples/frame_features.py front.jpg side.jpg --angles front,side \
-  --zones '{"table": [[0, 0.55], [1, 0.55], [1, 1], [0, 1]]}'
-```
 
 ## Post-time processing
 
