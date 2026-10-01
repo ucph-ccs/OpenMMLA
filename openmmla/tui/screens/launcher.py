@@ -1032,6 +1032,8 @@ _ASR_LANGUAGES = [
 # transformation_matrices_<id>.json: camera sync's matrices into base <id>'s
 # coordinates, the one the IPS synchronizer takes as its main camera
 _MATRIX_FILE_PREFIX = "transformation_matrices_"
+# camera sync's pairs, `<alt>-<main>` of every room, which export makes the files above from
+_MATRIX_PAIRS_FILE = "transformation_matrices.json"
 
 # the IPS Base card's Room: which room's bases a session is. Passed to no
 # process: it sets the card's Bases, Num Bases and Main Camera (ParamDef.presets)
@@ -1100,6 +1102,19 @@ def _matrix_file_ids(names: list[str]) -> list[str]:
     return sorted(ids, key=lambda value: (0, int(value), "") if value.isdigit() else (1, 0, value))
 
 
+def _matrix_base_note(base: dict | None) -> str:
+    """what a transformation_matrices_<id>.json says of base <id>, whose
+    coordinates it holds: `main of room wegrow` (`main` without rooms), `room
+    wegrow` for another base of a room, `no Bases entry` for an id the config
+    does not list, else nothing."""
+    if base is None:
+        return "no Bases entry"
+    room = base_room(base)
+    if _is_main_base(base):
+        return "main of room " + room if room else "main"
+    return "room " + room if room else ""
+
+
 def _main_camera_choices(ids: list[str], config: dict) -> tuple[list[tuple[str, str]], str]:
     """the Main Camera dropdown of the IPS synchronizer: one option per matrix
     file on the card's host, and the default, the Bases entry with main: true
@@ -1108,17 +1123,46 @@ def _main_camera_choices(ids: list[str], config: dict) -> tuple[list[tuple[str, 
     options = []
     for base_id in ids:
         base = bases.get(base_id)
-        if base is None:
-            label = f"{base_id} · no Bases entry"
-        else:
-            camera = _shown_base_value(base.get("camera"))
-            room = base_room(base)
-            main = ("main of room " + room if room else "main") if _is_main_base(base) else ""
-            label = " · ".join(part for part in (base_id, camera, main) if part)
+        camera = _shown_base_value(base.get("camera")) if base is not None else ""
+        label = " · ".join(part for part in (base_id, camera, _matrix_base_note(base)) if part)
         options.append((label, base_id))
     main = next((base_id for base_id, base in bases.items() if _is_main_base(base)), None)
     default = main if main in ids else (ids[0] if ids else "")
     return options, default
+
+
+def _matrix_file_options(files: list[str], config: dict) -> list[tuple[str, str]]:
+    """the Transform Matrix tab's files, each named with whose coordinates it
+    holds, `transformation_matrices_7.json · main of room wegrow`, by the
+    host's Bases; camera sync's pairs file is every synced pair, of any room.
+    A config not read (a host not reached yet) names nothing."""
+    bases = {str(base.get("id")): base for base in get_bases(config)}
+    if not bases:
+        return [(name, name) for name in files]
+    options = []
+    for name in files:
+        base_id = name[len(_MATRIX_FILE_PREFIX):-len(".json")] if name.startswith(_MATRIX_FILE_PREFIX) else ""
+        note = ("camera sync pairs" if name == _MATRIX_PAIRS_FILE
+                else _matrix_base_note(bases.get(base_id)) if base_id else "")
+        options.append((f"{name} · {note}" if note else name, name))
+    return options
+
+
+def _matrix_file_losers(name: str, config: dict) -> str:
+    """who has no matrices once `name` is gone, by the host's Bases: a
+    main's file is what every base of its room and its synchronizer load."""
+    if name == _MATRIX_PAIRS_FILE:
+        return "camera sync's pairs of every room are gone there (the exported files stay); camera sync"
+    base_id = name[len(_MATRIX_FILE_PREFIX):-len(".json")] if name.startswith(_MATRIX_FILE_PREFIX) else ""
+    if not base_id:
+        return "the IPS bases there then have no matrices from it; camera sync"
+    base = next((b for b in get_bases(config) if str(b.get("id")) == base_id), None)
+    if base is None or not _is_main_base(base):
+        return f"base {base_id} there then has no matrices until camera sync"
+    room = base_room(base)
+    ids = ", ".join(str(b.get("id")) for b in bases_by_room(config).get(room, []))
+    whose = f"every base of room {room}" if room else "every base"
+    return f"{whose} ({ids}) and the synchronizer with Main Camera {base_id} there then have no matrices until camera sync"
 
 
 def _room_choices(config: dict) -> tuple[list[tuple[str, str]], dict[str, dict]]:
@@ -1262,6 +1306,7 @@ class TransformMatrixPanel(Widget):
         remote_files: list[str],
         ssh_profiles: list[str],
         ssh_profile=None,
+        config: dict | None = None,
     ) -> None:
         super().__init__()
         self.local_dir = local_dir
@@ -1270,6 +1315,8 @@ class TransformMatrixPanel(Widget):
         self.local_files = local_files
         self.remote_files = remote_files
         self.ssh_profiles = ssh_profiles
+        # the host's IPS config: its Bases tell each file's room
+        self.config = config or {}
         # when set (host is remote), the panel lists/reads/writes the matrix
         # files on the selected remote host instead of the local disk
         self._ssh_profile = ssh_profile
@@ -1297,6 +1344,23 @@ class TransformMatrixPanel(Widget):
     def _tm_files(self) -> list[str]:
         return self.remote_files if self._is_remote else self.local_files
 
+    def _file_options(self, files: list[str]) -> list[tuple[str, str]]:
+        return _matrix_file_options(files, self.config)
+
+    def set_config(self, config: dict | None) -> None:
+        """name the files by these Bases (a config saved, or read again by
+        Refresh), the file on screen staying picked and its text as it is."""
+        self.config = config or {}
+        try:
+            select = self.query_one("#tm-file-select", Select)
+        except Exception:
+            return  # no file listed
+        files = self._tm_files()
+        with select.prevent(Select.Changed):
+            select.set_options(self._file_options(files))
+            if self._current_file in files:
+                select.value = self._current_file
+
     def compose(self) -> ComposeResult:
         # make the active source unambiguous: when the host is remote, the list
         # and editor operate on that host's files (read/written over SSH); when
@@ -1314,7 +1378,7 @@ class TransformMatrixPanel(Widget):
 
         if files:
             yield Select(
-                [(name, name) for name in files],
+                self._file_options(files),
                 prompt="Select a transform matrix file...",
                 id="tm-file-select",
             )
@@ -1439,11 +1503,9 @@ class TransformMatrixPanel(Widget):
         host_label = self.target if self._is_remote else "Local"
         if self._pending_delete != name:
             self._pending_delete = name
-            base_id = name[len(_MATRIX_FILE_PREFIX):-len(".json")] if name.startswith(_MATRIX_FILE_PREFIX) else ""
-            who = f"base {base_id} there" if base_id else "the IPS bases there"
             self._set_status(
-                f"Press Delete again to delete {name} on {host_label}: {who} then has no matrices until "
-                f"camera sync writes them again. The other hosts keep their copy.")
+                f"Press Delete again to delete {name} on {host_label}: {_matrix_file_losers(name, self.config)} "
+                f"writes them again. The other hosts keep their copy.")
             return
         self._pending_delete = None
         if self._is_remote:
@@ -1470,7 +1532,7 @@ class TransformMatrixPanel(Widget):
         if name in files:
             files.remove(name)
         try:
-            self.query_one("#tm-file-select", Select).set_options([(item, item) for item in files])
+            self.query_one("#tm-file-select", Select).set_options(self._file_options(files))
         except Exception:
             pass
         self._current_file = None
@@ -4662,7 +4724,7 @@ class ServicePanel(Widget):
                 transform_scroll = VerticalScroll(classes="svc-launch-scroll")
                 transform_pane = TabPane("Transform Matrix", transform_scroll, id="svc-tab-transform")
                 await tabs.add_pane(transform_pane)
-                await transform_scroll.mount(self._transform_matrix_panel())
+                await transform_scroll.mount(self._transform_matrix_panel(svc))
 
             if svc.name == "VFA Server":
                 prompts_scroll = VerticalScroll(classes="svc-launch-scroll")
@@ -6378,6 +6440,10 @@ class ServicePanel(Widget):
                 continue
             fresh = self._service_with_base_choices(service, target)
             card.update_param_choices(host_params(fresh.params))
+        ips = self._svc_map.get("IPS Base")
+        if ips is not None:
+            for panel in self.query(TransformMatrixPanel):
+                panel.set_config(self._base_card_config(ips, target))  # the files' rooms follow the Bases
         self._show_speakers_summary()
 
     async def _async_refresh_base_choices(self, svc: ServiceDef, target: str) -> None:
@@ -6468,7 +6534,7 @@ class ServicePanel(Widget):
             remote_path=remote_path,
         )
 
-    def _transform_matrix_panel(self) -> TransformMatrixPanel:
+    def _transform_matrix_panel(self, svc: ServiceDef) -> TransformMatrixPanel:
         target = self._get_panel_target()
         local_dir = _ips_transform_local_dir(self._root)
         remote_dir = None
@@ -6487,6 +6553,7 @@ class ServicePanel(Widget):
             remote_files=remote_files,
             ssh_profiles=self._ssh_profile_names,
             ssh_profile=profile,
+            config=self._base_card_config(svc, target),
         )
 
     # ── config logic ─────────────────────────────────────────────
