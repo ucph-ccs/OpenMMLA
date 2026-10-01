@@ -45,7 +45,9 @@ OUTPUT_FOLDERS = ('legacy', 'analysis', 'exports', 'measurements', 'pipelines', 
 MEDIA_EXTS = ('.wav', '.mp4', '.mov', '.mkv', '.m4a', '.avi', '.webm', '.flac', '.mp3')
 CLUTTER = ('.DS_Store', 'Thumbs.db', '.manifest.lock', 'manifest.json', 'manifest.yml')  # never a reason to keep a folder
 MAX_PUPILS = 3  # the interaction classifier's slots (layout.N_SLOTS)
-KEPT_KEYS = ('legacy_meta', 'imported_from', 'tag_size', 'same_class_as', 'origin_session', 'pupils')  # session manifest keys a rebuild keeps
+# session manifest keys a rebuild keeps: `archive` and `stream_cuts` are what ses-archive wrote there
+KEPT_KEYS = ('legacy_meta', 'imported_from', 'tag_size', 'same_class_as', 'origin_session', 'pupils', 'archive',
+             'stream_cuts')
 
 
 def _remove_if_empty(folder: Path) -> bool:
@@ -371,6 +373,15 @@ def rebuild_manifests(session_dir: Path, experiment_id: str | None = None, group
     for key in KEPT_KEYS:
         if old.get(key) is not None:
             data[key] = old[key]
+    for cut in data.get('stream_cuts') or []:
+        # a stream cut is no file of collection/: its path follows the session folder
+        rel = cut.get('relpath') if isinstance(cut, dict) else None
+        if isinstance(rel, str) and rel and not os.path.isabs(rel) and '..' not in Path(rel).parts:
+            cut['path'] = str(session_dir / rel)
+    # what other folders the session's files came from (exports, base files) stays known
+    old_artifacts = old.get('artifacts') if isinstance(old.get('artifacts'), dict) else {}
+    data['artifacts'] = {**{key: value for key, value in old_artifacts.items() if key != 'collection'},
+                         **data['artifacts']}
     raw = session_dir / 'raw'
     if raw.is_dir():
         data['raw'] = sorted(str(p.relative_to(session_dir)) for p in raw.rglob('*') if p.is_file())

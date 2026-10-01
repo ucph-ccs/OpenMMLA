@@ -530,10 +530,20 @@ class SessionsPanel(Widget):
         height: 3;
         padding: 0 1;
     }
-    /* a short label keeps its own width, so the whole row fits 160 columns */
+    /* a short label keeps its own width, so the whole row fits 171 columns */
     #sessions-actions Button {
         margin: 0 1;
         min-width: 10;
+    }
+    /* below that, the buttons take two lines of five (_fit_actions) */
+    #sessions-actions.-two-lines {
+        layout: grid;
+        grid-size: 5;
+        grid-rows: 3;
+        height: 6;
+    }
+    #sessions-actions.-two-lines Button {
+        width: 1fr;
     }
     /* the progress of Export Streams, up while it runs; height auto because a
        bare Horizontal defaults to 1fr */
@@ -614,6 +624,8 @@ class SessionsPanel(Widget):
                 # what the bases wrote on the machines they ran on (base_files)
                 yield Button("Export Base Files", variant="success", id="btn-ses-export-base-files")
                 yield Button("Export All", variant="warning", id="btn-ses-export-all")
+                # the session's raw files sent to the System Settings host (mmla ses-archive)
+                yield Button("Archive", variant="success", id="btn-ses-archive")
                 # a session left active (its console gone before Stop) set to ended
                 yield Button("End Session", variant="warning", id="btn-ses-end")
                 yield Button("Delete Session", variant="error", id="btn-ses-delete")
@@ -630,6 +642,21 @@ class SessionsPanel(Widget):
         table.add_columns("Session ID", "Experiment", "Group", "Status", "Started", "Recordings until", "Source")
         table.cursor_type = "row"
         self._start_bootstrap()
+
+    def on_resize(self, event) -> None:
+        self._fit_actions(event.size.width)
+
+    def _fit_actions(self, width: int) -> None:
+        """the action row on one line when it holds every button (each its
+        label and a cell either side, at least 10; a cell between two; the
+        row's padding and outer margins), else on two."""
+        try:
+            row = self.query_one("#sessions-actions", Horizontal)
+        except Exception:
+            return
+        buttons = list(row.query(Button))
+        needed = sum(max(10, len(str(button.label)) + 2) for button in buttons) + len(buttons) + 3
+        row.set_class(width < needed, "-two-lines")
 
     def on_show(self) -> None:
         self._refresh_target_options()
@@ -973,6 +1000,8 @@ class SessionsPanel(Widget):
             self._start_streams_export(session_id, self._run_export_streams, "Export Streams")
         elif bid == "btn-ses-export-base-files":
             self._start_streams_export(session_id, self._run_export_base_files, "Export Base Files")
+        elif bid == "btn-ses-archive":
+            self._start_archive(session_id)
         elif bid == "btn-ses-end":
             self._pending_delete_session_id = None
             self._pending_delete_artifacts_session_id = None
@@ -1048,7 +1077,7 @@ class SessionsPanel(Widget):
         except asyncio.CancelledError:
             if self._streams_cancel is not None:
                 self._streams_cancel.set()  # a clip downloading in a thread stops at its next chunk
-            staged = ("" if self._streams_export_button == "Export Base Files" else
+            staged = ("" if self._streams_export_button in ("Export Base Files", "Archive") else
                       ", and cuts made on a capture host stay there until they are fetched")
             self._log(
                 f"[yellow]The export of '{escape(session_id)}' stopped. What arrived is kept{staged}: press "
@@ -1458,6 +1487,38 @@ class SessionsPanel(Widget):
             )
         elif not result.fetched:
             self._log(f"[yellow]No SSH host holds base files of {shown}.[/yellow]")
+
+    # ---- Archive ----
+
+    def _start_archive(self, session_id: str) -> None:
+        """Archive: send the session's raw files from this checkout to the
+        System Settings host (mmla ses-archive), with the progress row and
+        Cancel of the exports. A session with no folder here has nothing to
+        send yet."""
+        from openmmla.commands.ses import archive
+
+        if not archive.local_session_dir(session_id).is_dir():
+            self._log(f"[yellow]{escape(archive.no_local_folder(session_id))}.[/yellow]")
+            return
+        self._start_streams_export(session_id, self._run_archive, "Archive")
+
+    async def _run_archive(self, session_id: str) -> None:
+        """what mmla ses-archive does, in this worker, with the MongoDB the
+        table was listed from."""
+        from openmmla.commands.ses import archive
+
+        cancel = self._streams_cancel or threading.Event()
+        callbacks = stream_export.ExportCallbacks(
+            log=self._log,
+            progress_start=self._progress_start,
+            progress_update=self._progress_update,
+            progress_end=self._progress_end,
+            cancelled=cancel.is_set,
+        )
+        try:
+            await archive.archive_session(session_id, callbacks=callbacks, mongo=self._mongo_client)
+        except archive.ArchiveError as error:
+            self._log(f"[red]✗ The archive of '{escape(session_id)}' was not made: {escape(str(error))}[/red]")
 
     async def _run_delete(self, session_id: str) -> None:
         import asyncio

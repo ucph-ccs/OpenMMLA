@@ -53,6 +53,7 @@ OPTIONAL_DEP_MAP = {
     "ses-jev": "uber-base",
     "ses-classify": "uber-base",
     "ses-calibrate": "ips-base",
+    "ses-archive": "tui",
     "tui": "tui",
     "crypto": "tui",
 }
@@ -178,6 +179,10 @@ COMMANDS = {
     "ses-classify": (
         "openmmla.commands.ses.classify:main",
         "Train and evaluate the 10 s interaction classifier across sessions."
+    ),
+    "ses-archive": (
+        "openmmla.commands.ses.archive:main",
+        "Send a session's raw files to the System Settings host, check them there by sha256, and note the archive."
     ),
     "tui": (
         "openmmla.commands.tui:main",
