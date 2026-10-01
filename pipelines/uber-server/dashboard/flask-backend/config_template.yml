@@ -1,5 +1,12 @@
+# Dashboard backend settings. The TUI fills InfluxDB, MongoDB and Redis from System Settings ->
+# Connections when it saves this file; the live camera tiles find MediaMTX through System Settings ->
+# Stream Server (config/system_services.yml). A StreamServer section here (host, api_port,
+# playback_port, webrtc_port) is used only when System Settings has none, and without either the
+# dashboard tries the InfluxDB host with the MediaMTX default ports.
+
 # Database settings
 InfluxDB:
+  # The dashboard reads every measurement it shows from here (sessions, live view, analysis).
   # Replace <inlfuxdb-example-server> with your actual sever address that runs the InfluxDB server, and the <port>
   # with the actual port number that InfluxDB server is listening to. The default port for InfluxDB is 8086.
   # Replace <influxdb-token> with your actual InfluxDB token, and <org-name> with your actual InfluxDB organization name.
@@ -16,10 +23,15 @@ InfluxDB:
   bucket: mmla-data
 
 MongoDB:
+  # Optional and only read: the session documents add each session's devices, streams, IPS camera
+  # placement and provenance, and list sessions that have no measurements yet.
   url: mongodb://<mongodb-example-server>:<port>
   db: openmmla
 
 Redis:
+  # The analysis report jobs go through this Redis database to the Celery worker (make celery),
+  # on the queue mmla-dashboard (environment variable DASHBOARD_CELERY_QUEUE to change it). Without a
+  # worker the dashboard computes the report itself.
   # Replace <redis-example-server> with your actual sever address that runs the Redis server, and the <port-number>
   # with the actual port number that Redis server is listening to. Specify a certain database number you want to use for
   # message queue. The default database number is 0. The default port for Redis is 6379. The redis here is for celery

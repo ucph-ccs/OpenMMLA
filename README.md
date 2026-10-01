@@ -20,7 +20,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 
 + **Data input stage (purple)**: multimodal raw data from sensors and wearable badges is streamed to base stations or a central media server, where it is turned into structured, coded streams for efficient transmission and processing.
 + **Data processing stage (black)**: each coded stream is processed by the matching *Base* (ASR, IPS or VFA), which handles the signal processing itself and offloads the heavier tasks to the AI server. The *Synchronizer* merges the results of all bases in a session and writes segment-level measurement features to the time-series database.
-+ **Data output stage (lime)**: the measurement features are visualized on the dashboard in real time and combined into indicators of group interaction. Post-processing visualizations, logs and reports are stored with the session and reachable from the same dashboard, for both real-time awareness and retrospective analysis of group dynamics.
++ **Data output stage (lime)**: the measurement features are shown on the dashboard in real time, or replayed once the session has ended, and its analysis report summarizes each session's speech, proximity and attention from the same features, for both real-time awareness and retrospective analysis of group dynamics. Exported measurements, logs and plots are stored with the session.
 
 </details>
 
@@ -38,7 +38,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 - **Servers**: PCs that provide centralized services.
     + *Base server*: the AI services (speaker inference, transcription, VAD, frame analysis, ...) as Docker containers on a GPU machine.
     + *Uber server*: the system services: InfluxDB and MongoDB (databases), Redis and Mosquitto (messaging), Nginx (load balancing), MediaMTX (streaming) and the dashboard.
-- **Dashboard**: web pages for phones and browsers with session selection, real-time and post-time visualizations, and measurement downloads.
+- **Dashboard**: web pages with a session explorer, a live view of a running session (with its camera video when the session streams through MediaMTX) or a replay of an ended one, an analysis report per session, and measurement downloads.
 
 </details>
 

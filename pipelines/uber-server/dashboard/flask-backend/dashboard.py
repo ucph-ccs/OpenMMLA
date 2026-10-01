@@ -1,237 +1,865 @@
+"""The OpenMMLA dashboard: session explorer, live view and analysis report.
+
+One Flask app serves the static pages under ../frontend, a JSON API over the sessions in InfluxDB
+(with MongoDB's session documents when it answers), a Server-Sent Events stream for the live and
+replay views, and the report parts, which openmmla.analytics.report computes and store.py caches.
+The report jobs run on the Celery worker of `celery -A dashboard.celery worker` when one listens on
+the dashboard's queue, else in a `python dashboard.py precompute` process this one starts.
+
+Run it as the Makefile does, from this folder: `gunicorn -k gevent -w 1 -b 0.0.0.0:5050 dashboard:app`
+(one worker: the job bookkeeping and the live feeds that every follower of a session shares live in
+this process, see stream.py). For development, `python dashboard.py serve`; to fill the cache ahead
+of a meeting, `python dashboard.py precompute --all`.
+"""
+
 import os
-import shutil
+import sys
+
+if __name__ == "__main__" and sys.argv[1:2] == ["serve"]:
+    # gevent's server needs the standard library patched before anything opens a socket, as
+    # gunicorn's gevent worker does for the deployed app
+    from gevent import monkey
+    monkey.patch_all()
+
+import argparse
+import gzip
+import json
+import logging
+import mimetypes
 import threading
 import time
-from datetime import datetime, timedelta
-from threading import Event
+from urllib.parse import urlsplit
 
-import yaml
 from celery import Celery
-from flask import Flask, request, jsonify, send_from_directory, url_for
-from flask_socketio import SocketIO
+from flask import Flask, Response, request, send_file, send_from_directory
 
-from openmmla.analytics.asr.analyze import asr_session_analysis
-from openmmla.analytics.ips.analyze import ips_session_analysis
-from openmmla.utils.constants import EVENT_TYPE_ASR_RECOGNITION, EVENT_TYPE_ASR_TRANSCRIPTION, EVENT_TYPE_IPS_RELATION
-from openmmla.utils.querys import fetch_latest_entry, get_node_positions
-from openmmla.utils.client import InfluxDBClientWrapper
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
 
-project_dir = os.getcwd()
-config_path = os.path.join(project_dir, 'config.yml')
-static_dir = os.path.join(project_dir, 'static')
-frontend_dir = os.path.abspath(os.path.join(project_dir, '..', 'frontend'))
-logs_dir = os.path.join(static_dir, 'logs')
-visualizations_dir = os.path.join(static_dir, 'visualizations')
-os.makedirs(logs_dir, exist_ok=True)
-os.makedirs(visualizations_dir, exist_ok=True)
+import jobs as report_jobs  # noqa: E402
+from media import MediaServer  # noqa: E402
+from store import JOBS, PART_JOB, ReportStore  # noqa: E402
+from stream import FEEDS, clamp_backfill, clamp_speed, live_stream  # noqa: E402
 
-app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
-influx_client = InfluxDBClientWrapper(config_path)
+from openmmla.analytics.report import common, sessions  # noqa: E402
+from openmmla.analytics.report.common import InfluxUnavailable, valid_session_id  # noqa: E402
 
-with open(config_path, 'r') as f:
-    redis_config = yaml.safe_load(f)['Redis']
+logger = logging.getLogger("dashboard")
 
-post_time_visualization_timestamps = {}  # session_id -> last generation time
-real_time_visualization_threads = {}  # session_id -> (thread, stop_event)
-active_sessions = {}  # session_id -> set of client ids
-last_sent_data = {}  # session_id -> last sent timestamps per data type
+FRONTEND_DIR = os.path.abspath(os.path.join(BACKEND_DIR, "..", "frontend"))
+ASSETS_DIR = os.path.join(FRONTEND_DIR, "assets")
+REPO_ROOT = os.path.abspath(os.path.join(BACKEND_DIR, "..", "..", "..", ".."))
+project_dir = BACKEND_DIR if os.path.isfile(os.path.join(BACKEND_DIR, "config.yml")) else os.getcwd()
+config_path = os.path.join(project_dir, "config.yml")
+
+QUEUE = os.environ.get("DASHBOARD_CELERY_QUEUE", "").strip() or "mmla-dashboard"
+DEFAULT_PORT = 5050
+INDEX_TTL = 15.0
+LAST_EVENT_TTL = 5.0
+# a failed InfluxDB query is answered from memory this long, so the requests that waited for it
+# fail with it rather than each waiting out the client timeout again
+INFLUX_ERROR_TTL = 5.0
+STATE_TTL = 2.0
+HEALTH_TTL = 10.0
+GZIP_MIN_BYTES = 32 * 1024
+EXPORT_NAMES = ("transcript.txt", "transcript.srt", "window_features.csv", "report.json")
+
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
 
 
-def make_celery(app):
-    celery = Celery(
-        app.import_name,
-        backend=f"redis://{redis_config['host']}:{redis_config['port']}/{redis_config['db']}",
-        broker=f"redis://{redis_config['host']}:{redis_config['port']}/{redis_config['db']}"
+def _usable(value) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and "<" not in text and ">" not in text
+
+
+def _load_config() -> tuple[dict, str | None]:
+    """the dashboard config merged with System Settings (and decrypted); ({}, reason) when unreadable."""
+    if not os.path.isfile(config_path):
+        return {}, f"{config_path} does not exist: copy config_template.yml or save it from the TUI."
+    try:
+        from openmmla.utils.config import load_config_with_system_services
+        return load_config_with_system_services(config_path) or {}, None
+    except Exception as exc:
+        return {}, f"config.yml could not be read: {type(exc).__name__}"
+
+
+CONFIG, CONFIG_ERROR = _load_config()
+
+
+def _redis_url(config: dict) -> str | None:
+    section = config.get("Redis") if isinstance(config.get("Redis"), dict) else {}
+    host = section.get("host")
+    if not _usable(host):
+        return None
+    try:
+        port = int(section.get("port") or 6379)
+        db = int(section.get("db") or 0)
+    except (TypeError, ValueError):
+        return None
+    return f"redis://{str(host).strip()}:{port}/{db}"
+
+
+REDIS_URL = _redis_url(CONFIG)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name) or default))
+    except ValueError:
+        return default
+
+
+def make_celery(flask_app: Flask) -> Celery:
+    """the report worker's Celery app, on Redis from the merged config and on its own queue, so a
+    worker of an older dashboard (which consumes the default `celery` queue) never takes its tasks."""
+    broker = REDIS_URL or "memory://"
+    app_celery = Celery(flask_app.import_name if flask_app.import_name != "__main__" else "dashboard",
+                        broker=broker, backend=REDIS_URL or None)
+    app_celery.conf.update(
+        task_default_queue=QUEUE,
+        task_ignore_result=True,
+        task_track_started=False,
+        worker_prefetch_multiplier=1,
+        # a video job holds a whole session's video features: two at a time is what one server takes
+        worker_concurrency=_int_env("DASHBOARD_WORKER_CONCURRENCY", 2),
+        broker_connection_retry_on_startup=True,
+        broker_connection_timeout=3,
+        broker_transport_options={"socket_connect_timeout": 3},
     )
-    celery.conf.update(app.config)
-    return celery
+    return app_celery
 
 
-def clear_folder_contents(folder_path):
-    for filename in os.listdir(folder_path):
-        file_path = os.path.join(folder_path, filename)
-        try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
-        except Exception as e:
-            print(f"Failed to delete {file_path}. Reason: {e}")
-
-
-clear_folder_contents(visualizations_dir)
-clear_folder_contents(logs_dir)
+app = Flask(__name__, static_folder=ASSETS_DIR, static_url_path="/assets")
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = None
+app.json.sort_keys = False
 celery = make_celery(app)
+STORE = ReportStore()
+MEDIA = MediaServer(REPO_ROOT, CONFIG)
 
 
-# ======= Frontend pages =======
-@app.route('/')
-def index():
-    return send_from_directory(frontend_dir, 'index.html')
+@celery.task(name="dashboard.build_report_task", ignore_result=True)
+def build_report_task(sid, job):
+    """compute one report job of one session into the cache (light: speech + space, video:
+    attention + timeline)."""
+    if not valid_session_id(sid) or job not in JOBS:
+        logger.warning("ignored a report task with an invalid session id or job")
+        return None
+    status = report_jobs.run_in_worker(STORE, config_path, sid, job, REPO_ROOT)
+    return (status or {}).get("state")
 
 
-@app.route('/realtime')
-def realtime_page():
-    return send_from_directory(frontend_dir, 'realtime.html')
+class ApiError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
 
-@app.route('/posttime')
-def posttime_page():
-    return send_from_directory(frontend_dir, 'posttime.html')
+_client = None
+_client_lock = threading.Lock()
 
 
-@app.route('/css/<path:filename>')
-def frontend_css(filename):
-    return send_from_directory(os.path.join(frontend_dir, 'css'), filename)
+def influx_client():
+    """the web process's InfluxDB client wrapper, made on first use."""
+    global _client
+    if _client is not None:
+        return _client
+    with _client_lock:
+        if _client is None:
+            if CONFIG_ERROR:
+                raise InfluxUnavailable(CONFIG_ERROR)
+            try:
+                from openmmla.utils.client import InfluxDBClientWrapper
+                _client = InfluxDBClientWrapper(config_path)
+            except Exception as exc:
+                raise InfluxUnavailable(f"InfluxDB is not configured in config.yml ({type(exc).__name__})") from exc
+    return _client
 
 
-# ======= API =======
-@app.route('/api/get_sessions')
-def get_sessions():
-    """List the recorded sessions.
-
-    An InfluxDB that refuses the connection or the token answers 503 with the
-    reason: returning an empty list instead would render as 'no sessions yet',
-    which is what a misconfigured dashboard looked like for a whole session."""
-    try:
-        return jsonify(influx_client.get_all_session_ids(raise_on_error=True))
-    except Exception as e:
-        message = f"InfluxDB at {influx_client.url} (bucket {influx_client.bucket}): {e}"
-        print(f"get_sessions failed: {message}")
-        return jsonify({'error': message}), 503
+def influx_label() -> str:
+    section = CONFIG.get("InfluxDB") if isinstance(CONFIG.get("InfluxDB"), dict) else {}
+    url = section.get("url") if _usable(section.get("url")) else "n/a"
+    bucket = section.get("bucket") or "mmla-data"
+    return f"InfluxDB at {url} (bucket {bucket})"
 
 
-@celery.task
-def generate_post_time_visualization(session_id):
-    try:
-        print("Generating post-time visualization...")
-        asr_session_analysis(static_dir, session_id, influx_client)
-        ips_session_analysis(static_dir, session_id, influx_client)
-    except KeyError as e:
-        print(f"Key not found, {e}")
+_mongo = None
+_mongo_checked = 0.0
+_mongo_lock = threading.Lock()
+MONGO_RETRY = 30.0
 
 
-@app.route('/api/post_time_visualize', methods=['POST'])
-def post_time_visualize():
-    """Start the post-time visualization generation task (throttled)."""
-    session_id = request.json['session_id']
-    last_visualized = post_time_visualization_timestamps.get(session_id)
-    visualization_age = datetime.now() - last_visualized if last_visualized else timedelta.max
-    if visualization_age > timedelta(minutes=2):
-        generate_post_time_visualization.delay(session_id)
-        post_time_visualization_timestamps[session_id] = datetime.now()
-        print("Post-time visualization task started")
-    return jsonify({'message': "Post-time visualization started"})
+def mongo_configured() -> bool:
+    section = CONFIG.get("MongoDB") if isinstance(CONFIG.get("MongoDB"), dict) else {}
+    return _usable(section.get("url"))
 
 
-@app.route('/api/get_post_time_visualizations/<session_id>')
-def get_post_time_visualizations(session_id):
-    visualization_dir = os.path.join(visualizations_dir, session_id, 'post-time')
-    valid_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.html')
-    try:
-        files = [f for f in os.listdir(visualization_dir)
-                 if os.path.isfile(os.path.join(visualization_dir, f)) and f.endswith(valid_extensions)]
-    except FileNotFoundError:
-        files = []
-    file_urls = [url_for('static', filename=f"visualizations/{session_id}/post-time/{f}") for f in files]
-    return jsonify({'files': file_urls})
+def mongo_db():
+    """the MongoDB database of the session documents, None when not configured or unreachable
+    (retried every 30 s)."""
+    global _mongo, _mongo_checked
+    if _mongo is not None or not mongo_configured():
+        return _mongo
+    now = time.time()
+    if now - _mongo_checked < MONGO_RETRY:
+        return None
+    with _mongo_lock:
+        if _mongo is None and now - _mongo_checked >= MONGO_RETRY:
+            _mongo_checked = now
+            try:
+                _mongo = sessions.open_mongo(CONFIG)
+            except Exception as exc:
+                logger.info("MongoDB not available: %s", type(exc).__name__)
+                _mongo = None
+    return _mongo
 
 
-@app.route('/api/get_logs/<session_id>')
-def get_logs(session_id):
-    log_path = os.path.join(logs_dir, session_id)
-    try:
-        log_files = [f for f in os.listdir(log_path) if os.path.isfile(os.path.join(log_path, f))]
-        log_urls = [{'name': f, 'url': f"/logs/{session_id}/{f}"} for f in log_files]
-        return jsonify({'logs': log_urls})
-    except FileNotFoundError:
-        return jsonify({'message': 'Log files not found', 'logs': []}), 404
+_last_events: dict = {}
+_last_lock = threading.Lock()
+_last_queries: dict = {}
+_last_errors: dict = {}
 
 
-@app.route('/logs/<session_id>/<filename>')
-def download_log(session_id, filename):
-    return send_from_directory(os.path.join(logs_dir, session_id), filename, as_attachment=True)
+def _cached_last(sid: str, max_age: float, now: float):
+    with _last_lock:
+        hit = _last_events.get(sid)
+    return hit if hit and now - hit[0] < max_age else None
 
 
-@app.route('/api/real_time_visualize/<session_id>')
-def real_time_visualize(session_id):
-    """Start the real-time data emitter for the specified session."""
-    if session_id not in real_time_visualization_threads:
-        stop_event = Event()
-        thread = threading.Thread(target=emit_realtime_data, args=(session_id, stop_event))
-        thread.daemon = True
-        thread.start()
-        real_time_visualization_threads[session_id] = (thread, stop_event)
-        print(f"Starting real-time visualization thread for session: {session_id}")
-    return jsonify({'message': "Real-time visualization started"})
+def _keep_last(sid: str, at: float, value) -> None:
+    with _last_lock:
+        if len(_last_events) > 2048:
+            _last_events.clear()
+        _last_events[sid] = (at, value)
 
 
-def emit_realtime_data(session_id, stop_event):
-    while not stop_event.is_set():
+def last_event(sid: str, refresh: bool = False, max_age: float = LAST_EVENT_TTL) -> float | None:
+    """the newest event time of a session, at most `max_age` seconds old (5 s by default; every
+    live view asks it). A session whose live feed polled within that time answers from the feed
+    without a query; otherwise one request asks InfluxDB while the others for the session wait,
+    and when it fails they fail with it (INFLUX_ERROR_TTL)."""
+    now = time.time()
+    if not refresh:
+        hit = _cached_last(sid, max_age, now)
+        if hit is not None:
+            return hit[1]
+        fed = FEEDS.newest(sid, max_age, now)
+        if fed is not None:
+            _keep_last(sid, now, fed)
+            return fed
+    with _last_lock:
+        lock = _last_queries.get(sid)
+        if lock is None:
+            if len(_last_queries) > 2048:
+                _last_queries.clear()
+            lock = _last_queries[sid] = threading.Lock()
+    with lock:
+        now = time.time()
+        if not refresh:
+            hit = _cached_last(sid, max_age, now)
+            if hit is not None:
+                return hit[1]
+        with _last_lock:
+            failed = _last_errors.get(sid)
+        if failed is not None and now - failed[0] < INFLUX_ERROR_TTL:
+            raise InfluxUnavailable(failed[1])
         try:
-            recognition = fetch_latest_entry(session_id, EVENT_TYPE_ASR_RECOGNITION, influx_client)
-            transcription = fetch_latest_entry(session_id, EVENT_TYPE_ASR_TRANSCRIPTION, influx_client)
-            relations = fetch_latest_entry(session_id, EVENT_TYPE_IPS_RELATION, influx_client)
-            graph = relations.get('graph') if relations else None
-            graph_timestamp = relations.get('window_start_time') if relations else None
-            positions = get_node_positions(session_id, influx_client, graph_timestamp) if graph_timestamp else {}
-
-            sent = last_sent_data.setdefault(session_id, {})
-            data = {'recognition': None, 'transcription': None, 'graph': None, 'positions': None}
-
-            if recognition and recognition['window_start_time'] != sent.get('recognition'):
-                sent['recognition'] = recognition['window_start_time']
-                data['recognition'] = recognition
-
-            if transcription and transcription['window_start_time'] != sent.get('transcription'):
-                sent['transcription'] = transcription['window_start_time']
-                data['transcription'] = transcription
-
-            if graph_timestamp and graph_timestamp != sent.get('graph'):
-                sent['graph'] = graph_timestamp
-                data['graph'] = graph
-                data['positions'] = positions
-
-            if any(v is not None for v in data.values()):
-                socketio.emit('realtime_data', {'session': session_id, 'data': data})
-
-        except Exception as e:
-            print(f"An unexpected error occurred during data fetching: {e}")
-
-        time.sleep(1)
+            value = common.last_event_time(influx_client(), sid)
+        except InfluxUnavailable as exc:
+            with _last_lock:
+                if len(_last_errors) > 2048:
+                    _last_errors.clear()
+                _last_errors[sid] = (time.time(), str(exc))
+            raise
+        _keep_last(sid, now, value)
+        with _last_lock:
+            _last_errors.pop(sid, None)
+    return value
 
 
-# ======= SocketIO events =======
-@socketio.on('join_session')
-def handle_join_session(data):
-    session_id = data['session_id']
-    client_id = data['client_id']
-    active_sessions.setdefault(session_id, set()).add(client_id)
-    print(f"Client {client_id} joined session: {session_id}")
+def is_live(last: float | None, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    return last is not None and now - last < sessions.LIVE_SECONDS
 
 
-@socketio.on('connect')
-def handle_connect():
-    print('Client connected')
+_index = None
+_index_at = 0.0
+_index_error = None
+_index_lock = threading.Lock()
 
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    print('Client disconnected')
-    for session_id, clients in active_sessions.items():
-        if request.sid in clients:
-            clients.remove(request.sid)
-            print(f"{request.sid} is removed for {session_id}.")
-            if not clients and session_id in real_time_visualization_threads:
-                thread, stop_event = real_time_visualization_threads.pop(session_id)
-                stop_event.set()
-                thread.join()
-                print(f"{session_id} has no clients connected and its thread has been cleaned up.")
-    for session_id in [s for s, clients in active_sessions.items() if not clients]:
-        del active_sessions[session_id]
+def session_index(refresh: bool = False) -> dict:
+    """sessions.session_index, cached 15 s; one request computes it while the others wait, and
+    when it fails they fail with it (INFLUX_ERROR_TTL)."""
+    global _index, _index_at, _index_error
+    if not refresh and _index is not None and time.time() - _index_at < INDEX_TTL:
+        return _index
+    with _index_lock:
+        if refresh or _index is None or time.time() - _index_at >= INDEX_TTL:
+            failed = _index_error
+            if failed is not None and time.time() - failed[0] < INFLUX_ERROR_TTL:
+                raise InfluxUnavailable(failed[1])
+            try:
+                value = sessions.session_index(influx_client(), mongo_db())
+            except InfluxUnavailable as exc:
+                _index_error = (time.time(), str(exc))
+                raise
+            _index, _index_at, _index_error = value, time.time(), None
+            now = time.time()
+            with _last_lock:
+                for entry in value.get("sessions") or []:
+                    if entry.get("id") and entry.get("last_event") is not None:
+                        _last_events.setdefault(entry["id"], (now, entry["last_event"]))
+    return _index
 
 
-# gunicorn -k gevent -w 1 -b 0.0.0.0:5050 dashboard:app
-if __name__ == '__main__':
-    socketio.run(app, debug=True, port=5050, host='0.0.0.0')
+def index_entry(sid: str) -> dict | None:
+    """the session's entry in the cached index, without querying when the cache is cold."""
+    index = _index
+    if index is None:
+        return None
+    for entry in index.get("sessions") or []:
+        if entry.get("id") == sid:
+            return entry
+    return None
+
+
+def report_summary(sid: str, last: float | None, live: bool) -> dict:
+    now = time.time()
+    return {job: report_jobs.job_summary(STORE, sid, job, last, live, now) for job in JOBS}
+
+
+def job_command(sid: str, job: str) -> list[str]:
+    """the command of a local report job: this file's precompute, in this interpreter."""
+    return [sys.executable, os.path.join(BACKEND_DIR, "dashboard.py"), "precompute", "--force", "--job", job, sid]
+
+
+RUNNER = report_jobs.JobRunner(STORE, job_command, celery_app=celery if REDIS_URL else None,
+                               task=build_report_task, queue=QUEUE, cwd=BACKEND_DIR)
+
+
+def _dumps(body) -> str:
+    try:
+        return json.dumps(body, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return json.dumps(common.jsonable(body), allow_nan=False, separators=(",", ":"))
+
+
+def json_response(body, status: int = 200) -> Response:
+    text = _dumps(body).encode("utf-8")
+    response = Response(text, status=status, mimetype="application/json")
+    if len(text) >= GZIP_MIN_BYTES and "gzip" in (request.headers.get("Accept-Encoding") or ""):
+        response.set_data(gzip.compress(text, compresslevel=5))
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Vary"] = "Accept-Encoding"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def check_sid(sid: str) -> str:
+    if not valid_session_id(sid):
+        raise ApiError(400, "That is not a valid session id.")
+    return sid
+
+
+def influx_error(exc: Exception) -> ApiError:
+    return ApiError(503, f"{influx_label()}: {exc}")
+
+
+@app.errorhandler(ApiError)
+def _api_error(exc: ApiError):
+    return json_response({"error": exc.message}, exc.status)
+
+
+@app.errorhandler(404)
+def _not_found(exc):
+    if request.path.startswith("/api/"):
+        return json_response({"error": "Not found."}, 404)
+    return Response("Not found.", status=404, mimetype="text/plain")
+
+
+@app.errorhandler(405)
+def _not_allowed(exc):
+    if request.path.startswith("/api/"):
+        return json_response({"error": "Method not allowed."}, 405)
+    return Response("Method not allowed.", status=405, mimetype="text/plain")
+
+
+@app.errorhandler(500)
+def _server_error(exc):
+    if request.path.startswith("/api/"):
+        return json_response({"error": "The dashboard failed on this request; its log says why."}, 500)
+    return Response("Server error.", status=500, mimetype="text/plain")
+
+
+@app.after_request
+def _cache_headers(response: Response) -> Response:
+    path = request.path
+    if path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    elif path.startswith("/assets/") or path.endswith(".html") or path in ("/", "/live", "/realtime",
+                                                                            "/analysis", "/posttime"):
+        response.headers["Cache-Control"] = "no-cache"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
+
+
+def _page(name: str) -> Response:
+    if not os.path.isfile(os.path.join(FRONTEND_DIR, name)):
+        return Response(f"{name} is missing from the dashboard frontend.", status=404, mimetype="text/plain")
+    return send_from_directory(FRONTEND_DIR, name)
+
+
+@app.route("/")
+def index_page():
+    return _page("index.html")
+
+
+@app.route("/live")
+@app.route("/realtime")
+def live_page():
+    return _page("live.html")
+
+
+@app.route("/analysis")
+@app.route("/posttime")
+def analysis_page():
+    return _page("analysis.html")
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return Response(status=204)
+
+
+_health = None
+_health_at = 0.0
+_health_lock = threading.Lock()
+
+
+@app.route("/api/health")
+def api_health():
+    """reachability of everything the dashboard reads, for the explorer's status chips; never 5xx.
+    The checks run at most every 10 s, however many pages ask; `checked_at` says when they ran,
+    `stream` how many sessions are followed live now and by how many connections."""
+    global _health, _health_at
+    if _health is None or time.time() - _health_at >= HEALTH_TTL:
+        with _health_lock:
+            if _health is None or time.time() - _health_at >= HEALTH_TTL:
+                _health = _check_health()
+                _health_at = time.time()
+    out = dict(_health)
+    out["checked_at"] = round(_health_at, 3)
+    out["time"] = round(time.time(), 3)
+    out["stream"] = FEEDS.stats()
+    return json_response(out)
+
+
+def _check_health() -> dict:
+    out = {"influx": {"ok": False, "url": None, "bucket": None}, "mongo": {"ok": None},
+           "worker": {"ok": None, "workers": 0, "queue": QUEUE}, "media": {"ok": None, "host": None}}
+    section = CONFIG.get("InfluxDB") if isinstance(CONFIG.get("InfluxDB"), dict) else {}
+    out["influx"]["url"] = section.get("url") if _usable(section.get("url")) else None
+    out["influx"]["bucket"] = section.get("bucket") or "mmla-data"
+    try:
+        client = influx_client()
+        common.query_tables(client, f'from(bucket: "{client.bucket}") |> range(start: -1m) |> limit(n: 1)')
+        out["influx"]["ok"] = True
+    except Exception as exc:
+        out["influx"]["error"] = str(exc) if isinstance(exc, InfluxUnavailable) else type(exc).__name__
+    if mongo_configured():
+        try:
+            db = mongo_db()
+            if db is None:
+                out["mongo"] = {"ok": False, "error": "MongoDB did not answer."}
+            else:
+                db.command("ping")
+                out["mongo"] = {"ok": True}
+        except Exception as exc:
+            out["mongo"] = {"ok": False, "error": f"MongoDB did not answer ({type(exc).__name__})."}
+    try:
+        worker = dict(RUNNER.worker_status())
+        out["worker"] = {"ok": worker.get("ok"), "workers": worker.get("workers", 0), "queue": QUEUE,
+                         "mode": worker.get("mode")}
+        if worker.get("error"):
+            out["worker"]["error"] = str(worker["error"])[:300]
+    except Exception as exc:
+        out["worker"]["error"] = type(exc).__name__
+    try:
+        out["media"] = MEDIA.health()
+    except Exception as exc:
+        out["media"] = {"ok": False, "host": None, "error": type(exc).__name__}
+    return out
+
+
+@app.route("/api/sessions")
+def api_sessions():
+    try:
+        index = session_index()
+    except InfluxUnavailable as exc:
+        raise influx_error(exc)
+    except Exception as exc:
+        logger.exception("session index failed")
+        raise influx_error(f"{type(exc).__name__}: {exc}")
+    now = time.time()
+    entries = []
+    for entry in index.get("sessions") or []:
+        entry = dict(entry)
+        last = entry.get("last_event")
+        try:
+            entry["report"] = report_summary(entry["id"], last, is_live(last, now))
+        except Exception as exc:
+            logger.warning("report state of %s: %s", entry.get("id"), exc)
+            entry["report"] = {job: "missing" for job in JOBS}
+        entries.append(entry)
+    body = dict(index)
+    body["sessions"] = entries
+    return json_response(body)
+
+
+@app.route("/api/get_sessions")
+def api_get_sessions():
+    """the old plain list of session ids, kept for anything scripted against it."""
+    try:
+        index = session_index()
+    except Exception as exc:
+        raise influx_error(exc)
+    ids = sorted(entry["id"] for entry in index.get("sessions") or []
+                 if entry.get("id") and any((entry.get("counts") or {}).values()))
+    return json_response(ids)
+
+
+def _meta(sid: str) -> dict:
+    """the meta object of a session, 404 when neither InfluxDB nor MongoDB knows it."""
+    try:
+        meta = sessions.session_meta(influx_client(), sid, mongo_db())
+    except InfluxUnavailable as exc:
+        raise influx_error(exc)
+    if not meta:
+        raise ApiError(404, "No session with this id in InfluxDB or MongoDB.")
+    return meta
+
+
+@app.route("/api/sessions/<sid>")
+def api_session(sid):
+    check_sid(sid)
+    meta = dict(_meta(sid))
+    state = meta.get("state") or {}
+    last = state.get("last_event")
+    if last is not None:
+        with _last_lock:
+            _last_events[sid] = (time.time(), last)
+    meta["report"] = report_summary(sid, last, bool(state.get("live")))
+    return json_response(meta)
+
+
+@app.route("/api/sessions/<sid>/state")
+def api_session_state(sid):
+    """whether a session is live and how far behind its newest data is, for pages that poll every
+    few seconds (the explorer's live band): one small InfluxDB query per session at most every 2 s
+    (none while the session's live feed runs), the span from the cached session list."""
+    check_sid(sid)
+    try:
+        last = last_event(sid, max_age=STATE_TTL)
+    except InfluxUnavailable as exc:
+        raise influx_error(exc)
+    entry = index_entry(sid)
+    if last is None and entry is None:
+        raise ApiError(404, "No session with this id in InfluxDB.")
+    now = time.time()
+    t0 = entry.get("t0") if entry else None
+    ends = [float(x) for x in ((entry or {}).get("t1"), last) if x is not None]
+    return json_response({"live": is_live(last, now), "last_event": None if last is None else round(last, 3),
+                          "lag": None if last is None else round(now - last, 3),
+                          "t0": None if t0 is None else round(float(t0), 3),
+                          "t1": round(max(ends), 3) if ends else None})
+
+
+def _session_last(sid: str) -> float:
+    """the session's newest event time, 404 when it has no measurements at all."""
+    try:
+        last = last_event(sid)
+    except InfluxUnavailable as exc:
+        raise influx_error(exc)
+    if last is None:
+        raise ApiError(404, "This session has no measurements in InfluxDB.")
+    return last
+
+
+@app.route("/api/sessions/<sid>/report/<part>")
+def api_report_part(sid, part):
+    check_sid(sid)
+    if part not in PART_JOB:
+        raise ApiError(404, "Report parts are speech, space, attention and timeline.")
+    last = _session_last(sid)
+    # ?submit=0 reads the cache only and never starts a job
+    submit = request.args.get("submit", "1") != "0"
+    status, body = RUNNER.serve_part(sid, part, last, is_live(last), submit=submit)
+    return json_response(body, status)
+
+
+@app.route("/api/sessions/<sid>/report/refresh", methods=["POST"])
+def api_report_refresh(sid):
+    check_sid(sid)
+    payload = request.get_json(silent=True) or {}
+    job = payload.get("job") if isinstance(payload, dict) else None
+    job = job or "all"
+    if job not in ("light", "video", "all"):
+        raise ApiError(400, "job must be light, video or all.")
+    last = _session_last(sid)
+    states = {}
+    for name in (JOBS if job == "all" else (job,)):
+        status = RUNNER.submit(sid, name, force=True, last_event=last) or {}
+        states[name] = {"state": status.get("state"), "runner": status.get("runner")}
+    return json_response({"status": "queued", "jobs": states}, 202)
+
+
+def _span(sid: str) -> dict:
+    """t0, t1 and the group of a session, from the cached index when it holds the session."""
+    entry = index_entry(sid)
+    if entry is None:
+        meta = _meta(sid)
+        entry = {"t0": meta.get("t0"), "t1": meta.get("t1"), "group": meta.get("group"),
+                 "last_event": (meta.get("state") or {}).get("last_event")}
+    return entry
+
+
+def _float_arg(name: str):
+    value = request.args.get(name)
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        raise ApiError(400, f"{name} must be a number.")
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ApiError(400, f"{name} must be a number.")
+    return number
+
+
+@app.route("/api/sessions/<sid>/stream")
+def api_stream(sid):
+    check_sid(sid)
+    mode = (request.args.get("mode") or "follow").strip().lower()
+    if mode not in ("follow", "replay"):
+        raise ApiError(400, "mode must be follow or replay.")
+    at = _float_arg("at")
+    speed = clamp_speed(request.args.get("speed") or 1)
+    backfill = clamp_backfill(request.args.get("backfill") if request.args.get("backfill") not in (None, "")
+                              else 300)
+    try:
+        client = influx_client()
+        span = _span(sid)
+    except InfluxUnavailable as exc:
+        raise influx_error(exc)
+    floor = None
+    try:
+        space = STORE.read_part(sid, "space")
+        floor = ((space or {}).get("data") or {}).get("floor")
+    except Exception:
+        floor = None
+
+    def cached_last():
+        try:
+            return last_event(sid)
+        except InfluxUnavailable:
+            return None
+
+    generator = live_stream(client, sid, mode=mode, t0=span.get("t0"), t1=span.get("t1"),
+                            group_id=span.get("group"), at=at, speed=speed, backfill=backfill,
+                            floor=floor, last_event_fn=cached_last)
+    response = Response(generator, mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+def _request_hostname() -> str | None:
+    try:
+        return urlsplit("//" + (request.host or "")).hostname
+    except ValueError:
+        return None
+
+
+@app.route("/api/sessions/<sid>/media")
+def api_media(sid):
+    check_sid(sid)
+    want_recordings = request.args.get("recordings") in ("1", "true", "yes")
+    db = mongo_db()
+    doc = None
+    if db is not None:
+        try:
+            doc = sessions.mongo_session(db, sid)
+        except Exception as exc:
+            logger.info("MongoDB read of %s failed: %s", sid, type(exc).__name__)
+    devices = sessions.mongo_devices(doc) if doc else None
+    t0 = t1 = None
+    try:
+        span = _span(sid)
+        t0, t1 = span.get("t0"), span.get("last_event") or span.get("t1")
+    except InfluxUnavailable:
+        pass
+    except ApiError as exc:
+        if exc.status not in (404, 503) or (exc.status == 404 and doc is None):
+            raise
+    if t0 is None and doc:
+        t0 = common.to_epoch(doc.get("start_time"))
+        t1 = common.to_epoch(doc.get("end_time")) or time.time()
+    body = MEDIA.session_media(doc, devices, db is not None, t0, t1, want_recordings, _request_hostname())
+    return json_response(body)
+
+
+def _attachment(response: Response, sid: str, name: str) -> Response:
+    response.headers["Content-Disposition"] = f'attachment; filename="{sid}_{name}"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _speech_for_export(sid: str) -> dict:
+    """the speech part's data for the transcript downloads; a part not computed yet goes through
+    the report route's rules (its job queued unless it runs or failed a moment ago)."""
+    envelope = STORE.read_part(sid, "speech")
+    if envelope is not None:
+        return envelope.get("data") or {}
+    last = _session_last(sid)
+    code, body = RUNNER.serve_part(sid, "speech", last, is_live(last))
+    if code == 200:
+        return body.get("data") or {}
+    if code == 500:
+        raise ApiError(500, f"The speech report failed: {body.get('error')}")
+    raise ApiError(404, "The speech report has not been computed yet; it is being computed now.")
+
+
+@app.route("/api/sessions/<sid>/export/<name>")
+def api_export(sid, name):
+    check_sid(sid)
+    if name.endswith(".jsonl"):
+        event_type = name[:-len(".jsonl")]
+        if event_type not in common.EVENT_TYPES:
+            raise ApiError(404, "Unknown event type.")
+        _session_last(sid)
+        from openmmla.analytics.report import exports
+        try:
+            lines = exports.iter_jsonl(influx_client(), sid, event_type)
+        except InfluxUnavailable as exc:
+            raise influx_error(exc)
+
+        def body():
+            try:
+                for line in lines:
+                    yield line if line.endswith("\n") else line + "\n"
+            except InfluxUnavailable as exc:
+                logger.warning("export of %s %s stopped: %s", sid, event_type, exc)
+                # the server then drops the connection without the closing chunk, so the client
+                # reports an incomplete download rather than a whole file cut short
+                raise
+
+        return _attachment(Response(body(), mimetype="application/x-ndjson"), sid, name)
+    if name not in EXPORT_NAMES:
+        raise ApiError(404, "Unknown export.")
+    if name == "window_features.csv":
+        path = STORE.window_features_path(sid)
+        if not os.path.isfile(path):
+            raise ApiError(404, "The window features exist once the video analysis has run.")
+        return _attachment(send_file(path, mimetype="text/csv", conditional=False), sid, name)
+    if name in ("transcript.txt", "transcript.srt"):
+        from openmmla.analytics.report import exports
+        speech = _speech_for_export(sid)
+        transcript = speech.get("transcript") or []
+        if name == "transcript.txt":
+            text = exports.transcript_text(transcript, speech.get("t0") or 0.0)
+        else:
+            text = exports.transcript_srt(transcript)
+        kind = "text/plain" if name.endswith(".txt") else "application/x-subrip"
+        return _attachment(Response(text, content_type=f"{kind}; charset=utf-8"), sid, name)
+    meta = _meta(sid)
+    parts = {}
+    for part in PART_JOB:
+        envelope = STORE.read_part(sid, part)
+        if envelope is not None:
+            parts[part] = {"computed_at": envelope.get("computed_at"),
+                           "source_last_event": envelope.get("source_last_event"), "data": envelope.get("data")}
+    text = _dumps({"session": sid, "exported_at": round(time.time(), 3), "meta": meta, "parts": parts})
+    return _attachment(Response(text, mimetype="application/json"), sid, name)
+
+
+def _precompute(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="dashboard.py precompute",
+                                     description="compute report parts into the cache")
+    parser.add_argument("sessions", nargs="*", help="session ids")
+    parser.add_argument("--all", action="store_true", help="every session with InfluxDB data")
+    parser.add_argument("--job", choices=("light", "video", "all"), default="all")
+    parser.add_argument("--force", action="store_true", help="run even when the job looks active")
+    args = parser.parse_args(argv)
+    client = influx_client()
+    # one connection for the run, with a job's patience: a part keeps the cameras it was computed with
+    db = sessions.open_mongo(CONFIG, timeout_ms=report_jobs.JOB_MONGO_TIMEOUT_MS) if mongo_configured() else None
+    if mongo_configured() and db is None:
+        print("MongoDB did not answer: the space parts are computed without camera placement", file=sys.stderr)
+    ids = list(args.sessions)
+    if args.all:
+        index = sessions.session_index(client, db)
+        ids += [e["id"] for e in index.get("sessions") or [] if any((e.get("counts") or {}).values())]
+    if not ids:
+        parser.error("name session ids or pass --all")
+    failures = 0
+    for sid in dict.fromkeys(ids):
+        if not valid_session_id(sid):
+            print(f"{sid}: not a valid session id", file=sys.stderr)
+            failures += 1
+            continue
+        doc = sessions.mongo_session(db, sid) if db is not None else None
+        for job in (JOBS if args.job == "all" else (args.job,)):
+            if not args.force and report_jobs.is_active(STORE.read_status(sid, job)):
+                print(f"{sid} {job}: already running elsewhere, skipped", file=sys.stderr)
+                continue
+            started = time.time()
+            status = report_jobs.compute_job(client, STORE, sid, job, runner="local", mongo_doc=doc,
+                                             repo_root=REPO_ROOT)
+            took = time.time() - started
+            if status.get("state") == "done":
+                print(f"{sid} {job}: done in {took:.1f} s", file=sys.stderr)
+            else:
+                failures += 1
+                print(f"{sid} {job}: {status.get('error')}", file=sys.stderr)
+    if db is not None:
+        db.client.close()
+    return 1 if failures else 0
+
+
+def _serve(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="dashboard.py serve", description="development server (gevent)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT") or DEFAULT_PORT))
+    parser.add_argument("--host", default="0.0.0.0")
+    args = parser.parse_args(argv)
+    from gevent.pywsgi import WSGIServer
+    print(f"dashboard on http://{args.host}:{args.port} (cache {STORE.cache_dir}, jobs {RUNNER.mode})",
+          file=sys.stderr)
+    server = WSGIServer((args.host, args.port), app)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.stop()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    if not argv or argv[0] in ("-h", "--help"):
+        print("usage: python dashboard.py serve [--port N] | precompute <sid>... | --all [--job light|video|all]")
+        return 0
+    command, rest = argv[0], argv[1:]
+    if command == "serve":
+        return _serve(rest)
+    if command == "precompute":
+        return _precompute(rest)
+    print(f"unknown command {command!r}: serve or precompute", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,77 +1,174 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenMMLA Dashboard</title>
-<link rel="stylesheet" href="/css/style.css">
+<meta name="color-scheme" content="light dark">
+<title>Sessions · OpenMMLA</title>
+<script>
+  // apply a stored light/dark choice before the first paint, so a dark page never flashes light
+  try {
+    var mode = window.localStorage.getItem('openmmla.dashboard.theme');
+    if (mode === 'light' || mode === 'dark') document.documentElement.setAttribute('data-theme', mode);
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="/assets/css/app.css">
+<style>
+  /* page head: title on the left, system status chips on the right */
+  .health { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; padding: 0; list-style: none; }
+  .health-chip { gap: 6px; padding: 0 10px 0 9px; cursor: default; }
+  .health-chip .dot { --swatch: var(--muted); }
+  .health-chip[data-tone="good"] .dot { --swatch: var(--good); }
+  .health-chip[data-tone="bad"] .dot { --swatch: var(--critical); }
+  .health-chip[data-tone="neutral"] .dot { --swatch: var(--ink-2); }
+  .health-chip[data-tone="off"] .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+  .health-word { color: var(--muted); font-weight: 400; }
+
+  .notes { display: flex; flex-direction: column; gap: 6px; margin: -8px 0 16px; }
+  .note-line { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 4px 8px; color: var(--ink-2); font-size: 13px; }
+  .note-line > span { flex: 1 1 200px; min-width: 0; }
+  .note-line .icon { margin-top: 2px; color: var(--muted); }
+  .note-line[data-kind="warn"] .icon { color: var(--warning); }
+
+  /* live now band */
+  .live-band { margin-bottom: 28px; }
+  .live-list { display: flex; flex-direction: column; gap: 12px; }
+  .live-card { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 14px 28px; padding: 16px 20px; }
+  .live-who { flex: 1 1 100%; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .live-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
+  .live-title { font-size: 16px; font-weight: 600; }
+  .live-date { color: var(--ink-2); font-size: 14px; }
+  .live-stat { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .live-stat-label { font-size: 12px; color: var(--muted); }
+  .live-stat .mods, .live-speech, .live-age { min-height: 24px; display: flex; align-items: center; }
+  .live-clock { font-size: 32px; font-weight: 600; line-height: 1.05; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+  .live-age { gap: 6px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .live-age .dot { --swatch: var(--good); }
+  .live-age[data-tone="warn"] .dot { --swatch: var(--warning); }
+  .live-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+  @media (min-width: 1200px) {
+    /* one line per live session, the same columns in every card */
+    .live-card { display: grid; grid-template-columns: minmax(0, 1fr) 168px 128px 132px 120px auto; align-items: center; gap: 12px 24px; }
+    .live-actions { margin-left: 0; }
+  }
+
+  /* filter row */
+  .filters { margin-bottom: 8px; }
+  .search-box { position: relative; }
+  .search-box .icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+  .search-box .input { width: 260px; max-width: 100%; padding-left: 30px; }
+  .count { margin-left: auto; align-self: flex-end; padding-bottom: 6px; color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* session table (selectors start at table.sessions to win over app.css's table.data rules) */
+  table.sessions thead th { top: var(--topbar-h); z-index: 2; background: var(--page); }
+  table.sessions thead th.c-dur { text-align: right; }
+  table.sessions tbody th { position: static; z-index: auto; padding: 22px 10px 8px; background: none; color: var(--ink); font-size: 13px; border-bottom: 1px solid var(--axis); }
+  table.sessions tbody tr:first-child th { padding-top: 10px; }
+  table.sessions td { white-space: nowrap; padding-top: 10px; padding-bottom: 10px; }
+  table.sessions tr.month-row:hover { background: none; }
+  .month-count { margin-left: 8px; color: var(--muted); font-weight: 400; }
+  .session-row { cursor: pointer; }
+  .session-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  table.sessions .c-ses { width: 100%; max-width: 0; }
+  table.sessions .c-rec { font-variant-numeric: tabular-nums; }
+  table.sessions .c-dur { text-align: right; font-variant-numeric: tabular-nums; }
+  table.sessions .c-act { text-align: right; }
+  .ses-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; font-size: 14px; }
+  .ses-title > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .ses-id { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--mono); color: var(--muted); }
+  .line2 { margin-top: 2px; }
+  .mods { display: flex; align-items: center; gap: 4px; }
+  .mod-badge { gap: 5px; cursor: default; }
+  .mod-badge .meter { width: 24px; }
+  .ana { display: inline-flex; align-items: center; gap: 6px; }
+  .ana .icon { width: 14px; height: 14px; }
+  .ana[data-kind="ready"] .icon { color: var(--good); }
+  .ana[data-kind="partial"] .icon { color: var(--ink-2); }
+  .ana[data-kind="error"] .icon { color: var(--critical); }
+  .ana[data-kind="missing"], .ana[data-kind="none"] { color: var(--muted); }
+  .acts { display: inline-flex; gap: 6px; }
+  .acts .btn { min-width: 64px; }
+
+  table.sessions .list-skeleton td { padding-top: 14px; padding-bottom: 14px; }
+  .list-skeleton .skeleton + .skeleton { margin-top: 6px; }
+
+  /* under 1200 px the badges stack their meter under the label, so the session column keeps its room */
+  @media (max-width: 1199px) {
+    .c-data .mod-badge { flex-direction: column; justify-content: center; height: auto; padding: 4px 5px; gap: 3px; }
+  }
+  @media (max-width: 1199px) and (min-width: 900px) {
+    .acts { flex-direction: column; gap: 4px; }
+  }
+
+  /* narrow screens: every session becomes a stacked card */
+  @media (max-width: 899px) {
+    table.sessions, table.sessions tbody { display: block; width: 100%; }
+    /* the column heads stay for screen readers; their row and cells shrink with them, or the hidden
+       table row would still reach past the right edge of a phone screen */
+    table.sessions thead, table.sessions thead tr, table.sessions thead th {
+      display: block; position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; padding: 0;
+      overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+    }
+    table.sessions tr.month-row { display: block; }
+    table.sessions tr.month-row th { display: block; padding: 18px 2px 8px; border: 0; }
+    table.sessions tbody tr:first-child th { padding-top: 4px; }
+    table.sessions .session-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas: "ses ses" "rec dur" "data speech" "ana act";
+      gap: 12px 16px;
+      align-items: end;
+      margin-bottom: 8px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-card);
+      background: var(--surface);
+    }
+    table.sessions .session-row:hover { background: var(--surface); border-color: var(--border-strong); }
+    table.sessions .session-row td { display: block; padding: 0; border: 0; width: auto; max-width: none; min-width: 0; white-space: normal; }
+    table.sessions .session-row td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 3px; font-size: 11px; font-weight: 500; color: var(--muted); }
+    table.sessions .c-ses { grid-area: ses; }
+    table.sessions .c-rec { grid-area: rec; }
+    table.sessions .c-dur { grid-area: dur; text-align: right; }
+    table.sessions .c-data { grid-area: data; }
+    table.sessions .c-speech { grid-area: speech; text-align: right; }
+    table.sessions .c-ana { grid-area: ana; }
+    table.sessions .c-act { grid-area: act; text-align: right; }
+    table.sessions .list-skeleton { display: block; padding: 4px 0; border-bottom: 1px solid var(--grid); }
+    table.sessions .list-skeleton td { display: none; padding: 6px 0; border: 0; }
+    table.sessions .list-skeleton td:first-child, table.sessions .list-skeleton td.c-ses { display: block; max-width: none; }
+  }
+
+  @media (max-width: 639px) {
+    .search-box .input { width: 100%; }
+    .filters .search-field { flex: 1 1 100%; }
+    .live-clock { font-size: 28px; }
+    .live-actions { flex: 1 1 100%; margin-left: 0; }
+  }
+</style>
 </head>
 <body>
-
-<nav class="topbar">
-  <a class="brand" href="/">Open<span>MMLA</span> Dashboard</a>
-</nav>
-
-<main class="hero">
-  <h1>Session Explorer</h1>
-  <p>Select a recorded session to watch it live or browse its analysis report.</p>
-
-  <div class="card picker">
-    <select id="session-select" aria-label="Session">
-      <option value="">Loading sessions…</option>
-    </select>
-    <div class="actions">
-      <a class="btn primary" id="btn-live" aria-disabled="true">● Live view</a>
-      <a class="btn" id="btn-report" aria-disabled="true">Analysis report</a>
+<div id="topbar"></div>
+<main class="page" id="main">
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Sessions</h1>
+      <p class="page-sub" id="page-sub">Reading the session list</p>
     </div>
-    <span class="empty-note" id="note" hidden></span>
+    <ul class="health" id="health" aria-label="System status"></ul>
   </div>
+  <div class="notes" id="notes" hidden></div>
+  <section class="live-band" id="live-band" aria-labelledby="live-heading" hidden>
+    <div class="section-head">
+      <h2 id="live-heading">Live now</h2>
+      <p id="live-sub"></p>
+    </div>
+    <div class="live-list" id="live-list"></div>
+  </section>
+  <div class="toolbar filters" id="filters" hidden></div>
+  <div id="list" aria-live="off"></div>
 </main>
-
-<script>
-const select = document.getElementById('session-select');
-const btnLive = document.getElementById('btn-live');
-const btnReport = document.getElementById('btn-report');
-const note = document.getElementById('note');
-
-function syncButtons() {
-  const id = select.value;
-  btnLive.href = id ? `/realtime?session=${encodeURIComponent(id)}` : '#';
-  btnReport.href = id ? `/posttime?session=${encodeURIComponent(id)}` : '#';
-  btnLive.setAttribute('aria-disabled', !id);
-  btnReport.setAttribute('aria-disabled', !id);
-  btnLive.style.pointerEvents = btnReport.style.pointerEvents = id ? '' : 'none';
-  btnLive.style.opacity = btnReport.style.opacity = id ? '' : '.5';
-}
-
-// an empty list and an unreachable database used to look identical here, so
-// the endpoint reports the reason and the two are told apart
-function fail(label, detail) {
-  select.innerHTML = `<option value="">${label}</option>`;
-  note.textContent = detail;
-  note.hidden = false;
-}
-
-fetch('/api/get_sessions')
-  .then(r => r.json().then(body => ({ ok: r.ok, body })))
-  .then(({ ok, body }) => {
-    if (!ok || !Array.isArray(body)) {
-      fail('Could not reach the database', (body && body.error) || 'The dashboard could not query InfluxDB.');
-      return;
-    }
-    if (!body.length) {
-      fail('No sessions recorded yet', 'InfluxDB answered, but no session has written to it yet.');
-      return;
-    }
-    const ids = body.slice().sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    select.innerHTML = '<option value="">— Choose a session —</option>' +
-      ids.map(id => `<option value="${id}">${id}</option>`).join('');
-  })
-  .catch(() => fail('Failed to load sessions', 'The dashboard backend did not answer.'));
-
-select.addEventListener('change', syncButtons);
-syncButtons();
-</script>
-
+<noscript><p class="page">The dashboard needs JavaScript to list sessions.</p></noscript>
+<script type="module" src="/assets/js/explorer.js"></script>
 </body>
 </html>

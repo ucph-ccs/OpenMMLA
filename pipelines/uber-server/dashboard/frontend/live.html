@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live session</title>
+  <meta name="description" content="Watch a running OpenMMLA session, or replay an ended one: speech, badge positions, gaze and camera skeletons as they arrive.">
+  <link rel="icon" href="data:,">
+  <script>
+    // the stored theme before the stylesheet paints, so a dark choice never flashes light
+    try {
+      var m = localStorage.getItem('openmmla.dashboard.theme');
+      if (m === 'light' || m === 'dark') document.documentElement.setAttribute('data-theme', m);
+    } catch (e) { /* storage blocked: the OS setting applies */ }
+  </script>
+  <link rel="stylesheet" href="/assets/css/app.css">
+  <style>
+    /* live page: session bar */
+    .live-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 24px; align-items: start; margin-bottom: 12px; }
+    .live-state { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; font-size: 13px; color: var(--ink-2); }
+    .live-clock { text-align: right; min-width: 0; }
+    .live-clock-value { font-size: 32px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    .live-clock-sub { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 2px; }
+    .live-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); margin-bottom: 12px; }
+    .scrub { display: flex; align-items: center; gap: 8px; flex: 1 1 260px; min-width: 200px; }
+    .scrub input[type="range"] { flex: 1 1 auto; min-width: 80px; margin: 0; height: 24px; cursor: pointer; }
+    .scrub-label { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .live-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; border-radius: 8px; background: var(--surface-2); color: var(--ink-2); font-size: 13px; }
+    .live-banner .icon { width: 16px; height: 16px; flex: none; }
+    .live-banner[data-kind="error"] .icon { color: var(--critical); }
+    .live-banner[data-kind="warning"] .icon { color: var(--warning); }
+    .live-banner[data-kind="info"] .icon { color: var(--ink-2); }
+    .live-banner-text { flex: 1 1 240px; min-width: 0; }
+
+    /* health strip */
+    .health { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 12px; font-size: 12px; color: var(--ink-2); min-height: 24px; }
+    .health-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .health-item b { font-weight: 600; color: var(--ink); }
+    .health-item .icon { width: 12px; height: 12px; }
+    .health-item[data-status="warning"] .icon { color: var(--warning); }
+    .health-item[data-status="none"] { color: var(--muted); }
+    .health-tags { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .health-tags .chip { height: 20px; padding: 0 8px; }
+    .health-sep { width: 1px; height: 14px; background: var(--border-strong); }
+
+    .kpi-caption { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+    .kpis { margin-bottom: 16px; }
+
+    /* transcript */
+    .transcript { position: relative; height: 420px; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+    .transcript ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+    .tr-chunk { display: flex; flex-direction: column; gap: 3px; }
+    .tr-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .tr-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 44px; }
+    .tr-meta .chip { height: 20px; padding: 0 8px; }
+    .tr-text { margin: 0; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+    .tr-text .w-v { text-decoration-line: underline; text-decoration-color: var(--u, currentColor); text-decoration-thickness: 2px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
+    .tr-text .w-dim { color: var(--muted); }
+    .tr-empty-text { color: var(--muted); font-style: italic; }
+    .tr-pending { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+    .tr-jump { position: sticky; bottom: 8px; display: flex; justify-content: center; pointer-events: none; margin-top: -32px; }
+    .tr-jump .btn { pointer-events: auto; box-shadow: var(--shadow-pop); }
+
+    /* pairs: named by their two tag dots, never by a hue */
+    .pair-dots { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+    table.data td .pair-dots { margin-right: 6px; vertical-align: 0; }
+    table.data td .pair-dots .swatch, .tl-label .pair-dots .swatch { margin: 0; width: 8px; height: 8px; border-radius: 50%; }
+    .pairs-table { margin-bottom: 12px; }
+    .pairs-sub { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 4px 0 6px; }
+
+    /* cameras */
+    .cam-wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; }
+    .cam-tile { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .cam-head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+    .cam-name { flex: none; font-family: var(--mono); font-size: 12px; color: var(--ink); }
+    .cam-age { flex: none; }
+    .cam-head .btn { flex: none; }
+    .cam-age[data-stale="true"] { box-shadow: inset 0 0 0 1px var(--warning); }
+    .cam-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 6px; overflow: hidden; background: var(--surface-2); }
+    .cam-stage video, .cam-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .cam-stage video { object-fit: contain; background: #000; }
+    .cam-note { margin: 0; font-size: 12px; color: var(--muted); min-height: 16px; }
+    .cam-toggles { display: inline-flex; gap: 6px; }
+
+    .live-empty { margin-top: 24px; }
+
+    @media (max-width: 767px) {
+      .live-head { grid-template-columns: minmax(0, 1fr); }
+      .live-clock { text-align: left; }
+      .live-clock-value { font-size: 28px; }
+      .transcript { height: 360px; }
+      .scrub { flex-basis: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div id="topbar"></div>
+  <main class="page" id="page" aria-live="off">
+    <div id="live-root"></div>
+  </main>
+  <script type="module" src="/assets/js/live.js"></script>
+</body>
+</html>

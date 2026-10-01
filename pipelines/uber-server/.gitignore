@@ -6,6 +6,9 @@ __pycache__/
 
 **/static/
 
+# dashboard report cache (computed from classroom data: never commit)
+dashboard/flask-backend/cache/
+
 # Ignore specific files
 test*.*
 *test.*
