@@ -2,7 +2,7 @@
 #
 # cameras and microphones publish with FFmpeg to rtmp://<stream-server>:1935/<app>/<name>
 # (or srt:// / rtsp://), the bases pull the same path as rtsp://<stream-server>:8554/<app>/<name>,
-# and every published stream is also recorded on the server. Started by
+# and the paths of a running session are also recorded on the server. Started by
 # `make mediamtx` in pipelines/uber-server (native) or by docker/docker-compose.infra.yml;
 # both read this file. Every key not listed here keeps the MediaMTX default.
 # Reference: https://github.com/bluenviron/mediamtx (mediamtx.yml in the release).
@@ -68,11 +68,24 @@ pathDefaults:
   # are then filed by the publisher's clock, which Sessions -> Export Streams matches against
   # the session's window: only for a path whose publisher is NTP-synchronized, and per path
   # (paths: <name>: useAbsoluteTimestamp: yes), see docs/rtmp_streaming.md#timestamps
-  # record every published path; segments are fMP4 files named after their
-  # start time. ./streams/server is artifacts/streams/server of the repository
-  # either way: make starts MediaMTX from artifacts/, and docker compose mounts
-  # that folder at /streams/server of the container, whose ./ is /
-  record: yes
+  # no path is recorded by default. A camera may publish around the clock and
+  # is shared by the sessions that pull it, so the server keeps only the time a
+  # session ran: START (Session Control in the TUI, mmla ses-ctl)
+  # switches record on for the paths the session's bases pull, each in a named
+  # path entry it adds through the control API, and STOP removes those entries
+  # again (openmmla/utils/stream_recording.py). Per path and never here, so two
+  # sessions in two rooms do not touch each other. The API changes the running
+  # server only: restarted mid-session, it records nothing until the next START,
+  # and neither does it after it reads this file again, which MediaMTX does
+  # whenever the file changes (it drops the entries the API added). A Save or a
+  # Sync on the Stream Server card's Config tab switches the running sessions'
+  # paths on again a few seconds later; after any other change, send START again.
+  # yes records every published path, sessions or not.
+  # segments are fMP4 files named after their start time. ./streams/server is
+  # artifacts/streams/server of the repository either way: make starts MediaMTX
+  # from artifacts/, and docker compose mounts that folder at /streams/server of
+  # the container, whose ./ is /
+  record: no
   recordPath: ./streams/server/%path/%Y-%m-%d_%H-%M-%S-%f
   recordFormat: fmp4
   recordPartDuration: 1s

@@ -3,6 +3,7 @@
 from .input import interactive_menu, multi_interactive_menu
 from .client import MongoDBClientWrapper, RedisClientWrapper
 from .logger import get_logger
+from .stream_recording import set_session_recording
 
 
 def get_operation() -> int:
@@ -73,6 +74,11 @@ def start_control(config_path: str):
                 channel = f"{session_id}/{service}/control"
                 redis_client.publish(channel, command)
                 print(f"{'✅' if command == 'START' else '🛑'} {command} signal sent to {service}.")
+
+            # the Stream Server records the session's streams only while it runs
+            recording = set_session_recording(session_id, command == 'START', mongo_db=mongo_client,
+                                              start_path=config_path)
+            print(recording['text'])
 
         except KeyboardInterrupt as e:
             if "Exit" in str(e):

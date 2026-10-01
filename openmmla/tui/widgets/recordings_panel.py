@@ -88,13 +88,15 @@ class StreamServerRecordingsPanel(Widget):
         self._free: int | None = None
         self._recorder: recordings.Recorder | None = None
         self._live: dict[str, datetime | None] = {}  # what is publishing, and since when
+        self._entries: dict[str, bool] | None = None  # path entry -> record, None when not read
         self._pending: tuple | None = None  # a deletion waiting for its second press
 
     def compose(self) -> ComposeResult:
         yield Static("[b]Recordings on the Stream Server[/b]", classes="rp-title")
         yield Static(
-            "What MediaMTX holds on its disk, path by path: every stream published to it while server-side "
-            "recording is on, in ten-minute segments, whether or not a session ran. A session's footage is "
+            "What MediaMTX holds on its disk, path by path, in ten-minute segments: the paths of each "
+            "session while it ran (START to STOP), or every stream published to it while server-side "
+            "recording is on for every path. A session's footage is "
             "exported under Sessions → Export Streams; this is what there is to export from, and the way "
             "to make room before the retention of the Config tab does. A deletion goes through the server's "
             "API, so it works for a docker and a native run alike.",
@@ -125,9 +127,9 @@ class StreamServerRecordingsPanel(Widget):
 
     async def _load(self) -> None:
         try:
-            recorded, state, live = await asyncio.to_thread(self._ask_server)
+            recorded, state, live, entries = await asyncio.to_thread(self._ask_server)
         except recordings.RecordingsError as error:
-            self._recorded, self._recorder, self._live = [], None, {}
+            self._recorded, self._recorder, self._live, self._entries = [], None, {}, None
             self._sizes, self._free = {}, None
             self._show_inventory()
             self._set_log(
@@ -136,7 +138,7 @@ class StreamServerRecordingsPanel(Widget):
                 "in mediamtx.yml (Config tab)."
             )
             return
-        self._recorded, self._recorder, self._live = recorded, state, live
+        self._recorded, self._recorder, self._live, self._entries = recorded, state, live, entries
         self._sizes, self._free = {}, None
         self._show_inventory()
         self._set_log(self._diagnosis())
@@ -151,18 +153,24 @@ class StreamServerRecordingsPanel(Widget):
         self._show_inventory()
 
     def _ask_server(self) -> tuple[list[recordings.Recorded], recordings.Recorder,
-                                   dict[str, datetime | None]]:
+                                   dict[str, datetime | None], dict[str, bool] | None]:
         """the inventory and the settings it has to be read against. What is
-        publishing comes last and may fail on its own: it sharpens the reading
-        of an empty inventory, and a tab that works without it is worth more
-        than one that goes red when that one call does not answer."""
+        publishing, and which path entries record (the paths of the running
+        sessions, while pathDefaults records none), come last and may fail on
+        their own: they sharpen the reading of an empty inventory, and a tab
+        that works without them is worth more than one that goes red when one
+        of those calls does not answer."""
         held = recordings.inventory(self._host, self._api_port)
         state = recordings.recorder(self._host, self._api_port)
         try:
             live = recordings.publishing(self._host, self._api_port)
         except recordings.RecordingsError:
             live = {}
-        return held, state, live
+        try:
+            entries = recordings.path_records(self._host, self._api_port)
+        except recordings.RecordingsError:
+            entries = None
+        return held, state, live, entries
 
     def _ask_disk(self, paths: list[str]) -> tuple[dict[str, int], int | None] | None:
         output = self._run_shell(bash(recordings.usage_script(self._quoted_root, paths)))
@@ -181,10 +189,11 @@ class StreamServerRecordingsPanel(Widget):
             table.add_row(item.path, str(len(item.segments)), _stamp(first), _stamp(last), size)
         segments = sum(len(item.segments) for item in self._recorded)
         kept = self._recorder.retention if self._recorder is not None else None
-        parts = [f"{self._host}:{self._api_port}",
-                 "recording off" if self._recorder is not None and not self._recorder.record
-                 else f"kept {recordings.describe_retention(kept)}",
-                 f"{len(self._recorded)} path(s), {segments} segment(s)"]
+        parts = [f"{self._host}:{self._api_port}"]
+        if self._recorder is not None:
+            parts.append("records every path" if self._recorder.record else "records sessions only")
+        parts += [f"kept {recordings.describe_retention(kept)}",
+                  f"{len(self._recorded)} path(s), {segments} segment(s)"]
         if self._sizes:
             parts[-1] += f", {recordings.human_size(sum(self._sizes.values()))}"
         if self._free is not None:
@@ -203,16 +212,18 @@ class StreamServerRecordingsPanel(Widget):
 
     def _diagnosis(self) -> str:
         """why the table holds what it holds. An empty one has three readings,
-        and the server knows which: it is not recording, it is recording and
-        cannot write, or nothing has been published to it."""
+        and the server knows which: it is recording and cannot write, nothing
+        has been published to it, or (recording only the paths of running
+        sessions, record: no under pathDefaults) no session records what is
+        published. Only the paths that record are expected on the disk."""
         state = self._recorder
-        if state is not None and not state.record:
-            return (
-                "[yellow]The server is not recording: the mediamtx.yml it started with has record: no under "
-                "pathDefaults, so nothing published to it reaches the disk. The Config tab switches it back "
-                "on, and the server reads that file only at startup — Stop and Start it afterwards.[/yellow]"
-            )
-        late = recordings.unrecorded(self._live, self._recorded)
+        sessions_only = state is not None and not state.record
+        live = self._live
+        if self._entries is not None or sessions_only:
+            default = state is None or state.record
+            live = {path: since for path, since in self._live.items()
+                    if recordings.records_path(path, self._entries or {}, default)}
+        late = recordings.unrecorded(live, self._recorded)
         if late:
             shown = ", ".join(escape(path) for path in late[:4])
             if len(late) > 4:
@@ -227,6 +238,20 @@ class StreamServerRecordingsPanel(Widget):
                 "docker/docker-compose.infra.yml logs --tail 50 mediamtx` on its host, or the tmux window of "
                 "a native run.[/red]"
             )
+        if sessions_only:
+            said = ("The server records only the paths of a running session (record: no under pathDefaults; "
+                    "START switches a session's paths on, STOP off).")
+            if self._entries is None:
+                said += " Which paths it records now could not be read."
+            elif live:
+                shown = ", ".join(escape(path) for path in sorted(live)[:4])
+                if len(live) > 4:
+                    shown += f" and {len(live) - 4} more"
+                said += f" Recording now: {shown}."
+            else:
+                said += " No path is being recorded now" + (
+                    ", and nothing is publishing to it." if not self._live else ".")
+            return said
         if not self._recorded:
             return ("The server holds no recording, and nothing is publishing to it right now."
                     if not self._live else "The server holds no recording.")
@@ -298,7 +323,7 @@ class StreamServerRecordingsPanel(Widget):
             note += ("; ..." if len(failures) > 3 else "") + "[/red]"
         self._set_log(note)
         try:
-            self._recorded, self._recorder, self._live = await asyncio.to_thread(self._ask_server)
+            self._recorded, self._recorder, self._live, self._entries = await asyncio.to_thread(self._ask_server)
         except recordings.RecordingsError:
             return
         self._sizes, self._free = {}, None

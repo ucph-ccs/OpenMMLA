@@ -2536,9 +2536,11 @@ class StreamServerConfigPanel(Widget):
         yield Static("[b]Stream Server config (mediamtx.yml)[/b]", classes="ss-title")
         yield Static(where, classes="ss-muted")
         yield Static(
-            "MediaMTX records every stream that is published to it while `record` under "
-            "`pathDefaults` is on: ten-minute segments under artifacts/streams/server/<app>/<name>/ of the "
-            "project on this host (the same folder for a docker and a native run). A segment is deleted "
+            "MediaMTX records the paths of a running session, from START to STOP (Session Control switches "
+            "each on through its API), and every stream that is published to it while `record` under "
+            "`pathDefaults` is on (every path): ten-minute segments under "
+            "artifacts/streams/server/<app>/<name>/ of the project on this host (the same folder for a "
+            "docker and a native run). A segment is deleted "
             "`recordDeleteAfter` after it began, by MediaMTX itself, so a session's footage has to be "
             "exported before then (Sessions → Export Streams; the Recordings tab shows what is held). "
             "This is the server-side copy; recording on the capture device is the `record` field of a "
@@ -2572,7 +2574,7 @@ class StreamServerConfigPanel(Widget):
         if state is None:
             button.label, button.variant, button.disabled = "Server-side recording: not set", "default", True
         else:
-            button.label = f"Server-side recording: {'ON' if state[1] else 'OFF'}"
+            button.label = f"Server-side recording: {'every path' if state[1] else 'sessions only'}"
             button.variant, button.disabled = ("success" if state[1] else "default"), False
         self._show_retention_state()
 
@@ -7894,7 +7896,8 @@ class ServicePanel(Widget):
                 "publishes, read_target what the bases pull. Write the path alone (ips/cam-1) and Save "
                 f"completes both with the Stream Server of System Settings: {publish} and {pull}. "
                 "A full URL is kept as written. record: true also records on the capture device; the "
-                "Stream Server records on its side whatever reaches it (its card, Config tab). The "
+                "Stream Server records on its side the streams of a running session, START to STOP (its "
+                "card, Config tab). The "
                 "machine that captures a stream is picked on the Streams tab, in its SSH Profile column."
             ),
         }
@@ -10453,6 +10456,15 @@ class ServicePanel(Widget):
         note = await asyncio.to_thread(self._mark_mongodb_session_ended, session_id, target)
         if note:
             self._log(note)
+        # its paths on the Stream Server stop recording, as at STOP
+        from openmmla.tui.system_services import system_services_config_path
+        from openmmla.utils.stream_recording import end_session_recording
+
+        recording = await asyncio.to_thread(
+            end_session_recording, session_id, start_path=system_services_config_path(self._root))
+        if recording["paths"]:
+            color = "yellow" if recording["warnings"] else "dim"
+            self._log(f"[{color}]{rich_escape(recording['text'])}[/{color}]")
         self._release_collection_session(session_id)
         self._unfollow_session(session_id)
 

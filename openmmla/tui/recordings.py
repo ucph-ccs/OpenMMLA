@@ -1,7 +1,9 @@
 """server-side recordings: what the stream server (MediaMTX) recorded, by time.
 
-MediaMTX records every published path whether or not a session runs, and its
-playback server returns any time range of a path as one file. A stream is
+MediaMTX records the paths of a running session (openmmla.utils.stream_recording
+switches each on at START and off at STOP), or every published path when
+`record` is on under its pathDefaults, and its playback server returns any
+time range of a path as one file. A stream is
 shared by the sessions that pull it, so the footage of one session is a query
 and not a folder: the paths its bases pulled (they note them in the session's
 document, openmmla.utils.session_sources), each cut to the window between the
@@ -462,6 +464,42 @@ def recorder(host: str, api_port: int = API_PORT, timeout: float = 5.0) -> Recor
     return Recorder(record=bool(data.get("record", True)),
                     folder=str(data.get("recordPath") or "").strip(),
                     retention=0.0 if seconds is None else seconds)
+
+
+def path_records(host: str, api_port: int = API_PORT, timeout: float = 5.0) -> dict[str, bool]:
+    """name -> `record` of each path entry the running server holds (control
+    API), in its order: those of mediamtx.yml and those added since, such as
+    the entry START adds for each path of a session."""
+    found: dict[str, bool] = {}
+    page = 0
+    while True:
+        data = _get_json(f"{_origin(host, api_port)}/v3/config/paths/list?itemsPerPage=100&page={page}", timeout)
+        for item in data.get("items") or []:
+            if isinstance(item, dict) and item.get("name"):
+                found[str(item["name"])] = bool(item.get("record"))
+        page += 1
+        if page >= int(data.get("pageCount") or 0):
+            break
+    return found
+
+
+def records_path(path: str, entries: dict[str, bool], default: bool) -> bool:
+    """whether the server records `path`, as MediaMTX picks its entry: one of
+    that name, else the first regular expression (~...) that matches it, else
+    all_others (or all); `default` (pathDefaults) when none does."""
+    if path in entries:
+        return entries[path]
+    for name, record in entries.items():
+        if name.startswith("~") and name not in ("all", "all_others"):
+            try:
+                if re.search(name[1:], path):
+                    return record
+            except re.error:
+                continue
+    for name in ("all_others", "all"):
+        if name in entries:
+            return entries[name]
+    return default
 
 
 def retention(host: str, api_port: int = API_PORT, timeout: float = 5.0) -> float:

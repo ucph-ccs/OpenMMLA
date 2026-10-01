@@ -261,6 +261,14 @@ class SessionControlPanel(Widget):
             except Exception as exc:
                 return f"[red]publish failed on {channel}: {exc}[/red]"
 
+        # the Stream Server records the session's streams only while it runs
+        from rich.markup import escape
+
+        from openmmla.utils.stream_recording import set_session_recording
+        recording = set_session_recording(session_id, command == "START", start_path=self._config_path)
+        notes.append(f"[yellow]{escape(recording['text'])}[/yellow]" if recording["warnings"]
+                     else escape(recording["text"]))
+
         total = sum(receivers_by_service.values())
         detail = ", ".join(f"{svc}:{n}" for svc, n in receivers_by_service.items())
         extra = f" — {'; '.join(notes)}" if notes else ""

@@ -1136,9 +1136,10 @@ class SessionsPanel(Widget):
         """Export Streams: both copies of the session's part of every stream it
         used, from its `sources` (read again from MongoDB at the press).
 
-        A stream is shared by the sessions that pull it and is recorded whether
-        or not one runs: by the Stream Server (every path published to it) and,
-        with Record on, by the machine that captures it. Nothing of either
+        A stream is shared by the sessions that pull it: the Stream Server
+        records its path while a session that pulls it runs (START to STOP,
+        openmmla.utils.stream_recording), and with Record on the machine that
+        captures it records it whether or not one runs. Nothing of either
         belongs to a session; each base notes in the session's document the
         stream it takes (openmmla.utils.session_sources), and the session's
         start and end (recordings.session_end) pick the part of it:
@@ -1268,8 +1269,8 @@ class SessionsPanel(Widget):
                      + (f" (it holds {', '.join(held)} from other times)." if held
                         else " (it holds no recording of them)."))
             self._log(
-                f"  [yellow]{escape(found)} Server-side recording is the switch on the Stream Server card, "
-                f"Config tab.[/yellow]"
+                f"  [yellow]{escape(found)} The server records a session's paths from its START to its STOP "
+                f"(Session Control); a session never STARTed, or a server restarted meanwhile, has none.[/yellow]"
             )
             return 0
 
@@ -1509,6 +1510,17 @@ class SessionsPanel(Widget):
             return
         if await asyncio.to_thread(self._mongo_client.end_session, session_id, end):
             self._log(f"[green]✓ Session '{shown}' marked ended at {end:%Y-%m-%d %H:%M:%S} UTC.[/green]")
+            # its paths on the Stream Server stop recording, as at STOP
+            from openmmla.tui.schema.loader import _find_project_root
+            from openmmla.tui.system_services import system_services_config_path
+            from openmmla.utils.stream_recording import end_session_recording
+
+            recording = await asyncio.to_thread(
+                end_session_recording, session_id, mongo_db=self._mongo_client, now=end,
+                start_path=str(system_services_config_path(_find_project_root())))
+            if recording["text"]:
+                color = "yellow" if recording["warnings"] else "dim"
+                self._log(f"  [{color}]{escape(recording['text'])}[/{color}]")
             self.post_message(self.SessionEnded(session_id))
         else:
             self._log(f"[red]✗ Session '{shown}' could not be marked ended: MongoDB did not take it.[/red]")

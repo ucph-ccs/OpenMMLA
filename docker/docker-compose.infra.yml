@@ -22,9 +22,9 @@
 # Redis (6379) and Mosquitto (1883) would join this same file if they are ever
 # containerized too; today they stay bare-metal via pipelines/uber-server/Makefile.
 #
-# MediaMTX reads pipelines/uber-server/mediamtx/mediamtx.yml and records every
-# published stream under MEDIAMTX_STREAMS_DIR (default artifacts/streams/server in
-# the repository); see docs/rtmp_streaming.md.
+# MediaMTX reads pipelines/uber-server/mediamtx/mediamtx.yml and records the
+# paths of a running session (START to STOP) under MEDIAMTX_STREAMS_DIR (default
+# artifacts/streams/server in the repository); see docs/rtmp_streaming.md#on-the-server.
 
 name: openmmla-infra
 

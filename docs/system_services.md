@@ -9,7 +9,7 @@ The services below are shared by every pipeline. They usually run together on on
 | [Redis](#redis) | 6379 | yes | session start/stop control between bases and synchronizers; Celery broker for the dashboard |
 | [Mosquitto](#mosquitto) | 1883 | yes | MQTT broker that carries results between *Bases* and *Synchronizers* |
 | [Nginx](#nginx-optional) | 8080 | optional | load balancer in front of the AI services |
-| [MediaMTX](#mediamtx-optional) | 1935 RTMP, 8554 RTSP, 8890 SRT, 9997 API | optional | streaming server: cameras and microphones publish to it, the bases pull from it, every stream is recorded |
+| [MediaMTX](#mediamtx-optional) | 1935 RTMP, 8554 RTSP, 8890 SRT, 9997 API | optional | streaming server: cameras and microphones publish to it, the bases pull from it, and it records the paths of a running session, START to STOP ([On the server](rtmp_streaming.md#on-the-server)) |
 | [Dashboard](#dashboard-optional) | 5050 | optional | Flask backend and static frontend for live and post-time views |
 
 InfluxDB, MongoDB and MediaMTX can run natively (this page) or as containers from `docker/docker-compose.infra.yml`; see [Docker: Database stack](docker.md#database-stack-influxdb-and-mongodb). Redis, Mosquitto, Nginx and the dashboard run natively. What is stored in the two databases is described in the [Database Reference](database.md).

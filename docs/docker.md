@@ -259,7 +259,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
 - `~/.openmmla` is mounted read-only so the containers can decrypt `ENC(...)` secrets.
 - The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.
 - The database containers do **not** mount `~/.openmmla`: the official influxdb / mongo images contain no OpenMMLA code, never read `config.yml`, and have nothing to decrypt.
-- MediaMTX mounts its config read-only and writes its recordings to a bind mount, `artifacts/streams/server/` of the repository by default, so the files are plain fMP4 segments on the host.
+- MediaMTX mounts its config read-only and writes its recordings (the streams of a running session, see [Streaming](rtmp_streaming.md#on-the-server)) to a bind mount, `artifacts/streams/server/` of the repository by default, so the files are plain fMP4 segments on the host.
 
 ## How the TUI uses these stacks
 
