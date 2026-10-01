@@ -36,7 +36,7 @@ from openmmla.tui.schema.loader import (
     FieldDef as LoaderFieldDef,
     discover_pipelines, load_existing_config, get_nested_value,
     save_config, PipelineDef, _find_project_root, fields_from_config_section,
-    load_streams, streams_from_config, move_source_settings, PLACEHOLDER_RE,
+    load_streams, streams_from_config, move_source_settings, PLACEHOLDER_RE, StreamDef,
 )
 from openmmla.tui.schema.definitions import (
     CONSOLE_ONLY_SECTIONS, PRIVATE_SECTIONS, SHARED_SECTIONS, SHARED_SECTION_NAMES, apply_shared_values,
@@ -126,6 +126,7 @@ from openmmla.utils.experiments import (
 from openmmla.tui.widgets.command_session import CommandSession
 from openmmla.tui.widgets.config_form import ConfigForm, DictListField, FieldRow
 from openmmla.tui.widgets.recordings_panel import StreamServerRecordingsPanel
+from openmmla.tui.widgets.streams_overview import StreamServerStreamsPanel
 from openmmla.tui.widgets.experiment_form import ExperimentForm
 from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef, host_params
 from openmmla.tui.widgets.ssh_form import SSHForm
@@ -4792,6 +4793,11 @@ class ServicePanel(Widget):
                 config_path=local_path, target=target, ssh_profile=profile,
                 remote_path=self._remote_config_path(local_path, profile) if profile is not None else None,
             ))
+            # every pipeline's streams in one table, to find and stop the ones
+            # still publishing whichever card started them
+            streams_scroll = VerticalScroll(classes="svc-launch-scroll")
+            await tabs.add_pane(TabPane("Streams", streams_scroll, id="svc-tab-server-streams"))
+            await streams_scroll.mount(self._stream_server_streams_panel(profile))
             # what the server holds and the way to make room: asked over HTTP,
             # sized over a shell on the card's host
             recordings_scroll = VerticalScroll(classes="svc-launch-scroll")
@@ -8600,6 +8606,42 @@ class ServicePanel(Widget):
     def _remote_config_path(self, local_path: str, profile) -> str:
         rel_path = os.path.relpath(local_path, self._root)
         return _remote_path_join(profile.remote_project_path, rel_path)
+
+    def _stream_server_streams_panel(self, profile) -> StreamServerStreamsPanel:
+        """every stream of the pipeline cards, and what reaches the server. Its
+        API is asked where the Recordings tab asks it."""
+        server = self._stream_server_address()
+        api_port = int(server.get("api_port") or recordings.API_PORT)
+        host = str(server.get("host") or "localhost") if profile is None else profile.host
+        return StreamServerStreamsPanel(
+            host=host, api_port=api_port, configured=self._every_card_stream,
+            server=self._stream_server_address, project_dir=self._root,
+        )
+
+    def _every_card_stream(self) -> tuple[list[tuple[str, StreamDef]], list[str]]:
+        """the Streams entries of every pipeline card, each read from the config
+        of the host its card is on, as that card's Streams tab reads it; and
+        what could not be read. Off the UI thread: another host is asked over SSH."""
+        found: list[tuple[str, StreamDef]] = []
+        notes: list[str] = []
+        profiles = load_ssh_profiles()
+        for card in sorted(_STREAM_PIPELINES):
+            svc = self._svc_map.get(card)
+            pipeline = self._pipeline_for_service(card)
+            if svc is None or pipeline is None:
+                continue
+            target = self._derive_node_host(svc, profiles).target
+            if target == "local":
+                streams = load_streams(pipeline.config_path)
+            else:
+                config, message = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
+                if message and not config:
+                    # not the message itself: an ssh error in it may quote the command line, password and all
+                    notes.append(f"{svc.display_name}: its config on {target} could not be read, so its streams "
+                                 f"are missing here.")
+                streams = streams_from_config(config)
+            found.extend((card, stream) for stream in streams)
+        return found, notes
 
     def _stream_server_recordings_panel(self, profile) -> StreamServerRecordingsPanel:
         """the server's inventory. Its API is asked on the card's host: the

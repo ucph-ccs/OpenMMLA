@@ -151,21 +151,93 @@ def inventory(host: str, api_port: int = API_PORT, timeout: float = 10.0) -> lis
     return [Recorded(name, tuple(sorted(found[name]))) for name in sorted(found)]
 
 
-def publishing(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> dict[str, datetime | None]:
-    """the paths being published to the stream server right now, each with the
-    moment it became ready (control API: a path is ready while its source
-    sends). The time is None when the server does not report one."""
-    live: dict[str, datetime | None] = {}
+@dataclass(frozen=True)
+class Published:
+    """a path someone is publishing to the server right now, and who: the
+    connection that sends it (source_type rtmpConn, rtspSession, srtConn, ...;
+    its id is what the API kicks) and how many read it."""
+    path: str
+    ready: datetime | None
+    source_type: str = ""
+    source_id: str = ""
+    readers: int = 0
+    received: int = 0  # bytes
+
+
+def published(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> list[Published]:
+    """the paths being published to the stream server right now (control API:
+    a path is ready while its source sends), by name. The time is None when
+    the server does not report one."""
+    found: list[Published] = []
     page = 0
     while True:
         data = _get_json(f"{_origin(host, api_port)}/v3/paths/list?itemsPerPage=100&page={page}", timeout)
         for item in data.get("items") or []:
-            if item.get("ready") and item.get("name"):
-                live[str(item["name"])] = parse_time(item.get("readyTime"))
+            if not (item.get("ready") and item.get("name")):
+                continue
+            source = item.get("source") if isinstance(item.get("source"), dict) else {}
+            try:
+                received = int(item.get("bytesReceived") or 0)
+            except (TypeError, ValueError):
+                received = 0
+            found.append(Published(
+                str(item["name"]), parse_time(item.get("readyTime")),
+                str(source.get("type") or ""), str(source.get("id") or ""),
+                len(item.get("readers") or []), received,
+            ))
         page += 1
         if page >= int(data.get("pageCount") or 0):
             break
-    return live
+    return sorted(found, key=lambda item: item.path)
+
+
+def publishing(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> dict[str, datetime | None]:
+    """the paths being published to the stream server right now, each with the
+    moment it became ready."""
+    return {item.path: item.ready for item in published(host, api_port, timeout)}
+
+
+# the publisher connections the API lists (and kicks), by the source type a path names
+_CONNECTION_LISTS = {
+    "rtmpConn": "rtmpconns", "rtmpsConn": "rtmpsconns", "rtspSession": "rtspsessions",
+    "rtspsSession": "rtspssessions", "srtConn": "srtconns", "webRTCSession": "webrtcsessions",
+}
+
+
+def publisher_addresses(host: str, api_port: int = API_PORT, timeout: float = 3.0,
+                        source_types=None) -> dict[str, str]:
+    """connection id -> the address it comes from (host:port), for the
+    connections of `source_types` (all the API lists when None). A list the
+    server does not answer for (its protocol switched off) is left out."""
+    wanted = set(source_types) if source_types is not None else set(_CONNECTION_LISTS)
+    addresses: dict[str, str] = {}
+    for kind in sorted({_CONNECTION_LISTS[name] for name in wanted if name in _CONNECTION_LISTS}):
+        try:
+            data = _get_json(f"{_origin(host, api_port)}/v3/{kind}/list?itemsPerPage=1000", timeout)
+        except RecordingsError:
+            continue
+        for item in data.get("items") or []:
+            if item.get("id") and item.get("remoteAddr"):
+                addresses[str(item["id"])] = str(item["remoteAddr"])
+    return addresses
+
+
+def kick_publisher(host: str, source_type: str, source_id: str, api_port: int = API_PORT,
+                   timeout: float = 10.0) -> None:
+    """close the connection a path is published over (control API): what sent
+    it stops reaching the server, and may connect again."""
+    kind = _CONNECTION_LISTS.get(source_type)
+    if not kind or not source_id:
+        raise RecordingsError(f"a {source_type or 'source'} cannot be disconnected through the API")
+    request = urllib.request.Request(
+        f"{_origin(host, api_port)}/v3/{kind}/kick/{urllib.parse.quote(source_id, safe='')}", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):
+            pass
+    except urllib.error.HTTPError as error:
+        raise RecordingsError(f"HTTP {error.code} {_error_text(error)}") from error
+    except (urllib.error.URLError, OSError) as error:
+        raise RecordingsError(str(getattr(error, "reason", error))) from error
 
 
 def live_paths(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> set[str]:
