@@ -45,6 +45,11 @@ tests/*
 .DS_Store
 twine.txt
 docs/paper.md
+# unpublished study pages and figures, kept locally until the paper is out
+docs/analytics/interaction_classifier.md
+docs/img/interaction_architecture.svg
+docs/img/interaction_net.svg
+papers/openmmla_feature_overview.svg
 config/ssh_profiles.yml
 config/launcher_hosts.yml
 config/experiments.yaml

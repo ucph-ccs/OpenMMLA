@@ -7,9 +7,12 @@ edit_uri: edit/main/docs/
 copyright: MIT License
 
 docs_dir: docs
-# the pip requirements for this site are not a page
+# the pip requirements for this site are not a page, and some local pages are kept out of the site
 exclude_docs: |
   requirements.txt
+  paper.md
+  analytics/interaction_classifier.md
+  img/interaction_*.svg
 
 theme:
   name: material
@@ -72,7 +75,6 @@ nav:
           - Human coding interface: pipelines/vfa/coding_interface.md
   - Analysis:
       - Window features: analytics/window_features.md
-      - Interaction classifier: analytics/interaction_classifier.md
   - Deployment:
       - Docker: docker.md
       - Dashboard: dashboard.md
