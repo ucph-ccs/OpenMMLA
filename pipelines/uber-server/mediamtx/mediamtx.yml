@@ -28,7 +28,22 @@ rtmpAddress: :1935
 srt: yes
 srtAddress: :8890
 hls: no
-webrtc: no
+
+# WebRTC, for browsers only: the dashboard's camera tiles read a live path with
+# WHEP (POST http://<stream-server>:8889/<app>/<name>/whep). The handshake goes
+# over 8889/tcp and the video over ICE on 8189 (udp, else tcp), so both have to
+# be reachable from the browser. H.264 video plays; AAC audio paths do not
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ['*']
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+# the addresses the server offers browsers to take the video from are those of
+# its own interfaces. inside docker those are the container's, which no browser
+# reaches, so docker/docker-compose.infra.yml sets this list from
+# MEDIAMTX_WEBRTC_HOSTS (env MTX_WEBRTCADDITIONALHOSTS, comma-separated): the
+# address or name browsers reach this host at, such as its tailnet IP
+webrtcAdditionalHosts: []
 
 # lab-network defaults: anyone may publish, read and use the API. To require
 # credentials, give the users a pass and restrict the api action (see the

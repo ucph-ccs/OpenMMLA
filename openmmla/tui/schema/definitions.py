@@ -158,6 +158,11 @@ SHARED_SECTIONS = {
                 "field_type": "int",
                 "default": 9996,
             },
+            "webrtc_port": {
+                "description": "MediaMTX WebRTC port browsers watch live video on (the dashboard's camera tiles)",
+                "field_type": "int",
+                "default": 8889,
+            },
         },
     },
 }

@@ -35,5 +35,6 @@ StreamServer:
   rtsp_port: 8554
   api_port: 9997                      # control API: which paths were recorded
   playback_port: 9996                 # playback server: Sessions → Export Recordings cuts a session's time range
+  webrtc_port: 8889                   # WebRTC: the dashboard's camera tiles play live video from it
 Sudo:
   password: <local-sudo-password>     # only used on this machine for native service starts; encrypted on save

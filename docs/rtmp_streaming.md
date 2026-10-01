@@ -15,6 +15,8 @@ All ports are on the host of **System Settings → Connections → Stream Server
 | 8890/udp | | SRT publish or read |
 | 9997 | | control API, `http://<stream-server>:9997/v3/paths/list` |
 | 9996 | | playback server for the server-side recordings |
+| 8889 | `webrtc_port` | WebRTC (WHEP), what the [dashboard](dashboard.md#camera-tiles-and-live-video)'s camera tiles play live video from |
+| 8189/udp, 8189/tcp | | WebRTC media (ICE), from the server to the browser |
 | 9998 | | Prometheus metrics |
 
 ### Run it
@@ -52,7 +54,7 @@ cd ~/artifacts && for d in streams-2[0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do [ -d
 
 ### Configuration
 
-Both ways read `pipelines/uber-server/mediamtx/mediamtx.yml`. Stream paths are created on the fly (`all_others`), so any `<app>/<name>` in a publish URL works without editing the server. Recording is on for every path (fMP4, ten-minute segments, deleted three days after they began: `recordDeleteAfter`), the API, playback and metrics are on, and there is no authentication, which suits a trusted lab network; the file points at the MediaMTX reference for credentials.
+Both ways read `pipelines/uber-server/mediamtx/mediamtx.yml`. Stream paths are created on the fly (`all_others`), so any `<app>/<name>` in a publish URL works without editing the server. Recording is on for every path (fMP4, ten-minute segments, deleted three days after they began: `recordDeleteAfter`), the API, playback and metrics are on, WebRTC is on for the dashboard's camera tiles (HLS is off), and there is no authentication, which suits a trusted lab network; the file points at the MediaMTX reference for credentials. In Docker, MediaMTX cannot see the address browsers reach its host at, so set `MEDIAMTX_WEBRTC_HOSTS` in `docker/.env` (see [Dashboard](dashboard.md#camera-tiles-and-live-video)). After any change to `mediamtx.yml` or to these variables, recreate the container (`docker compose -f docker/docker-compose.infra.yml up -d --force-recreate mediamtx`) or restart `make mediamtx`: a running server keeps the file it started with.
 
 ### Check what is published
 
@@ -140,7 +142,7 @@ Frame timestamps: a managed stream's capture-side start time is recorded when th
 Every measurement is filed under a time, and that time is put on a frame by the machine that reads it, not by the camera and not by the stream server. What the stamp means depends on the path the frame took:
 
 - **A publishing device** stamps what it encodes with its own clock (`-use_wallclock_as_timestamps 1` in the commands above), but RTMP and SRT carry only the differences between frames, not the clock. Published over RTSP (`-f rtsp -rtsp_transport tcp rtsp://<stream-server>:8554/vfa/front`, or a `target` that starts with `rtsp://`), the clock travels too, in RTCP sender reports.
-- **MediaMTX** stamps every frame with its own clock as it arrives, and names and times its recordings by that clock. Its `useAbsoluteTimestamp` option keeps an RTSP publisher's clock instead (WebRTC and HLS carry one too, but this server has them off). The shipped `mediamtx.yml` leaves it off, and explains why in place: with it on, an RTSP path publishes nothing until the first sender report arrives, and its recordings are filed by the publisher's clock, which **Sessions → Export Streams** matches against the session's window, so a publisher whose clock is off by minutes exports nothing. Switch it on per path, for a publisher that is NTP-synchronized.
+- **MediaMTX** stamps every frame with its own clock as it arrives, and names and times its recordings by that clock. Its `useAbsoluteTimestamp` option keeps an RTSP publisher's clock instead (a WebRTC or HLS publisher carries one too, but nothing here publishes that way: HLS is off, and WebRTC is on only for the dashboard to read). The shipped `mediamtx.yml` leaves it off, and explains why in place: with it on, an RTSP path publishes nothing until the first sender report arrives, and its recordings are filed by the publisher's clock, which **Sessions → Export Streams** matches against the session's window, so a publisher whose clock is off by minutes exports nothing. Switch it on per path, for a publisher that is NTP-synchronized.
 - **A base pulling a `stream` source** sees the media clock of the stream, not the clock itself (OpenCV and FFmpeg hand over positions, never RTCP), and anchors it once: a base that opened the stream within thirty seconds of the publisher's start uses the start time the Streams tab recorded on the device, any other takes its own clock at the first frame it received. From then on the stamps follow the media clock, so a slow base does not smear them, but the delay of the first frame (encode, network, server, decoder, typically 0.2 to 0.5 s on a wired network) stays in every stamp as a constant.
 - **The ASR base on a raw `udp` or `tcp` stream** (FFmpeg on the device sending PCM) counts samples from the arrival of the first packet, so its stamps also carry that first packet's delay as a constant.
 - **A base on a local camera or microphone** (`opencv`, `pyaudio`), and the ASR base on a `stream` source (FFmpeg decodes it to raw PCM, which has no timestamps), stamp each frame or chunk with the base's own clock when it arrives: the device's and decoder's delay is in every stamp, and a busy base stamps late.
