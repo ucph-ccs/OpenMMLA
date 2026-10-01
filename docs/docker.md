@@ -23,7 +23,7 @@ For the AI service stacks (a GPU base server):
 
 - NVIDIA driver
 - Docker Engine + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-- `~/.openmmla/master.key`, mounted read-only into the containers to decrypt the `ENC(...)` values in the config
+- the host's own `~/.openmmla/master.key`, mounted read-only into the containers to decrypt the `ENC(...)` values in the config (see [Mounts](#mounts))
 - the current user in the `docker` group, so `docker` runs without `sudo` (the TUI runs plain `docker compose`)
 
 The database stack only needs Docker Engine: no GPU, no nvidia-container-toolkit, no master key.
@@ -215,7 +215,7 @@ itself, and its own processes could already dial the bind address.
 | Field | Value |
 |---|---|
 | `InfluxDB.url` | `http://server-01.local:8086` (`org: admin` and `bucket: mmla-data` stay as they are) |
-| `InfluxDB.token` | the `INFLUXDB_INIT_ADMIN_TOKEN` from above, replacing the whole `ENC(...)` string with the plain value; or press **Fetch Token** on the InfluxDB card (see below) |
+| `InfluxDB.token` | the `INFLUXDB_INIT_ADMIN_TOKEN` from above, replacing the whole `ENC(...)` string (the stored token, encrypted with this machine's master key) with the plain value; or press **Fetch Token** on the InfluxDB card (see below) |
 | `MongoDB.url` | `mongodb://server-01.local:27017` (`db: openmmla` stays) |
 
 **How you spell the host name depends on your network.** `.local` is mDNS and only works on the **same LAN**. If your Mac and `server-01` are on different subnets with Tailscale in between (`ssh admin@server-01` works but `ping server-01.local` does not), use the Tailscale MagicDNS name or the tailnet IP: `http://server-01:8086`, `http://100.x.x.x:8086`. That also means **every base station has to be in the tailnet**, or it cannot reach the databases. If you changed the ports, include them: `http://server-01:8087`.
@@ -256,7 +256,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
 
 - `pipelines/asr-server` / `pipelines/vfa-server` → `/project` in the container: `config.yml`, `temp/`, runtime logs and, for the frame analyzer, `weights/` (the pose weights of the [features endpoint](pipelines/vfa/index.md#features-endpoint-skeletons-and-gazes), fetched once at the first start into this bind mount rather than a named volume) stay on the host, the same as with conda.
 - Model caches (HuggingFace / torch hub / ModelScope / wespeaker) are shared named volumes, so re-created containers do not download again (the frame analyzer's PaGE checkpoint and its model code land in `hf-cache`, a Gaze-LLE checkpoint in `torch-cache`, RetinaFace's weights in `deepface-cache`).
-- `~/.openmmla` is mounted read-only so the containers can decrypt `ENC(...)` secrets.
+- `~/.openmmla` of the user who runs `docker compose` (or the folder `OPENMMLA_KEY_DIR` names) is mounted read-only at `/root/.openmmla`, and the services decrypt the `ENC(...)` values of `config.yml` with its `master.key` at startup. The key in `~/.openmmla` is the host's own, the one the console encrypts that host's configs with, so no key is copied from anywhere: run the stack as the user the console's SSH profile logs in as, as the TUI does. The console always uses `~/.openmmla/master.key` of that login, so leave `OPENMMLA_KEY_DIR` unset or point it at that same folder: a key from anywhere else does not open what the console wrote, and the services get the `ENC(...)` strings themselves. A plain-text secret in `config.yml` is encrypted with that key and written back by the service at startup; with no key there it is used as it is. A host whose configs hold no encrypted value yet may have no key; the console makes it one with the first encrypted value it writes there (or run `openmmla crypto init` there). If a stack was started before `~/.openmmla` existed, Docker made that folder itself, owned by root, and nothing can put a key in it: `sudo chown -R "$USER": ~/.openmmla` first.
 - The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.
 - The database containers do **not** mount `~/.openmmla`: the official influxdb / mongo images contain no OpenMMLA code, never read `config.yml`, and have nothing to decrypt.
 - MediaMTX mounts its config read-only and writes its recordings (the streams of a running session, see [Streaming](rtmp_streaming.md#on-the-server)) to a bind mount, `artifacts/streams/server/` of the repository by default, so the files are plain fMP4 segments on the host.
@@ -274,7 +274,7 @@ A remote host runs the same commands over SSH in its repository directory, so it
 
 **InfluxDB / MongoDB / MediaMTX** cards (Launcher → System Services):
 
-- **Status**: the cards probe the URL configured in System Settings, with a direct TCP connect from the TUI machine to host:port, independent of the Host selector. Only when the URL says `localhost` do they fall back to probing the selected host's own loopback. The Status tab does the same and its port column shows the host:port that was actually probed.
+- **Status**: the cards probe the URL configured in System Settings, with a direct TCP connect from the TUI machine to host:port, independent of the Host selector. Only when the URL says `localhost` do they fall back to probing the selected host's own loopback; a URL that still says `<uber-server>` is never looked up: the card names the form to fill and, as for `localhost`, probes the selected host's own port. The Status tab does the same and its port column shows the host:port that was actually probed.
 - **Start / Stop / Logs**: each card has a **Run mode** dropdown (`docker` / `native`), **`docker` by default**. Switch a machine that still uses brew / systemctl databases to `native`, otherwise Start brings up a container on that machine and fights the bare-metal instance for the port. In `docker` mode the three buttons run `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <service>`. Stop uses `stop`, not `down`: the cards share one compose file and `down` would take the other containers with it. The **Stream Server (MediaMTX)** card probes the `rtmp_port` and `rtsp_port` of the Stream Server section.
 - Run mode is remembered per host + service, so switching Host or clicking another node and coming back keeps it, but only for this TUI session; a restart returns to `docker`.
 - **Fetch Token** (InfluxDB card only, docker mode): reads the docker stack's admin token on the selected Host, first from the running container's `/etc/influxdb2/influx-configs` (which also covers a token influx generated itself), then from `docker/.env`, and stores it encrypted in System Settings as `InfluxDB.token`. The token never appears in the logs; only its first and last 4 characters are shown. The TUI warns when the URL's host and the host the token was read from differ.

@@ -11,15 +11,9 @@ from textual.widgets import Button, Checkbox, Label, Select, Static
 from openmmla.tui.ssh import is_select_sentinel
 
 
-def control_endpoints(config_path: str) -> tuple[str, str]:
-    """(where the signals go, a warning or "") from the System Settings store.
-
-    The panel has no host: it publishes to the configured Redis from this
-    machine, and every base subscribed to that same Redis hears it."""
-    from urllib.parse import urlsplit
-
+def _store_sections(config_path: str) -> tuple[dict, dict]:
+    """the Redis and MongoDB sections of the System Settings store."""
     from openmmla.tui.schema.loader import load_existing_config
-    from openmmla.tui.system_services import is_loopback_host
 
     try:
         config = load_existing_config(config_path) or {}
@@ -27,16 +21,69 @@ def control_endpoints(config_path: str) -> tuple[str, str]:
         config = {}
     redis = config.get("Redis") if isinstance(config.get("Redis"), dict) else {}
     mongo = config.get("MongoDB") if isinstance(config.get("MongoDB"), dict) else {}
-    redis_host = str(redis.get("host") or "localhost").strip()
-    redis_where = f"{redis_host}:{redis.get('port') or 6379} (db {redis.get('db') or 0})"
+    return redis, mongo
+
+
+def unset_control_endpoints(config_path: str) -> list[str]:
+    """the System Settings sections Session Control needs and the store does
+    not fill in (no store, no section, an empty or unfilled host or url):
+    Redis carries the signals, MongoDB marks a stopped session ended."""
+    from openmmla.tui.system_services import section_address_set
+
+    redis, mongo = _store_sections(config_path)
+    return [name for name, section in (("Redis", redis), ("MongoDB", mongo))
+            if not section_address_set(section, name)]
+
+
+def _unset_note(config_path: str, name: str) -> str:
+    """why Session Control has no address for `name`. A section the store
+    lacks may still show a host on its form, taken from the pipeline configs
+    (a machine whose System Settings were never saved): the form then looks
+    filled in, so say that it is only shown, and what saves it."""
+    import os
+
+    from openmmla.tui.system_services import (
+        SHARED_SECTIONS, SYSTEM_SERVICE_ADDRESS_FIELDS, load_system_service_values, unset_address_note,
+        usable_system_service_value,
+    )
+
+    field = SYSTEM_SERVICE_ADDRESS_FIELDS.get(name, "host")
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(config_path)))
+        shown = load_system_service_values(root).get(f"{name}.{field}")
+    except Exception:
+        shown = None
+    if usable_system_service_value(shown):
+        label = str((SHARED_SECTIONS.get(name) or {}).get("label") or name)
+        return (f"System Settings → Connections → {label} shows {shown} from the pipeline configs, "
+                f"but it is not saved yet: press Save on that form")
+    return unset_address_note(name)
+
+
+def control_endpoints(config_path: str) -> tuple[str, str]:
+    """(where the signals go, a warning or "") from the System Settings store.
+
+    The panel has no host: it publishes to the configured Redis from this
+    machine, and every base subscribed to that same Redis hears it."""
+    from urllib.parse import urlsplit
+
+    from openmmla.tui.system_services import is_loopback_host
+
+    redis, mongo = _store_sections(config_path)
+    unset = unset_control_endpoints(config_path)
+    redis_host = str(redis.get("host") or "").strip()
+    redis_where = ("(no host yet)" if "Redis" in unset
+                   else f"{redis_host}:{redis.get('port') or 6379} (db {redis.get('db') or 0})")
     try:
         parts = urlsplit(str(mongo.get("url") or ""))
-        mongo_where = f"{parts.hostname or 'localhost'}:{parts.port or 27017}"
+        mongo_where = "(no url yet)" if "MongoDB" in unset else f"{parts.hostname or 'localhost'}:{parts.port or 27017}"
     except ValueError:
         mongo_where = str(mongo.get("url") or "unset")
     summary = f"Redis {redis_where}  ·  MongoDB {mongo_where}  (from System Settings)"
     warning = ""
-    if is_loopback_host(redis_host):
+    if unset:
+        warning = f"{'; '.join(_unset_note(config_path, name) for name in unset)}."
+    elif is_loopback_host(redis_host):
         warning = (
             f"Redis.host is {redis_host}: only bases on this machine hear the signal, because a "
             f"base on another machine reads {redis_host} as itself. For a session that spans "
@@ -235,6 +282,10 @@ class SessionControlPanel(Widget):
             self.post_message(self.SessionStopped(session_id))
 
     def _send_sync(self, command: str, session_id: str, services: list[str]) -> str:
+        unset = unset_control_endpoints(self._config_path)
+        if "Redis" in unset:
+            # not a connection to <uber-server>, nor to a localhost nobody chose
+            return f"[red]{command} not sent: {_unset_note(self._config_path, 'Redis')}.[/red]"
         try:
             from openmmla.utils.client import RedisClientWrapper
         except ImportError as exc:
@@ -245,7 +296,9 @@ class SessionControlPanel(Widget):
             return f"[red]Redis connection failed: {exc}[/red]"
 
         notes = []
-        if command == "STOP":
+        if command == "STOP" and "MongoDB" in unset:
+            notes.append(f"not marked ended in MongoDB: {_unset_note(self._config_path, 'MongoDB')}")
+        elif command == "STOP":
             try:
                 from openmmla.utils.client import MongoDBClientWrapper
                 MongoDBClientWrapper(self._config_path).end_session(session_id)

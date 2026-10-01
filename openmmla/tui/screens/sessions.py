@@ -66,8 +66,16 @@ def _quote_remote_path(path: str) -> str:
     return shlex.quote(text)
 
 
+def _database_url_set(config: dict, section: str) -> bool:
+    """whether a config says where MongoDB or InfluxDB is: its url is filled
+    in (an unfilled mongodb://<uber-server>:27017 names no machine)."""
+    from openmmla.tui.system_services import section_address_set
+
+    return isinstance(config, dict) and section_address_set(config.get(section), section)
+
+
 def _has_database_config(config: dict) -> bool:
-    return bool(isinstance(config, dict) and (config.get("MongoDB") or config.get("InfluxDB")))
+    return _database_url_set(config, "MongoDB") or _database_url_set(config, "InfluxDB")
 
 
 def _replace_loopback_url(url: object, host: str) -> object:
@@ -133,6 +141,28 @@ def _read_remote_config(profile, remote_path: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _sealed_here(config: dict, profile) -> dict:
+    """another host's config as this machine reads it: each ENC(...) value,
+    sealed with that host's own master key, opened with it (read over ssh, in
+    memory only) and sealed again with this machine's; one this machine's
+    key opens already, or none opens, stays as it is."""
+    from openmmla.utils import crypto
+
+    if not crypto.enc_tokens(config):
+        return config
+    from openmmla.tui.screens.launcher import _local_master_key, _read_host_master_key
+
+    host_key, _ = _read_host_master_key(profile)
+    local_key = _local_master_key()
+    opened, _ = crypto.plan_reseal(config, local_key, [host_key])
+    if not opened:
+        return config
+    try:
+        return crypto.apply_reseal(config, opened, local_key or crypto.ensure_master_key())
+    except Exception:
+        return config  # no key here to seal with: the values stay as they came
+
+
 def _find_config_source(target: str) -> SessionConfigSource | None:
     from openmmla.tui.schema.loader import discover_pipelines, load_existing_config, _find_project_root
     from openmmla.tui.ssh import get_profile_by_name
@@ -171,7 +201,7 @@ def _find_config_source(target: str) -> SessionConfigSource | None:
         if _has_database_config(config):
             return SessionConfigSource(
                 config_path=pipeline.config_path,
-                config=_config_for_local_access(config, profile),
+                config=_sealed_here(_config_for_local_access(config, profile), profile),
                 label=f"{target}:{remote_path}",
                 target=target,
                 remote_path=remote_path,
@@ -715,7 +745,11 @@ class SessionsPanel(Widget):
             return
 
         if not config_source:
-            self._update_summary(f"No pipeline config with MongoDB/InfluxDB found for {target}.")
+            from openmmla.tui.system_services import unset_address_note
+
+            self._update_summary(
+                f"No MongoDB or InfluxDB address for {target}: {unset_address_note('MongoDB')}, and no "
+                f"pipeline config there says where it is.")
             self._refresh_sessions()
             return
 
@@ -723,12 +757,19 @@ class SessionsPanel(Widget):
         self._config_source = config_source
 
         temp_path = await loop.run_in_executor(None, _write_temp_config, config_source.config)
+        from openmmla.tui.system_services import unset_address_note
+
+        # a database whose url is not filled in is not asked: there is no machine to ask
+        unset = [name for name in ("MongoDB", "InfluxDB") if not _database_url_set(config_source.config, name)]
+        for name in unset:
+            self._log(f"[yellow]{name} not connected: {unset_address_note(name)}.[/yellow]")
         try:
             from openmmla.utils.client import MongoDBClientWrapper
             try:
-                self._mongo_client = await loop.run_in_executor(
-                    None, MongoDBClientWrapper, temp_path,
-                )
+                if "MongoDB" not in unset:
+                    self._mongo_client = await loop.run_in_executor(
+                        None, MongoDBClientWrapper, temp_path,
+                    )
             except Exception as e:
                 self._mongo_client = None
                 self._log(f"[yellow]MongoDB connection unavailable: {e}[/yellow]")
@@ -739,9 +780,10 @@ class SessionsPanel(Widget):
         try:
             from openmmla.utils.client import InfluxDBClientWrapper
             try:
-                self._influx_client = await loop.run_in_executor(
-                    None, InfluxDBClientWrapper, temp_path,
-                )
+                if "InfluxDB" not in unset:
+                    self._influx_client = await loop.run_in_executor(
+                        None, InfluxDBClientWrapper, temp_path,
+                    )
             except Exception as e:
                 self._influx_client = None
                 self._log(f"[yellow]InfluxDB connection unavailable: {e}[/yellow]")
@@ -864,8 +906,10 @@ class SessionsPanel(Widget):
         from openmmla.tui.system_services import stream_server_address
 
         server = stream_server_address(_find_project_root())
+        if not server.get("host"):
+            return None  # System Settings have no address for it yet
         try:
-            return recordings.retention(str(server.get("host") or "localhost"),
+            return recordings.retention(str(server.get("host")),
                                         int(server.get("api_port") or recordings.API_PORT), timeout=2.0)
         except recordings.RecordingsError:
             return None
@@ -1216,7 +1260,8 @@ class SessionsPanel(Widget):
 
         root = _find_project_root()
         server = await asyncio.to_thread(stream_server_address, root)
-        sources = await asyncio.to_thread(_server_sources, record, server)
+        # without an address no URL is known to be the Stream Server's
+        sources = await asyncio.to_thread(_server_sources, record, server) if server.get("host") else _ServerSources()
         from_server = await self._export_server_copy(
             root, session_id, server, sources, (start, end), why == "ended", cancel)
         if cancel.is_set():
@@ -1246,7 +1291,12 @@ class SessionsPanel(Widget):
 
         start, end = window
         shown = escape(session_id)
-        host = str(server.get("host") or "localhost")
+        host = str(server.get("host") or "")
+        if not host:
+            from openmmla.tui.system_services import unset_address_note
+
+            self._log(f"[yellow]Not asked of the Stream Server: {unset_address_note('StreamServer')}.[/yellow]")
+            return 0
         playback_port = int(server.get("playback_port") or recordings.PLAYBACK_PORT)
         out_dir = session_server_streams_dir(root, session_id)
         self._log(f"[cyan]From the Stream Server {escape(host)} into {_shown_path(root, out_dir)}[/cyan]")

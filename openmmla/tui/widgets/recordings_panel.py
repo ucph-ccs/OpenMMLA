@@ -20,6 +20,7 @@ from textual.widgets import Button, DataTable, Select, Static
 
 from openmmla.tui import recordings
 from openmmla.tui.stream_cuts import bash
+from openmmla.tui.system_services import unset_address_note
 
 # a shell on the server: a command's stdout, or None when it could not run
 RunShell = Callable[[str], "str | None"]
@@ -122,6 +123,11 @@ class StreamServerRecordingsPanel(Widget):
 
     def reload(self) -> None:
         self._pending = None
+        if not self._host:
+            # System Settings have no address for the server yet: nothing to ask
+            self._set_log(f"[yellow]{unset_address_note('StreamServer')}: fill it in to see what the server "
+                          f"holds.[/yellow]")
+            return
         self._set_log(f"Asking {self._host}:{self._api_port}...")
         self.run_worker(self._load(), exclusive=True, group="rp-work")
 

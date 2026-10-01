@@ -625,8 +625,9 @@ def save_config(config_path, fields, values, transform=None):
     config).
 
     Sensitive values (api_key, token, password, ...) entered as plaintext are
-    encrypted to ENC(...) with the master key before hitting disk; a master
-    key is generated automatically on first use.
+    encrypted to ENC(...) with this machine's own master key before hitting
+    disk; a master key is generated automatically on first use. A copy meant
+    for another host is sealed again with that host's key on its way there.
     """
     existing = load_existing_config(config_path)
     data = copy.deepcopy(existing) if isinstance(existing, dict) else {}

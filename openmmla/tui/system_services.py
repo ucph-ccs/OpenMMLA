@@ -14,6 +14,7 @@ import yaml
 
 from openmmla.tui.schema.definitions import SHARED_SECTIONS, get_shared_defaults
 from openmmla.tui.schema.loader import load_existing_config
+from openmmla.utils.config import holds_placeholder, read_yaml_mapping
 
 
 SYSTEM_SERVICES_REL_PATH = os.path.join("config", "system_services.yml")
@@ -31,8 +32,38 @@ def system_services_config_path(root: str | os.PathLike[str]) -> str:
 
 
 def usable_system_service_value(value: object) -> bool:
+    """whether a value of System Settings is filled in: not empty, and no
+    <placeholder> left in it (http://<uber-server>:8086 is not)."""
     text = str(value or "").strip()
-    return bool(text and "<" not in text and ">" not in text)
+    return bool(text) and not holds_placeholder(text)
+
+
+# the field of each Connections form that names the machine its service is on
+SYSTEM_SERVICE_ADDRESS_FIELDS: dict[str, str] = {
+    "InfluxDB": "url",
+    "MongoDB": "url",
+    "MQTT": "host",
+    "Redis": "host",
+    "Dashboard": "host",
+    "Gateway": "host",
+    "StreamServer": "host",
+}
+
+
+def unset_address_note(section_name: str) -> str:
+    """what the console says where it would need the address of a Connections
+    form that has none yet (missing, empty, or an unfilled <uber-server>)."""
+    label = str((SHARED_SECTIONS.get(section_name) or {}).get("label") or section_name)
+    return f"System Settings → Connections → {label} has no host yet"
+
+
+def section_address_set(section: object, section_name: str) -> bool:
+    """whether a section says which machine its service is on: its host (or
+    url) is filled in. A section without an address field always does."""
+    field = SYSTEM_SERVICE_ADDRESS_FIELDS.get(section_name)
+    if field is None:
+        return True
+    return isinstance(section, dict) and usable_system_service_value(section.get(field))
 
 
 # Top-level list key in a pipeline config naming shared sections that this
@@ -101,9 +132,13 @@ def _section_from_flat_values(section_name: str, values: dict[str, object]) -> d
     return section_data
 
 
-def flat_values_to_config(values: dict[str, object]) -> dict[str, Any]:
+def flat_values_to_config(values: dict[str, object], sections: set[str] | None = None) -> dict[str, Any]:
+    """the store's sections from flat values, each completed with its field
+    defaults; only `sections` when given."""
     config: dict[str, Any] = {}
     for section_name in SHARED_SECTIONS:
+        if sections is not None and section_name not in sections:
+            continue
         section_data = _section_from_flat_values(section_name, values)
         if section_data:
             config[section_name] = section_data
@@ -273,9 +308,14 @@ def load_system_services_config(root: str | os.PathLike[str]) -> dict[str, Any]:
 
 def stream_server_address(root: str | os.PathLike[str]) -> dict[str, object]:
     """host and ports of System Settings → Stream Server on this machine,
-    with the MediaMTX defaults for whatever the store does not say."""
+    with the MediaMTX defaults for the ports the store does not say. The host
+    is "" while that form has none (no store, no section, or an unfilled
+    <uber-server>): there is no server to ask then, localhost least of all."""
     values = config_to_flat_values(load_system_services_config(root))
-    return {key: values.get(f"StreamServer.{key}") for key in SHARED_SECTIONS["StreamServer"]["fields"]}
+    address = {key: values.get(f"StreamServer.{key}") for key in SHARED_SECTIONS["StreamServer"]["fields"]}
+    if not usable_system_service_value(address.get("host")):
+        address["host"] = ""
+    return address
 
 
 def harvest_system_services_from_pipeline_configs(root: str | os.PathLike[str]) -> dict[str, object]:
@@ -290,14 +330,17 @@ def harvest_system_services_from_pipeline_configs(root: str | os.PathLike[str]) 
 
 def harvest_system_services_from_configs(configs: list[dict]) -> dict[str, object]:
     """flat shared values taken from pipeline configs, first usable value wins;
-    the configs may have been read on this machine or on another one."""
+    the configs may have been read on this machine or on another one. No
+    pipeline config carries the Stream Server: what the old Gateway fallback
+    of a settings store would make of one is its Gateway, so the Stream
+    Server keeps its defaults here and counts only from a settings store."""
     values = get_shared_defaults()
     seen: set[str] = set()
     for config in configs:
         if not isinstance(config, dict):
             continue
         for section_name, info in SHARED_SECTIONS.items():
-            section = stream_server_section(config) if section_name == "StreamServer" else config.get(section_name)
+            section = config.get(section_name)
             if not isinstance(section, dict):
                 continue
             for key in info.get("fields", {}):
@@ -312,16 +355,24 @@ def harvest_system_services_from_configs(configs: list[dict]) -> dict[str, objec
 
 
 def load_system_service_values(root: str | os.PathLike[str]) -> dict[str, object]:
-    config = load_system_services_config(root)
-    if config:
-        return config_to_flat_values(config)
-    return harvest_system_services_from_pipeline_configs(root)
+    """the flat values System Settings show for this machine, read the way a
+    remote host's are: what its pipeline configs say (the defaults where they
+    say nothing), overlaid section by section with what its own
+    config/system_services.yml says. A section nobody saved keeps the value
+    the pipeline configs carry."""
+    values = harvest_system_services_from_pipeline_configs(root)
+    store = load_system_services_config(root)
+    if isinstance(store, dict) and store:
+        values.update(config_to_flat_values(store, include_defaults=False))
+    return values
 
 
-def save_system_services_config(root: str | os.PathLike[str], values: dict[str, object]) -> str:
+def save_system_services_config(root: str | os.PathLike[str], values: dict[str, object],
+                                sections: set[str] | None = None) -> str:
+    """write the store from flat values: every section, or only `sections`."""
     config_path = system_services_config_path(root)
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    config = flat_values_to_config(values)
+    config = flat_values_to_config(values, sections)
     try:
         from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key
         encrypt_sensitive_values(config, ensure_master_key())
@@ -355,12 +406,22 @@ def save_system_service_section(
     section_name: str,
     section_data: dict[str, object],
 ) -> str:
-    config = load_system_services_config(root)
-    if not isinstance(config, dict):
-        config = {}
+    """write one form into config/system_services.yml (created when there is
+    none). The sections the store already has stay, each completed with its
+    field defaults, and no section nobody saved is added: a default written
+    there would beat the value of the pipeline configs. A store that cannot be
+    read raises (OSError, yaml.YAMLError, ValueError) instead of being written
+    over from nothing."""
+    config = read_yaml_mapping(system_services_config_path(root)) or {}
+    # a store from before the Stream Server had a section of its own keeps it
+    # under Gateway, and goes on meaning that host and those ports; told from
+    # the store as it was, since a Gateway saved now is no Stream Server
+    legacy = bool(stream_server_section(config))
     config[section_name] = dict(section_data)
-    values = config_to_flat_values(config)
-    return save_system_services_config(root, values)
+    sections = {name for name in SHARED_SECTIONS if isinstance(config.get(name), dict)}
+    if legacy:
+        sections.add("StreamServer")
+    return save_system_services_config(root, config_to_flat_values(config), sections)
 
 
 # ── system service endpoints ──────────────────────────────────────
@@ -596,6 +657,11 @@ def system_service_port_states(
     if endpoint is None:
         return {}
     host = endpoint[0]
+    if holds_placeholder(host) and not own_port:
+        # an address nobody filled in names no machine: nothing to probe, and
+        # no name to look up (a card asks its own host's port, as for an
+        # empty address, and looks nothing up either)
+        return {}
     states: dict[int, bool] = {}
     for port in system_service_probe_ports(root, target):
         if not own_port and not is_loopback_host(host):

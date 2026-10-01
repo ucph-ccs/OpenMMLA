@@ -94,9 +94,16 @@ class ExperimentForm(Widget):
     ExperimentForm .ef-participant Button { margin: 0 1; min-width: 10; }
     """
 
-    def __init__(self, sessions=None, notify=None) -> None:
+    def __init__(self, data: dict | None = None, task_names: list[str] | None = None,
+                 persist=None, sessions=None, notify=None) -> None:
         super().__init__()
-        self._data = load_experiments()
+        # this machine's config/experiments.yaml, unless the launcher hands in
+        # another host's: its experiments (`data`), its task names, and
+        # `persist`, which takes the whole data after every change in place
+        # of save_experiments
+        self._data = load_experiments() if data is None else data
+        self._task_names = task_names
+        self._persist_to = persist
         # `sessions` lists the sessions there are, as (session id, experiment
         # id or "") pairs, and is called off the UI thread: an experiment a
         # session carries keeps its id. Until it answers every id is kept;
@@ -153,6 +160,13 @@ class ExperimentForm(Widget):
         """whether `eid` is kept: a session carries it, or the sessions are
         not known yet."""
         return self._sessions is None or bool(_sessions_named_after(eid, self._sessions))
+
+    def _persist(self) -> None:
+        """write the whole file after a change."""
+        if self._persist_to is None:
+            save_experiments(self._data)
+        else:
+            self._persist_to(self._data)
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="ef-root"):
@@ -234,7 +248,7 @@ class ExperimentForm(Widget):
                   id="ef-title", classes="ef-field-input"),
             classes="ef-field",
         )
-        task_names = list_tasks()
+        task_names = list_tasks() if self._task_names is None else list(self._task_names)
         options = [(t, t) for t in task_names]
         task_val = exp.get("task_type", "")
         if task_val and task_val not in task_names:
@@ -414,7 +428,7 @@ class ExperimentForm(Widget):
                 return
             new_status = "inactive" if exp.get("status", "active") == "active" else "active"
             exp["status"] = new_status
-            save_experiments(self._data)
+            self._persist()
             await self._show_list()
             color = "green" if new_status == "active" else "yellow"
             self.call_after_refresh(
@@ -444,7 +458,7 @@ class ExperimentForm(Widget):
             exps = self._data.get("active_experiments", [])
             self._data["active_experiments"] = [e for e in exps if e.get("experiment_id") != eid]
             self._data.get("assignments", {}).pop(eid, None)
-            save_experiments(self._data)
+            self._persist()
             done = f"[red]Experiment '{escape(eid)}' deleted.[/red]"
             if self._notify is not None:
                 # said before the list is drawn again: a write to another host
@@ -474,7 +488,7 @@ class ExperimentForm(Widget):
                 "task_type": "",
             })
             self._data.setdefault("assignments", {})[new_id] = {}
-            save_experiments(self._data)
+            self._persist()
             await self._show_detail(new_id)
             self.post_message(self.DataChanged())
 
@@ -548,7 +562,7 @@ class ExperimentForm(Widget):
             exp["task_type"] = task_type
             exp["status"] = status
 
-        save_experiments(self._data)
+        self._persist()
         await self._show_list()
         self.call_after_refresh(lambda: self._set_status(f"[green]Experiment '{new_id}' saved.[/green]"))
         self.post_message(self.DataChanged())
@@ -596,7 +610,7 @@ class ExperimentForm(Widget):
         if original_name and original_name != name:
             assignments.pop(original_name, None)
         assignments[name] = participant_data
-        save_experiments(self._data)
+        self._persist()
         self._clear_participant_form()
         if original_name:
             self._set_status(f"[green]{name} updated.[/green]")
@@ -610,7 +624,7 @@ class ExperimentForm(Widget):
         if not eid:
             return
         self._data.get("assignments", {}).get(eid, {}).pop(person, None)
-        save_experiments(self._data)
+        self._persist()
         if self._editing_participant == person:
             self._clear_participant_form()
         self._set_status(f"[red]{person} removed.[/red]")

@@ -431,8 +431,9 @@ class StreamServerStreamsPanel(Widget):
         self._rows = rows
         self._show()
         wanted = await asyncio.to_thread(machines_to_scan, rows)
+        server_part = f" and {self._host}:{self._api_port}" if self._host else ""
         self._set_log("\n".join(filter(None, [
-            note, f"Asking {len(wanted)} machine(s) and {self._host}:{self._api_port}..."])))
+            note, f"Asking {len(wanted)} machine(s){server_part}..."])))
         scans, live = await asyncio.gather(
             asyncio.to_thread(self._scan_all, wanted), asyncio.to_thread(self._ask_server))
         rows = apply_scans(rows, scans, server)
@@ -462,6 +463,8 @@ class StreamServerStreamsPanel(Widget):
             return {machine: future.result() for machine, future in futures.items()}
 
     def _ask_server(self) -> list[recordings.Published] | None:
+        if not self._host:
+            return None  # no Stream Server in System Settings: localhost is nobody's choice
         try:
             return recordings.published(self._host, self._api_port)
         except recordings.RecordingsError:
@@ -541,7 +544,7 @@ class StreamServerStreamsPanel(Widget):
         live = [row for row in self._rows if row.live is not None]
         foreign = [row for row in self._rows if row.state == EXTERNAL and row.live is not None and not row.in_config]
         machines = {row.machine for row in running}
-        parts = [f"{self._host}:{self._api_port}",
+        parts = [f"{self._host}:{self._api_port}" if self._host else "no Stream Server host",
                  f"{len(running)} capture(s) running on {len(machines)} machine(s)"]
         if exited:
             parts.append(f"{len(exited)} exited")
@@ -549,14 +552,19 @@ class StreamServerStreamsPanel(Widget):
         if offline:
             parts.append(f"{len(offline)} on offline machine(s)")
         parts.append(f"{len(live)} path(s) live on the server" if self._server_answered
-                     else "the server does not answer")
+                     else "the server does not answer" if self._host else "no server asked")
         if foreign:
             parts.append(f"{len(foreign)} from elsewhere")
         return " · ".join(parts)
 
     def _diagnosis(self, notes: list[str]) -> str:
         lines = [f"[yellow]{escape(note)}[/yellow]" for note in notes]
-        if not self._server_answered:
+        if not self._server_answered and not self._host:
+            from openmmla.tui.system_services import unset_address_note
+
+            lines.append(f"[red]{escape(unset_address_note('StreamServer'))}, so what it receives is not "
+                         "known.[/red]")
+        elif not self._server_answered:
             lines.append(
                 f"[red]The Stream Server does not answer at {escape(self._host)}:{self._api_port}, so what it "
                 "receives is not known.[/red] Its host and API port are under System Settings → Stream Server.")
@@ -708,6 +716,11 @@ class StreamServerStreamsPanel(Widget):
         try:
             source = row.live
             sender = row.publisher or (f"{row.machine}?" if row.machine else "its publisher")
+            if not self._host:
+                from openmmla.tui.system_services import unset_address_note
+
+                self._set_log(f"[red]{escape(unset_address_note('StreamServer'))}: there is no server to ask.[/red]")
+                return
             try:
                 await asyncio.to_thread(
                     recordings.kick_publisher, self._host, source.source_type, source.source_id, self._api_port)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import functools
 import json
@@ -14,8 +15,9 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -66,12 +68,16 @@ from openmmla.tui.system_services import (
     save_system_service_section,
     pipeline_section_overrides,
     shared_section_drift,
+    section_address_set,
+    stream_server_section,
+    unset_address_note,
+    usable_system_service_value,
 )
 from openmmla.tui.ssh import (
     REFRESH_TARGETS_OPTION, TARGET_PLATFORMS, TARGET_STATES, WINDOWS_HOST_NOTE, is_select_sentinel, remote_platform, probe_all_profiles, probe_ssh_endpoint, summarize_states, target_options, target_state_label,
-    load_ssh_profiles, get_profile_by_name, ssh_run_sync,
+    SSHProfile, load_ssh_profiles, get_profile_by_name, ssh_run_sync, _profiles_path as _ssh_profiles_path,
     scp_file_async, scp_from_remote_async, ssh_run_async, ssh_check_port, ssh_check_tmux,
-    ssh_test_connection,
+    ssh_error_text, ssh_test_connection,
     wrap_local, wrap_remote,
 )
 from openmmla.tui.artifacts import (
@@ -87,7 +93,8 @@ from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source, stream_kind
 from openmmla.utils.config import (
     asr_segment_durations, base_room, bases_by_room, decrypt_config_values, get_base_by_id, get_bases,
-    load_yaml_config, main_of_base, room_main, shared_segment_duration,
+    holds_placeholder, load_yaml_config, main_of_base, placeholder_fields, read_yaml_mapping, room_main,
+    shared_segment_duration,
 )
 from openmmla.collection.recording import (
     DEFAULT_AUDIO_CHANNEL,
@@ -413,6 +420,13 @@ _LAUNCHER_REMOTE_DELETE_WORKER_GROUP = "launcher-remote-delete"
 _LAUNCHER_REMOTE_STOP_WORKER_GROUP = "launcher-remote-stop"
 _LAUNCHER_COLLECTION_STOP_WORKER_GROUP = "launcher-collection-stop"
 _LAUNCHER_COLLECTION_START_WORKER_GROUP = "launcher-collection-start"
+# every write to a host (a Save there, a sync either way, the push before a
+# Start): never exclusive, since cancelling a copy midway is what breaks a
+# file; the jobs of one host wait for each other in its write queue instead
+_HOST_SYNC_WORKER_GROUP = "host-sync"
+# the status line of the press that started a write job: set at its start, so
+# what the job says still goes where the press came from (see _bound_reporter)
+_SYNC_REPORTER: contextvars.ContextVar = contextvars.ContextVar("openmmla_sync_reporter", default=None)
 
 _MLLM_FIELDS = [
     LoaderFieldDef(
@@ -664,7 +678,8 @@ def _collection_channel_pick(text: object, count: int | None) -> str:
 async def _process_output(proc) -> str:
     """everything an scp or ssh child wrote, read in chunks: a long line with
     no newline in it would overrun the stream reader's limit."""
-    assert proc.stdout is not None
+    if proc.stdout is None:
+        return ""
     chunks = []
     while True:
         chunk = await proc.stdout.read(4096)
@@ -672,6 +687,35 @@ async def _process_output(proc) -> str:
             break
         chunks.append(chunk.decode(errors="replace"))
     return "".join(chunks)
+
+
+# how long one ssh or scp child of a write job (a mkdir, a mv, a config-sized
+# copy) may take: a host's write queue waits on it, so one whose connection
+# went silent is ended rather than holding every later write to that host
+_HOST_CHILD_TIMEOUT = 60.0
+
+
+async def _wait_child(proc, seconds: float | None = None) -> tuple[int, str]:
+    """(exit code, everything it wrote) of an ssh or scp child, once it has
+    ended. One still running after `seconds` is killed, and
+    subprocess.TimeoutExpired is raised, which ssh_error_text turns into
+    "timed out after N s" (it carries no command line)."""
+    seconds = _HOST_CHILD_TIMEOUT if seconds is None else seconds
+    try:
+        output, rc = await asyncio.wait_for(asyncio.gather(_process_output(proc), proc.wait()), seconds)
+    except asyncio.TimeoutError:
+        kill = getattr(proc, "kill", None)
+        if kill is not None:
+            try:
+                kill()
+            except ProcessLookupError:
+                pass  # it ended in the meantime
+            try:
+                await asyncio.wait_for(proc.wait(), 5)
+            except asyncio.TimeoutError:
+                pass
+        raise subprocess.TimeoutExpired("", seconds) from None
+    return rc, output
 
 
 def _sync_destination_options(source: str, ssh_profiles: list[str]) -> list[tuple[str, str]]:
@@ -1409,20 +1453,25 @@ def _room_choices(config: dict) -> tuple[list[tuple[str, str]], dict[str, dict]]
 _FILE_MISSING_SENTINEL = "__OPENMMLA_FILE_MISSING__"
 
 
-def _remote_list_files(profile, remote_dir: str, suffix: str) -> list[str]:
-    """list files in a remote directory matching *suffix (basename only)."""
+def _remote_listing(profile, remote_dir: str, suffix: str | tuple[str, ...]) -> list[str] | None:
+    """the files of a remote directory whose names end in `suffix` (one, or a
+    tuple of them), basenames only: [] when there are none or no such
+    directory, None when the host could not be asked. Hidden files and the
+    .tmp files of an interrupted write are left out."""
     quoted = _quote_remote_path(remote_dir)
+    suffixes = (suffix,) if isinstance(suffix, str) else tuple(suffix)
+    names = " -o ".join(f"-name {shlex.quote('*' + item)}" for item in suffixes)
     cmd = (
         f"if [ -d {quoted} ]; then "
-        f"find {quoted} -maxdepth 1 -type f -name '*{suffix}' -exec basename {{}} \\; "
+        f"find {quoted} -maxdepth 1 -type f \\( {names} \\) -exec basename {{}} \\; "
         "2>/dev/null; fi"
     )
     try:
         result = ssh_run_sync(profile, cmd, timeout=8.0)
     except Exception:
-        return []
+        return None
     if result.returncode != 0:
-        return []
+        return None
     return sorted(
         line.strip()
         for line in (result.stdout or "").splitlines()
@@ -1430,59 +1479,615 @@ def _remote_list_files(profile, remote_dir: str, suffix: str) -> list[str]:
     )
 
 
-def _remote_read_file(profile, remote_path: str) -> str | None:
-    """read a remote file's contents, or None if missing/unreadable."""
+def _remote_list_files(profile, remote_dir: str, suffix: str) -> list[str]:
+    """list files in a remote directory matching *suffix (basename only)."""
+    return _remote_listing(profile, remote_dir, suffix) or []
+
+
+# the files of config/tasks: load_task reads <name>.yaml before <name>.yml
+_TASK_SUFFIXES = (".yaml", ".yml")
+
+
+def _remote_task_files(profile, remote_dir: str) -> tuple[dict[str, str] | None, str]:
+    """every task file of a remote config/tasks with its text, in one ssh
+    call: ({file name: text}, ""), {} when there are none or no such folder,
+    and (None, why) when they could not be read."""
+    quoted = _quote_remote_path(remote_dir)
+    # a mark of this call's own: no task file holds it
+    mark = f"__OPENMMLA_FILE_{uuid.uuid4().hex}__"
+    names = " ".join(f"*{suffix}" for suffix in _TASK_SUFFIXES)
+    cmd = (
+        f"if [ -d {quoted} ]; then cd {quoted} || exit 1; "
+        f"for f in {names}; do [ -f \"$f\" ] || continue; "
+        f"printf '\\n{mark} %s\\n' \"$f\"; cat \"$f\" || exit 1; done; fi"
+    )
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=10.0)
+    except Exception as exc:
+        return None, ssh_error_text(exc)
+    if result.returncode != 0:
+        return None, (result.stderr or "").strip() or f"exit code {result.returncode}"
+    files: dict[str, str] = {}
+    name = None
+    lines: list[str] = []
+    for line in (result.stdout or "").split("\n"):
+        if line.startswith(mark + " "):
+            if name is not None:
+                files[name] = "\n".join(lines)
+            name, lines = line[len(mark) + 1:], []
+        elif name is not None:
+            lines.append(line)
+    if name is not None:
+        files[name] = "\n".join(lines)
+    return files, ""
+
+
+def _task_files_by_name(names) -> dict[str, str]:
+    """{task name: the file load_task reads for it} of a folder's task files."""
+    chosen: dict[str, str] = {}
+    for suffix in reversed(_TASK_SUFFIXES):
+        for file_name in names:
+            if file_name.endswith(suffix) and not file_name.startswith("."):
+                chosen[file_name[:-len(suffix)]] = file_name
+    return dict(sorted(chosen.items()))
+
+
+def _parse_task_files(files: dict[str, str]) -> tuple[dict[str, dict], list[str]]:
+    """({task name: data}, files that could not be read as "name (why)") of a
+    folder's task files ({file name: text}), each name read as load_task
+    reads it."""
+    tasks: dict[str, dict] = {}
+    broken: list[str] = []
+    for name, file_name in _task_files_by_name(files).items():
+        try:
+            data = yaml.safe_load(files[file_name]) or {}
+        except yaml.YAMLError as exc:
+            broken.append(f"{file_name} ({' '.join(str(exc).split())})")
+            continue
+        if not isinstance(data, dict):
+            broken.append(f"{file_name} (holds no mapping)")
+            continue
+        tasks[name] = data
+    return tasks, broken
+
+
+def _settings_yaml(data: dict) -> str:
+    """a settings file's text as the forms write it (save_experiments, save_task)."""
+    return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+class _HostTaskStore:
+    """the tasks of another host as TaskForm edits them: read once, kept
+    here, and every change handed to `save` / `delete`, which write it
+    through to that host."""
+
+    def __init__(self, tasks: dict[str, dict], save, delete) -> None:
+        self._tasks = tasks
+        self._save = save
+        self._delete = delete
+
+    def list_tasks(self) -> list[str]:
+        return sorted(self._tasks)
+
+    def load_task(self, name: str) -> dict:
+        return copy.deepcopy(self._tasks.get(name, {}))
+
+    def save_task(self, name: str, data: dict) -> None:
+        self._tasks[name] = copy.deepcopy(data)
+        self._save(name, data)
+
+    def delete_task(self, name: str) -> bool:
+        existed = self._tasks.pop(name, None) is not None
+        self._delete(name)
+        return existed
+
+
+class _HostProfileStore:
+    """the SSH profiles of another host as SSHForm edits them: every change
+    hands the whole list to `save`, which writes it through to that host."""
+
+    def __init__(self, save) -> None:
+        self._save = save
+
+    def save_ssh_profiles(self, profiles: list[SSHProfile]) -> None:
+        self._save(list(profiles))
+
+
+def _parse_profile_list(text: str | None) -> tuple[list | None, str]:
+    """the entries of an ssh_profiles.yml (a YAML list): [] for an empty
+    one, and (None, why) for one that is no YAML or holds no list, which is
+    never taken for an empty one."""
+    try:
+        data = yaml.safe_load(text or "")
+    except yaml.YAMLError as exc:
+        return None, f"is no valid YAML ({' '.join(str(exc).split())})"
+    if data is None:
+        return [], ""
+    if not isinstance(data, list):
+        return None, "holds no list of profiles"
+    return data, ""
+
+
+def _profile_name(entry: object) -> str:
+    """the name of an ssh_profiles.yml entry SSHForm can show; "" for one it
+    cannot (no name or host, a port that is no number), which is written back
+    as it was and never carried to another host."""
+    if not isinstance(entry, dict) or not entry.get("name") or not entry.get("host"):
+        return ""
+    try:
+        int(entry.get("port") or 22)
+    except (TypeError, ValueError):
+        return ""
+    return str(entry["name"])
+
+
+def _opened_password(value: object, keys) -> str | None:
+    """a stored password as plaintext: as it is when it is not encrypted, an
+    ENC(...) opened with the first of `keys` (master keys, None passed over)
+    that opens it, and None for one none of them opens."""
+    from openmmla.utils.crypto import is_encrypted, open_value
+    text = "" if value is None else str(value)
+    if not is_encrypted(text):
+        return text
+    return open_value(text, keys)
+
+
+def _profiles_of_entries(entries: list, key: bytes | None) -> tuple[list[SSHProfile], list]:
+    """(the profiles SSHForm shows, the entries it cannot show) of another
+    host's ssh_profiles.yml, its passwords opened with `key`, that host's own
+    master key. One that key does not open stays ENC(...), which the form
+    shows as encrypted there."""
+    profiles: list[SSHProfile] = []
+    kept: list = []
+    for entry in entries:
+        if not _profile_name(entry):
+            kept.append(entry)
+            continue
+        opened = _opened_password(entry.get("password"), [key])
+        profiles.append(SSHProfile(
+            name=str(entry["name"]),
+            host=str(entry["host"]),
+            user=str(entry.get("user") or ""),
+            port=int(entry.get("port") or 22),
+            password=str(entry.get("password") or "") if opened is None else opened,
+            key_path=str(entry.get("key_path") or ""),
+            remote_project_path=str(entry.get("remote_project_path") or "~/OpenMMLA"),
+        ))
+    return profiles, kept
+
+
+def _profiles_text(entries: list, key) -> str:
+    """an ssh_profiles.yml as save_ssh_profiles writes it: the passwords of
+    the profiles among `entries` encrypted with `key`, the master key of the
+    machine it is written to (or a callable that gets it, asked only when a
+    password is to be encrypted; one that is ENC(...) already stays as it
+    is), and the entries SSHForm cannot show as they were."""
+    from openmmla.utils.crypto import encrypt_sensitive_values
+    data = copy.deepcopy(entries)
+    profiles = [entry for entry in data if _profile_name(entry)]
+    if _plaintext_secrets(profiles):
+        sealing = key() if callable(key) else key
+        for entry in profiles:
+            encrypt_sensitive_values(entry, sealing)
+    return yaml.dump(data, default_flow_style=False, sort_keys=False)
+
+
+def _carried_password(value: object, dest_key: bytes | None, keys) -> str | None:
+    """a password of one machine's list as it goes into another's: "" for
+    none, an ENC(...) the destination's key (`dest_key`) opens as it is, and
+    any other opened with the first of `keys` (the source's, this
+    console's) that opens it, as plaintext the destination's key then
+    seals; None when none of them opens it."""
+    from openmmla.utils.crypto import is_encrypted, open_value
+    text = "" if value is None else str(value)
+    if is_encrypted(text) and dest_key and open_value(text, [dest_key]) is not None:
+        return text
+    return _opened_password(text, keys)
+
+
+def _merge_profile_entries(source: list, dest: list, dest_key: bytes | None,
+                           keys) -> tuple[list, dict[str, list[str]]]:
+    """`dest`'s ssh_profiles.yml entries once the profiles of `source` are
+    merged into them by name: each replaces the profile of its name there or
+    is added at the end, and what only `dest` has stays where it was. A
+    password travels opened (_carried_password: `dest_key` is the
+    destination's master key, `keys` the source's and this console's) and is
+    sealed with the destination's key when the list is written. A profile
+    `dest` has already keeps its own key_path (a file of that machine), and
+    its own password when the one that comes is empty or none of the keys
+    opens it: nothing that does not open lands anywhere. Returns (entries,
+    names): the profiles "added" and "replaced", those that kept their
+    "key_path" or "password" there (when it differs), came with
+    "no_password", or are new with a key_path, which names a file of the
+    source machine ("new_key_path")."""
+    merged = copy.deepcopy(dest)
+    at = {_profile_name(entry): index for index, entry in enumerate(merged) if _profile_name(entry)}
+    names: dict[str, list[str]] = {
+        what: [] for what in ("added", "replaced", "key_path", "password", "no_password", "new_key_path")}
+    for entry in source:
+        name = _profile_name(entry)
+        if not name:
+            continue
+        new = copy.deepcopy(entry)
+        password = "" if new.get("password") is None else str(new.get("password"))
+        carried = _carried_password(password, dest_key, keys) if password else None
+        if carried is not None:
+            new["password"] = carried
+        if name in at:
+            old = merged[at[name]]
+            if str(old.get("key_path") or "") != str(new.get("key_path") or ""):
+                names["key_path"].append(name)
+            new["key_path"] = old.get("key_path") or ""
+            if carried is None:
+                own = "" if old.get("password") is None else str(old.get("password"))
+                if own and own != password:
+                    names["password"].append(name)
+                elif not own and password:
+                    names["no_password"].append(name)
+                new["password"] = old.get("password") or ""
+            merged[at[name]] = {**old, **new}
+            names["replaced"].append(name)
+        else:
+            if password and carried is None:
+                new["password"] = ""
+                names["no_password"].append(name)
+            if new.get("key_path"):
+                names["new_key_path"].append(name)
+            at[name] = len(merged)
+            merged.append(new)
+            names["added"].append(name)
+    return merged, names
+
+
+def _profile_endpoint(entry: dict) -> tuple[str, str, str]:
+    """where a profile of an ssh_profiles.yml connects to."""
+    return str(entry.get("host") or ""), str(entry.get("port") or 22), str(entry.get("user") or "")
+
+
+def _write_private_file(path: str, text: str) -> None:
+    """write a file of this machine that only its owner may read (chmod
+    600), never half written: beside it as <path>.tmp first, then moved over
+    it."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _remote_read_text(profile, remote_path: str) -> tuple[str | None, str]:
+    """a remote file's contents as (text, ""), (None, "") when there is no
+    such file, and (None, why) when it could not be read, which is never to be
+    taken for missing: a file nobody could read is not written over."""
     quoted = _quote_remote_path(remote_path)
     cmd = f"if [ -f {quoted} ]; then cat {quoted}; else printf '{_FILE_MISSING_SENTINEL}'; fi"
     try:
         result = ssh_run_sync(profile, cmd, timeout=10.0)
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, ssh_error_text(exc)
     if result.returncode != 0:
-        return None
+        return None, (result.stderr or "").strip() or f"exit code {result.returncode}"
     out = result.stdout or ""
     if out.strip() == _FILE_MISSING_SENTINEL:
-        return None
-    return out
+        return None, ""
+    return out, ""
 
 
-def _remote_delete_file(profile, remote_path: str) -> tuple[bool, str]:
-    """delete a remote file; one that is not there counts as deleted. Returns (ok, error)."""
+def _remote_read_file(profile, remote_path: str) -> str | None:
+    """read a remote file's contents, or None if missing/unreadable."""
+    return _remote_read_text(profile, remote_path)[0]
+
+
+def _remote_delete_file(profile, remote_path: str, *others: str) -> tuple[bool, str]:
+    """delete a remote file (and `others`, in the same command); one that is
+    not there counts as deleted. Returns (ok, error)."""
+    paths = " ".join(_quote_remote_path(path) for path in (remote_path, *others))
     try:
-        result = ssh_run_sync(profile, f"rm -f {_quote_remote_path(remote_path)}", timeout=10.0)
+        result = ssh_run_sync(profile, f"rm -f {paths}", timeout=10.0)
     except Exception as exc:
-        return False, str(exc)
+        return False, ssh_error_text(exc)
     if result.returncode != 0:
         return False, (result.stderr or "").strip() or f"exit code {result.returncode}"
     return True, ""
 
 
-def _remote_write_file(profile, remote_path: str, content: str) -> tuple[bool, str]:
-    """write content to a remote file (creating parent dirs). Returns (ok, error)."""
-    quoted = _quote_remote_path(remote_path)
+def _remote_write_file(profile, remote_path: str, content: str, mode: str = "") -> tuple[bool, str]:
+    """write content to a remote file (creating parent dirs). Returns (ok, error).
+
+    The text goes into <path>.tmp beside the file, and only once all of it is
+    there (the byte count is checked: a connection cut midway hands `cat` an
+    early end of input, not an error) is it moved over the file, in the same
+    ssh command: the file is never left half written. `mode` (e.g. "600") is
+    set on the new file before it takes the old one's place, and a file
+    given one is private from the start: <path>.tmp is created readable by
+    its owner alone, since a cut connection can leave it behind."""
+    data = content.encode("utf-8")
     remote_dir = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
-    cmd = f"mkdir -p {_quote_remote_path(remote_dir)} && cat > {quoted}"
+    quoted = _quote_remote_path(remote_path)
+    tmp = _quote_remote_path(remote_path + ".tmp")
+    chmod = f"chmod {mode} {tmp} && " if mode else ""
+    private = "umask 077 && " if mode else ""
+    cmd = (
+        f"mkdir -p {_quote_remote_path(remote_dir)} && {private}cat > {tmp} && "
+        f"[ \"$(wc -c < {tmp} | tr -d ' ')\" = {len(data)} ] && {chmod}mv -f {tmp} {quoted} "
+        f"|| {{ rm -f {tmp}; exit 1; }}"
+    )
     args = profile.base_ssh_args() + [cmd]
     try:
-        proc = subprocess.run(
-            args, input=content, capture_output=True, text=True, timeout=20.0
-        )
+        proc = subprocess.run(args, input=data, capture_output=True, timeout=20.0)
     except Exception as exc:
-        return False, str(exc)
+        return False, ssh_error_text(exc)
     if proc.returncode != 0:
-        return False, (proc.stderr or "").strip() or f"exit code {proc.returncode}"
+        stderr = (proc.stderr or b"").decode(errors="replace").strip()
+        return False, stderr or f"exit code {proc.returncode}"
     return True, ""
 
 
-def _streams_to_carry(local_config: object, remote_config: object) -> dict | None:
-    """the Streams entries of a local pipeline config that a remote copy of it
-    should have: None when the local config has none, or the remote's already
-    match. The rest of the remote config is not looked at."""
-    streams = local_config.get("Streams") if isinstance(local_config, dict) else None
+async def _scp_into_place(
+    profile, local_path: str, remote_path: str, mode: str = "", replace: bool = True,
+) -> tuple[bool, str]:
+    """write a file of this machine onto a host without ever leaving the file
+    there half written: scp puts it beside the file as <path>.tmp, and one
+    ssh command then moves it over (a copy cut off midway leaves the old file
+    as it was, and only a .tmp beside it). `mode` (e.g. "600") is set on the
+    new file before the move; `replace` False leaves a file that is already
+    there alone. Returns (ok, why not)."""
+    remote_dir = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
+    tmp_path = remote_path + ".tmp"
+    quoted, tmp = _quote_remote_path(remote_path), _quote_remote_path(tmp_path)
+    try:
+        await _wait_child(await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}"))
+        rc, output = await _wait_child(await scp_file_async(profile, local_path, tmp_path))
+        if rc != 0:
+            return False, output.strip() or f"exit code {rc}"
+        chmod = f"chmod {mode} {tmp} && " if mode else ""
+        keep = "" if replace else f"[ ! -e {quoted} ] && "
+        rc, output = await _wait_child(await ssh_run_async(
+            profile, f"{chmod}{keep}mv -f {tmp} {quoted} || {{ rm -f {tmp}; exit 1; }}"))
+        if rc != 0:
+            return False, output.strip() or (
+                f"{os.path.basename(remote_path)} is there already" if not replace else f"exit code {rc}")
+    except Exception as exc:
+        return False, ssh_error_text(exc)
+    return True, ""
+
+
+# a cache entry that was not there (None is a value)
+_NOT_HELD = object()
+
+# a file a panel has not been handed yet, and reads itself (None is a failed read)
+_NOT_READ = object()
+
+# where every machine keeps its own master key, on the remote side of ssh
+# (an ENC(...) value in a text is crypto.ENC_TOKEN_RE)
+_HOST_KEY_DIR = '"$HOME/.openmmla"'
+_HOST_KEY_PATH = '"$HOME/.openmmla/master.key"'
+
+
+def _local_master_key() -> bytes | None:
+    """this machine's ~/.openmmla/master.key, None when it has none."""
+    from openmmla.utils import crypto
+    try:
+        with open(crypto.MASTER_KEY_PATH, "rb") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def _valid_master_key(text: str) -> bytes | None:
+    """the key a master.key holds, None when that is no Fernet key."""
+    from cryptography.fernet import Fernet
+    key = (text or "").strip().encode("ascii", errors="replace")
+    try:
+        Fernet(key)
+    except Exception:
+        return None
+    return key
+
+
+def _read_host_master_key(profile) -> tuple[bytes | None, str]:
+    """another host's own ~/.openmmla/master.key, read over ssh (off the UI
+    thread): (key, ""), (None, "") when it has none, and (None, why) when it
+    could not be read or holds no key. Anyone with this ssh login can read
+    that file anyway; the key is kept in memory only, and neither shown,
+    logged, written nor sent anywhere (no why ever holds it)."""
+    cmd = f"if [ -f {_HOST_KEY_PATH} ]; then cat {_HOST_KEY_PATH}; else printf '{_FILE_MISSING_SENTINEL}'; fi"
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=10.0)
+    except Exception as exc:
+        return None, ssh_error_text(exc)
+    if result.returncode != 0:
+        return None, (result.stderr or "").strip() or f"exit code {result.returncode}"
+    out = (result.stdout or "").strip()
+    if out == _FILE_MISSING_SENTINEL:
+        return None, ""
+    key = _valid_master_key(out)
+    if key is None:
+        return None, "its ~/.openmmla/master.key holds no valid key"
+    return key, ""
+
+
+def _make_host_master_key(profile) -> tuple[bytes | None, str]:
+    """a key of its own for a host that has none, the first time something
+    sealed with it is written there: made fresh and random here, handed
+    over on the ssh channel's stdin, and put in place there only while there
+    is still none (written beside it with umask 077, so 0600 in a 0700
+    ~/.openmmla when that is made, then linked into place, which never goes
+    over a file that is there). The key there is then read back: of two
+    consoles that make one at once, both use the one that won. A key that is
+    there is never replaced. (key, "") or (None, why)."""
+    from cryptography.fernet import Fernet
+    data = Fernet.generate_key() + b"\n"
+    cmd = (
+        f"umask 077; d={_HOST_KEY_DIR}; k={_HOST_KEY_PATH}; t=\"$k.$$.new\"; "
+        "mkdir -p \"$d\" || exit 1; "
+        "cat > \"$t\" || { rm -f \"$t\"; exit 1; }; "
+        f"if [ \"$(wc -c < \"$t\" | tr -d ' ')\" != {len(data)} ]; then rm -f \"$t\"; exit 1; fi; "
+        "ln \"$t\" \"$k\" 2>/dev/null || { [ -e \"$k\" ] || mv -n \"$t\" \"$k\"; }; "
+        "rm -f \"$t\"; cat \"$k\""
+    )
+    try:
+        proc = subprocess.run(profile.base_ssh_args() + [cmd], input=data, capture_output=True, timeout=20.0)
+    except Exception as exc:
+        return None, ssh_error_text(exc)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or b"").decode(errors="replace").strip()
+        return None, stderr or f"exit code {proc.returncode}"
+    key = _valid_master_key((proc.stdout or b"").decode(errors="replace"))
+    if key is None:
+        return None, "its ~/.openmmla/master.key holds no valid key"
+    return key, ""
+
+
+def _plaintext_secrets(config: object) -> bool:
+    """whether a config holds a token/password value that is not
+    encrypted yet (what the user just typed, a token fetched)."""
+    try:
+        from openmmla.utils.crypto import is_sensitive_key, sensitive_plaintext
+    except Exception:
+        return False
+    if isinstance(config, list):
+        return any(_plaintext_secrets(item) for item in config)
+    if not isinstance(config, dict):
+        return False
+    return any(
+        _plaintext_secrets(value) if isinstance(value, (dict, list))
+        else is_sensitive_key(str(key)) and sensitive_plaintext(value) is not None
+        for key, value in config.items()
+    )
+
+
+def _opened_tree(data: object, keys) -> object:
+    """a copy of `data` whose ENC(...) values are opened with the first of
+    `keys` that opens them (one none opens stays as it is): what two
+    machines' values are compared by, since one secret sealed with two keys
+    reads differently. Never shown or written."""
+    from openmmla.utils.crypto import is_encrypted, open_value
+    if isinstance(data, dict):
+        return {key: _opened_tree(value, keys) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_opened_tree(value, keys) for value in data]
+    if isinstance(data, str) and is_encrypted(data):
+        opened = open_value(data, keys)
+        return data if opened is None else opened
+    return data
+
+
+def _read_problem(why: str) -> str:
+    """the reason of a failed read, without the "using defaults" its message
+    ends in for a form (a write job uses no defaults: it leaves the file)."""
+    text = str(why).strip()
+    for tail in (" Using defaults.", "; using defaults."):
+        if text.endswith(tail):
+            text = text[:-len(tail)]
+    return text.rstrip(".")
+
+
+def _unlink_entries(entries) -> None:
+    """remove the temp files of scp entries that will not be sent."""
+    for entry in entries:
+        try:
+            os.unlink(entry[0])
+        except OSError:
+            pass
+
+
+def _streams_to_carry(source_config: object, dest_config: object) -> dict | None:
+    """the Streams entries the copy of a pipeline config on another host
+    should have once those of `source_config` are carried there, merged by
+    name: each replaces the entry of the same name there or is added, and the
+    entries only the destination has stay. None when the source has none, or
+    the destination has them already. The rest of the configs is not looked at."""
+    streams = source_config.get("Streams") if isinstance(source_config, dict) else None
     if not isinstance(streams, dict) or not streams:
         return None
-    remote_streams = remote_config.get("Streams") if isinstance(remote_config, dict) else None
-    return None if remote_streams == streams else copy.deepcopy(streams)
+    dest_streams = dest_config.get("Streams") if isinstance(dest_config, dict) else None
+    merged = copy.deepcopy(dest_streams) if isinstance(dest_streams, dict) else {}
+    for name, entry in streams.items():
+        merged[name] = copy.deepcopy(entry)
+    return None if merged == dest_streams else merged
+
+
+def _repoint_streams_in_config(config: object, old: dict | None, new: dict | None) -> int:
+    """the Stream Server moved from `old` to `new`: the stream URLs of one
+    pipeline config that named its old address follow it, in place. How many
+    moved; none when the address did not change, or the new one is not filled
+    in (nowhere to move them to)."""
+    old, new = old or {}, new or {}
+    if all(str(old.get(key)) == str(new.get(key)) for key in ("host", "rtmp_port", "rtsp_port")):
+        return 0
+    if not usable_system_service_value(new.get("host")):
+        return 0
+    streams = config.get("Streams") if isinstance(config, dict) else None
+    if not isinstance(streams, dict):
+        return 0
+    changed = 0
+    for entry in streams.values():
+        if not isinstance(entry, dict):
+            continue
+        for key in ("target", "read_target"):
+            url = str(entry.get(key) or "").strip()
+            repointed = repoint_stream_url(url, old, new) if url else url
+            if repointed != url:
+                entry[key] = repointed
+                changed += 1
+    return changed
+
+
+def _loopback_fields(section_name: str, section: dict) -> list[str]:
+    """the address fields of a section that name a loopback address, which
+    means a different machine on every host that reads it."""
+    return [
+        f"{section_name}.{key}" for key, value in section.items()
+        if key in ("host", "url") and is_loopback_host(
+            urlsplit(str(value)).hostname if "://" in str(value) else value)
+    ]
+
+
+# the row of a host picker with its Sync to Host and Sync from Host buttons,
+# the same under every tab and form that has one (the Config tab, the panels
+# beside it, Calibration Cameras): the buttons are as wide as their labels and
+# the picker takes the rest, one line high even when that is little (at 100
+# columns a tab's picker is about 20 wide)
+_SYNC_BAR_CSS = """
+    .sync-bar {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    .sync-bar Select {
+        width: 1fr;
+    }
+    .sync-bar SelectCurrent #label {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    .sync-bar Button {
+        min-width: 14;
+        margin: 0 0 0 1;
+    }
+"""
+
+
+def _sync_bar(select_id: str, to_id: str, from_id: str, options: list[tuple[str, str]],
+              disabled: bool = False) -> Horizontal:
+    """a host picker and the two buttons that copy what the tab shows to the
+    host picked (Sync to Host) and that host's copy over it (Sync from Host)."""
+    return Horizontal(
+        Select(options, prompt="Select host...", id=select_id),
+        Button("Sync to Host", variant="warning", id=to_id, disabled=disabled),
+        Button("Sync from Host", variant="warning", id=from_id, disabled=disabled),
+        classes="sync-bar",
+    )
 
 
 class TransformMatrixPanel(Widget):
@@ -1519,7 +2124,7 @@ class TransformMatrixPanel(Widget):
         height: 22;
         margin-top: 1;
     }
-    """
+    """ + _SYNC_BAR_CSS
 
     def __init__(
         self,
@@ -1612,28 +2217,32 @@ class TransformMatrixPanel(Widget):
                 yield Button("Save", variant="primary", id="btn-tm-save", disabled=True)
                 yield Button("Reload", id="btn-tm-reload", disabled=True)
                 yield Button("Delete", variant="error", id="btn-tm-delete", disabled=True)
-            yield Static("", id="tm-status", classes="tm-muted")
         else:
             where = host_label
             yield Static(
                 f"No transformation_matrices*.json files found on {where}.",
                 classes="tm-muted",
             )
+        # there with no files as well: that is the host a Sync from Host is for
+        yield Static("", id="tm-status", classes="tm-muted")
 
         # the files of the host on screen go to any other machine, this one
-        # included: a matrix made on a base station is brought back here the
-        # same way this machine's are sent out.
+        # included, and another machine's come over them: a matrix made on a
+        # base station is brought back here the way this machine's go out.
         destinations = _sync_destination_options(self.target, self.ssh_profiles)
         if destinations:
-            with Horizontal(classes="tm-actions"):
-                yield Select(
-                    destinations,
-                    prompt="Select destination host...",
-                    id="transform-sync-host-select",
-                )
-                yield Button("Sync to Host", variant="warning", id="btn-sync-transform-host")
+            yield _sync_bar("transform-sync-host-select", "btn-sync-transform-host",
+                            "btn-sync-transform-from-host", destinations)
         else:
             yield Static("No SSH profiles configured for sync.", classes="tm-muted")
+
+    def set_files(self, local_files: list[str], remote_files: list[str]) -> None:
+        """the files listed again after a sync landed here; a recompose()
+        draws them, with none picked."""
+        self.local_files = list(local_files)
+        self.remote_files = list(remote_files)
+        self._current_file = None
+        self._pending_delete = None
 
     def _set_status(self, text: str) -> None:
         try:
@@ -1834,16 +2443,23 @@ class CameraManagerPanel(Widget):
     the list holds both. A camera's images open in the file browser, where
     they can be looked at; a camera is deleted with its parameters (not while
     a base uses it); and its parameters go to the host that will capture with
-    it, without the rest of this machine's config."""
+    it, without the rest of this machine's config, as the cameras calibrated
+    on another host come here (parameters only: the images stay there)."""
 
     class SyncRequested(Message):
-        """Sync to Host: this camera's parameters into that host's config."""
+        """Sync to Host ("to"): this camera's parameters into that host's
+        config. Sync from Host ("from"): every calibrated camera of that host's
+        config into this machine's (no camera named); `confirmed` holds the
+        cameras whose parameters here the user has agreed to replace."""
 
-        def __init__(self, panel: "CameraManagerPanel", camera: str, profile_name: str) -> None:
+        def __init__(self, panel: "CameraManagerPanel", camera: str, profile_name: str,
+                     direction: str = "to", confirmed: frozenset[str] = frozenset()) -> None:
             super().__init__()
             self.panel = panel
             self.camera = camera
             self.profile_name = profile_name
+            self.direction = direction
+            self.confirmed = confirmed
 
     DEFAULT_CSS = """
     CameraManagerPanel {
@@ -1866,11 +2482,7 @@ class CameraManagerPanel(Widget):
         min-width: 18;
         margin-right: 1;
     }
-    CameraManagerPanel #cm-sync-profile {
-        width: 40;
-        margin-right: 1;
-    }
-    """
+    """ + _SYNC_BAR_CSS
 
     def __init__(
         self, *, cameras_dir: str, target: str, config_path: str = "", ssh_profiles: list[str] | None = None,
@@ -1883,6 +2495,9 @@ class CameraManagerPanel(Widget):
         self._current_camera: str | None = None
         # a camera whose Delete Camera has been pressed once
         self._pending_delete: str | None = None
+        # (host, cameras) a Sync from Host would give that host's parameters
+        # here, said at its first press: the second takes them
+        self._pending_pull: tuple[str, frozenset[str]] | None = None
 
     # ── what is here ─────────────────────────────────────────────
     def _config(self) -> dict:
@@ -1948,18 +2563,8 @@ class CameraManagerPanel(Widget):
             yield Button("Delete Camera", variant="error", id="btn-cm-del-camera", disabled=True)
             yield Button("Refresh", id="btn-cm-refresh")
         if self.ssh_profiles:
-            with Horizontal(classes="cm-actions"):
-                yield Select(
-                    [(name, name) for name in self.ssh_profiles],
-                    prompt="Host that captures with it...",
-                    id="cm-sync-profile",
-                )
-                yield Button("Sync to Host", variant="warning", id="btn-cm-sync", disabled=True)
-        yield Static(
-            "After calibrating, Sync to Host gives the host that runs the IPS base this camera's "
-            "parameters (only them: the rest of its config stays as it is).",
-            classes="cm-muted",
-        )
+            yield _sync_bar("cm-sync-profile", "btn-cm-sync", "btn-cm-sync-from",
+                            [(name, name) for name in self.ssh_profiles], disabled=True)
         yield Static("", id="cm-status", classes="cm-muted")
 
     # ── state ────────────────────────────────────────────────────
@@ -1974,15 +2579,24 @@ class CameraManagerPanel(Widget):
             value = self.query_one("#cm-sync-profile", Select).value
         except Exception:
             return None
-        return None if value in (None, Select.BLANK) else str(value)
+        # an empty Select holds Select.NULL on textual 8, Select.BLANK before
+        return None if is_select_sentinel(value) else str(value)
+
+    def confirm_pull(self, host: str, cameras: list[str]) -> None:
+        """a Sync from Host from `host` would replace the parameters these
+        cameras have here: the next press of it takes them."""
+        self._pending_pull = (host, frozenset(cameras))
 
     def _update_actions(self) -> None:
         camera = self._current_camera
         calibrated = bool(camera) and camera in _calibrated_cameras(self._config())
+        host = self._sync_profile()
         states = {
             "#btn-cm-open": not (camera and os.path.isdir(os.path.join(self.cameras_dir, camera))),
             "#btn-cm-del-camera": camera is None,
-            "#btn-cm-sync": not (calibrated and self._sync_profile()),
+            "#btn-cm-sync": not (calibrated and host),
+            # every calibrated camera of that host comes: no camera to pick
+            "#btn-cm-sync-from": not host,
         }
         for selector, disabled in states.items():
             try:
@@ -2002,7 +2616,10 @@ class CameraManagerPanel(Widget):
         try:
             sel = self.query_one("#cm-camera-select", Select)
             sel.set_options([(c, c) for c in cameras])
-            sel.value = keep if keep else Select.BLANK
+            if keep:
+                sel.value = keep
+            else:
+                sel.clear()
         except Exception:
             pass
         self._current_camera = keep
@@ -2012,11 +2629,12 @@ class CameraManagerPanel(Widget):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "cm-camera-select":
             event.stop()
-            self._current_camera = None if event.value in (None, Select.BLANK) else str(event.value)
+            self._current_camera = None if is_select_sentinel(event.value) else str(event.value)
             self._pending_delete = None
             self._update_actions()
         elif event.select.id == "cm-sync-profile":
             event.stop()
+            self._pending_pull = None
             self._update_actions()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -2024,6 +2642,7 @@ class CameraManagerPanel(Widget):
         if bid == "btn-cm-refresh":
             event.stop()
             self._pending_delete = None
+            self._pending_pull = None
             self._refresh_cameras()
             self.set_status("Refreshed.")
         elif bid == "btn-cm-open":
@@ -2038,6 +2657,14 @@ class CameraManagerPanel(Widget):
             if self._current_camera and profile:
                 self.set_status(f"Syncing '{self._current_camera}' to {profile} ...")
                 self.post_message(self.SyncRequested(self, self._current_camera, profile))
+        elif bid == "btn-cm-sync-from":
+            event.stop()
+            profile = self._sync_profile()
+            if profile:
+                pending, self._pending_pull = self._pending_pull, None
+                confirmed = pending[1] if pending is not None and pending[0] == profile else frozenset()
+                self.set_status(f"Reading the calibrated cameras of {profile} ...")
+                self.post_message(self.SyncRequested(self, "", profile, direction="from", confirmed=confirmed))
 
     def _safe_under_cameras(self, path: str) -> bool:
         root = os.path.abspath(self.cameras_dir)
@@ -2136,7 +2763,7 @@ class PromptsPanel(Widget):
         min-width: 16;
         margin-right: 1;
     }
-    """
+    """ + _SYNC_BAR_CSS
 
     def __init__(
         self,
@@ -2149,6 +2776,7 @@ class PromptsPanel(Widget):
         ssh_profiles: list[str] | None = None,
         ssh_profile=None,
         remote_dir: str | None = None,
+        files: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.prompts_dir = prompts_dir
@@ -2161,6 +2789,9 @@ class PromptsPanel(Widget):
         # selected remote host instead of the local disk.
         self._ssh_profile = ssh_profile
         self._remote_dir = remote_dir
+        # the prompt files as listed by the launcher (off the UI thread);
+        # None: the panel lists them itself
+        self.files = list(files) if files is not None else None
         self._current_file: str | None = None
 
     @property
@@ -2177,6 +2808,8 @@ class PromptsPanel(Widget):
         return os.path.join(self.prompts_dir, name)
 
     def _prompt_files(self) -> list[str]:
+        if self.files is not None:
+            return list(self.files)
         if self._is_remote:
             return _remote_list_files(self._ssh_profile, self._remote_dir, ".txt")
         try:
@@ -2187,36 +2820,39 @@ class PromptsPanel(Widget):
         except OSError:
             return []
 
+    def set_files(self, files: list[str]) -> None:
+        """the prompt files listed again after a sync landed here; a
+        recompose() draws them, with none picked."""
+        self.files = list(files)
+        self._current_file = None
+
     def compose(self) -> ComposeResult:
         host_label = self.target if self._is_remote else "Local"
         yield Static("[b]Prompt Templates[/b]", classes="pp-title")
         yield Static(f"{host_label}: {self._dir}", classes="pp-muted")
         yield Static(self._profile_line(), id="pp-profile-line", classes="pp-muted")
         files = self._prompt_files()
-        if not files:
+        if files:
+            yield Select(
+                self._build_options(),
+                prompt="Select a prompt template...",
+                id="prompt-file-select",
+            )
+            yield TextArea("", id="prompt-editor", read_only=True)
+            with Horizontal(classes="pp-actions"):
+                yield Button("Save", variant="primary", id="btn-prompt-save", disabled=True)
+                yield Button("Reload", id="btn-prompt-reload", disabled=True)
+        else:
             yield Static("No .txt prompt templates found.", classes="pp-muted")
-            return
-        yield Select(
-            self._build_options(),
-            prompt="Select a prompt template...",
-            id="prompt-file-select",
-        )
-        yield TextArea("", id="prompt-editor", read_only=True)
-        with Horizontal(classes="pp-actions"):
-            yield Button("Save", variant="primary", id="btn-prompt-save", disabled=True)
-            yield Button("Reload", id="btn-prompt-reload", disabled=True)
+        # there with no files as well: that is the host a Sync from Host is for
         yield Static("", id="prompt-status", classes="pp-muted")
         # the prompt files of the host on screen go to any other machine, this
-        # one included: what was edited on a server comes back here.
+        # one included, and another machine's come over them: what was edited
+        # on a server comes back here.
         destinations = _sync_destination_options(self.target, self.ssh_profiles)
         if destinations:
-            with Horizontal(classes="pp-actions"):
-                yield Select(
-                    destinations,
-                    prompt="Select destination host...",
-                    id="prompts-sync-host-select",
-                )
-                yield Button("Sync to Host", variant="warning", id="btn-sync-prompts-host")
+            yield _sync_bar("prompts-sync-host-select", "btn-sync-prompts-host",
+                            "btn-sync-prompts-from-host", destinations)
 
     def _profile_line(self) -> str:
         mode = "end-to-end" if self.end_to_end else "two-step (VLM + LLM)"
@@ -2292,7 +2928,7 @@ class PromptsPanel(Widget):
         if event.select.id != "prompt-file-select":
             return
         value = event.value
-        self._current_file = None if value in (None, Select.BLANK) else str(value)
+        self._current_file = None if is_select_sentinel(value) else str(value)
         has_file = self._current_file is not None
         self.query_one("#btn-prompt-save", Button).disabled = not has_file
         self.query_one("#btn-prompt-reload", Button).disabled = not has_file
@@ -2351,7 +2987,7 @@ class ActionSchemaPanel(Widget):
         min-width: 16;
         margin-right: 1;
     }
-    """
+    """ + _SYNC_BAR_CSS
 
     def __init__(
         self,
@@ -2395,16 +3031,12 @@ class ActionSchemaPanel(Widget):
             yield Button("Reload", id="btn-aschema-reload")
         yield Static("", id="aschema-status", classes="as-muted")
         # the schema of the host on screen goes to any other machine, this one
-        # included: what was edited on a server comes back here.
+        # included, and another machine's comes over it: what was edited on a
+        # server comes back here.
         destinations = _sync_destination_options(self.target, self.ssh_profiles)
         if destinations:
-            with Horizontal(classes="as-actions"):
-                yield Select(
-                    destinations,
-                    prompt="Select destination host...",
-                    id="aschema-sync-host-select",
-                )
-                yield Button("Sync to Host", variant="warning", id="btn-sync-aschema-host")
+            yield _sync_bar("aschema-sync-host-select", "btn-sync-aschema-host",
+                            "btn-sync-aschema-from-host", destinations)
 
     def on_mount(self) -> None:
         self._load()
@@ -2420,10 +3052,13 @@ class ActionSchemaPanel(Widget):
         status line of the Config tab is not on screen while this one is."""
         self._set_status(text)
 
-    def _load(self) -> None:
+    def _load(self, content=_NOT_READ) -> None:
+        """show the schema; `content` is a remote file's text read off the UI
+        thread (None when it could not be read), else it is read here."""
         editor = self.query_one("#action-schema-editor", TextArea)
         if self._is_remote:
-            content = _remote_read_file(self._ssh_profile, self._remote_path)
+            if content is _NOT_READ:
+                content = _remote_read_file(self._ssh_profile, self._remote_path)
             if content is None:
                 editor.load_text("")
                 editor.read_only = True
@@ -2517,15 +3152,23 @@ class StreamServerConfigPanel(Widget):
     StreamServerConfigPanel .ss-actions Select {
         width: 34;
     }
-    """
+    """ + _SYNC_BAR_CSS
+
+    # what a Save says, and a copy that landed on a host: how it takes effect
+    _APPLY_NOTE = ("MediaMTX reloads the file when it changes; Stop and Start on the Launch tab if a change "
+                   "does not show.")
+    # seconds MediaMTX is given to read a changed file before the running
+    # sessions' paths are switched on again
+    _RELOAD_SECONDS = 3.0
 
     def __init__(self, *, config_path: str, target: str = "local", ssh_profile=None,
-                 remote_path: str | None = None) -> None:
+                 remote_path: str | None = None, ssh_profiles: list[str] | None = None) -> None:
         super().__init__()
         self.config_path = config_path
         self.target = target
         self._ssh_profile = ssh_profile
         self._remote_path = remote_path
+        self.ssh_profiles = list(ssh_profiles or [])
 
     @property
     def _is_remote(self) -> bool:
@@ -2558,15 +3201,60 @@ class StreamServerConfigPanel(Widget):
             yield Button("Save", variant="primary", id="btn-mediamtx-save")
             yield Button("Reload", id="btn-mediamtx-reload")
         yield Static("", id="mediamtx-status", classes="ss-muted")
+        # the file of the host on screen goes to any other machine, and
+        # another machine's comes over it
+        destinations = _sync_destination_options(self.target, self.ssh_profiles)
+        if destinations:
+            yield _sync_bar("mediamtx-sync-host-select", "btn-sync-mediamtx-host",
+                            "btn-sync-mediamtx-from-host", destinations)
 
     def on_mount(self) -> None:
         self._load()
 
     def _set_status(self, text: str) -> None:
+        self._status_text = text
         try:
             self.query_one("#mediamtx-status", Static).update(text)
         except Exception:
             pass
+
+    def set_status(self, text: str) -> None:
+        """what a sync started from this tab has to say, said on this tab; a
+        copy that landed is applied the way a Save is."""
+        self._set_status(f"{text}. {self._APPLY_NOTE}" if text.startswith("Synced ") else text)
+        if text.startswith("Synced "):
+            self._reapply_session_recording()
+
+    def set_status_elsewhere(self, text: str) -> None:
+        """what a Sync to Host from this tab has to say: the copy landed on
+        another host, whose MediaMTX this card's Launch tab does not drive."""
+        self._set_status(f"{text}. MediaMTX there reloads the file when it changes."
+                         if text.startswith("Synced ") else text)
+        if text.startswith("Synced "):
+            self._reapply_session_recording()
+
+    def _reapply_session_recording(self) -> None:
+        """MediaMTX reads a changed mediamtx.yml again and drops every path
+        entry START added through its API, so a running session would record
+        nothing more: once it has, the paths of the running sessions are
+        switched on again (stream_recording.reapply_open_windows)."""
+        try:
+            self.run_worker(self._reapply_after_reload(), exclusive=True, group="mediamtx-reapply")
+        except Exception:
+            pass  # the tab is gone
+
+    async def _reapply_after_reload(self) -> None:
+        from openmmla.tui.schema.loader import _find_project_root
+        from openmmla.tui.system_services import system_services_config_path
+        from openmmla.utils.stream_recording import reapply_open_windows
+
+        await asyncio.sleep(self._RELOAD_SECONDS)
+        result = await asyncio.to_thread(
+            reapply_open_windows, start_path=system_services_config_path(_find_project_root()))
+        if result["text"]:
+            color = "yellow" if result["warnings"] else "green"
+            said = getattr(self, "_status_text", "")
+            self._set_status(f"{said} [{color}]{rich_escape(result['text'])}.[/{color}]".strip())
 
     def _show_recording_state(self) -> None:
         state = _mediamtx_server_recording(self.query_one("#mediamtx-editor", TextArea).text)
@@ -2618,10 +3306,13 @@ class StreamServerConfigPanel(Widget):
         self._show_retention_state()
         self._set_status("Changed in the editor: press Save to write it.")
 
-    def _load(self) -> None:
+    def _load(self, content=_NOT_READ) -> None:
+        """show the config; `content` is a remote file's text read off the UI
+        thread (None when it could not be read), else it is read here."""
         editor = self.query_one("#mediamtx-editor", TextArea)
         if self._is_remote:
-            content = _remote_read_file(self._ssh_profile, self._remote_path)
+            if content is _NOT_READ:
+                content = _remote_read_file(self._ssh_profile, self._remote_path)
         else:
             try:
                 with open(self.config_path, "r", encoding="utf-8") as fh:
@@ -2665,11 +3356,19 @@ class StreamServerConfigPanel(Widget):
                     ok, err = True, ""
                 except OSError as exc:
                     ok, err = False, str(exc)
-            self._set_status(
-                "Saved. MediaMTX reloads the file when it changes; Stop and Start on the Launch tab "
-                "if a change does not show." if ok else f"Save failed: {err}"
-            )
+            self._set_status(f"Saved. {self._APPLY_NOTE}" if ok else f"Save failed: {err}")
             self._show_recording_state()
+            if ok:
+                self._reapply_session_recording()
+
+
+def _help_stream_server(stream_server: dict | None) -> dict:
+    """the Stream Server a help text names: <stream-server> while System
+    Settings have no address for it."""
+    server = dict(stream_server or {})
+    if not str(server.get("host") or "").strip():
+        server["host"] = "<stream-server>"
+    return server
 
 
 def _make_stream_fields(stream_name: str, stream_server: dict | None = None,
@@ -2678,7 +3377,7 @@ def _make_stream_fields(stream_name: str, stream_server: dict | None = None,
     section of System Settings, the help names its real address; default_kind
     is what the card takes a stream with an empty kind for."""
     section = f"Streams.{stream_name}"
-    publish, _pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "<app>/<name>")
+    publish, _pull = stream_server_urls(_help_stream_server(stream_server), "<app>/<name>")
     fields = []
     for key, ftype, default, desc in _STREAM_FIELDS_TEMPLATE:
         choices = list(_STREAM_FIELD_CHOICES.get(key, []))
@@ -3272,16 +3971,13 @@ _SERVICE_HOST_FIELDS: dict[str, str] = {
 
 _SETTINGS_HOST_NOTE = "Local  (System Settings live in this project)"
 # settings that only mean something on the machine the console runs on; the
-# Connections forms have a Host selector instead (every machine's services read
-# that machine's own settings)
+# other System Settings forms have a Host selector instead (every machine's
+# services, and a console started there, read that machine's own files)
 _LOCAL_SETTINGS_NOTES: dict[str, str] = {
-    "__ssh_profiles__": "Local  (the machines this console can reach)",
-    "__experiments__": "Local  (a session takes its participants to every host through MongoDB)",
-    "__tasks__": "Local  (task definitions are read by this console only)",
     "__shared__Sudo": "Local  (this machine's admin password; a remote host uses its SSH profile's)",
-    "__shared__StreamServer": "Local  (System Settings live in this project; Sync to Host gives another machine "
-                              "this address and the stream URLs it completed)",
 }
+# System Settings nodes that edit a file of their own, of any host
+_SETTINGS_FILE_NODES = ("__experiments__", "__tasks__", "__ssh_profiles__")
 _SESSION_CONTROL_HOST_NOTE = "Not host-specific  (START and STOP travel over Redis)"
 _COLLECTION_HOST_NOTE = "Per recorder  (the Host column of the table)"
 
@@ -3310,14 +4006,24 @@ class NodeHost:
     fallback_from: str = ""
 
 
-def _encrypt_secrets(config: dict) -> None:
+class _MasterKeyUnavailable(Exception):
+    """the master key of the machine a write goes to could not be read or
+    made; the message says why, and never holds a key."""
+
+
+def _encrypt_secrets(config: dict, key) -> None:
     """ENC(...) the token/password values of a config that is about to be
-    written to another machine (what the user just typed is still plaintext)."""
+    written to a machine (what the user just typed is still plaintext) with
+    `key`, that machine's own master key: the key, or a callable that gets it
+    (made there when it has none, else raising _MasterKeyUnavailable),
+    called only when there is something to encrypt."""
+    if not _plaintext_secrets(config):
+        return
     try:
-        from openmmla.utils.crypto import encrypt_sensitive_values, ensure_master_key
-        encrypt_sensitive_values(config, ensure_master_key())
+        from openmmla.utils.crypto import encrypt_sensitive_values
     except Exception:
-        pass  # crypto unavailable: written as it is, like the local store
+        return  # crypto unavailable: written as it is, like the local store
+    encrypt_sensitive_values(config, key() if callable(key) else key)
 
 
 def _node_hosts_path(root: str) -> str:
@@ -3446,6 +4152,13 @@ _INFRA_NO_ENV_TARGETS = {"influxdb", "mongodb", "redis", "mosquitto", "mediamtx"
 def _shared_section_label(section: str) -> str:
     info = SHARED_SECTIONS.get(section) or {}
     return str(info.get("label") or section)
+
+
+def _unfilled_text(section: str, keys: list[str]) -> str:
+    """"Redis.host is not filled in yet": the fields of a section that still
+    hold a placeholder, for a status line."""
+    paths = [f"{section}.{key}" for key in keys]
+    return f"{', '.join(paths)} {'is' if len(paths) == 1 else 'are'} not filled in yet"
 
 
 def _service_uses_conda_env(svc: ServiceDef) -> bool:
@@ -3916,34 +4629,12 @@ class ServicePanel(Widget):
     #svc-sub-tabs TabPane {
         height: 1fr;
     }
-    .sync-bar {
-        layout: horizontal;
-        height: auto;
-        padding: 1 0;
-        margin-top: 1;
-    }
-    .sync-bar Select {
-        width: 1fr;
-    }
-    .sync-bar Button {
-        margin: 0 1;
-        min-width: 18;
-    }
-    .sync-note {
-        height: auto;
-        margin-top: 1;
-        color: $text-muted;
-    }
+    """ + _SYNC_BAR_CSS + """
     /* whose settings a Connections form shows when it is not this machine's */
     .settings-origin {
         height: auto;
         margin-bottom: 1;
         color: $warning;
-    }
-    /* the note sits right on top of the picker */
-    .sync-bar-noted {
-        margin-top: 0;
-        padding-top: 0;
     }
     .preflight-warning {
         color: $warning;
@@ -4013,6 +4704,30 @@ class ServicePanel(Widget):
         # those forms so one pick lets the user read through a host's settings,
         # and back on Local with every new console
         self._settings_target: str = "local"
+        # the host whose settings the Connections form on screen was read
+        # from, and the section as it was read there: its Save and its sync
+        # buttons act on that host, whatever the selector says by then, and
+        # Sync to Host sends only what that host has saved. A form whose
+        # settings file could not be read is read-only
+        self._shared_form_host: str | None = None
+        self._shared_form_loaded: dict[str, object] | None = None
+        self._shared_form_readonly: bool = False
+        # Experiments, Tasks or SSH Profiles when one of them is on screen, and
+        # the host it was read from, which its changes and its sync buttons act
+        # on; and the SSH profile sync a second press would write, (source,
+        # dest, names, count)
+        self._current_settings_node: str | None = None
+        self._settings_node_host: str | None = None
+        self._profile_sync_confirm: tuple | None = None
+        # each host's own master key, as read over ssh: (its login, the key),
+        # held in memory for this console's run and never shown or written
+        self._host_master_keys: dict[str, tuple[tuple[str, str, str], bytes]] = {}
+        # changes those forms made to another host's files, newest only, per
+        # (host, file): (text, what makes it from that host's master key, or
+        # None to delete, files deleted along), and the files a write job is
+        # queued or running for (_queue_settings_write)
+        self._pending_settings_writes: dict[tuple[str, str], tuple[object, tuple[str, ...]]] = {}
+        self._settings_writers: set[tuple[str, str]] = set()
         # card and host the next log lines belong to, and the one the log last
         # drew a divider for (see _log)
         self._log_context: str = ""
@@ -4126,7 +4841,7 @@ class ServicePanel(Widget):
                     return
                 statuses = await env_statuses_remote(profile)
         except Exception as e:
-            self._log(f"[yellow]Environment check on {target} failed: {e}[/yellow]")
+            self._log(f"[yellow]Environment check on {target} failed: {rich_escape(ssh_error_text(e))}[/yellow]")
             return
         self._env_statuses[target] = statuses
         self._env_statuses_at[target] = time.time()
@@ -4221,6 +4936,10 @@ class ServicePanel(Widget):
     @on(SSHForm.ProfilesChanged)
     def on_ssh_form_profiles_changed(self, event: SSHForm.ProfilesChanged) -> None:
         event.stop()
+        if getattr(event, "host", "local") != "local":
+            return  # another host's list: not the hosts this console reaches
+        # a profile may point at another machine now: its key is read again
+        getattr(self, "_host_master_keys", {}).clear()
         renamed = getattr(event, "renamed", None)
         if renamed and renamed[0] in self._node_hosts.values():
             # the cards that were pointed at this profile follow its new name
@@ -4236,6 +4955,8 @@ class ServicePanel(Widget):
     def on_ssh_form_connection_tested(self, event: SSHForm.ConnectionTested) -> None:
         """a single-host test updated TARGET_STATES; mirror it in the dropdown."""
         event.stop()
+        if getattr(event, "host", "local") != "local":
+            return  # a profile of another host's list, tested from here
         self._target_states = dict(TARGET_STATES)
         self._refresh_target_options()
 
@@ -4323,9 +5044,16 @@ class ServicePanel(Widget):
             endpoint = system_service_endpoint(
                 self._root, "flask" if make_target == "celery" else make_target)
             host = endpoint[0] if endpoint else ""
+            field = _SERVICE_HOST_FIELDS.get(make_target, "System Settings")
+            if holds_placeholder(host):
+                # an address nobody filled in names no machine either, and is not
+                # looked up: the card stays where it was left, as for an empty one
+                own = self._own_node_host(svc, profiles)
+                unset = unset_address_note(field.split(".", 1)[0])
+                return NodeHost(own.target, follows=field, fallback_from="; ".join(
+                    reason for reason in (unset, own.fallback_from) if reason))
             # a loopback address names no machine: that card is the user's pick
             if not is_loopback_host(host):
-                field = _SERVICE_HOST_FIELDS.get(make_target, "System Settings")
                 bound = target_for_service_host(host, profiles)
                 if not bound:
                     return NodeHost(
@@ -4339,7 +5067,10 @@ class ServicePanel(Widget):
                         follows=field, machine=host,
                         fallback_from=f"System Settings put it on '{bound}' ({field}), which {reason}")
                 return NodeHost(bound, follows=field, machine=host, machine_target=bound)
+        return self._own_node_host(svc, profiles)
 
+    def _own_node_host(self, svc: ServiceDef, profiles: list) -> NodeHost:
+        """where the user last pointed a node, while it is still usable."""
         saved = self._node_hosts.get(svc.name, "local")
         if saved == "local":
             return NodeHost()
@@ -4381,7 +5112,8 @@ class ServicePanel(Widget):
         self._set_log_context(svc, target)
         # said once per cause: the card is rebuilt often, the reason stays the same
         if node.fallback_from and self._fallback_noted.get(svc.name) != node.fallback_from:
-            self._log(f"[yellow]{svc.display_name}: {node.fallback_from}. Showing Local.[/yellow]")
+            shown = "Local" if node.target == "local" else f"'{node.target}'"
+            self._log(f"[yellow]{svc.display_name}: {node.fallback_from}. Showing {shown}.[/yellow]")
         self._fallback_noted[svc.name] = node.fallback_from
         if self._point_host_select(target):
             # as on a manual host switch: the [E] markers of that host catch up
@@ -4422,15 +5154,19 @@ class ServicePanel(Widget):
         name = self._current_service_name
         if not name:
             return
-        if self._current_node_host.follows:
+        current = self._current_node_host
+        if current.follows and current.machine:
             # System Settings stay this card's home: the move is a one-off
-            self._host_override = None if target == self._current_node_host.target else (name, target)
+            self._host_override = None if target == current.target else (name, target)
             return
         if target == "local":
             self._node_hosts.pop(name, None)
         else:
             self._node_hosts[name] = target
-        node = NodeHost(target)
+        # an address not filled in yet: the card is remembered where it was
+        # pointed, as for an empty one, and goes on saying it has no host
+        node = NodeHost(target, follows=current.follows, fallback_from=unset_address_note(
+            current.follows.split(".", 1)[0])) if current.follows else NodeHost(target)
         self._node_host_cache[name] = node
         self._current_node_host = node
         save_node_hosts(self._root, self._node_hosts)
@@ -4442,13 +5178,6 @@ class ServicePanel(Widget):
         endpoint, which is what the pipelines connect to."""
         node = self._node_host_cache.get(svc.name)
         return bool(node and node.follows and target != node.machine_target)
-
-    @staticmethod
-    def _is_local_only_node(node_str: str) -> bool:
-        """tree nodes whose content ignores the Host selector."""
-        return node_str.startswith("__shared__") or node_str in (
-            "__ssh_profiles__", "__experiments__", "__tasks__",
-        )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "svc-target-select":
@@ -4547,6 +5276,16 @@ class ServicePanel(Widget):
         self._capture_collection_card_state(self._last_target)
         self._capture_infra_mode(self._last_target)
         self._last_target = val
+        if getattr(self, "_current_settings_node", None):
+            # Experiments, Tasks or SSH Profiles: the same pick of whose settings to show
+            self._settings_target = val
+            self.query_one("#svc-cmd-session", CommandSession).set_target(val)
+            self.run_worker(
+                self._reload_settings_node(),
+                group=_LAUNCHER_UI_WORKER_GROUP,
+                exclusive=True,
+            )
+            return
         if self._current_shared_section:
             self._settings_target = val
             self.query_one("#svc-cmd-session", CommandSession).set_target(val)
@@ -4675,8 +5414,9 @@ class ServicePanel(Widget):
         never on the UI thread while rendering the tree."""
         markers = ""
         node = self._node_host_cache.get(svc.name) or NodeHost(self._node_hosts.get(svc.name, "local"))
-        # no [E] for a machine the console cannot look into
-        if _service_uses_conda_env(svc) and not (node.follows and not node.machine_target):
+        # no [E] for a machine the console cannot look into (an address not
+        # filled in yet names none: the card is on its own host then)
+        if _service_uses_conda_env(svc) and not (node.follows and node.machine and not node.machine_target):
             statuses = self._env_statuses.get(node.target) or {}
             color = _env_marker_color(statuses.get(svc.conda_env))
             if color:
@@ -4684,7 +5424,7 @@ class ServicePanel(Widget):
         config_file = self._svc_config_file(svc)
         # a config file this service needs, on the host the node sits on: red
         # when it has not been made there yet, none while that is not known
-        if config_file and not (node.follows and not node.machine_target):
+        if config_file and not (node.follows and node.machine and not node.machine_target):
             if node.target == "local":
                 present: bool | None = os.path.isfile(config_file)
             else:
@@ -4706,7 +5446,7 @@ class ServicePanel(Widget):
             return ""
         if node.machine_target:
             host = "Local" if node.machine_target == "local" else node.machine_target
-        elif node.follows:
+        elif node.follows and node.machine:
             # a machine the console cannot use: the address says where it runs
             host = node.machine
             if "offline" in node.fallback_from:
@@ -4777,6 +5517,11 @@ class ServicePanel(Widget):
         self._current_pipeline = None
         self._current_form = None
         self._current_shared_section = None
+        self._shared_form_host = None
+        self._shared_form_readonly = False
+        self._current_settings_node = None
+        self._settings_node_host = None
+        self._profile_sync_confirm = None
         self._current_config_local_path = None
         self._config_container = None
         self._current_service_name = None
@@ -4797,19 +5542,15 @@ class ServicePanel(Widget):
             await self._mount_shared_form(scroll, section_name)
             return
 
-        if node_str == "__experiments__":
+        if node_str in _SETTINGS_FILE_NODES:
+            # Experiments, Tasks, SSH Profiles: as a Connections form, the sync
+            # row and the status line go below the form
             self._set_command_session_visible(False)
-            await content_area.mount(ExperimentForm(sessions=functools.partial(_experiment_sessions, self._root, "local")))
-            return
-
-        if node_str == "__tasks__":
-            self._set_command_session_visible(False)
-            await content_area.mount(TaskForm())
-            return
-
-        if node_str == "__ssh_profiles__":
-            self._set_command_session_visible(False)
-            await content_area.mount(SSHForm())
+            scroll = Vertical(classes="svc-config-scroll")
+            await content_area.mount(scroll)
+            self._config_container = scroll
+            self._current_settings_node = node_str
+            await self._mount_settings_node(scroll, node_str)
             return
 
         if node_str == "__session_control__":
@@ -4882,6 +5623,11 @@ class ServicePanel(Widget):
         self._current_pipeline = None
         self._current_form = None
         self._current_shared_section = None
+        self._shared_form_host = None
+        self._shared_form_readonly = False
+        self._current_settings_node = None
+        self._settings_node_host = None
+        self._profile_sync_confirm = None
         self._current_config_local_path = None
         self._config_container = None
         self._set_command_session_visible(True)
@@ -5020,6 +5766,7 @@ class ServicePanel(Widget):
             await config_scroll.mount(StreamServerConfigPanel(
                 config_path=local_path, target=target, ssh_profile=profile,
                 remote_path=self._remote_config_path(local_path, profile) if profile is not None else None,
+                ssh_profiles=self._ssh_profile_names,
             ))
             # every pipeline's streams in one table, to find and stop the ones
             # still publishing whichever card started them
@@ -5140,6 +5887,11 @@ class ServicePanel(Widget):
             )
             if config:
                 configs.append(_config_for_local_db_access(config, profile))
+        # that host's secrets are sealed with its own key: opened in memory
+        # only, with it or this console's, for the databases to be asked
+        keys = self._comparison_keys(target, *configs)
+        if keys:
+            configs = [_opened_tree(config, keys) for config in configs]
 
         local_sessions = _remote_artifact_session_ids(profile) + _artifact_session_choices(self._root)
         choices = _artifact_session_choices_from_configs(configs, local_sessions)
@@ -6549,10 +7301,16 @@ class ServicePanel(Widget):
         """say on the card which address the status probe connects to."""
         if svc.launch_type != "make":
             return svc
-        endpoint = system_service_endpoint(self._root, _make_target_for(svc.name))
+        make_target = _make_target_for(svc.name)
+        endpoint = system_service_endpoint(self._root, make_target)
         if endpoint is None:
             return svc
         host, port = endpoint
+        if holds_placeholder(host):
+            field = _SERVICE_HOST_FIELDS.get(make_target, "System Settings")
+            return replace(svc, description=(
+                f"{svc.description}. [yellow]{unset_address_note(field.split('.', 1)[0])}, so the status "
+                f"probe has nowhere to connect.[/yellow]"))
         if self._off_configured_machine(svc, target):
             node = self._node_host_cache[svc.name]
             here = "this machine" if target == "local" else f"'{target}'"
@@ -7398,9 +8156,12 @@ class ServicePanel(Widget):
     # ── config logic ─────────────────────────────────────────────
 
     def _settings_host(self, section_name: str) -> str:
-        """whose settings a System Settings form shows: the Connections forms
-        follow their Host selector, everything else is this machine's."""
-        if f"__shared__{section_name}" in _LOCAL_SETTINGS_NOTES:
+        """whose settings a System Settings form shows: the forms follow their
+        Host selector, those of _LOCAL_SETTINGS_NOTES are this machine's.
+        `section_name` is a Connections section, or the key of another node
+        (__experiments__)."""
+        key = section_name if section_name.startswith("__") else f"__shared__{section_name}"
+        if key in _LOCAL_SETTINGS_NOTES:
             return "local"
         target = self._settings_target
         if target != "local" and (
@@ -7413,8 +8174,15 @@ class ServicePanel(Widget):
     def _settings_values_for(self, target: str) -> tuple[dict[str, object], str]:
         """(flat shared values, where they come from) of one machine. A remote
         machine is read over ssh, so this runs off the UI thread."""
+        values, origin, _unread = self._settings_values_read(target)
+        return values, origin
+
+    def _settings_values_read(self, target: str) -> tuple[dict[str, object], str, str]:
+        """_settings_values_for, and why its config/system_services.yml could
+        not be read ("" when it was, or is not there): a form shown from what
+        is left is read-only, since a Save would write over what nobody read."""
         if target == "local":
-            return self._shared_values, ""
+            return self._shared_values, "", ""
         configs = []
         for rel_path in SYSTEM_SERVICE_SOURCE_CONFIG_RELS:
             config, _ = self._load_config_for_target(
@@ -7428,33 +8196,41 @@ class ServicePanel(Widget):
             # what its services read at startup; the pipeline configs only fill
             # in the sections that file does not have
             values.update(config_to_flat_values(store, include_defaults=False))
-            return values, f"'{target}' has System Settings of its own (config/system_services.yml): its services use these."
+            return values, f"'{target}' has System Settings of its own (config/system_services.yml): its services use these.", ""
         if error and "No remote config" not in error:
-            return values, f"[red]{rich_escape(error)}[/red]"
+            return values, (
+                f"[red]{rich_escape(_read_problem(error))}.[/red] What its pipeline configs say is shown, "
+                f"read-only; open this form again to read it again."
+            ), _read_problem(error)
         if configs:
             return values, (
                 f"'{target}' has no config/system_services.yml: these values are from its pipeline "
                 f"configs, which a Start from this console keeps in step with Local. Save gives it "
                 f"settings of its own."
-            )
-        return values, f"'{target}' has neither settings nor pipeline configs yet: these are the defaults."
+            ), ""
+        return values, f"'{target}' has neither settings nor pipeline configs yet: these are the defaults.", ""
 
     async def _mount_shared_form(self, container: Vertical, section_name: str) -> None:
         target = self._settings_host(section_name)
         if f"__shared__{section_name}" not in _LOCAL_SETTINGS_NOTES:
             self._show_host_bar(None)
             self._point_host_select(target)
-        values, origin = self._shared_values, ""
+        values, origin, unread = self._shared_values, "", ""
         if target != "local":
             loading = Static(f" Reading the settings of '{target}' ...", classes="status-saved")
             await container.mount(loading)
-            values, origin = await asyncio.to_thread(self._settings_values_for, target)
+            values, origin, unread = await asyncio.to_thread(self._settings_values_read, target)
             if not container.is_attached or self._current_shared_section != section_name:
                 return  # the user moved on while ssh was at work
             await loading.remove()
         if origin:
             await container.mount(Static(origin, classes="settings-origin"))
-        self._show_shared_form(container, section_name, values)
+        mounted = self._show_shared_form(container, section_name, values, host=target, read_only=bool(unread))
+        if unread and mounted is not None:
+            await mounted
+            # neither saved nor reset: what is shown is what that host's pipeline configs say
+            for button in container.query("#btn-save, #btn-reset"):
+                button.disabled = True
 
     async def _reload_shared_form(self) -> None:
         """the Host selector moved while a Connections form is open."""
@@ -7467,7 +8243,10 @@ class ServicePanel(Widget):
         await self._mount_shared_form(container, section_name)
 
     def _show_shared_form(self, container: Vertical, section_name: str,
-                          values: dict[str, object] | None = None) -> None:
+                          values: dict[str, object] | None = None, host: str = "local",
+                          read_only: bool = False):
+        """the form of one Connections section, showing `values` (the flat
+        values of `host`, whose form this is), and the mount to await."""
         shared_values = self._shared_values if values is None else values
         sec_info = SHARED_SECTIONS.get(section_name, {})
         fields = []
@@ -7481,12 +8260,401 @@ class ServicePanel(Widget):
                 section=section_name,
             ))
         values = {f.path: shared_values.get(f.path, f.default) for f in fields}
-        form = ConfigForm(f"shared:{section_name}", fields, values)
-        container.mount(form)
+        form = ConfigForm(f"shared:{section_name}", fields, values,
+                          readonly_paths={f.path for f in fields} if read_only else None)
+        mounted = container.mount(form)
         self._current_form = form
+        self._shared_form_host = host
+        self._shared_form_loaded = {f.path.split(".", 1)[1]: values[f.path] for f in fields}
+        self._shared_form_readonly = read_only
         self._show_sync_bar(shared_section=section_name)
+        return mounted
+
+    # ── Experiments, Tasks and SSH Profiles of any host ──────────
+    #
+    # They follow the Host selector of System Settings, as the Connections
+    # forms do (_settings_target): another host's config/experiments.yaml,
+    # config/tasks or config/ssh_profiles.yml is read over ssh, shown, and
+    # every change the form makes is written back there, in that host's write
+    # queue. What could not be read is not shown at all, so nothing writes
+    # over it. The Collection card, the rosters and the sessions keep reading
+    # this machine's experiments, and the Host selector this machine's SSH
+    # profiles.
+
+    def _settings_node_path(self, node: str) -> str:
+        """the file (Experiments, SSH Profiles) or folder (Tasks) of this
+        project a node edits."""
+        if node == "__experiments__":
+            return os.path.join(self._root, "config", "experiments.yaml")
+        if node == "__ssh_profiles__":
+            return os.path.join(self._root, "config", "ssh_profiles.yml")
+        return os.path.join(self._root, "config", "tasks")
+
+    def _settings_node_shows(self, local_path: str, host: str) -> bool:
+        """whether Experiments or Tasks is on screen as read from `host`, and
+        edits `local_path` (its file, its folder or a file in that)."""
+        node = getattr(self, "_current_settings_node", None)
+        container = getattr(self, "_config_container", None)
+        if not node or getattr(self, "_settings_node_host", None) != host \
+                or container is None or not container.is_attached:
+            return False
+        path, shown = os.path.abspath(local_path), os.path.abspath(self._settings_node_path(node))
+        return path == shown or os.path.dirname(path) == shown
+
+    async def _mount_settings_node(self, container: Vertical, node: str, host: str | None = None) -> None:
+        """Experiments, Tasks or SSH Profiles of `host` (else of the host the
+        Host selector names), with the sync row below: this machine's, or
+        another host's, read over ssh off the UI thread. What could not be
+        read shows why, with neither form nor row."""
+        target = host or self._settings_host(node)
+        self._show_host_bar(None)
+        self._point_host_select(target)
+        self._settings_node_host = target
+        # of two reads into this container (a host switch, a landing), the later one is shown
+        mount = self._settings_node_mounts = getattr(self, "_settings_node_mounts", 0) + 1
+        what, label, read = {
+            "__experiments__": ("config/experiments.yaml", "Experiments", self._host_experiments),
+            "__tasks__": ("config/tasks", "Tasks", self._host_tasks),
+            "__ssh_profiles__": ("config/ssh_profiles.yml", "SSH Profiles", self._host_ssh_profiles),
+        }[node]
+        loading = None
+        if target != "local":
+            loading = Static(f" Reading {what} of '{target}' ...", classes="status-saved")
+            await container.mount(loading)
+        content, origin, why = await asyncio.to_thread(read, target)
+        if (not container.is_attached or self._current_settings_node != node
+                or self._settings_node_mounts != mount):
+            return  # the user moved on while ssh was at work
+        if loading is not None:
+            await loading.remove()
+        if why:
+            await container.mount(Static(
+                f"[red]{rich_escape(why)}.[/red] Open {label} again to read it again.", classes="settings-origin"))
+            return
+        if origin:
+            await container.mount(Static(rich_escape(origin), classes="settings-origin"))
+        if node == "__experiments__":
+            sessions = functools.partial(_experiment_sessions, self._root, target)
+            form = ExperimentForm(sessions=sessions, notify=self._show_status) if content is None else ExperimentForm(
+                data=copy.deepcopy(content[0]), task_names=content[1], persist=self._experiments_persist(target),
+                sessions=sessions, notify=self._show_status)
+        elif node == "__tasks__":
+            form = TaskForm(notify=self._show_status) if content is None else TaskForm(
+                store=self._task_store(target, content), notify=self._show_status)
+        elif content is None:
+            form = SSHForm(notify=self._show_status)
+        else:
+            profiles, kept = content
+            form = SSHForm(profiles=profiles, store=self._profile_store(target, kept), host=target,
+                           notify=self._show_status)
+        await container.mount(form)
+        self._show_sync_bar(settings_node=node)
+
+    async def _reload_settings_node(self, host: str | None = None) -> None:
+        """read Experiments or Tasks again: after the Host selector moved, or
+        (`host`) after what it shows changed on that host."""
+        node = getattr(self, "_current_settings_node", None)
+        container = self._config_container
+        if not node or container is None or not container.is_attached:
+            return
+        if host is not None and getattr(self, "_settings_node_host", None) != host:
+            return  # it shows another host's by now
+        await container.remove_children()
+        await self._mount_settings_node(container, node, host)
+
+    async def _reload_settings_then_say(self, host: str, lines: list[str], say) -> None:
+        """read Experiments or Tasks of `host` again, then post `lines` below."""
+        try:
+            await self._reload_settings_node(host)
+        finally:
+            for text in lines:
+                say(text)
+
+    def _host_experiments(self, host: str) -> tuple[tuple[dict, list[str]] | None, str, str]:
+        """((experiments, task names), origin line, why not) of `host`'s
+        config/experiments.yaml, read afresh (over ssh: a thread). This
+        machine's is only checked, (None, "", ""), as its form reads it
+        itself. A file that is not there holds no experiments yet; one that
+        could not be read, is no YAML or holds no mapping is never taken for
+        that. The task names are that host's too."""
+        path = self._settings_node_path("__experiments__")
+        if host == "local":
+            try:
+                read_yaml_mapping(path)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                return None, "", f"{path} could not be read ({' '.join(str(exc).split())})"
+            return None, "", ""
+        profile = get_profile_by_name(host)
+        if profile is None:
+            return None, "", f"SSH profile '{host}' not found"
+        remote_path = self._remote_config_path(path, profile)
+        text, why = _remote_read_text(profile, remote_path)
+        if why:
+            return None, "", f"{host}:{remote_path} could not be read ({why})"
+        try:
+            data = yaml.safe_load(text or "") or {}
+        except yaml.YAMLError as exc:
+            return None, "", f"{host}:{remote_path} is no valid YAML ({' '.join(str(exc).split())})"
+        if not isinstance(data, dict):
+            return None, "", f"{host}:{remote_path} holds no mapping"
+        self._target_config_cache[self._config_cache_key(path, host)] = copy.deepcopy(data)
+        listed = _remote_listing(
+            profile, self._remote_config_path(self._settings_node_path("__tasks__"), profile), _TASK_SUFFIXES)
+        origin = (f"'{host}': {remote_path}" if text is not None else
+                  f"'{host}' has no config/experiments.yaml yet: the first change made here creates it.")
+        if listed is None:
+            origin += " Its config/tasks could not be listed, so Task Type offers none of its tasks."
+        return (data, list(_task_files_by_name(listed or []))), origin, ""
+
+    def _host_tasks(self, host: str) -> tuple[dict[str, dict] | None, str, str]:
+        """(tasks, origin line, why not) of `host`'s config/tasks, every task
+        file read afresh at once (another host's in one ssh call: a thread).
+        This machine's are only checked, (None, "", ""), as its form reads
+        them itself. A task file that is no YAML or holds no mapping leaves
+        the whole folder unread."""
+        tasks_dir = self._settings_node_path("__tasks__")
+        if host == "local":
+            try:
+                names = [name for name in os.listdir(tasks_dir) if os.path.isfile(os.path.join(tasks_dir, name))]
+            except FileNotFoundError:
+                names = []
+            except OSError as exc:
+                return None, "", f"{tasks_dir} could not be listed ({exc})"
+            files = {}
+            for file_name in _task_files_by_name(names).values():
+                try:
+                    with open(os.path.join(tasks_dir, file_name), "r", encoding="utf-8") as fh:
+                        files[file_name] = fh.read()
+                except OSError as exc:
+                    return None, "", f"{os.path.join(tasks_dir, file_name)} could not be read ({exc})"
+            _, broken = _parse_task_files(files)
+            if broken:
+                return None, "", f"{', '.join(broken)} in {tasks_dir} could not be read"
+            return None, "", ""
+        profile = get_profile_by_name(host)
+        if profile is None:
+            return None, "", f"SSH profile '{host}' not found"
+        remote_dir = self._remote_config_path(tasks_dir, profile)
+        files, why = _remote_task_files(profile, remote_dir)
+        if files is None:
+            return None, "", f"{host}:{remote_dir} could not be read ({why})"
+        tasks, broken = _parse_task_files(files)
+        if broken:
+            return None, "", f"{', '.join(broken)} on {host}:{remote_dir} could not be read"
+        origin = f"'{host}': {remote_dir}" if files else f"'{host}' has no task files in config/tasks yet."
+        return tasks, origin, ""
+
+    def _host_ssh_profiles(self, host: str) -> tuple[tuple[list, list] | None, str, str]:
+        """((profiles, entries the form cannot show), origin line, why not)
+        of `host`'s config/ssh_profiles.yml, read afresh (over ssh: a
+        thread): the list a console started there would use, its passwords
+        opened with that host's own master key. This machine's is only
+        checked, (None, "", ""), as its form reads it itself. A file that is
+        no YAML or holds no list is never taken for an empty one."""
+        entries, where, why = self._profile_entries_of(host)
+        if entries is None:
+            return None, "", why
+        if host == "local":
+            return None, "", ""
+        profile = get_profile_by_name(host)
+        if profile is None:
+            return None, "", f"SSH profile '{host}' not found"
+        from openmmla.utils.crypto import is_encrypted
+        sealed = [entry for entry in entries if _profile_name(entry) and is_encrypted(str(entry.get("password") or ""))]
+        key, key_why = self._host_master_key(host) if sealed else (None, "")
+        profiles, kept = _profiles_of_entries(entries, key)
+        origin = (f"'{host}': {where}" if where else
+                  f"'{host}' has no config/ssh_profiles.yml yet: the first profile added here creates it.")
+        same = []
+        unopened = sum(1 for p in profiles if is_encrypted(p.password))
+        if unopened:
+            same.append(f"{unopened} password(s) {host}'s master key does not open" if not key_why else
+                        f"{unopened} password(s): {host}'s master key could not be read ({key_why})")
+        if kept:
+            same.append(f"{len(kept)} entr{'y' if len(kept) == 1 else 'ies'} without a name or host")
+        if same:
+            origin += f" (kept as they are: {', '.join(same)})"
+        return (profiles, kept), origin, ""
+
+    def _profile_entries_of(self, host: str) -> tuple[list | None, str, str]:
+        """(entries, where, why not) of `host`'s config/ssh_profiles.yml as
+        it is written, read afresh (over ssh: a thread): [] when there is
+        none, `where` then "", and None with why when it could not be read,
+        is no YAML or holds no list. `where` is its path on that host."""
+        if host == "local":
+            where = _ssh_profiles_path()
+            try:
+                with open(where, "r", encoding="utf-8") as fh:
+                    text = fh.read()
+            except FileNotFoundError:
+                return [], "", ""
+            except OSError as exc:
+                return None, where, f"{where} could not be read ({exc})"
+            shown = where
+        else:
+            profile = get_profile_by_name(host)
+            if profile is None:
+                return None, "", f"SSH profile '{host}' not found"
+            where = self._remote_config_path(self._settings_node_path("__ssh_profiles__"), profile)
+            shown = f"{host}:{where}"
+            text, why = _remote_read_text(profile, where)
+            if why:
+                return None, where, f"{shown} could not be read ({why})"
+            if text is None:
+                return [], "", ""
+        entries, why = _parse_profile_list(text)
+        if entries is None:
+            return None, where, f"{shown} {why}"
+        return entries, where, ""
+
+    def _profile_store(self, host: str, kept: list) -> _HostProfileStore:
+        """the SSH profiles of `host` for its SSHForm: after every change the
+        whole list is written through to that host (in its write queue, never
+        half written, chmod 600), with the entries the form cannot show
+        (`kept`) as they were. The list is taken at once; its passwords are
+        sealed with that host's own master key in the write, and travel
+        until then in this console's memory only."""
+        path = self._settings_node_path("__ssh_profiles__")
+
+        def save(profiles: list[SSHProfile]) -> None:
+            entries = copy.deepcopy([asdict(profile) for profile in profiles] + list(kept))
+            self._queue_settings_write(host, path, lambda key: _profiles_text(entries, key))
+
+        return _HostProfileStore(save)
+
+    def _experiments_persist(self, host: str):
+        """what the ExperimentForm of `host` calls with its whole data after a
+        change: the text is taken at once, as the form holds it then, and
+        written there in the host's write queue."""
+        path = self._settings_node_path("__experiments__")
+        return lambda data: self._queue_settings_write(host, path, _settings_yaml(data))
+
+    def _task_store(self, host: str, tasks: dict[str, dict]) -> _HostTaskStore:
+        """the tasks of `host` for its TaskForm, every change written through
+        to that host's config/tasks: a task is saved as <name>.yaml (what
+        load_task reads first), and deleted with its <name>.yml."""
+        tasks_dir = self._settings_node_path("__tasks__")
+
+        def save(name: str, data: dict) -> None:
+            self._queue_settings_write(host, os.path.join(tasks_dir, f"{name}.yaml"), _settings_yaml(data))
+
+        def delete(name: str) -> None:
+            self._queue_settings_write(host, os.path.join(tasks_dir, f"{name}.yaml"), None,
+                                       also=(os.path.join(tasks_dir, f"{name}.yml"),))
+
+        return _HostTaskStore(tasks, save, delete)
+
+    def _queue_settings_write(self, host: str, local_path: str, text,
+                              also: tuple[str, ...] = ()) -> None:
+        """a change Experiments, Tasks or SSH Profiles made to a file of
+        `host`: `text` is the whole file as it is now (or what makes it from
+        that host's master key, for a file with secrets to seal), None
+        deletes it (and the files of `also`). Only the newest change of a
+        file waits: the job queued for that file writes whatever is newest
+        when it gets there, so a burst of edits makes few writes, and they
+        land in order."""
+        say = self._bound_reporter()
+        problem = self._settings_host_problem(host)
+        if problem:
+            self._settings_not_written(host, local_path, [
+                f"{os.path.relpath(local_path, self._root)} not written: {problem}."], say)
+            return
+        key = (host, os.path.abspath(local_path))
+        self._pending_settings_writes[key] = (text, tuple(also))
+        if key in self._settings_writers:
+            return  # the job of this file takes it along
+        self._settings_writers.add(key)
+        self.run_worker(self._write_settings_file(host, local_path, say),
+                        group=_HOST_SYNC_WORKER_GROUP, exclusive=False)
+
+    async def _write_settings_file(self, host: str, local_path: str, say) -> None:
+        """write the newest change of one file of `host` until no newer one
+        waits, each in the host's write queue. When one fails, what waits is
+        dropped (it was made on top of what did not land) and the node is read
+        again, so the form shows what that host has."""
+        key = (host, os.path.abspath(local_path))
+        try:
+            while key in self._pending_settings_writes:
+                lines: list[str] = []
+                done = await self._host_job(
+                    host, self._write_settings_change(host, local_path, lines.append), say=lines.append)
+                if done:
+                    for text in lines:
+                        say(text)
+                    continue
+                self._pending_settings_writes.pop(key, None)
+                self._settings_not_written(host, local_path, lines, say)
+                return
+        finally:
+            self._settings_writers.discard(key)
+
+    def _settings_not_written(self, host: str, local_path: str, lines: list[str], say) -> None:
+        """a change to a file of `host` did not land: the node that edits it,
+        if it is on screen, is read again from that host (the form then
+        shows what is there, not what was not written), and `lines` say why,
+        below it."""
+        if self._settings_node_shows(local_path, host):
+            self.run_worker(self._reload_settings_then_say(host, lines, say),
+                            group=_LAUNCHER_UI_WORKER_GROUP, exclusive=True)
+            return
+        for text in lines:
+            say(text)
+
+    async def _write_settings_change(self, host: str, local_path: str, say) -> bool:
+        """the write itself, inside `host`'s write queue: the remote file is
+        never left half written (_remote_write_file), and what it holds
+        encrypted is sealed with that host's own master key (_sealed_for).
+        Whether it landed."""
+        change = self._pending_settings_writes.pop((host, os.path.abspath(local_path)), None)
+        if change is None:
+            return True  # dropped after a write that failed
+        text, also = change
+        rel = os.path.relpath(local_path, self._root)
+        profile = get_profile_by_name(host)
+        if profile is None:
+            say(f"{rel} not written: SSH profile '{host}' not found.")
+            return False
+        remote_path = self._remote_config_path(local_path, profile)
+        # the SSH profiles hold passwords: only their owner reads them there
+        private = os.path.abspath(local_path) == os.path.abspath(self._settings_node_path("__ssh_profiles__"))
+        if callable(text):
+            # passwords to seal: with the host's own key, made there when it has none
+            try:
+                text = await asyncio.to_thread(text, self._key_maker(host))
+            except _MasterKeyUnavailable as exc:
+                say(f"{rel} not written: {exc}.")
+                return False
+        if text is not None:
+            # an ENC(...) value of another key is sealed again for the host;
+            # one the host holds already and no key opens stays as it is
+            sealed, why = await self._sealed_for(
+                host, text, source=host, what=f"{rel} for {host}", existing=remote_path)
+            if sealed is None:
+                say(f"{rel} not written: {why}.")
+                return False
+            text = sealed
+        if text is None:
+            ok, why = await asyncio.to_thread(
+                _remote_delete_file, profile, remote_path, *(self._remote_config_path(path, profile) for path in also))
+        else:
+            ok, why = await asyncio.to_thread(_remote_write_file, profile, remote_path, text, "600" if private else "")
+        if not ok:
+            say(f"{rel} was not written to {host}: {why}.")
+            return False
+        if text is None:
+            gone = " and ".join([rel, *(os.path.basename(path) for path in also)])
+            say(f"{gone} {'are' if also else 'is'} gone from {host}.")
+            return True
+        if not private:
+            # a list of profiles is no config anything reads from there
+            self._target_config_cache[self._config_cache_key(local_path, host)] = yaml.safe_load(text) or {}
+        say(f"Saved to {host}:{remote_path}")
+        return True
 
     def _show_pipeline_form(self, container: Vertical, pipeline: PipelineDef) -> None:
+        # the host this tab is drawn for: its Save and sync act on that one,
+        # not on the one the Host selector names once it has moved on
+        self._config_tab_host = self._get_panel_target()
         existing, source_message = self._load_config_for_target(pipeline.config_path)
         apply_shared_values(pipeline.fields, self._shared_values)
         # what only one source uses, and an older config keeps in Base (a udp/tcp
@@ -7700,7 +8868,8 @@ class ServicePanel(Widget):
         if has_cameras:
             section_notes["Cameras"] = (
                 "The cameras of this config: written by IPS Camera Calibration (Calibrate), synced from "
-                "another machine (Calibration Cameras, Sync to Host), or added here with + Add Camera.")
+                "another machine (Calibration Cameras, Sync to Host or Sync from Host), or added here with "
+                "+ Add Camera.")
         form = ConfigForm(pipeline.name, form_fields, values, dynamic_sections,
                           group_add_buttons=group_add_buttons,
                           base_section=pipeline.base_section or None,
@@ -7844,6 +9013,14 @@ class ServicePanel(Widget):
         server = self._stream_server_address()
         host = str(server.get("host") or "").strip()
         if not host:
+            try:
+                fields = [f for f in form.query(DictListField) if f.field_def.path == "Bases"]
+            except Exception:
+                return  # the form was replaced meanwhile
+            for field in fields:
+                field.set_stream_states(
+                    {}, f"{unset_address_note('StreamServer')}, so whether these streams are live now is not "
+                        f"known.")
             return
         try:
             live = await asyncio.to_thread(
@@ -7878,7 +9055,7 @@ class ServicePanel(Widget):
         """what the sections of a pipeline config are called in the form, and a
         note on the ones that only make sense together: Gateway, Server and
         Streams. Also says, under each Server entry, where its value leads."""
-        publish, pull = stream_server_urls(stream_server or {"host": "<stream-server>"}, "ips/cam-1")
+        publish, pull = stream_server_urls(_help_stream_server(stream_server), "ips/cam-1")
         titles = {
             name: str(info.get("label") or name)
             for name, info in SHARED_SECTIONS.items() if info.get("label") and info["label"] != name
@@ -7956,16 +9133,26 @@ class ServicePanel(Widget):
             if profile is None:
                 self._log(f"[red]SSH profile '{target}' not found; not changed.[/red]")
                 return None
-            tmp = tempfile.NamedTemporaryFile(
-                "w", suffix=".yml", prefix="openmmla-stream-", delete=False, encoding="utf-8")
-            with tmp:
-                yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            # shown at once; what goes there is these keys set in its config
+            # as read afresh in its write queue, so a change made there since
+            # is kept, and one write after another, each lands whole
             self._target_config_cache[cache_key] = config
-            # one group for both: each copy carries the whole file, and the last one must win
+            changed = copy.deepcopy(changes)
+
+            def apply(fresh: dict) -> str:
+                fresh_streams = fresh.get("Streams")
+                gone = [name for name in changed
+                        if not isinstance(fresh_streams, dict) or not isinstance(fresh_streams.get(name), dict)]
+                if gone:
+                    return f"{', '.join(gone)} not in the config there any more; Save the Config tab first"
+                for name, values in changed.items():
+                    fresh_streams[name].update(values)
+                return ""
             self.run_worker(
-                self._run_scp(target, tmp.name, self._remote_config_path(pipeline.config_path, profile),
-                              cleanup_local=True, cache_key=cache_key, cache_config=config),
-                group="stream-entry-scp", exclusive=True,
+                self._host_job(target, self._rewrite_host_config(
+                    target, pipeline.config_path, apply, f"Streams of {pipeline.name}"),
+                    say=lambda text: self._log(rich_escape(text))),
+                group=_HOST_SYNC_WORKER_GROUP, exclusive=False,
             )
         for panel in self.query(StreamPanel):
             panel.update_streams(streams_from_config(config))
@@ -8111,57 +9298,54 @@ class ServicePanel(Widget):
             self.run_worker(self._reload_current_service_view(), exclusive=True)
             return
 
-        # remote host: write the toggled config back over scp
+        # remote host: the pin goes into its config as read afresh in its
+        # write queue, so a change made there since is kept
         profile = get_profile_by_name(target)
         if profile is None:
             self._show_status(f"SSH profile '{target}' not found; override not changed.")
             return
-        tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".yml", prefix="openmmla-override-", delete=False, encoding="utf-8")
-        with tmp:
-            yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        remote_path = self._remote_config_path(pipeline.config_path, profile)
         # optimistically reflect the new state so the reloaded form is correct;
-        # _run_scp confirms/keeps it on success.
+        # the write sets it to what landed, or forgets it when nothing did
         self._target_config_cache[cache_key] = config
+        pinned = section in overrides
+
+        def apply(fresh: dict) -> str:
+            pins = set(pipeline_section_overrides(fresh))
+            if pinned:
+                pins.add(section)
+            else:
+                pins.discard(section)
+            if pins:
+                fresh["SystemServicesOverride"] = sorted(pins)
+            else:
+                fresh.pop("SystemServicesOverride", None)
+            return ""
+        say = self._bound_reporter()
         self._show_status(f"{action}; saving to {target} ...")
         self.run_worker(
-            self._run_scp(target, tmp.name, remote_path, cleanup_local=True,
-                          cache_key=cache_key, cache_config=config),
-            group="override-scp", exclusive=True,
+            self._host_job(target, self._rewrite_host_config(
+                target, pipeline.config_path, apply, f"The {section} override"), say=say),
+            group=_HOST_SYNC_WORKER_GROUP, exclusive=False,
         )
         self.run_worker(self._reload_current_service_view(), exclusive=True)
 
     def on_config_form_saved(self, event: ConfigForm.Saved) -> None:
         if event.pipeline_name.startswith("shared:"):
             section_name = event.pipeline_name.replace("shared:", "", 1)
-            target = self._settings_host(section_name)
+            # the host the form was read from, not the one the selector names by now
+            target = self._shared_form_shown(section_name)
+            problem = self._shared_form_problem(target)
+            if problem:
+                self._show_status(f"{section_name} not saved: {problem}.")
+                return
             if target != "local":
                 # that machine's own settings file and its pipeline configs
                 self._sync_shared_section_to_target(section_name, target, save=True)
                 return
-            old_stream_server = self._stream_server_address() if section_name == "StreamServer" else None
-            for path, val in event.values.items():
-                self._shared_values[path] = val
-            config_path = save_system_service_section(
-                self._root,
-                section_name,
-                self._shared_section_data(section_name),
-            )
-            updated = self._apply_shared_section_to_local_configs(section_name)
-            message = f"{section_name} system service saved to {config_path} and {updated} local pipeline config(s)"
-            if old_stream_server is not None:
-                message = f"{section_name} system service saved to {config_path}"
-                moved, configs = self._repoint_local_streams(old_stream_server, self._stream_server_address())
-                if moved:
-                    message += (
-                        f"; {moved} stream URL(s) in {configs} local pipeline config(s) followed it to "
-                        f"{self._stream_server_address().get('host')} (Sync to Host on a pipeline's Config tab "
-                        f"takes them to another host)"
-                    )
-            self._show_status(message)
-            # the address may now name another machine: move the markers along
-            self._refresh_visible_statuses()
+            current = self._shared_section_data(section_name)
+            section_data = {
+                key: event.values.get(f"{section_name}.{key}", value) for key, value in current.items()}
+            self._show_status(self._save_shared_section_locally(section_name, section_data))
             return
 
         if event.pipeline_name == "MLLM Server":
@@ -8175,6 +9359,10 @@ class ServicePanel(Widget):
 
         pipeline = self._pipeline_map.get(event.pipeline_name)
         if pipeline is None:
+            return
+        moving = self._config_tab_moved()
+        if moving:
+            self._show_status(f"The card is moving to {_host_label(moving)}; nothing was saved.")
             return
 
         form = self._current_form
@@ -8240,9 +9428,123 @@ class ServicePanel(Widget):
                 card.update_service_def(self._service_for_current_target(service))
         self._show_speakers_summary()  # the ASR Base card's Participant options, if it is up
 
-    def _apply_shared_section_to_local_configs(self, section_name: str) -> int:
-        section_data = self._shared_section_data(section_name)
+    def _shared_form_shown(self, section_name: str) -> str:
+        """the host whose settings the Connections form on screen was read
+        from: what its Save and its sync buttons act on."""
+        host = getattr(self, "_shared_form_host", None)
+        return host if host is not None else self._settings_host(section_name)
+
+    def _shared_form_problem(self, host: str) -> str:
+        """why the form read from `host` can write nothing now ("" when it
+        can): a host gone offline, or gone from the profiles, since. The next
+        form opened falls back to Local (_settings_host); this one does not
+        quietly write that machine's values here."""
+        if getattr(self, "_shared_form_readonly", False):
+            return "its config/system_services.yml could not be read; open this form again to read it again"
+        return self._settings_host_problem(host)
+
+    def _settings_host_problem(self, host: str) -> str:
+        """why a System Settings form read from `host` can write nothing
+        there now ("" when it can)."""
+        if host == "local":
+            return ""
+        if TARGET_STATES.get(host) == "offline":
+            return f"'{host}' is offline"
+        if not any(value == host for _, value in target_options()):
+            return f"SSH profile '{host}' not found"
+        return ""
+
+    def _shared_form_unsaved(self, section_name: str) -> bool:
+        """whether the form on screen holds edits that were not saved: what it
+        shows differs from what it was read with."""
+        form = getattr(self, "_current_form", None)
+        loaded = getattr(self, "_shared_form_loaded", None)
+        if form is None or loaded is None:
+            return False
+        try:
+            values = form.collect_values()
+        except Exception:
+            return False
+
+        def shown(value, default) -> str:
+            # how a field reads back: an empty one is its default
+            if value is None or (isinstance(value, str) and not value.strip()):
+                value = default
+            return str(value).strip()
+
+        for key, fdef in SHARED_SECTIONS.get(section_name, {}).get("fields", {}).items():
+            path = f"{section_name}.{key}"
+            if path in values and shown(values[path], fdef.get("default", "")) != shown(
+                    loaded.get(key), fdef.get("default", "")):
+                return True
+        return False
+
+    def _save_shared_section_locally(self, section_name: str, section_data: dict) -> str:
+        """what a Save of a Connections form does on this machine, and what
+        to say: this machine's config/system_services.yml, the local pipeline
+        configs that carry the section, the stream URLs that named the old
+        Stream Server, and the markers that follow the address."""
+        return self._write_shared_section_locally(section_name, section_data)[1]
+
+    def _write_shared_section_locally(self, section_name: str, section_data: dict) -> tuple[bool, str]:
+        """_save_shared_section_locally: (saved, what to say)."""
+        old_stream_server = self._stream_server_address() if section_name == "StreamServer" else None
+        previous = dict(self._shared_values)
+        self._shared_values.update({f"{section_name}.{key}": value for key, value in section_data.items()})
+        try:
+            config_path = save_system_service_section(self._root, section_name, dict(section_data))
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            # never written over from nothing: the other sections and Sudo live there
+            self._shared_values.clear()
+            self._shared_values.update(previous)
+            return False, (
+                f"{section_name} not saved: config/system_services.yml could not be read "
+                f"({rich_escape(str(e))}). Fix or move that file, then Save again.")
+        skipped: list[str] = []
+        updated = self._apply_shared_section_to_local_configs(section_name, skipped, data=section_data)
+        message = f"{section_name} system service saved to {config_path} and {updated} local pipeline config(s)"
+        if skipped:
+            message += f"; not written, as they could not be read: {rich_escape(', '.join(skipped))}"
+        unfilled = placeholder_fields(section_data)
+        if unfilled and section_name not in CONSOLE_ONLY_SECTIONS:
+            message = (
+                f"{section_name} system service saved to {config_path}. The local pipeline configs keep "
+                f"their own {section_name} section while {_unfilled_text(section_name, unfilled)}")
+        if old_stream_server is not None:
+            message = f"{section_name} system service saved to {config_path}"
+            unread: list[str] = []
+            moved, configs = self._repoint_local_streams(old_stream_server, self._stream_server_address(), unread)
+            if unread:
+                message += f"; stream URLs not moved in {rich_escape(', '.join(unread))}: could not be read"
+            if moved:
+                message += (
+                    f"; {moved} stream URL(s) in {configs} local pipeline config(s) followed it to "
+                    f"{self._stream_server_address().get('host')} (Sync to Host on this form, or on a "
+                    f"pipeline's Config tab, takes them to another host)"
+                )
+        if getattr(self, "_current_shared_section", None) == section_name and \
+                getattr(self, "_shared_form_host", None) == "local":
+            # what the form on screen was read with is what is saved now
+            self._shared_form_loaded = dict(section_data)
+        # the address may now name another machine: move the markers along
+        self._refresh_visible_statuses()
+        return True, message
+
+    def _apply_shared_section_to_local_configs(self, section_name: str, skipped: list[str] | None = None,
+                                               *, data: dict | None = None) -> int:
+        """write the section into the local pipeline configs that carry it and
+        do not pin it; how many were written. `data` is the section (the form
+        on screen when not given). A config that is not there is not made (a
+        file holding one section is no config), and one that could not be
+        read is left as it is and named in `skipped`, when given."""
+        section_data = dict(data) if data is not None else self._shared_section_data(section_name)
         if not section_data:
+            return 0
+        if placeholder_fields(section_data):
+            # not filled in yet: the pipeline configs keep the section they have,
+            # whole, rather than a placeholder a service would take for a host
+            self._shared_values.update(
+                {f"{section_name}.{key}": value for key, value in section_data.items()})
             return 0
         if not self._pipelines:
             self._pipelines = discover_pipelines()
@@ -8251,9 +9553,14 @@ class ServicePanel(Widget):
         for pipeline in self._pipelines:
             if not self._pipeline_has_section(pipeline, section_name):
                 continue
-            config = load_existing_config(pipeline.config_path)
-            if not isinstance(config, dict):
-                config = {}
+            try:
+                config = read_yaml_mapping(pipeline.config_path)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                if skipped is not None:
+                    skipped.append(f"{pipeline.name} ({exc})")
+                continue
+            if not config:
+                continue
             # a pipeline that pins this section (override) manages it itself and
             # must not be overwritten from the central store.
             if section_name in pipeline_section_overrides(config):
@@ -8284,61 +9591,43 @@ class ServicePanel(Widget):
         pipeline: PipelineDef | None = None,
         shared_section: str | None = None,
         local_path: str | None = None,
+        settings_node: str | None = None,
     ) -> None:
         container = self._config_container
         if container is None:
             return
-        for old in container.query(".sync-bar, .sync-note"):
+        for old in container.query(".sync-bar"):
             old.remove()
         if shared_section in PRIVATE_SECTIONS:
             return  # this machine's admin password never leaves it
-        if shared_section is not None and self._settings_host(shared_section) != "local":
-            # the form shows that machine's settings and Save writes them there
-            return
+        if shared_section is not None and getattr(self, "_shared_form_readonly", False):
+            return  # what could not be read is neither sent nor written over
         target = self._get_panel_target()
-        if pipeline is None and local_path is None and shared_section is None:
+        if pipeline is None and local_path is None and shared_section is None and settings_node is None:
             return
-        # a pipeline config is synced from the host it was read on, so the Host
-        # selector picks the source and the picker below the destination: what
-        # was edited on server-01 goes back to this machine, or on to another
-        # host. System Settings and the MLLM launch config are different: their
-        # Save writes this machine's project whatever the Host selector says,
-        # so their source is this machine and the picker defaults to the
-        # selected host.
-        source = target if pipeline is not None else "local"
-        options = _sync_destination_options(source, [p.name for p in load_ssh_profiles()])
+        # a pipeline config belongs to the host it was read on, which the Host
+        # selector names; the picker below names the other machine: Sync to
+        # Host copies the config from the host on screen there (what was
+        # edited on server-01 goes back to this machine, or on to another
+        # host), Sync from Host copies that machine's over it. A Connections
+        # form, Experiments, Tasks and SSH Profiles belong to the host they
+        # were read from, and the MLLM launch config to this machine whatever
+        # the Host selector says. The picker always opens on its prompt.
+        if settings_node is not None:
+            shown = getattr(self, "_settings_node_host", None) or "local"
+        elif shared_section is not None:
+            shown = getattr(self, "_shared_form_host", None) or "local"
+        else:
+            shown = target if pipeline is not None else "local"
+        options = _sync_destination_options(shown, [p.name for p in load_ssh_profiles()])
         if not options:
             return
-        preselect = target if shared_section is not None and any(
-            name == target for _, name in options) else None
-        select_kwargs = {"value": preselect} if preselect is not None else {}
-        bar = Horizontal(
-            Select(
-                options,
-                prompt="Select destination host...",
-                id="sync-host-select",
-                **select_kwargs,
-            ),
+        container.mount(Horizontal(
+            Select(options, prompt="Select host...", id="sync-host-select"),
             Button("Sync to Host", variant="warning", id="btn-sync-host"),
-            classes="sync-bar" if shared_section is None else "sync-bar sync-bar-noted",
-        )
-        if shared_section == "StreamServer":
-            container.mount(Static(
-                "Save writes this machine's project and moves the stream URLs of its pipeline configs "
-                "with the address. Sync to Host gives another machine this address (its own "
-                "config/system_services.yml, which a console there reads) and those Streams entries "
-                "(what its bases pull), and leaves the rest of its configs as they are.",
-                classes="sync-note",
-            ))
-        elif shared_section is not None:
-            container.mount(Static(
-                f"Save writes this machine's project. Sync to Host copies the {shared_section} "
-                f"section to another machine: into its pipeline configs that carry it, and into its own "
-                f"config/system_services.yml (created when it has none), so what runs there connects to "
-                f"the same service.",
-                classes="sync-note",
-            ))
-        container.mount(bar)
+            Button("Sync from Host", variant="warning", id="btn-sync-from-host"),
+            classes="sync-bar",
+        ))
 
     def _clone_template_fields(self, pipeline: PipelineDef, new_name: str) -> list[LoaderFieldDef]:
         """clone base_template fields with paths rewritten to a new section name."""
@@ -8369,12 +9658,24 @@ class ServicePanel(Widget):
             return
         if event.button.id == "btn-sync-host":
             self._sync_to_host()
+        elif event.button.id == "btn-sync-from-host":
+            self._sync_from_host()
         elif event.button.id == "btn-sync-transform-host":
             self._sync_transform_to_host()
+        elif event.button.id == "btn-sync-transform-from-host":
+            self._sync_transform_from_host()
         elif event.button.id == "btn-sync-prompts-host":
             self._sync_prompts_to_host()
+        elif event.button.id == "btn-sync-prompts-from-host":
+            self._sync_prompts_from_host()
         elif event.button.id == "btn-sync-aschema-host":
             self._sync_action_schema_to_host()
+        elif event.button.id == "btn-sync-aschema-from-host":
+            self._sync_action_schema_from_host()
+        elif event.button.id == "btn-sync-mediamtx-host":
+            self._sync_mediamtx("to")
+        elif event.button.id == "btn-sync-mediamtx-from-host":
+            self._sync_mediamtx("from")
         elif event.button.id == "btn-add-base":
             self._show_add_base_input()
         elif event.button.id == "btn-confirm-add-base":
@@ -8483,11 +9784,16 @@ class ServicePanel(Widget):
         self._restore_add_stream_button()
 
     def _stream_server_address(self) -> dict[str, object]:
-        """host and ports of System Settings → Stream Server, as this console holds them."""
-        return {
+        """host and ports of System Settings → Stream Server, as this console holds
+        them. The host is "" while that form has none (an unfilled <uber-server>
+        names no machine, and localhost would name this one)."""
+        server = {
             key: self._shared_values.get(f"StreamServer.{key}", fdef.get("default", ""))
             for key, fdef in SHARED_SECTIONS["StreamServer"]["fields"].items()
         }
+        if not usable_system_service_value(server.get("host")):
+            server["host"] = ""
+        return server
 
     def _stored_capture_hosts(self, pipeline: PipelineDef, values: dict) -> list[LoaderFieldDef]:
         """each stream's ssh_profile and device are picked on the Streams tab,
@@ -8525,7 +9831,17 @@ class ServicePanel(Widget):
         if pipeline.name not in _STREAM_PIPELINES:
             return ""
         server = self._stream_server_address()
-        host = str(server.get("host") or "").strip() or "localhost"
+        host = str(server.get("host") or "").strip()
+        if not host:
+            # no address to complete them with: a path stays a path until there is
+            short = sorted({
+                key[len("Streams."):].rsplit(".", 1)[0] for key, value in values.items()
+                if key.startswith("Streams.") and key.endswith((".target", ".read_target"))
+                and is_stream_path(value)
+            })
+            if not short:
+                return ""
+            return f". {', '.join(short)}: left as a path, because {unset_address_note('StreamServer')}"
         names = [
             key[len("Streams."):-len(".target")] for key in values
             if key.startswith("Streams.") and key.endswith(".target")
@@ -8566,11 +9882,14 @@ class ServicePanel(Widget):
             )
         return "".join(f". {note}" for note in notes)
 
-    def _repoint_local_streams(self, old: dict, new: dict) -> tuple[int, int]:
+    def _repoint_local_streams(self, old: dict, new: dict, skipped: list[str] | None = None) -> tuple[int, int]:
         """the Stream Server moved: the stream URLs of the local pipeline configs
-        that named its old address follow it. (URLs moved, configs written)"""
+        that named its old address follow it. (URLs moved, configs written) A
+        config that could not be read is left as it is and named in `skipped`."""
         if all(str(old.get(key)) == str(new.get(key)) for key in ("host", "rtmp_port", "rtsp_port")):
             return 0, 0
+        if not usable_system_service_value(new.get("host")):
+            return 0, 0  # an address not filled in is nowhere to move them to
         if not self._pipelines:
             self._pipelines = discover_pipelines()
             self._pipeline_map = {pipeline.name: pipeline for pipeline in self._pipelines}
@@ -8578,20 +9897,13 @@ class ServicePanel(Widget):
         for pipeline in self._pipelines:
             if pipeline.name not in _STREAM_PIPELINES or not os.path.isfile(pipeline.config_path):
                 continue
-            config = load_existing_config(pipeline.config_path)
-            streams = config.get("Streams") if isinstance(config, dict) else None
-            if not isinstance(streams, dict):
+            try:
+                config = read_yaml_mapping(pipeline.config_path)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                if skipped is not None:
+                    skipped.append(f"{pipeline.name} ({exc})")
                 continue
-            changed = 0
-            for entry in streams.values():
-                if not isinstance(entry, dict):
-                    continue
-                for key in ("target", "read_target"):
-                    url = str(entry.get(key) or "").strip()
-                    repointed = repoint_stream_url(url, old, new) if url else url
-                    if repointed != url:
-                        entry[key] = repointed
-                        changed += 1
+            changed = _repoint_streams_in_config(config, old, new)
             if not changed:
                 continue
             with open(pipeline.config_path, "w", encoding="utf-8") as file:
@@ -8667,7 +9979,7 @@ class ServicePanel(Widget):
         try:
             result = ssh_run_sync(profile, cmd, timeout=10.0)
         except Exception as e:
-            return {}, f"Could not read {target}:{remote_path}: {e}. Using defaults."
+            return {}, f"Could not read {target}:{remote_path}: {ssh_error_text(e)}. Using defaults."
 
         if result.returncode != 0:
             error = (result.stderr or "").strip() or f"exit code {result.returncode}"
@@ -8684,7 +9996,8 @@ class ServicePanel(Widget):
         except yaml.YAMLError as e:
             return {}, f"Invalid remote config at {target}:{remote_path}: {e}. Using defaults."
         if not isinstance(config, dict):
-            config = {}
+            # never taken for a missing file: a write would replace what is there
+            return {}, f"Invalid remote config at {target}:{remote_path}: it holds no mapping. Using defaults."
         self._target_config_cache[key] = config
         return (
             config,
@@ -8728,7 +10041,7 @@ class ServicePanel(Widget):
         remote_path = self._remote_config_path(pipeline.config_path, profile)
         self._show_status(f"Saving to {target}:{remote_path} ...")
         self.run_worker(
-            self._run_scp(
+            self._host_job(target, self._run_scp(
                 target,
                 tmp_path,
                 remote_path,
@@ -8736,8 +10049,9 @@ class ServicePanel(Widget):
                 cache_key=cache_key,
                 cache_config=cache_config,
                 note=note,
-            ),
-            exclusive=True,
+            ), say=self._bound_reporter()),
+            group=_HOST_SYNC_WORKER_GROUP,
+            exclusive=False,
         )
         return cache_config
 
@@ -8749,6 +10063,12 @@ class ServicePanel(Widget):
     # machine. Either end may be this one: what was edited on server-01 comes
     # back here, or goes on to another host (through this machine, the one
     # place both are reachable).
+    #
+    # Every write to a host runs as a job in its write queue (_host_job), in
+    # the "host-sync" worker group, where nothing cancels it: a job that reads
+    # a file there, changes it and writes it back reads it afresh inside the
+    # queue, and a remote file is written beside itself and then moved over,
+    # so it is never left half written.
 
     def _host_profile(self, host: str):
         """the SSH profile of a host; None is this machine."""
@@ -8782,16 +10102,301 @@ class ServicePanel(Widget):
         (say or self._show_status)(f"SSH profile '{source}' not found; nothing was synced.")
         return False
 
+    def _dest_is_reachable(self, dest: str, say=None) -> bool:
+        """the same for the host a copy goes to, which is the host on screen
+        for a Sync from Host and nothing else checks: without its profile the
+        copy would land on this machine, which reads as no profile."""
+        if dest == "local" or self._host_profile(dest) is not None:
+            return True
+        (say or self._show_status)(f"SSH profile '{dest}' not found; nothing was synced.")
+        return False
+
+    def _bound_reporter(self, say=None):
+        """the status line a write job reports to, bound when its button is
+        pressed: a copy that ends after the user moved on must not write into
+        whatever is on screen then. `say` is a panel's own status line, used
+        while the panel is mounted; otherwise it is the status line of the
+        form or tab on screen at the press (self._config_container), while it
+        is still the one on screen. What cannot go there goes to the log."""
+        if say is not None:
+            owner = getattr(say, "__self__", None)
+
+            def report_to_panel(text: str) -> None:
+                if isinstance(owner, Widget) and not owner.is_attached:
+                    self._log(rich_escape(text))
+                else:
+                    say(text)
+            return report_to_panel
+        container = getattr(self, "_config_container", None)
+        shown = self._shown_files_host()
+
+        def report(text: str) -> None:
+            current = getattr(self, "_config_container", None)
+            # a form that is read again for another host keeps its container
+            if current is container and (container is None or container.is_attached) \
+                    and self._shown_files_host() == shown:
+                self._show_status(text)
+            else:
+                self._log(rich_escape(text))
+        return report
+
+    def _shown_files_host(self) -> str | None:
+        """whose files the form or tab on screen shows: the host it was read
+        from (a Connections form, Experiments, Tasks, SSH Profiles) or drawn
+        for (a pipeline's Config tab)."""
+        if getattr(self, "_current_settings_node", None):
+            return getattr(self, "_settings_node_host", None) or "local"
+        if getattr(self, "_current_shared_section", None):
+            return getattr(self, "_shared_form_host", None) or "local"
+        return getattr(self, "_config_tab_host", None)
+
+    def _job_reporter(self):
+        """where a write job says what it did: the status line its press was
+        bound to (_host_job), else the one on screen."""
+        return _SYNC_REPORTER.get() or self._show_status
+
+    def _host_lock(self, host: str) -> asyncio.Lock:
+        """the write queue of one host (this machine is "local")."""
+        locks = getattr(self, "_host_write_locks", None)
+        if locks is None:
+            locks = self._host_write_locks = {}
+        lock = locks.get(host)
+        if lock is None:
+            lock = locks[host] = asyncio.Lock()
+        return lock
+
+    async def _host_job(self, host: str, job, say=None):
+        """run one write job to `host` (a coroutine that reads, builds and
+        writes) once the jobs before it there are done, and return what it
+        returns. The queue is taken once, here, and by nothing the job calls.
+        `say` is the status line of the press that started it
+        (_bound_reporter), where everything the job says goes; an error it did
+        not see coming ends it there with a line, never in a traceback."""
+        if say is not None:
+            _SYNC_REPORTER.set(say)
+        started = False
+        try:
+            async with self._host_lock(host):
+                started = True
+                return await job
+        except Exception as exc:
+            self._job_reporter()(f"Writing to {_host_label(host)} failed: {ssh_error_text(exc)}")
+            return None
+        finally:
+            if not started and hasattr(job, "close"):
+                job.close()  # cancelled while it waited: it never ran
+
+    # ── one master key per machine ───────────────────────────────
+    #
+    # Every machine keeps its own ~/.openmmla/master.key, made the first time
+    # something sealed with it is written there and never copied to another
+    # machine or replaced. What is at rest on a machine is sealed with that
+    # machine's key: whatever the console writes to a host has each ENC(...)
+    # value sealed again for it (_sealed_for), and each secret typed or
+    # fetched sealed with its key (_encrypt_secrets). Another host's key is
+    # read over ssh when a write or a comparison needs it, off the UI thread
+    # where it can be, and kept in memory for this console's run only.
+
+    def _host_master_key(self, host: str, create: bool = False) -> tuple[bytes | None, str]:
+        """(key, why not) of `host`'s own master key: this machine's for
+        "local", another host's read over ssh (call it off the UI thread)
+        and held for this console's run while its profile points at the same
+        login; a read that fails drops what was held. (None, "") is a host
+        with no key, unless `create` makes one there (never over one that is
+        there). No key is ever shown, logged or written by this."""
+        if host == "local":
+            if not create:
+                return _local_master_key(), ""
+            try:
+                from openmmla.utils import crypto
+                return crypto.ensure_master_key(), ""
+            except Exception as exc:
+                return None, f"this machine's ~/.openmmla/master.key could not be made ({type(exc).__name__})"
+        profile = get_profile_by_name(host)
+        if profile is None:
+            return None, f"SSH profile '{host}' not found"
+        held_keys = getattr(self, "_host_master_keys", None)
+        if held_keys is None:
+            held_keys = self._host_master_keys = {}
+        login = (str(getattr(profile, "host", "")), str(getattr(profile, "port", "")),
+                 str(getattr(profile, "user", "")))
+        held = held_keys.get(host)
+        if held is not None and held[0] == login:
+            return held[1], ""
+        key, why = _read_host_master_key(profile)
+        if key is None and not why and create:
+            key, why = _make_host_master_key(profile)
+        if key is None:
+            held_keys.pop(host, None)
+            return None, why
+        held_keys[host] = (login, key)
+        return key, ""
+
+    def _key_maker(self, host: str):
+        """what _encrypt_secrets takes for `host`: a callable that gets its
+        key, made there when it has none, once for the whole write."""
+        got: list = []
+
+        def key() -> bytes:
+            if not got:
+                got.append(self._host_master_key(host, create=True))
+            value, why = got[0]
+            if value is None:
+                raise _MasterKeyUnavailable(
+                    f"the master key of {_host_label(host)} could not be read or made ({why})")
+            return value
+        return key
+
+    def _host_tokens(self, host: str, path: str) -> set[str]:
+        """the ENC(...) values of a file of `host` as it is there now
+        (`path` is where it is there): what a write may leave there although
+        no key opens them. Asks over ssh: off the UI thread."""
+        from openmmla.utils.crypto import enc_tokens
+        if host == "local":
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    return enc_tokens(fh.read())
+            except OSError:
+                return set()
+        profile = get_profile_by_name(host)
+        if profile is None:
+            return set()
+        text, _ = _remote_read_text(profile, path)
+        return enc_tokens(text or "")
+
+    async def _reseal_plan(self, dest: str, data, source: str | None,
+                           keep=()) -> tuple[bytes | None, dict, list, str, str]:
+        """what sealing `data` for `dest` takes (crypto.plan_reseal), the
+        keys read off the UI thread: (dest's key, None when it has none yet;
+        {value: plaintext} to seal again; the values none of the keys
+        involved opens; why dest's key could not be read, then nothing else;
+        why the source's could not, to name beside a value none opens). The
+        candidates are the key of `source`, the host the data comes from,
+        and this console's."""
+        from openmmla.utils.crypto import plan_reseal
+        dest_key, why = await asyncio.to_thread(self._host_master_key, dest)
+        if why:
+            return None, {}, [], f"the master key of {_host_label(dest)} could not be read ({why})", ""
+        candidates, unread = [], ""
+        if source and source != dest:
+            key, why = await asyncio.to_thread(self._host_master_key, source)
+            if key is not None:
+                candidates.append(key)
+            elif why:
+                unread = f"the master key of {_host_label(source)} could not be read ({why})"
+        console = _local_master_key()
+        if console is not None:
+            candidates.append(console)
+        opened, unopened = plan_reseal(data, dest_key, candidates, keep)
+        return dest_key, opened, unopened, "", unread
+
+    async def _resealed(self, dest: str, data, dest_key: bytes | None, opened: dict) -> tuple[object, str]:
+        """`data` with the values of `opened` sealed with dest's key, made
+        there when it has none: (data, "") or (None, why)."""
+        from openmmla.utils.crypto import apply_reseal
+        if not opened:
+            return data, ""
+        if dest_key is None:
+            dest_key, why = await asyncio.to_thread(self._host_master_key, dest, True)
+            if dest_key is None:
+                return None, f"no master key could be made on {_host_label(dest)} ({why})"
+        return apply_reseal(data, opened, dest_key), ""
+
+    async def _sealed_for(self, dest: str, data, source: str | None = None, what: str = "what goes there",
+                          keep=(), existing: str | None = None) -> tuple[object, str]:
+        """`data` (a text, or a config) as it may be written to `dest`: each
+        ENC(...) value sealed with dest's own master key. One dest's key
+        opens is its own already and stays as it is (the same key at both
+        ends leaves a file untouched); any other is opened with the key of
+        `source`, the host it comes from, else this console's, and sealed
+        again with dest's, made there when it has none. A value none of them
+        opens is not written: (None, why), unless dest holds it already (one
+        of `keep`, or of the file at `existing` there), when it stays as it
+        is. Only the ENC(...) values of a text change, its layout and
+        comments stay; with no value that is not in `keep`, no key is asked
+        at all. The plaintext lives in memory only."""
+        from openmmla.utils.crypto import enc_tokens
+        if enc_tokens(data) <= set(keep):
+            return data, ""  # nothing that is not there already: no key is asked
+        dest_key, opened, unopened, why, unread = await self._reseal_plan(dest, data, source, keep)
+        if why:
+            return None, why
+        if unopened and existing:
+            there = await asyncio.to_thread(self._host_tokens, dest, existing)
+            unopened = [token for token in unopened if token not in there]
+        if unopened:
+            return None, (f"{what} holds an encrypted value none of the keys involved can open"
+                          + (f"; {unread}" if unread else ""))
+        return await self._resealed(dest, data, dest_key, opened)
+
+    async def _sealed_section(self, section_data: dict, source: str | None, dest: str,
+                              section_name: str = "") -> tuple[dict | None, list[str], str]:
+        """a Connections section from `source` as it may go into `dest`:
+        (section, the fields dest keeps its own value of, why nothing may be
+        written). A secret sealed with another key is sealed again with
+        dest's (_sealed_for); a field whose value none of the keys involved
+        opens is kept: dest's own value stays, never "" (the caller fills it
+        in); on a Save of dest's own form (`source` is dest) it is dest's own
+        and stays as it is. While the source's key could not be read, such a
+        field writes nothing at all: that key may well open it. A plaintext
+        one (just typed) is left for _encrypt_secrets."""
+        from openmmla.utils.crypto import enc_tokens
+        section = dict(section_data)
+        if not enc_tokens(section):
+            return section, [], ""
+        # a Save of dest's own form: what it read there is dest's own, and
+        # one sealed with this console's key is sealed again with dest's
+        keep = enc_tokens(section) if source == dest else set()
+        dest_key, opened, unopened, why, unread = await self._reseal_plan(dest, section, source, keep)
+        if why:
+            return None, [], why
+        kept = [key for key, value in section.items() if enc_tokens(value) & set(unopened)]
+        if kept and unread:
+            fields = ', '.join(f"{section_name}.{key}" if section_name else key for key in kept)
+            return None, [], f"{fields} could not be opened: {unread}"
+        section, why = await self._resealed(dest, section, dest_key, opened)
+        return (None, [], why) if section is None else (section, kept, "")
+
+    def _read_host_config(self, local_path: str, target: str) -> tuple[dict | None, str]:
+        """a config of `target` read afresh by a job that rewrites it: (config,
+        "") when it is there, (None, "") when it is not (or holds nothing), and
+        (None, why) when it could not be read, which is never taken for
+        missing: a file nobody could read is left as it is. What the console
+        holds for it (_target_config_cache) stays as it was: the job sets that
+        to what it writes."""
+        if target == "local":
+            try:
+                config = read_yaml_mapping(local_path)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                return None, f"could not read {local_path}: {exc}"
+            return (config or None), ""
+        cache = getattr(self, "_target_config_cache", None)
+        if cache is None:
+            cache = self._target_config_cache = {}
+        key = self._config_cache_key(local_path, target)
+        held = cache.pop(key, _NOT_HELD)
+        try:
+            config, message = self._load_config_for_target(local_path, show_status=False, target=target)
+        finally:
+            if held is not _NOT_HELD:
+                cache[key] = held
+        if message and not message.startswith("No remote config"):
+            return None, message
+        if not isinstance(config, dict) or not config:
+            return None, ""
+        return config, ""
+
     def _sync_selection(self, selector: str, say=None) -> str | None:
-        """the host picked next to a Sync to Host button, or None with a note
-        in the status line when there is nothing usable to sync to."""
+        """the host picked next to a Sync to Host / Sync from Host button, or
+        None with a note in the status line when there is nothing usable to
+        sync with."""
         say = say or self._show_status
         try:
             value = self.query_one(selector, Select).value
         except Exception:
             return None
         if is_select_sentinel(value):
-            say("Select a destination host first.")
+            say("Select a host first.")
             return None
         host = str(value)
         if host != "local" and get_profile_by_name(host) is None:
@@ -8799,21 +10404,36 @@ class ServicePanel(Widget):
             return None
         return host
 
+    def _config_tab_moved(self) -> str:
+        """the host the card is moving to while the Config tab on screen is
+        still the previous host's (the new one is being read), or ""."""
+        drawn = getattr(self, "_config_tab_host", None)
+        if drawn is None:
+            return ""
+        target = self._get_panel_target()
+        return target if drawn != target else ""
+
     def _sync_to_host(self) -> None:
         dest = self._sync_selection("#sync-host-select")
         if dest is None:
             return
 
-        # System Settings shared-section view: push just this section to the
-        # selected host (respecting any per-pipeline overrides on that host).
-        if self._current_shared_section == "StreamServer":
-            self._sync_streams_to_target(dest)
+        node = getattr(self, "_current_settings_node", None)
+        if node:
+            self._sync_settings_node(node, "to", dest)
             return
+
+        # a Connections form: the section as the host on screen saved it goes
+        # to the host picked (respecting any per-pipeline overrides there)
         if self._current_shared_section:
-            self._sync_shared_section_to_target(self._current_shared_section, dest)
+            self._sync_section_to_host(self._current_shared_section, dest)
             return
 
         if self._current_pipeline is not None:
+            moving = self._config_tab_moved()
+            if moving:
+                self._show_status(f"The card is moving to {_host_label(moving)}; nothing was synced.")
+                return
             self._sync_config_between_hosts(
                 self._current_pipeline.config_path, self._get_panel_target(), dest)
         elif self._current_config_local_path:
@@ -8822,31 +10442,400 @@ class ServicePanel(Widget):
             # what goes out whatever the Host selector says
             self._sync_config_between_hosts(self._current_config_local_path, "local", dest)
 
+    def _sync_from_host(self) -> None:
+        """Sync from Host under the Config tab: the picked host's copy of the
+        config on screen comes over the one of the host on screen, which is
+        then drawn again (_config_landed); on a Connections form, the picked
+        host's section is written into the host the form shows; on
+        Experiments, Tasks and SSH Profiles, the picked host's file(s) or
+        profiles into the host they were read from (_sync_settings_node)."""
+        source = self._sync_selection("#sync-host-select")
+        if source is None:
+            return
+        node = getattr(self, "_current_settings_node", None)
+        if node:
+            self._sync_settings_node(node, "from", source)
+            return
+        if self._current_shared_section:
+            self._sync_section_from_host(self._current_shared_section, source)
+            return
+        if self._current_pipeline is not None:
+            moving = self._config_tab_moved()
+            if moving:
+                self._show_status(f"The card is moving to {_host_label(moving)}; nothing was synced.")
+                return
+            self._sync_config_between_hosts(
+                self._current_pipeline.config_path, source, self._get_panel_target())
+        elif self._current_config_local_path:
+            # the MLLM launch config: this machine's file is the one on screen
+            self._sync_config_between_hosts(self._current_config_local_path, source, "local")
+
+    def _sync_settings_node(self, node: str, direction: str, picked: str) -> None:
+        """Sync to Host / Sync from Host on Experiments, Tasks or SSH
+        Profiles, between the host the node was read from and the one picked:
+        the whole experiments file, as a pipeline config goes, every task of
+        the source by name (added or overwritten, never deleted), or the
+        source's SSH profiles merged by name. What lands on the host on screen
+        is read again (_config_landed, _files_landed, _copy_profiles_between_hosts)."""
+        shown = getattr(self, "_settings_node_host", None) or "local"
+        problem = self._settings_host_problem(shown)
+        if problem:
+            self._show_status(f"Nothing synced: {problem}.")
+            return
+        source, dest = self._sync_ends(direction, shown, picked)
+        busy = next((host for host, _ in getattr(self, "_settings_writers", ()) if host in (source, dest)), None)
+        if busy is not None:
+            # a copy made now could miss them, or be written over by them
+            self._show_status(
+                f"Changes made here are still being written to {_host_label(busy)}; sync once they are.")
+            return
+        if node == "__experiments__":
+            path = self._settings_node_path(node)
+            if source == "local" and not os.path.isfile(path):
+                # the form has no Save: its first change writes the file
+                self._show_status(
+                    f"Local has no {os.path.relpath(path, self._root)} yet; nothing was synced.")
+                return
+            self._sync_config_between_hosts(path, source, dest)
+        elif node == "__ssh_profiles__":
+            self._sync_profiles_between_hosts(source, dest)
+        else:
+            self._sync_tasks_between_hosts(source, dest)
+
+    def _sync_profiles_between_hosts(self, source: str, dest: str) -> None:
+        """the SSH profiles of `source` merged by name into `dest`'s
+        config/ssh_profiles.yml (_merge_profile_entries), on a second press:
+        the first reads them, in the job, off the UI thread, and says how
+        many would be written, with how many passwords."""
+        say = self._bound_reporter()
+        if source == dest:
+            say(f"{_host_label(source)} is both where the SSH profiles come from and where they go; "
+                f"nothing was synced.")
+            return
+        if not self._source_is_reachable(source, say) or not self._dest_is_reachable(dest, say):
+            return
+        confirmed, self._profile_sync_confirm = getattr(self, "_profile_sync_confirm", None), None
+        say(f"Reading the SSH profiles of {_host_label(source)} ...")
+        self.run_worker(self._copy_profiles_between_hosts(source, dest, confirmed, say),
+                        group=_HOST_SYNC_WORKER_GROUP, exclusive=False)
+
+    async def _copy_profiles_between_hosts(self, source: str, dest: str, confirmed, say) -> int:
+        """the work of _sync_profiles_between_hosts: `confirmed` is what the
+        press before asked about, (source, dest, names, passwords); the write
+        goes ahead only when what was read now is that. The form on screen,
+        when it shows `dest`, is read again, and the lines come after it.
+        Returns how many profiles were written."""
+        entries, _, why = await asyncio.to_thread(self._profile_entries_of, source)
+        if entries is None:
+            say(f"Nothing synced: {why}.")
+            return 0
+        carried = [entry for entry in entries if _profile_name(entry)]
+        if not carried:
+            say(f"No SSH profiles in {_host_label(source)}'s config/ssh_profiles.yml; nothing was synced.")
+            return 0
+        names = tuple(_profile_name(entry) for entry in carried)
+        # the passwords that travel: one none of the keys involved opens does not
+        keys, why = await self._password_keys(source, dest, carried)
+        if why:
+            say(f"Nothing synced: {why}.")
+            return 0
+        passwords = sum(1 for entry in carried if _carried_password(entry.get("password"), keys[0], keys[1:]))
+        asked = (source, dest, names, passwords)
+        if confirmed != asked:
+            self._profile_sync_confirm = asked
+            say(f"Press again to write {len(names)} profile(s) ({passwords} with passwords) into "
+                f"{_host_label(dest)}'s config/ssh_profiles.yml.")
+            return 0
+        said: list[str] = []
+        done = await self._host_job(
+            dest, self._write_merged_profiles(source, dest, entries, said.append), say=said.append)
+        if done and self._settings_node_shows(self._settings_node_path("__ssh_profiles__"), dest):
+            self.run_worker(self._reload_settings_then_say(dest, said, say),
+                            group=_LAUNCHER_UI_WORKER_GROUP, exclusive=True)
+        else:
+            for text in said:
+                say(text)
+        return len(names) if done else 0
+
+    async def _password_keys(self, source: str, dest: str, entries: list) -> tuple[list[bytes | None], str]:
+        """([dest's master key, source's, this console's], why nothing may be
+        written) for the SSH profiles `entries` that go from `source` into
+        `dest` (None for a key that is not there); asked off the UI thread.
+        Nothing is written while a password of `entries` opens with none of
+        them and one of the two hosts' keys could not be read: that key may
+        well open it."""
+        dest_key, dest_why = await asyncio.to_thread(self._host_master_key, dest)
+        source_key, source_why = await asyncio.to_thread(self._host_master_key, source)
+        keys = [dest_key, source_key, _local_master_key()]
+        unread = [f"the master key of {_host_label(host)} could not be read ({why})"
+                  for host, why in ((dest, dest_why), (source, source_why)) if why]
+        if unread:
+            stuck = [_profile_name(entry) for entry in entries if _profile_name(entry)
+                     and _carried_password(entry.get("password"), keys[0], keys[1:]) is None]
+            if stuck:
+                return [], f"the passwords of {', '.join(stuck)} could not be opened: {'; '.join(unread)}"
+        return keys, ""
+
+    async def _write_merged_profiles(self, source: str, dest: str, entries: list, say) -> bool:
+        """the write of _copy_profiles_between_hosts, in `dest`'s write queue:
+        its list read afresh, the profiles of `source` (`entries`) merged in
+        by name, each password opened with the key it was sealed with and
+        sealed again with dest's own (made there when it has none), and the
+        whole file written back, never half written and chmod 600. Landing
+        here, the hosts this console reaches are refreshed as a Save of the
+        form does. Whether it landed."""
+        there, _, why = await asyncio.to_thread(self._profile_entries_of, dest)
+        if there is None:
+            say(f"Nothing synced: {why}.")
+            return False
+        keys, why = await self._password_keys(source, dest, entries)
+        if why:
+            say(f"Nothing synced: {why}.")
+            return False
+        merged, names = _merge_profile_entries(entries, there, keys[0], keys[1:])
+        try:
+            text = await asyncio.to_thread(_profiles_text, merged, self._key_maker(dest))
+        except _MasterKeyUnavailable as exc:
+            say(f"Nothing synced: {exc}.")
+            return False
+        except Exception as exc:
+            say(f"Nothing synced: the passwords could not be encrypted ({type(exc).__name__}).")
+            return False
+        if dest == "local":
+            path = _ssh_profiles_path()
+            try:
+                await asyncio.to_thread(_write_private_file, path, text)
+            except OSError as exc:
+                say(f"Nothing synced: {path} could not be written ({exc}).")
+                return False
+        else:
+            profile = get_profile_by_name(dest)
+            if profile is None:
+                say(f"Nothing synced: SSH profile '{dest}' not found.")
+                return False
+            remote_path = self._remote_config_path(self._settings_node_path("__ssh_profiles__"), profile)
+            ok, why = await asyncio.to_thread(_remote_write_file, profile, remote_path, text, "600")
+            if not ok:
+                say(f"Nothing synced: config/ssh_profiles.yml was not written to {dest}: {why}.")
+                return False
+        came, went = _host_label(source), _host_label(dest)
+        parts = [f"Synced {len(names['added']) + len(names['replaced'])} SSH profile(s) from {came} into "
+                 f"{went}'s config/ssh_profiles.yml ({len(names['added'])} added, "
+                 f"{len(names['replaced'])} replaced)"]
+        if names["key_path"]:
+            parts.append(f"{went} keeps its own key_path for {', '.join(names['key_path'])}")
+        if names["password"]:
+            parts.append(f"{went} keeps its own password for {', '.join(names['password'])} "
+                         f"({came}'s is empty or none of the keys involved can open it)")
+        if names["no_password"]:
+            parts.append(f"{', '.join(names['no_password'])} came without a password "
+                         f"({came}'s: none of the keys involved can open it)")
+        if names["new_key_path"]:
+            parts.append(f"key_path names a file on {came}: {', '.join(names['new_key_path'])}")
+        say("; ".join(parts) + ".")
+        if dest == "local":
+            # what a Save of the SSH Profiles form does: a profile that points
+            # elsewhere now is asked its platform again (and its key read
+            # again), and the Host selector lists and probes what is there now
+            getattr(self, "_host_master_keys", {}).clear()
+            before = {_profile_name(entry): _profile_endpoint(entry) for entry in there if _profile_name(entry)}
+            for entry in merged:
+                name = _profile_name(entry)
+                if name and before.get(name) != _profile_endpoint(entry):
+                    TARGET_PLATFORMS.pop(name, None)
+            self._refresh_target_options()
+            self._probe_targets()
+        return True
+
+    def _sync_tasks_between_hosts(self, source: str, dest: str) -> None:
+        """every task of `source` into `dest`'s config/tasks; the tasks are
+        listed in the job, off the UI thread."""
+        say = self._bound_reporter()
+        if source == dest:
+            say(f"{_host_label(source)} is both where the tasks come from and where they go; nothing was synced.")
+            return
+        if not self._source_is_reachable(source, say) or not self._dest_is_reachable(dest, say):
+            return
+        say(f"Listing the tasks of {_host_label(source)} ...")
+        self.run_worker(self._copy_tasks_between_hosts(source, dest, say),
+                        group=_HOST_SYNC_WORKER_GROUP, exclusive=False)
+
+    async def _copy_tasks_between_hosts(self, source: str, dest: str, say) -> int:
+        """the work of _sync_tasks_between_hosts. A task is carried by name:
+        the file load_task reads on `source` lands as <name>.yaml, which
+        load_task reads first on `dest` too; a <name>.yml `dest` keeps beside
+        it is named. Returns how many landed."""
+        tasks_dir = self._settings_node_path("__tasks__")
+        where = f"{_host_label(source)}:{self._host_path(tasks_dir, source)}"
+        listed = await asyncio.to_thread(self._host_listing, source, tasks_dir, _TASK_SUFFIXES)
+        if listed is None:
+            say(f"Could not list the task files on {where}; nothing was synced.")
+            return 0
+        carried = _task_files_by_name(listed)
+        if not carried:
+            say(f"No task files on {where}; nothing was synced.")
+            return 0
+        there = await asyncio.to_thread(self._host_listing, dest, tasks_dir, _TASK_SUFFIXES) or []
+        shadowed = [f"{name}.yml" for name in carried if f"{name}.yml" in there]
+        note = (f"; {_host_label(dest)} also has {', '.join(shadowed)}, which the .yaml of the same name "
+                f"now comes before" if shadowed else "")
+        say(f"Syncing {len(carried)} task file(s) from {_host_label(source)} "
+            f"to {_host_label(dest)}:{self._host_path(tasks_dir, dest)} ...")
+        return await self._run_files_copy(
+            source, dest, tasks_dir, list(carried.values()), "task", say,
+            dest_names=[f"{name}.yaml" for name in carried], note=note)
+
     def _sync_config_between_hosts(self, local_path: str, source: str, dest: str) -> None:
         """copy one config file from the host it was read on to another."""
-        if source == dest or not self._source_is_reachable(source):
+        if source == dest:
+            self._show_status(
+                f"{os.path.relpath(local_path, self._root)}: {_host_label(source)} is both where it "
+                f"comes from and where it goes; nothing was synced.")
+            return
+        if not self._source_is_reachable(source) or not self._dest_is_reachable(dest):
             return
         if source == "local" and not os.path.isfile(local_path):
             self._show_status(f"Local config not found: {local_path}. Save first.")
             return
+        say = self._bound_reporter()
         self._show_status(
             f"Syncing {os.path.relpath(local_path, self._root)} from {_host_label(source)} "
             f"to {_host_label(dest)} ..."
         )
-        self.run_worker(self._run_config_copy(source, dest, local_path), exclusive=True)
+        self.run_worker(self._run_config_copy(source, dest, local_path, say),
+                        group=_HOST_SYNC_WORKER_GROUP, exclusive=False)
 
     def _sync_files_between_hosts(
         self, source: str, dest: str, local_dir: str, files: list[str], label: str, say=None
     ) -> None:
-        say = say or self._show_status
-        if source == dest or not self._source_is_reachable(source, say):
+        say = self._bound_reporter(say)
+        if source == dest:
+            say(f"{_host_label(source)} is both where the {label} files come from and where they go; "
+                f"nothing was synced.")
+            return
+        if not self._source_is_reachable(source, say) or not self._dest_is_reachable(dest, say):
             return
         dest_dir = self._host_path(local_dir, dest)
         say(
             f"Syncing {len(files)} {label} file(s) from {_host_label(source)} "
             f"to {_host_label(dest)}:{dest_dir} ..."
         )
-        self.run_worker(self._run_files_copy(source, dest, local_dir, files, label, say), exclusive=True)
+        self.run_worker(self._run_files_copy(source, dest, local_dir, files, label, say),
+                        group=_HOST_SYNC_WORKER_GROUP, exclusive=False)
+
+    def _sync_listed_files_between_hosts(
+        self, source: str, dest: str, local_dir: str, suffix: str, label: str, say=None, keep=None
+    ) -> None:
+        """Sync from Host on a tab that lists files: the files of `source`
+        (ending in `suffix`, and passing `keep` when given) are listed in the
+        job, off the UI thread, where a host that cannot be asked is told
+        apart from one that has none; then they are copied like any others."""
+        say = self._bound_reporter(say)
+        if source == dest:
+            say(f"{_host_label(source)} is both where the {label} files come from and where they go; "
+                f"nothing was synced.")
+            return
+        if not self._source_is_reachable(source, say) or not self._dest_is_reachable(dest, say):
+            return
+        say(f"Listing the {label} files of {_host_label(source)} ...")
+        self.run_worker(self._list_and_copy_files(source, dest, local_dir, suffix, label, say, keep),
+                        group=_HOST_SYNC_WORKER_GROUP, exclusive=False)
+
+    async def _list_and_copy_files(
+        self, source: str, dest: str, local_dir: str, suffix: str, label: str, say, keep=None
+    ) -> int:
+        where = f"{_host_label(source)}:{self._host_path(local_dir, source)}"
+        listing = await asyncio.to_thread(self._host_listing, source, local_dir, suffix)
+        if listing is None:
+            say(f"Could not list the {label} files on {where}; nothing was synced.")
+            return 0
+        files = [name for name in listing if keep is None or keep(name)]
+        if not files:
+            say(f"No {label} files on {where}; nothing was synced.")
+            return 0
+        say(f"Syncing {len(files)} {label} file(s) from {_host_label(source)} "
+            f"to {_host_label(dest)}:{self._host_path(local_dir, dest)} ...")
+        return await self._run_files_copy(source, dest, local_dir, files, label, say)
+
+    def _host_listing(self, host: str, local_dir: str, suffix: str) -> list[str] | None:
+        """the files of one directory of this project on `host` whose names
+        end in `suffix`: [] when there are none (or no such directory), None
+        when they could not be listed. Asks over ssh: off the UI thread."""
+        profile = self._host_profile(host)
+        if profile is None:
+            if host != "local":
+                return None  # a profile that has gone: nobody to ask
+            try:
+                return sorted(
+                    name for name in os.listdir(local_dir)
+                    if name.endswith(suffix) and not name.startswith(".")
+                    and os.path.isfile(os.path.join(local_dir, name))
+                )
+            except (FileNotFoundError, NotADirectoryError):
+                return []
+            except OSError:
+                return None
+        return _remote_listing(profile, self._host_path(local_dir, host), suffix)
+
+    def _sync_ends(self, direction: str, shown: str, picked: str) -> tuple[str, str]:
+        """(source, destination) of a sync: Sync to Host copies what the tab
+        shows to the host picked, Sync from Host the other way round."""
+        return (shown, picked) if direction == "to" else (picked, shown)
+
+    def _sync_transform_from_host(self) -> None:
+        try:
+            panel = self.query_one(TransformMatrixPanel)
+        except Exception:
+            return
+        source = self._sync_selection("#transform-sync-host-select", panel.set_status)
+        if source is None:
+            return
+        self._sync_listed_files_between_hosts(
+            source, panel.target, panel.local_dir, ".json", "transform matrix", panel.set_status,
+            keep=_is_transform_matrix_file)
+
+    def _sync_prompts_from_host(self) -> None:
+        try:
+            panel = self.query_one(PromptsPanel)
+        except Exception:
+            return
+        source = self._sync_selection("#prompts-sync-host-select", panel.set_status)
+        if source is None:
+            return
+        self._sync_listed_files_between_hosts(
+            source, panel.target, panel.prompts_dir, ".txt", "prompt", panel.set_status)
+
+    def _sync_one_file(self, direction: str, picker: str, shown: str, local_path: str, label: str, say) -> None:
+        """the sync of a tab that edits one file (the action schema, the
+        MediaMTX config): to or from the host picked beside it."""
+        picked = self._sync_selection(picker, say)
+        if picked is None:
+            return
+        source, dest = self._sync_ends(direction, shown, picked)
+        if source == "local" and not os.path.isfile(local_path):
+            say(f"No {label} file on this machine: {local_path}")
+            return
+        self._sync_files_between_hosts(
+            source, dest, os.path.dirname(local_path), [os.path.basename(local_path)], label, say)
+
+    def _sync_action_schema_from_host(self) -> None:
+        try:
+            panel = self.query_one(ActionSchemaPanel)
+        except Exception:
+            return
+        self._sync_one_file("from", "#aschema-sync-host-select", panel.target, panel.schema_path,
+                            "action schema", panel.set_status)
+
+    def _sync_mediamtx(self, direction: str) -> None:
+        """the sync row of the Stream Server card's Config tab: mediamtx.yml
+        of the card's host to or from the host picked beside it."""
+        try:
+            panel = self.query_one(StreamServerConfigPanel)
+        except Exception:
+            return
+        say = panel.set_status if direction == "from" else panel.set_status_elsewhere
+        self._sync_one_file(direction, "#mediamtx-sync-host-select", panel.target, panel.config_path,
+                            "MediaMTX config", say)
 
     def _sync_transform_to_host(self) -> None:
         try:
@@ -8894,17 +10883,8 @@ class ServicePanel(Widget):
             panel = self.query_one(ActionSchemaPanel)
         except Exception:
             return
-        dest = self._sync_selection("#aschema-sync-host-select", panel.set_status)
-        if dest is None:
-            return
-        source = panel.target
-        local_path = panel.schema_path
-        if source == "local" and not os.path.isfile(local_path):
-            panel.set_status(f"No action schema file: {local_path}")
-            return
-        self._sync_files_between_hosts(
-            source, dest, os.path.dirname(local_path), [os.path.basename(local_path)],
-            "action schema", panel.set_status)
+        self._sync_one_file("to", "#aschema-sync-host-select", panel.target, panel.schema_path,
+                            "action schema", panel.set_status)
 
     async def _stage_from_host(self, host: str, paths: list[str]) -> tuple[str, dict[str, str], list[str]]:
         """bring files of `host` onto this machine, from where they can be
@@ -8914,6 +10894,9 @@ class ServicePanel(Widget):
         them goes through here."""
         profile = self._host_profile(host)
         if profile is None:
+            if host != "local":
+                # this machine's files under the name of a host that has gone
+                return "", {}, [f"SSH profile '{host}' not found"]
             staged = {path: path for path in paths if os.path.isfile(path)}
             return "", staged, [
                 f"{os.path.basename(path)}: not on this machine" for path in paths if path not in staged
@@ -8925,9 +10908,11 @@ class ServicePanel(Widget):
             # the index keeps two files of the same name (another directory,
             # another host) from landing on each other in the staging dir
             local_copy = os.path.join(staging, f"{index}-{os.path.basename(path)}")
-            proc = await scp_from_remote_async(profile, path, local_copy)
-            output = await _process_output(proc)
-            rc = await proc.wait()
+            try:
+                rc, output = await _wait_child(await scp_from_remote_async(profile, path, local_copy))
+            except Exception as exc:
+                failures.append(f"{os.path.basename(path)}: {ssh_error_text(exc)}")
+                continue
             if rc == 0 and os.path.isfile(local_copy):
                 staged[path] = local_copy
             else:
@@ -8935,8 +10920,12 @@ class ServicePanel(Widget):
         return staging, staged, failures
 
     async def _place_on_host(self, host: str, pairs: list[tuple[str, str]]) -> tuple[int, list[str]]:
-        """write files that are on this machine onto `host`: (written, failures)."""
+        """write files that are on this machine onto `host`: (written, failures).
+        A host whose profile has gone gets nothing (no profile would read as
+        this machine), and a remote file is never left half written."""
         profile = self._host_profile(host)
+        if profile is None and host != "local":
+            return 0, [f"SSH profile '{host}' not found"]
         written = 0
         failures: list[str] = []
         for local_path, dest_path in pairs:
@@ -8949,77 +10938,262 @@ class ServicePanel(Widget):
                 except OSError as exc:
                     failures.append(f"{os.path.basename(dest_path)}: {exc}")
                 continue
-            remote_dir = dest_path.rsplit("/", 1)[0]
-            mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
-            await mkdir_proc.wait()
-            proc = await scp_file_async(profile, local_path, dest_path)
-            output = await _process_output(proc)
-            rc = await proc.wait()
-            if rc == 0:
+            ok, why = await _scp_into_place(profile, local_path, dest_path)
+            if ok:
                 written += 1
             else:
-                failures.append(f"{os.path.basename(dest_path)}: {output.strip() or f'exit code {rc}'}")
+                failures.append(f"{os.path.basename(dest_path)}: {why}")
         return written, failures
 
-    async def _run_config_copy(self, source: str, dest: str, local_path: str) -> None:
+    async def _sealed_copy(self, source: str, dest: str, staged_path: str, shown_path: str, dest_path: str,
+                           scratch: list[str]) -> tuple[str | None, str]:
+        """the file staged from `source` as it goes to `dest`: a byte copy
+        but for its ENC(...) values, sealed with dest's own master key
+        (_sealed_for). The staged file itself when nothing changes, else a
+        copy in a folder of its own (kept in `scratch` for the caller to
+        remove), never the file of this machine a local source stages as
+        itself. (path, "") or (None, why it is not copied)."""
+        try:
+            with open(staged_path, "r", encoding="utf-8", newline="") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            return staged_path, ""  # no text: no ENC(...) value in it to seal
+        what = f"{os.path.basename(shown_path)} on {_host_label(source)}"
+        sealed, why = await self._sealed_for(dest, text, source=source, what=what, existing=dest_path)
+        if sealed is None:
+            return None, why
+        if sealed == text:
+            return staged_path, ""
+        if not scratch:
+            scratch.append(tempfile.mkdtemp(prefix="openmmla-sealed-"))
+        fd, path = tempfile.mkstemp(dir=scratch[0], suffix=f"-{os.path.basename(shown_path)}")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(sealed)
+        return path, ""
+
+    async def _run_config_copy(self, source: str, dest: str, local_path: str, say=None) -> bool:
         """one config file from one host to another. What lands is what the
-        console then holds for the destination, and what its [C] marker says."""
+        console then holds for the destination, and what its [C] marker says;
+        whatever shows it is then redrawn (_config_landed). Runs in the
+        destination's write queue; False when nothing landed."""
+        say = say or self._job_reporter()
+        landed = await self._host_job(dest, self._copy_config_file(source, dest, local_path, say), say=say)
+        if landed is None:
+            return False
+        config, message = landed
+        await self._config_landed(local_path, dest, config)
+        say(message)
+        return True
+
+    async def _copy_config_file(self, source: str, dest: str, local_path: str, say) -> tuple[dict, str] | None:
+        """the copy itself, inside the destination's write queue: (what landed,
+        what to say), or None after saying why nothing did."""
+        if not self._dest_is_reachable(dest, say):
+            return None
         source_path = self._host_path(local_path, source)
         dest_path = self._host_path(local_path, dest)
+        scratch: list[str] = []
         staging, staged, failures = await self._stage_from_host(source, [source_path])
         try:
             if source_path not in staged:
-                self._show_status(
-                    f"Sync failed: {failures[0] if failures else f'{_host_label(source)}:{source_path}'}")
-                return
-            written, failures = await self._place_on_host(dest, [(staged[source_path], dest_path)])
+                say(f"Sync failed: {failures[0] if failures else f'{_host_label(source)}:{source_path}'}")
+                return None
+            # an empty or broken copy (cut off by an old write) never goes over a good one
+            try:
+                parsed = read_yaml_mapping(staged[source_path])
+                problem = "" if parsed else "it is empty"
+            except ValueError:
+                problem = "it holds no mapping"
+            except (OSError, yaml.YAMLError) as exc:
+                problem = f"it is not valid YAML ({type(exc).__name__})"
+            if problem:
+                say(f"Nothing synced: {_host_label(source)}:{source_path} could not be used: {problem}.")
+                return None
+            placed, why = await self._sealed_copy(
+                source, dest, staged[source_path], source_path, dest_path, scratch)
+            if placed is None:
+                say(f"Nothing synced: {why}.")
+                return None
+            written, failures = await self._place_on_host(dest, [(placed, dest_path)])
             if not written:
-                self._show_status(f"Sync failed: {'; '.join(failures[:2])}")
-                return
-            self._target_config_cache[self._config_cache_key(local_path, dest)] = (
-                load_existing_config(staged[source_path]))
+                say(f"Sync failed: {'; '.join(failures[:2])}")
+                return None
+            config = load_existing_config(placed)
+            self._target_config_cache[self._config_cache_key(local_path, dest)] = config
             self._note_config_presence(dest, local_path, True)
-            profile = self._host_profile(dest)
-            if profile is not None:
-                await self._maybe_push_master_key(profile, staged[source_path])
-            self._show_status(
+            return config, (
                 f"Synced {os.path.relpath(local_path, self._root)} from {_host_label(source)} "
                 f"to {_host_label(dest)}: {dest_path}"
             )
-            self._refresh_service_cards()
         finally:
-            if staging:
-                shutil.rmtree(staging, ignore_errors=True)
+            for folder in [staging, *scratch]:
+                if folder:
+                    shutil.rmtree(folder, ignore_errors=True)
+
+    async def _config_landed(self, local_path: str, dest: str, config: dict) -> None:
+        """a config copy has landed on `dest`: whatever shows that config is
+        brought up to date. Decided from what is on screen now, not at the
+        press, and run outside the write queue. The Config tab that shows it
+        is drawn again, with what a Save of it refreshes, and the line the
+        sync says comes after, below the new form."""
+        path = os.path.abspath(local_path)
+        asr_server = getattr(self, "_pipeline_map", {}).get("ASR Server")
+        if dest == "local" and (
+                path == os.path.abspath(_mllm_config_path(self._root))
+                or (asr_server is not None and path == os.path.abspath(asr_server.config_path))):
+            # the services the tree lists are read from these two files of this machine
+            self._services = _build_service_registry(self._root)
+            self._svc_map = {s.name: s for s in self._services}
+        self._refresh_service_cards()
+        container = getattr(self, "_config_container", None)
+        pipeline = getattr(self, "_current_pipeline", None)
+        on_screen = getattr(self, "_current_config_local_path", None)
+        if container is not None and container.is_attached and not getattr(self, "_current_shared_section", None) \
+                and not getattr(self, "_current_settings_node", None):
+            try:
+                if pipeline is not None and os.path.abspath(pipeline.config_path) == path \
+                        and self._get_panel_target() == dest \
+                        and getattr(self, "_config_tab_host", dest) == dest:
+                    await container.remove_children()
+                    self._current_form = None
+                    self._show_pipeline_form(container, pipeline)
+                    self._refresh_stream_panels(pipeline, config)
+                    self._refresh_vfa_prompts(pipeline)
+                    self._refresh_base_card_choices()
+                elif pipeline is None and dest == "local" and on_screen and os.path.abspath(on_screen) == path:
+                    await container.remove_children()
+                    self._current_form = None
+                    self._show_mllm_form(container)
+            except Exception as exc:
+                # the tab went while it was drawn again: the copy itself has landed
+                self._log(f"[yellow]{rich_escape(os.path.basename(local_path))} landed on {_host_label(dest)}; "
+                          f"its tab could not be drawn again ({rich_escape(str(exc))}).[/yellow]")
+        elif self._settings_node_shows(local_path, dest):
+            # Experiments, read again from the host it landed on
+            try:
+                await self._reload_settings_node(dest)
+            except Exception as exc:
+                self._log(f"[yellow]{rich_escape(os.path.basename(local_path))} landed on {_host_label(dest)}; "
+                          f"it could not be shown again ({rich_escape(str(exc))}).[/yellow]")
+        # the [C] markers: a remote host's follow _note_config_presence, this
+        # machine's are read from its files when the tree is drawn
+        self._build_tree()
 
     async def _run_files_copy(
-        self, source: str, dest: str, local_dir: str, files: list[str], label: str, say=None
-    ) -> None:
+        self, source: str, dest: str, local_dir: str, files: list[str], label: str, say=None,
+        dest_names: list[str] | None = None, note: str = "",
+    ) -> int:
         """the named files of one directory of this project, from one host to
-        another."""
-        say = say or self._show_status
+        another; files are added or overwritten there, never deleted. Each
+        lands under its own name, or the one of `dest_names` in its place;
+        `note` ends the line. Runs in the destination's write queue and
+        returns how many landed."""
+        say = say or self._job_reporter()
+        done = await self._host_job(
+            dest, self._copy_files(source, dest, local_dir, files, label, say, dest_names), say=say)
+        if done is None:
+            return 0
+        written, message = done
+        if written:
+            await self._files_landed(dest, local_dir, label)
+        say(f"{message}{note}")
+        return written
+
+    async def _copy_files(
+        self, source: str, dest: str, local_dir: str, files: list[str], label: str, say,
+        dest_names: list[str] | None = None,
+    ) -> tuple[int, str] | None:
+        """the copy itself, inside the destination's write queue: (files
+        written, what to say), or None after saying why nothing was."""
+        if not self._dest_is_reachable(dest, say):
+            return None
         source_dir = self._host_path(local_dir, source)
         dest_dir = self._host_path(local_dir, dest)
         paths = [self._host_join(source, source_dir, name) for name in files]
+        scratch: list[str] = []
         staging, staged, failures = await self._stage_from_host(source, paths)
         try:
+            for path, name in zip(paths, dest_names or files):
+                if path not in staged:
+                    continue
+                placed, why = await self._sealed_copy(
+                    source, dest, staged[path], path, self._host_join(dest, dest_dir, name), scratch)
+                if placed is None:
+                    failures.append(why)
+                    del staged[path]
+                else:
+                    staged[path] = placed
             written, placed_failures = await self._place_on_host(dest, [
                 (staged[path], self._host_join(dest, dest_dir, name))
-                for path, name in zip(paths, files) if path in staged
+                for path, name in zip(paths, dest_names or files) if path in staged
             ])
             failures += placed_failures
             if failures:
-                say(
+                return written, (
                     f"{label} sync to {_host_label(dest)}: {written} file(s) copied, "
                     f"{'; '.join(failures[:2])}"
                 )
-                return
-            say(
+            return written, (
                 f"Synced {written} {label} file(s) from {_host_label(source)} "
                 f"to {_host_label(dest)}:{dest_dir}"
             )
         finally:
-            if staging:
-                shutil.rmtree(staging, ignore_errors=True)
+            for folder in [staging, *scratch]:
+                if folder:
+                    shutil.rmtree(folder, ignore_errors=True)
+
+    async def _files_landed(self, dest: str, local_dir: str, label: str) -> None:
+        """files of `local_dir` have landed on `dest`: the tab that lists them
+        there, if one is on screen now, is brought up to date, its files
+        listed again off the UI thread. Run outside the write queue, before
+        the copy says what it did."""
+        directory = os.path.abspath(local_dir)
+        try:
+            if self._settings_node_shows(local_dir, dest):
+                # Tasks, read again from the host they landed on
+                await self._reload_settings_node(dest)
+            if label == "transform matrix":
+                # the Main Camera of an IPS Base card on that host lists its matrix files
+                if dest != "local":
+                    await asyncio.to_thread(self._transform_matrix_ids, dest, True)
+                if self._get_panel_target() == dest:
+                    self._refresh_base_card_choices()
+            for panel in list(self.query(TransformMatrixPanel)):
+                if panel.target != dest or os.path.abspath(panel.local_dir) != directory:
+                    continue
+                files = await asyncio.to_thread(self._host_listing, dest, panel.local_dir, ".json")
+                if files is None or not panel.is_attached:
+                    continue  # not listed: the tab keeps what it had
+                files = [name for name in files if _is_transform_matrix_file(name)]
+                if dest == "local":
+                    panel.set_files(files, panel.remote_files)
+                else:
+                    panel.set_files(panel.local_files, files)
+                await panel.recompose()
+            for panel in list(self.query(PromptsPanel)):
+                if panel.target != dest or os.path.abspath(panel.prompts_dir) != directory:
+                    continue
+                files = await asyncio.to_thread(self._host_listing, dest, panel.prompts_dir, ".txt")
+                if files is not None and panel.is_attached:
+                    panel.set_files(files)
+                    await panel.recompose()
+            # a remote file is read over ssh off the UI thread, then shown
+            for panel in list(self.query(ActionSchemaPanel)):
+                if panel.target == dest and os.path.abspath(os.path.dirname(panel.schema_path)) == directory:
+                    content = await asyncio.to_thread(
+                        _remote_read_file, panel._ssh_profile, panel._remote_path) if panel._is_remote else _NOT_READ
+                    if panel.is_attached:
+                        panel._load(content)
+            for panel in list(self.query(StreamServerConfigPanel)):
+                if panel.target == dest and os.path.abspath(os.path.dirname(panel.config_path)) == directory:
+                    content = await asyncio.to_thread(
+                        _remote_read_file, panel._ssh_profile, panel._remote_path) if panel._is_remote else _NOT_READ
+                    if panel.is_attached:
+                        panel._load(content)
+        except Exception as exc:
+            # the tab went while it was drawn again: the files themselves have landed
+            self._log(f"[yellow]The {rich_escape(label)} files landed on {_host_label(dest)}; their tab "
+                      f"could not be drawn again ({rich_escape(str(exc))}).[/yellow]")
 
     def _remote_dir_for_local(self, local_dir: str, profile) -> str:
         rel = os.path.relpath(local_dir, self._root)
@@ -9051,161 +11225,639 @@ class ServicePanel(Widget):
         self._log(ok_msg if rc == 0 else f"[red]{fail_msg} (exit {rc}).[/red]")
         self._refresh_service_cards()
 
-    def _sync_shared_section_to_target(self, section_name: str, target: str, save: bool = False) -> None:
-        """write the section on screen into `target`: its pipeline configs and
-        its own settings file. `save` is the Save of a form that shows that
-        machine's settings (the file is created when it has none); otherwise
-        this is Sync to Host, which copies Local's and only ever updates a
-        settings file that is already there."""
-        profile = get_profile_by_name(target)
-        if profile is None:
-            self._show_status(f"SSH profile '{target}' not found.")
-            return
-        section_data = self._shared_section_data(section_name)
-        if not section_data:
-            self._show_status(f"No shared defaults found for {section_name}.")
-            return
+    # ── Connections forms between hosts ──────────────────────────
+    #
+    # A Connections form shows the settings of the host it was read from
+    # (_shared_form_host). Sync to Host writes the section that host has
+    # saved into the host picked, as a Save of that host's form would; Sync
+    # from Host reads the picked host's section afresh and writes it into the
+    # host on screen the same way, then reads the form again. A section with
+    # a field not filled in goes nowhere, and a secret this machine's master
+    # key cannot decrypt stays what the destination has.
 
-        entries: list[tuple[str, str, tuple[str, str], dict]] = []
-        temp_paths: list[str] = []
-        carriers = [pipeline for pipeline in self._pipelines if self._pipeline_has_section(pipeline, section_name)]
-        for pipeline in carriers:
-            remote_config, _ = self._load_config_for_target(
-                pipeline.config_path,
-                show_status=False,
-                target=target,
-            )
-            if not isinstance(remote_config, dict):
-                remote_config = {}
-            # respect a pipeline that pins this section locally.
-            if section_name in pipeline_section_overrides(remote_config):
-                continue
-            remote_config[section_name] = dict(section_data)
-            _encrypt_secrets(remote_config)
-
-            tmp = tempfile.NamedTemporaryFile(
-                "w",
-                suffix=".yml",
-                prefix="openmmla-shared-config-",
-                delete=False,
-                encoding="utf-8",
-            )
-            with tmp:
-                yaml.safe_dump(remote_config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            temp_paths.append(tmp.name)
-            remote_path = self._remote_config_path(pipeline.config_path, profile)
-            cache_key = self._config_cache_key(pipeline.config_path, target)
-            entries.append((tmp.name, remote_path, cache_key, remote_config))
-
-        # the host's own settings file gets the section too, and is created
-        # when the host has none: its services read it at startup, a console
-        # there shows it, and both then say what this one says
-        own_store = self._remote_settings_entry(
-            target, profile, {section_name: section_data}, create=True)
-        if own_store is not None:
-            temp_paths.append(own_store[0])
-            entries.append(own_store)
-
-        if not entries:
-            for path in temp_paths:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-            self._show_status(
-                f"'{target}' already has these {section_name} settings: its config/system_services.yml says "
-                f"the same, and every pipeline config there that carries the section says the same or pins "
-                f"its own.")
-            return
-
-        if not save:
-            for key, value in section_data.items():
-                self._shared_values[f"{section_name}.{key}"] = value
-
-        loopback = [
-            f"{section_name}.{key}" for key, value in section_data.items()
-            if key in ("host", "url") and is_loopback_host(
-                urlsplit(str(value)).hostname if "://" in str(value) else value)
-        ]
-        success_message = f"{'Saved' if save else 'Synced'} {section_name} system service"
-        if loopback and not save:
-            # the log pane is hidden on this node, so the warning rides along
-            success_message = (
-                f"Note: {', '.join(loopback)} is a loopback address, which on '{target}' means "
-                f"'{target}' itself and not this machine; machines that share one service need "
-                f"its real host name. {success_message}"
-            )
-        self._show_status(f"{'Saving' if save else 'Syncing'} {section_name} system service to {target} ...")
-        self.run_worker(
-            self._run_scp_batch(target, entries, cleanup_local=True, success_message=success_message),
-            exclusive=True,
+    def _shared_form_on_screen(self, section_name: str, host: str, container=None) -> bool:
+        """whether the form of `section_name` read from `host` is still the
+        one on screen (in `container`, when given)."""
+        current = getattr(self, "_config_container", None)
+        return (
+            getattr(self, "_current_shared_section", None) == section_name
+            and getattr(self, "_shared_form_host", None) == host
+            and current is not None and current.is_attached
+            and (container is None or current is container)
         )
 
-    def _sync_streams_to_target(self, target: str) -> None:
-        """Sync to Host on the Stream Server form: that machine gets this
-        address in its own settings file (no pipeline config carries the
-        section; a console there reads it from the file, created when it has
-        none) and the stream URLs the address completed, which are what
-        a base there pulls: the Streams entries of the local pipeline configs
-        go into that machine's copies, and the rest of each config stays as it
-        is there."""
-        profile = get_profile_by_name(target)
-        if profile is None:
-            self._show_status(f"SSH profile '{target}' not found.")
+    def _shared_form_wrote(self, section_name: str, host: str, section_data: dict) -> None:
+        """a write of the section into `host` landed: the form on screen, if
+        it is that host's, was read with what that host has now."""
+        if self._shared_form_on_screen(section_name, host):
+            self._shared_form_loaded = dict(section_data)
+
+    def _carried_note(self, section_name: str, section_data: dict, source: str, target: str,
+                      kept: list[str] | tuple = ()) -> str:
+        """what goes before the line of a section written from `source` into
+        `target`: an address that means another machine there, and the
+        secrets `target` keeps because none of the keys involved opens the
+        ones that came."""
+        notes = []
+        if source != target:
+            loopback = _loopback_fields(section_name, section_data)
+            if loopback:
+                notes.append(
+                    f"{', '.join(loopback)} is a loopback address: on {_host_label(source)} it meant "
+                    f"{_host_label(source)} itself, on {_host_label(target)} it means {_host_label(target)}; "
+                    f"machines that share one service need its real host name")
+        if kept:
+            notes.append(
+                f"{', '.join(f'{section_name}.{key}' for key in kept)} on {_host_label(source)} holds an encrypted "
+                f"value none of the keys involved can open, so {_host_label(target)} keeps its own")
+        return "".join(f"Note: {note}. " for note in notes)
+
+    def _sync_section_to_host(self, section_name: str, dest: str) -> None:
+        """Sync to Host on a Connections form: the section as the host on
+        screen has saved it goes into `dest`, as a Save of its form there."""
+        shown = self._shared_form_shown(section_name)
+        if section_name in PRIVATE_SECTIONS:
+            self._show_status(f"{section_name} never leaves this machine.")
             return
+        problem = self._shared_form_problem(shown)
+        if problem:
+            self._show_status(f"Nothing synced: {problem}.")
+            return
+        if self._shared_form_unsaved(section_name):
+            self._show_status(f"Save first: Sync to Host sends what {_host_label(shown)} has saved.")
+            return
+        if shown == dest:
+            self._show_status(
+                f"{_host_label(shown)} is both where {section_name} comes from and where it goes; nothing was synced.")
+            return
+        section_data = self._shared_section_data(section_name)
+        if dest != "local":
+            if section_name == "StreamServer":
+                self._sync_streams_to_target(dest, source=shown, address=section_data)
+            else:
+                self._sync_shared_section_to_target(section_name, dest, data=section_data, source=shown)
+            return
+        unfilled = placeholder_fields(section_data)
+        if unfilled:
+            self._show_status(f"Nothing synced to Local: {_unfilled_text(section_name, unfilled)}.")
+            return
+        say = self._bound_reporter()
+        self._show_status(f"Syncing {section_name} from {_host_label(shown)} to Local ...")
+        self.run_worker(
+            self._host_job("local", self._land_section_locally(section_name, section_data, shown), say=say),
+            group=_HOST_SYNC_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    def _sync_section_from_host(self, section_name: str, source: str) -> None:
+        """Sync from Host on a Connections form: `source`'s section, read
+        afresh, goes into the host on screen as a Save of its form would
+        write it, and the form is read again."""
+        shown = self._shared_form_shown(section_name)
+        if section_name in PRIVATE_SECTIONS:
+            self._show_status(f"{section_name} never leaves this machine.")
+            return
+        problem = self._shared_form_problem(shown)
+        if problem:
+            self._show_status(f"Nothing synced: {problem}.")
+            return
+        if source == shown:
+            self._show_status(
+                f"{_host_label(source)} is both where {section_name} comes from and where it goes; nothing was synced.")
+            return
+        if not self._source_is_reachable(source) or not self._dest_is_reachable(shown):
+            return
+        say = self._bound_reporter()
+        self._show_status(f"Reading the {section_name} settings of {_host_label(source)} ...")
+        self.run_worker(
+            self._pull_section(section_name, source, shown, say, self._config_container),
+            group=_HOST_SYNC_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    async def _pull_section(self, section_name: str, source: str, dest: str, say, container) -> None:
+        """the work of _sync_section_from_host: read (no queue), write in the
+        destination's write queue, and the form read again outside it, with
+        what the write said posted below it."""
+        try:
+            section_data, why = await asyncio.to_thread(self._settings_section_from, source, section_name)
+        except Exception as exc:
+            say(f"Nothing synced from {_host_label(source)}: {ssh_error_text(exc)}.")
+            return
+        if section_data is None:
+            say(f"Nothing synced from {_host_label(source)}: {why}.")
+            return
+        said: list[str] = []
+        if dest == "local":
+            done = await self._host_job(
+                "local", self._land_section_locally(section_name, section_data, source), say=said.append)
+        else:
+            job = self._section_job(section_name, dest, data=section_data, source=source, say=said.append)
+            done = None if job is None else await self._host_job(dest, job, say=said.append)
+        if done is not None and self._shared_form_on_screen(section_name, dest, container):
+            # the form shows what landed, and the line comes after it
+            self.run_worker(self._reload_then_say(said, say), group=_LAUNCHER_UI_WORKER_GROUP, exclusive=True)
+            return
+        for text in said:
+            say(text)
+
+    async def _reload_then_say(self, lines: list[str], say) -> None:
+        """read the Connections form on screen again, then post `lines`."""
+        try:
+            await self._reload_shared_form()
+        finally:
+            for text in lines:
+                say(text)
+
+    def _settings_section_from(self, host: str, section_name: str) -> tuple[dict | None, str]:
+        """`host`'s own values of one Connections form, read afresh for a
+        Sync from Host (a thread: it reads over ssh), not from what the console
+        holds: the section of its config/system_services.yml, else what its
+        pipeline configs carry. (None, why) when that file could not be read,
+        when nothing but defaults would come back, or when a field still holds
+        a placeholder. The Stream Server counts only from that file: no
+        pipeline config carries it, and what one would yield is the Gateway's."""
+        label = _host_label(host)
+        fields = SHARED_SECTIONS.get(section_name, {}).get("fields", {})
+        store, why = self._fresh_host_config(self._remote_settings_path(), host)
+        if why:
+            return None, f"its config/system_services.yml could not be read ({_read_problem(why)})"
+        store = store or {}
+        own = stream_server_section(store) if section_name == "StreamServer" else store.get(section_name)
+        if isinstance(own, dict) and own:
+            section_data = {
+                key: own.get(key) if own.get(key) is not None else fdef.get("default", "")
+                for key, fdef in fields.items()
+            }
+        elif section_name in CONSOLE_ONLY_SECTIONS:
+            return None, (
+                f"{label} has no {_shared_section_label(section_name)} address of its own (its "
+                f"config/system_services.yml {'does not set one' if store else 'is not there'})")
+        else:
+            configs, unread = [], []
+            for rel_path in SYSTEM_SERVICE_SOURCE_CONFIG_RELS:
+                config, why = self._fresh_host_config(os.path.join(self._root, rel_path), host)
+                if why:
+                    unread.append(_read_problem(why))
+                elif config:
+                    configs.append(config)
+            carriers = [
+                config for config in configs
+                if isinstance(config.get(section_name), dict)
+                and any(usable_system_service_value(config[section_name].get(key)) for key in fields)
+            ]
+            if not carriers:
+                if unread:
+                    return None, (
+                        f"its config/system_services.yml has no {section_name} section, and its pipeline "
+                        f"configs could not be read ({'; '.join(unread)})")
+                return None, (
+                    f"{label} has no {section_name} settings of its own: neither its config/system_services.yml "
+                    f"nor its pipeline configs set them")
+            values = harvest_system_services_from_configs(carriers)
+            section_data = {
+                key: values.get(f"{section_name}.{key}", fdef.get("default", "")) for key, fdef in fields.items()}
+        unfilled = placeholder_fields(section_data)
+        if unfilled:
+            return None, f"on {label}, {_unfilled_text(section_name, unfilled)}"
+        return section_data, ""
+
+    def _fresh_host_config(self, local_path: str, host: str) -> tuple[dict | None, str]:
+        """a config of `host` read from the host itself, not from what the
+        console holds (which then holds what was read): as _read_host_config."""
+        cache = getattr(self, "_target_config_cache", None)
+        if host != "local" and cache is not None:
+            cache.pop(self._config_cache_key(local_path, host), None)
+        return self._read_host_config(local_path, host)
+
+    async def _land_section_locally(self, section_name: str, section_data: dict, source: str) -> bool:
+        """a section that came from `source` written into this machine as a
+        Save of its form here would, in this machine's write queue; the Stream
+        Server brings the Streams entries of `source`'s pipeline configs along
+        into the local ones. Whether it was saved."""
+        say = self._job_reporter()
+        # a secret sealed with the source's key is sealed again with this
+        # machine's; one none of the keys involved opens keeps this machine's
+        section_data, kept, why = await self._sealed_section(section_data, source, "local", section_name)
+        if section_data is None:
+            say(f"Nothing synced from {_host_label(source)}: {why}.")
+            return False
+        for key in kept:
+            path = f"{section_name}.{key}"
+            section_data[key] = self._shared_values.get(
+                path, SHARED_SECTIONS[section_name]["fields"][key].get("default", ""))
+        streams, unread = {}, []
+        if section_name == "StreamServer":
+            streams, unread = await asyncio.to_thread(self._stream_configs_of, source)
+            # only the Streams entries come along: a secret elsewhere in those
+            # configs (an InfluxDB token) stays where it is and is not opened
+            streams = {name: {"Streams": config["Streams"]} for name, config in streams.items()
+                       if isinstance(config, dict) and isinstance(config.get("Streams"), dict)}
+            streams, why = await self._sealed_for(
+                "local", streams, source=source, what=f"the Streams entries of {_host_label(source)}")
+            if streams is None:
+                streams, unread = {}, [*unread, why]
+        note = self._carried_note(section_name, section_data, source, "local", kept)
+        saved, message = self._write_shared_section_locally(section_name, section_data)
+        if saved and section_name == "StreamServer":
+            message += self._merge_streams_locally(source, streams, unread)
+        say(f"{note}{message}")
+        return saved
+
+    def _stream_configs_of(self, host: str) -> tuple[dict[str, dict], list[str]]:
+        """the stream pipeline configs of `host`, read afresh (a thread):
+        ({pipeline: config} of those there, pipelines whose config could not
+        be read, as "Name (why)")."""
         if not self._pipelines:
             self._pipelines = discover_pipelines()
             self._pipeline_map = {pipeline.name: pipeline for pipeline in self._pipelines}
+        configs: dict[str, dict] = {}
+        unread: list[str] = []
+        for pipeline in self._pipelines:
+            if pipeline.name not in _STREAM_PIPELINES:
+                continue
+            config, why = self._fresh_host_config(pipeline.config_path, host)
+            if why:
+                unread.append(f"{pipeline.name} ({_read_problem(why)})")
+            elif config:
+                configs[pipeline.name] = config
+        return configs, unread
+
+    def _merge_streams_locally(self, source: str, streams: dict[str, dict], unread: list[str]) -> str:
+        """the Streams entries of `source`'s stream pipeline configs merged, by
+        name, into this machine's copies; what to add to the line. A local
+        config that is not there is not made for them, and one that could not
+        be read is left as it is."""
+        carried: list[str] = []
+        left = list(unread)
+        for pipeline in self._pipelines:
+            if pipeline.name not in streams:
+                continue
+            try:
+                config = read_yaml_mapping(pipeline.config_path)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                left.append(f"{pipeline.name} ({exc})")
+                continue
+            merged = _streams_to_carry(streams[pipeline.name], config or {})
+            if merged is None:
+                continue
+            if not config:
+                left.append(f"{pipeline.name} (no config here yet)")
+                continue
+            config["Streams"] = merged
+            with open(pipeline.config_path, "w", encoding="utf-8") as file:
+                yaml.safe_dump(config, file, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            carried.append(pipeline.name)
+        if carried:
+            self._target_config_cache.clear()
+            self._refresh_visible_statuses()
+        message = ""
+        if carried:
+            message += f"; the Streams entries of {', '.join(carried)} came along from {_host_label(source)}"
+        if left:
+            message += f"; Streams left as they are: {rich_escape(', '.join(left))}"
+        return message
+
+    def _sync_shared_section_to_target(self, section_name: str, target: str, save: bool = False, *,
+                                       data: dict | None = None, source: str | None = None) -> None:
+        """write a Connections section into `target`: its pipeline configs and
+        its own settings file. `save` is the Save of a form that shows that
+        machine's settings; otherwise this is a sync. `data` is the section
+        (the form on screen when not given), and `source` the host it comes
+        from (the host the form was read from when not given). The settings
+        file is created when the host has none; a pipeline config there is
+        only ever updated (one that is missing stays missing: a file holding
+        one section is no config, and one that could not be read is named and
+        left as it is), and nothing at all is written while the settings file
+        could not be read. The files are read afresh and written in the
+        host's write queue."""
+        job = self._section_job(section_name, target, save, data=data, source=source)
+        if job is None:
+            return
+        say = self._bound_reporter()
+        self._show_status(f"{'Saving' if save else 'Syncing'} {section_name} system service to {target} ...")
+        self.run_worker(
+            self._host_job(target, job, say=say),
+            group=_HOST_SYNC_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    def _section_job(self, section_name: str, target: str, save: bool = False, *,
+                     data: dict | None = None, source: str | None = None, say=None):
+        """what _sync_shared_section_to_target checks before anything is read,
+        and the job that writes (run it in `target`'s write queue); None after
+        saying why nothing is written."""
+        say = say or self._show_status
+        if section_name in PRIVATE_SECTIONS:
+            say(f"{section_name} never leaves this machine.")
+            return None
+        profile = get_profile_by_name(target)
+        if profile is None:
+            say(f"SSH profile '{target}' not found.")
+            return None
+        section_data = dict(data) if data is not None else self._shared_section_data(section_name)
+        if not section_data:
+            say(f"No shared defaults found for {section_name}.")
+            return None
+        unfilled = placeholder_fields(section_data)
+        if unfilled:
+            # never carried to another machine: a checkout there may merge
+            # whole sections and connect to <uber-server>
+            say(f"Nothing {'saved' if save else 'synced'} to '{target}': {_unfilled_text(section_name, unfilled)}.")
+            return None
+        if source is None:
+            source = getattr(self, "_shared_form_host", None) or "local"
+        if section_name == "StreamServer":
+            # a Save moves that host's stream URLs from the address the form
+            # was read with; a sync brings the source's Streams entries along
+            old = None
+            if source == target and self._shared_form_on_screen("StreamServer", target):
+                old = getattr(self, "_shared_form_loaded", None)
+            return self._streams_job(
+                target, source=None if source == target else source, address=section_data,
+                save=save, old=old, say=say)
+        success_message = f"{'Saved' if save else 'Synced'} {section_name} system service"
+        if source not in (target, "local"):
+            success_message += f" from {source}"
+        return self._write_section_job(
+            section_name, target, profile, section_data, save, success_message, source=source)
+
+    async def _write_section_job(self, section_name: str, target: str, profile, section_data: dict,
+                                 save: bool, success_message: str, source: str | None = None) -> int:
+        """the write of _sync_shared_section_to_target, in the host's write
+        queue: how many files were written. A secret of the section that came
+        sealed with another key than target's is sealed again with target's;
+        one none of the keys involved opens is kept: target's own value stays."""
+        say = self._job_reporter()
+        source = source or target
+        # what the form on screen shows, which then reads as saved: the same
+        # secret sealed again with target's key reads differently
+        shown = dict(section_data)
+        section_data, kept, why = await self._sealed_section(section_data, source, target, section_name)
+        if section_data is None:
+            say(f"Nothing {'saved' if save else 'synced'} to '{target}': {why}.")
+            return 0
+        success_message = self._carried_note(section_name, section_data, source, target, kept) + success_message
+        try:
+            entries, skipped, problem = await asyncio.to_thread(
+                self._section_entries, section_name, target, profile, section_data, kept)
+        except _MasterKeyUnavailable as exc:
+            say(f"Nothing {'saved' if save else 'synced'} to '{target}': {exc}.")
+            return 0
+        if problem:
+            say(f"Nothing {'saved' if save else 'synced'} to '{target}': {problem}")
+            return 0
+        left_alone = f"; left as they are: {', '.join(skipped)}" if skipped else ""
+        if not entries:
+            say(
+                f"'{target}' already has these {section_name} settings: its config/system_services.yml says "
+                f"the same, and every pipeline config there that carries the section says the same or pins "
+                f"its own{left_alone}.")
+            self._shared_form_wrote(section_name, target, shown)
+            return 0
+        written = await self._run_scp_batch(
+            target, entries, cleanup_local=True, success_message=success_message + left_alone, source=source)
+        written = len(entries) if written is None else written
+        if written == len(entries):
+            self._shared_form_wrote(section_name, target, shown)
+        return written
+
+    def _section_entries(self, section_name: str, target: str, profile, section_data: dict,
+                         kept: list[str] | tuple = ()) -> tuple[list, list[str], str]:
+        """the files that give `target` this section, read there afresh (a
+        thread: it reads over ssh): (scp entries, pipelines left alone because
+        their config could not be read, why nothing at all may be written).
+        The fields in `kept` stay what each file there has."""
+        store, why = self._read_host_config(self._remote_settings_path(), target)
+        if why:
+            return [], [], f"its config/system_services.yml could not be read ({_read_problem(why)}); nothing was changed."
+
+        # what the host's pipeline configs carry for each kept field: its
+        # settings file takes that where it has none of its own
+        carried: dict[str, object] = {}
+
+        def written(existing: object, fallback: dict | None = None) -> dict:
+            # the section as it goes into one file there: a kept field stays
+            # what that file has, else what `fallback` has, else is left out.
+            # never "": the services lay the settings file over their pipeline
+            # config field by field, and "" would beat the real value there
+            data = dict(section_data)
+            for key in kept:
+                if isinstance(existing, dict) and existing.get(key) is not None:
+                    data[key] = existing[key]
+                elif fallback and key in fallback:
+                    data[key] = fallback[key]
+                else:
+                    data.pop(key, None)
+            return data
+
+        entries: list[tuple[str, str, tuple[str, str], dict]] = []
+        skipped: list[str] = []
+        # what is typed is sealed with the host's own key, made there when it has none
+        sealing = self._key_maker(target)
+        try:
+            for pipeline in self._pipelines:
+                if not self._pipeline_has_section(pipeline, section_name):
+                    continue
+                remote_config, why = self._read_host_config(pipeline.config_path, target)
+                if why:
+                    skipped.append(f"{pipeline.name} ({_read_problem(why)})")
+                    continue
+                # not there: a config holding this one section would be none
+                if remote_config is None:
+                    continue
+                # respect a pipeline that pins this section locally.
+                if section_name in pipeline_section_overrides(remote_config):
+                    continue
+                own = remote_config.get(section_name)
+                for key in kept:
+                    if key not in carried and isinstance(own, dict) and usable_system_service_value(own.get(key)):
+                        carried[key] = own[key]
+                remote_config = copy.deepcopy(remote_config)
+                remote_config[section_name] = written(own)
+                _encrypt_secrets(remote_config, sealing)
+                entries.append(self._scp_entry(
+                    remote_config, pipeline.config_path, target, profile, "openmmla-shared-config-"))
+            # the host's own settings file gets the section too, and is created
+            # when the host has none: its services read it at startup, a console
+            # there shows it, and both then say what this one says
+            own_store = self._remote_settings_entry(
+                target, profile, {section_name: written((store or {}).get(section_name), carried)},
+                create=True, store=store or {}, key=sealing)
+            if own_store is not None:
+                entries.append(own_store)
+        except Exception:
+            _unlink_entries(entries)
+            raise
+        return entries, skipped, ""
+
+    def _scp_entry(self, config: dict, local_path: str, target: str, profile,
+                   prefix: str) -> tuple[str, str, tuple[str, str], dict]:
+        """a config written to a temp file, as an entry of _run_scp_batch."""
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".yml", prefix=prefix, delete=False, encoding="utf-8")
+        with tmp:
+            yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        return (tmp.name, self._remote_config_path(local_path, profile),
+                self._config_cache_key(local_path, target), config)
+
+    def _sync_streams_to_target(self, target: str, source: str = "local", address: dict | None = None) -> None:
+        """Sync to Host of the Stream Server form: `target` gets the address
+        (`address`, the form on screen when not given) in its own settings
+        file (no pipeline config carries the section; a console there reads
+        it from the file, created when it has none), and the Streams entries
+        of `source`'s stream pipeline configs, which are what a base there
+        pulls: merged by name into its copies, whose own entries stay (moved
+        along when they named its old address). A pipeline config that machine
+        does not have is not made for its Streams, and one that could not be
+        read is left alone."""
+        job = self._streams_job(target, source=source, address=address)
+        if job is None:
+            return
+        say = self._bound_reporter()
+        self._show_status(f"Syncing the Stream Server address to {target} ...")
+        self.run_worker(
+            self._host_job(target, job, say=say),
+            group=_HOST_SYNC_WORKER_GROUP,
+            exclusive=False,
+        )
+
+    def _streams_job(self, target: str, *, source: str | None = "local", address: dict | None = None,
+                     save: bool = False, old: dict | None = None, say=None):
+        """the checks of a Stream Server write into `target` and the job that
+        writes it (run it in `target`'s write queue), or None after saying why
+        nothing is written. `source` None is a Save of that host's own form:
+        no Streams entry comes along, and its stream URLs that named `old` (the
+        address the form was read with; its settings file's when not given)
+        follow the new address."""
+        say = say or self._show_status
+        profile = get_profile_by_name(target)
+        if profile is None:
+            say(f"SSH profile '{target}' not found.")
+            return None
+        stream_server = dict(address) if address is not None else self._shared_section_data("StreamServer")
+        unfilled = placeholder_fields(stream_server)
+        if unfilled:
+            say(f"Nothing {'saved' if save else 'synced'} to '{target}': {_unfilled_text('StreamServer', unfilled)}.")
+            return None
+        if not self._pipelines:
+            self._pipelines = discover_pipelines()
+            self._pipeline_map = {pipeline.name: pipeline for pipeline in self._pipelines}
+        note = self._carried_note("StreamServer", stream_server, source, target) if source is not None else ""
+        return self._write_streams_job(
+            target, profile, stream_server, source=source, old=old, save=save, note=note)
+
+    async def _write_streams_job(self, target: str, profile, stream_server: dict, *, source: str | None = "local",
+                                 old: dict | None = None, save: bool = False, note: str = "") -> int:
+        """the write of _sync_streams_to_target, in the host's write queue."""
+        say = self._job_reporter()
+        try:
+            entries, carried, same, skipped, problem = await asyncio.to_thread(
+                self._streams_entries, target, profile, stream_server, source, old)
+        except _MasterKeyUnavailable as exc:
+            say(f"Nothing {'saved' if save else 'synced'} to '{target}': {exc}.")
+            return 0
+        if problem:
+            say(f"Nothing {'saved' if save else 'synced'} to '{target}': {problem}")
+            return 0
+        left_alone = f"; left as they are: {', '.join(skipped)}" if skipped else ""
+        own_store = any(entry[1] == self._remote_config_path(self._remote_settings_path(), profile)
+                        for entry in entries)
+        if not entries:
+            if source is None:
+                say(f"'{target}' already has this Stream Server address, and no stream URL there names "
+                    f"the one it had{left_alone}.")
+            else:
+                say(
+                    f"Nothing to sync: '{target}' already has this Stream Server address, and "
+                    + (f"the Streams entries of {', '.join(same)} there match "
+                       f"{'this machine' if source == 'local' else source}'s" if same
+                       else f"no pipeline config on {'this machine' if source == 'local' else source} "
+                            f"has Streams entries")
+                    + f"{left_alone}.")
+            self._shared_form_wrote("StreamServer", target, stream_server)
+            return 0
+        what = ["the Stream Server address"] if own_store else []
+        if carried:
+            what.append(f"the stream URLs of {', '.join(carried)}")
+        origin = f" from {source}" if source not in (None, "local", target) else ""
+        written = await self._run_scp_batch(
+            target, entries, cleanup_local=True,
+            success_message=f"{note}{'Saved' if save else 'Synced'} {' and '.join(what)}{origin}{left_alone}",
+            source=source)
+        written = len(entries) if written is None else written
+        if written == len(entries):
+            self._shared_form_wrote("StreamServer", target, stream_server)
+        return written
+
+    def _streams_entries(self, target: str, profile, stream_server: dict, source: str | None = "local",
+                         old: dict | None = None):
+        """the files of a Stream Server write into `target`, read afresh (a
+        thread): (scp entries, pipelines whose Streams change, pipelines
+        already in step, pipelines left alone, why nothing at all may be
+        written). The stream URLs there that named its previous address
+        (`old`, else what its settings file says) follow the new one, and
+        `source`'s Streams entries (None: none) are merged in by name."""
+        store, why = self._read_host_config(self._remote_settings_path(), target)
+        if why:
+            return [], [], [], [], (
+                f"its config/system_services.yml could not be read ({_read_problem(why)}); nothing was changed.")
+        previous = old if old is not None else stream_server_section(store or {})
         entries: list[tuple[str, str, tuple[str, str], dict]] = []
         carried: list[str] = []
         same: list[str] = []
-        for pipeline in self._pipelines:
-            if pipeline.name not in _STREAM_PIPELINES or not os.path.isfile(pipeline.config_path):
-                continue
-            local_config = load_existing_config(pipeline.config_path)
-            remote_config, _ = self._load_config_for_target(pipeline.config_path, show_status=False, target=target)
-            streams = _streams_to_carry(local_config, remote_config)
-            if streams is None:
-                if isinstance(local_config, dict) and local_config.get("Streams"):
-                    same.append(pipeline.name)
-                continue
-            remote_config = dict(remote_config) if isinstance(remote_config, dict) else {}
-            remote_config["Streams"] = streams
-            _encrypt_secrets(remote_config)
-            tmp = tempfile.NamedTemporaryFile(
-                "w", suffix=".yml", prefix="openmmla-streams-", delete=False, encoding="utf-8")
-            with tmp:
-                yaml.safe_dump(remote_config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            entries.append((tmp.name, self._remote_config_path(pipeline.config_path, profile),
-                            self._config_cache_key(pipeline.config_path, target), remote_config))
-            carried.append(pipeline.name)
-        own_store = self._remote_settings_entry(
-            target, profile, {"StreamServer": self._shared_section_data("StreamServer")}, create=True)
-        if own_store is not None:
-            entries.append(own_store)
-        if not entries:
-            self._show_status(
-                f"Nothing to sync: '{target}' already has this Stream Server address, and "
-                + (f"the Streams entries of {', '.join(same)} there match this machine's." if same
-                   else "no pipeline config on this machine has Streams entries."))
-            return
-        what = ["the Stream Server address"] if own_store is not None else []
-        if carried:
-            what.append(f"the stream URLs of {', '.join(carried)}")
-        what = " and ".join(what)
-        self._show_status(f"Syncing {what} to {target} ...")
-        self.run_worker(
-            self._run_scp_batch(target, entries, cleanup_local=True, success_message=f"Synced {what}"),
-            exclusive=True,
-        )
+        skipped: list[str] = []
+        sealing = self._key_maker(target)
+        try:
+            for pipeline in self._pipelines:
+                if pipeline.name not in _STREAM_PIPELINES:
+                    continue
+                source_config = None
+                if source is not None:
+                    source_config, why = self._read_host_config(pipeline.config_path, source)
+                    if why:
+                        skipped.append(f"{pipeline.name} ({_read_problem(why)})")
+                        continue
+                remote_config, why = self._read_host_config(pipeline.config_path, target)
+                if why:
+                    skipped.append(f"{pipeline.name} ({_read_problem(why)})")
+                    continue
+                if remote_config is None:
+                    if _streams_to_carry(source_config, {}) is not None:
+                        skipped.append(f"{pipeline.name} (no config there yet)")
+                    continue
+                working = copy.deepcopy(remote_config)
+                _repoint_streams_in_config(working, previous, stream_server)
+                streams = _streams_to_carry(source_config, working)
+                if streams is not None:
+                    working["Streams"] = streams
+                if working == remote_config:
+                    if isinstance(source_config, dict) and source_config.get("Streams"):
+                        same.append(pipeline.name)
+                    continue
+                _encrypt_secrets(working, sealing)
+                entries.append(self._scp_entry(
+                    working, pipeline.config_path, target, profile, "openmmla-streams-"))
+                carried.append(pipeline.name)
+            own_store = self._remote_settings_entry(
+                target, profile, {"StreamServer": stream_server}, create=True, store=store or {}, key=sealing)
+            if own_store is not None:
+                entries.append(own_store)
+        except Exception:
+            _unlink_entries(entries)
+            raise
+        return entries, carried, same, skipped, ""
 
     def _remote_settings_path(self) -> str:
         from openmmla.tui.system_services import system_services_config_path
         return system_services_config_path(self._root)
 
-    def _remote_settings_entry(self, target: str, profile, sections: dict[str, dict], create: bool = False):
+    def _remote_settings_entry(self, target: str, profile, sections: dict[str, dict], create: bool = False,
+                               store: dict | None = None, key=None):
         """scp entry that writes `sections` into the host's own
         config/system_services.yml, or None when there is nothing to write.
+        `store` is that file as a write job has just read it ({} for none);
+        without it, it is read through the cache. A secret typed is sealed
+        with `key` (_encrypt_secrets), else with the host's own key.
 
         The services read that file on top of their pipeline config (a section
         the pipeline pins stays its own), so a copy left behind on a host, by a
@@ -9216,18 +11868,20 @@ class ServicePanel(Widget):
         what this one says. `create` False only looks (nothing is written for
         a host without the file)."""
         local_path = self._remote_settings_path()
-        remote_store, _ = self._load_config_for_target(local_path, show_status=False, target=target)
+        remote_store = store
+        if remote_store is None:
+            remote_store, _ = self._load_config_for_target(local_path, show_status=False, target=target)
         if not isinstance(remote_store, dict):
             remote_store = {}
         if not remote_store and not create:
             return None
-        updated = dict(remote_store)
+        updated = copy.deepcopy(remote_store)
         for name, data in sections.items():
             if name not in PRIVATE_SECTIONS:
                 updated[name] = dict(data)
         if updated == remote_store:
             return None
-        _encrypt_secrets(updated)
+        _encrypt_secrets(updated, key if key is not None else self._key_maker(target))
         tmp = tempfile.NamedTemporaryFile(
             "w", suffix=".yml", prefix="openmmla-remote-settings-", delete=False, encoding="utf-8")
         with tmp:
@@ -9248,24 +11902,43 @@ class ServicePanel(Widget):
         if isinstance(remote_store, dict):
             for name in SHARED_SECTION_NAMES:
                 data = remote_store.get(name)
-                if name not in CONSOLE_ONLY_SECTIONS and isinstance(data, dict) and data:
+                # a section of its own not filled in yet is not set there: its
+                # services keep their pipeline's, and so does the reference
+                if (name not in CONSOLE_ONLY_SECTIONS and isinstance(data, dict) and data
+                        and not placeholder_fields(data)):
                     reference[name] = data
         return reference
+
+    def _comparison_keys(self, host: str, *data) -> list[bytes | None]:
+        """the keys that open the secrets of `data` when this console's
+        settings are compared with `host`'s: `host`'s own and this
+        console's. None asked when there is no secret to compare. Asks over
+        ssh the first time (the Start of a remote card reads that host
+        already); held for the console's run after that."""
+        from openmmla.utils.crypto import enc_tokens
+        if not any(enc_tokens(item) for item in data):
+            return []
+        key, _ = self._host_master_key(host)
+        return [key, _local_master_key()]
 
     def _remote_settings_drift(self, target: str, central: dict[str, dict], carried: set[str]) -> list[str]:
         """connection sections that the host's own config/system_services.yml
         sets to something else than System Settings here, as "Section → host".
-        Secrets are compared decrypted and never shown."""
-        from openmmla.utils.config import SYSTEM_SERVICE_SECTIONS, decrypt_config_values
+        Secrets are compared opened, each with the key of the machine that
+        sealed it, and never shown."""
+        from openmmla.utils.config import SYSTEM_SERVICE_SECTIONS
         remote_store, _ = self._load_config_for_target(
             self._remote_settings_path(), show_status=False, target=target)
         if not isinstance(remote_store, dict) or not remote_store:
             return []
+        keys = self._comparison_keys(target, remote_store, central)
         drifted = []
         for name in SYSTEM_SERVICE_SECTIONS:
             if name not in carried or name not in central or not isinstance(remote_store.get(name), dict):
                 continue
-            if decrypt_config_values(remote_store[name]) != decrypt_config_values(central[name]):
+            if placeholder_fields(remote_store[name]):
+                continue  # not filled in there: its services do not read it
+            if _opened_tree(remote_store[name], keys) != _opened_tree(central[name], keys):
                 where = remote_store[name].get("url") or remote_store[name].get("host") or "other values"
                 if "://" in str(where):
                     where = urlsplit(str(where)).netloc.rsplit("@", 1)[-1]
@@ -9287,7 +11960,9 @@ class ServicePanel(Widget):
 
         Only sections actually present in that file are returned, so a section
         that has never been saved centrally is left untouched at launch (its
-        pipeline value is never clobbered by an unset default).
+        pipeline value is never clobbered by an unset default). Nor is one that
+        still holds a placeholder: pipelines take sections whole, and a
+        section not filled in yet is not set at all.
         """
         stored = load_system_services_config(self._root)
         result: dict[str, dict] = {}
@@ -9296,17 +11971,21 @@ class ServicePanel(Widget):
                 if name in CONSOLE_ONLY_SECTIONS:
                     continue  # read by this console only; never synced into pipeline configs
                 data = stored.get(name)
-                if isinstance(data, dict) and data:
+                if isinstance(data, dict) and data and not placeholder_fields(data):
                     result[name] = data
         return result
 
     def _apply_central_sections_to_config_file(self, config_path: str, central: dict[str, dict],
-                                               sections: list[str]) -> None:
+                                               sections: list[str]) -> str:
         """Rewrite the named shared sections in a local pipeline config from the
-        central store, in place."""
-        config = load_existing_config(config_path)
-        if not isinstance(config, dict):
-            config = {}
+        central store, in place. A config that is not there is not made, and
+        one that could not be read is left as it is: returns why, or ""."""
+        try:
+            config = read_yaml_mapping(config_path)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            return f"{config_path} could not be read ({exc})"
+        if not config:
+            return f"{config_path} is not there"
         for section_name in sections:
             if section_name in central:
                 config[section_name] = dict(central[section_name])
@@ -9314,12 +11993,15 @@ class ServicePanel(Widget):
         with open(config_path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(config, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
         self._target_config_cache.pop(self._config_cache_key(config_path, "local"), None)
+        return ""
 
     def _sync_shared_sections_to_target(self, section_names: list[str], target: str,
                                         central: dict[str, dict]) -> None:
         """Push the named central shared sections into every remote pipeline
         config on ``target`` (respecting per-pipeline overrides), in one scp
-        batch."""
+        batch, read afresh and written in the host's write queue. A pipeline
+        config the host does not have is not made, and one that could not be
+        read is left as it is."""
         profile = get_profile_by_name(target)
         if profile is None:
             self._show_status(f"SSH profile '{target}' not found.")
@@ -9330,46 +12012,65 @@ class ServicePanel(Widget):
         if not self._pipelines:
             self._pipelines = discover_pipelines()
             self._pipeline_map = {p.name: p for p in self._pipelines}
-        entries: list[tuple[str, str, tuple[str, str], dict]] = []
-        temp_paths: list[str] = []
-        for pipeline in self._pipelines:
-            relevant = [s for s in section_names if self._pipeline_has_section(pipeline, s)]
-            if not relevant:
-                continue
-            remote_config, _ = self._load_config_for_target(
-                pipeline.config_path, show_status=False, target=target)
-            if not isinstance(remote_config, dict):
-                remote_config = {}
-            overrides = pipeline_section_overrides(remote_config)
-            wrote = False
-            for s in relevant:
-                if s in overrides:
-                    continue
-                remote_config[s] = dict(central[s])
-                wrote = True
-            if not wrote:
-                continue
-            tmp = tempfile.NamedTemporaryFile(
-                "w", suffix=".yml", prefix="openmmla-shared-config-", delete=False, encoding="utf-8")
-            with tmp:
-                yaml.safe_dump(remote_config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            temp_paths.append(tmp.name)
-            remote_path = self._remote_config_path(pipeline.config_path, profile)
-            cache_key = self._config_cache_key(pipeline.config_path, target)
-            entries.append((tmp.name, remote_path, cache_key, remote_config))
-        if not entries:
-            for path in temp_paths:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-            return
+        say = self._bound_reporter()
         self._show_status(f"Syncing {', '.join(section_names)} to {target} ...")
         self.run_worker(
-            self._run_scp_batch(target, entries, cleanup_local=True,
-                                success_message=f"Synced system services to {target}"),
-            exclusive=True,
+            self._host_job(target, self._write_sections_job(
+                section_names, target, profile, copy.deepcopy(central)), say=say),
+            group=_HOST_SYNC_WORKER_GROUP,
+            exclusive=False,
         )
+
+    async def _write_sections_job(self, section_names: list[str], target: str, profile,
+                                  central: dict[str, dict]) -> int:
+        """the write of _sync_shared_sections_to_target, in the host's write queue."""
+        entries, skipped = await asyncio.to_thread(
+            self._sections_entries, section_names, target, profile, central)
+        left_alone = f"; left as they are: {', '.join(skipped)}" if skipped else ""
+        if skipped:
+            self._log(f"[yellow]Not synced to '{target}' (could not be read there): "
+                      f"{rich_escape(', '.join(skipped))}.[/yellow]")
+        if not entries:
+            return 0
+        written = await self._run_scp_batch(
+            target, entries, cleanup_local=True,
+            success_message=f"Synced system services to {target}{left_alone}")
+        return len(entries) if written is None else written
+
+    def _sections_entries(self, section_names: list[str], target: str, profile,
+                          central: dict[str, dict]) -> tuple[list, list[str]]:
+        """the pipeline configs of `target` that take the sections, read there
+        afresh (a thread): (scp entries, pipelines left alone because their
+        config could not be read)."""
+        entries: list[tuple[str, str, tuple[str, str], dict]] = []
+        skipped: list[str] = []
+        try:
+            for pipeline in self._pipelines:
+                relevant = [s for s in section_names if self._pipeline_has_section(pipeline, s)]
+                if not relevant:
+                    continue
+                remote_config, why = self._read_host_config(pipeline.config_path, target)
+                if why:
+                    skipped.append(f"{pipeline.name} ({_read_problem(why)})")
+                    continue
+                if remote_config is None:
+                    continue  # not there: a config holding these sections alone would be none
+                remote_config = copy.deepcopy(remote_config)
+                overrides = pipeline_section_overrides(remote_config)
+                wrote = False
+                for s in relevant:
+                    if s in overrides:
+                        continue
+                    remote_config[s] = dict(central[s])
+                    wrote = True
+                if not wrote:
+                    continue
+                entries.append(self._scp_entry(
+                    remote_config, pipeline.config_path, target, profile, "openmmla-shared-config-"))
+        except Exception:
+            _unlink_entries(entries)
+            raise
+        return entries, skipped
 
     def _reconcile_shared_sections_before_launch(self, svc: ServiceDef, target: str,
                                                 is_remote: bool) -> bool:
@@ -9385,24 +12086,35 @@ class ServicePanel(Widget):
         forms show and save.
         """
         central = self._central_shared_sections()
-        if not central:
-            return True  # nothing saved centrally; leave pipeline configs as-is
         config_path = os.path.join(svc.config_dir, "config.yml")
         if not is_remote:
             config = load_existing_config(config_path)
+            if not self._shared_sections_set(svc, config, central, "local"):
+                return False
+            if not central:
+                return True  # nothing saved centrally; leave pipeline configs as-is
             overrides = pipeline_section_overrides(config)
             drifted = shared_section_drift(central, config, overrides=overrides)
             if drifted:
-                self._apply_central_sections_to_config_file(config_path, central, drifted)
-                self._log(
-                    f"[yellow]Updated {', '.join(drifted)} from System Settings before "
-                    f"launch (local config was out of date).[/yellow]"
-                )
+                problem = self._apply_central_sections_to_config_file(config_path, central, drifted)
+                if problem:
+                    self._log(f"[yellow]{', '.join(drifted)} not updated from System Settings before launch: "
+                              f"{rich_escape(problem)}.[/yellow]")
+                else:
+                    self._log(
+                        f"[yellow]Updated {', '.join(drifted)} from System Settings before "
+                        f"launch (local config was out of date).[/yellow]"
+                    )
             return True
         # remote
         if get_profile_by_name(target) is None:
             return True  # cannot verify; existing checks already warned
         remote_config, _ = self._load_config_for_target(config_path, show_status=False, target=target)
+        reference = self._settings_reference_for(target, central)
+        if not self._shared_sections_set(svc, remote_config, reference, target):
+            return False
+        if not central:
+            return True  # nothing saved centrally; leave pipeline configs as-is
         overrides = pipeline_section_overrides(remote_config)
         carried = {name for name in central if name in (remote_config or {}) and name not in overrides}
         own_drift = self._remote_settings_drift(target, central, carried)
@@ -9412,11 +12124,14 @@ class ServicePanel(Widget):
             self._log(
                 f"[yellow]'{target}' has System Settings of its own that differ from this machine's: "
                 f"{'; '.join(own_drift)}. What runs there connects to those. Open the Connections "
-                f"forms with Host = {target} to review them, or press Sync to Host on the Local "
-                f"forms to replace them.[/yellow]"
+                f"forms with Host = {target} to review them; Sync from Host with Local picked there "
+                f"(or Sync to Host on the Local forms) replaces them with this machine's.[/yellow]"
             )
-        reference = self._settings_reference_for(target, central)
-        drifted = shared_section_drift(reference, remote_config, overrides=overrides)
+        # one secret sealed with two machines' keys reads differently: they
+        # are compared opened (the push seals them with the host's own key)
+        keys = self._comparison_keys(target, reference, remote_config)
+        drifted = shared_section_drift(
+            _opened_tree(reference, keys), _opened_tree(remote_config, keys), overrides=overrides)
         if not drifted:
             return True
         self._log(
@@ -9425,6 +12140,33 @@ class ServicePanel(Widget):
         )
         self._sync_shared_sections_to_target(drifted, target, reference)
         self._log(f"[yellow]Relaunch {svc.display_name} once the sync above completes.[/yellow]")
+        return False
+
+    def _shared_sections_set(self, svc: ServiceDef, config: dict | None, reference: dict[str, dict],
+                             target: str) -> bool:
+        """whether every connection a pipeline config carries names a machine
+        once the settings it starts with are laid over it (`reference`, field by
+        field, as its services merge them); otherwise the Start is refused here,
+        naming the forms to fill. A section the config pins is its own affair."""
+        if not isinstance(config, dict):
+            return True
+        overrides = pipeline_section_overrides(config)
+        unset = []
+        for name in SHARED_SECTIONS:
+            if name in CONSOLE_ONLY_SECTIONS or name in overrides or name not in config:
+                continue
+            own = config.get(name)
+            started_with = {**(own if isinstance(own, dict) else {}), **reference.get(name, {})}
+            if not section_address_set(started_with, name):
+                unset.append(name)
+        if not unset:
+            return True
+        where = "" if target == "local" else f" on '{target}'"
+        self._log(
+            f"[red]{svc.display_name} not started{where}: "
+            f"{'; '.join(unset_address_note(name) for name in unset)}. Its config carries "
+            f"{'that section' if len(unset) == 1 else 'these sections'}, and a service would connect to no "
+            f"machine: fill {'it' if len(unset) == 1 else 'them'} in, then Start again.[/red]")
         return False
 
     @staticmethod
@@ -9446,7 +12188,8 @@ class ServicePanel(Widget):
         API is asked where the Recordings tab asks it."""
         server = self._stream_server_address()
         api_port = int(server.get("api_port") or recordings.API_PORT)
-        host = str(server.get("host") or "localhost") if profile is None else profile.host
+        # "" while System Settings name no Stream Server: nothing is asked then
+        host = str(server.get("host") or "") if profile is None else profile.host
         return StreamServerStreamsPanel(
             host=host, api_port=api_port, configured=self._every_card_stream,
             server=self._stream_server_address, project_dir=self._root,
@@ -9486,7 +12229,8 @@ class ServicePanel(Widget):
         server = self._stream_server_address()
         api_port = int(server.get("api_port") or recordings.API_PORT)
         if profile is None:
-            host = str(server.get("host") or "localhost")
+            # "" while System Settings have no address for it: the panel says so
+            host = str(server.get("host") or "")
             quoted_root = shlex.quote(os.path.join(self._root, ARTIFACTS_DIR, SERVER_RECORD_REL))
 
             def run_shell(command: str) -> str | None:
@@ -9566,7 +12310,8 @@ class ServicePanel(Widget):
         )
         if target != "local" and os.path.isfile(pipeline.config_path):
             # the form on that host starts from defaults; this one is filled in
-            hint += f", or copy this machine's with Host = Local and Sync to Host to '{target}'"
+            hint += (f", or copy this machine's: Sync from Host with Local picked on that Config tab, or "
+                     f"Sync to Host to '{target}' with Host = Local")
         self._log(f"[yellow]{hint}.[/yellow]")
         return False
 
@@ -9596,10 +12341,18 @@ class ServicePanel(Widget):
     @on(CameraManagerPanel.SyncRequested)
     def on_camera_sync_requested(self, event: CameraManagerPanel.SyncRequested) -> None:
         event.stop()
+        # in the write queue of the host written: a second press waits for
+        # the first instead of cutting its copy off midway
+        if getattr(event, "direction", "to") == "from":
+            host, job = "local", self._sync_cameras_from_host(
+                event.panel, event.profile_name, getattr(event, "confirmed", frozenset()))
+        else:
+            host, job = event.profile_name, self._sync_camera_to_host(
+                event.panel, event.camera, event.profile_name)
         self.run_worker(
-            self._sync_camera_to_host(event.panel, event.camera, event.profile_name),
-            group="camera-sync",
-            exclusive=True,
+            self._host_job(host, job, say=self._bound_reporter(event.panel.set_status)),
+            group=_HOST_SYNC_WORKER_GROUP,
+            exclusive=False,
         )
 
     async def _sync_camera_to_host(self, panel, camera: str, profile_name: str) -> None:
@@ -9608,7 +12361,8 @@ class ServicePanel(Widget):
         it (its Bases and Streams, which belong to that host) stays as it is.
         The config's own Sync to Host copies the whole file instead."""
         def report(text: str, color: str) -> None:
-            panel.set_status(text)
+            if getattr(panel, "is_attached", True):
+                panel.set_status(text)  # gone when the user moved on
             self._log(f"[{color}]{rich_escape(text)}[/{color}]")
 
         local_path = self._ips_base_config_path()
@@ -9630,10 +12384,10 @@ class ServicePanel(Widget):
                 f"with Host = {profile_name}, Config tab, Save; then sync the camera.", "yellow")
             return
         # read afresh rather than from the cache: someone may have saved it since
-        result = await asyncio.to_thread(ssh_run_sync, profile, f"cat {_quote_remote_path(remote_path)}", 15.0)
         try:
+            result = await asyncio.to_thread(ssh_run_sync, profile, f"cat {_quote_remote_path(remote_path)}", 15.0)
             config = yaml.safe_load(result.stdout) if result.returncode == 0 else None
-        except yaml.YAMLError:
+        except (yaml.YAMLError, subprocess.SubprocessError, OSError):
             config = None
         if not isinstance(config, dict):
             report(f"Could not read {profile_name}:{remote_path}; it was left as it is.", "red")
@@ -9645,27 +12399,120 @@ class ServicePanel(Widget):
             report(f"{profile_name} already has the same parameters for '{camera}'.", "green")
             return
         existed = camera in cameras
+        from openmmla.utils.crypto import enc_tokens
+        own = enc_tokens(config)
         cameras[camera] = copy.deepcopy(params)
+        # the host's own config with one camera more: its own ENC(...) values
+        # go back as they came, and one the camera brings is sealed with its key
+        config, why = await self._sealed_for(
+            profile_name, config, source="local", what=f"'{camera}' of this machine", keep=own)
+        if config is None:
+            report(f"'{camera}' was not synced to {profile_name}: {why}.", "red")
+            return
         # the calibrator's own writer: the rest of the file is written back as read
         tmp = tempfile.NamedTemporaryFile("w", suffix=".yml", prefix="openmmla-camera-", delete=False)
         tmp.close()
         try:
             await asyncio.to_thread(dump_yaml_pretty, config, tmp.name)
-            proc = await scp_file_async(profile, tmp.name, remote_path)
-            output = (await proc.stdout.read()).decode(errors="replace") if proc.stdout else ""
-            rc = await proc.wait()
+            ok, why = await _scp_into_place(profile, tmp.name, remote_path)
         finally:
             try:
                 os.unlink(tmp.name)
             except OSError:
                 pass
-        if rc != 0:
-            report(f"Sync of '{camera}' to {profile_name} failed: {output.strip() or f'scp exited {rc}'}", "red")
+        if not ok:
+            report(f"Sync of '{camera}' to {profile_name} failed: {why}", "red")
             return
         self._target_config_cache[self._config_cache_key(local_path, profile_name)] = config
         report(
             f"'{camera}' synced to {profile_name}: {'updated' if existed else 'added'} Cameras.{camera} in "
             f"{remote_path}; the rest of that config is as it was.", "green")
+
+    async def _sync_cameras_from_host(self, panel, profile_name: str, confirmed: frozenset[str] = frozenset()) -> None:
+        """Sync from Host on the Calibration Cameras panel: every calibrated
+        camera of that host's IPS base config, Cameras.<name> and nothing else,
+        comes into this machine's (the images stay where they were taken). A
+        camera this machine has with other parameters is replaced only once a
+        first press has named it and a second one (`confirmed`) agreed: a
+        calibration made here and not sent anywhere yet would be lost."""
+        def report(text: str, color: str) -> None:
+            if getattr(panel, "is_attached", True):
+                panel.set_status(text)  # gone when the user moved on
+            self._log(f"[{color}]{rich_escape(text)}[/{color}]")
+
+        local_path = self._ips_base_config_path()
+        profile = get_profile_by_name(profile_name)
+        if profile is None:
+            report(f"SSH profile '{profile_name}' not found.", "red")
+            return
+        # both read afresh in the write queue of this machine: someone may
+        # have calibrated or saved since
+        try:
+            config = await asyncio.to_thread(read_yaml_mapping, local_path)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            report(f"{local_path} could not be read ({exc}); it was left as it is.", "red")
+            return
+        if not config:
+            # a config holding nothing but Cameras would be no config
+            report(
+                f"This machine has no IPS base config yet ({local_path}). Save one first: IPS Base with "
+                f"Host = Local, Config tab, Save; then bring the cameras.", "yellow")
+            return
+        remote, why = await asyncio.to_thread(self._read_host_config, local_path, profile_name)
+        remote_path = self._remote_config_path(local_path, profile)
+        if why:
+            report(f"{_read_problem(why)}; nothing was brought.", "red")
+            return
+        if remote is None:
+            report(f"{profile_name} has no IPS base config ({remote_path}): there is no camera to bring.", "yellow")
+            return
+        theirs = _calibrated_cameras(remote)
+        if not theirs:
+            report(f"{profile_name}'s IPS base config has no calibrated camera: nothing was brought.", "yellow")
+            return
+        cameras = config.get("Cameras")
+        if not isinstance(cameras, dict):
+            cameras = config["Cameras"] = {}
+        added = [name for name in theirs if name not in cameras]
+        updated = [name for name in theirs if name in cameras and cameras[name] != theirs[name]]
+        same = [name for name in theirs if name in cameras and cameras[name] == theirs[name]]
+        if updated and not set(updated) <= set(confirmed):
+            confirm = getattr(panel, "confirm_pull", None)
+            if confirm is not None:
+                confirm(profile_name, updated)
+            report(
+                f"{', '.join(updated)}: the parameters here differ from {profile_name}'s. Press Sync from Host "
+                f"again to take {profile_name}'s" + (f" (and add {', '.join(added)})" if added else "")
+                + "; nothing was written yet.", "yellow")
+            return
+        if not added and not updated:
+            report(f"This machine already has {profile_name}'s parameters for {', '.join(same)}.", "green")
+            return
+        from openmmla.utils.crypto import enc_tokens
+        own = enc_tokens(config)
+        for name in added + updated:
+            cameras[name] = copy.deepcopy(theirs[name])
+        # this machine's own ENC(...) values stay; one the cameras bring is
+        # sealed with this machine's key
+        config, why = await self._sealed_for(
+            "local", config, source=profile_name, what=f"the cameras of {profile_name}", keep=own)
+        if config is None:
+            report(f"Nothing was brought: {why}.", "red")
+            return
+        try:
+            # the calibrator's own writer: the rest of the file is written back as read
+            await asyncio.to_thread(dump_yaml_pretty, config, local_path)
+        except OSError as exc:
+            report(f"Writing {local_path} failed: {exc}", "red")
+            return
+        self._target_config_cache.pop(self._config_cache_key(local_path, "local"), None)
+        if getattr(panel, "is_attached", True) and hasattr(panel, "_refresh_cameras"):
+            panel._refresh_cameras()
+        done = [f"{what} {', '.join(names)}" for what, names in (
+            ("added", added), ("updated", updated), ("unchanged", same)) if names]
+        report(
+            f"Cameras of {profile_name} in {local_path}: {'; '.join(done)}. Parameters only: the images stay "
+            f"on {profile_name}, and the rest of this config is as it was.", "green")
 
     def _ips_transform_remote_dir(self, profile) -> str:
         rel_path = os.path.relpath(_ips_transform_local_dir(self._root), self._root)
@@ -9717,6 +12564,61 @@ class ServicePanel(Widget):
         specs = self._stack_service_specs_for_target(svc, target)
         return _stack_ports_from_specs(specs)
 
+    async def _rewrite_host_config(self, target: str, local_path: str, change, what: str) -> dict | None:
+        """a config of `target` read afresh, changed by `change` (it edits the
+        config in place and returns why it cannot, or "") and written back,
+        never half written; run it in the host's write queue (_host_job). The
+        values it holds are the host's own and stay as they are; an ENC(...)
+        value the change brings is sealed with the host's key (_sealed_for).
+        Returns what landed, or None after saying why nothing did."""
+        say = self._job_reporter()
+        rel = os.path.relpath(local_path, self._root)
+        cache_key = self._config_cache_key(local_path, target)
+        profile = get_profile_by_name(target)
+        if profile is None:
+            say(f"{what} not changed: SSH profile '{target}' not found.")
+            return None
+        config, why = await asyncio.to_thread(self._read_host_config, local_path, target)
+        if config is None:
+            self._target_config_cache.pop(cache_key, None)  # what was shown is not what is there
+            say(f"{what} not changed on {target}: " + (
+                f"{rel} could not be read there ({_read_problem(why)})." if why
+                else f"it has no {rel}; Save the Config tab there first."))
+            return None
+        from openmmla.utils.crypto import enc_tokens
+        own = enc_tokens(config)
+        config = copy.deepcopy(config)
+        problem = change(config)
+        if problem:
+            self._target_config_cache.pop(cache_key, None)
+            say(f"{what} not changed on {target}: {problem}.")
+            return None
+        config, why = await self._sealed_for(target, config, source=target, what=f"{rel} for {target}", keep=own)
+        if config is None:
+            self._target_config_cache.pop(cache_key, None)
+            say(f"{what} not changed on {target}: {why}.")
+            return None
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".yml", prefix="openmmla-config-", delete=False, encoding="utf-8")
+        with tmp:
+            yaml.safe_dump(config, tmp, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        remote_path = self._remote_config_path(local_path, profile)
+        try:
+            ok, why = await _scp_into_place(profile, tmp.name, remote_path)
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+        if not ok:
+            self._target_config_cache.pop(cache_key, None)
+            say(f"{what} not saved on {target}: {why}")
+            return None
+        self._target_config_cache[cache_key] = config
+        self._note_config_presence(target, local_path, True)
+        self._refresh_service_cards()
+        say(f"Saved to {target}:{remote_path}")
+        return config
+
     async def _run_scp(
         self,
         profile_name: str,
@@ -9726,68 +12628,63 @@ class ServicePanel(Widget):
         cache_key: tuple[str, str] | None = None,
         cache_config: dict | None = None,
         note: str = "",
-    ) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            return
+    ) -> bool:
+        """write one file of this machine onto a host (a pipeline config Save
+        there), never half written, its ENC(...) values sealed with that
+        host's own master key (_sealed_for: what the form read there is the
+        host's own, what was typed this console sealed); run it in the host's
+        write queue (_host_job). True when it landed."""
+        say = self._job_reporter()
+        sealed_path = ""
         try:
-            remote_dir = remote_path.rsplit("/", 1)[0]
-            mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
-            await mkdir_proc.wait()
-
-            proc = await scp_file_async(profile, local_path, remote_path)
-            assert proc.stdout is not None
-            output = ""
-            async for line in proc.stdout:
-                output += line.decode(errors="replace")
-            rc = await proc.wait()
-            if rc == 0:
-                if cache_key is not None and cache_config is not None:
-                    self._target_config_cache[cache_key] = cache_config
-                    self._refresh_service_cards()
-                    self._note_config_presence(*cache_key, True)
-                self._show_status(f"Saved to {profile_name}:{remote_path}{note}")
-                await self._maybe_push_master_key(profile, local_path)
-            else:
-                self._show_status(f"Save failed: {output.strip()}")
+            profile = get_profile_by_name(profile_name)
+            if profile is None:
+                say(f"SSH profile '{profile_name}' not found; nothing was saved.")
+                return False
+            sealed_path, why = await self._sealed_file(
+                profile_name, local_path, remote_path, f"{profile_name}:{remote_path}", source=profile_name)
+            if why:
+                say(f"Nothing saved: {why}.")
+                return False
+            ok, why = await _scp_into_place(profile, sealed_path or local_path, remote_path)
+            if not ok:
+                say(f"Save failed: {why}")
+                return False
+            if cache_key is not None and cache_config is not None:
+                self._target_config_cache[cache_key] = (
+                    load_existing_config(sealed_path) if sealed_path else cache_config)
+                self._refresh_service_cards()
+                self._note_config_presence(*cache_key, True)
+            say(f"Saved to {profile_name}:{remote_path}{note}")
+            return True
         finally:
-            if cleanup_local:
+            for path in ([local_path] if cleanup_local else []) + ([sealed_path] if sealed_path else []):
                 try:
-                    os.unlink(local_path)
+                    os.unlink(path)
                 except OSError:
                     pass
 
-    async def _maybe_push_master_key(self, profile, local_config_path: str) -> None:
-        """sync ~/.openmmla/master.key to the remote host when an uploaded
-        config contains ENC(...) values, so remote services can decrypt them."""
+    async def _sealed_file(self, host: str, local_path: str, remote_path: str, what: str,
+                           source: str | None = None) -> tuple[str, str]:
+        """a file of this machine about to be written to `host` at
+        `remote_path`, its ENC(...) values sealed with that host's own master
+        key (_sealed_for; a value the file there holds already stays as it
+        is): ("", "") when it goes as it is, (a sealed copy in a temp file
+        the caller removes, "") when it changed, ("", why) when it may not go."""
         try:
-            with open(local_config_path, "r", encoding="utf-8") as fh:
-                if "ENC(" not in fh.read():
-                    return
-        except OSError:
-            return
-        try:
-            from openmmla.utils.crypto import MASTER_KEY_PATH
-        except ImportError:
-            return
-        if not os.path.exists(MASTER_KEY_PATH):
-            return
-        try:
-            mkdir_proc = await ssh_run_async(profile, "mkdir -p ~/.openmmla && chmod 700 ~/.openmmla")
-            await mkdir_proc.wait()
-            scp_proc = await scp_file_async(profile, MASTER_KEY_PATH, ".openmmla/master.key")
-            rc = await scp_proc.wait()
-            if rc == 0:
-                chmod_proc = await ssh_run_async(profile, "chmod 600 ~/.openmmla/master.key")
-                await chmod_proc.wait()
-                self._show_status(
-                    f"Saved to {profile.name} (encrypted values; master key synced to remote ~/.openmmla/)"
-                )
-        except Exception:
-            self._show_status(
-                "Config has encrypted values but master key sync failed; "
-                "copy ~/.openmmla/master.key to the remote manually."
-            )
+            with open(local_path, "r", encoding="utf-8", newline="") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            return "", ""  # no text: no ENC(...) value in it to seal
+        sealed, why = await self._sealed_for(host, text, source=source, what=what, existing=remote_path)
+        if sealed is None:
+            return "", why
+        if sealed == text:
+            return "", ""
+        fd, path = tempfile.mkstemp(suffix=os.path.splitext(local_path)[1], prefix="openmmla-sealed-")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(sealed)
+        return path, ""
 
     async def _run_scp_batch(
         self,
@@ -9795,47 +12692,53 @@ class ServicePanel(Widget):
         entries: list[tuple[str, str, tuple[str, str], dict]],
         cleanup_local: bool = False,
         success_message: str = "Synced config",
-    ) -> None:
-        profile = get_profile_by_name(profile_name)
-        if profile is None:
-            return
+        source: str | None = None,
+    ) -> int:
+        """write the files of `entries` ((local temp file, remote path, cache
+        key, config)) onto a host, each never half written and its ENC(...)
+        values sealed with that host's own master key (_sealed_for; `source`
+        is the host what they carry comes from, besides the host's own files
+        and this console's settings); run it in the host's write queue
+        (_host_job). A file holding a value none of the keys involved opens
+        is not written, and named. Returns how many landed."""
+        say = self._job_reporter()
         saved = 0
         failures: list[str] = []
         try:
-            for local_path, _, _, _ in entries:
-                # one key serves them all: push it with the first file that needs it
-                try:
-                    with open(local_path, "r", encoding="utf-8") as fh:
-                        needs_key = "ENC(" in fh.read()
-                except OSError:
-                    needs_key = False
-                if needs_key:
-                    await self._maybe_push_master_key(profile, local_path)
-                    break
+            profile = get_profile_by_name(profile_name)
+            if profile is None:
+                say(f"SSH profile '{profile_name}' not found; nothing was written.")
+                return 0
             for local_path, remote_path, cache_key, cache_config in entries:
-                remote_dir = remote_path.rsplit("/", 1)[0]
-                mkdir_proc = await ssh_run_async(profile, f"mkdir -p {_quote_remote_path(remote_dir)}")
-                await mkdir_proc.wait()
-
-                proc = await scp_file_async(profile, local_path, remote_path)
-                assert proc.stdout is not None
-                output = ""
-                async for line in proc.stdout:
-                    output += line.decode(errors="replace")
-                rc = await proc.wait()
-                if rc == 0:
+                sealed_path, why = await self._sealed_file(
+                    profile_name, local_path, remote_path, f"{profile_name}:{remote_path}", source=source)
+                if why:
+                    failures.append(why)
+                    continue
+                try:
+                    ok, why = await _scp_into_place(profile, sealed_path or local_path, remote_path)
+                    if ok and sealed_path:
+                        cache_config = load_existing_config(sealed_path)
+                finally:
+                    if sealed_path:
+                        try:
+                            os.unlink(sealed_path)
+                        except OSError:
+                            pass
+                if ok:
                     self._target_config_cache[cache_key] = cache_config
                     self._note_config_presence(*cache_key, True)
                     saved += 1
                 else:
-                    failures.append(f"{remote_path}: {output.strip() or f'exit code {rc}'}")
+                    failures.append(f"{remote_path}: {why}")
 
             if failures:
-                self._show_status(f"{success_message} partially failed: {'; '.join(failures[:2])}")
+                say(f"{success_message} partially failed: {'; '.join(failures[:2])}")
             else:
-                self._show_status(f"{success_message} to {profile_name} ({saved} file(s))")
+                say(f"{success_message} to {profile_name} ({saved} file(s))")
             if saved:
                 self._refresh_service_cards()
+            return saved
         finally:
             if cleanup_local:
                 for local_path, _, _, _ in entries:
@@ -10687,10 +13590,11 @@ class ServicePanel(Widget):
 
     def _detect_node_status(self, svc: ServiceDef, node: NodeHost) -> tuple[bool, tuple[int, int] | None]:
         target = node.target
-        if node.follows and not node.machine_target:
+        if node.follows and node.machine and not node.machine_target:
             # a machine the console cannot log into: only the address itself,
             # probed from here, says anything (a tmux session on this machine
-            # would be someone else's)
+            # would be someone else's). An address not filled in names no
+            # machine: that card reports its own host, as for an empty one
             make_target = _make_target_for(svc.name)
             port_probed = make_target in _SYSTEM_SVC_PORTS or make_target == "flask"
             return (system_service_reachable(self._root, make_target) if port_probed else False), None
@@ -10848,7 +13752,7 @@ class ServicePanel(Widget):
                 result = await asyncio.to_thread(ssh_run_sync, profile, cmd, 30.0)
                 origin = f"{profile.name} ({profile.host})"
         except (subprocess.TimeoutExpired, OSError) as e:
-            self._log(f"[red]Could not read the token: {e}[/red]")
+            self._log(f"[red]Could not read the token: {rich_escape(ssh_error_text(e))}[/red]")
             return
 
         token = result.stdout.strip().strip('"').strip("'")
@@ -10864,8 +13768,15 @@ class ServicePanel(Widget):
             return
 
         config = load_system_services_config(self._root)
-        section = dict((config.get("InfluxDB") if isinstance(config, dict) else None) or {})
-        current = str(section.get("token") or "")
+        stored = dict((config.get("InfluxDB") if isinstance(config, dict) else None) or {})
+        # what the InfluxDB form shows here (its pipeline configs' url and org
+        # where the store has no section yet) under what the store says: a
+        # section made now keeps those rather than taking the defaults
+        shown = getattr(self, "_shared_values", None) or {}
+        section = {key: shown[f"InfluxDB.{key}"] for key in SHARED_SECTIONS["InfluxDB"]["fields"]
+                   if f"InfluxDB.{key}" in shown}
+        section.update(stored)
+        current = str(stored.get("token") or "")
         try:
             from openmmla.utils.crypto import is_encrypted, decrypt_value
             if is_encrypted(current):
@@ -10877,7 +13788,13 @@ class ServicePanel(Widget):
             return
 
         section["token"] = token
-        path = save_system_service_section(self._root, "InfluxDB", section)
+        try:
+            path = save_system_service_section(self._root, "InfluxDB", section)
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            self._log(
+                f"[red]InfluxDB.token not stored: config/system_services.yml could not be read "
+                f"({rich_escape(str(e))}). Fix or move that file, then capture the token again.[/red]")
+            return
         # remote pipeline configs are re-synced from System Settings on launch
         self._target_config_cache.clear()
         self._log(
@@ -10886,7 +13803,10 @@ class ServicePanel(Widget):
         )
 
         url_host, _ = system_service_endpoint(self._root, "influxdb") or ("", 0)
-        if target != "local" and not is_loopback_host(url_host) and profile is not None:
+        if holds_placeholder(url_host):
+            self._log(f"[yellow]Note: {unset_address_note('InfluxDB')}: point InfluxDB.url at {origin}, "
+                      f"where this token came from.[/yellow]")
+        elif target != "local" and not is_loopback_host(url_host) and profile is not None:
             if not (hosts_match(url_host, profile.host) or hosts_match(url_host, profile.name)):
                 self._log(
                     f"[yellow]Note: InfluxDB.url points at {url_host}, but this token came from "
@@ -12598,6 +15518,9 @@ class ServicePanel(Widget):
         to do while the Gateway does not run: its own Start renders it."""
         label = SYSTEM_SERVICE_LABELS["nginx"]
         host = (system_service_endpoint(self._root, "nginx") or ("", 0))[0]
+        if holds_placeholder(host):
+            self._log(f"[yellow]{unset_address_note('Gateway')}: fill it in to route {started}.[/yellow]")
+            return
         if not await asyncio.to_thread(system_service_reachable, self._root, "nginx"):
             self._log(
                 f"[yellow]{label} does not answer at {host or 'its configured address'}: start it "

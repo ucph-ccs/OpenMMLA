@@ -91,7 +91,7 @@ One-time setup for a camera arrangement, done in this order from the leaves unde
 
 ### Calibrate each camera model
 
-**IPS Camera Calibration** runs `mmla ips-ccal`, which films a checkerboard, computes the intrinsic parameters and writes them into the `Cameras` section of `config.yml` under the name you give the camera. The captured images land in `pipelines/ips-base/camera_calib/cameras/<camera>/`; the panel below the card lists them and can delete images or a whole camera (local host only). Cameras of the same model can share one profile.
+**IPS Camera Calibration** runs `mmla ips-ccal`, which films a checkerboard, computes the intrinsic parameters and writes them into the `Cameras` section of `config.yml` under the name you give the camera. The captured images land in `pipelines/ips-base/camera_calib/cameras/<camera>/`; the panel below the card lists them and can delete images or a whole camera (local host only). Cameras of the same model can share one profile. The panel's **Sync to Host** gives the machine that runs the IPS base a camera's parameters, and **Sync from Host** brings every calibrated camera of another machine into this one's `config.yml`, asking for a second press before it replaces parameters this machine has; the images never travel.
 
 ### Synchronize the cameras
 
@@ -99,7 +99,7 @@ Define the `Bases` entries first (one per camera position, exactly one `main: tr
 
 ### Distribute the matrices
 
-The **Transform Matrix** tab of the IPS Base card shows the exported files as editable JSON. The tab edits the files of the host it is set to, and **Sync to Host** copies them into `pipelines/ips-base/camera_sync/` on the machine picked beside it: from here to a base station, or from a base station back here. **Delete** removes the file on screen from the host the tab edits, after a second press (the other hosts keep theirs). Every base station that runs an IPS base needs the exported file.
+The **Transform Matrix** tab of the IPS Base card shows the exported files as editable JSON. The tab edits the files of the host it is set to. **Sync to Host** copies them into `pipelines/ips-base/camera_sync/` on the machine picked beside it, and **Sync from Host** copies that machine's into the host the tab is set to, so either button takes them from here to a base station or from a base station back here; files are added or overwritten, never deleted. **Delete** removes the file on screen from the host the tab edits, after a second press (the other hosts keep theirs). Every base station that runs an IPS base needs the exported file.
 
 ### Calibrate from a recorded session
 

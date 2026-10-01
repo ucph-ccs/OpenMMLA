@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from rich.markup import escape
 from textual import events
@@ -35,6 +36,17 @@ def _profile_row_buttons(profile_name: str) -> tuple[Button, Button, Button]:
         Button("Delete", variant="error", name=profile_name, classes="ssh-row-del"),
     )
 
+
+def _sealed(password: str) -> bool:
+    """whether a password is still ENC(...): one of another host's list that
+    that host's own master key does not open, kept as it was read."""
+    try:
+        from openmmla.utils.crypto import is_encrypted
+    except Exception:
+        return False
+    return is_encrypted(password)
+
+
 def _by_name(profiles: list[SSHProfile]) -> list[SSHProfile]:
     """profiles in the order the list shows them: by name, case-insensitive
     (the file keeps the order they were added in)."""
@@ -43,6 +55,8 @@ def _by_name(profiles: list[SSHProfile]) -> list[SSHProfile]:
 
 # rows a profile entry takes (its buttons are three high)
 _ROW_HEIGHT = 3
+
+_PASSWORD_PLACEHOLDER = "leave empty for key-based auth"
 
 
 class _Splitter(Static):
@@ -105,14 +119,21 @@ class SSHForm(Widget):
 
     class ProfilesChanged(Message):
         """posted when the profile list is modified; `renamed` is (old, new)
-        when a profile changed its name, so what refers to it can follow."""
+        when a profile changed its name, so what refers to it can follow.
+        `host` is whose list it is: only "local" is this console's."""
 
-        def __init__(self, renamed: tuple[str, str] | None = None) -> None:
+        def __init__(self, renamed: tuple[str, str] | None = None, host: str = "local") -> None:
             super().__init__()
             self.renamed = renamed
+            self.host = host
 
     class ConnectionTested(Message):
-        """posted after a successful Test Connection (lets the launcher re-probe targets)."""
+        """posted after a successful Test Connection (lets the launcher re-probe
+        targets); `host` is whose list the tested profile is in."""
+
+        def __init__(self, host: str = "local") -> None:
+            super().__init__()
+            self.host = host
 
     DEFAULT_CSS = """
     SSHForm {
@@ -178,9 +199,19 @@ class SSHForm(Widget):
     # of the console's run so reopening SSH Profiles keeps it
     list_height: int | None = None
 
-    def __init__(self, notify=None) -> None:
+    def __init__(self, profiles: list[SSHProfile] | None = None, store=None, host: str = "local",
+                 notify=None) -> None:
         super().__init__()
-        self._profiles = load_ssh_profiles()
+        # this machine's config/ssh_profiles.yml, unless the launcher hands in
+        # another host's: its profiles (opened with that host's own master
+        # key; a password that key does not open still ENC(...)), and `store`,
+        # whose save_ssh_profiles takes the whole list after every change in
+        # place of save_ssh_profiles. That list is not the hosts this console
+        # reaches: a change of it leaves their states alone, and its Tests
+        # only say how they went
+        self._profiles = load_ssh_profiles() if profiles is None else list(profiles)
+        self._store = store
+        self._host = host
         self._editing: str | None = None
         # where a Delete asks and answers: the status line the launcher keeps
         # below the form, else this form's own
@@ -243,7 +274,7 @@ class SSHForm(Widget):
                 with Horizontal(classes="ssh-field"):
                     yield Label("Password:", classes="ssh-field-label")
                     yield Input(
-                        placeholder="leave empty for key-based auth",
+                        placeholder=_PASSWORD_PLACEHOLDER,
                         id="ssh-password",
                         password=True,
                         classes="ssh-field-input",
@@ -277,7 +308,14 @@ class SSHForm(Widget):
         self.query_one("#ssh-host", Input).value = profile.host
         self.query_one("#ssh-user", Input).value = profile.user
         self.query_one("#ssh-port", Input).value = str(profile.port)
-        self.query_one("#ssh-password", Input).value = profile.password
+        password = self.query_one("#ssh-password", Input)
+        if _sealed(profile.password):
+            # shown empty: a Save that leaves it so keeps it as it is
+            password.value = ""
+            password.placeholder = f"encrypted on {self._host}"
+        else:
+            password.value = profile.password
+            password.placeholder = _PASSWORD_PLACEHOLDER
         self.query_one("#ssh-key", Input).value = profile.key_path
         self.query_one("#ssh-remote-path", Input).value = profile.remote_project_path
         self._editing = profile.name
@@ -289,6 +327,7 @@ class SSHForm(Widget):
         self.query_one("#ssh-user", Input).value = ""
         self.query_one("#ssh-port", Input).value = "22"
         self.query_one("#ssh-password", Input).value = ""
+        self.query_one("#ssh-password", Input).placeholder = _PASSWORD_PLACEHOLDER
         self.query_one("#ssh-key", Input).value = ""
         self.query_one("#ssh-remote-path", Input).value = "~/OpenMMLA"
         self._editing = None
@@ -352,9 +391,17 @@ class SSHForm(Widget):
             name = event.button.name or ""
             if armed != name:
                 self._pending_delete = name
-                self._say(f"[yellow]Press Delete again to delete profile '{escape(name)}'.[/yellow]")
+                where = "" if self._host == "local" else f" from the list on {escape(self._host)}"
+                self._say(f"[yellow]Press Delete again to delete profile '{escape(name)}'{where}.[/yellow]")
                 return
             await self._delete_profile(name)
+
+    def _write(self) -> None:
+        """write the whole list after a change."""
+        if self._store is None:
+            save_ssh_profiles(self._profiles)
+        else:
+            self._store.save_ssh_profiles(self._profiles)
 
     async def _save_profile(self) -> None:
         profile = self._build_profile_from_form()
@@ -369,19 +416,25 @@ class SSHForm(Widget):
         # it was renamed (the old name used to stay behind as a second profile);
         # only a new profile goes to the end
         replaced = editing or (profile.name if profile.name in names else None)
+        previous = next((p for p in self._profiles if p.name == replaced), None)
+        if not profile.password and previous is not None and _sealed(previous.password):
+            # a password its host's key does not open was shown empty: left
+            # empty, it stays as it was (an empty one would lose it for good)
+            profile.password = previous.password
         if replaced is None:
             self._profiles.append(profile)
         else:
             self._profiles = [profile if p.name == replaced else p for p in self._profiles]
-        save_ssh_profiles(self._profiles)
+        self._write()
         renamed = (editing, profile.name) if editing and editing != profile.name else None
-        from openmmla.tui.ssh import TARGET_PLATFORMS, TARGET_STATES
-        # the profile may point at another machine now: ask it again
-        TARGET_PLATFORMS.pop(profile.name, None)
-        if renamed:
-            TARGET_PLATFORMS.pop(renamed[0], None)
-            if renamed[0] in TARGET_STATES:
-                TARGET_STATES[renamed[1]] = TARGET_STATES.pop(renamed[0])
+        if self._host == "local":
+            from openmmla.tui.ssh import TARGET_PLATFORMS, TARGET_STATES
+            # the profile may point at another machine now: ask it again
+            TARGET_PLATFORMS.pop(profile.name, None)
+            if renamed:
+                TARGET_PLATFORMS.pop(renamed[0], None)
+                if renamed[0] in TARGET_STATES:
+                    TARGET_STATES[renamed[1]] = TARGET_STATES.pop(renamed[0])
         # the form still shows this profile: further changes are edits of it
         self._editing = profile.name
         self._set_save_mode(editing=True)
@@ -390,18 +443,18 @@ class SSHForm(Widget):
             else f"[green]Profile '{profile.name}' saved.[/green]"
         )
         await self._rebuild_list(show=profile.name)
-        self.post_message(self.ProfilesChanged(renamed=renamed))
+        self.post_message(self.ProfilesChanged(renamed=renamed, host=self._host))
 
     async def _delete_profile(self, name: str) -> None:
         self._profiles = [p for p in self._profiles if p.name != name]
-        save_ssh_profiles(self._profiles)
+        self._write()
         if self._editing == name:
             self._clear_form()
         # said before the list is drawn again: a write to another host reports
         # on the same line once it is done
         self._say(f"[red]Profile '{escape(name)}' deleted.[/red]")
         await self._rebuild_list()
-        self.post_message(self.ProfilesChanged())
+        self.post_message(self.ProfilesChanged(host=self._host))
 
     async def _test_connection(self, button: Button | None = None) -> None:
         profile = self._build_profile_from_form()
@@ -416,7 +469,7 @@ class SSHForm(Widget):
             success, msg = await loop.run_in_executor(None, ssh_test_connection, profile)
             if success:
                 self._set_status(f"[green]{msg}[/green]")
-                self.post_message(self.ConnectionTested())
+                self.post_message(self.ConnectionTested(host=self._host))
             else:
                 self._set_status(f"[red]{msg}[/red]")
         finally:
@@ -432,15 +485,19 @@ class SSHForm(Widget):
         self._set_status(f"[yellow]Testing connection to '{name}'...[/yellow]")
         button.disabled = True
         button.label = "..."
+        if _sealed(profile.password):
+            # what a console makes of a password its key does not open
+            profile = replace(profile, password="")
         try:
             success, msg = await asyncio.to_thread(ssh_test_connection, profile)
-            from openmmla.tui.ssh import TARGET_STATES
-            TARGET_STATES[name] = "online" if success else "offline"
+            if self._host == "local":
+                from openmmla.tui.ssh import TARGET_STATES
+                TARGET_STATES[name] = "online" if success else "offline"
             if success:
                 self._set_status(f"[green]'{name}': {msg}[/green]")
             else:
                 self._set_status(f"[red]'{name}': {msg}[/red]")
-            self.post_message(self.ConnectionTested())
+            self.post_message(self.ConnectionTested(host=self._host))
         finally:
             button.disabled = False
             button.label = "Test"

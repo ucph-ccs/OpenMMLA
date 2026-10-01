@@ -36,9 +36,13 @@ class TaskForm(Widget):
     TaskForm .tf-actions Button { margin: 0 1; min-width: 16; }
     """
 
-    def __init__(self, notify=None) -> None:
+    def __init__(self, store=None, notify=None) -> None:
         super().__init__()
-        self._task_names = list_tasks()
+        # where the tasks live: this machine's config/tasks, or `store` (the
+        # tasks of another host as the launcher keeps them), which offers the
+        # same list_tasks, load_task, save_task and delete_task
+        self._store = store
+        self._task_names = self._list_tasks()
         self._editing: str | None = None
         # where a Delete asks and answers: the status line the launcher keeps
         # below the form, else this form's own
@@ -57,6 +61,24 @@ class TaskForm(Widget):
         except Exception:
             pass
 
+    def _list_tasks(self) -> list[str]:
+        return list_tasks() if self._store is None else self._store.list_tasks()
+
+    def _load_task(self, name: str) -> dict:
+        return load_task(name) if self._store is None else self._store.load_task(name)
+
+    def _save_task(self, name: str, data: dict) -> None:
+        if self._store is None:
+            save_task(name, data)
+        else:
+            self._store.save_task(name, data)
+
+    def _delete_task(self, name: str) -> None:
+        if self._store is None:
+            delete_task(name)
+        else:
+            self._store.delete_task(name)
+
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="tf-root"):
             yield from self._compose_list_view()
@@ -68,7 +90,7 @@ class TaskForm(Widget):
         yield Static("", id="tf-status", classes="tf-status")
 
         for name in self._task_names:
-            data = load_task(name)
+            data = self._load_task(name)
             domain = data.get("domain", "")
             yield Horizontal(
                 Static(f"{name}  —  domain: {domain}", classes="tf-entry-name"),
@@ -92,7 +114,7 @@ class TaskForm(Widget):
     # ── editor view ──────────────────────────────────────────────
 
     def _compose_editor_view(self, name: str):
-        data = load_task(name)
+        data = self._load_task(name)
         yaml_text = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
         yield Static(f"[b]Editing: {name}[/b]", classes="tf-title")
@@ -107,7 +129,7 @@ class TaskForm(Widget):
 
     async def _show_list(self) -> None:
         self._editing = None
-        self._task_names = list_tasks()
+        self._task_names = self._list_tasks()
         root = self.query_one("#tf-root")
         await root.remove_children()
         await root.mount(*list(self._compose_list_view()))
@@ -142,13 +164,13 @@ class TaskForm(Widget):
                     f"[yellow]Press Delete again to delete task '{escape(name)}'. "
                     f"Experiments whose Task Type it is keep the name.[/yellow]")
                 return
-            delete_task(name)
+            self._delete_task(name)
             done = f"[red]Task '{escape(name)}' deleted.[/red]"
             if self._notify is not None:
                 # said before the list is drawn again: a write to another host
                 # reports on the same line once it is done
                 self._notify(done)
-            self._task_names = list_tasks()
+            self._task_names = self._list_tasks()
             await self._show_list()
             if self._notify is None:
                 self.call_after_refresh(lambda: self._set_status(done))
@@ -159,8 +181,12 @@ class TaskForm(Widget):
             if not name:
                 self._set_status("[red]Task name is required.[/red]")
                 return
-            save_task(name, {"domain": ""})
-            self._task_names = list_tasks()
+            if name in self._list_tasks():
+                # a new task never takes the place of one of the same name
+                self._set_status(f"[red]Task '{name}' already exists. Click Edit instead.[/red]")
+                return
+            self._save_task(name, {"domain": ""})
+            self._task_names = self._list_tasks()
             await self._show_editor(name)
             self.post_message(self.DataChanged())
 
@@ -182,7 +208,7 @@ class TaskForm(Widget):
             return
         if not isinstance(data, dict):
             return
-        save_task(self._editing, data)
+        self._save_task(self._editing, data)
         name = self._editing
         await self._show_list()
         self.call_after_refresh(lambda: self._set_status(f"[green]Task '{name}' saved.[/green]"))

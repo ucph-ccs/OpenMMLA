@@ -244,6 +244,23 @@ def load_yaml_config(config_path: str | os.PathLike[str]) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def read_yaml_mapping(config_path: str | os.PathLike[str]) -> dict[str, Any] | None:
+    """a config file read for a rewrite, which must not start from nothing in
+    place of what is there: None when there is no such file ({} for an empty
+    one); raises OSError or yaml.YAMLError when it cannot be read, and
+    ValueError when it holds something else than a mapping."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            data = yaml.safe_load(file)
+    except FileNotFoundError:
+        return None
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{config_path} holds no mapping of sections")
+    return data
+
+
 def find_system_services_config(
     start_path: str | os.PathLike[str] | None = None,
 ) -> Path | None:

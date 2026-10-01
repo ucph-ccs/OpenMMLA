@@ -180,9 +180,9 @@ def load_ssh_profiles() -> list[SSHProfile]:
 def save_ssh_profiles(profiles: list[SSHProfile]) -> None:
     """save ssh profiles to .openmmla/ssh_profiles.yml.
 
-    Passwords are encrypted to ENC(...) with the master key before hitting
-    disk, so a profile store that is copied or shared never carries a readable
-    password. The file is gitignored; ssh_profiles_template.yml is the tracked
+    Passwords are encrypted to ENC(...) with this machine's own master key
+    before hitting disk, so a profile store that is copied or shared never
+    carries a readable password. The file is gitignored; ssh_profiles_template.yml is the tracked
     stand-in."""
     path = _profiles_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)

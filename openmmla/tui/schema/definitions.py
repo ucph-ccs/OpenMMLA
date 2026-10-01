@@ -2,16 +2,26 @@
 
 These values describe where the common deployment services live. The TUI uses
 them to prefill and synchronize matching sections across pipeline configs.
+
+The machine of every address defaults to the placeholder of
+config/system_services_template.yml, <uber-server>: no default can know which
+machine runs the services, and localhost would read as filled in while it
+means the very machine that reads it. Until a form is filled, its address is
+not set (system_services.usable_system_service_value).
 """
+
+# what an address of System Settings holds until it is filled in
+UBER_SERVER_PLACEHOLDER = "<uber-server>"
 
 SHARED_SECTIONS = {
     "InfluxDB": {
         "label": "InfluxDB",
         "fields": {
             "url": {
-                "description": "InfluxDB server URL (e.g. http://localhost:8086)",
+                "description": "URL of the InfluxDB server, by the name the machines of the deployment reach it "
+                               "(localhost only when everything runs on this machine)",
                 "field_type": "url",
-                "default": "http://localhost:8086",
+                "default": f"http://{UBER_SERVER_PLACEHOLDER}:8086",
             },
             "token": {
                 "description": "InfluxDB authentication token",
@@ -34,9 +44,10 @@ SHARED_SECTIONS = {
         "label": "MongoDB",
         "fields": {
             "url": {
-                "description": "MongoDB connection URL (e.g. mongodb://localhost:27017)",
+                "description": "MongoDB connection URL, by the name the machines of the deployment reach the "
+                               "server (localhost only when everything runs on this machine)",
                 "field_type": "url",
-                "default": "mongodb://localhost:27017",
+                "default": f"mongodb://{UBER_SERVER_PLACEHOLDER}:27017",
             },
             "db": {
                 "description": "MongoDB database name (default openmmla)",
@@ -49,9 +60,10 @@ SHARED_SECTIONS = {
         "label": "MQTT (Mosquitto)",
         "fields": {
             "host": {
-                "description": "MQTT broker hostname (e.g. localhost)",
+                "description": "Host the MQTT broker runs on, by the name the machines of the deployment reach "
+                               "it (localhost only when everything runs on this machine)",
                 "field_type": "str",
-                "default": "localhost",
+                "default": UBER_SERVER_PLACEHOLDER,
             },
             "port": {
                 "description": "MQTT broker port (default 1883)",
@@ -64,9 +76,10 @@ SHARED_SECTIONS = {
         "label": "Redis",
         "fields": {
             "host": {
-                "description": "Redis server hostname (e.g. localhost)",
+                "description": "Host the Redis server runs on, by the name the machines of the deployment reach "
+                               "it (localhost only when everything runs on this machine)",
                 "field_type": "str",
-                "default": "localhost",
+                "default": UBER_SERVER_PLACEHOLDER,
             },
             "port": {
                 "description": "Redis server port (default 6379)",
@@ -94,9 +107,10 @@ SHARED_SECTIONS = {
         "label": "Dashboard (Flask)",
         "fields": {
             "host": {
-                "description": "Host the dashboard backend runs on, as reached from this machine (e.g. localhost or server-01)",
+                "description": "Host the dashboard backend runs on, as reached from this machine (localhost when "
+                               "it runs on this one)",
                 "field_type": "str",
-                "default": "localhost",
+                "default": UBER_SERVER_PLACEHOLDER,
             },
             "port": {
                 "description": "Dashboard backend (gunicorn) port; `make flask` binds to it (default 5050)",
@@ -109,9 +123,10 @@ SHARED_SECTIONS = {
         "label": "Gateway (Nginx)",
         "fields": {
             "host": {
-                "description": "Host of the Nginx load balancer that the bases reach the AI services through (e.g. localhost)",
+                "description": "Host of the Nginx load balancer that the bases reach the AI services through, by "
+                               "the name the bases reach it (localhost only when everything runs on this machine)",
                 "field_type": "str",
-                "default": "localhost",
+                "default": UBER_SERVER_PLACEHOLDER,
             },
             "http_port": {
                 "description": "Nginx HTTP reverse-proxy port (default 8080)",
@@ -136,7 +151,7 @@ SHARED_SECTIONS = {
             "host": {
                 "description": "Host MediaMTX runs on, by the name cameras and bases on other machines reach it (localhost only when everything runs here). A stream written as a path (ips/cam-1) is completed with it",
                 "field_type": "str",
-                "default": "localhost",
+                "default": UBER_SERVER_PLACEHOLDER,
             },
             "rtmp_port": {
                 "description": "MediaMTX RTMP port that cameras and microphones publish to (default 1935)",

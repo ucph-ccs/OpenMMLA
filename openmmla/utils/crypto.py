@@ -221,9 +221,11 @@ def process_config_dict(data, key: bytes | None = None) -> tuple:
                 runtime_data[k] = decrypt_value(v, key)
             except Exception:
                 logger.warning(
-                    f"Could not decrypt config value '{k}' — wrong or missing master key? "
-                    f"Keeping the encrypted form; sync ~/.openmmla/master.key from the "
-                    f"machine that encrypted it."
+                    f"Could not decrypt config value '{k}' with this machine's master key "
+                    f"(~/.openmmla/master.key): it was encrypted with another machine's key. "
+                    f"Keeping the encrypted form; enter the value again on this machine, or "
+                    f"sync the file to it from the console, which encrypts it with this "
+                    f"machine's key. Never copy one machine's master.key over another's."
                 )
                 runtime_data[k] = v
         elif is_sensitive_key(k):
