@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -70,6 +71,10 @@ class SSHProfile:
         return [
             "-o", "StrictHostKeyChecking=no",
             "-o", "ConnectTimeout=5",
+            # a connection that went silent (a host off the network, a stale
+            # shared master) ends in about 15 s instead of hanging for hours
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=3",
             "-o", "ControlMaster=auto",
             "-o", f"ControlPath={self._control_path()}",
             "-o", "ControlPersist=300",
@@ -227,6 +232,28 @@ async def ssh_run_async(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
+
+
+_SSHPASS_ARG_RE = re.compile(r"""(sshpass['"]?,?\s*['"]?-p['"]?,?\s*)('[^']*'|"[^"]*"|\S+)""")
+
+
+def ssh_error_text(exc: BaseException) -> str:
+    """what went wrong with an ssh or scp call, fit to show or log. The
+    exceptions of subprocess carry the command line in their str and repr,
+    and with a password in the profile that line starts with `sshpass -p
+    <password>`: a timeout says how long it waited, a failed command what it
+    wrote on stderr, and anything else has an sshpass argument masked."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"timed out after {exc.timeout:g} s"
+    if isinstance(exc, subprocess.SubprocessError):
+        stderr = getattr(exc, "stderr", None)
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        lines = str(stderr or "").strip().splitlines()
+        code = getattr(exc, "returncode", None)
+        return lines[-1] if lines else (f"exit code {code}" if code is not None else type(exc).__name__)
+    text = _SSHPASS_ARG_RE.sub(r"\1***", str(exc).strip())
+    return text or type(exc).__name__
 
 
 def ssh_check_port(profile: SSHProfile, port: int) -> bool:
