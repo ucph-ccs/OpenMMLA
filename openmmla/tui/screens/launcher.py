@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import json
 import os
 import re
@@ -1008,6 +1009,97 @@ def _remote_artifact_session_ids(profile) -> list[str]:
         ],
         reverse=True,
     )
+
+
+def _mongodb_session_experiments_from_config(config: dict) -> list[tuple[str, str]] | None:
+    """(session id, experiment id) of every session of the MongoDB `config`
+    names: none when it names none, None when it cannot be asked."""
+    mongo_config = config.get("MongoDB", {})
+    if not isinstance(mongo_config, dict):
+        return []
+    url = str(mongo_config.get("url") or "").strip()
+    if not url or "<" in url:
+        return []
+    try:
+        from pymongo import MongoClient
+        from openmmla.utils.constants import MONGODB_DEFAULT_DB
+
+        client = MongoClient(url, serverSelectionTimeoutMS=800, connectTimeoutMS=800)
+        try:
+            client.admin.command("ping")
+            sessions = client[str(mongo_config.get("db") or MONGODB_DEFAULT_DB)]["sessions"]
+            return [
+                (str(session.get("session_id")), str(session.get("experiment_id") or ""))
+                for session in sessions.find({}, {"_id": 0, "session_id": 1, "experiment_id": 1})
+                if isinstance(session, dict) and session.get("session_id")
+            ]
+        finally:
+            client.close()
+    except Exception:
+        return None
+
+
+def _remote_session_folder_ids(profile) -> list[str] | None:
+    """the session folders of `profile`'s artifacts/ and collection/; None
+    when the host cannot be asked."""
+    dirs = " ".join(
+        _quote_remote_path(_remote_path_join(profile.remote_project_path, name))
+        for name in ("artifacts", "collection"))
+    cmd = (
+        f"for d in {dirs}; do if [ -d \"$d\" ]; then "
+        "find \"$d\" -mindepth 1 -maxdepth 1 -type d -exec basename {} \\; 2>/dev/null; fi; done; exit 0"
+    )
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=8.0)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return [
+        line.strip() for line in (result.stdout or "").splitlines()
+        if line.strip() and line.strip() not in _NON_SESSION_ARTIFACT_NAMES
+    ]
+
+
+def _experiment_sessions(root: str, target: str = "local") -> list[tuple[str, str]]:
+    """the sessions an experiment id may be carried by, as (session id,
+    experiment id or "") pairs: those of the MongoDB this machine's pipeline
+    configs name, which every host shares, and the session folders of this
+    machine and of `target` (artifacts/, collection/). Not capped, unlike a
+    session dropdown. A source that cannot be asked raises RuntimeError naming
+    it: no answer is not "no sessions"."""
+    sessions = [(sid, "") for sid in _local_artifact_session_ids(root) + _local_collection_session_ids(root)]
+    unasked: list[str] = []
+    seen_mongo: set[tuple[str, str]] = set()
+    for rel_path in _ARTIFACT_CONFIG_RELS:
+        config_path = os.path.join(root, rel_path)
+        if not os.path.isfile(config_path):
+            continue
+        config = load_existing_config(config_path)
+        mongo_cfg = config.get("MongoDB") if isinstance(config, dict) else None
+        if not isinstance(mongo_cfg, dict):
+            continue
+        mongo_sig = (str(mongo_cfg.get("url") or ""), str(mongo_cfg.get("db") or ""))
+        if mongo_sig in seen_mongo:
+            continue
+        seen_mongo.add(mongo_sig)
+        found = _mongodb_session_experiments_from_config(config)
+        if found is None:
+            # the address only: a url may hold a user and password
+            where = urlsplit(mongo_sig[0]).netloc.rsplit("@", 1)[-1]
+            unasked.append(f"the MongoDB at {where}" if where else "the MongoDB")
+        else:
+            sessions += found
+    if target != "local":
+        profile = get_profile_by_name(target)
+        folders = _remote_session_folder_ids(profile) if profile is not None else None
+        if folders is None:
+            unasked.append(f"the session folders of {target}")
+        else:
+            sessions += [(sid, "") for sid in folders]
+    if unasked:
+        raise RuntimeError(f"could not ask {' or '.join(unasked)}")
+    return sessions
 
 
 def _ips_transform_local_dir(root: str) -> str:
@@ -4705,7 +4797,7 @@ class ServicePanel(Widget):
 
         if node_str == "__experiments__":
             self._set_command_session_visible(False)
-            await content_area.mount(ExperimentForm())
+            await content_area.mount(ExperimentForm(sessions=functools.partial(_experiment_sessions, self._root, "local")))
             return
 
         if node_str == "__tasks__":

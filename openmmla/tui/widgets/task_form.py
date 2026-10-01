@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import yaml
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll, Horizontal
 from textual.message import Message
@@ -35,10 +36,26 @@ class TaskForm(Widget):
     TaskForm .tf-actions Button { margin: 0 1; min-width: 16; }
     """
 
-    def __init__(self) -> None:
+    def __init__(self, notify=None) -> None:
         super().__init__()
         self._task_names = list_tasks()
         self._editing: str | None = None
+        # where a Delete asks and answers: the status line the launcher keeps
+        # below the form, else this form's own
+        self._notify = notify
+        # the task whose Delete was pressed once: the next press deletes it
+        self._pending_delete: str | None = None
+
+    def _say(self, text: str) -> None:
+        if self._notify is not None:
+            self._notify(text)
+            return
+        self._set_status(text)
+        try:
+            # this line sits at the top, where a row further down may have scrolled it away
+            self.query_one("#tf-status").scroll_visible(animate=False)
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="tf-root"):
@@ -111,16 +128,30 @@ class TaskForm(Widget):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
+        # a Delete waits for its second press only until another button is pressed
+        armed, self._pending_delete = self._pending_delete, None
 
         if event.button.has_class("tf-row-edit"):
             await self._show_editor(event.button.name or "")
 
         elif event.button.has_class("tf-row-del"):
             name = event.button.name or ""
+            if armed != name:
+                self._pending_delete = name
+                self._say(
+                    f"[yellow]Press Delete again to delete task '{escape(name)}'. "
+                    f"Experiments whose Task Type it is keep the name.[/yellow]")
+                return
             delete_task(name)
+            done = f"[red]Task '{escape(name)}' deleted.[/red]"
+            if self._notify is not None:
+                # said before the list is drawn again: a write to another host
+                # reports on the same line once it is done
+                self._notify(done)
             self._task_names = list_tasks()
             await self._show_list()
-            self.call_after_refresh(lambda: self._set_status(f"[red]Task '{name}' deleted.[/red]"))
+            if self._notify is None:
+                self.call_after_refresh(lambda: self._set_status(done))
             self.post_message(self.DataChanged())
 
         elif btn_id == "tf-create":

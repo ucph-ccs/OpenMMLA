@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import re
+
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.message import Message
@@ -40,6 +44,29 @@ def _participant_row_buttons(person: str) -> tuple[Button, Button]:
         Button("Remove", variant="error", name=person, classes="ef-row-rmp"),
     )
 
+
+# an experiment id starts every session id (`<experiment>_<group>_<time>`), and
+# with it the session's folders: the dashboard takes a session id of these
+# characters only, and a folder keeps its name with them on every host
+_EXPERIMENT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_EXPERIMENT_ID_RULE = ("An Experiment ID is up to 64 ASCII letters, digits, '_', '-' or '.', "
+                       "and starts with a letter or digit.")
+# exp_<YYYYMMDD>_<task> is the id the dashboard reads a session's date and task from
+_EXPERIMENT_ID_PLACEHOLDER = "exp_<YYYYMMDD>_<task type>, e.g. exp_20261001_wegrow"
+
+
+def _sessions_named_after(eid: str, sessions: list[tuple[str, str]]) -> list[str]:
+    """the session ids of `sessions` ((session id, experiment id or "")
+    pairs) that carry `eid`, each once: the experiment their record names,
+    or, for a session no record names, an id that starts with `eid` and "_".
+    The second also counts a folder of exp_a_b for exp_a, which only ever
+    keeps an id where it is."""
+    named = {sid: experiment for sid, experiment in sessions if experiment}
+    return list(dict.fromkeys(
+        sid for sid, experiment in sessions
+        if experiment == eid or (sid not in named and sid.startswith(f"{eid}_"))))
+
+
 class ExperimentForm(Widget):
     """experiment management widget with list view and detail view."""
 
@@ -67,11 +94,65 @@ class ExperimentForm(Widget):
     ExperimentForm .ef-participant Button { margin: 0 1; min-width: 10; }
     """
 
-    def __init__(self) -> None:
+    def __init__(self, sessions=None, notify=None) -> None:
         super().__init__()
         self._data = load_experiments()
+        # `sessions` lists the sessions there are, as (session id, experiment
+        # id or "") pairs, and is called off the UI thread: an experiment a
+        # session carries keeps its id. Until it answers every id is kept;
+        # without it none is
+        self._sessions_source = sessions
+        self._sessions: list[tuple[str, str]] | None = None if sessions is not None else []
+        # where a Delete asks and answers: the status line the launcher keeps
+        # below the form, else this form's own
+        self._notify = notify
         self._editing_exp: str | None = None
         self._editing_participant: str | None = None
+        # the experiment whose Delete was pressed once: the next press deletes it
+        self._pending_delete: str | None = None
+
+    def _say(self, text: str) -> None:
+        if self._notify is not None:
+            self._notify(text)
+            return
+        self._set_status(text)
+        try:
+            # this line sits at the top, where a row further down may have scrolled it away
+            self.query_one("#ef-status").scroll_visible(animate=False)
+        except Exception:
+            pass
+
+    def on_mount(self) -> None:
+        if self._sessions_source is not None:
+            self.run_worker(self._read_sessions, thread=True, exit_on_error=False)
+
+    def _ask_sessions(self) -> list[tuple[str, str]]:
+        return [(str(sid), str(experiment or "")) for sid, experiment in self._sessions_source() if sid]
+
+    def _read_sessions(self) -> None:
+        try:
+            sessions = self._ask_sessions()
+        except Exception as exc:
+            # the ids stay kept (_sessions stays None), and the status line says why
+            self.app.call_from_thread(
+                self._set_status,
+                f"[red]Which sessions carry the experiment ids is not known ({escape(str(exc))}), so no "
+                f"Experiment ID can change. Open Experiments again to ask again.[/red]")
+            return
+        self.app.call_from_thread(self._sessions_read, sessions)
+
+    def _sessions_read(self, sessions: list[tuple[str, str]]) -> None:
+        self._sessions = sessions
+        if self._editing_exp:
+            try:
+                self.query_one("#ef-id", Input).disabled = self._id_locked(self._editing_exp)
+            except Exception:
+                pass
+
+    def _id_locked(self, eid: str) -> bool:
+        """whether `eid` is kept: a session carries it, or the sessions are
+        not known yet."""
+        return self._sessions is None or bool(_sessions_named_after(eid, self._sessions))
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="ef-root"):
@@ -111,7 +192,7 @@ class ExperimentForm(Widget):
 
         yield Horizontal(
             Label("New experiment ID:", classes="ef-field-label"),
-            Input(placeholder="e.g. exp_03", id="ef-new-id", classes="ef-field-input"),
+            Input(placeholder=_EXPERIMENT_ID_PLACEHOLDER, id="ef-new-id", classes="ef-field-input"),
             classes="ef-field",
         )
         yield Horizontal(
@@ -143,12 +224,14 @@ class ExperimentForm(Widget):
 
         yield Horizontal(
             Label("Experiment ID:", classes="ef-field-label"),
-            Input(value=exp.get("experiment_id", ""), id="ef-id", classes="ef-field-input"),
+            Input(value=exp.get("experiment_id", ""), placeholder=_EXPERIMENT_ID_PLACEHOLDER,
+                  disabled=self._id_locked(eid), id="ef-id", classes="ef-field-input"),
             classes="ef-field",
         )
         yield Horizontal(
             Label("Title:", classes="ef-field-label"),
-            Input(value=exp.get("title", ""), id="ef-title", classes="ef-field-input"),
+            Input(value=exp.get("title", ""), placeholder="e.g. WeGrow microscope study, October 2026",
+                  id="ef-title", classes="ef-field-input"),
             classes="ef-field",
         )
         task_names = list_tasks()
@@ -313,6 +396,8 @@ class ExperimentForm(Widget):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
         row_value = event.button.name or ""
+        # a Delete waits for its second press only until another button is pressed
+        armed, self._pending_delete = self._pending_delete, None
 
         # list view actions
         if event.button.has_class("ef-row-toggle"):
@@ -338,18 +423,41 @@ class ExperimentForm(Widget):
 
         elif event.button.has_class("ef-row-del"):
             eid = row_value
+            if armed != eid:
+                self._pending_delete = eid
+                people = len(self._data.get("assignments", {}).get(eid) or {})
+                ask = f"Press Delete again to delete '{escape(eid)}' and its {people} participant(s)."
+                carried = [] if self._sessions is None else _sessions_named_after(eid, self._sessions)
+                if self._sessions is None:
+                    self._say(f"[red]{ask} Whether sessions carry this id is not known yet.[/red]")
+                elif carried:
+                    self._say(
+                        f"[red]{ask} {len(carried)} session(s) carry this id and keep it, but ses-tidy "
+                        f"and the ASR card's Speakers will no longer find their participants.[/red]")
+                else:
+                    self._say(f"[yellow]{ask}[/yellow]")
+                return
             exps = self._data.get("active_experiments", [])
             self._data["active_experiments"] = [e for e in exps if e.get("experiment_id") != eid]
             self._data.get("assignments", {}).pop(eid, None)
             save_experiments(self._data)
+            done = f"[red]Experiment '{escape(eid)}' deleted.[/red]"
+            if self._notify is not None:
+                # said before the list is drawn again: a write to another host
+                # reports on the same line once it is done
+                self._notify(done)
             await self._show_list()
-            self.call_after_refresh(lambda: self._set_status(f"[red]Experiment '{eid}' deleted.[/red]"))
+            if self._notify is None:
+                self.call_after_refresh(lambda: self._set_status(done))
             self.post_message(self.DataChanged())
 
         elif btn_id == "ef-create":
             new_id = self.query_one("#ef-new-id", Input).value.strip()
             if not new_id:
                 self._set_status("[red]Experiment ID is required.[/red]")
+                return
+            if not _EXPERIMENT_ID_RE.fullmatch(new_id):
+                self._set_status(f"[red]{_EXPERIMENT_ID_RULE}[/red]")
                 return
             existing = [e["experiment_id"] for e in self._data.get("active_experiments", [])]
             if new_id in existing:
@@ -402,6 +510,26 @@ class ExperimentForm(Widget):
         if not new_id:
             self._set_status("[red]Experiment ID is required.[/red]")
             return
+        if new_id != eid:
+            # sessions carry the id in theirs, their folders and their records,
+            # and none of those would follow it; asked again, since one may
+            # have started since the form opened
+            if self._sessions_source is not None:
+                try:
+                    self._sessions = await asyncio.to_thread(self._ask_sessions)
+                except Exception as exc:
+                    self._set_status(f"[red]'{escape(eid)}' keeps its id: which sessions carry it is not known "
+                                     f"({escape(str(exc))}).[/red]")
+                    return
+            if self._id_locked(eid):
+                self._set_status(f"[red]Sessions carry '{escape(eid)}', so it keeps its id; change the Title instead.[/red]")
+                return
+            if not _EXPERIMENT_ID_RE.fullmatch(new_id):
+                self._set_status(f"[red]{_EXPERIMENT_ID_RULE}[/red]")
+                return
+            if any(e.get("experiment_id") == new_id for e in self._data.get("active_experiments", [])):
+                self._set_status(f"[red]'{new_id}' already exists.[/red]")
+                return
 
         exp = next(
             (e for e in self._data.get("active_experiments", []) if e.get("experiment_id") == eid),
