@@ -73,15 +73,39 @@ def read_json_file(file_path: str) -> Any:
         return None
 
 
+def _json_default(value: Any) -> Any:
+    """what json cannot write by itself: the `time` the InfluxDB client adds to every row is a
+    datetime (Influx _time), written as ISO 8601 with its offset; numpy scalars as numbers."""
+    from datetime import date, datetime
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    item = getattr(value, 'item', None)
+    if callable(item):
+        return item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def save_to_json_file(session_id: str, data: Any, suffix: str, log_dir: str, compact: bool = False) -> str:
     """Saves data to a JSON file named by session_id and suffix; `compact` writes it without
-    indentation (a large export, such as the features of a session, is a fraction of the size)."""
+    indentation (a large export, such as the features of a session, is a fraction of the size).
+    The file is written beside its name and moved into place once complete, so a failed export
+    leaves no cut-off file behind."""
     json_path = os.path.join(log_dir, f"{session_id}_{suffix}.json")
-    with open(json_path, 'w') as f:
-        if compact:
-            json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
-        else:
-            json.dump(data, f, ensure_ascii=False, indent=5)
+    partial = json_path + '.partial'
+    try:
+        with open(partial, 'w') as f:
+            if compact:
+                json.dump(data, f, ensure_ascii=False, separators=(',', ':'), default=_json_default)
+            else:
+                json.dump(data, f, ensure_ascii=False, indent=5, default=_json_default)
+        os.replace(partial, json_path)
+    except BaseException:
+        try:
+            os.unlink(partial)
+        except OSError:
+            pass
+        raise
     print(f"{suffix} saved to {session_id}_{suffix}.json")
     return json_path
 
