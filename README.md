@@ -61,7 +61,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 
     Guide to every tab and card: [Management Console (TUI)](docs/tui.md).
 
-4. **Pipelines**: set up and run [ASR with diarization](docs/pipelines/asr.md), the [Indoor positioning system](docs/pipelines/ips.md) or the [Video frame analyzer](docs/pipelines/vfa/index.md).
+4. **Pipelines**: set up and run [Automatic speech recognition](docs/pipelines/asr.md), the [Indoor positioning system](docs/pipelines/ips.md) or the [Video frame analyzer](docs/pipelines/vfa/index.md).
 
 ## Documentation
 
@@ -72,6 +72,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 | [Management Console](docs/tui.md) | the TUI: environments, launcher tree, cards, sessions, status, remote hosts |
 | [ASR](docs/pipelines/asr.md), [IPS](docs/pipelines/ips.md), [VFA](docs/pipelines/vfa/index.md) | the three pipelines end to end |
 | [Human coding interface](docs/pipelines/vfa/coding_interface.md) | coding VFA ground truth frame by frame, in the pipeline's own output format |
+| [Window features](docs/analytics/window_features.md) | `mmla ses-fuse`: a session's ASR, IPS and VFA events joined into one table, window by window |
 | [Docker](docs/docker.md) | the ASR/VFA AI service stacks and the InfluxDB/MongoDB/MediaMTX stack |
 | [Dashboard](docs/dashboard.md) | Flask backend, Celery worker and the static frontend |
 | [Nginx](docs/nginx.md), [Streaming](docs/rtmp_streaming.md) | load balancing; camera/microphone streaming and recording through MediaMTX |

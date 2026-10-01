@@ -65,12 +65,13 @@ nav:
       - System services: system_services.md
       - Management console (TUI): tui.md
   - Pipelines:
-      - ASR with diarization: pipelines/asr.md
+      - Automatic speech recognition (ASR): pipelines/asr.md
       - Indoor positioning (IPS): pipelines/ips.md
       - Video frame analyzer (VFA):
           - pipelines/vfa/index.md
           - Human coding interface: pipelines/vfa/coding_interface.md
   - Analysis:
+      - Window features: analytics/window_features.md
       - Interaction classifier: analytics/interaction_classifier.md
   - Deployment:
       - Docker: docker.md

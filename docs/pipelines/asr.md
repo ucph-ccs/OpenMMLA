@@ -1,4 +1,4 @@
-# ASR with Diarization
+# Automatic Speech Recognition (ASR)
 
 Automatic speech recognition with speaker diarization. Audio from microphones or wearable badges is split into speech segments, attributed to registered speakers and transcribed in real time, and the results of every base in a session are synchronized into one timeline.
 
