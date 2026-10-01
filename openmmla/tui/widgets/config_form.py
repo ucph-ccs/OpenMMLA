@@ -18,7 +18,7 @@ from textual.widget import Widget
 
 from rich.text import Text
 
-from openmmla.tui.schema.loader import REMOVED_SECTION, FieldDef
+from openmmla.tui.schema.loader import REMOVED_SECTION, FieldDef, natural_key
 from openmmla.utils.constants import normalize_source
 
 # media files the file-browser highlights (others are still shown, greyed)
@@ -1204,15 +1204,35 @@ class ConfigForm(Widget):
             yield FieldRow(f, initial_value=initial, source=self._sources.get(f.path),
                            read_only=f.path in self._readonly_paths)
 
+    @staticmethod
+    def _entry_order(section_name: str) -> tuple:
+        # a group's entries in name order (c920-2 before c920-10)
+        return natural_key(section_name.split(".", 1)[1])
+
+    def _next_in_group(self, inner: Vertical, section_name: str) -> Widget | None:
+        """the entry of a group that a new one is mounted before, so the group
+        stays in name order; None at its end."""
+        group = section_name.split(".", 1)[0]
+        later = sorted((other for other in self._dynamic_sections
+                        if other.startswith(f"{group}.")
+                        and self._entry_order(other) > self._entry_order(section_name)),
+                       key=self._entry_order)
+        for other in later:
+            found = inner.query(f"#{_safe_id(f'dyn-{other}')}")
+            if found:
+                return found.first()
+        return None
+
     def _render_dyn_group(self, group_name: str, dyn_groups: dict[str, list[str]]) -> ComposeResult:
-        """render one dynamic section group (e.g. ASR 'Base', 'Streams').
-        Collapsed by default so the form doesn't open fully expanded."""
+        """render one dynamic section group (e.g. ASR 'Base', 'Streams'), its
+        entries in name order. Collapsed by default so the form doesn't open
+        fully expanded."""
         group_coll_id = _safe_id(f"grp-{group_name}")
         inner_id = _safe_id(f"grp-inner-{group_name}")
         with Collapsible(title=self._section_titles.get(group_name, group_name), collapsed=True, id=group_coll_id):
             yield from self._section_note(group_name)
             with Vertical(id=inner_id, classes="grp-inner"):
-                for section_name in dyn_groups.get(group_name, []):
+                for section_name in sorted(dyn_groups.get(group_name, []), key=self._entry_order):
                     child_name = section_name.split(".", 1)[1]
                     coll_id = _safe_id(f"dyn-{section_name}")
                     btn_id = _safe_id(f"btn-remove-{section_name}")
@@ -1448,7 +1468,7 @@ class ConfigForm(Widget):
             collapsible = Collapsible(*children, title=child_name, collapsed=False, id=coll_id)
             try:
                 inner = self.query_one(f"#{inner_id}", Vertical)
-                inner.mount(collapsible)
+                inner.mount(collapsible, before=self._next_in_group(inner, section_name))
                 return
             except Exception:
                 pass

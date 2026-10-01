@@ -523,15 +523,63 @@ def _tidy_participants(entries) -> None:
             entry["participant"] = value
 
 
+def natural_key(name) -> tuple:
+    """a sort key under which c920-2 comes before c920-10: runs of digits
+    compare as numbers, the rest without case."""
+    from openmmla.collection.recording import natural_device_key
+
+    return natural_device_key(str(name)), str(name)
+
+
+def _base_order(entry) -> tuple:
+    # an entry with no id yet goes last
+    base_id = entry.get("id") if isinstance(entry, dict) else None
+    text = "" if base_id is None else str(base_id).strip()
+    return not text, natural_key(text)
+
+
+def order_entries(config) -> None:
+    """put the Streams of a pipeline config in the order of their names and
+    its Bases in the order of their ids: an entry added later is appended to
+    the file, and the form and the bases' pick lists follow the file. A stream
+    base whose source_index is a number (an older config's position among the
+    pullable Streams) is pointed at the same stream by name first, as the
+    positions change with the order. Changes `config` in place."""
+    from openmmla.utils.constants import normalize_source, resolve_stream_source
+
+    if not isinstance(config, dict):
+        return
+    bases = config.get("Bases")
+    streams = config.get("Streams")
+    if isinstance(streams, dict) and streams:
+        for entry in bases if isinstance(bases, list) else []:
+            if not isinstance(entry, dict) or normalize_source(entry.get("source")) != "stream":
+                continue
+            index = str(entry.get("source_index") if entry.get("source_index") is not None else "").strip()
+            if not index.isdigit():
+                continue
+            try:
+                name, _url = resolve_stream_source(config, index)
+            except ValueError:
+                continue  # past the streams there are: the base says so when it starts
+            if name in streams:
+                entry["source_index"] = name
+        config["Streams"] = dict(sorted(streams.items(), key=lambda item: natural_key(item[0])))
+    if isinstance(bases, list):
+        config["Bases"] = sorted(bases, key=_base_order)
+
+
 def move_source_settings(config) -> list[str]:
     """move out of Base what only some sources use, into the Bases entries that
     use it: an ASR base type's stream_kwargs.host and packet_format go to its
     udp/tcp entries, and a file_dir goes into the source_index of the file
     entries that named a bare file. An entry that has its own value keeps it,
-    and the key leaves Base either way, so what no entry uses is dropped.
+    and the key leaves Base either way, so what no entry uses is dropped. The
+    Streams and Bases are put in order too (order_entries).
     Changes `config` in place; returns what moved, a line each."""
     from openmmla.utils.constants import normalize_source
 
+    order_entries(config)
     if not isinstance(config, dict) or not isinstance(config.get("Base"), dict):
         return []
     base = config["Base"]
