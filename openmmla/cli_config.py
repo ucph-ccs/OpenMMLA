@@ -37,7 +37,6 @@ OPTIONAL_DEP_MAP = {
     "ips-ctag": "ips-base",
     "ips-base": "ips-base",
     "ips-sync": "ips-base",
-    "ips-vis": "ips-base",
     "vfa-base": "vfa-base",
     "vfa-sync": "vfa-base",
     "vfa-vllm": "vfa-server",
@@ -115,10 +114,6 @@ COMMANDS = {
     "ips-sync": (
         "openmmla.commands.ips.sync:main",
         "Run IPS synchronizer of real-time indoor positioning system."
-    ),
-    "ips-vis": (
-        "openmmla.commands.ips.vis:main",
-        "Run IPS visualizer of real-time indoor positioning system."
     ),
     "vfa-base": (
         "openmmla.commands.vfa.base:main",

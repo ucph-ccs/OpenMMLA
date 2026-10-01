@@ -31,7 +31,7 @@ class IPSBase(Base):
     """IPSBase class for real-time indoor positioning."""
     logger = get_logger('ips-base')
 
-    def __init__(self, project_dir: str | None, config_path: str, graphics: bool = True,
+    def __init__(self, project_dir: str | None, config_path: str, graphics: bool | None = None,
                  store: bool = True, verbose: bool = False, session_id: str | None = None,
                  base: str | None = None):
         """Initialize the IPSBase class.
@@ -39,7 +39,9 @@ class IPSBase(Base):
         Args:
             config_path: path to the configuration file
             project_dir: path to the project directory
-            graphics: whether to show graphics (default: True)
+            graphics: whether to show the frames in a window; None (default) shows them unless the
+                source is a stream, which a base pulls on a machine nobody watches, often over SSH
+                with no display (the dashboard's camera tiles draw what the bases found)
             store: whether to store the video frames (default: True)
             verbose: whether to enable verbose logging (default: False)
             session_id: the session to join; if omitted, choose or create one interactively
@@ -117,6 +119,8 @@ class IPSBase(Base):
         source_list = ['opencv', 'stream', 'lsl', 'file']
         if self.source not in source_list:
             raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
+        if self.graphics is None:
+            self.graphics = self.source != 'stream'
 
     def _setup_directories(self):
         """Set up directories."""

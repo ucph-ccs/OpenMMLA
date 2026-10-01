@@ -10,13 +10,12 @@ Camera-based indoor positioning with AprilTags. Several cameras watch the room, 
 2. AprilTag detection and pose estimation with the calibrated camera intrinsics
 3. Transformation of every camera's coordinates into the main camera's frame, using the matrices produced by camera sync
 4. Synchronization of all bases into time buckets, written as `ips_translation`, `ips_rotation` and `ips_relation` events
-5. Optional real-time visualization of the positions
+5. The positions, headings and who faces whom are shown live on the [dashboard](../dashboard.md)'s Live page (its Room card), and summarized on its Analysis page
 
 | Component | Runs on | Command | Environment |
 |---|---|---|---|
 | IPS Base, one per camera | base station | `mmla ips-base` | conda env `ips-base` |
 | IPS Synchronizer, one per session | base station | `mmla ips-sync` | conda env `ips-base` |
-| IPS Visualizer, optional | base station | `mmla ips-vis` | conda env `ips-base` |
 | Camera calibrator, once per camera model | any machine with the camera | `mmla ips-ccal` | conda env `ips-base` |
 | Camera tag detector and sync manager, once per camera arrangement | base stations | `mmla ips-ctag`, `mmla ips-csync` | conda env `ips-base` |
 
@@ -119,16 +118,15 @@ The batch replay (`scripts/replay_sessions.py`) runs `ses-calibrate` for every m
 ## Run from the TUI
 
 1. **System services** running and reachable, and the setup above done: calibrated `Cameras`, `Bases` with one `main: true` (one per room), and the exported transform matrices on every base station.
-2. **IPS Base**: `Launcher → Pipelines → IPS → IPS Base`, Host set to the base station. Choose the number of bases, synchronizers and visualizers, the **Session** (or `Create MongoDB Session` from an experiment group), and the toggles (`Graphics` shows the annotated frames, `Store` saves frames, `Verbose` prints debug output). Everything the windows used to ask is chosen on the card:
+2. **IPS Base**: `Launcher → Pipelines → IPS → IPS Base`, Host set to the base station. Choose the number of bases and synchronizers, the **Session** (or `Create MongoDB Session` from an experiment group), **Graphics** (`-g`: `off for streams`, the default, opens a window on the annotated frames unless the base's source is a stream, which a base pulls where nobody watches it, often over SSH with no display; `on` and `off` decide for every source), and the toggles (`Store` saves frames, `Verbose` prints debug output). Everything the windows used to ask is chosen on the card:
     - with rooms in `Bases`, the **Room** of the session: picking one puts that room's bases on the card, sets **Num Bases** to their number and the main camera to the room's main (see [Several rooms](#several-rooms));
     - which `Bases` entry each base is, one dropdown per base (their number follows **Num Bases**);
-    - the synchronizer's **main camera**, the base whose `camera_sync/transformation_matrices_<id>.json` it loads. The dropdown lists the files exported on the card's host and starts on the `Bases` entry with `main: true` when its file is there, else on the first file, and follows Base 1 to the main of its room; **Start** refuses to launch a synchronizer until one is picked (press Refresh on the card once the files are there);
-    - the visualizer's **2d** or **3d** plot.
+    - the synchronizer's **main camera**, the base whose `camera_sync/transformation_matrices_<id>.json` it loads. The dropdown lists the files exported on the card's host and starts on the `Bases` entry with `main: true` when its file is there, else on the first file, and follows Base 1 to the main of its room; **Start** refuses to launch a synchronizer until one is picked (press Refresh on the card once the files are there).
 
     **Start** opens one terminal window per instance. Each process starts at once with those choices and waits for START; nothing is asked in the windows.
-3. **Session Control**: once every window reports that it is waiting, send **START** for the session; send **STOP** at the end. On STOP every base, synchronizer and visualizer ends its run and exits (the visualizer closes its plot window), also when STOP comes before START; start the card again for the next session. A synchronizer whose run ends on an error instead of STOP (the connection to Redis lost, say) says so and shows its menu, where `1` starts it again.
+3. **Session Control**: once every window reports that it is waiting, send **START** for the session; send **STOP** at the end. On STOP every base and synchronizer ends its run and exits, also when STOP comes before START; start the card again for the next session. A synchronizer whose run ends on an error instead of STOP (the connection to Redis lost, say) says so and shows its menu, where `1` starts it again.
 
-When a choice from the card cannot be used (the synchronizer finds no `camera_sync/transformation_matrices_<id>.json` for its main camera, the visualizer gets a dimension other than 2d or 3d, or a base gets an id that is not in `Bases`), that window says why and what to do, then shows the process's own menu or base prompt, so it can be fixed there, or on the card before the next Start.
+When a choice from the card cannot be used (the synchronizer finds no `camera_sync/transformation_matrices_<id>.json` for its main camera, or a base gets an id that is not in `Bases`), that window says why and what to do, then shows the process's own menu or base prompt, so it can be fixed there, or on the card before the next Start.
 
 Each base notes in the session's MongoDB document which `Bases` entry it is, the stream it pulls (for a `stream` source) and when it joined and left; it notes the leaving first on its way out, before it stops its threads and stream. **Sessions → Export Streams** reads this note, so it takes the session's own streams, from the Stream Server and from the capture hosts, without being told which. A session without this note (one from before the bases wrote it, or one no base joined) has nothing to export, and the console says so.
 
@@ -160,10 +158,9 @@ mmla ips-csync -p $P -c $C                 # sync manager; pairs each alternativ
 
 mmla ips-base  -p $P -c $C -sid <session-id> -b <base-id>
 mmla ips-sync  -p $P -c $C -sid <session-id> -mc <main-base-id>   # -mc/--main_camera
-mmla ips-vis   -p $P -c $C -sid <session-id> -d 3d                # -d/--dimension: 2d (default) or 3d
 ```
 
-With `-sid`, as the console runs them, each command asks nothing: it starts at once, waits for START and exits when the run ends on STOP. `ips-sync` without `-mc` takes the `Bases` entry marked `main: true` when its transformation file is there, else, when the `Bases` name no room, the only `transformation_matrices_<id>.json` in `camera_sync/` (with a main per room it asks for `-mc`); `ips-base` without `-b` takes the only `Bases` entry there is. Without `-sid` the commands ask for the session, and `ips-base` for its base when `-b` is omitted; `ips-sync` and `ips-vis` show their menus as before (start, set main camera or switch 2d/3d, exit) and go back to them after each run. `pipelines/ips-base/apriltag/` contains printable tag36h11 tags and a resize script; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to check the timing of recordings.
+With `-sid`, as the console runs them, each command asks nothing: it starts at once, waits for START and exits when the run ends on STOP. `ips-sync` without `-mc` takes the `Bases` entry marked `main: true` when its transformation file is there, else, when the `Bases` name no room, the only `transformation_matrices_<id>.json` in `camera_sync/` (with a main per room it asks for `-mc`); `ips-base` without `-b` takes the only `Bases` entry there is. Without `-sid` the commands ask for the session, and `ips-base` for its base when `-b` is omitted; `ips-sync` shows its menu as before (start, set main camera, exit) and goes back to it after each run. To watch the positions while a session runs, open it on the [dashboard](../dashboard.md)'s Live page. `pipelines/ips-base/apriltag/` contains printable tag36h11 tags and a resize script; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to check the timing of recordings.
 
 ## Post-time processing
 

@@ -1131,6 +1131,12 @@ _ASK_BASE_LABEL = "ask in its window"
 # Action Labels, Pose and Gaze): the first option passes nothing
 _CONFIG_OR_ON_OFF = [("as the config says", ""), ("on", "true"), ("off", "false")]
 
+# what the IPS and VFA Base cards' Graphics offers (-g): a base with a stream
+# source runs where nobody watches it, often over SSH with no display, so by
+# default it opens no window there (the dashboard's camera tiles show what the
+# bases found); "" passes nothing and the base decides by its source
+_GRAPHICS_BY_SOURCE = [("off for streams", ""), ("on", "true"), ("off", "false")]
+
 # what the ASR Base card's Language offers (-lang): the language each of its
 # bases has its speech transcribed in, sent with every request, which leaves
 # the speech transcriber's own configured language for the first option. The
@@ -2665,7 +2671,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
             ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
-            ParamDef("-g", "Graphics", "bool", True),
+            ParamDef("-g", "Graphics", "str", "", _GRAPHICS_BY_SOURCE),
             ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
             # what the synchronizer asks the frame analyzer for: action labels
@@ -2690,11 +2696,10 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
         conda_env="ips-base",
         config_dir=os.path.join(root, "pipelines", "ips-base"),
         launch_type="bash",
-        description="Indoor positioning system base stations, synchronizer, and visualizer",
+        description="Indoor positioning system base stations and synchronizer",
         params=[
             ParamDef("-nb", "Num Bases", "int", 1),
             ParamDef("-ns", "Num Synchronizers", "int", 1),
-            ParamDef("-nv", "Num Visualizers", "int", 1),
             ParamDef("-sid", "Session", "str", ""),
             ParamDef("--experiment-group", "Experiment Group", "str", ""),
             # the room of the session (the Bases' room): picking one puts its bases,
@@ -2703,8 +2708,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
             # follows Base 1: the main base of that base's room
             ParamDef("-mc", "Main Camera", "choice", "", follows="-b"),
-            ParamDef("-d", "Visualizer View", "str", "2d", ["2d", "3d"]),
-            ParamDef("-g", "Graphics", "bool", True),
+            ParamDef("-g", "Graphics", "str", "", _GRAPHICS_BY_SOURCE),
             ParamDef("-s", "Store Frames", "bool", True),
             ParamDef("-v", "Verbose", "bool", True),
         ],
@@ -2713,8 +2717,6 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                          ["-sid", "-b", "-g", "-s", "-v"]),
             ComponentDef("synchronizer", "mmla ips-sync", "-ns",
                          ["-sid", "-mc", "-v"]),
-            ComponentDef("visualizer", "mmla ips-vis", "-nv",
-                         ["-sid", "-d", "-s"]),
         ],
         artifact_pipeline="ips-base",
     ))

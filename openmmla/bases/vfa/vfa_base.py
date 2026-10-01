@@ -31,7 +31,7 @@ class VFABase(Base):
     """VFABase class for video frame analysis."""
     logger = get_logger('vfa-base')
 
-    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'live', graphics: bool = True,
+    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'live', graphics: bool | None = None,
                  store: bool = True, verbose: bool = False, session_id: str | None = None,
                  base: str | None = None):
         """Initializes the VFABase class.
@@ -40,7 +40,9 @@ class VFABase(Base):
             project_dir: path to the project directory
             config_path: path to the configuration file
             mode: operating mode, 'capture', 'analyze', or 'live'. (default: 'live')
-            graphics: whether to display graphics (default: True)
+            graphics: whether to show the frames in a window; None (default) shows them unless the
+                source is a stream, which a base pulls on a machine nobody watches, often over SSH
+                with no display (the dashboard's camera tiles draw what the bases found)
             store: whether to store frames locally (default: True)
             verbose: whether to enable verbose logging (default: False)
             session_id: the session to join; if omitted, choose or create one
@@ -56,6 +58,7 @@ class VFABase(Base):
         # VFABase specific parameters
         self.mode = mode
         self.graphics = graphics
+        self._graphics_asked = graphics  # what the launch said; None follows the source
         self.store = store
         self.verbose = verbose
         self.launch_session_id = session_id
@@ -125,6 +128,8 @@ class VFABase(Base):
         source_list = ['opencv', 'stream', 'lsl', 'file']
         if self.source not in source_list:
             raise ValueError(f'Unknown source {self.source}, must be one of {source_list}')
+        if self.graphics is None:
+            self.graphics = self.source != 'stream'
 
     def _setup_directories(self):
         """Create and set up the necessary directories for runtime operations."""
@@ -223,7 +228,7 @@ class VFABase(Base):
         project_dir = getattr(self, 'project_dir', None)
         config_path = getattr(self, 'config_path', None)
         mode = getattr(self, 'mode', 'live')
-        graphics = getattr(self, 'graphics', True)
+        graphics = getattr(self, '_graphics_asked', None)
         store = getattr(self, 'store', True)
         verbose = getattr(self, 'verbose', False)
         session_id = getattr(self, 'launch_session_id', None)

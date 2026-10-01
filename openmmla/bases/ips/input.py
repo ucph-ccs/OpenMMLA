@@ -105,32 +105,6 @@ def get_function_synchronizer(main_id: str):
             print('Please enter a valid integer')
 
 
-def get_function_visualizer(dimension: str):
-    """Get the function to be performed from user input for visualizer."""
-    while True:
-        try:
-            flush_input()
-            print("------------------------------------------------")
-            select_fun = input(f"Please input your operation:\n"
-                               f"1: start\n"
-                               f"2: switch (dimension:{LIGHT_BLUE}{dimension}{ENDC})\n"
-                               f"0: exit\n"
-                               f"Selected function: ")
-
-            if select_fun.strip():  # Check if input is not empty after removing leading/trailing whitespace
-                return int(select_fun)
-            else:
-                print('Please enter a value')
-
-        except EOFError:
-            print(
-                "\nUnexpected input received. If you resized the terminal or pressed certain keys, please avoid doing "
-                "so and try again.")
-
-        except ValueError:
-            print('Please enter a valid integer')
-
-
 # base-list helpers are shared across pipelines; re-exported here for IPS callers
 from openmmla.utils.config import (  # noqa: E402,F401
     get_bases, get_base_by_id, coerce_source_index, select_source_by_index_or_name,

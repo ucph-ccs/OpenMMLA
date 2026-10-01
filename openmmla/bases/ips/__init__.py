@@ -14,8 +14,5 @@ def __getattr__(name):
     elif name == 'IPSSynchronizer':
         from .ips_synchronizer import IPSSynchronizer
         return IPSSynchronizer
-    elif name == 'IPSVisualizer':
-        from .ips_visualizer import IPSVisualizer
-        return IPSVisualizer
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")

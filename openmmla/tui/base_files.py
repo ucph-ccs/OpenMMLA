@@ -1,15 +1,15 @@
 """the files a session's bases leave on the machines they run on, taken off
 those machines: Sessions -> Export Base Files.
 
-A base, and a synchronizer or the IPS visualizer beside it, keeps what it
-writes for a session in the checkout it runs from, under
-artifacts/<session>/pipelines/<pipeline>/<host>/ (<host> is the machine's
-short name; artifact_paths.pipeline_section_dir): its logs (logger/), the
-config it ran with (config/), what it recorded (real-time/runtime/: an ASR
-base's speech segments with Store Audio on and the speaker profiles it
-recognized, the frames VFA and IPS keep) and the IPS visualizer's plots
-(visualizations/). A process run on this machine writes into this console's
-artifacts/ in the first place; one run over SSH leaves them on its host.
+A base, and a synchronizer beside it, keeps what it writes for a session in
+the checkout it runs from, under artifacts/<session>/pipelines/<pipeline>/<host>/
+(<host> is the machine's short name; artifact_paths.pipeline_section_dir): its
+logs (logger/), the config it ran with (config/), what it recorded
+(real-time/runtime/: an ASR base's speech segments with Store Audio on and the
+speaker profiles it recognized, the frames VFA and IPS keep) and, in a session
+from before the IPS visualizer was removed, its plots (visualizations/). A
+process run on this machine writes into this console's artifacts/ in the first
+place; one run over SSH leaves them on its host.
 
 This asks every SSH profile at once what it holds of the session (one round
 trip each), fetches it folder by folder into the same place here with the

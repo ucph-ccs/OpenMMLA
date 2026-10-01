@@ -1405,10 +1405,11 @@ class SessionsPanel(Widget):
     # ---- Export Base Files ----
 
     async def _run_export_base_files(self, session_id: str) -> None:
-        """Export Base Files: what the session's bases, synchronizers and IPS
-        visualizer wrote on the machines they ran on (their logs, the config
-        they ran with, what they recorded), from the host of every SSH profile,
-        into artifacts/<session>/pipelines/<pipeline>/<host>/ (base_files).
+        """Export Base Files: what the session's bases and synchronizers (and
+        an older session's IPS visualizer) wrote on the machines they ran on
+        (their logs, the config they ran with, what they recorded), from the
+        host of every SSH profile, into
+        artifacts/<session>/pipelines/<pipeline>/<host>/ (base_files).
         Those run on this machine wrote there in the first place. Cancel stops
         it between folders (a transfer at once); what arrived stays, and a
         transfer cut short resumes at the next press."""

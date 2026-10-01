@@ -1,6 +1,6 @@
-"""what a session ran with: one entry per component (a base, a synchronizer, the
-IPS visualizer), kept in the session's MongoDB document under `components` and,
-next to the config it copied, as
+"""what a session ran with: one entry per component (a base, a synchronizer, and
+in an older session the IPS visualizer), kept in the session's MongoDB document
+under `components` and, next to the config it copied, as
 artifacts/<session>/pipelines/<pipeline>/<host>/config/<role>[_<id>].json.
 
 A component writes its entry as soon as it knows its session and what it runs
@@ -53,8 +53,9 @@ _SECRET_KEY = re.compile(r"(token|api[_-]?key|secret|passw(or)?d|subscription[_-
 
 def component_key(pipeline: str, role: str, component_id=None) -> str:
     """one entry per component of a pipeline: `asr:base:1`, `ips:synchronizer`,
-    `asr:synchronizer`, `ips:visualizer` (an ASR synchronizer of an older
-    session is `asr:synchronizer:<base type>`)."""
+    `asr:synchronizer` (an ASR synchronizer of an older session is
+    `asr:synchronizer:<base type>`, and an older session's IPS visualizer
+    `ips:visualizer`)."""
     key = f"{pipeline}:{role}"
     if component_id is None or str(component_id).strip() == "":
         return key
