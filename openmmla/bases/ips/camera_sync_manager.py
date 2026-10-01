@@ -23,7 +23,9 @@ from .transform import (
     distance_between_rotations, export_main_transformations_json
 )
 
-matplotlib.use('TkAgg')
+# the sync plots with Tk, chosen where it plots (_start_synchronization): set
+# here, on import, it switched every importer's matplotlib to Tk too
+PLOT_BACKEND = 'TkAgg'
 
 
 class CameraSyncManager(Synchronizer):
@@ -191,6 +193,7 @@ class CameraSyncManager(Synchronizer):
 
             self.mqtt_client.reinitialise(on_message=self._handle_base_result, topics="camera/synchronize")
             self.mqtt_client.loop_start()
+            matplotlib.use(PLOT_BACKEND)
             self.fig, self.ax = plt.subplots(1, 1, subplot_kw={'projection': '3d'})
             plt.get_current_fig_manager().set_window_title(
                 f"Camera Sync Manager: main:{self.main_id} - alternative:{self.alt_id}")
