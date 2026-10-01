@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from rich.markup import escape
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
@@ -177,10 +178,25 @@ class SSHForm(Widget):
     # of the console's run so reopening SSH Profiles keeps it
     list_height: int | None = None
 
-    def __init__(self) -> None:
+    def __init__(self, notify=None) -> None:
         super().__init__()
         self._profiles = load_ssh_profiles()
         self._editing: str | None = None
+        # where a Delete asks and answers: the status line the launcher keeps
+        # below the form, else this form's own
+        self._notify = notify
+        # the profile whose Delete was pressed once: the next press deletes it
+        self._pending_delete: str | None = None
+
+    def _say(self, text: str) -> None:
+        if self._notify is not None:
+            self._notify(text)
+            return
+        self._set_status(text)
+        try:
+            self.query_one("#ssh-status").scroll_visible(animate=False)
+        except Exception:
+            pass
 
     def on_mount(self) -> None:
         profile_list = self.query_one("#ssh-profile-list")
@@ -316,6 +332,8 @@ class SSHForm(Widget):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
+        # a Delete waits for its second press only until another button is pressed
+        armed, self._pending_delete = self._pending_delete, None
         if btn_id == "ssh-save":
             await self._save_profile()
         elif btn_id == "ssh-test":
@@ -331,7 +349,12 @@ class SSHForm(Widget):
                 self._fill_form(profile)
                 self._set_status(f"Editing profile '{name}'.")
         elif event.button.has_class("ssh-row-del"):
-            await self._delete_profile(event.button.name or "")
+            name = event.button.name or ""
+            if armed != name:
+                self._pending_delete = name
+                self._say(f"[yellow]Press Delete again to delete profile '{escape(name)}'.[/yellow]")
+                return
+            await self._delete_profile(name)
 
     async def _save_profile(self) -> None:
         profile = self._build_profile_from_form()
@@ -374,7 +397,9 @@ class SSHForm(Widget):
         save_ssh_profiles(self._profiles)
         if self._editing == name:
             self._clear_form()
-        self._set_status(f"[red]Profile '{name}' deleted.[/red]")
+        # said before the list is drawn again: a write to another host reports
+        # on the same line once it is done
+        self._say(f"[red]Profile '{escape(name)}' deleted.[/red]")
         await self._rebuild_list()
         self.post_message(self.ProfilesChanged())
 
