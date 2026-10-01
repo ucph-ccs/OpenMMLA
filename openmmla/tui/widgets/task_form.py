@@ -128,7 +128,7 @@ class TaskForm(Widget):
             if not name:
                 self._set_status("[red]Task name is required.[/red]")
                 return
-            save_task(name, {"domain": "", "semantic_mapping_rules": {}})
+            save_task(name, {"domain": ""})
             self._task_names = list_tasks()
             await self._show_editor(name)
             self.post_message(self.DataChanged())
