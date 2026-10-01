@@ -64,8 +64,9 @@ def get_parser():
         "--participant", "--audio-participant",
         dest="participant",
         default=None,
-        help="the tag id of whoever wears this microphone; its recording is personal. Several channels take "
-             "one per channel, in channel order (5,7; none for one left unbound)",
+        help="the tag id of whoever wears this microphone; its recording is personal (group: the room's, "
+             "as --scope group). Several channels take one per channel, in channel order (5,group; group for "
+             "one that is the room's, none for one left unbound)",
     )
     parser.add_argument(
         "--scope", "--audio-scope",
@@ -94,6 +95,7 @@ def main():
     args = parser.parse_args()
 
     from openmmla.collection.recording import (
+        channel_participants_note,
         list_audio_devices,
         prompt_audio_options,
         prompt_channel_participants,
@@ -124,9 +126,20 @@ def main():
         args.participant = prompt_channel_participants(
             args.device, args.device_label, args.channel, args.channels, args.participant)
 
-    if args.participant and args.scope == "group":
+    # one entry per channel: a tag id, group (the room's) or none (bound later)
+    wearers = [part.strip() for part in str(args.participant or "").split(",")]
+    tags = [wearer for wearer in wearers if wearer and wearer.lower() not in ("none", "group")]
+    groups = [wearer for wearer in wearers if wearer.lower() == "group"]
+    if tags and args.scope == "group":
         parser.error("a group microphone has no participant")
-    if args.participant:
+    if groups and args.scope == "personal":
+        parser.error("a personal microphone is not the group's")
+    if len(wearers) > 1 and (tags or groups):
+        print("Participants: " + channel_participants_note(
+            args.device, args.device_label, args.channel, args.channels, args.participant))
+    elif groups:
+        print("Scope: group (room microphone)")
+    elif tags:
         print(f"Participant: tag {args.participant} (personal microphone)")
     elif args.scope:
         print(f"Scope: {args.scope}")

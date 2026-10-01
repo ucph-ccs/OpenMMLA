@@ -128,11 +128,16 @@ def participant_roster(experiments: Any, experiment_id: str, group_id: str) -> l
 
 
 def live_audio_role(slot: str, participant: str | None, scope: str | None) -> tuple[str | None, str | None]:
-    """the (scope, participant) a live recording notes: a named wearer makes it personal, else the
-    scope given, else the default scope of its device."""
+    """the (scope, participant) a live recording notes: a named wearer makes it personal, the
+    wearer group makes it the room's (group, never a tag), else the scope given, else the default
+    scope of its device."""
     wearer = None if participant is None else str(participant).strip()
     if not wearer or wearer.lower() == "none":
         wearer = None
+    if wearer is not None and wearer.lower() == "group":
+        if scope == "personal":
+            raise ValueError("a personal microphone is not the group's")
+        return "group", None
     if wearer is not None:
         if scope == "group":
             raise ValueError("a group microphone has no participant")
@@ -742,30 +747,52 @@ def audio_channel_selection(channel: str, channel_count: int | None) -> list[str
 
 def channel_participants(participant: str | None, count: int) -> list[str | None]:
     """the wearer of each of `count` channels, from --participant: one tag id per channel in channel
-    order (5,7; none for one left unbound), or nothing for all. One wearer named for several
-    channels is refused: two worn microphones on one receiver are two people."""
+    order (5,7; group for one that is the room's, none for one left unbound), or nothing for all;
+    a single group makes every channel the room's. One wearer named for several channels is
+    refused: two worn microphones on one receiver are two people (group is nobody's, so it may
+    stand on several)."""
     text = "" if participant is None else str(participant).strip()
     parts = [part.strip() for part in text.split(",")] if text else []
     wearers = [None if not part or part.lower() == "none" else part for part in parts]
     if not any(wearers):
         return [None] * count
+    if len(wearers) == 1 and wearers[0].lower() == "group":
+        return [wearers[0]] * count
     if len(wearers) != count:
         raise ValueError(
             f"--participant {text} names {len(wearers)} wearer(s) for {count} channel(s): give one per channel "
-            f"in channel order (5,7; none for one left unbound), or none and bind them later with "
+            f"in channel order (5,7; group for the room's, none for one left unbound), or none and bind them later with "
             f"mmla ses-tidy --participant")
-    named = [wearer for wearer in wearers if wearer]
+    named = [wearer for wearer in wearers if wearer and wearer.lower() != "group"]
     if len(set(named)) != len(named):
         raise ValueError(f"--participant {text} names one wearer for several channels: two worn microphones "
                          f"on one receiver are two people")
     return wearers
 
 
+def channel_participants_note(device: str, device_label: str | None, channel: str, channels: int | None,
+                              participant: str | None) -> str:
+    """who each channel of --participant is, in words, for the recorder terminal: vimo-0-ch0 tag 5,
+    vimo-0-ch1 group (channel 1, channel 2 ... when the channels are not known before the probe)"""
+    parts = [part.strip() for part in str(participant or "").split(",")]
+    try:
+        label = sanitize_label(device_label, _device_label_from_device(device, "mic"))
+        slots = [_audio_device_slot(label, picked) for picked in audio_channel_selection(channel, channels)]
+    except ValueError:
+        slots = []
+    if len(slots) != len(parts):
+        slots = [f"channel {index + 1}" for index in range(len(parts))]
+    words = ["bound later" if not part or part.lower() == "none" else "group" if part.lower() == "group"
+             else f"tag {part}" for part in parts]
+    return ", ".join(f"{slot} {word}" for slot, word in zip(slots, words))
+
+
 def prompt_channel_participants(device: str, device_label: str | None, channel: str, channels: int | None,
                                 participant: str | None) -> str | None:
     """the wearers of several channels asked for in the recorder terminal, when --participant does
-    not name one per channel (the Collection card names one per recorder); the one given is the
-    first channel's default, and one wearer typed for two channels is asked again"""
+    not name one per channel (the Collection card names one per recorder); each is a tag id, group
+    (the room's) or none, the one given is the first channel's default, and one wearer typed for two
+    channels is asked again"""
     picked = audio_channel_selection(channel, channels)
     try:
         channel_participants(participant, len(picked))
@@ -777,8 +804,11 @@ def prompt_channel_participants(device: str, device_label: str | None, channel: 
     while True:
         answers: list[str] = []
         for index, channel in enumerate(picked):
-            default = given[index] if index < len(given) and given[index] and given[index] not in answers else "none"
-            answer = input(f"Participant of {_audio_device_slot(label, channel)} (tag id or none) [{default}]: ").strip()
+            offered = given[index] if index < len(given) else ""
+            # a tag already answered is not offered again; group may stand on several channels
+            default = offered if offered and (offered.lower() == "group" or offered not in answers) else "none"
+            answer = input(f"Participant of {_audio_device_slot(label, channel)} (tag id, group or none) "
+                           f"[{default}]: ").strip()
             answers.append(answer or default)
         try:
             channel_participants(",".join(answers), len(picked))
@@ -914,7 +944,7 @@ def record_audio(
     participant: str | None = None,
     scope: str | None = None,
 ) -> int:
-    # a participant on a group microphone fails before anything else
+    # a participant on a group microphone, or group on a personal one, fails before anything else
     for wearer in str(participant or "").split(","):
         live_audio_role("", wearer, scope)
     ensure_command("ffmpeg")
