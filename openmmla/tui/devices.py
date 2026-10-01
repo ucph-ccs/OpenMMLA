@@ -15,6 +15,14 @@ console knows what each host runs, see ssh.remote_platform):
 An opencv index is the camera list again: OpenCV opens /dev/video<N> for index
 N on Linux, and AVFoundation's Nth device on a Mac.
 
+A host asked for its microphones also says how many input channels each has,
+when it can (the Channel a recorder picks, and the -ac an ALSA input needs):
+  a Mac      system_profiler SPAudioDataType: each CoreAudio device by the
+             name AVFoundation lists it under, with its input channel count
+  Linux      /proc/asound/card<C>/stream<D> of a USB microphone (read, never
+             opened, so a busy one still answers), else the hw params arecord
+             reads when it opens the device (a busy one says nothing)
+
 What a host says is a snapshot: a device plugged in later shows up at the next
 Refresh of the card. The parsers are pure and tested on real output."""
 
@@ -26,7 +34,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from openmmla.tui.ssh import TARGET_PLATFORMS, get_profile_by_name, remote_platform, ssh_run_sync, wrap_local, \
     wrap_remote
@@ -41,11 +49,30 @@ TIMEOUT = 20.0
 
 # the lines the scripts mark their parts with
 _AUDIO_MARK, _VIDEO_MARK, _NODES_MARK, _PYAUDIO_MARK = "@audio", "@video", "@nodes", "@pyaudio"
+_CHANNELS_MARK, _STREAM_MARK, _HWPARAMS_MARK = "@channels", "@stream", "@hwparams"
 
 MAC_SCRIPT = 'ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1; true'
 LINUX_SCRIPT = (
     f'echo {_AUDIO_MARK}; arecord -l 2>&1; echo {_VIDEO_MARK}; v4l2-ctl --list-devices 2>&1; '
     f'echo {_NODES_MARK}; ls -1 /dev/video* 2>/dev/null; true'
+)
+# the input channel counts, run after the script above only when microphones are asked for (the last part of
+# the output, so stray stderr lands after it)
+MAC_CHANNELS_SCRIPT = f"echo {_CHANNELS_MARK}; system_profiler SPAudioDataType -json 2>/dev/null; true"
+# each capture PCM hw:C,D: a USB microphone's stream file, else what arecord reads opening it for at most 3 s;
+# card[0-9]* skips the cards' id symlinks (/proc/asound/USB)
+LINUX_CHANNELS_SCRIPT = (
+    f'echo {_CHANNELS_MARK}; '
+    'for p in /proc/asound/card[0-9]*/pcm[0-9]*c; do '
+    '[ -d "$p" ] || continue; '
+    'c=${p#/proc/asound/card}; c=${c%%/*}; d=${p##*/pcm}; d=${d%c}; '
+    'if [ -r "/proc/asound/card$c/stream$d" ]; then '
+    f'echo "{_STREAM_MARK} hw:$c,$d"; cat "/proc/asound/card$c/stream$d"; '
+    'else '
+    f'echo "{_HWPARAMS_MARK} hw:$c,$d"; '
+    'timeout 3 arecord -D "hw:$c,$d" --dump-hw-params -d 1 -f S16_LE /dev/null 2>&1 | grep "^CHANNELS"; '
+    'fi; '
+    'done; true'
 )
 # run by the python of the asr-base env; prints one @pyaudio line
 PYAUDIO_SCRIPT = f'''
@@ -68,8 +95,9 @@ print("{_PYAUDIO_MARK} " + json.dumps({{"devices": found}}))
 
 @dataclass(frozen=True)
 class Device:
-    value: str   # what the config stores
-    label: str   # what the dropdown shows beside it
+    value: str                   # what the config stores
+    label: str                   # what the dropdown shows beside it
+    channels: int | None = None  # the input channels its host reported; None when not known
 
 
 @dataclass
@@ -83,6 +111,14 @@ class Devices:
     def options(self, kind: str) -> list[tuple[str, str]]:
         """(label, value) pairs for a dropdown; [] when the kind is not known."""
         return [(f"{d.value}  {d.label}".rstrip() if d.label else d.value, d.value) for d in self.found.get(kind, [])]
+
+    def channels_of(self, kind: str, value: str) -> int | None:
+        """the input channel count of the device `value` of `kind`; None when
+        the device or its count is not known."""
+        for device in self.found.get(kind, []):
+            if device.value == value:
+                return device.channels
+        return None
 
     def note(self, kind: str, where: str) -> str:
         """one line under a field: what was found on `where`, or why nothing is known."""
@@ -199,7 +235,8 @@ def parse_pyaudio(text: str) -> tuple[list[Device], str]:
             if answer.get("error"):
                 return [], str(answer["error"])
             devices = [
-                Device(str(d.get("index")), f"{d.get('name', '')} ({d.get('channels', '?')} ch)".strip())
+                Device(str(d.get("index")), f"{d.get('name', '')} ({d.get('channels', '?')} ch)".strip(),
+                       d["channels"] if isinstance(d.get("channels"), int) and d["channels"] > 0 else None)
                 for d in answer.get("devices", []) if d.get("index") is not None
             ]
             return devices, ""
@@ -209,8 +246,113 @@ def parse_pyaudio(text: str) -> tuple[list[Device], str]:
     return [], "pyaudio did not answer" + (f" ({' / '.join(tail)})" if tail else "")
 
 
+def parse_coreaudio_inputs(text: str) -> dict[str, int]:
+    """the input channel count of each CoreAudio device `system_profiler
+    SPAudioDataType -json` lists, by its name (the name AVFoundation lists the
+    microphone under); a name seen with two counts is left out."""
+    start = (text or "").find("{")
+    if start < 0:
+        return {}
+    try:
+        answer, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return {}
+    counts: dict[str, int] = {}
+    clashes = set()
+    groups = answer.get("SPAudioDataType") if isinstance(answer, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        for item in (group.get("_items") or []) if isinstance(group, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            name, count = str(item.get("_name") or "").strip(), item.get("coreaudio_device_input")
+            # an output-only device has no input count
+            if not name or not isinstance(count, int) or count <= 0:
+                continue
+            if counts.get(name, count) != count:
+                clashes.add(name)
+            counts[name] = count
+    return {name: count for name, count in counts.items() if name not in clashes}
+
+
+_USB_CHANNELS = re.compile(r"^\s*Channels:\s*(\d+)\s*$")
+
+
+def parse_usb_stream(text: str) -> int | None:
+    """the most channels a format of the Capture section of a USB microphone's
+    /proc/asound/card<C>/stream<D> offers (its Playback section is the
+    speaker's); None when it has no capture format."""
+    section, most = "", None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line in ("Playback:", "Capture:"):
+            section = line
+            continue
+        match = _USB_CHANNELS.match(raw)
+        if match and section == "Capture:":
+            most = max(most or 0, int(match.group(1)))
+    return most
+
+
+# one count ("CHANNELS: 2") or a range ("CHANNELS: [1 2]"), as arecord --dump-hw-params prints it
+_DUMP_CHANNELS = re.compile(r"^CHANNELS:\s*[\[(]?\s*(\d+)(?:\s+(\d+))?\s*[\])]?\s*$")
+
+
+def parse_dump_channels(text: str) -> int | None:
+    """the channels `arecord --dump-hw-params` says the device takes (the
+    upper bound of a range); None when it did not say (a busy device)."""
+    for raw in (text or "").splitlines():
+        match = _DUMP_CHANNELS.match(raw.strip())
+        if match:
+            return int(match.group(2) or match.group(1))
+    return None
+
+
+_ALSA_PART = re.compile(rf"^({_STREAM_MARK}|{_HWPARAMS_MARK}) (hw:\d+,\d+)$")
+
+
+def parse_alsa_channels(text: str) -> dict[str, int]:
+    """the input channel count of each hw:<card>,<device> LINUX_CHANNELS_SCRIPT
+    answered for; a device that did not say is left out."""
+    counts: dict[str, int] = {}
+    parts: list[tuple[str, str, list[str]]] = []
+    for raw in (text or "").splitlines():
+        match = _ALSA_PART.match(raw.strip())
+        if match:
+            parts.append((match.group(1), match.group(2), []))
+        elif parts:
+            parts[-1][2].append(raw)
+    for mark, hw, body in parts:
+        parse = parse_usb_stream if mark == _STREAM_MARK else parse_dump_channels
+        count = parse("\n".join(body))
+        if count:
+            counts[hw] = count
+    return counts
+
+
+def with_channels(devices: list[Device], counts: dict[str, int], by_label: bool = False) -> list[Device]:
+    """`devices` with the channel counts of `counts` (keyed by value, or by
+    label), each known count also shown in its label as "(N ch)"."""
+    found = []
+    for device in devices:
+        count = counts.get(device.label if by_label else device.value)
+        if count:
+            device = replace(device, label=f"{device.label} ({count} ch)".strip(), channels=count)
+        found.append(device)
+    return found
+
+
+def _part_after(text: str, mark: str) -> str:
+    """the lines of a script's output after the line `mark`; "" without it."""
+    lines = (text or "").splitlines()
+    for i, raw in enumerate(lines):
+        if raw.strip() == mark:
+            return "\n".join(lines[i + 1:])
+    return ""
+
+
 def _split_linux(text: str) -> tuple[str, str, str]:
-    """the arecord, v4l2-ctl and ls parts of LINUX_SCRIPT's output."""
+    """the arecord, v4l2-ctl and ls parts of LINUX_SCRIPT's output (the
+    channel counts after them are read by _part_after)."""
     audio = video = nodes = ""
     part = None
     for raw in (text or "").splitlines():
@@ -220,6 +362,8 @@ def _split_linux(text: str) -> tuple[str, str, str]:
             part = "video"
         elif raw.strip() == _NODES_MARK:
             part = "nodes"
+        elif raw.strip() == _CHANNELS_MARK:
+            part = "channels"
         elif part == "audio":
             audio += raw + "\n"
         elif part == "video":
@@ -282,21 +426,28 @@ def list_devices(target: str, kinds, root: str = "") -> Devices:
         return answer
 
     if kinds & {"audio", "video", "opencv"}:
-        script = MAC_SCRIPT if answer.platform == "darwin" else LINUX_SCRIPT
+        darwin = answer.platform == "darwin"
+        script = MAC_SCRIPT if darwin else LINUX_SCRIPT
+        if "audio" in kinds:
+            # only a microphone's count is asked: a camera probe neither waits for it nor opens a microphone
+            script += "; " + (MAC_CHANNELS_SCRIPT if darwin else LINUX_CHANNELS_SCRIPT)
         text = _run(target, bash(with_tool_path(script)))
         if text is None:
             for kind in kinds & {"audio", "video", "opencv"}:
                 answer.problems[kind] = f"{where} did not answer, so its devices are not known"
         else:
-            if answer.platform == "darwin":
+            if darwin:
                 cameras, microphones = parse_avfoundation(text)
                 if not cameras and not microphones and "avfoundation" not in text.lower():
                     for kind in kinds & {"audio", "video", "opencv"}:
                         answer.problems[kind] = f"ffmpeg on {where} did not list its devices (is it installed?)"
                     return _ask_pyaudio(answer, target, kinds, root, where)
+                counts = parse_coreaudio_inputs(_part_after(text, _CHANNELS_MARK))
+                microphones = with_channels(microphones, counts, by_label=True)
             else:
                 audio, video, nodes = _split_linux(text)
-                microphones = parse_arecord(audio)
+                counts = parse_alsa_channels(_part_after(text, _CHANNELS_MARK))
+                microphones = with_channels(parse_arecord(audio), counts)
                 cameras = parse_v4l2(video, nodes)
             if "audio" in kinds:
                 answer.found["audio"] = microphones
