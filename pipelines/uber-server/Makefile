@@ -11,6 +11,14 @@ OPENMMLA_BIND_ADDRESS ?= 0.0.0.0
 OPENMMLA_MQTT_ALLOW_ANONYMOUS ?= true
 # dashboard backend port; the TUI passes the Dashboard section's value
 DASHBOARD_PORT ?= 5050
+# where the dashboard listens: where the docker stack publishes InfluxDB, MongoDB and MediaMTX
+# (INFRA_BIND_ADDRESS and INFRA_LOOPBACK_ADDRESS of docker/.env), so a host that keeps them on its
+# tailnet address keeps the dashboard, its transcripts and recordings off its other networks too;
+# every interface when docker/.env names none. Several addresses are space-separated
+DOCKER_ENV_FILE := $(abspath ../../docker/.env)
+INFRA_BIND_ADDRESS ?= $(shell sed -n 's/^INFRA_BIND_ADDRESS=//p' '$(DOCKER_ENV_FILE)' 2>/dev/null | tail -n 1)
+INFRA_LOOPBACK_ADDRESS ?= $(shell sed -n 's/^INFRA_LOOPBACK_ADDRESS=//p' '$(DOCKER_ENV_FILE)' 2>/dev/null | tail -n 1)
+DASHBOARD_BIND ?= $(or $(strip $(INFRA_BIND_ADDRESS) $(INFRA_LOOPBACK_ADDRESS)),$(OPENMMLA_BIND_ADDRESS))
 # MediaMTX stream server (native run; the docker run is in docker/docker-compose.infra.yml)
 MEDIAMTX_BIN ?= mediamtx
 MEDIAMTX_CONFIG ?= mediamtx/mediamtx.yml
@@ -310,7 +318,7 @@ flask:
 	tmux new-session -d -s flask -n flask bash
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t flask 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
-	tmux send-keys -t flask 'gunicorn -k gevent -w 1 -b 0.0.0.0:$(DASHBOARD_PORT) dashboard:app' C-m
+	tmux send-keys -t flask 'gunicorn -k gevent -w 1 $(foreach address,$(DASHBOARD_BIND),-b $(address):$(DASHBOARD_PORT)) dashboard:app' C-m
 
 celery:
 	@echo "🔁 Starting Celery worker"

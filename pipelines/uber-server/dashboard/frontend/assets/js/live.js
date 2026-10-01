@@ -6,7 +6,9 @@
  * share, pairs, transcript) once a second. Replay keeps no stream open while paused: Play reconnects
  * at the paused moment and backfills only what the last connection had not sent yet, a seek clears
  * the model and reconnects with five minutes of history. A dropped stream reconnects after 1, 2, 5,
- * then every 10 seconds; a page back from the back/forward cache reconnects at once.
+ * then every 10 seconds; a page back from the back/forward cache reconnects at once. The Cameras card
+ * plays live video in follow mode and, in the replay of an ended session, each camera's recorded file
+ * at the replay clock (cameras.js), from the list the recordings route gives.
  */
 
 import {
@@ -34,6 +36,8 @@ const HEAVY_MS = 1000;
 const STALE_AGE = 10;
 const LOOKS_SECONDS = 60;
 const MEDIA_REFRESH_MS = 60000;
+// a recordings list that could not be read is asked for again after this long
+const RECORDINGS_RETRY_MS = 60000;
 const GAZE_FILL = {
   partner_face: 'var(--ord-4)',
   partner_hands: 'var(--ord-3)',
@@ -110,6 +114,10 @@ const S = {
   distances: true,
   media: null,
   mediaAt: 0,
+  // the recordings route's answer (the replay of an ended session plays the camera files it lists)
+  recordings: null,
+  recordingsAt: 0,
+  recordingsBusy: false,
   camsOpen: false,
   raf: 0,
   lastFrame: 0,
@@ -666,7 +674,7 @@ function build(root) {
   const overlayBtn = toggleButton('Overlay', true, (v) => UI.cams.wall.setOptions({ overlay: v }), 'Draw the skeletons over the video');
   const syncBtn = toggleButton('Sync overlay', true, (v) => UI.cams.wall.setOptions({ sync: v }), 'Hold the video back so the skeletons line up');
   const videoToggles = h('span', { class: 'cam-toggles', hidden: true }, overlayBtn, syncBtn);
-  const camCard = card({ title: 'Cameras', subtitle: 'Skeletons, gaze rays and AprilTags of the newest frame set; live video when the session streams it', span: 12, actions: [videoToggles, camToggle] });
+  const camCard = card({ title: 'Cameras', subtitle: 'Skeletons, gaze rays and AprilTags of the newest frame set; live video when the session streams it, the recorded video in a replay', span: 12, actions: [videoToggles, camToggle] });
   const wall = cameraWall({ tagColor: (t) => S.ident.tag(t).color, tagLabel: (t) => `Tag ${t}` });
   camCard.body.appendChild(wall.el);
   camCard.body.hidden = true;
@@ -678,11 +686,15 @@ function build(root) {
     if (!S.camsOpen) camCard.setState('ready');
     camCard.body.hidden = !S.camsOpen;
     wall.setExpanded(S.camsOpen);
-    if (S.camsOpen) loadMedia(true);
+    if (S.camsOpen) {
+      loadMedia(true);
+      // files downloaded since the card was last open play too
+      if (endedReplay()) loadRecordings(true);
+    }
     S.force = true;
     requestFrame();
   });
-  UI.cams = { card: camCard, wall, toggle: camToggle, videoToggles };
+  UI.cams = { card: camCard, wall, toggle: camToggle, videoToggles, syncBtn };
   grid.appendChild(camCard.el);
 
   for (const c of [roomCard, trCard, actCard, looksCard, shareCard, pairsCard]) c.setState('loading', 'Connecting to the live stream');
@@ -696,6 +708,46 @@ async function loadMedia(force = false) {
   else S.media = { webrtc: null, streams: [], reason: res.error ? `The stream server could not be asked: ${res.error}` : null };
   S.force = true;
   requestFrame();
+}
+
+/** the replay of an ended session: its cameras play their recorded files */
+function endedReplay() {
+  return S.mode === 'replay' && !S.live;
+}
+
+/**
+ * ask for the session's recordings (once, and again when the card is opened; a failed answer again
+ * after a minute). Only the video files are kept: the tiles play no sound.
+ */
+async function loadRecordings(force = false) {
+  if (S.recordingsBusy) return;
+  if (!force && S.recordings && !(S.recordings.failed && performance.now() - S.recordingsAt >= RECORDINGS_RETRY_MS)) return;
+  S.recordingsBusy = true;
+  S.recordingsAt = performance.now();
+  const res = await api(`/api/sessions/${encodeURIComponent(S.sid)}/recordings`);
+  S.recordingsBusy = false;
+  const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
+  if (d) {
+    S.recordings = {
+      enabled: !!d.enabled,
+      files: (Array.isArray(d.files) ? d.files : []).filter((f) => f && f.modality === 'video'),
+      reason: typeof d.reason === 'string' ? d.reason : null,
+      failed: false,
+    };
+  } else {
+    const why = res.error ? ` (${String(res.error).replace(/\.$/, '')})` : '';
+    S.recordings = { enabled: false, files: [], reason: `The recordings could not be listed${why}.`, failed: true };
+  }
+  S.force = true;
+  requestFrame();
+}
+
+/** whether the replay clock advances now (displayNow interpolates it), so recorded video plays */
+function clockRunning(now) {
+  if (!(S.mode === 'replay' && S.playing && S.connState === 'open' && !S.backfilling && !S.preview)) return false;
+  // the drawn clock holds 1.5 s after the newest batch, and at the session's end
+  if ((performance.now() - S.clockPerf) / 1000 >= 1.5) return false;
+  return !(S.t1 != null && now != null && now >= S.t1);
 }
 
 // colours
@@ -1507,6 +1559,7 @@ function renderCameras(now) {
       UI.cams.card.setState('empty', noVfa ? 'This session has no video features: VFA did not run.' : 'No camera frames in this window yet.');
     } else UI.cams.card.setState('ready');
     if (S.mode === 'follow') loadMedia(false);
+    else if (endedReplay()) loadRecordings(false);
   }
   const newestVfa = S.model.vfa.last;
   wall.update({
@@ -1514,11 +1567,17 @@ function renderCameras(now) {
     frameAt: (t) => S.model.vfaAt(t),
     now,
     mode: S.mode,
+    live: S.live,
     media: S.media,
     serverNow: serverNow(),
     vfaLag: newestVfa ? serverNow() - newestVfa.t : null,
+    recordings: S.recordings,
+    speed: S.speed,
+    running: clockRunning(now),
   });
   UI.cams.videoToggles.hidden = !wall.hasVideo();
+  // holding the video back only concerns live video
+  UI.cams.syncBtn.hidden = !wall.hasLiveVideo();
 }
 
 // page

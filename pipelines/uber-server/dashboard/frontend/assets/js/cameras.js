@@ -1,13 +1,16 @@
 /**
  * Camera tiles of the live page. A tile plays the camera's live video over WebRTC (WHEP against
  * MediaMTX) when the session streams it and the stream server has WebRTC on, with the VFA skeletons
- * drawn over the video; otherwise it draws the skeletons of the newest frame set on a blank canvas.
+ * drawn over the video. In the replay of an ended session it plays the camera's recorded file from
+ * the dashboard (the recordings route), kept in step with the replay clock. Otherwise it draws the
+ * skeletons of the newest frame set on a blank canvas.
  *
  * Video costs bandwidth on the camera's uplink and the stream server, so a tile connects only while
  * the Cameras card is open, the tile is on screen and the tab is visible, and at most MAX_PLAYING
- * tiles play at once; everything else closes its RTCPeerConnection. The WHEP exchange lives in
- * whepNegotiate and WhepPlayer, which take their RTCPeerConnection and fetch as arguments so the
- * offer/answer flow can be tested without a browser or a server.
+ * tiles play at once; everything else closes its RTCPeerConnection or lets go of its file. The WHEP
+ * exchange lives in whepNegotiate and WhepPlayer, which take their RTCPeerConnection and fetch as
+ * arguments so the offer/answer flow can be tested without a browser or a server; FilePlayer takes
+ * its video element and clock the same way.
  */
 
 import { h, clear, fmt, tooltip, theme, icon } from './core.js';
@@ -20,6 +23,19 @@ export const ICE_TIMEOUT_MS = 2000;
 // the browser holds at most this much video back to line it up with the overlay
 export const MAX_VIDEO_DELAY = 4;
 export const KEYPOINT_MIN_CONF = 0.3;
+// a recorded video seeks once it is this far (media seconds) off the replay clock, at 1x and 2x
+export const RECORDING_DRIFT = 0.5;
+// a paused replay shows the frame of its moment, give or take this much
+export const PAUSED_DRIFT = 0.05;
+// a smaller gap closes by playing this much slower or faster
+export const RATE_NUDGE = 0.1;
+// the playback rates browsers accept
+export const MIN_RATE = 0.0625;
+export const MAX_RATE = 16;
+// a speed the browser refuses: the paused video steps to the clock this often
+export const STEP_MS = 1000;
+// a recording that starts within this many seconds of wall time loads before the clock reaches it
+export const RECORDING_LOOKAHEAD = 3;
 // COCO-17 limbs: face, arms, torso, legs
 export const COCO_LIMBS = [
   [0, 1], [0, 2], [1, 3], [2, 4],
@@ -309,15 +325,279 @@ export class WhepPlayer {
   }
 }
 
+// recorded video
+
+/**
+ * how far (media seconds) a recorded video may run off the replay clock before it seeks: 0.5 s, or a
+ * quarter second of wall time from 4x on, where the replay clock itself steps that much between the
+ * stream's batches (the overlay follows the video's own time, so the skeletons stay on the picture).
+ */
+export function driftTolerance(speed) {
+  const s = finite(speed) && speed > 0 ? speed : 1;
+  return Math.max(RECORDING_DRIFT, 0.25 * s);
+}
+
+/**
+ * [start, end] of a recording in epoch seconds, null without a start. The end comes from the listed
+ * duration or the one the browser read from the file, the shorter of the two; Infinity while neither
+ * is known.
+ */
+export function recordingSpan(file, mediaDuration = null) {
+  const lengths = [file && file.duration, mediaDuration].filter((d) => finite(d) && d > 0);
+  const start = file && finite(file.start) ? file.start : null;
+  if (start == null) return null;
+  return [start, lengths.length ? start + Math.min(...lengths) : Infinity];
+}
+
+/**
+ * the recording of `files` that holds the moment t (epoch), the one that started last when several
+ * do (its last frame stays up at its very end, where a replay that reaches the session's end stops);
+ * null when none does. `durations` maps a file's url to the length the browser read from it.
+ */
+export function recordingAt(files, t, durations = null) {
+  if (!finite(t)) return null;
+  let best = null;
+  for (const f of files || []) {
+    const span = recordingSpan(f, durations && f ? durations.get(f.url) : null);
+    if (span && t >= span[0] && t <= span[1] && (!best || f.start > best.start)) best = f;
+  }
+  return best;
+}
+
+/** the first recording of `files` that starts after t and within `within` seconds of it; null when none does. */
+export function nextRecording(files, t, within) {
+  if (!finite(t) || !(within > 0)) return null;
+  let best = null;
+  for (const f of files || []) {
+    if (f && finite(f.start) && f.start > t && f.start - t <= within && (!best || f.start < best.start)) best = f;
+  }
+  return best;
+}
+
+/** the box a vw x vh video fills inside a w x h element with object-fit: contain; null without sizes. */
+export function containBox(vw, vh, w, hgt) {
+  if (!(vw > 0) || !(vh > 0) || !(w > 0) || !(hgt > 0)) return null;
+  const k = Math.min(w / vw, hgt / vh);
+  return { x: (w - vw * k) / 2, y: (hgt - vh * k) / 2, w: vw * k, h: vh * k };
+}
+
+/** a recording's url for the player: inline, so the dashboard answers the ranges a seek asks for. */
+export function inlineUrl(url) {
+  const u = String(url || '');
+  return `${u}${u.includes('?') ? '&' : '?'}inline=1`;
+}
+
+function mediaErrorText(err) {
+  const code = err && err.code;
+  if (code === 4) return 'The browser could not open the recording: its format does not play here, or the dashboard did not serve it.';
+  if (code === 3) return 'The browser could not decode the recording.';
+  if (code === 2) return 'The recording stopped loading.';
+  return 'The recording could not be played.';
+}
+
+/**
+ * A recorded video kept in step with the replay clock. load(url) points the video at a file (nothing
+ * loads before start()); sync() then runs on every redraw with the media time the clock asks for:
+ * the video seeks when it is more than `tolerance` off, plays at the replay speed (a tenth slower or
+ * faster to close a smaller gap), pauses with the replay and, paused, shows the frame of the moment.
+ * A speed the browser refuses leaves the video paused, stepping to the clock once a second.
+ * onState({state: 'idle'|'loading'|'ready'|'error', message}).
+ */
+export class FilePlayer {
+  constructor({ video = null, onState = () => {}, now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()) } = {}) {
+    this.video = video;
+    this.onState = onState;
+    this.now = now;
+    this.wanted = false;
+    this.url = null;
+    this.source = null;
+    this.state = 'idle';
+    this.message = null;
+    this.hadFrame = false;
+    this.target = null;
+    this.seekTo = null;
+    this.lastSeek = -Infinity;
+    this.stepping = false;
+    this.badRates = new Set();
+    this.listeners = [];
+  }
+
+  emit(state, message = null) {
+    this.state = state;
+    this.message = message;
+    try {
+      this.onState({ state, message });
+    } catch {
+      // a broken listener must not stop the player
+    }
+  }
+
+  start() {
+    this.wanted = true;
+  }
+
+  /** point the video at `url` (`source` names the file for the caller; the url by default). */
+  load(url, source = url) {
+    if (!this.wanted || !this.video || !url || url === this.url) return;
+    this.detach();
+    const v = this.video;
+    this.url = url;
+    this.source = source;
+    const on = (name, fn) => {
+      v.addEventListener(name, fn);
+      this.listeners.push([name, fn]);
+    };
+    on('loadedmetadata', () => {
+      // the seek asked for before the file's length was known
+      if (this.target != null) this.seek(this.target);
+    });
+    on('loadeddata', () => {
+      this.hadFrame = true;
+      this.emit('ready');
+    });
+    on('seeked', () => {
+      if (this.state !== 'error') this.emit(this.hadFrame ? 'ready' : this.state);
+    });
+    on('error', () => this.emit('error', mediaErrorText(v.error)));
+    v.muted = true;
+    v.preload = 'auto';
+    v.src = url;
+    this.emit('loading');
+  }
+
+  detach() {
+    const v = this.video;
+    for (const [name, fn] of this.listeners) v.removeEventListener(name, fn);
+    this.listeners = [];
+    if (this.url && v) {
+      try {
+        v.pause();
+        v.removeAttribute('src');
+        // drops the download and the decoder
+        v.load();
+      } catch {
+        // a detached video
+      }
+    }
+    this.url = null;
+    this.source = null;
+    this.hadFrame = false;
+    this.target = null;
+    this.seekTo = null;
+    this.lastSeek = -Infinity;
+    this.stepping = false;
+  }
+
+  stop() {
+    this.wanted = false;
+    this.detach();
+    this.emit('idle');
+  }
+
+  /** the file's length as the browser read it, null before its metadata */
+  get duration() {
+    const d = this.video ? this.video.duration : null;
+    return this.url && finite(d) && d > 0 ? d : null;
+  }
+
+  /** true while the video shows a frame of the asked moment (the last one stays up during a seek) */
+  get showing() {
+    return !!(this.video && this.url && this.state !== 'error' && this.hadFrame && this.target != null);
+  }
+
+  mediaTime() {
+    return this.video && finite(this.video.currentTime) ? this.video.currentTime : null;
+  }
+
+  seek(t) {
+    try {
+      this.video.currentTime = t;
+    } catch {
+      return;
+    }
+    this.seekTo = t;
+    this.lastSeek = this.now();
+  }
+
+  /** false when the browser refuses `rate` (a refused rate is not asked again). */
+  trySetRate(rate) {
+    const v = this.video;
+    if (this.badRates.has(rate)) return false;
+    if (v.playbackRate === rate) return true;
+    try {
+      v.playbackRate = rate;
+    } catch {
+      this.badRates.add(rate);
+      return false;
+    }
+    if (Math.abs(v.playbackRate - rate) > 1e-9) {
+      this.badRates.add(rate);
+      return false;
+    }
+    return true;
+  }
+
+  pauseVideo() {
+    if (!this.video.paused) this.video.pause();
+  }
+
+  playVideo() {
+    const r = this.video.play();
+    // a play cut short by a pause rejects; the next sync asks again
+    if (r && typeof r.catch === 'function') r.catch(() => {});
+  }
+
+  /**
+   * target: media seconds the replay clock asks for (null: no recording at this moment); speed: the
+   * replay speed; playing: whether the replay clock runs.
+   */
+  sync({ target = null, speed = 1, playing = false, tolerance = driftTolerance(speed) } = {}) {
+    const v = this.video;
+    this.target = finite(target) ? Math.max(0, target) : null;
+    this.stepping = false;
+    if (!v || !this.url || this.state === 'error') return;
+    if (this.target == null) {
+      this.pauseVideo();
+      return;
+    }
+    // the seek waits for the metadata (loadedmetadata seeks to the newest target)
+    if (!(v.readyState >= 1)) return;
+    const drift = v.currentTime - this.target;
+    const inFlight = (tol) => v.seeking && this.seekTo != null && Math.abs(this.seekTo - this.target) <= tol;
+    if (!playing) {
+      this.pauseVideo();
+      if (Math.abs(drift) > PAUSED_DRIFT && !inFlight(PAUSED_DRIFT)) this.seek(this.target);
+      return;
+    }
+    const s = finite(speed) && speed > 0 ? speed : 1;
+    const gap = Math.abs(drift);
+    const nudge = gap > tolerance / 4 && gap <= tolerance && !v.seeking ? (drift > 0 ? 1 - RATE_NUDGE : 1 + RATE_NUDGE) : 1;
+    const nudged = s * nudge;
+    const want = nudged >= MIN_RATE && nudged <= MAX_RATE ? nudged : s;
+    let ok = this.trySetRate(want);
+    if (!ok && want !== s) ok = this.trySetRate(s);
+    if (!ok) {
+      this.stepping = true;
+      this.pauseVideo();
+      if (this.now() - this.lastSeek >= STEP_MS && gap > PAUSED_DRIFT && !v.seeking) this.seek(this.target);
+      return;
+    }
+    if (gap > tolerance && !inFlight(tolerance)) this.seek(this.target);
+    if (v.paused && !v.ended) this.playVideo();
+  }
+}
+
 // drawing
 
 /**
  * Draw one camera's frame set (slim VFA camera {id, w, h, tg, ps, pr}) into a canvas context whose
  * user space is css pixels `width` x `height`. Pupils (tagged persons) in their tag colours with
  * skeleton, label and gaze ray; untagged bodies as thin grey boxes; AprilTag centres as small
- * diamonds. Returns the hit regions of the tagged persons for the hover readout.
+ * diamonds. Returns the hit regions of the tagged persons for the hover readout. `box` ({x, y, w, h}
+ * in css pixels) is where a video shows the camera's picture: the frame set's w x h is stretched onto
+ * it; without one the frame set is fitted into the canvas.
  */
-export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabel = (t) => `Tag ${t}`, opacity = 1, background = null } = {}) {
+export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabel = (t) => `Tag ${t}`, opacity = 1, background = null, box = null } = {}) {
   const regions = [];
   ctx.save();
   ctx.clearRect(0, 0, width, height);
@@ -329,11 +609,11 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
     ctx.restore();
     return regions;
   }
-  const k = Math.min(width / cam.w, height / cam.h);
-  const ox = (width - cam.w * k) / 2;
-  const oy = (height - cam.h * k) / 2;
-  const X = (x) => ox + x * k;
-  const Y = (y) => oy + y * k;
+  const fit = box && box.w > 0 && box.h > 0 ? box : containBox(cam.w, cam.h, width, height);
+  const kx = fit.w / cam.w;
+  const ky = fit.h / cam.h;
+  const X = (x) => fit.x + x * kx;
+  const Y = (y) => fit.y + y * ky;
   ctx.globalAlpha = opacity;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -347,7 +627,7 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
     ctx.strokeStyle = grey;
     ctx.globalAlpha = opacity * 0.7;
     ctx.lineWidth = 1;
-    ctx.strokeRect(X(p.b[0]) + 0.5, Y(p.b[1]) + 0.5, (p.b[2] - p.b[0]) * k, (p.b[3] - p.b[1]) * k);
+    ctx.strokeRect(X(p.b[0]) + 0.5, Y(p.b[1]) + 0.5, (p.b[2] - p.b[0]) * kx, (p.b[3] - p.b[1]) * ky);
   }
   ctx.globalAlpha = opacity;
 
@@ -359,7 +639,7 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = opacity * 0.55;
-      ctx.strokeRect(X(p.b[0]), Y(p.b[1]), (p.b[2] - p.b[0]) * k, (p.b[3] - p.b[1]) * k);
+      ctx.strokeRect(X(p.b[0]), Y(p.b[1]), (p.b[2] - p.b[0]) * kx, (p.b[3] - p.b[1]) * ky);
       ctx.globalAlpha = opacity;
     }
     const kp = Array.isArray(p.k) ? p.k : null;
@@ -493,11 +773,15 @@ export function hitRegion(regions, x, y) {
 
 /**
  * The tiles of the Cameras card. opts: {tagColor(tag), tagLabel(tag), onNote(text)}.
- * Returns {el, update(state), setExpanded(bool), setOptions({overlay, sync}), hasVideo(), suspend(),
- * resume(), destroy()}. suspend() closes every video but keeps the tiles (a page going into the
- * back/forward cache); resume() lets them play again.
+ * Returns {el, update(state), setExpanded(bool), setOptions({overlay, sync}), hasVideo(), hasLiveVideo(),
+ * inspect(), suspend(), resume(), destroy()}. suspend() closes every video but keeps the tiles (a page
+ * going into the back/forward cache); resume() lets them play again.
  * update(state): {cameras: [ids], frameAt(t) -> vfa record, now (stream clock), mode ('follow'|'replay'),
- *                 media (the /media answer | null), serverNow (epoch), vfaLag (s | null)}.
+ *                 live (the session runs), media (the /media answer | null), serverNow (epoch),
+ *                 vfaLag (s | null), recordings ({enabled, files, reason} of the recordings route | null
+ *                 while it is asked), speed (replay speed), running (the replay clock advances)}.
+ * The replay of an ended session plays each camera's recorded file (files[].device is the VFA camera
+ * id) at the clock; a tile whose recording does not cover the moment draws the skeletons alone.
  */
 export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
   const el = h('div', { class: 'cam-wall' });
@@ -526,20 +810,29 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     schedulePlayback();
   };
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
+  // a redraw that moves no video: the clock of the last update is a moment old
   const offTheme = theme.onChange(() => {
     for (const t of tiles.values()) t.drawnKey = null;
-    if (st.last) render(st.last);
+    paintAll();
   });
   const ro = typeof ResizeObserver !== 'undefined'
     ? new ResizeObserver(() => {
       for (const t of tiles.values()) t.drawnKey = null;
-      if (st.last) render(st.last);
+      paintAll();
     })
     : null;
 
   /** why a tile draws skeletons instead of video */
   function skeletonNote(id, s) {
-    if (s.mode !== 'follow') return 'Skeleton view: a replay shows no video.';
+    if (s.mode !== 'follow') {
+      if (s.live) return 'Skeleton view: recorded video plays once the session has ended.';
+      const rec = s.recordings;
+      if (!rec) return 'Skeleton view: looking for the camera recordings.';
+      if (!rec.enabled) return rec.reason ? `Skeleton view. ${rec.reason}` : 'Skeleton view: the recordings are not available.';
+      const unplaced = (rec.files || []).some((f) => f && f.modality === 'video' && String(f.device) === id && !finite(f.start));
+      if (unplaced) return 'Skeleton view: the recording of this camera has no start time, so it cannot follow the clock.';
+      return 'Skeleton view: the dashboard\'s machine holds no recording of this camera.';
+    }
     const media = s.media;
     if (!media) return 'Skeleton view: this session has no live video.';
     const others = (media.streams || []).some((x) => x && x.kind === 'video' && x.ready);
@@ -553,6 +846,13 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     return (media.streams || []).find((x) => x && x.kind === 'video' && x.ready && (x.camera === id || x.base_id === id)) || null;
   }
 
+  /** the camera's recorded video files, in the replay of an ended session */
+  function recordingsFor(id, s) {
+    const rec = s && s.recordings;
+    if (!rec || !rec.enabled || s.mode !== 'replay' || s.live) return [];
+    return (rec.files || []).filter((f) => f && f.modality === 'video' && String(f.device) === id && finite(f.start) && f.url);
+  }
+
   function makeTile(id) {
     const name = h('span', { class: 'cam-name', text: id });
     const age = h('span', { class: 'badge cam-age num', text: fmt.na, title: 'Age of the frame set drawn' });
@@ -560,14 +860,16 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     const playBtn = h('button', { class: 'btn sm', attrs: { type: 'button' }, hidden: true }, icon('play', 12), h('span', { text: 'Play' }));
     const head = h('div', { class: 'cam-head' }, name, age, stateEl, h('span', { class: 'spacer' }), playBtn);
     const video = h('video', { class: 'cam-video', attrs: { muted: true, playsinline: true, autoplay: true }, muted: true, hidden: true });
+    // the recorded file of a replay: hidden (not display: none, so it keeps loading) until it has a frame
+    const fvideo = h('video', { class: 'cam-video cam-file', attrs: { muted: true, playsinline: true, preload: 'auto', disablepictureinpicture: true }, muted: true, style: { visibility: 'hidden' } });
     const canvas = h('canvas', { class: 'cam-canvas', attrs: { role: 'img', 'aria-label': `Camera ${id}: skeletons of the newest frame set` } });
-    const stage = h('div', { class: 'cam-stage' }, video, canvas);
+    const stage = h('div', { class: 'cam-stage' }, video, fvideo, canvas);
     const note = h('p', { class: 'cam-note' });
     const tileEl = h('div', { class: 'cam-tile', dataset: { camera: id } }, head, stage, note);
     const tile = {
-      id, el: tileEl, name, age, stateEl, playBtn, video, canvas, stage, note,
+      id, el: tileEl, name, age, stateEl, playBtn, video, fvideo, canvas, stage, note,
       onScreen: !io, player: null, playerState: null, stream: null, regions: [], drawnKey: null, aspect: 16 / 9,
-      videoMode: false,
+      videoMode: false, kind: null, files: [], file: null, next: null, durations: new Map(), onVideo: false,
     };
     playBtn.addEventListener('click', () => {
       st.priority = [id, ...st.priority.filter((x) => x !== id)];
@@ -639,8 +941,24 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
         t.playBtn.hidden = true;
         continue;
       }
-      if (active.has(t.id)) {
-        if (!t.player || t.player.url !== t.url) {
+      if (active.has(t.id) && t.kind === 'file') {
+        if (!(t.player instanceof FilePlayer)) {
+          if (t.player) t.player.stop();
+          t.playerState = null;
+          // the file to load is picked from the clock on the next update
+          t.player = new FilePlayer({
+            video: t.fvideo,
+            onState: (s) => {
+              t.playerState = s;
+              renderTileState(t);
+              if (st.expanded && st.last) paint(t, st.last);
+            },
+          });
+          t.player.start();
+        }
+        t.playBtn.hidden = true;
+      } else if (active.has(t.id)) {
+        if (!t.player || t.player instanceof FilePlayer || t.player.url !== t.url) {
           if (t.player) t.player.stop();
           t.player = new WhepPlayer({
             url: t.url,
@@ -672,7 +990,10 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       return;
     }
     if (!t.player) t.stateEl.textContent = t.playBtn.hidden ? 'Paused' : `Up to ${MAX_PLAYING} cameras play at once`;
-    else if (!ps || ps.state === 'connecting') t.stateEl.textContent = 'Connecting';
+    else if (t.player instanceof FilePlayer) {
+      const loading = t.file && (!ps || ps.state === 'loading' || ps.state === 'idle');
+      t.stateEl.textContent = ps && ps.state === 'error' ? 'Could not play' : loading ? 'Loading the recording' : '';
+    } else if (!ps || ps.state === 'connecting') t.stateEl.textContent = 'Connecting';
     else if (ps.state === 'playing') t.stateEl.textContent = '';
     else if (ps.state === 'retrying') t.stateEl.textContent = `${ps.message} Retrying in ${ps.retryIn} s.`;
     else t.stateEl.textContent = ps.message || '';
@@ -704,23 +1025,73 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     for (const t of tiles.values()) {
       const stream = streamFor(t.id, s);
       const url = stream ? whepUrl(s.media.webrtc, stream.path) : null;
-      const videoMode = !!stream;
-      if (videoMode !== t.videoMode || url !== t.url) {
+      t.files = stream ? [] : recordingsFor(t.id, s);
+      const kind = stream ? 'live' : t.files.length ? 'file' : null;
+      pickRecording(t, s, kind);
+      // a recorded camera takes a player (and one of the MAX_PLAYING) only while a file holds the clock
+      const videoMode = kind === 'live' || (kind === 'file' && !!(t.file || t.next));
+      if (kind !== t.kind || url !== t.url || videoMode !== t.videoMode) {
+        t.kind = kind;
         t.videoMode = videoMode;
         t.url = url;
-        t.video.hidden = !videoMode;
+        t.video.hidden = kind !== 'live';
         t.el.classList.toggle('is-video', videoMode);
         t.drawnKey = null;
       }
     }
     schedulePlayback();
     if (!st.expanded) return;
-    const resolve = colorResolver(el);
     for (const t of tiles.values()) {
-      // the overlay of a video shows the frame set at the video's (delayed) time
-      let at = s.now;
-      let delayNote = '';
-      if (t.videoMode && finite(s.serverNow)) {
+      if (t.kind === 'file') syncRecording(t, s);
+      paint(t, s);
+    }
+  }
+
+  /** the recording that holds the clock (t.file) or, when none does, the one about to (t.next) */
+  function pickRecording(t, s, kind) {
+    const p = t.player instanceof FilePlayer ? t.player : null;
+    // the length the browser read ends a file that is shorter than its listing says
+    if (p && p.source && p.duration != null) t.durations.set(p.source, p.duration);
+    const file = kind === 'file' ? recordingAt(t.files, s.now, t.durations) : null;
+    const speed = finite(s.speed) && s.speed > 0 ? s.speed : 1;
+    t.next = kind === 'file' && !file ? nextRecording(t.files, s.now, RECORDING_LOOKAHEAD * speed) : null;
+    if (file !== t.file) t.drawnKey = null;
+    t.file = file;
+  }
+
+  /** keep the video of the recording at the clock's moment (a coming one loads, paused) */
+  function syncRecording(t, s) {
+    const p = t.player instanceof FilePlayer ? t.player : null;
+    if (!p) return;
+    const pick = t.file || t.next;
+    if (pick) p.load(inlineUrl(pick.url), pick.url);
+    const target = t.file && p.source === t.file.url ? s.now - t.file.start : null;
+    p.sync({ target, speed: s.speed, playing: !!s.running, tolerance: driftTolerance(s.speed) });
+  }
+
+  function paintAll() {
+    if (!st.expanded || !st.last) return;
+    for (const t of tiles.values()) paint(t, st.last);
+  }
+
+  /** what a recorded video's tile says under it */
+  function recordingNote(t, s) {
+    const p = t.player instanceof FilePlayer ? t.player : null;
+    if (p && p.state === 'error') return `Skeleton view. ${p.message || 'The recording could not be played.'}`;
+    if (!t.file) return 'No recording at this moment.';
+    if (!p) return '';
+    if (p.stepping) return `This browser cannot play the video at ${s.speed}x: it steps once a second.`;
+    return t.file.host ? `Recorded video from ${t.file.host}.` : 'Recorded video.';
+  }
+
+  /** draw one tile: the overlay of a video shows the frame set at the video's own time */
+  function paint(t, s) {
+    let at = s.now;
+    let delayNote = '';
+    let picture = null;
+    if (t.kind === 'live') {
+      picture = t.video;
+      if (finite(s.serverNow)) {
         const lag = finite(s.vfaLag) ? Math.max(0, s.vfaLag) : 0;
         let applied = 0;
         if (st.sync && t.player && supportsVideoDelay()) {
@@ -729,39 +1100,57 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
         } else if (t.player) t.player.setDelay(0);
         at = s.serverNow - applied;
       }
-      const rec = s.frameAt ? s.frameAt(at) : null;
-      const cam = rec ? (rec.c || []).find((c) => String(c.id) === t.id) : null;
-      const { w, h: hgt, dpr } = sizeCanvas(t, cam);
-      const showOverlay = !t.videoMode || st.overlay;
-      const key = `${rec ? rec.t : 'none'}|${w}x${hgt}|${showOverlay}|${t.videoMode}`;
-      if (key !== t.drawnKey) {
-        t.drawnKey = key;
-        const ctx = t.canvas.getContext('2d');
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        if (!showOverlay) {
-          ctx.clearRect(0, 0, w, hgt);
-          t.regions = [];
-        } else {
-          t.regions = drawCamera(ctx, cam, {
-            width: w, height: hgt, resolve, tagColor, tagLabel,
-            opacity: t.videoMode ? 0.8 : 1,
-            background: t.videoMode ? null : resolve('var(--surface-2)'),
-          });
-          if (!cam && !t.videoMode) {
-            ctx.fillStyle = resolve('var(--muted)');
-            ctx.font = '500 13px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText(rec ? 'This camera is missing from the newest frame set.' : 'No frame set yet.', w / 2, hgt / 2);
-            ctx.textAlign = 'start';
-          }
+    } else if (t.kind === 'file') {
+      const p = t.player instanceof FilePlayer ? t.player : null;
+      if (p && t.file && p.source === t.file.url && p.showing && p.mediaTime() != null) {
+        picture = t.fvideo;
+        at = t.file.start + p.mediaTime();
+      }
+    }
+    // a tile without a picture draws the skeletons alone, on its own background
+    const onVideo = !!picture;
+    if (onVideo !== t.onVideo) {
+      t.onVideo = onVideo;
+      t.drawnKey = null;
+    }
+    t.fvideo.style.visibility = onVideo && t.kind === 'file' ? 'visible' : 'hidden';
+    const rec = s.frameAt ? s.frameAt(at) : null;
+    const cam = rec ? (rec.c || []).find((c) => String(c.id) === t.id) : null;
+    const { w, h: hgt, dpr } = sizeCanvas(t, cam);
+    // object-fit: contain letterboxes a picture whose shape differs from the frame set's
+    const box = picture ? containBox(picture.videoWidth, picture.videoHeight, w, hgt) : null;
+    const showOverlay = !onVideo || st.overlay;
+    const boxKey = box ? `${box.x.toFixed(1)},${box.y.toFixed(1)},${box.w.toFixed(1)},${box.h.toFixed(1)}` : '';
+    const key = `${rec ? rec.t : 'none'}|${w}x${hgt}|${showOverlay}|${t.kind}|${onVideo}|${boxKey}`;
+    if (key !== t.drawnKey) {
+      t.drawnKey = key;
+      const resolve = colorResolver(el);
+      const ctx = t.canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!showOverlay) {
+        ctx.clearRect(0, 0, w, hgt);
+        t.regions = [];
+      } else {
+        t.regions = drawCamera(ctx, cam, {
+          width: w, height: hgt, resolve, tagColor, tagLabel, box,
+          opacity: onVideo ? 0.8 : 1,
+          background: onVideo ? null : resolve('var(--surface-2)'),
+        });
+        if (!cam && !onVideo) {
+          ctx.fillStyle = resolve('var(--muted)');
+          ctx.font = '500 13px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(rec ? 'This camera is missing from the newest frame set.' : 'No frame set yet.', w / 2, hgt / 2);
+          ctx.textAlign = 'start';
         }
       }
-      const ageS = rec ? (finite(s.serverNow) && s.mode === 'follow' ? s.serverNow - rec.t : s.now - rec.t) : null;
-      t.age.textContent = ageS == null ? 'no frame' : ageS < 1.5 ? 'now' : fmt.ago(ageS);
-      t.age.dataset.stale = ageS != null && ageS > 10 ? 'true' : 'false';
-      if (t.videoMode) t.note.textContent = delayNote;
-      else t.note.textContent = skeletonNote(t.id, s);
     }
+    const ageS = rec ? (finite(s.serverNow) && s.mode === 'follow' ? s.serverNow - rec.t : at - rec.t) : null;
+    t.age.textContent = ageS == null ? 'no frame' : ageS < 1.5 ? 'now' : fmt.ago(ageS);
+    t.age.dataset.stale = ageS != null && ageS > 10 ? 'true' : 'false';
+    if (t.kind === 'live') t.note.textContent = delayNote;
+    else if (t.kind === 'file') t.note.textContent = recordingNote(t, s);
+    else t.note.textContent = skeletonNote(t.id, s);
   }
 
   return {
@@ -780,10 +1169,26 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       if (overlay != null) st.overlay = !!overlay;
       if (sync != null) st.sync = !!sync;
       for (const t of tiles.values()) t.drawnKey = null;
-      if (st.last) render(st.last);
+      paintAll();
     },
     hasVideo() {
       return Array.from(tiles.values()).some((t) => t.videoMode);
+    },
+    hasLiveVideo() {
+      return Array.from(tiles.values()).some((t) => t.kind === 'live');
+    },
+    /** each tile's video as it stands, for checks from the browser console */
+    inspect() {
+      return Array.from(tiles.values()).map((t) => {
+        const p = t.player instanceof FilePlayer ? t.player : null;
+        const v = t.kind === 'file' ? t.fvideo : t.video;
+        return {
+          id: t.id, kind: t.kind, playing: !!t.player, state: t.playerState ? t.playerState.state : null,
+          file: t.file ? t.file.id : null, target: p ? p.target : null, time: v.currentTime, paused: v.paused,
+          rate: v.playbackRate, onVideo: t.onVideo, stepping: p ? p.stepping : false,
+          picture: [v.videoWidth, v.videoHeight], stage: [t.stage.clientWidth, t.stage.clientHeight], note: t.note.textContent,
+        };
+      });
     },
     playing() {
       return Array.from(tiles.values()).filter((t) => t.player).map((t) => t.id);

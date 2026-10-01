@@ -73,6 +73,14 @@
     .an-legend-row .chart-scale { margin-top: 0; }
     .an-dl { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
     .an-dl-off { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+    .an-dl.an-recs { gap: 10px; }
+    .an-rec { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: start; gap: 2px 8px; font-size: 13px; }
+    .an-rec > .icon { margin-top: 3px; color: var(--ink-2); }
+    .an-rec-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .an-rec-label { overflow-wrap: anywhere; }
+    .an-rec-meta { font-size: 12px; font-variant-numeric: tabular-nums; }
+    .an-rec-links { display: flex; flex-wrap: wrap; gap: 4px 14px; padding-top: 1px; white-space: nowrap; }
+    .an-rec-state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; font-size: 13px; }
     .an-details > summary { cursor: pointer; color: var(--link); font-size: 13px; }
     .an-details[open] > summary { margin-bottom: 12px; }
     .an-details .table-wrap { margin-top: 12px; }
@@ -113,6 +121,7 @@
       .an-range-hint { display: none; }
       .tx-row { grid-template-columns: auto minmax(0, 1fr); }
       .tx-text { grid-column: 1 / -1; }
+      .an-rec-links { grid-column: 2; }
       .an-menu-pop { right: auto; left: 0; }
     }
   </style>

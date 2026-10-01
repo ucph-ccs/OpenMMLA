@@ -28,7 +28,7 @@ import logging
 import mimetypes
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from celery import Celery
 from flask import Flask, Response, request, send_file, send_from_directory
@@ -38,7 +38,8 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 import jobs as report_jobs  # noqa: E402
-from media import MediaServer  # noqa: E402
+import recordings as raw_recordings  # noqa: E402
+from media import MediaServer, rfc3339  # noqa: E402
 from store import JOBS, PART_JOB, ReportStore  # noqa: E402
 from stream import FEEDS, clamp_backfill, clamp_speed, live_stream  # noqa: E402
 
@@ -64,6 +65,8 @@ STATE_TTL = 2.0
 HEALTH_TTL = 10.0
 GZIP_MIN_BYTES = 32 * 1024
 EXPORT_NAMES = ("transcript.txt", "transcript.srt", "window_features.csv", "report.json")
+# a stream recording shorter than this is not offered (the TUI's Export Streams skips it too)
+SERVER_CLIP_MIN_SECONDS = 1.0
 
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/javascript", ".mjs")
@@ -87,6 +90,47 @@ def _load_config() -> tuple[dict, str | None]:
 
 
 CONFIG, CONFIG_ERROR = _load_config()
+
+RAW_MEDIA_OFF = "Raw recordings are turned off on this dashboard (Exports.raw_media in config.yml)."
+RAW_MEDIA_OFF_ENV = "Raw recordings are turned off on this dashboard (DASHBOARD_RAW_MEDIA)."
+RAW_MEDIA_OFF_UNREAD = ("Raw recordings are turned off on this dashboard because its configuration could not "
+                        "be read (config.yml or System Settings).")
+
+
+def _switch(value) -> bool | None:
+    """a yes/no setting as a bool, None when it says neither."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def raw_media_state() -> tuple[bool, str | None]:
+    """(whether the raw recordings are listed and served, why not). DASHBOARD_RAW_MEDIA overrides
+    Exports.raw_media of the merged config; on when neither says anything, off when either holds
+    something that is neither yes nor no, an empty value included (they guard footage of children, so
+    a typo keeps them off), and off when config.yml exists but the merged config could not be read
+    (it may say false)."""
+    env = (os.environ.get("DASHBOARD_RAW_MEDIA") or "").strip()
+    if env:
+        on = _switch(env)
+        return (True, None) if on else (False, RAW_MEDIA_OFF_ENV)
+    if CONFIG_ERROR and os.path.isfile(config_path):
+        return False, RAW_MEDIA_OFF_UNREAD
+    if "Exports" not in CONFIG or CONFIG.get("Exports") is None:
+        return True, None
+    section = CONFIG.get("Exports")
+    if not isinstance(section, dict):
+        return False, RAW_MEDIA_OFF
+    if "raw_media" not in section:
+        return True, None
+    if _switch(section.get("raw_media")) is True:
+        return True, None
+    return False, RAW_MEDIA_OFF
 
 
 def _redis_url(config: dict) -> str | None:
@@ -684,10 +728,10 @@ def _request_hostname() -> str | None:
         return None
 
 
-@app.route("/api/sessions/<sid>/media")
-def api_media(sid):
-    check_sid(sid)
-    want_recordings = request.args.get("recordings") in ("1", "true", "yes")
+def _media_inputs(sid: str) -> tuple:
+    """(MongoDB answered, the session's document, its devices, t0, t1, the ApiError of a span
+    lookup that failed) for the stream server's view of a session: the span from the session list
+    or InfluxDB, else from the document."""
     db = mongo_db()
     doc = None
     if db is not None:
@@ -697,19 +741,111 @@ def api_media(sid):
             logger.info("MongoDB read of %s failed: %s", sid, type(exc).__name__)
     devices = sessions.mongo_devices(doc) if doc else None
     t0 = t1 = None
+    failed = None
     try:
         span = _span(sid)
         t0, t1 = span.get("t0"), span.get("last_event") or span.get("t1")
     except InfluxUnavailable:
         pass
     except ApiError as exc:
-        if exc.status not in (404, 503) or (exc.status == 404 and doc is None):
-            raise
+        failed = exc
     if t0 is None and doc:
         t0 = common.to_epoch(doc.get("start_time"))
         t1 = common.to_epoch(doc.get("end_time")) or time.time()
-    body = MEDIA.session_media(doc, devices, db is not None, t0, t1, want_recordings, _request_hostname())
+    return db is not None, doc, devices, t0, t1, failed
+
+
+@app.route("/api/sessions/<sid>/media")
+def api_media(sid):
+    check_sid(sid)
+    # while Exports.raw_media is off, neither the recorded stretches nor the playback server that
+    # serves them go out (the live view only needs webrtc)
+    raw_media_on, _ = raw_media_state()
+    want_recordings = raw_media_on and request.args.get("recordings") in ("1", "true", "yes")
+    mongo_ok, doc, devices, t0, t1, failed = _media_inputs(sid)
+    if failed is not None and (failed.status not in (404, 503) or (failed.status == 404 and doc is None)):
+        raise failed
+    body = MEDIA.session_media(doc, devices, mongo_ok, t0, t1, want_recordings, _request_hostname())
+    if not raw_media_on:
+        body["playback"] = None
     return json_response(body)
+
+
+def _server_recordings(mongo_ok: bool, doc, devices, t0, t1) -> list[dict]:
+    """MediaMTX's recordings of the session's stream paths within its span: one entry per unbroken
+    stretch of a path (a stream restarted during the session gives two), each with the playback
+    server's URL of that stretch (fMP4, as Sessions -> Export Streams fetches it); [] without the
+    session's streams, a stream server that answers or its playback server."""
+    if doc is None or t0 is None or t1 is None:
+        return []
+    ready, _ = MEDIA.ready_paths()
+    if ready is None:
+        # the API did not answer, and the playback server beside it would make every path wait
+        # out its timeout
+        return []
+    body = MEDIA.session_media(doc, devices, mongo_ok, t0, t1, True, _request_hostname())
+    playback = body.get("playback")
+    if not playback:
+        return []
+    kinds = {stream.get("path"): stream.get("kind") for stream in body.get("streams") or []}
+    out = []
+    for item in body.get("recordings") or []:
+        for start, duration in item.get("spans") or []:
+            if duration < SERVER_CLIP_MIN_SECONDS:
+                continue
+            query = urlencode({"path": item["path"], "start": rfc3339(start), "duration": f"{duration:.3f}"})
+            out.append({"path": item["path"], "kind": kinds.get(item["path"]) or "video",
+                        "spans": [[start, duration]], "url": f"{playback}/get?{query}"})
+    return out
+
+
+@app.route("/api/sessions/<sid>/recordings")
+def api_recordings(sid):
+    """the session's raw camera and microphone files on this machine (artifacts/<sid>/collection/)
+    and MediaMTX's recordings of its streams, for the downloads; nothing while Exports.raw_media
+    (or DASHBOARD_RAW_MEDIA) turns them off. The files are listed without InfluxDB or MongoDB;
+    those only add each file's offset from the session start and the stream recordings."""
+    check_sid(sid)
+    enabled, reason = raw_media_state()
+    if not enabled:
+        return json_response({"enabled": False, "files": [], "server": [], "reason": reason})
+    files = raw_recordings.list_recordings(raw_recordings.artifacts_root(), sid)
+    try:
+        mongo_ok, doc, devices, t0, t1, _ = _media_inputs(sid)
+    except Exception as exc:
+        logger.info("span of %s for its recordings: %s", sid, type(exc).__name__)
+        mongo_ok, doc, devices, t0, t1 = False, None, None, None, None
+    for record in files:
+        record["url"] = f"/api/sessions/{sid}/recordings/{quote(record['id'], safe='')}"
+        start = record.get("start")
+        record["offset"] = round(start - float(t0), 3) if start is not None and t0 is not None else None
+    try:
+        server = _server_recordings(mongo_ok, doc, devices, t0, t1)
+    except Exception as exc:
+        logger.info("stream recordings of %s: %s", sid, type(exc).__name__)
+        server = []
+    return json_response({"enabled": True, "files": files, "server": server, "reason": None})
+
+
+@app.route("/api/sessions/<sid>/recordings/<rec_id>")
+def api_recording_file(sid, rec_id):
+    """one file the recordings route lists, with HTTP ranges (a player seeks in it); a download
+    unless ?inline=1."""
+    check_sid(sid)
+    if not raw_recordings.REC_ID_RE.fullmatch(rec_id or ""):
+        raise ApiError(400, "That is not a valid recording id.")
+    enabled, reason = raw_media_state()
+    if not enabled:
+        raise ApiError(403, reason)
+    path = raw_recordings.resolve(raw_recordings.artifacts_root(), sid, rec_id)
+    if path is None:
+        raise ApiError(404, "This session has no recording with this id on the dashboard's machine.")
+    inline = request.args.get("inline") in ("1", "true", "yes")
+    response = send_file(path, mimetype=raw_recordings.media_type(path), as_attachment=not inline,
+                         download_name=raw_recordings.download_name(sid, rec_id, path), conditional=True,
+                         max_age=None)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 def _attachment(response: Response, sid: str, name: str) -> Response:

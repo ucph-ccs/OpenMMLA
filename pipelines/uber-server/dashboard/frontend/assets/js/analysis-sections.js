@@ -6,7 +6,7 @@
  * own totals are shown wherever its rule cannot be rebuilt exactly from the arrays.
  */
 
-import { h, clear, fmt, icon, sortTags, voiceLabel, segmented, emptyState, downloadLink } from './core.js';
+import { h, s as svgEl, clear, fmt, api, icon, sortTags, voiceLabel, segmented, emptyState, downloadLink } from './core.js';
 import {
   card, legend, timeline, barList, stackedBars, heatMatrix, lineChart, histogram, networkGraph, statTile,
   bullet, scaleLegend, seqColor,
@@ -2446,10 +2446,90 @@ export function exportLinks(ctx) {
   const has = { asr: !!mods.asr, ips: !!mods.ips, vfa: !!mods.vfa };
   const videoReady = !!ctx.parts.timeline;
   return [
-    { group: 'Report', items: [{ name: 'report.json', label: 'Report (JSON, every computed part)' }, { name: 'window_features.csv', label: 'Window features (CSV, 10 s windows)', disabled: !videoReady, reason: 'after the video analysis' }] },
-    { group: 'Transcript', items: [{ name: 'transcript.txt', label: 'Transcript (text)', disabled: !has.asr }, { name: 'transcript.srt', label: 'Transcript (subtitles, SRT)', disabled: !has.asr }] },
-    { group: 'Raw events (JSON lines)', items: EVENT_TYPES.map(([t, label]) => ({ name: `${t}.jsonl`, label, disabled: !has[t.slice(0, 3)] })) },
+    { key: 'report', group: 'Report', items: [{ name: 'report.json', label: 'Report (JSON, every computed part)' }, { name: 'window_features.csv', label: 'Window features (CSV, 10 s windows)', disabled: !videoReady, reason: 'after the video analysis' }] },
+    { key: 'transcript', group: 'Transcript', items: [{ name: 'transcript.txt', label: 'Transcript (text)', disabled: !has.asr }, { name: 'transcript.srt', label: 'Transcript (subtitles, SRT)', disabled: !has.asr }] },
+    { key: 'events', group: 'Raw events (JSON lines)', items: EVENT_TYPES.map(([t, label]) => ({ name: `${t}.jsonl`, label, disabled: !has[t.slice(0, 3)] })) },
   ].map((g) => ({ ...g, items: g.items.map((it) => ({ ...it, href: `${base}${it.name}` })) }));
+}
+
+// raw recordings: the capture files the dashboard's machine keeps under artifacts/<session>/
+
+/** "32 KB", "804 MB", "1.2 GB" (decimal units, as the Finder counts them). */
+export function fileSize(bytes) {
+  if (!finite(bytes) || bytes < 0) return null;
+  if (bytes < 1e3) return `${fmt.int(bytes)}${NBSP}B`;
+  if (bytes < 999.5e3) return `${fmt.int(bytes / 1e3)}${NBSP}KB`;
+  if (bytes < 999.5e6) return `${fmt.int(bytes / 1e6)}${NBSP}MB`;
+  return `${fmt.num(bytes / 1e9, 1)}${NBSP}GB`;
+}
+
+/** a recording's length in whole minutes once it passes one: "45 s", "35 min", "1 h 05 min". */
+function recordingLength(sec) {
+  if (!finite(sec) || sec <= 0) return null;
+  return fmt.duration(sec < 59.5 ? Math.max(1, Math.round(sec)) : Math.round(sec / 60) * 60);
+}
+
+/** "MP4, 35 min, 804 MB" (parts it does not know are left out). */
+export function recordingMeta(rec) {
+  return [rec.format ? String(rec.format).toUpperCase() : null, recordingLength(rec.duration), fileSize(rec.size)]
+    .filter(Boolean).join(', ');
+}
+
+function withQuery(url, query) {
+  return `${url}${url.includes('?') ? '&' : '?'}${query}`;
+}
+
+// core.js has no microphone; this one sits on the same 24 px grid and stroke as its icons
+function micIcon(size = 14) {
+  return svgEl('svg', {
+    class: 'icon icon-mic',
+    attrs: {
+      viewBox: '0 0 24 24', width: size, height: size, fill: 'none', stroke: 'currentColor',
+      'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false',
+    },
+  }, svgEl('rect', { attrs: { x: 9, y: 2, width: 6, height: 12, rx: 3 } }), svgEl('path', { attrs: { d: 'M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8' } }));
+}
+
+function mediaIcon(kind) {
+  if (kind === 'audio') return micIcon(14);
+  return icon(kind === 'video' ? 'camera' : 'monitor', 14);
+}
+
+function recordingLink(href, text, iconName, ariaLabel, newTab) {
+  return h('a', {
+    class: 'download-link',
+    href,
+    attrs: newTab ? { target: '_blank', rel: 'noopener', 'aria-label': ariaLabel } : { download: '', 'aria-label': ariaLabel },
+  }, icon(iconName, 14), h('span', { text }));
+}
+
+function recordingRow(kind, label, meta, links) {
+  return h('li', { class: 'an-rec' },
+    mediaIcon(kind),
+    h('div', { class: 'an-rec-text' },
+      h('span', { class: 'an-rec-label', text: label }),
+      meta ? h('span', { class: 'an-rec-meta muted', text: meta }) : null),
+    h('div', { class: 'an-rec-links' }, links));
+}
+
+function fileRow(rec) {
+  const label = rec.label || rec.id;
+  return recordingRow(rec.modality, label, recordingMeta(rec), [
+    recordingLink(rec.url, 'Download', 'download', `Download ${label}`, false),
+    recordingLink(withQuery(rec.url, 'inline=1'), 'Play', 'play', `Play ${label} in a new tab`, true),
+  ]);
+}
+
+function serverRow(entry) {
+  const spans = entry.spans.filter((sp) => Array.isArray(sp) && finite(sp[1]));
+  const total = sum(spans.map((sp) => sp[1]));
+  const len = recordingLength(total);
+  const meta = [len, spans.length > 1 ? `${fmt.int(spans.length)} parts` : null, finite(spans[0] && spans[0][0]) ? `from ${fmt.hm(spans[0][0])}` : null]
+    .filter(Boolean).join(', ');
+  const label = `Stream ${entry.path}`;
+  return recordingRow(entry.kind, label, meta, entry.url
+    ? [recordingLink(entry.url, 'Play', 'play', `Play ${label} in a new tab`, true)]
+    : [h('span', { class: 'muted an-small', text: 'Playback is off' })]);
 }
 
 function dataSection(ctx) {
@@ -2459,6 +2539,8 @@ function dataSection(ctx) {
   const provCard = card({ title: 'Devices and provenance', subtitle: 'What recorded the session and which code computed it', span: 12 });
   sec.grid.append(covCard.el, dlCard.el, provCard.el);
   let provOpen = false;
+  // the raw recordings are asked for once, when this section first renders
+  const recs = { state: 'idle', data: null, error: null };
 
   function renderCoverage() {
     const meta = ctx.meta;
@@ -2491,9 +2573,58 @@ function dataSection(ctx) {
     ], rows, 'Coverage per modality'));
   }
 
+  async function loadRecordings() {
+    recs.state = 'loading';
+    recs.error = null;
+    const res = await api(`/api/sessions/${encodeURIComponent(ctx.sid)}/recordings`);
+    if (res.ok && res.data && Array.isArray(res.data.files)) {
+      recs.state = 'ready';
+      recs.data = res.data;
+    } else {
+      recs.state = 'error';
+      recs.error = res.ok ? 'the answer had no file list' : String(res.error || '').replace(/[.\s]+$/, '');
+    }
+    renderDownloads();
+  }
+
+  function recordingsGroup() {
+    const out = [h('h3', { class: 'an-sub', text: 'Recordings' })];
+    const quiet = (text) => h('p', { class: 'muted an-rec-state', text });
+    if (recs.state === 'error') {
+      out.push(h('p', { class: 'muted an-rec-state' },
+        h('span', { text: `Could not list the recordings${recs.error ? ` (${recs.error})` : ''}. ` }),
+        h('button', {
+          class: 'btn sm', attrs: { type: 'button' }, text: 'Retry',
+          on: { click: () => { loadRecordings(); renderDownloads(); } },
+        })));
+      return out;
+    }
+    if (recs.state !== 'ready') {
+      out.push(quiet('Looking for recordings.'));
+      return out;
+    }
+    const d = recs.data;
+    if (!d.enabled) {
+      out.push(quiet(d.reason || 'Raw recordings are turned off on this dashboard.'));
+      return out;
+    }
+    const files = d.files.filter((f) => f && f.url);
+    out.push(files.length
+      ? h('ul', { class: 'an-dl an-recs' }, files.map(fileRow))
+      : quiet("No recordings of this session on the dashboard's machine."));
+    const server = (Array.isArray(d.server) ? d.server : []).filter((e) => e && e.path && Array.isArray(e.spans) && e.spans.length);
+    if (server.length) {
+      out.push(h('h3', { class: 'an-sub', text: 'Stream recordings (MediaMTX, kept 72 h)' }),
+        h('ul', { class: 'an-dl an-recs' }, server.map(serverRow)));
+    }
+    return out;
+  }
+
   function renderDownloads() {
     clear(dlCard.body);
     for (const g of exportLinks(ctx)) {
+      // the recordings sit between the transcript and the raw events
+      if (g.key === 'events') dlCard.body.append(...recordingsGroup());
       const ul = h('ul', { class: 'an-dl' });
       for (const it of g.items) {
         ul.appendChild(h('li', {}, it.disabled
@@ -2544,6 +2675,7 @@ function dataSection(ctx) {
     ...sec,
     render() {
       renderCoverage();
+      if (recs.state === 'idle' && ctx.sid) loadRecordings();
       renderDownloads();
       renderProvenance();
     },
