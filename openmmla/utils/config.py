@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,23 @@ import yaml
 
 SYSTEM_SERVICES_REL_PATH = Path("config") / "system_services.yml"
 SYSTEM_SERVICE_SECTIONS = ("InfluxDB", "MongoDB", "MQTT", "Redis")
+
+# a <...> left from a template anywhere in a value: <uber-server> on its own,
+# or inside a URL (http://<uber-server>:8086)
+_PLACEHOLDER_RE = re.compile(r"<[^<>]*>")
+
+
+def holds_placeholder(value: Any) -> bool:
+    """whether a config value still holds an unfilled <...> placeholder, on its
+    own or anywhere inside it: such a value names nothing yet."""
+    return isinstance(value, str) and _PLACEHOLDER_RE.search(value) is not None
+
+
+def placeholder_fields(section: Any) -> list[str]:
+    """the keys of a config section whose value still holds a placeholder."""
+    if not isinstance(section, dict):
+        return []
+    return [str(key) for key, value in section.items() if holds_placeholder(value)]
 
 
 def get_bases(config: dict) -> list[dict]:
@@ -273,8 +291,16 @@ def merge_system_services(
         if section in pinned and isinstance(config.get(section), dict):
             continue
         section_data = system_config.get(section)
-        if isinstance(section_data, dict):
-            merged[section] = dict(section_data)
+        if not isinstance(section_data, dict):
+            continue
+        # a section of the store still holding a placeholder (a form saved, or
+        # the template copied, before its host was filled in) is not set: the
+        # pipeline keeps its own, whole, rather than connect to <uber-server>
+        if placeholder_fields(section_data):
+            continue
+        # field by field: what the store does not say, the pipeline still does
+        own = config.get(section)
+        merged[section] = {**(own if isinstance(own, dict) else {}), **section_data}
     return merged
 
 
