@@ -42,7 +42,7 @@ from .input import get_base_type, get_function_base, get_name, get_base_mode, ge
 from openmmla.utils.config import get_bases, get_base_by_id
 
 
-def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = True,
+def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = False,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                    hsr: bool = True, session_id: str | None = None, base: str | None = None,
                    speakers: str | None = None, language: str | None = None, diarize: bool = False,
@@ -106,7 +106,7 @@ class ASRBase(Base):
     speech_gate = 'absolute'  # absolute: rms/peak thresholds after gain; relative: raw snr over the base's floor
     speech_gate_snr_db = SPEECH_GATE_SNR_DB  # the relative gate's dB over the floor
 
-    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'capture', store: bool = True,
+    def __init__(self, project_dir: str | None, config_path: str, mode: str = 'capture', store: bool = False,
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                  hsr: bool = True, session_id: str | None = None, base: str | None = None,
                  speakers: str | list[str] | None = None, registration: str | None = None,
@@ -117,7 +117,7 @@ class ASRBase(Base):
             project_dir: path to the project directory
             config_path: path to the configuration file
             mode: operating mode, 'capture', 'analyze', or 'live' (default: 'capture')
-            store: whether to store audio files (default: True)
+            store: whether to store audio files (default: False)
             vad: whether to apply Voice Activity Detection (default: True)
             nr: whether to apply noise reduction (default: True)
             tr: whether to transcribe speech to text (default: True)

@@ -2728,7 +2728,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("--speakers", "Speakers", "speakers", None, per_instance="-nb", under="-b",
                      shown_by=_ASR_PARTICIPANT_FLAG, shown_when=_asr_takes_speakers),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
-            ParamDef("-s", "Store Audio", "bool", True),
+            ParamDef("-s", "Store Audio", "bool", False),
             ParamDef("-vad", "VAD", "bool", True),
             ParamDef("-nr", "Noise Reduce", "bool", True),
             ParamDef("-tr", "Transcribe", "bool", True),
@@ -2766,7 +2766,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-b", "Base", "choice", "", per_instance="-nb"),
             ParamDef("-m", "Mode", "str", "live", ["live", "capture", "analyze"]),
             ParamDef("-g", "Graphics", "str", "", _GRAPHICS_BY_SOURCE),
-            ParamDef("-s", "Store Frames", "bool", True),
+            ParamDef("-s", "Store Frames", "bool", False),
             ParamDef("-v", "Verbose", "bool", True),
             # what the synchronizer asks the frame analyzer for: action labels
             # (the VLM, vfa_action), the pose (skeletons, tags, head yaws;
@@ -2803,7 +2803,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             # follows Base 1: the main base of that base's room
             ParamDef("-mc", "Main Camera", "choice", "", follows="-b"),
             ParamDef("-g", "Graphics", "str", "", _GRAPHICS_BY_SOURCE),
-            ParamDef("-s", "Store Frames", "bool", True),
+            ParamDef("-s", "Store Frames", "bool", False),
             ParamDef("-v", "Verbose", "bool", True),
         ],
         components=[

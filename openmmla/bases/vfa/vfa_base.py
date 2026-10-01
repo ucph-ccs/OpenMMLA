@@ -32,7 +32,7 @@ class VFABase(Base):
     logger = get_logger('vfa-base')
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'live', graphics: bool | None = None,
-                 store: bool = True, verbose: bool = False, session_id: str | None = None,
+                 store: bool = False, verbose: bool = False, session_id: str | None = None,
                  base: str | None = None):
         """Initializes the VFABase class.
 
@@ -43,7 +43,7 @@ class VFABase(Base):
             graphics: whether to show the frames in a window; None (default) shows them unless the
                 source is a stream, which a base pulls on a machine nobody watches, often over SSH
                 with no display (the dashboard's camera tiles draw what the bases found)
-            store: whether to store frames locally (default: True)
+            store: whether to store frames locally (default: False); capture mode always does
             verbose: whether to enable verbose logging (default: False)
             session_id: the session to join; if omitted, choose or create one
                 interactively. The base notes in it which Bases entry it is and
@@ -59,7 +59,9 @@ class VFABase(Base):
         self.mode = mode
         self.graphics = graphics
         self._graphics_asked = graphics  # what the launch said; None follows the source
-        self.store = store
+        # capture mode is there to store frames (for human coding): it stores them whatever `store` says
+        self._store_asked = bool(store)
+        self.store = self._store_asked or mode == 'capture'
         self.verbose = verbose
         self.launch_session_id = session_id
         self.launch_base = base
@@ -229,7 +231,7 @@ class VFABase(Base):
         config_path = getattr(self, 'config_path', None)
         mode = getattr(self, 'mode', 'live')
         graphics = getattr(self, '_graphics_asked', None)
-        store = getattr(self, 'store', True)
+        store = getattr(self, '_store_asked', getattr(self, 'store', True))
         verbose = getattr(self, 'verbose', False)
         session_id = getattr(self, 'launch_session_id', None)
         base = getattr(self, 'launch_base', None)
@@ -405,6 +407,7 @@ class VFABase(Base):
     def _switch_mode(self):
         """Switch the operating mode between 'capture', 'analyze' and 'live'."""
         self.mode = get_mode()
+        self.store = getattr(self, '_store_asked', self.store) or self.mode == 'capture'
         self.logger.info(f"Switched to {self.mode} mode.")
 
     def _set_camera(self):

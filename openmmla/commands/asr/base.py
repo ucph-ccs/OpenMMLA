@@ -14,7 +14,7 @@ def get_parser():
             'path to the project directory; if not set, defaults to the current working directory', shortname='-p')
     add_arg('config_path', str, None, 'path to the configuration file', shortname='-c', required=True)
     add_arg('mode', str, 'capture', 'operating mode (capture/analyze/live)', choices=['capture', 'analyze', 'live'], shortname='-m')
-    add_arg('store', bool, True, 'whether to store audio', shortname='-s')
+    add_arg('store', bool, False, 'whether to store audio', shortname='-s')
     add_arg('vad', bool, True, 'whether to use VAD', shortname='-vad')
     add_arg('nr', bool, True, 'whether to use noise reduction', shortname='-nr')
     add_arg('tr', bool, True, 'whether to transcribe speech to text', shortname='-tr')
