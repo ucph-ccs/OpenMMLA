@@ -474,6 +474,14 @@ class SessionsPanel(Widget):
     _streams_cancel: threading.Event | None = None
     _streams_export_button: str = "Export Streams"
 
+    class SessionEnded(Message):
+        """End Session marked a session ended here: the Launcher's base cards
+        must stop opening on it."""
+
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
+
     class SessionDeleted(Message):
         """a session's database records were deleted here: the Launcher must
         stop offering its id, or the next recording goes to a session MongoDB
@@ -1500,6 +1508,7 @@ class SessionsPanel(Widget):
             return
         if await asyncio.to_thread(self._mongo_client.end_session, session_id, end):
             self._log(f"[green]✓ Session '{shown}' marked ended at {end:%Y-%m-%d %H:%M:%S} UTC.[/green]")
+            self.post_message(self.SessionEnded(session_id))
         else:
             self._log(f"[red]✗ Session '{shown}' could not be marked ended: MongoDB did not take it.[/red]")
         await self._async_reload()

@@ -43,6 +43,10 @@ class OpenMMLAApp(App):
         # the two tabs are siblings: the news has to be carried across
         self.query_one(ServicePanel).forget_session(event.session_id)
 
+    @on(SessionsPanel.SessionEnded)
+    def _session_ended(self, event: SessionsPanel.SessionEnded) -> None:
+        self.query_one(ServicePanel).session_ended(event.session_id)
+
     @on(EnvironmentPanel.EnvsChanged)
     def _envs_changed(self, event: EnvironmentPanel.EnvsChanged) -> None:
         # the Launcher's [E] markers come from a cache of each host's envs

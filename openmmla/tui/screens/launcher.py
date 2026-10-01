@@ -185,6 +185,8 @@ _REMOTE_COLLECTION_FILES = (
     "openmmla/utils/mac_desktop.py",
 )
 _NEW_COLLECTION_SESSION_CHOICE = "Create MongoDB Session"
+# the Session param of the base cards (ASR, IPS, VFA)
+_BASE_CARD_SESSION_FLAGS = ("-sid", "--session-id", "--artifact-session-id")
 _COLLECTION_HIDDEN_PRESET_FLAGS = {
     # the recording machine's name in the files and folders: each host's own
     # (_collection_default_host_label), as each recorder picks its host
@@ -3816,6 +3818,12 @@ class ServicePanel(Widget):
         # (host, session id) of a Start that was held back because the session
         # has ended; the second press on the same pair goes ahead
         self._pending_ended_start: tuple[str, str] | None = None
+        # the session the base cards open on: the one the last Start of a base
+        # or Collection card went into, or the Session picked by hand on a base
+        # card ("" for Create MongoDB Session), so the bases of one take,
+        # started from several cards and hosts, join one session. Cleared once
+        # the session ends.
+        self._followed_session: str = ""
         # (target, session, host) keys of downloads already running, so a second
         # press — or the other collection tab's Download — is refused instead of
         # racing the first one into the same staging directory
@@ -4549,6 +4557,7 @@ class ServicePanel(Widget):
 
         self._capture_collection_card_state()
         self._capture_infra_mode()
+        self._capture_base_card_session()
         content_area = self.query_one("#svc-content-area", Vertical)
         await content_area.remove_children()
         self._current_pipeline = None
@@ -4595,6 +4604,10 @@ class ServicePanel(Widget):
             # Settings from this machine, whichever machines the bases run on
             choices = await asyncio.to_thread(self._artifact_session_choices_for_target, "local")
             choices = [c for c in choices if c and c != _NEW_COLLECTION_SESSION_CHOICE]
+            # the session the base cards were started into is the one to START
+            followed = _safe_session_id(self.__dict__.get("_followed_session"))
+            if followed:
+                choices = [followed, *(c for c in choices if c != followed)]
             from openmmla.tui.system_services import system_services_config_path
             scroll = VerticalScroll(classes="svc-launch-scroll")
             await content_area.mount(scroll)
@@ -4626,6 +4639,7 @@ class ServicePanel(Widget):
         if capture:
             self._capture_collection_card_state()
             self._capture_infra_mode()
+            self._capture_base_card_session()
         if not self._current_service_name:
             self._build_tree()
             return
@@ -4848,15 +4862,19 @@ class ServicePanel(Widget):
             return svc
         target = target or self._get_panel_target()
         session_choices = self._artifact_session_choices_for_target(target)
+        # offered even before the databases list it (MongoDB was down when it
+        # was made, or the list is cached)
+        followed = _safe_session_id(self.__dict__.get("_followed_session"))
         choices = [_NEW_COLLECTION_SESSION_CHOICE]
-        for session_id in session_choices:
+        for session_id in [followed, *session_choices]:
             if session_id and session_id not in choices:
                 choices.append(session_id)
         experiment_group_choices = self._collection_experiment_group_choices()
         params = []
         for param in svc.params:
-            if param.flag in ("-sid", "--session-id", "--artifact-session-id"):
-                params.append(ParamDef(param.flag, "Session", param.param_type, _NEW_COLLECTION_SESSION_CHOICE, choices))
+            if param.flag in _BASE_CARD_SESSION_FLAGS:
+                params.append(ParamDef(param.flag, "Session", param.param_type,
+                                       followed or _NEW_COLLECTION_SESSION_CHOICE, choices))
             elif param.flag == "--experiment-group" and experiment_group_choices:
                 params.append(replace(param, default=experiment_group_choices[0], choices=experiment_group_choices))
             else:
@@ -4955,6 +4973,30 @@ class ServicePanel(Widget):
                 continue
             if mode in ("native", "docker"):
                 self._infra_mode[(target, svc.name)] = mode
+
+    def _capture_base_card_session(self) -> None:
+        """follow a Session picked by hand on a base card before the card is
+        rebuilt (another host, Refresh, the next card), Create MongoDB Session
+        included: the rebuild must not put the card back on the session it was
+        just taken off. A card left on what it was built with changes nothing."""
+        try:
+            cards = list(self.query(ServiceCard))
+        except Exception:
+            return
+        for card in cards:
+            svc = card.service_def
+            if not svc.artifact_pipeline:
+                continue
+            param = next((p for p in svc.params if p.flag in _BASE_CARD_SESSION_FLAGS), None)
+            if param is None:
+                continue
+            try:
+                shown = str((card.collect_params() or {}).get(param.flag) or "").strip()
+            except Exception:
+                continue
+            if not shown or shown == str(param.default):
+                continue
+            self._followed_session = "" if _is_new_collection_session_choice(shown) else _safe_session_id(shown)
 
     def _capture_collection_card_state(self, target: str | None = None) -> None:
         """remember the collection card's choices before the card is rebuilt.
@@ -5121,6 +5163,8 @@ class ServicePanel(Widget):
         if not session_id:
             return
         self._collection_sticky["--session-id"] = session_id
+        # the base cards of the take join it too
+        self._follow_session(session_id)
         # a brand new session is in no target's cached choice list yet
         self._invalidate_session_choice_cache()
         # keep the card on screen in step: a capture before the next rebuild
@@ -5132,6 +5176,50 @@ class ServicePanel(Widget):
         for card in cards:
             if card.service_def.launch_type == "collection":
                 card.select_collection_session(session_id)
+
+    def _follow_session(self, session_id: object) -> None:
+        """a Start went into this session: the base cards open on it from now
+        on, so the bases of one take join it instead of each card creating a
+        session of its own."""
+        session_id = _safe_session_id(session_id)
+        if not session_id:
+            return
+        self._followed_session = session_id
+        self._show_session_on_base_cards(session_id)
+
+    def _unfollow_session(self, session_id: object) -> None:
+        """the session has ended or is gone: the base cards go back to Create
+        MongoDB Session, so the next Start is a new take."""
+        session_id = _safe_session_id(session_id)
+        if not session_id or _safe_session_id(self.__dict__.get("_followed_session")) != session_id:
+            return
+        self._followed_session = ""
+        self._show_session_on_base_cards(_NEW_COLLECTION_SESSION_CHOICE, only_from=session_id)
+
+    def _show_session_on_base_cards(self, choice: str, only_from: str = "") -> None:
+        """point the base card on screen at a session (or Create MongoDB
+        Session), so it agrees with what a rebuild would show; with
+        `only_from`, only a card that shows that session."""
+        try:
+            cards = list(self.query(ServiceCard))
+        except Exception:
+            return
+        for card in cards:
+            if not card.service_def.artifact_pipeline:
+                continue
+            if only_from:
+                shown = next((str(value) for flag, value in (card.collect_params() or {}).items()
+                              if flag in _BASE_CARD_SESSION_FLAGS), "")
+                if _is_new_collection_session_choice(shown) or _safe_session_id(shown) != only_from:
+                    continue
+            card.select_session(choice)
+
+    def on_session_control_panel_session_stopped(self, event: SessionControlPanel.SessionStopped) -> None:
+        self._unfollow_session(event.session_id)
+
+    def session_ended(self, session_id: str) -> None:
+        """a session was marked ended in the Sessions tab."""
+        self._unfollow_session(session_id)
 
     def _remember_collection_launch(self, target: str, session_id: object) -> None:
         session_id = _safe_session_id(session_id)
@@ -9192,6 +9280,11 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
                 return
 
+        if svc.artifact_pipeline:
+            picked = next((value for flag, value in event.params.items() if flag in _BASE_CARD_SESSION_FLAGS), "")
+            if not _is_new_collection_session_choice(picked) and not self._confirm_start_into_ended_session(
+                    event.params, target, session_id=_safe_session_id(picked)):
+                return
         launch_params = dict(event.params)
         if not self._ensure_pipeline_session_for_launch(svc, launch_params, target=target):
             self._log("[red]Could not resolve a launch session id.[/red]")
@@ -9616,6 +9709,7 @@ class ServicePanel(Widget):
         if note:
             self._log(note)
         self._release_collection_session(session_id)
+        self._unfollow_session(session_id)
 
     def _release_collection_session(self, session_id: str) -> None:
         """the recording is over on every host: the cards go back to `Create
@@ -10691,14 +10785,15 @@ class ServicePanel(Widget):
         except Exception:
             return None
 
-    def _confirm_start_into_ended_session(self, params: dict, target: str) -> bool:
-        """hold a collection Start back when its session has already ended.
+    def _confirm_start_into_ended_session(self, params: dict, target: str, session_id: str | None = None) -> bool:
+        """hold a collection or base card Start back when its session has
+        already ended (`session_id`, else the collection params').
 
         The session id follows the user from host to host, and it still does
         after Stop All Hosts: the next Start, meant as a new take, would quietly
         go into the finished session. The second press goes ahead and makes
         the session active again."""
-        session_id = self._collection_session_id(params)
+        session_id = self._collection_session_id(params) if session_id is None else session_id
         if not session_id:
             return True  # "Create MongoDB Session"
         record = self._session_record(session_id, target)
@@ -10728,6 +10823,7 @@ class ServicePanel(Widget):
             return
         if self._collection_sticky.get("--session-id") == session_id:
             self._collection_sticky.pop("--session-id", None)
+        self._unfollow_session(session_id)
         for key, params in list(self._collection_last_params.items()):
             if self._collection_session_id(params) == session_id:
                 del self._collection_last_params[key]
@@ -10763,6 +10859,7 @@ class ServicePanel(Widget):
             self._ensure_session_registered(
                 session_id, params.get("--experiment-group"), target,
                 f"tui_{safe_segment(svc.artifact_pipeline, 'pipeline')}")
+            self._follow_session(session_id)
             return True
 
         session_id = self._create_mongodb_session(
@@ -10773,6 +10870,8 @@ class ServicePanel(Widget):
         if not session_id:
             return False
         params["-sid"] = session_id
+        # the other base cards of the take open on it
+        self._follow_session(session_id)
         return True
 
     def _collection_component_command(

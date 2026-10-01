@@ -1588,6 +1588,31 @@ class ServiceCard(Widget):
                     sel.value = str(current)
         self.service_def = replace(self.service_def, params=params)
 
+    def select_session(self, choice: str) -> None:
+        """point a base card's Session at a session id (added to the options
+        when new) or at Create MongoDB Session, as its default too, so the card
+        on screen agrees with what a rebuild would show."""
+        if self.service_def.launch_type == "collection" or not choice:
+            return
+        params = []
+        for param in self.service_def.params:
+            if param.flag not in _SESSION_PARAM_FLAGS:
+                params.append(param)
+                continue
+            choices = [str(c) for c in param.choices]
+            if choice not in choices:
+                # first after Create MongoDB Session, where the newest session is listed
+                choices.insert(1 if choices else 0, choice)
+            params.append(replace(param, choices=choices, default=choice))
+            self._param_values[param.flag] = choice
+            try:
+                sel = self.query_one(f"#{self._param_id('select', param.flag)}", Select)
+            except Exception:
+                continue
+            sel.set_options((c, c) for c in choices)
+            sel.value = choice
+        self.service_def = replace(self.service_def, params=params)
+
     def select_collection_session(self, session_id: str) -> None:
         """point both role tabs at a session, adding it to the options if new.
 

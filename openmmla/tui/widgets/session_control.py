@@ -58,6 +58,14 @@ class SessionControlPanel(Widget):
         """user clicked the ↻ next to the session Select: the launcher
         re-queries the active session list and calls update_session_choices."""
 
+    class SessionStopped(Message):
+        """STOP was sent for a session: the launcher's base cards stop opening
+        on it, so the next Start is a new take."""
+
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
+
     DEFAULT_CSS = """
     SessionControlPanel {
         height: auto;
@@ -223,6 +231,8 @@ class SessionControlPanel(Widget):
     async def _async_send(self, command: str, session_id: str, services: list[str]) -> None:
         result = await asyncio.to_thread(self._send_sync, command, session_id, services)
         self._set_status(result)
+        if command == "STOP":
+            self.post_message(self.SessionStopped(session_id))
 
     def _send_sync(self, command: str, session_id: str, services: list[str]) -> str:
         try:
