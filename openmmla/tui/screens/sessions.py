@@ -27,7 +27,7 @@ from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, P
 from openmmla.tui import base_files, recordings, stream_export
 from openmmla.utils import session_sources
 from openmmla.utils.artifact_paths import (
-    NON_SESSION_ARTIFACT_DIRS, session_capture_streams_dir, session_server_streams_dir,
+    NON_SESSION_ARTIFACT_DIRS, session_capture_streams_dir, session_server_streams_dir, short_hostname,
 )
 
 
@@ -352,6 +352,62 @@ _WINDOW_REASONS = {
 }
 
 
+# what the end End Session writes is (_end_by_hand), as the log says it
+_END_REASONS = {
+    "left": "when its last base left",
+    "measurement": "its last measurement in InfluxDB",
+    "source": "when a base last joined or left it",
+    "log": "when a log of it was last written on this machine",
+    "now": "now: neither its record, InfluxDB nor a log here says when it stopped",
+}
+
+
+def _end_by_hand(record: dict, last_measurement: datetime | None, now: datetime | None = None,
+                 last_log: datetime | None = None) -> tuple[datetime, str]:
+    """the end_time End Session writes into a session that was never ended,
+    and what it is (_END_REASONS). When every base that joined it has left,
+    that moment, which is where Export Streams already took it to end, so the
+    window it cuts stays the same; otherwise the latest moment the session is
+    known to have been alive: its last measurement, a base joining or leaving,
+    or a log its components wrote on this machine; now when nothing says. A
+    time from before the session began (a replay stamps its measurements with
+    the original time, a copied file keeps its own) says nothing about its end."""
+    try:
+        left = recordings.parse_time(session_sources.last_left(record))
+    except (TypeError, ValueError):  # left_at of kinds that do not compare
+        left = None
+    if left is not None:
+        return left, "left"
+    start = recordings.parse_time(record.get("start_time"))
+    moments = []
+    for moment, why in ((last_measurement, "measurement"), (last_log, "log")):
+        if moment is not None and (start is None or moment >= start):
+            moments.append((moment, why))
+    for entry in session_sources.session_sources(record):
+        for key in ("joined_at", "left_at"):
+            moment = recordings.parse_time(entry.get(key))
+            if moment is not None:
+                moments.append((moment, "source"))
+    if moments:
+        return max(moments, key=lambda moment: moment[0])
+    return now or datetime.now(timezone.utc), "now"
+
+
+def _last_local_log(artifact_dir: Path) -> datetime | None:
+    """when a log the session's components wrote on this machine was last
+    written (pipelines/<pipeline>/<this host>/logger/ of its artifacts); None
+    without one. The folders of other hosts are left out: a log fetched from
+    one without rsync carries the time it arrived."""
+    times = []
+    for path in Path(artifact_dir).glob(f"pipelines/*/{short_hostname()}/logger/*"):
+        try:
+            if path.is_file():
+                times.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return datetime.fromtimestamp(max(times), tz=timezone.utc) if times else None
+
+
 class _ExportStopped(Exception):
     """Cancel was pressed while a clip was being downloaded."""
 
@@ -466,8 +522,10 @@ class SessionsPanel(Widget):
         height: 3;
         padding: 0 1;
     }
+    /* a short label keeps its own width, so the whole row fits 160 columns */
     #sessions-actions Button {
         margin: 0 1;
+        min-width: 10;
     }
     /* the progress of Export Streams, up while it runs; height auto because a
        bare Horizontal defaults to 1fr */
@@ -523,6 +581,8 @@ class SessionsPanel(Widget):
         self._selected_session_id: str | None = None
         self._pending_delete_session_id: str | None = None
         self._pending_delete_artifacts_session_id: str | None = None
+        # the session End Session was pressed on once, and the end it announced
+        self._pending_end: tuple[str, datetime] | None = None
         self._target = "local"
         self._suppress_select = False
         self._bootstrapping = False
@@ -546,6 +606,8 @@ class SessionsPanel(Widget):
                 # what the bases wrote on the machines they ran on (base_files)
                 yield Button("Export Base Files", variant="success", id="btn-ses-export-base-files")
                 yield Button("Export All", variant="warning", id="btn-ses-export-all")
+                # a session left active (its console gone before Stop) set to ended
+                yield Button("End Session", variant="warning", id="btn-ses-end")
                 yield Button("Delete Session", variant="error", id="btn-ses-delete")
                 yield Button("Delete Artifacts", variant="error", id="btn-ses-delete-artifacts")
             with Horizontal(id="sessions-progress"):
@@ -690,6 +752,7 @@ class SessionsPanel(Widget):
         self._selected_session_id = None
         self._pending_delete_session_id = None
         self._pending_delete_artifacts_session_id = None
+        self._pending_end = None
         try:
             self.query_one("#sessions-table", DataTable).clear()
         except Exception:
@@ -830,6 +893,7 @@ class SessionsPanel(Widget):
             self._selected_session_id = str(row_data[0])
             self._pending_delete_session_id = None
             self._pending_delete_artifacts_session_id = None
+            self._pending_end = None
         except Exception:
             self._selected_session_id = None
 
@@ -901,10 +965,19 @@ class SessionsPanel(Widget):
             self._start_streams_export(session_id, self._run_export_streams, "Export Streams")
         elif bid == "btn-ses-export-base-files":
             self._start_streams_export(session_id, self._run_export_base_files, "Export Base Files")
+        elif bid == "btn-ses-end":
+            self._pending_delete_session_id = None
+            self._pending_delete_artifacts_session_id = None
+            pending, self._pending_end = self._pending_end, None
+            if pending is not None and pending[0] == session_id:
+                self.run_worker(self._run_end(session_id, pending[1]), group="sessions-end", exclusive=True)
+            else:
+                self.run_worker(self._run_end_ask(session_id), group="sessions-end", exclusive=True)
         elif bid == "btn-ses-delete":
             if self._pending_delete_session_id != session_id:
                 self._pending_delete_session_id = session_id
                 self._pending_delete_artifacts_session_id = None
+                self._pending_end = None
                 self._log(
                     f"[red]Delete session '{session_id}' will remove MongoDB metadata, "
                     "and InfluxDB measurements. Local artifacts and downloaded logs are preserved. "
@@ -917,6 +990,7 @@ class SessionsPanel(Widget):
             if self._pending_delete_artifacts_session_id != session_id:
                 self._pending_delete_artifacts_session_id = session_id
                 self._pending_delete_session_id = None
+                self._pending_end = None
                 self._log(
                     f"[red]Delete artifacts for '{session_id}' will remove local artifacts/files only. "
                     "MongoDB metadata and InfluxDB measurements are preserved. "
@@ -1387,6 +1461,69 @@ class SessionsPanel(Widget):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._do_delete_artifacts, session_id)
         self._refresh_sessions()
+
+    # ---- End Session ----
+
+    async def _run_end_ask(self, session_id: str) -> None:
+        """End Session, first press: read the session's document again and say
+        the end the second press writes; nothing changes yet."""
+        shown = escape(session_id)
+        record = await self._endable_record(session_id)
+        if record is None:
+            return
+        last_measurement = None
+        if self._influx_client is not None:
+            try:
+                last_measurement = await asyncio.to_thread(self._influx_client.last_event_time, session_id)
+            except Exception as error:
+                self._log(f"  [dim]InfluxDB did not say when its last measurement was: {escape(str(error))}[/dim]")
+        last_log = await asyncio.to_thread(_last_local_log, self._local_artifact_path_for_session(session_id))
+        end, why = _end_by_hand(record, last_measurement, last_log=last_log)
+        # the conclusion first: the log does not wrap
+        self._log(
+            f"[yellow]Click End Session again to mark '{shown}' ended at {end:%Y-%m-%d %H:%M:%S} UTC, "
+            f"{_END_REASONS[why]}.[/yellow]"
+        )
+        still_in = [str(entry.get("key") or "?") for entry in session_sources.session_sources(record)
+                    if entry.get("left_at") is None]
+        if still_in:
+            self._log(
+                f"  [yellow]Never noted leaving: {escape(', '.join(still_in))}. If still running, stop it "
+                f"instead (STOP in Session Control), which ends the session too.[/yellow]"
+            )
+        self._pending_end = (session_id, end)
+
+    async def _run_end(self, session_id: str, end: datetime) -> None:
+        """End Session, second press: the end announced at the first."""
+        shown = escape(session_id)
+        if await self._endable_record(session_id) is None:
+            return
+        if await asyncio.to_thread(self._mongo_client.end_session, session_id, end):
+            self._log(f"[green]✓ Session '{shown}' marked ended at {end:%Y-%m-%d %H:%M:%S} UTC.[/green]")
+        else:
+            self._log(f"[red]✗ Session '{shown}' could not be marked ended: MongoDB did not take it.[/red]")
+        await self._async_reload()
+
+    async def _endable_record(self, session_id: str) -> dict | None:
+        """the session's MongoDB document when End Session can end it; None,
+        and the reason in the log, when it is not there or has ended already."""
+        shown = escape(session_id)
+        if self._mongo_client is None:
+            self._log(f"[yellow]MongoDB is not connected: '{shown}' cannot be ended here.[/yellow]")
+            return None
+        record = await asyncio.to_thread(self._mongo_client.get_session, session_id)
+        if not record:
+            self._log(
+                f"[yellow]'{shown}' is not in MongoDB (it is known from its files only, or MongoDB did not "
+                f"answer): it has no status to change.[/yellow]"
+            )
+            return None
+        if record.get("status") == "ended":
+            ended = recordings.parse_time(record.get("end_time"))
+            when = f" at {ended:%Y-%m-%d %H:%M:%S} UTC" if ended else ""
+            self._log(f"[yellow]'{shown}' has already ended{when}.[/yellow]")
+            return None
+        return record
 
     def _session_by_id(self, session_id: str) -> dict:
         for session in self._sessions:

@@ -96,16 +96,18 @@ class MongoDBClientWrapper:
             logger.warning("get_sessions_by_experiment failed: %s", e)
             return []
 
-    def end_session(self, session_id: str) -> bool:
+    def end_session(self, session_id: str, end_time: datetime | None = None) -> bool:
+        """mark the session ended at `end_time` (now when none is given). False
+        when the session is not there."""
         try:
             result = self.sessions.update_one(
                 {"session_id": session_id},
                 {"$set": {
-                    "end_time": datetime.now(timezone.utc),
+                    "end_time": end_time or datetime.now(timezone.utc),
                     "status": "ended",
                 }},
             )
-            return result.acknowledged
+            return bool(result.matched_count)
         except Exception as e:
             logger.warning("end_session failed: %s", e)
             return False

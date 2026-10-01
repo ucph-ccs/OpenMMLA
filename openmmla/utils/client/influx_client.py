@@ -109,6 +109,25 @@ class InfluxDBClientWrapper:
         events = self._execute_query(query)
         return events[0] if events else None
 
+    def last_event_time(self, session_id: str) -> datetime | None:
+        """when the session's latest event is stamped; None when it has none.
+        Raises when InfluxDB cannot be asked."""
+        query = f'''
+            from(bucket: "{self.bucket}")
+            |> range(start: 0)
+            |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}")
+            |> filter(fn: (r) => r.session_id == "{session_id}")
+            |> last()
+            |> keep(columns: ["_time"])
+            |> group()
+            |> sort(columns: ["_time"], desc: true)
+            |> limit(n: 1)
+        '''
+        for table in self.query_api.query(org=self.org, query=query):
+            for record in table.records:
+                return record.get_time()
+        return None
+
     def get_all_session_ids(self, raise_on_error: bool = False) -> list[str]:
         """Return every session id in the bucket.
 
