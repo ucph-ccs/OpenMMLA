@@ -237,6 +237,10 @@ class ExperimentForm(Widget):
         task_names = list_tasks()
         options = [(t, t) for t in task_names]
         task_val = exp.get("task_type", "")
+        if task_val and task_val not in task_names:
+            # a task that is not (or no longer) there: kept, not a crash of the
+            # Select, which takes no value it does not offer
+            options.append((task_val, task_val))
         yield Horizontal(
             Label("Task Type:", classes="ef-field-label"),
             Select(

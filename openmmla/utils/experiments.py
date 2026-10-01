@@ -152,14 +152,16 @@ def save_task(name: str, data: dict, project_root: str | None = None) -> None:
 
 
 def delete_task(name: str, project_root: str | None = None) -> bool:
-    """delete config/tasks/<name>.yaml. returns True if file existed."""
+    """delete config/tasks/<name>.yaml and <name>.yml: a .yml left behind
+    would bring the task back. returns True if either file existed."""
     d = _tasks_dir(project_root)
+    existed = False
     for ext in (".yaml", ".yml"):
         path = os.path.join(d, name + ext)
         if os.path.isfile(path):
             os.remove(path)
-            return True
-    return False
+            existed = True
+    return existed
 
 
 def select_experiment_and_group(project_root: str | None = None) -> tuple[str, str]:
