@@ -388,15 +388,16 @@ class IPSSynchronizer(Synchronizer):
         main_bases = [base for base in get_bases(self.config) if is_main_base(base)]
         mains = [str(base.get('id')) for base in main_bases]
         with_file = [main_id for main_id in mains if matrices_file_name(main_id) in exported]
-        if len(with_file) == 1:
-            return with_file[0], ''
-        if len(with_file) > 1:
-            rooms = ', '.join(f"{base.get('id')} (room {base_room(base) or '-'})" for base in main_bases
-                              if str(base.get('id')) in with_file)
+        if len(mains) > 1:
+            # one room's file being there does not make the session that room's
+            rooms = ', '.join(f"{base.get('id')} (room {base_room(base) or '-'})" for base in main_bases)
             return None, (f"The IPS synchronizer has no main camera: the Bases have a main base per room ({rooms}), "
                           f"and a session is one room's. Give it the main camera of that room (-mc, the Main Camera "
                           f"of the IPS Base card).")
-        if len(exported) == 1:
+        if with_file:
+            return with_file[0], ''
+        if len(exported) == 1 and not any(base_room(base) for base in get_bases(self.config)):
+            # without rooms the only file is the one camera sync made; with rooms it may be another room's
             return main_id_of(exported[0]), ''
         wanted = (f"the main base {mains[0]} has no camera_sync/{matrices_file_name(mains[0])}" if mains
                   else "no Bases entry is marked main: true")

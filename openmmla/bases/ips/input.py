@@ -25,8 +25,9 @@ def get_function_calibrator():
             print('Please enter a valid integer')
 
 
-def get_function_sync_manager(main_id: str, alt_id: str, sync: bool):
-    """Get the function to be performed from user input for sync manager."""
+def get_function_sync_manager(main_id: str, alt_id: str, sync: bool, clear_scope: str = ""):
+    """Get the function to be performed from user input for sync manager; `clear_scope`
+    (the main base's room, "" without rooms) is what clear removes."""
     while True:
         try:
             flush_input()
@@ -36,7 +37,8 @@ def get_function_sync_manager(main_id: str, alt_id: str, sync: bool):
                                f"2: set camera id (main:{LIGHT_BLUE}{main_id}{ENDC}, alt:{LIGHT_BLUE}{alt_id}{ENDC})\n"
                                f"3: switch mode (sync:{LIGHT_BLUE}{sync}{ENDC})\n"
                                f"4: export transformations\n"
-                               f"5: clear transformations\n"
+                               f"5: clear transformations"
+                               f"{f' ({LIGHT_BLUE}{clear_scope}{ENDC} only)' if clear_scope else ''}\n"
                                f"0: exit\n"
                                f"Selected function: ")
             if select_fun.strip():

@@ -14,7 +14,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
-from openmmla.utils.config import base_room, camera_sync_problem, is_main_base
+from openmmla.utils.config import base_room, bases_by_room, camera_sync_problem, is_main_base
 
 from .input import get_base_by_id, get_bases, get_function_sync_manager
 from .transform import (
@@ -170,7 +170,7 @@ class CameraSyncManager(Synchronizer):
                     4: self._export_transformations, 5: self._clear_transformations}
         while True:
             try:
-                select_fun = get_function_sync_manager(self.main_id, self.alt_id, self.sync)
+                select_fun = get_function_sync_manager(self.main_id, self.alt_id, self.sync, self._clear_scope())
                 if select_fun == 0:
                     self.logger.info("Exiting video synchronizer...")
                     break
@@ -371,8 +371,62 @@ class CameraSyncManager(Synchronizer):
         output_path = os.path.join(self.camera_sync_dir, f'transformation_matrices_{main_system}.json')
         export_main_transformations_json(input_path, output_path, main_system)
 
+    def _room(self) -> str | None:
+        """the room clear works on: None when the config names no room (all of it is
+        one), else the main base's room, "" for the bases that name none beside rooms."""
+        if list(bases_by_room(self.config)) == [""]:
+            return None
+        main = get_base_by_id(self.config, self.main_id) if self.main_id else None
+        return base_room(main) if main else None
+
+    def _clear_scope(self) -> str:
+        """what clear removes, as the menu says it: "" for everything."""
+        room = self._room()
+        return "" if room is None else f"room {room}" if room else "the bases without a room"
+
     def _clear_transformations(self):
-        for file in os.listdir(self.camera_sync_dir):
-            if file.startswith("transformation_matrices"):
-                os.remove(os.path.join(self.camera_sync_dir, file))
-                print(f"File {file} has been removed.")
+        """Remove the matrices of the main base's room. A config without rooms is one
+        room, so every transformation_matrices*.json goes; with rooms, only the pairs
+        that involve one of its bases and the transformation_matrices_<id>.json of its
+        bases go, and the other rooms keep theirs (their cameras were not re-synced)."""
+        room = self._room()
+        if room is None:
+            for file in os.listdir(self.camera_sync_dir):
+                if file.startswith("transformation_matrices"):
+                    os.remove(os.path.join(self.camera_sync_dir, file))
+                    print(f"File {file} has been removed.")
+            return
+
+        scope = self._clear_scope()
+        ids = {str(base.get('id')) for base in bases_by_room(self.config).get(room, [])}
+        for base_id in sorted(ids):
+            exported = f'transformation_matrices_{base_id}.json'
+            if os.path.exists(os.path.join(self.camera_sync_dir, exported)):
+                os.remove(os.path.join(self.camera_sync_dir, exported))
+                print(f"File {exported} of {scope} has been removed.")
+
+        pairs_path = os.path.join(self.camera_sync_dir, 'transformation_matrices.json')
+        if not os.path.exists(pairs_path):
+            return
+        try:
+            with open(pairs_path, 'r') as file:
+                pairs = json.load(file)
+        except (OSError, ValueError):
+            pairs = None
+        if not isinstance(pairs, dict):
+            # cut short by a sync killed while writing it: no room's pairs can be read from it
+            os.remove(pairs_path)
+            print("transformation_matrices.json could not be read and has been removed (every room's pairs).")
+            return
+        # a pair is `<alt>-<main>`; ids may hold dashes, so match the ends against the room's ids
+        kept = {key: value for key, value in pairs.items()
+                if not any(key.startswith(f'{i}-') or key.endswith(f'-{i}') for i in ids)}
+        removed = [key for key in pairs if key not in kept]
+        if kept:
+            with open(pairs_path, 'w') as file:
+                json.dump(kept, file, indent=4)
+        else:
+            os.remove(pairs_path)
+        if removed:
+            print(f"Pairs {', '.join(removed)} of {scope} have been removed from transformation_matrices.json"
+                  + (f"; {', '.join(kept)} of other rooms are kept." if kept else "."))

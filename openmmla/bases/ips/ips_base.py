@@ -14,7 +14,7 @@ from pupil_apriltags import Detector
 from openmmla.bases.base import Base
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
-from openmmla.utils.config import main_of_base
+from openmmla.utils.config import bases_by_room, main_of_base
 from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
@@ -707,7 +707,8 @@ class IPSBase(Base):
     def _load_transform_matrices(self):
         """Load the transformation matrices of this base's room: the file camera sync exported for
         the main base of its room, transformation_matrices_<main>.json (a config without rooms has
-        one main), else the first file there is."""
+        one main), else, without rooms, the first file there is: another room's file holds other
+        coordinates, so a base of a room whose main has none has no matrices."""
         transformation_choices = [d for d in os.listdir(self.camera_sync_dir) if
                                   d.startswith('transformation_matrices_')]
         for idx, choice in enumerate(transformation_choices):
@@ -720,6 +721,10 @@ class IPSBase(Base):
         # suffix (e.g. transformation_matrices_m.json -> main camera id 'm')
         room_main_id = main_of_base(self.config, self._base_id_override)
         wanted = f'transformation_matrices_{room_main_id}.json' if room_main_id else None
+        if wanted and wanted not in transformation_choices and list(bases_by_room(self.config)) != ['']:
+            self.logger.warning(f"There is no {wanted} for the main base {room_main_id} of this base's room; "
+                                f"the other files are other rooms' coordinates.")
+            return None
         chosen_transformation = wanted if wanted in transformation_choices else sorted(transformation_choices)[0]
         self.transform_matrices_file = chosen_transformation
         self.main_id = chosen_transformation.split('_')[-1].split('.')[0]

@@ -144,8 +144,8 @@ Bases:
   - {id: 8, camera: logitechC920, source: stream, source_index: c920-08, room: B, main: false}
 ```
 
-- **Camera sync** pairs a room's cameras with its main. With a main per room, `mmla ips-csync` first asks for the main (or takes `-m <id>`, or the room of `-b <id>`) and then offers only that room's other bases. Export writes `transformation_matrices_<main>.json` per main, with that room's cameras only.
-- **Each base** loads the matrix file of its room's main.
+- **Camera sync** pairs a room's cameras with its main. With a main per room, `mmla ips-csync` first asks for the main (or takes `-m <id>`, or the room of `-b <id>`) and then offers only that room's other bases. Export writes `transformation_matrices_<main>.json` per main, with that room's cameras only. **clear transformations** in the manager's menu clears that room alone (the menu names it): its pairs leave `transformation_matrices.json` and its bases' `transformation_matrices_<id>.json` are removed, while the other rooms' pairs and files stay; bases left without a room beside named rooms are a room of their own here. Without rooms it removes every `transformation_matrices*.json`, as before.
+- **Each base** loads the matrix file of its room's main, and none when that file is missing: another room's file holds other coordinates.
 - **A session is one room's.** Two rooms at the same time are two sessions: start the IPS Base card with **Room** A and a new session, then again with **Room** B and another new session, and send START and STOP to each from Session Control. Each synchronizer takes its room's main as **Main Camera** (`-mc`); without one, a synchronizer facing a main per room says so instead of picking one. **Start** refuses a card whose bases are in different rooms, or whose main camera belongs to another room than its bases, and a synchronizer leaves out, with one warning, the detections of a base its main camera's matrices do not place.
 
 ## Manual CLI
@@ -163,7 +163,7 @@ mmla ips-sync  -p $P -c $C -sid <session-id> -mc <main-base-id>   # -mc/--main_c
 mmla ips-vis   -p $P -c $C -sid <session-id> -d 3d                # -d/--dimension: 2d (default) or 3d
 ```
 
-With `-sid`, as the console runs them, each command asks nothing: it starts at once, waits for START and exits when the run ends on STOP. `ips-sync` without `-mc` takes the `Bases` entry marked `main: true` when its transformation file is there, else the only `transformation_matrices_<id>.json` in `camera_sync/`; `ips-base` without `-b` takes the only `Bases` entry there is. Without `-sid` the commands ask for the session, and `ips-base` for its base when `-b` is omitted; `ips-sync` and `ips-vis` show their menus as before (start, set main camera or switch 2d/3d, exit) and go back to them after each run. `pipelines/ips-base/apriltag/` contains printable tag36h11 tags and a resize script; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to check the timing of recordings.
+With `-sid`, as the console runs them, each command asks nothing: it starts at once, waits for START and exits when the run ends on STOP. `ips-sync` without `-mc` takes the `Bases` entry marked `main: true` when its transformation file is there, else, when the `Bases` name no room, the only `transformation_matrices_<id>.json` in `camera_sync/` (with a main per room it asks for `-mc`); `ips-base` without `-b` takes the only `Bases` entry there is. Without `-sid` the commands ask for the session, and `ips-base` for its base when `-b` is omitted; `ips-sync` and `ips-vis` show their menus as before (start, set main camera or switch 2d/3d, exit) and go back to them after each run. `pipelines/ips-base/apriltag/` contains printable tag36h11 tags and a resize script; `pipelines/ips-base/docs/clock.html` is a browser clock you can film to check the timing of recordings.
 
 ## Post-time processing
 
