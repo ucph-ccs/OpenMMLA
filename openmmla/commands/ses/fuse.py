@@ -35,6 +35,10 @@ def get_parser():
             "split each pupil pair's joint attention by where it met (the group's own faces, hands or work area, or "
             'someone outside the group) and add the non-member columns (nm_at_table_ratio ...); false gives the table '
             'fused before 2026-09-29 byte for byte, for comparison', shortname='-js')
+    add_arg('tag_memory', float, 60.0,
+            'seconds after a track last read a tag that the tag stays on the track: a tag the server kept on it '
+            'longer is taken off, and a read is carried along its track no further; 0 keeps every kept tag and '
+            'carries the reads without a limit, as every table fused before 2026-10-02', shortname='-tm')
     add_arg('out', str, None,
             'where to write the table (.csv, else JSON lines); if not set, '
             'artifacts/<session>/analysis/features/<session>_window_features.csv', shortname='-o')
@@ -53,6 +57,9 @@ def main():
     )
     if args.window <= 0 or args.step <= 0:
         parser.error("-w/--window and -st/--step must be greater than 0")
+    if args.tag_memory < 0:
+        parser.error("-tm/--tag_memory must be 0 (no limit) or more")
+    tag_memory = args.tag_memory or None
     project_dir = args.project_dir or os.getcwd()
     session_id = args.session_id
     inputs: list[str] = []
@@ -86,7 +93,7 @@ def main():
             parser.error(str(e))
         pupils_source = 'manifest' if pupils is not None else 'trust bound'
     rows = fusion.window_features(events, window=args.window, step=args.step, participants=participants, pupils=pupils,
-                                  hand_relabel=args.hand_relabel, joint_split=args.joint_split)
+                                  hand_relabel=args.hand_relabel, joint_split=args.joint_split, tag_memory=tag_memory)
     if not rows:
         print(f"No events found for session {session_id}: nothing to build a table from.")
         return
@@ -175,6 +182,8 @@ def main():
                                                                 'min': fusion.JOINT_BASELINE_MIN},
                                              'hand_circle': hand_circle, 'hands': hands, 'speech': speech,
                                              'joint_split': joint_split,
+                                             # None: every tag the server kept, reads carried without a limit
+                                             'tag_memory_seconds': tag_memory,
                                              'events': counts, 'source': args.measurements or 'influxdb'},
                                  root=project_dir, project_dir=project_dir)
         write_analysis_record(record, os.path.join(os.path.dirname(path), 'fusion'))

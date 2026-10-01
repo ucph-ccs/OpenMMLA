@@ -10,12 +10,17 @@ every pair a sorted tag pair; persons the pose model saw without a tag count onl
 trace.
 
 A tag names more frames than the ones it was read in. The features endpoint tracks every person
-per camera and keeps a read tag on the track from then on; the fusion carries it further, over
-the whole session: the frames of a track before its first read, and those after the server lost
-its memory of it, take the tag of the track's nearest read (propagate_track_tags). Such a person
-counts like a tagged one everywhere but in learning the seats, and `n_vfa_propagated` says how
-many of the window's person frames were named that way; a session whose persons were not tracked
-has no such column.
+per camera and keeps a read tag on the track from then on, however long; the fusion trusts such a
+kept tag for TAG_MEMORY_SECONDS after the track last read it and takes it off later frames
+(expire_track_tags), since a track that lost its person and was picked up by another body carries
+the tag on to the wrong one. The fusion then carries the reads further, over the whole session:
+the frames of a track before its first read, and those after the server lost its memory of it,
+take the tag of the track's nearest read when that read is at most TAG_MEMORY_SECONDS away
+(propagate_track_tags). Such a person counts like a tagged one everywhere but in learning the
+seats, and `n_vfa_propagated` says how many of the window's person frames were named that way; a
+session whose persons were not tracked has no such column. `window_features(..., tag_memory=None)`
+keeps every kept tag and carries the reads without a limit, as every table fused before
+2026-10-02.
 
 The events come from InfluxDB (a session id) or from a Sessions -> Export Measurements folder
 (`<session>_<suffix>.json`), so a table can be built offline from an export.
@@ -213,6 +218,14 @@ SEAT_MIN_BOXES = 10
 # away longer than 32 s), so a longer absence means the server restarted or forgot the camera and
 # handed the id out again
 TRACK_GAP_SECONDS = 60.0
+# how long after a track last read a tag the fusion trusts the tag on that track: a tag the
+# features endpoint kept on the track without reading it (`tag_match: track`) is taken off after
+# this, and the fusion carries a read along its track no further. In five replayed sessions
+# (2026-10-01) the next read on the track confirmed a kept tag in 86 % of the frames within 5 s of
+# the last read, 69 % at 45 to 60 s and about half after a minute, and contradicted it in 2 % up to
+# two minutes and in 7 to 22 % beyond; at a minute the cleaner sessions keep 87 to 97 % of their
+# tagged frames
+TAG_MEMORY_SECONDS = 60.0
 # the tag_match of a person whose tag the fusion carried along their track
 PROPAGATED = 'propagated'
 # the features endpoint's keypoint_confidence and inout_threshold, which every replay used (the
@@ -1517,8 +1530,52 @@ def _renamed(frame: dict, persons: list[dict], names: dict[str, str]) -> dict:
     return frame
 
 
+def expire_track_tags(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None,
+                      memory: float = TAG_MEMORY_SECONDS) -> list[dict]:
+    """the vfa_features records with every tag the features endpoint kept on a track (`tag_match:
+    track`) taken off when the track read that tag more than `memory` seconds before, or never, or
+    read another tag last: the person is an untagged body again (`person_id` track_<id>), and the
+    pairs and gaze targets of the frame follow the new name. Records nothing changes in are returned
+    as they were; `layout` is the session's frame_set_layout, worked out from the records when not
+    given."""
+    records = list(records)
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    out = list(records)
+    # (camera, track id) -> (time, tag) of the track's last read
+    last: dict[tuple[str, Any], tuple[float, str]] = {}
+    for i in sorted((i for i, record in enumerate(records) if _time(record) > 0), key=lambda i: _time(records[i])):
+        moment = _time(records[i])
+        frames = _frames_of(records[i])
+        kept, changed = [], False
+        for frame, camera in zip(frames, camera_keys(frames, shared)):
+            persons = list(frame.get('persons') or [])
+            for person in persons:
+                if _decoded(person) and person.get('track_id') is not None:
+                    last[(camera, person['track_id'])] = (moment, str(person['tag_id']))
+            names: dict[str, str] = {}
+            for k, person in enumerate(persons):
+                if person.get('tag_id') is None or person.get('tag_match') != 'track':
+                    continue
+                read = last.get((camera, person.get('track_id')))
+                if read is not None and read[1] == str(person['tag_id']) and moment - read[0] <= memory:
+                    continue
+                name = f"track_{person.get('track_id')}"
+                if person.get('person_id') is not None:
+                    names[str(person['person_id'])] = name
+                persons[k] = dict(person, tag_id=None, tag_match=None, person_id=name)
+            if any(p is not q for p, q in zip(persons, frame.get('persons') or [])):
+                # a name another person of the frame still holds keeps its pairs and targets
+                held = {str(person.get('person_id')) for person in persons}
+                frame = _renamed(frame, persons, {old: new for old, new in names.items() if old not in held})
+                changed = True
+            kept.append(frame)
+        if changed:
+            out[i] = dict(records[i], features=kept)
+    return out
+
+
 def propagate_track_tags(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None,
-                         gap: float = TRACK_GAP_SECONDS) -> list[dict]:
+                         gap: float = TRACK_GAP_SECONDS, memory: float | None = None) -> list[dict]:
     """the vfa_features records with the tags carried along the tracks, offline, over the whole
     session: within a camera, a person without a tag whose track has a read tag somewhere takes
     the tag of the nearest read of that track (`tag_match: propagated`, `person_id` the tag), so
@@ -1527,10 +1584,11 @@ def propagate_track_tags(records: Iterable[dict], layout: tuple[int | None, froz
     frame going to the read nearest it. A track id not seen for more than `gap` seconds is
     another track from then on. A tag is only ever given to a person without one, and not in a
     frame where another person already carries it or where two tracks would get it (then
-    neither does); a track id twice in one frame names nobody. The pairs and gaze targets of a
-    renamed person's frame follow the new name. Records nothing changes in are returned as they
-    were; `layout` is the session's frame_set_layout, worked out from the records when not
-    given."""
+    neither does); a track id twice in one frame names nobody. With `memory` a person takes the
+    nearest read's tag only when that read is at most `memory` seconds away. The pairs and gaze
+    targets of a renamed person's frame follow the new name. Records nothing changes in are
+    returned as they were; `layout` is the session's frame_set_layout, worked out from the records
+    when not given."""
     records = list(records)
     _, shared = layout if layout is not None else frame_set_layout(records)
     parsed = [_frames_of(record) for record in records]
@@ -1559,8 +1617,13 @@ def propagate_track_tags(records: Iterable[dict], layout: tuple[int | None, froz
                 continue
             times = [moment for moment, _ in anchors]
             for moment, i, j, k in segment:
-                if parsed[i][j]['persons'][k].get('tag_id') is None:
-                    proposed[(i, j)].append((k, _nearest_tag(anchors, times, moment)))
+                if parsed[i][j]['persons'][k].get('tag_id') is not None:
+                    continue
+                if memory is not None:
+                    at = bisect.bisect_left(times, moment)
+                    if min(abs(moment - times[n]) for n in (at - 1, at) if 0 <= n < len(times)) > memory:
+                        continue
+                proposed[(i, j)].append((k, _nearest_tag(anchors, times, moment)))
     if not proposed:
         return records
     out = list(records)
@@ -2487,7 +2550,7 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
                     participants: list[str] | None = None, speakers: list[str] | None = None,
                     track_tags: bool = True, pupils: list[str] | None = None,
                     work_area: bool = True, seat_partners: bool = True, hand_relabel: bool = True,
-                    joint_split: bool = False) -> list[dict]:
+                    joint_split: bool = False, tag_memory: float | None = TAG_MEMORY_SECONDS) -> list[dict]:
     """the fusion table: one row per window over the session's span. `pupils` are the session's
     pupils, the in-group set whose faces and hands are a partner's (default_pupils of the
     participants when not given). With `hand_relabel` (the default) every stored frame's gaze
@@ -2497,9 +2560,12 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     (table_hand_circle: the version the frames state, version 1 for frames that state none, as every
     frame stored before the server's image was rebuilt). With `work_area`
     (the default) a gaze the server called elsewhere that lands in its camera's work area is
-    work_area (label_work_areas). With `track_tags` (the default) the tags are then carried along
-    the tracks of the features endpoint (propagate_track_tags), and a session whose persons were
-    tracked gets `n_vfa_propagated`. With `seat_partners` (the default) a gaze on an untagged body
+    work_area (label_work_areas). A tag the features endpoint kept on a track more than
+    `tag_memory` seconds after the track last read it is taken off first, before anything learns
+    from the tags (expire_track_tags); None keeps every kept tag. With `track_tags` (the default)
+    the tags are then carried along the tracks of the features endpoint, up to `tag_memory` seconds
+    from a read (propagate_track_tags), and a session whose persons were tracked gets
+    `n_vfa_propagated`. With `seat_partners` (the default) a gaze on an untagged body
     at the seat of a pupil the camera's frame does not hold counts as a partner's
     (n_vfa_seat_partners). With `joint_split` (off by default) the frames are marked with their
     non-members and the pupils' gaze referents (mark_referents), the pupil pairs' joint attention is
@@ -2526,6 +2592,10 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     relations = EventIndex(events.get(EVENT_TYPE_IPS_RELATION, []), 1.0)
     raw = events.get(EVENT_TYPE_VFA_FEATURES, [])
     layout = frame_set_layout(raw)
+    # a tag the server kept on a track too long after its last read is taken off before the work
+    # areas, the seats, the pupils' tracks and the propagation learn from the tags
+    if tag_memory is not None and _tracked(raw):
+        raw = expire_track_tags(raw, layout, tag_memory)
     # the gaze targets and hand distances made again with the current hand circle, from the frames
     # as the server stored and named them; it touches no box, tag or name. Without the relabel, the
     # work area and the hand columns read the circle the stored targets were made with
@@ -2537,7 +2607,8 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     # the persons' tags carried along their tracks; a session the server did not track has no
     # propagation column
     tracked = track_tags and _tracked(raw)
-    features = EventIndex(propagate_track_tags(labelled, layout) if tracked else labelled, instant=True)
+    features = EventIndex(propagate_track_tags(labelled, layout, memory=tag_memory) if tracked else labelled,
+                          instant=True)
     # the seats of the participants, learned once from the whole session and from the tags the
     # server gave (read or kept on the track), not the propagated ones, so a track carried to the
     # wrong person cannot move a seat; None without VFA, so its table has no seat trace
