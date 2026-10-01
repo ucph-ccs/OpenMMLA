@@ -11760,6 +11760,9 @@ class ServicePanel(Widget):
             say(f"Nothing {'saved' if save else 'synced'} to '{target}': {problem}")
             return 0
         left_alone = f"; left as they are: {', '.join(skipped)}" if skipped else ""
+        # the pipelines whose Streams there already matched are named too, so a pipeline missing
+        # from the line is not taken for one the sync forgot
+        in_step = f"; already in step: {', '.join(same)}" if same and entries else ""
         own_store = any(entry[1] == self._remote_config_path(self._remote_settings_path(), profile)
                         for entry in entries)
         if not entries:
@@ -11782,7 +11785,7 @@ class ServicePanel(Widget):
         origin = f" from {source}" if source not in (None, "local", target) else ""
         written = await self._run_scp_batch(
             target, entries, cleanup_local=True,
-            success_message=f"{note}{'Saved' if save else 'Synced'} {' and '.join(what)}{origin}{left_alone}",
+            success_message=f"{note}{'Saved' if save else 'Synced'} {' and '.join(what)}{origin}{in_step}{left_alone}",
             source=source)
         written = len(entries) if written is None else written
         if written == len(entries):
