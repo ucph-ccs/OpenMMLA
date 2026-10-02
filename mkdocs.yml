@@ -12,6 +12,7 @@ exclude_docs: |
   requirements.txt
   paper.md
   analytics/interaction_classifier.md
+  analytics/coding_and_audit.md
   img/interaction_*.svg
 
 theme:

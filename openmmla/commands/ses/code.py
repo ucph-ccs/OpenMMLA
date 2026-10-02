@@ -36,6 +36,13 @@ fails the inclusion rule S1 (openmmla.analytics.interaction.layout.session_inclu
 A session without a fused table cannot be judged and is kept, and so is every session when the
 analytics package (pandas) cannot be imported. --all lists every session. A voided session is one
 moved out of artifacts/; the manifest has no marker for it.
+
+A locked campaign (--campaign DIR with --campaign-init, --issue-token, --locked ...; see
+openmmla.commands.ses.code_locked) serves the same page to named coders over one-time links, each
+seeing only their own labels, on its own port and request log; its labels stay under
+labels/locked/<campaign>/, out of this page's reach, until --release-campaign. A sensing audit
+(--audit-sample, --audit-render, --audit, --audit-score ...; see openmmla.commands.ses.audit) has a
+person check identity, gaze and who speaks on sampled frames and windows, blind to the pipeline.
 """
 import argparse
 import json
@@ -1365,11 +1372,19 @@ def get_parser():
     parser.add_argument('--threads', type=int, default=4, help="CPU threads of the translation model (default 4)")
     parser.add_argument('-p', '--port', type=int, default=8765)
     parser.add_argument('--bind', default='127.0.0.1', help="address to listen on (default 127.0.0.1: this machine only; a Tailscale address or 0.0.0.0 lets others in, mind who can reach it)")
+    from openmmla.commands.ses import audit, code_locked  # stdlib only at import: Jev imports this module, not this function
+    code_locked.add_arguments(parser)
+    audit.add_arguments(parser)
     return parser
 
 
 def main(argv=None):
     args = get_parser().parse_args(argv)
+    from openmmla.commands.ses import audit, code_locked
+    if code_locked.requested(args):  # a locked campaign's command; without its flags nothing below changes
+        return code_locked.run(args, argv)
+    if audit.requested(args):  # a sensing audit's step, likewise
+        return audit.run(args, argv)
     artifacts = Path(args.artifacts or os.path.join(os.getcwd(), 'artifacts')).resolve()
     hold = tuple(h.strip() for h in args.hold.split(',') if h.strip())
     Handler.sessions, Handler.hidden = load_sessions(artifacts, args.sessions, args.show_all, hold)
