@@ -54,6 +54,7 @@ config/ssh_profiles.yml
 config/launcher_hosts.yml
 config/experiments.yaml
 config/system_services.yml
+pipelines/uber-server/dashboard/flask-backend/cache.location
 .env
 
 # Ignore specific files at any level

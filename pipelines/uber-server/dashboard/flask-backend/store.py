@@ -6,6 +6,13 @@ the web process and the Celery worker on the same host: `<sid>/<part>.json` hold
 envelope that remembers which InfluxDB state it was computed from (`source_last_event`), and
 `<sid>/<job>.status.json` says whether a job is queued, running, done or failed. Every write goes
 through a temporary file and `os.replace`, so a reader never sees half a file.
+
+A store made without a folder (`ReportStore()`: every process that loads dashboard.py, the web
+process, the worker and a `python dashboard.py precompute` run alike) also adds the cache folder it
+uses to `cache.location` beside this file: one absolute path a line, the latest last, at most
+LOCATION_MAX_LINES. `mmla ses-delete` (Delete Session) deletes a session's cache in each folder listed
+there and at the default place, so a cache that `DASHBOARD_CACHE_DIR` put elsewhere is found even
+after a process with another folder started.
 """
 
 import json
@@ -48,6 +55,87 @@ def default_cache_dir() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 
 
+# the pointer to the cache folders in use, beside this file (gitignored): every folder a store of
+# this checkout kept its cache in, so one process started with another DASHBOARD_CACHE_DIR never
+# hides the folder a running dashboard uses; openmmla's commands/ses/delete.py reads it at
+# DASHBOARD_CACHE_POINTER_REL with the same limits (POINTER_MAX_BYTES, POINTER_MAX_LINES)
+LOCATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache.location")
+LOCATION_MAX_BYTES = 8192
+LOCATION_MAX_LINES = 16
+
+
+def _nameable(line: bytes) -> bool:
+    """whether a pointer line can hold this folder: an absolute path without control characters
+    that fits in the file with its newline."""
+    return (line.startswith(b"/") and len(line) < LOCATION_MAX_BYTES
+            and not any(byte < 32 or byte == 127 for byte in line))
+
+
+def read_locations(path: str | None = None) -> list[bytes]:
+    """the folders the pointer file lists (LOCATION_FILE unless `path`), as bytes, oldest first, each
+    once; a line that cannot name a folder, a line without its newline, a link and a file that cannot
+    be read count as nothing."""
+    path = path or LOCATION_FILE
+    try:
+        if os.path.islink(path):
+            return []
+        with open(path, "rb") as handle:
+            data = handle.read(LOCATION_MAX_BYTES + 1)
+    except OSError:
+        return []
+    if b"\0" in data:
+        return []
+    lines = []
+    for line in data[:LOCATION_MAX_BYTES].split(b"\n")[:-1]:
+        if _nameable(line) and line not in lines:
+            lines.append(line)
+    return lines
+
+
+def write_location(cache_dir: str, path: str | None = None) -> bool:
+    """add `cache_dir` to the pointer file (LOCATION_FILE unless `path`) as its last line: its absolute
+    path and a newline, the folders listed before kept (the oldest dropped past LOCATION_MAX_LINES or
+    LOCATION_MAX_BYTES), through a temporary file and `os.replace`; left alone when it already ends
+    with it. False when it cannot: a checkout that cannot be written, or a folder no line can name (a
+    control character, or too long), only means a delete does not look there."""
+    path = path or LOCATION_FILE
+    folder = os.path.abspath(cache_dir)
+    # bytes as the file system has them: a name that is no UTF-8 still goes as it is
+    line = os.fsencode(folder)
+    if not _nameable(line):
+        logger.warning("the cache folder %r cannot be named in %s: Delete Session does not look there", folder, path)
+        return False
+    lines = [entry for entry in read_locations(path) if entry != line] + [line]
+    while len(lines) > LOCATION_MAX_LINES or sum(len(entry) + 1 for entry in lines) > LOCATION_MAX_BYTES:
+        lines.pop(0)
+    data = b"".join(entry + b"\n" for entry in lines)
+    try:
+        if not os.path.islink(path):
+            with open(path, "rb") as handle:
+                if handle.read(LOCATION_MAX_BYTES + 1) == data:
+                    return True
+    except OSError:
+        pass
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".cache.location.", dir=os.path.dirname(path))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        # only paths: readable by whoever deletes a session over SSH
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+        return True
+    except (OSError, ValueError) as exc:
+        logger.warning("could not write %s (%s): Delete Session does not look in %s unless it is listed already "
+                       "or is the default place", path, exc, folder)
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return False
+
+
 def _dumps(obj) -> str:
     try:
         return json.dumps(obj, allow_nan=False, separators=(",", ":"))
@@ -64,6 +152,13 @@ class ReportStore:
         self.cache_dir = os.path.abspath(cache_dir or default_cache_dir())
         self._memo: dict[str, tuple[tuple, dict]] = {}
         self._memo_lock = threading.Lock()
+        if not cache_dir:
+            # the store of every process that loads dashboard.py: add where its cache is. A store
+            # given its folder (a test, a script) leaves the pointer alone
+            try:
+                write_location(self.cache_dir)
+            except Exception as exc:  # the pointer helps a delete; it never stops the dashboard
+                logger.warning("could not write the cache pointer: %s", exc)
 
     def session_dir(self, sid: str, create: bool = False) -> str:
         if not isinstance(sid, str) or not _SESSION_ID_RE.match(sid) or sid in (".", ".."):

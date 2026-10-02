@@ -2,7 +2,6 @@ import argparse
 import functools
 import os
 
-import shutil
 from datetime import datetime, timezone
 
 
@@ -66,18 +65,49 @@ def cleanup_session_events(influx_client, session_id) -> None:
         print(f"❌ Failed to clean up session events: {e}")
 
 
-def delete_session(influx_client, mongo_client, session_id) -> None:
-    """Delete all data for a session from both InfluxDB and MongoDB."""
+# the folders below the one mmla ses-ana runs in (here the config's) where it, and an older
+# layout of the bases, kept a session's own <folder>/<session>/: (folder, what the log names)
+LOCAL_ANALYSIS_FOLDERS = (
+    ("logs", "analysis logs"),
+    ("visualizations", "analysis plots"),
+    ("real-time/runtime", "runtime files (old layout)"),
+)
+
+
+def _ask(ask, question: str) -> str:
+    """the answer to a y/N question; an input that has ended is a no."""
     try:
-        confirm = input(f"Session: {session_id} will be deleted from InfluxDB and MongoDB. Are you sure? (y/n): ")
-        if confirm.lower() != 'y':
-            print("Deletion cancelled.")
-            return
-        influx_client.delete_session_data(session_id)
-        mongo_client.delete_session(session_id)
-        print(f"✅ Successfully deleted session: {session_id}")
-    except Exception as e:
-        print(f"❌ Failed to delete session: {e}")
+        return ask(question)
+    except EOFError:
+        return ""
+
+
+def delete_session(influx_client, mongo_client, session_id, *, settings_root=None, log=None, ask=input) -> bool:
+    """Delete Session, the one the Sessions tab and `mmla ses-delete` run (openmmla.commands.ses.delete):
+    what goes and what stays is read and printed first, then a y/N question names the archive's path
+    and what stays, and only y deletes, in the same order (the archive and the dashboard's cache, then
+    InfluxDB, then MongoDB), stopping at the first step that fails. True once all of it is gone."""
+    from rich.markup import escape
+
+    from openmmla.commands.ses import archive, delete
+
+    log = log or archive._ConsoleCallbacks().log
+    settings_root = settings_root or archive._settings_root()
+    try:
+        plan = delete.plan_session(session_id, influx=influx_client, mongo=mongo_client, project_root=settings_root,
+                                   settings_root=settings_root)
+    except Exception as error:  # a failure is this question's, not the menu's
+        log(f"[red]✗ What Delete Session would remove could not be read: {escape(str(error))}. Nothing is "
+            f"deleted.[/red]")
+        return False
+    for line in delete.describe_session_plan(plan, "Answer y below to delete"):
+        log(line)
+    if not plan.ready:
+        return False
+    if not delete.confirmed(_ask(ask, delete.session_question(plan))):
+        log("[yellow]Nothing was deleted.[/yellow]")
+        return False
+    return delete.delete_session(plan, influx=influx_client, mongo=mongo_client, log=log, header=False)
 
 
 def create_new_session(mongo_client) -> None:
@@ -94,30 +124,40 @@ def create_new_session(mongo_client) -> None:
         print(f"❌ Failed to create new session: {e}")
 
 
-def cleanup_local_data(project_dir, session_id) -> None:
-    """Clean up local data associated with the session."""
+def delete_local_files(session_id, mongo_client=None, *, analysis_dir=None, settings_root=None, log=None,
+                       ask=input) -> bool:
+    """Delete Files on this machine, the one the Sessions tab (Local) and `mmla ses-delete <session>
+    --files-on local` run: this checkout's artifacts/<session>/ and collection/<session>/, and
+    <folder>/<session>/ of `analysis_dir` for each of LOCAL_ANALYSIS_FOLDERS, with the same checks
+    (a folder named exactly the session id directly inside its root, no link, the root itself never).
+    The folders and their sizes are printed first, and only y deletes them. True once they are gone."""
+    from rich.markup import escape
+
+    from openmmla.commands.ses import archive, delete
+
+    log = log or archive._ConsoleCallbacks().log
+    settings_root = settings_root or archive._settings_root()
+    extra = []
+    if analysis_dir:
+        base = os.path.abspath(str(analysis_dir))
+        extra = [delete.FilesRoot(os.path.join(base, folder), what) for folder, what in LOCAL_ANALYSIS_FOLDERS]
+    record = None
+    if mongo_client is not None:
+        record = archive._find_record(mongo_client, session_id)[0]
     try:
-        confirm = input(f"Local data for session: {session_id} will be cleaned up. Are you sure? (y/n): ")
-        if confirm.lower() != 'y':
-            print("Cleanup cancelled.")
-            return
-        directories = [
-            os.path.join(project_dir, 'logs', f'*{session_id}*'),
-            os.path.join(project_dir, 'visualizations', f'*{session_id}*'),
-            os.path.join(project_dir, 'real-time', 'runtime', session_id)
-        ]
-        for dir_pattern in directories:
-            import glob
-            for dir_path in glob.glob(dir_pattern):
-                if os.path.exists(dir_path):
-                    if os.path.isdir(dir_path):
-                        shutil.rmtree(dir_path)
-                    else:
-                        os.remove(dir_path)
-                    print(f"✅ Cleaned up: {dir_path}")
-        print(f"✅ Successfully cleaned up local data for session: {session_id}")
-    except Exception as e:
-        print(f"❌ Failed to clean up local data: {e}")
+        plan = delete.plan_files("local", session_id, project_root=settings_root, record=record,
+                                 settings_root=settings_root, extra_roots=extra)
+    except Exception as error:  # a failure is this question's, not the menu's
+        log(f"[red]✗ The files on this machine could not be read: {escape(str(error))}. Nothing is deleted.[/red]")
+        return False
+    for line in delete.describe_files_plan(plan, "Answer y below to delete"):
+        log(line)
+    if not plan.ready:
+        return False
+    if not delete.confirmed(_ask(ask, delete.files_question(plan))):
+        log("[yellow]Nothing was deleted.[/yellow]")
+        return False
+    return delete.delete_files(plan, log, header=False)
 
 
 def run_session_management(args):
@@ -143,13 +183,15 @@ def run_session_management(args):
                 "➕ Create New Session",
                 "🗑️  Delete Session",
                 "🧹 Clean Up Session Events",
-                "📁 Clean Up Local Data",
+                "📁 Delete Local Files",
             ]
             descriptions = [
                 "Create a new session in the database",
-                "Delete a session from InfluxDB and MongoDB",
+                "Delete a session everywhere central, as the Sessions tab does: its archive, the dashboard's "
+                "cache, its InfluxDB events and its MongoDB document (asks first)",
                 "Clean up selected event types for a session",
-                "Clean up local files (logs, visualizations, runtime, etc.)",
+                "Delete a session's folders on this machine, as Delete Files does: artifacts/, collection/, and "
+                "ses-ana's logs and plots (asks first)",
             ]
 
             operation = interactive_menu("Session Management", options, descriptions, exit_on_q=True, prompt_enter=True)
@@ -167,7 +209,7 @@ def run_session_management(args):
             elif operation == 3:
                 session_id = select_session(mongo_client)
                 if session_id:
-                    cleanup_local_data(os.path.dirname(config_path), session_id)
+                    delete_local_files(session_id, mongo_client, analysis_dir=os.path.dirname(config_path))
         except KeyboardInterrupt as e:
             if "Exit" in str(e):
                 print("\n👋 Goodbye!")

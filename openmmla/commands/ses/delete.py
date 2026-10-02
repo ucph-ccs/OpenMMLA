@@ -9,17 +9,34 @@ press goes on from there):
   archive   artifacts/<session>/ of the archive host's checkout (the folder
             mmla ses-archive writes, on the host archive.resolve_target names;
             its ledger lies inside it, in .archive/), and the dashboard's
-            cached report of the session on that host
-            (pipelines/uber-server/dashboard/flask-backend/cache/<session>/,
-            its default place; a dashboard started with DASHBOARD_CACHE_DIR
-            keeps it elsewhere, and that copy is not found)
+            cached report of the session when the dashboard runs there
+  cache     the dashboard's cached report of the session, <cache>/<session>/,
+            as its own step when the dashboard runs on another host
   InfluxDB  every event of the session, counted again afterwards
   MongoDB   the session's document
+
+The dashboard's host is the one System Settings → Dashboard names (the
+archive host when it names none, and so far always the archive host, which
+archive.resolve_target takes from there first). Its cache is looked for at
+the default place, cache/ beside a pointer file of its checkout
+(pipelines/uber-server/dashboard/flask-backend/cache.location), and in each
+folder that file lists (store.py adds the folder its store uses whenever a
+process loads dashboard.py: its DASHBOARD_CACHE_DIR, or the default). A
+listed folder that may hold session data (the top of the file system, the
+home folder, the checkout or a folder above either, artifacts/ or
+collection/ of the checkout, ~/artifacts, or a folder below one of those
+three) is never looked in, and a session's folder in a cache that holds
+anything the store does not write there (a folder, a link, another kind of
+file) is left alone. The plan says which folders it looked in and why. A
+dashboard host other than the archive host that cannot be asked blocks
+nothing: the cache is only what the dashboard computed from the data, and
+can be rebuilt.
 
 Copies on other machines stay: this console's own folder (unless this console
 is the archive host), the capture hosts' folders and the Stream Server's
 recordings, which streams share between sessions. When the archive host cannot
-be reached, or cannot be named, nothing is deleted.
+be reached, or cannot be named, nothing is deleted. mmla ses-man's Delete
+Session runs this same plan and delete, after a y/N question.
 
 With --files-on HOST it is Delete Files: the session's folders on that one
 host ('local' for this machine, else an SSH profile) and nowhere else. On this
@@ -44,7 +61,8 @@ A host that stops answering once a delete was sent may have deleted part of
 it: what it said before is logged, and nothing claims the rest is untouched.
 
 Test hooks: ses-archive's OPENMMLA_ARCHIVE_REMOTE_ROOT moves the archive (and
-the dashboard cache looked for beside it), ses-export's
+the dashboard's checkout, where its pointer and default cache are looked
+for), ses-export's
 OPENMMLA_EXPORT_REMOTE_ROOT moves the folders of every SSH host. The log says
 so, in yellow, whenever one of them is set."""
 
@@ -60,8 +78,16 @@ from pathlib import Path
 
 ARTIFACTS_DIR = "artifacts"
 COLLECTION_DIR = "collection"
-# below the archive host's checkout: the dashboard's report cache, one folder per session
-DASHBOARD_CACHE_REL = "pipelines/uber-server/dashboard/flask-backend/cache"
+# below the dashboard host's checkout: the dashboard's backend, its report cache's default
+# place (one folder per session), and the pointer its report store leaves there listing the
+# cache folders it used (store.py LOCATION_FILE)
+DASHBOARD_BACKEND_REL = "pipelines/uber-server/dashboard/flask-backend"
+DASHBOARD_CACHE_REL = f"{DASHBOARD_BACKEND_REL}/cache"
+DASHBOARD_CACHE_POINTER_REL = f"{DASHBOARD_BACKEND_REL}/cache.location"
+# the largest pointer file read, in bytes and in lines (one path and its newline each): the
+# limits store.py keeps it in (LOCATION_MAX_BYTES, LOCATION_MAX_LINES)
+POINTER_MAX_BYTES = 8192
+POINTER_MAX_LINES = 16
 
 # seconds a host has: to list its session folders, to size one session's, to delete them
 LIST_TIMEOUT = 60.0
@@ -117,6 +143,15 @@ class FilesRoot:
     """a folder whose children named after a session are that session's files."""
     path: str    # as that host spells it: absolute, or ~/... and $HOME/... for its home
     what: str    # what it holds, as the log names it
+    # a file on that host listing more folders like `path`, an absolute path a line (the
+    # dashboard's cache pointer); read by a plan only, which then adds a root for each listed
+    # folder it looked in, so a delete never reads it again
+    pointer: str = ""
+    # `path` as that host wrote it (a pointer's line): quoted as it is, never respelled
+    verbatim: bool = False
+    # a dashboard cache: a session's folder there is taken only while it holds nothing but what
+    # the report store writes into it (files named *.json, window_features.csv or .tmp-*)
+    cache_only: bool = False
 
 
 def _spelled(path: str) -> str:
@@ -150,7 +185,8 @@ def hook_notes() -> list[str]:
     from openmmla.commands.ses import archive, export
 
     notes = []
-    for name, what in ((archive.ENV_REMOTE_ROOT, "the archive is looked for under {} on the archive host"),
+    for name, what in ((archive.ENV_REMOTE_ROOT, "the archive, and the dashboard's cache pointer and default cache, "
+                                                 "are looked for under {} on their host"),
                        (export.ENV_REMOTE_ROOT, "the files of every SSH host are looked for under {}")):
         value = os.environ.get(name, "").strip()
         if value:
@@ -281,6 +317,8 @@ look() {
   if [ ! -e "$c" ]; then return 0; fi
   if [ ! -d "$c" ]; then echo "REFUSED $i notdir $c"; return 0; fi
   if [ "$(resolve "$c")" != "$c" ]; then echo "REFUSED $i moved $c"; return 0; fi
+  # $3: a dashboard cache, whose session folder may hold only what its report store writes
+  if [ -n "$3" ] && ! cacheonly "$c"; then echo "REFUSED $i notcache $c"; return 0; fi
   k=$(du -sk "$c" 2>/dev/null | cut -f1)
   n=$(find "$c" -type f 2>/dev/null | wc -l | tr -d ' ')
   echo "HAS $i ${k:-0} ${n:-0} $c"
@@ -303,6 +341,7 @@ del() {
   if [ ! -e "$c" ]; then echo "GONE $i $want"; return 0; fi
   if [ ! -d "$c" ]; then echo "REFUSED $i notdir $want"; return 1; fi
   if [ "$(resolve "$c")" != "$c" ]; then echo "REFUSED $i moved $want"; return 1; fi
+  if [ -n "$4" ] && ! cacheonly "$c"; then echo "REFUSED $i notcache $want"; return 1; fi
   rm -rf -- "$c" 2>/dev/null
   if [ -e "$c" ] || [ -L "$c" ]; then echo "FAILED $i $want"; return 1; fi
   echo "DELETED $i $want"
@@ -310,8 +349,112 @@ del() {
 '''
 
 
+# whether folder $1 holds nothing but what the dashboard's report store writes into a session's
+# cache folder: regular files (no link) named *.json, window_features.csv or .tmp-* (its
+# temporary files), and the .DS_Store a Mac's Finder leaves. A folder of recordings, an archive
+# or anything else (a subfolder, another kind of file) is never taken for a cache
+_CACHEONLY = r'''
+cacheonly() {
+  local e
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    if [ -L "$e" ] || [ ! -f "$e" ]; then return 1; fi
+    case "${e##*/}" in *.json|window_features.csv|.tmp-*|.DS_Store) ;; *) return 1;; esac
+  done
+  return 0
+}
+'''
+
+# the folders a pointer file lists, read and never run: POINTER <i> none (no pointer), bad <why>
+# (no file a pointer can be) or ok <lines>, then for each line CACHE <i> <x> <path> (that folder
+# is there: it is looked in as root x, its path in $d<x>), same <path> (a folder looked in
+# already, the default place among them), missing <path> (it is not there), data <path> (it may
+# hold session data, so it is never taken for a cache) or bad path (no absolute path without
+# control characters). A good pointer is a regular file (no link) of at most POINTER_MAX_BYTES and
+# POINTER_MAX_LINES lines, each ended by its newline, with no NUL. $3 is the checkout it lies in,
+# $4 the default place (root i's own folder); x is the last root index in use, x0 the first added
+_POINTER = r'''
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+# whether folder $1 is one looked in already: $2, or a folder a pointer added
+seen() {
+  local j=$x0
+  [ "$1" -ef "$2" ] && return 0
+  while [ "$j" -le "$x" ]; do
+    eval "[ \"\$1\" -ef \"\$d$j\" ]" && return 0
+    j=$((j + 1))
+  done
+  return 1
+}
+# whether folder $1 (resolved) may hold session data: the top of the file system, the checkout $2
+# or the home folder $3 or a folder above either, or artifacts/ or collection/ of the checkout or
+# ~/artifacts or a folder below one of those three (letter case aside: a Mac's file system ignores it)
+datafolder() {
+  local a b c
+  [ "$1" = / ] && return 0
+  a=$(lower "$1")
+  for b in "$2" "$3"; do
+    [ -n "$b" ] || continue
+    case "$(lower "$b")/" in "$a"/*) return 0;; esac
+  done
+  for b in "$2/artifacts" "$2/collection" "$3/artifacts"; do
+    case "$b" in /artifacts|/collection) continue;; esac
+    c=$(resolve "$b"); [ -n "$c" ] || c=$b
+    case "$a/" in "$(lower "$c")"/*) return 0;; esac
+  done
+  return 1
+}
+pointer() {
+  local i=$1 f=$2 k h n l p r
+  k=$(resolve "$3"); h=$(resolve "$HOME")
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then echo "POINTER $i none"; return 0; fi
+  if [ -L "$f" ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then echo "POINTER $i bad file"; return 0; fi
+  n=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+  case "$n" in ''|*[!0-9]*) echo "POINTER $i bad file"; return 0;; esac
+  if [ "$n" -gt @MAX@ ]; then echo "POINTER $i bad size"; return 0; fi
+  l=$(wc -l < "$f" | tr -d ' ')
+  # no NUL, every line ended by its newline, and at most @LINES@ of them
+  if [ "$n" = 0 ] || [ "$(tr -d '\000' < "$f" | wc -c | tr -d ' ')" != "$n" ] || [ -n "$(tail -c 1 "$f")" ] \
+     || [ "$l" -gt @LINES@ ]; then
+    echo "POINTER $i bad lines"; return 0
+  fi
+  echo "POINTER $i ok $l"
+  while IFS= read -r p; do
+    case "$p" in /*) ;; *) echo "CACHE $i bad path"; continue;; esac
+    case "$p" in *[[:cntrl:]]*) echo "CACHE $i bad path"; continue;; esac
+    r=$(resolve "$p")
+    if [ -z "$r" ]; then printf 'CACHE %s missing %s\n' "$i" "$p"; continue; fi
+    if seen "$r" "$4"; then printf 'CACHE %s same %s\n' "$i" "$p"; continue; fi
+    if datafolder "$r" "$k" "$h"; then printf 'CACHE %s data %s\n' "$i" "$p"; continue; fi
+    x=$((x + 1)); eval "d$x=\$p"
+    printf 'CACHE %s %s %s\n' "$i" "$x" "$p"
+  done < "$f"
+}
+'''.replace("@MAX@", str(POINTER_MAX_BYTES)).replace("@LINES@", str(POINTER_MAX_LINES))
+
+# every root a pointer added, x0 to x, looked in as a dashboard cache
+_LOOK_ADDED = r'''j=$x0; while [ "$j" -le "$x" ]; do eval "look $j \"\$d$j\" cache"; j=$((j + 1)); done
+'''
+
+
 def _roots_lines(roots: list[FilesRoot]) -> str:
-    return "".join(f"d{index}={_quote_root(root.path)}\n" for index, root in enumerate(roots))
+    return "".join(f"d{index}={shlex.quote(root.path) if root.verbatim else _quote_root(root.path)}\n"
+                   for index, root in enumerate(roots))
+
+
+def _pointer_checkout(pointer: str) -> str:
+    """the checkout a dashboard cache pointer lies in, quoted for the shell ('' when it is no such
+    pointer, and then only the top of the file system and the home folder are told apart)."""
+    text, suffix = _spelled(pointer), "/" + DASHBOARD_CACHE_POINTER_REL
+    checkout = text[:-len(suffix)] if text.endswith(suffix) else ""
+    return _quote_root(checkout) if checkout else "''"
+
+
+def _pointer_lines(roots: list[FilesRoot]) -> str:
+    """for each root with a pointer: read it, and add a root for each folder it lists that is there
+    and new (root indices from len(roots) on)."""
+    calls = "".join(f"pointer {index} {_quote_root(root.pointer)} {_pointer_checkout(root.pointer)} \"$d{index}\"\n"
+                    for index, root in enumerate(roots) if root.pointer)
+    return f"x0={len(roots)}; x={len(roots) - 1}\n{calls}" if calls else ""
 
 
 def _probe_lines(probes: list[str]) -> str:
@@ -321,15 +464,20 @@ def _probe_lines(probes: list[str]) -> str:
 
 
 def plan_script(roots: list[FilesRoot], session_id: str, probes: list[str] = ()) -> str:
-    """MACHINE <id> <hostname> first; for each root: ROOT <i> <the folder it
-    resolves to, or ->, then HAS <i> <kB> <files> <path> for the session's
-    folder there, or REFUSED <i> <link|notdir|moved|root> <path> for one that
-    may not be deleted; PROBE <j> <path> for each of `probes` (folders only
-    read); PLANNED at the end."""
+    """MACHINE <id> <hostname> first; POINTER <i> ... and CACHE <i> ... for
+    each root with a pointer (each folder it lists that is there and new is
+    then a root of its own, from index len(roots) on); for each root:
+    ROOT <i> <the folder it resolves to, or ->, then HAS <i> <kB> <files>
+    <path> for the session's folder there, or REFUSED <i>
+    <link|notdir|moved|root|notcache> <path> for one that may not be
+    deleted; PROBE <j> <path> for each of `probes` (folders only read);
+    PLANNED at the end."""
     _check_id(session_id)
-    calls = "".join(f"look {index} \"$d{index}\"\n" for index in range(len(roots)))
-    return (f"sid={shlex.quote(session_id)}\n{_PRELUDE}{_LOOK}machine\n{_roots_lines(roots)}{calls}"
-            f"{_probe_lines(list(probes))}echo PLANNED\n")
+    calls = "".join(f"look {index} \"$d{index}\"{' cache' if root.cache_only else ''}\n"
+                    for index, root in enumerate(roots))
+    pointers = _pointer_lines(roots)
+    return (f"sid={shlex.quote(session_id)}\n{_PRELUDE}{_CACHEONLY}{_LOOK}{_POINTER}machine\n{_roots_lines(roots)}"
+            f"{pointers}{calls}{_LOOK_ADDED if pointers else ''}{_probe_lines(list(probes))}echo PLANNED\n")
 
 
 def probe_script(probes: list[str]) -> str:
@@ -348,8 +496,11 @@ def delete_script(roots: list[FilesRoot], session_id: str, folders: list[tuple[i
     for index, path in folders:
         if not 0 <= index < len(roots):
             raise ValueError(f"no root {index}")
-        lines.append(f"del {index} \"$d{index}\" {shlex.quote(path)} || {{ echo STOPPED; echo DONE; exit 0; }}\n")
-    return f"sid={shlex.quote(session_id)}\n{_PRELUDE}{_DELETE}{_roots_lines(roots)}{''.join(lines)}echo DONE\n"
+        cache = " cache" if roots[index].cache_only else ""
+        lines.append(f"del {index} \"$d{index}\" {shlex.quote(path)}{cache} "
+                     f"|| {{ echo STOPPED; echo DONE; exit 0; }}\n")
+    return (f"sid={shlex.quote(session_id)}\n{_PRELUDE}{_CACHEONLY}{_DELETE}{_roots_lines(roots)}{''.join(lines)}"
+            f"echo DONE\n")
 
 
 def listing_script(roots: list[FilesRoot]) -> str:
@@ -490,6 +641,8 @@ _REFUSALS = {
     "root": "its root is the top of the file system",
     "id": "the id names no single folder",
     "case": "a folder whose name differs from the session id in letter case only, not its folder",
+    "notcache": ("it holds what the dashboard's report store never writes into a session's cache (a folder, a "
+                 "link or a file not named *.json, window_features.csv or .tmp-*), so it is no cached report"),
 }
 
 
@@ -505,6 +658,15 @@ class HostPlan:
     why: str = ""                                             # why the host could not be asked
     machine: str = ""                                         # what the host says it is ('' unknown)
     probed: dict[int, str] = field(default_factory=dict)      # probe index -> the folder it resolves to
+    looked: dict[int, str] = field(default_factory=dict)      # root index -> the folder looked in there
+    # root index -> (ok|none|bad, what is wrong with its pointer: '' unless bad)
+    pointers: dict[int, tuple[str, str]] = field(default_factory=dict)
+    # root index -> what each line of its pointer gave: (ok|same|missing|data|bad, the folder, or
+    # 'path' when bad; the root index it is looked in as when ok, else -1)
+    listed: dict[int, list[tuple[str, str, int]]] = field(default_factory=dict)
+    # session folders of a dashboard cache that hold what its report store never writes: (path, why),
+    # left alone and blocking nothing (only a cache may go, and this is none)
+    left: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def bytes(self) -> int:
@@ -524,13 +686,70 @@ def _parse_probes(line: str, head: str, plan) -> None:
             plan.probed[int(parts[1])] = parts[2]
 
 
+def pointer_path_ok(path: str) -> bool:
+    """whether a pointer's line can name a folder: an absolute path without
+    control characters (the host checks the same, and more)."""
+    text = str(path or "")
+    return text.startswith("/") and not any(ord(char) < 32 or ord(char) == 127 for char in text)
+
+
+def _parse_pointer(line: str, plan: HostPlan) -> None:
+    """a POINTER line: what the pointer file of a root said."""
+    parts = line.split(" ", 3)
+    if len(parts) < 3 or not parts[1].isdigit():
+        return
+    index, state, value = int(parts[1]), parts[2], parts[3] if len(parts) == 4 else ""
+    if not 0 <= index < len(plan.roots) or not plan.roots[index].pointer or index in plan.pointers:
+        return
+    if state == "ok":
+        value = ""
+    elif state == "bad":
+        value = value if value in ("file", "size", "lines") else "file"
+    elif state != "none":
+        state, value = "bad", "file"
+    plan.pointers[index] = (state, value)
+
+
+def _parse_listed(line: str, plan: HostPlan) -> None:
+    """a CACHE line: a folder the pointer of a root lists, and, when it is
+    there and new, the root it is looked in as from now on (index x, added
+    here as that index), so a delete never reads the pointer again."""
+    parts = line.split(" ", 3)
+    if len(parts) < 3 or not parts[1].isdigit():
+        return
+    index, state, value = int(parts[1]), parts[2], parts[3] if len(parts) == 4 else ""
+    if not 0 <= index < len(plan.roots) or plan.pointers.get(index, ("",))[0] != "ok":
+        return
+    listed = plan.listed.setdefault(index, [])
+    if state.isdigit():
+        # a root index out of step with the roots added so far is never added: its folder is not taken
+        if int(state) == len(plan.roots) and pointer_path_ok(value):
+            root = plan.roots[index]
+            plan.roots.append(FilesRoot(value, root.what, verbatim=True, cache_only=root.cache_only))
+            listed.append(("ok", value, int(state)))
+        else:
+            listed.append(("bad", "path", -1))
+    elif state in ("same", "missing", "data") and pointer_path_ok(value):
+        listed.append((state, value, -1))
+    else:
+        listed.append(("bad", "path", -1))
+
+
 def parse_plan(text: str, plan: HostPlan) -> HostPlan:
     seen = set()
     for line in str(text or "").splitlines():
         line = line.rstrip("\r")
         head = line.split(" ", 1)[0]
         _parse_probes(line, head, plan)
-        if head == "HAS":
+        if head == "POINTER":
+            _parse_pointer(line, plan)
+        elif head == "CACHE":
+            _parse_listed(line, plan)
+        elif head == "ROOT":
+            parts = line.split(" ", 2)
+            if len(parts) == 3 and parts[1].isdigit() and parts[2] != "-":
+                plan.looked[int(parts[1])] = parts[2]
+        elif head == "HAS":
             parts = line.split(" ", 4)
             if len(parts) == 5 and parts[1].isdigit() and parts[2].isdigit() and parts[3].isdigit():
                 index = int(parts[1])
@@ -540,7 +759,11 @@ def parse_plan(text: str, plan: HostPlan) -> HostPlan:
                                                int(parts[3])))
         elif head == "REFUSED":
             parts = line.split(" ", 3)
-            if len(parts) == 4:
+            cache = len(parts) == 4 and parts[1].isdigit() and int(parts[1]) < len(plan.roots) and \
+                plan.roots[int(parts[1])].cache_only
+            if cache and parts[2] == "notcache":
+                plan.left.append((parts[3], _REFUSALS["notcache"]))
+            elif len(parts) == 4:
                 plan.refused.append((parts[3], _REFUSALS.get(parts[2], parts[2])))
     return plan
 
@@ -650,10 +873,12 @@ class FilesPlan:
 
 
 def plan_files(host: str, session_id: str, *, project_root=None, record: dict | None = None,
-               settings_root=None) -> FilesPlan:
-    """what Delete Files takes of `session_id` on `host`. Blocking (one call to
-    the host, the archive host's name resolved, and, when the host picked is
-    not the archive host's own login, one read on the archive host)."""
+               settings_root=None, extra_roots: list[FilesRoot] = ()) -> FilesPlan:
+    """what Delete Files takes of `session_id` on `host`: under its roots
+    (host_roots) and `extra_roots` (mmla ses-man's analysis folders), with
+    the same checks. Blocking (one call to the host, the archive host's name
+    resolved, and, when the host picked is not the archive host's own login,
+    one read on the archive host)."""
     from concurrent.futures import ThreadPoolExecutor
 
     from openmmla.commands.ses import archive
@@ -665,6 +890,11 @@ def plan_files(host: str, session_id: str, *, project_root=None, record: dict | 
         return plan
     plan.notes.extend(hook_notes())
     roots = host_roots(host, project_root, record, session_id)
+    seen = {_spelled(root.path) for root in roots}
+    for root in extra_roots:
+        if _spelled(root.path) not in seen:
+            seen.add(_spelled(root.path))
+            roots.append(FilesRoot(root.path, root.what))
     # the archive host's own copy is the folder ses-archive writes there. Which
     # machine the host picked is, and where that folder lies, both hosts say
     # themselves: another SSH profile, or an address, may reach the archive host
@@ -761,11 +991,36 @@ def _log_outcome(outcome: Outcome, where: str, log, done_text: str) -> bool:
 # ---- Delete Session: everywhere central ----
 
 @dataclass
+class CacheLookup:
+    """where Delete Session looked for the dashboard's cached report of the
+    session, and why there."""
+    host: str = ""            # the dashboard's host as the log names it ('' when not known)
+    via: str = ""             # what named that host
+    pointer: str = ""         # the pointer file there, as that host spells it
+    default: str = ""         # the cache's default place there
+    state: str = ""           # what the pointer file was: ok, none, bad ('' when not asked)
+    value: str = ""           # what is wrong with it (bad), else ''
+    # what each line of the pointer gave: (ok|same|missing|data|bad, the folder, or 'path' when bad)
+    listed: list[tuple[str, str]] = field(default_factory=list)
+    # the cache folders looked in, the default place first, as the host resolves them (those there)
+    looked: list[str] = field(default_factory=list)
+    # the session's folders in a cache folder that hold what the report store never writes: left alone
+    left: list[str] = field(default_factory=list)
+    separate: bool = False    # the dashboard runs on another host than the archive: its own step
+    why: str = ""             # why that host could not be named or asked ('' when it was)
+
+
+@dataclass
 class SessionPlan:
     """Delete Session: what goes, read just before the question."""
     session_id: str
     archive: object = None                                    # archive.ArchiveTarget, None when not known
-    archive_plan: HostPlan | None = None                      # its archive folder and dashboard cache there
+    archive_plan: HostPlan | None = None                      # its archive folder, and the dashboard cache
+    #                                                           when the dashboard runs there too
+    dashboard: object = None                                  # the dashboard's host (archive.ArchiveTarget,
+    #                                                           its root the checkout), None when not known
+    dashboard_plan: HostPlan | None = None                    # the cache there, when that is another host
+    cache: CacheLookup = field(default_factory=CacheLookup)
     influx_counts: dict[str, int] | None = None               # None: no InfluxDB in System Settings
     mongo_exists: bool | None = None                          # None: no MongoDB in System Settings
     mongo_status: str = ""
@@ -774,9 +1029,8 @@ class SessionPlan:
     blockers: list[str] = field(default_factory=list)
 
     def folders(self, what: str) -> list[Folder]:
-        if self.archive_plan is None:
-            return []
-        return [folder for folder in self.archive_plan.folders if folder.what == what]
+        plans = [plan for plan in (self.archive_plan, self.dashboard_plan) if plan is not None]
+        return [folder for plan in plans for folder in plan.folders if folder.what == what]
 
     @property
     def events(self) -> int:
@@ -784,7 +1038,8 @@ class SessionPlan:
 
     @property
     def empty(self) -> bool:
-        return not (self.archive_plan and self.archive_plan.folders) and not self.events and not self.mongo_exists
+        folders = any(plan is not None and plan.folders for plan in (self.archive_plan, self.dashboard_plan))
+        return not folders and not self.events and not self.mongo_exists
 
     @property
     def ready(self) -> bool:
@@ -817,13 +1072,130 @@ def _mongo_document(mongo, session_id: str) -> dict | None:
         {"_id": 0, "session_id": 1, "status": 1, "collection_hosts": 1, "sources": 1})
 
 
+# ---- the dashboard's host and its cache ----
+
+def dashboard_host_setting(settings_root=None) -> str:
+    """the host System Settings → Dashboard names ('' when none)."""
+    from openmmla.commands.ses import archive
+    from openmmla.tui.system_services import load_system_services_config, usable_system_service_value
+
+    fields = (load_system_services_config(settings_root or archive._settings_root()) or {}).get("Dashboard")
+    if isinstance(fields, dict) and usable_system_service_value(fields.get("host")):
+        return str(fields["host"]).strip()
+    return ""
+
+
+def dashboard_target(archive_target, settings_root=None) -> tuple[object, str, str]:
+    """(the host the dashboard runs on, as an archive.ArchiveTarget whose root
+    is its checkout, or None; what named it; why it is not known, '' when it
+    is). `archive_target` itself when the dashboard runs on the archive host,
+    which is also where it is looked for when System Settings name no
+    Dashboard host. Resolved as archive.resolve_target resolves a host, the
+    test hook OPENMMLA_ARCHIVE_REMOTE_ROOT moving its checkout too."""
+    from openmmla.commands.ses import archive
+    from openmmla.tui.ssh import load_ssh_profiles
+    from openmmla.tui.system_services import target_for_service_host
+    from openmmla.utils.artifact_paths import short_hostname
+
+    via = "System Settings → Dashboard"
+    try:
+        value = dashboard_host_setting(settings_root)
+    except Exception as error:  # a settings file that cannot be read
+        return archive_target, f"the archive host, as System Settings could not be read ({type(error).__name__})", ""
+    if not value:
+        return archive_target, "the archive host, as System Settings → Dashboard name no host", ""
+    try:
+        profiles = load_ssh_profiles()
+    except Exception as error:
+        return None, via, f"the SSH profiles could not be read ({type(error).__name__})"
+    named = target_for_service_host(value, profiles)
+    if not named:
+        return None, via, f"no SSH profile reaches {value}"
+    if (archive_target.here and named == "local") or (not archive_target.here and named == archive_target.name):
+        return archive_target, via, ""
+    remote_root = os.environ.get(archive.ENV_REMOTE_ROOT, "").strip()
+    if named == "local":
+        root = remote_root or str(settings_root or archive._settings_root())
+        return archive.ArchiveTarget(short_hostname(), None, root, via), via, ""
+    profile = next(profile for profile in profiles if profile.name == named)
+    root = remote_root or profile.remote_project_path or "~/OpenMMLA"
+    return archive.ArchiveTarget(profile.name, profile, root, via), via, ""
+
+
+def cache_root(checkout: str) -> FilesRoot:
+    """the dashboard's cache below `checkout` (as its host spells it): its
+    default place, and through the pointer its report store leaves there
+    every other folder it kept its cache in."""
+    base = str(checkout).rstrip("/") or "/"
+    return FilesRoot(_join(base, DASHBOARD_CACHE_REL), WHAT_CACHE, pointer=_join(base, DASHBOARD_CACHE_POINTER_REL),
+                     cache_only=True)
+
+
+def _cache_lookup(lookup: CacheLookup, host_plan: HostPlan, index: int) -> None:
+    """what the plan of the dashboard's host said of its cache root and of
+    the folders its pointer lists."""
+    lookup.state, lookup.value = host_plan.pointers.get(index, ("", ""))
+    listed = host_plan.listed.get(index, [])
+    lookup.listed = [(state, value) for state, value, _root in listed]
+    roots = [index] + [root for state, _value, root in listed if state == "ok"]
+    lookup.looked = [host_plan.looked[root] for root in roots if host_plan.looked.get(root)]
+    lookup.left = [path for path, _why in host_plan.left]
+
+
+_POINTER_FAULTS = {
+    "file": "is not a file that can be read",
+    "size": f"is larger than {POINTER_MAX_BYTES} bytes",
+    "lines": (f"is not {POINTER_MAX_LINES} lines or fewer, each ended by its newline, with no NUL (it is written "
+              f"again when the dashboard starts)"),
+}
+
+
+def _cache_source(cache: CacheLookup) -> str:
+    """why the cache was looked for where it was (markup)."""
+    pointer = _escape(f"{cache.host}:{_shown(_spelled(cache.pointer))}")
+    if cache.state == "ok":
+        if any(state in ("ok", "same") for state, _value in cache.listed):
+            return f"its default place and the folders the dashboard's pointer {pointer} lists"
+        return f"its default place, as no folder the dashboard's pointer {pointer} lists can be looked in"
+    if cache.state == "bad":
+        fault = _POINTER_FAULTS.get(cache.value, "cannot be read")
+        return f"its default place, as the pointer {pointer} {fault}"
+    return f"its default place, as there is no pointer {pointer} (the dashboard writes it when it starts)"
+
+
+def _listed_lines(cache: CacheLookup, host: str) -> list[str]:
+    """what of the pointer's list was not looked in, and the session's
+    folders left alone (markup), each kind on one line."""
+    lines = []
+    left = [_escape(path) for path in cache.left]
+    if left:
+        lines.append(f"  [yellow]- Left alone on {host}: {', '.join(left)}. No report store wrote it: it holds a "
+                     f"folder, a link or a file not named *.json, window_features.csv or .tmp-*.[/yellow]")
+    data = [_escape(value) for state, value in cache.listed if state == "data"]
+    if data:
+        lines.append(f"  [yellow]- Never taken for a cache, though the pointer lists it: {', '.join(data)}. Session "
+                     f"data lies there: it is the top of the file system, the home folder, the checkout or a folder "
+                     f"above either, or in artifacts/ or collection/ of the checkout or in ~/artifacts.[/yellow]")
+    missing = [_escape(value) for state, value in cache.listed if state == "missing"]
+    if missing:
+        lines.append(f"  [dim]- Not there, though the pointer lists it: {', '.join(missing)}.[/dim]")
+    bad = sum(1 for state, _value in cache.listed if state == "bad")
+    if bad:
+        lines.append(f"  [yellow]- {bad} line(s) of the pointer hold no absolute path, so no folder was looked in "
+                     f"for them.[/yellow]")
+    return lines
+
+
 def plan_session(session_id: str, *, influx=None, influx_configured: bool = True, mongo=None,
                  mongo_configured: bool = True, project_root=None, settings_root=None) -> SessionPlan:
     """what Delete Session takes of `session_id`. `influx` is an
     InfluxDBClientWrapper and `mongo` anything whose `sessions` is the MongoDB
     collection; each None while it is not connected, which stops the delete
     when System Settings name it (`*_configured`). Blocking: the archive host
-    is asked over SSH, both databases are read."""
+    is asked over SSH, both databases are read, and the dashboard's host
+    when it is another one."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from openmmla.commands.ses import archive
     from openmmla.commands.ses.export import COLLECTION_HOSTS_FIELD
     from openmmla.utils import session_sources
@@ -848,15 +1220,43 @@ def plan_session(session_id: str, *, influx=None, influx_configured: bool = True
     if target is not None:
         plan.archive = target
         root = target.root.rstrip("/")
-        roots = [FilesRoot(f"{root}/{ARTIFACTS_DIR}", WHAT_ARCHIVE),
-                 FilesRoot(f"{root}/{DASHBOARD_CACHE_REL}", WHAT_CACHE)]
+        roots = [FilesRoot(f"{root}/{ARTIFACTS_DIR}", WHAT_ARCHIVE)]
         host = "local" if target.here else target.name
-        plan.archive_plan = plan_host(host, session_id, roots, profile=None if target.here else target.profile)
+        # the dashboard's cache: on the archive host in the same call, else on its own host
+        dashboard, via, why = dashboard_target(target, settings_root)
+        plan.dashboard = dashboard
+        plan.cache = CacheLookup(via=via, why=why)
+        separate = dashboard is not None and dashboard is not target
+        if dashboard is not None:
+            cache = cache_root(dashboard.root)
+            plan.cache.host, plan.cache.pointer, plan.cache.default = dashboard.name, cache.pointer, cache.path
+            plan.cache.separate = separate
+            if not separate:
+                roots.append(cache)
+        if separate:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                asked = pool.submit(plan_host, "local" if dashboard.here else dashboard.name, session_id, [cache],
+                                    None if dashboard.here else dashboard.profile)
+                plan.archive_plan = plan_host(host, session_id, roots, profile=None if target.here else target.profile)
+                plan.dashboard_plan = asked.result()
+        else:
+            plan.archive_plan = plan_host(host, session_id, roots, profile=None if target.here else target.profile)
         if not plan.archive_plan.reached:
             plan.blockers.append(f"The archive host {target.name} could not be asked ({plan.archive_plan.why}): "
                                  f"nothing is deleted")
         for path, why in plan.archive_plan.refused:
             plan.blockers.append(f"{target.name}:{path}: {why}. Nothing is deleted until it is sorted out by hand")
+        if dashboard is not None and not separate:
+            _cache_lookup(plan.cache, plan.archive_plan, len(roots) - 1)
+        elif separate:
+            # a dashboard host that cannot be asked blocks nothing: its cache can be rebuilt
+            if plan.dashboard_plan.reached:
+                _cache_lookup(plan.cache, plan.dashboard_plan, 0)
+            else:
+                plan.cache.why = plan.dashboard_plan.why or "it did not answer"
+            for path, why in plan.dashboard_plan.refused:
+                plan.blockers.append(f"{dashboard.name}:{path}: {why}. Nothing is deleted until it is sorted out by "
+                                     f"hand")
 
     # InfluxDB: the events by type
     if influx is None:
@@ -911,6 +1311,33 @@ def plan_session(session_id: str, *, influx=None, influx_configured: bool = True
     return plan
 
 
+def _cache_lines(plan: SessionPlan) -> list[str]:
+    """the dashboard cache's lines of the first press (markup): what goes, or
+    that there is none, with the folder looked in and why there."""
+    cache = plan.cache
+    if plan.archive is None:
+        return []
+    host = _escape(cache.host or "?")
+    rebuilt = ("a cache of the session there stays. It holds only what the dashboard computed from the data and can "
+               "be rebuilt, so this blocks nothing")
+    if cache.why:
+        if cache.host:
+            return [f"  [yellow]- The dashboard's host {host} could not be asked ({_escape(cache.why)}): {rebuilt}."
+                    f"[/yellow]"]
+        return [f"  [yellow]- The dashboard's host is not known ({_escape(cache.why)}, {_escape(cache.via)}): "
+                f"{rebuilt}.[/yellow]"]
+    source = _cache_source(cache)
+    looked = ", ".join(_escape(path) for path in cache.looked) or _escape(_shown(_spelled(cache.default)))
+    folders = plan.folders(WHAT_CACHE)
+    skipped = _listed_lines(cache, host)
+    if not folders:
+        return [f"  [dim]- No dashboard cache on {host}: looked in {looked} ({source}).[/dim]"] + skipped
+    lines = [f"  [red]Dashboard cache on {host}, {_human(folder.bytes)}: {_escape(folder.path)}[/red]"
+             for folder in folders]
+    lines.append(f"  [dim]  Looked in {looked} ({source}).[/dim]")
+    return lines + skipped
+
+
 def describe_session_plan(plan: SessionPlan, lead: str = "Click Delete Session again to delete") -> list[str]:
     """the first press's lines (markup): what goes, in red, and what stays; or
     why nothing can go."""
@@ -919,8 +1346,10 @@ def describe_session_plan(plan: SessionPlan, lead: str = "Click Delete Session a
     if plan.blockers:
         return lines + [f"[red]✗ {_escape(text)}.[/red]" for text in plan.blockers]
     if plan.empty:
-        return lines + [f"[yellow]Nothing of '{sid}' is kept centrally (no archive, no InfluxDB events, no MongoDB "
-                        f"document): nothing to delete. Delete Files removes its files on the host picked.[/yellow]"]
+        # where the cache was looked for, then the conclusion
+        return lines + _cache_lines(plan) + [
+            f"[yellow]Nothing of '{sid}' is kept centrally (no archive, no InfluxDB events, no MongoDB document): "
+            f"nothing to delete. Delete Files removes its files on the host picked.[/yellow]"]
     target_name = _escape(plan.archive.name) if plan.archive is not None else "?"
     archive = plan.folders(WHAT_ARCHIVE)
     goes = []
@@ -942,8 +1371,7 @@ def describe_session_plan(plan: SessionPlan, lead: str = "Click Delete Session a
                      f"ledger): {_escape(folder.path)}[/red]")
     if not archive and plan.archive is not None:
         lines.append(f"  [dim]- No archive on {target_name}.[/dim]")
-    for folder in plan.folders(WHAT_CACHE):
-        lines.append(f"  [red]Dashboard cache on {target_name}, {_human(folder.bytes)}: {_escape(folder.path)}[/red]")
+    lines.extend(_cache_lines(plan))
     if plan.influx_counts is None:
         lines.append("  [dim]- InfluxDB: System Settings name none.[/dim]")
     elif plan.events:
@@ -964,9 +1392,12 @@ def describe_session_plan(plan: SessionPlan, lead: str = "Click Delete Session a
 
 
 def delete_session(plan: SessionPlan, *, influx=None, mongo=None, log=print, header: bool = True) -> bool:
-    """Delete Session, second press: the archive (and the dashboard cache) on
-    the archive host, then InfluxDB, then MongoDB, each step logged, stopping
-    at the first that fails. True once all of it is gone. Blocking."""
+    """Delete Session, second press: the archive (and the dashboard cache,
+    when the dashboard runs there) on the archive host, then the dashboard
+    cache on the dashboard's own host, then InfluxDB, then MongoDB, each step
+    logged, stopping at the first that fails; a dashboard host that cannot be
+    asked is only said, its cache being rebuildable. True once all of it is
+    gone. Blocking."""
     sid = plan.session_id
     _check_id(sid)  # never a delete whose predicate or path is anything but this one session
     shown = _escape(sid)
@@ -976,11 +1407,12 @@ def delete_session(plan: SessionPlan, *, influx=None, mongo=None, log=print, hea
     # 1. the archive host: the archive folder first, then the dashboard cache
     if plan.archive_plan is not None and plan.archive_plan.folders:
         target = plan.archive
-        folders = plan.folders(WHAT_ARCHIVE) + plan.folders(WHAT_CACHE)
+        archived = [folder for folder in plan.archive_plan.folders if folder.what == WHAT_ARCHIVE]
+        folders = archived + [folder for folder in plan.archive_plan.folders if folder.what == WHAT_CACHE]
         outcome = delete_on_host(plan.archive_plan, folders, profile=None if target.here else target.profile)
         where = _escape(target.name)
         for path in outcome.deleted:
-            what = "Archive" if any(folder.path == path for folder in plan.folders(WHAT_ARCHIVE)) else "Dashboard cache"
+            what = "Archive" if any(folder.path == path for folder in archived) else "Dashboard cache"
             log(f"  [green]✓[/green] {what} deleted on {where}: {_escape(path)}")
         for path in outcome.gone:
             log(f"  [dim]- {where}:{_escape(path)} was not there any more[/dim]")
@@ -998,6 +1430,32 @@ def delete_session(plan: SessionPlan, *, influx=None, mongo=None, log=print, hea
             return False
     else:
         log("  [dim]- No archive to delete[/dim]")
+
+    # 1b. the dashboard's own host, when that is not the archive host: its cache of the session
+    if plan.dashboard_plan is not None and plan.dashboard_plan.folders:
+        dashboard = plan.dashboard
+        where = _escape(dashboard.name)
+        outcome = delete_on_host(plan.dashboard_plan, plan.dashboard_plan.folders,
+                                 profile=None if dashboard.here else dashboard.profile)
+        for path in outcome.deleted:
+            log(f"  [green]✓[/green] Dashboard cache deleted on {where}: {_escape(path)}")
+        for path in outcome.gone:
+            log(f"  [dim]- {where}:{_escape(path)} was not there any more[/dim]")
+        if outcome.failed:
+            # the host answered and refused, or could not remove it: something is not as planned
+            for path, why in outcome.failed:
+                log(f"  [red]✗ {where}:{_escape(path)}: {_escape(why)}[/red]" if path else
+                    f"  [red]✗ {where}: {_escape(why)}[/red]")
+            log(f"[red]Stopped: nothing after it was deleted, so InfluxDB and MongoDB still hold '{shown}'. Delete "
+                f"it again to go on.[/red]")
+            return False
+        if outcome.why:
+            # unreachable: the cache can be rebuilt, so the delete goes on
+            said = outcome.deleted or outcome.gone
+            state = (f"stopped answering during the delete ({_escape(outcome.why)}): its cache there may be partly "
+                     f"deleted" if said else f"could not be asked ({_escape(outcome.why)}): its cache there stays")
+            log(f"  [yellow]- The dashboard's host {where} {state}. It can be rebuilt, so the delete goes on; "
+                f"mmla ses-delete {shown} --yes removes it once {where} answers.[/yellow]")
 
     # 2. InfluxDB, counted again afterwards
     if plan.influx_counts is not None:
@@ -1040,14 +1498,59 @@ def delete_session(plan: SessionPlan, *, influx=None, mongo=None, log=print, hea
     return True
 
 
+# ---- a terminal's question (mmla ses-man) ----
+
+def _plain(markup: str) -> str:
+    from rich.text import Text
+
+    return Text.from_markup(str(markup)).plain
+
+
+def _listed(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def session_question(plan: SessionPlan) -> str:
+    """the y/N question before a terminal's Delete Session (plain text): the
+    archive's path, what else goes, and what stays."""
+    name = plan.archive.name if plan.archive is not None else "?"
+    archived = plan.folders(WHAT_ARCHIVE)
+    goes = [f"its archive {name}:{folder.path} (cannot be undone)" for folder in archived]
+    goes += [f"its dashboard cache {plan.cache.host}:{folder.path}" for folder in plan.folders(WHAT_CACHE)]
+    if plan.events:
+        goes.append(f"{plan.events} InfluxDB event(s)")
+    if plan.mongo_exists:
+        goes.append("its MongoDB document")
+    none = f" There is no archive on {name}." if plan.archive is not None and not archived else ""
+    stays = "; ".join(_plain(text) for text in plan.kept)
+    return (f"Delete '{plan.session_id}' everywhere central: {_listed(goes) if goes else 'nothing'}?{none} "
+            f"Stays: {stays or 'nothing'}. [y/N]: ")
+
+
+def files_question(plan: FilesPlan) -> str:
+    """the y/N question before a terminal's Delete Files (plain text): the
+    host and every folder that goes."""
+    paths = ", ".join(folder.path for folder in plan.found.folders)
+    copy = " One of them is the archive copy too." if plan.archive_copies else ""
+    return (f"Delete the files of '{plan.found.session_id}' on {_where(plan.found.host)} ({paths}, "
+            f"{_human(plan.found.bytes)})?{copy} Nothing elsewhere is touched. [y/N]: ")
+
+
+def confirmed(answer) -> bool:
+    """whether a y/N answer is yes: y or yes, nothing else (an empty answer is no)."""
+    return str(answer or "").strip().lower() in ("y", "yes")
+
+
 # ---- the command ----
 
 def get_parser():
     parser = argparse.ArgumentParser(
         prog="mmla ses-delete",
         description="Delete a session. Without --files-on: everywhere central, as the Sessions tab's Delete Session "
-                    "does: its archive on the archive host (and the dashboard's cached report there), then its "
-                    "InfluxDB events, then its MongoDB document, stopping at the first step that fails. With "
+                    "does: its archive on the archive host, the dashboard's cached report (at the cache's default "
+                    "place and in the cache folders the dashboard lists on its host), then its InfluxDB events, then "
+                    "its MongoDB document, stopping at "
+                    "the first step that fails. With "
                     "--files-on HOST: its folders on that one host, as Delete Files does. Without --yes it says "
                     "what would go and deletes nothing.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=40, width=120),
