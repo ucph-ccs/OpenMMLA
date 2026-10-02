@@ -1110,7 +1110,7 @@ class StreamPanel(Widget):
         "(its card, Config tab).\n"
         "Recordings are filed by day on the capture device, not by session. Manage lists them there, deletes "
         "them, and sets how long they are kept. A session's part of them (and of the Stream Server's) is "
-        "Sessions → Export Streams."
+        "Sessions → Export."
     )
 
     # what a Record cell offers: record on the capture device next to the push, or not

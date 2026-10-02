@@ -3185,7 +3185,7 @@ class StreamServerConfigPanel(Widget):
             "artifacts/streams/server/<app>/<name>/ of the project on this host (the same folder for a "
             "docker and a native run). A segment is deleted "
             "`recordDeleteAfter` after it began, by MediaMTX itself, so a session's footage has to be "
-            "exported before then (Sessions → Export Streams; the Recordings tab shows what is held). "
+            "exported before then (Sessions → Export; the Recordings tab shows what is held). "
             "This is the server-side copy; recording on the capture device is the `record` field of a "
             "stream (Streams tab of a base card). The two are independent. The ports here have to match "
             "System Settings → Stream Server.",
@@ -14999,6 +14999,8 @@ class ServicePanel(Widget):
         )
         tab_cmds: list[tuple[str, str]] = []
         started: list[str] = []
+        # (host, its params, the folder its recordings go to), for the session's document
+        recorded: list[tuple[str, dict, str]] = []
         for (host, _rows), result in zip(plan, results):
             if isinstance(result, BaseException):
                 self._log(f"[red]{rich_escape(_host_label(host))}: could not start its recorders "
@@ -15011,7 +15013,10 @@ class ServicePanel(Widget):
             self._remember_collection_launch(host, session_id)
             tab_cmds.extend(commands)
             started.append(_host_label(host))
-        if tab_cmds and self._open_collection_terminal(tab_cmds):
+            recorded.append((host, params, self._collection_local_path(params, host) if host == "local"
+                             else self._collection_remote_path(get_profile_by_name(host), params)))
+        opened = bool(tab_cmds) and self._open_collection_terminal(tab_cmds)
+        if opened:
             output_root = str(prepared.get("--output-root") or "artifacts")
             self._log(f"[green]Collection recording started on {', '.join(started)}; files are written under "
                       f"{output_root} on each host.[/green]")
@@ -15023,6 +15028,13 @@ class ServicePanel(Widget):
             exclusive=True,
         )
         self.set_timer(3.0, self._refresh_visible_statuses)
+        if opened and recorded:
+            # the hosts it records on, in the session's document (collection_hosts): Sessions → Export asks them
+            from openmmla.commands.ses.export import note_collection_hosts
+
+            note = await asyncio.to_thread(note_collection_hosts, session_id, recorded, settings_root=self._root)
+            if note:
+                self._log(note)
 
     async def _prepare_collection_host(self, svc: ServiceDef, prepared: dict, host: str,
                                        rows: dict[str, list[int]]) -> tuple[dict, list[tuple[str, str]]] | None:

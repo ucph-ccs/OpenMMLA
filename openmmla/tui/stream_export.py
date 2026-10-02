@@ -246,6 +246,7 @@ async def fetch_tree(
     merge: Callable[..., dict] | None = None,
     after_merge: Callable[[], "str | None"] | None = None,
     describe: Callable = describe_files,
+    present: Callable[[Path, "dl.RemotePlan"], list[str]] | None = None,
 ) -> bool:
     """scan, download (staged, resumable) and merge one remote tree into
     `local_dir`: only what is not here yet at the remote size is fetched, and
@@ -260,7 +261,9 @@ async def fetch_tree(
     artifacts.merge_tree; `after_merge()`, run between the merge and the removal
     of the staging (in a thread), may return a line for the log. `describe(rels)`
     names a set of files in the log (describe_files: by recording kind); an
-    empty answer names them by their count."""
+    empty answer names them by their count. `present(local_dir, plan)` says
+    which planned files are here already (files_already_here: at the remote
+    size)."""
     merge = merge or merge_tree
     log = callbacks.log
 
@@ -285,7 +288,7 @@ async def fetch_tree(
             return False
         if plan.rejected:
             log(f"[yellow]Skipping {len(plan.rejected)} remote file(s) with unsupported names.[/yellow]")
-        here = await asyncio.to_thread(files_already_here, local_dir, plan) if plan.exact else []
+        here = await asyncio.to_thread(present or files_already_here, local_dir, plan) if plan.exact else []
         log_plan(log, plan, here, describe)
         if here:
             plan = dl.leave_out(plan, here)

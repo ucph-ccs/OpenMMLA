@@ -1,5 +1,5 @@
 """the files a session's bases leave on the machines they run on, taken off
-those machines: Sessions -> Export Base Files.
+those machines: Sessions -> Export (its base files part).
 
 A base, and a synchronizer beside it, keeps what it writes for a session in
 the checkout it runs from, under artifacts/<session>/pipelines/<pipeline>/<host>/
@@ -158,6 +158,8 @@ class BaseFilesExport:
     folder: Path                                                 # artifacts/<session>/pipelines here
     fetched: list[tuple[str, str]] = field(default_factory=list)  # (profile, <pipeline>/<host>) all here now
     incomplete: list[str] = field(default_factory=list)          # profiles whose folders did not all arrive
+    # (profile, <pipeline>/<host>/<folder>) of each folder that did not arrive
+    unfetched: list[tuple[str, str]] = field(default_factory=list)
     unasked: list[str] = field(default_factory=list)             # profiles that could not be asked
     missing: dict[str, list[str]] = field(default_factory=dict)  # noted host -> its bases, reached by none
 
@@ -222,10 +224,13 @@ async def export_session(
         seen[key] = profile.name
         complete = True
         for part, folders in listing.parts().items():
-            if await _fetch_part(project_root, session_id, profile, listing.root, part, folders, callbacks, fetch):
+            missed: list[str] = []
+            if await _fetch_part(project_root, session_id, profile, listing.root, part, folders, callbacks, fetch,
+                                 missed=missed):
                 result.fetched.append((profile.name, part))
             else:
                 complete = False
+                result.unfetched.extend((profile.name, f"{part}/{folder}") for folder in missed)
         if not complete:
             result.incomplete.append(profile.name)
 
@@ -234,9 +239,13 @@ async def export_session(
 
 
 async def _fetch_part(project_root, session_id: str, profile, root: str, part: str, folders: list[str],
-                      callbacks: stream_export.ExportCallbacks, fetch) -> bool:
+                      callbacks: stream_export.ExportCallbacks, fetch, *, merge=None,
+                      missed: list[str] | None = None) -> bool:
     """fetch the folders of one <pipeline>/<host> part and name what arrived in
-    the session's manifest; True when all of them are here."""
+    the session's manifest; True when all of them are here. `merge` (default
+    stream_export.merge_replacing: a log fetched while its base still wrote it
+    gives way to the whole one) puts each in place; the folders that did not
+    arrive are added to `missed`."""
     log = callbacks.log
     log(f"[cyan]{escape(profile.name)}: {escape(part)} ({escape(', '.join(folders))})[/cyan]")
     here = session_pipelines_dir(project_root, session_id) / part
@@ -248,9 +257,11 @@ async def _fetch_part(project_root, session_id: str, profile, root: str, part: s
             profile, f"{root}/{part}/{folder}", here / folder,
             staging=dl.staging_root(project_root, session_id, PIPELINES_DIR, *part.split("/"), *folder.split("/")),
             label=f"{profile.name} · {folder}", where=profile.name, what=f"{part}/{folder}",
-            callbacks=callbacks, merge=stream_export.merge_replacing, describe=_by_count,
+            callbacks=callbacks, merge=merge or stream_export.merge_replacing, describe=_by_count,
         ):
             arrived.append(folder)
+        elif missed is not None:
+            missed.append(folder)
     if arrived:
         pipeline, host = part.split("/")
         manifest = await asyncio.to_thread(

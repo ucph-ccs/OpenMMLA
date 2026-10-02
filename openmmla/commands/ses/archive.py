@@ -1,13 +1,12 @@
 """mmla ses-archive: a session's raw files, sent from this console's checkout
 to the System Settings host, where the dashboard and replays read them.
 
-A session's files reach the console when its recordings are downloaded
-(Collection card, Download) and its streams and base files exported (Sessions
-tab), often the day after it ran. Archive (the Sessions tab's button, or this
-command) sends what is raw of artifacts/<session>/ to the same place in the
-checkout of the archive host: the Dashboard's host of System Settings, else
-its Stream Server's, or the SSH profile --host names. Nothing runs by itself,
-and nothing is deleted, here or there.
+A session's files reach the console when it is exported (the Sessions tab's
+Export, or mmla ses-export), often the day after it ran. Archive (the Sessions
+tab's button, or this command) sends what is raw of artifacts/<session>/ to
+the same place in the checkout of the archive host: the Dashboard's host of
+System Settings, else its Stream Server's, or the SSH profile --host names.
+Nothing runs by itself, and nothing is deleted, here or there.
 
 What is sent: collection/ (every host), streams/ (the exported stream cuts),
 raw/, pipelines/<pipeline>/<host>/config/ and logger/ (with the JSON of what
@@ -1380,8 +1379,8 @@ class ArchiveResult:
 
 
 # what to do about a session this console holds nothing of
-DOWNLOAD_FIRST = ("download its recordings first (the Collection card's Download), and export its streams and base "
-                  "files (Sessions tab) if it has any, then archive it")
+DOWNLOAD_FIRST = ("export it first (the Sessions tab's Export, or mmla ses-export), which gathers its recordings, "
+                  "streams and base files here, then archive it")
 
 
 def no_local_folder(session_id: str) -> str:

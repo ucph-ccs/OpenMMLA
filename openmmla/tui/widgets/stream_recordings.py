@@ -1,7 +1,7 @@
 """Manage on the Streams tab: the recordings the streams of a card left on the
 machines that capture them, host by host, with the room left there; the way
 to delete them, and how long they are kept. It copies nothing to this
-machine: a session's part of them is Sessions -> Export Streams.
+machine: a session's part of them is Sessions -> Export.
 
 How long is `record_keep_days` of each stream (0 keeps them). A choice here
 sets it for every stream of the card; the Launcher writes it into the config,
@@ -34,7 +34,7 @@ HELP = (
     "Start, filed under the day it started. A dim name is a stream that is not in this card's Streams (another "
     "card's, or one removed since).\n"
     "The file a stream is writing now is never deleted: Stop it first. A session's part of the streams is "
-    "copied to this machine with Sessions → Export Streams.\n"
+    "copied to this machine with Sessions → Export.\n"
     "Keep recordings for sets record_keep_days of every stream here (Config tab): a recording last written "
     "longer ago is deleted at its stream's next Start and at Refresh on the Streams tab. The Stream Server's "
     "own recordings are on its card."
@@ -395,7 +395,7 @@ class StreamRecordingsScreen(ModalScreen):
             self._pending = key
             self._set_log(
                 f"[red]This deletes {what} from the capture host's disk, for good: a session that still needs its "
-                f"part has to be exported first (Sessions → Export Streams). Press {button} again to confirm.[/red]")
+                f"part has to be exported first (Sessions → Export). Press {button} again to confirm.[/red]")
             return
         self._pending = None
         self._deleting = True

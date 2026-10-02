@@ -54,6 +54,7 @@ OPTIONAL_DEP_MAP = {
     "ses-classify": "uber-base",
     "ses-calibrate": "ips-base",
     "ses-archive": "tui",
+    "ses-export": "tui",
     "tui": "tui",
     "crypto": "tui",
 }
@@ -183,6 +184,10 @@ COMMANDS = {
     "ses-archive": (
         "openmmla.commands.ses.archive:main",
         "Send a session's raw files to the System Settings host, check them there by sha256, and note the archive."
+    ),
+    "ses-export": (
+        "openmmla.commands.ses.export:main",
+        "Gather a session's measurements, recordings, stream cuts and base files onto this console."
     ),
     "tui": (
         "openmmla.commands.tui:main",

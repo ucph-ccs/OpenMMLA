@@ -17,7 +17,7 @@ not answer, is noted as such.
 
 The measurements in InfluxDB carry the session id and nothing else about the
 run, so this is where a session's numbers are compared to another's, or a run
-is set up again. Sessions -> Export Measurements writes it out next to them as
+is set up again. Sessions -> Export writes it out next to them as
 <session>_parameters.json. Writing never stops a component: MongoDB being down,
 or a session document the console did not create, is a warning in its log and
 nothing more."""
@@ -350,7 +350,7 @@ def component_summary(entry: dict) -> str:
 
 
 def session_parameters(record: dict) -> dict:
-    """what Export Measurements writes next to a session's measurements: the
+    """what Sessions -> Export writes next to a session's measurements: the
     session's own fields, the streams its bases took, and what every component ran with."""
     core = {name: record.get(name) for name in
             ("session_id", "experiment_id", "group_id", "participants", "start_time", "end_time", "status", "metadata")}

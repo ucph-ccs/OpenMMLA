@@ -98,7 +98,7 @@ class StreamServerRecordingsPanel(Widget):
             "What MediaMTX holds on its disk, path by path, in ten-minute segments: the paths of each "
             "session while it ran (START to STOP), or every stream published to it while server-side "
             "recording is on for every path. A session's footage is "
-            "exported under Sessions → Export Streams; this is what there is to export from, and the way "
+            "exported under Sessions → Export; this is what there is to export from, and the way "
             "to make room before the retention of the Config tab does. A deletion goes through the server's "
             "API, so it works for a docker and a native run alike.",
             classes="rp-muted",

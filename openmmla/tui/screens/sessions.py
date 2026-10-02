@@ -9,8 +9,7 @@ import shlex
 import shutil
 import tempfile
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -24,11 +23,9 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, DataTable, RichLog, Button, Select, Label, ProgressBar
 
-from openmmla.tui import base_files, recordings, stream_export
+from openmmla.tui import recordings, stream_export
 from openmmla.utils import session_sources
-from openmmla.utils.artifact_paths import (
-    NON_SESSION_ARTIFACT_DIRS, session_capture_streams_dir, session_server_streams_dir, short_hostname,
-)
+from openmmla.utils.artifact_paths import NON_SESSION_ARTIFACT_DIRS, safe_segment, short_hostname
 
 
 @dataclass
@@ -368,18 +365,11 @@ def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict
     return sorted(rows, key=lambda row: _coerce_start_timestamp(row.get("start_time")), reverse=True)
 
 
-# ---- Export Streams ----
+# ---- Export and Archive ----
 
-# the worker group of Export Streams, and of Export All, which ends with it: a
-# group of its own, so Refresh does not stop it and Cancel stops nothing else
-_STREAMS_WORKER_GROUP = "sessions-streams"
-
-# what the end of a session's window is (recordings.session_end), as the log says it
-_WINDOW_REASONS = {
-    "ended": "when it was ended",
-    "left": "never ended: when its last base left",
-    "running": "still running: up to now",
-}
+# the worker group of Export and of Archive: a group of its own, so Refresh
+# does not stop them and Cancel stops nothing else
+_JOB_WORKER_GROUP = "sessions-transfer"
 
 
 # what the end End Session writes is (_end_by_hand), as the log says it
@@ -396,8 +386,8 @@ def _end_by_hand(record: dict, last_measurement: datetime | None, now: datetime 
                  last_log: datetime | None = None) -> tuple[datetime, str]:
     """the end_time End Session writes into a session that was never ended,
     and what it is (_END_REASONS). When every base that joined it has left,
-    that moment, which is where Export Streams already took it to end, so the
-    window it cuts stays the same; otherwise the latest moment the session is
+    that moment, which is where Export already took it to end, so the window
+    it cuts stays the same; otherwise the latest moment the session is
     known to have been alive: its last measurement, a base joining or leaving,
     or a log its components wrote on this machine; now when nothing says. A
     time from before the session began (a replay stamps its measurements with
@@ -438,58 +428,6 @@ def _last_local_log(artifact_dir: Path) -> datetime | None:
     return datetime.fromtimestamp(max(times), tz=timezone.utc) if times else None
 
 
-class _ExportStopped(Exception):
-    """Cancel was pressed while a clip was being downloaded."""
-
-
-def _shown_path(project_root, path) -> str:
-    """a folder of the project as the log names it, artifacts/<session>/...,
-    escaped for markup."""
-    from openmmla.tui.artifacts import relative_to_root
-
-    return escape(relative_to_root(project_root, path))
-
-
-@dataclass
-class _ServerSources:
-    """the sources of a session as the Stream Server of System Settings sees them."""
-    paths: list[str] = field(default_factory=list)                  # its paths there, each once, in the order noted
-    elsewhere: list[tuple[str, str]] = field(default_factory=list)  # (stream, URL) published to another server
-    by_stream: dict[str, str] = field(default_factory=dict)         # stream name -> its path there
-    direct: list[str] = field(default_factory=list)                 # `asr:0 mic-1`: taken through no server at all
-
-
-def _server_sources(record: dict | None, server: dict) -> _ServerSources:
-    """sort the sources of a session record by where their streams went: the
-    URL each base pulled is looked up on the Stream Server of System Settings
-    (system_services.stream_server_path, which checks the host). Blocking: a
-    host name may be resolved."""
-    from openmmla.tui.system_services import hosts_match, is_loopback_host, stream_server_path
-
-    server_host = str((server or {}).get("host") or "").strip().strip("[]")
-    found = _ServerSources()
-    for entry in session_sources.session_sources(record):
-        name = str(entry.get("stream") or entry.get("key") or "?")
-        url = str(entry.get("url") or "").strip()
-        # only what a stream server serves (rtmp, rtsp, srt): udp and tcp go straight to a base
-        served = session_sources.stream_url_path(url) if url else None
-        if served is None:
-            found.direct.append(f"{entry.get('key')} {entry.get('stream') or entry.get('source') or '?'}")
-            continue
-        path = stream_server_path(url, server)
-        if path is None and is_loopback_host(urlsplit(url).hostname) and hosts_match(entry.get("host"), server_host):
-            # localhost in the URL of a base that runs on the Stream Server's host is that server
-            path = served
-        if path is None:
-            if (name, url) not in found.elsewhere:
-                found.elsewhere.append((name, url))
-            continue
-        found.by_stream.setdefault(name, path)
-        if path not in found.paths:
-            found.paths.append(path)
-    return found
-
-
 class SessionsPanel(Widget):
 
     # seconds the Stream Server keeps a recording, as it last said; None while
@@ -497,12 +435,14 @@ class SessionsPanel(Widget):
     _retention: float | None = None
     # the MongoDB client of the host shown; None while none is connected
     _mongo_client = None
-    # the session whose streams or base files are being exported (Export
-    # Streams, Export Base Files, Export All), what Cancel sets to stop it, and
-    # the button that started it; None while none is
-    _streams_export_session: str | None = None
-    _streams_cancel: threading.Event | None = None
-    _streams_export_button: str = "Export Streams"
+    # the session being exported or archived, what Cancel sets to stop it,
+    # and the button that started it; None while none is
+    _job_session: str | None = None
+    _job_cancel: threading.Event | None = None
+    _job_button: str = "Export"
+    # database clients let go of (Refresh, a Host change) while a job held
+    # them: closed once it is over
+    _clients_after_job: tuple = ()
 
     class SessionEnded(Message):
         """End Session marked a session ended here: the Launcher's base cards
@@ -560,23 +500,23 @@ class SessionsPanel(Widget):
         height: 3;
         padding: 0 1;
     }
-    /* a short label keeps its own width, so the whole row fits 171 columns */
+    /* a short label keeps its own width, so the whole row fits 86 columns */
     #sessions-actions Button {
         margin: 0 1;
         min-width: 10;
     }
-    /* below that, the buttons take two lines of five (_fit_actions) */
+    /* below that, the buttons take two lines of three (_fit_actions) */
     #sessions-actions.-two-lines {
         layout: grid;
-        grid-size: 5;
+        grid-size: 3;
         grid-rows: 3;
         height: 6;
     }
     #sessions-actions.-two-lines Button {
         width: 1fr;
     }
-    /* the progress of Export Streams, up while it runs; height auto because a
-       bare Horizontal defaults to 1fr */
+    /* the progress of Export and Archive, up while one runs; height auto
+       because a bare Horizontal defaults to 1fr */
     #sessions-progress {
         layout: horizontal;
         height: auto;
@@ -645,16 +585,10 @@ class SessionsPanel(Widget):
             yield DataTable(id="sessions-table")
             with Horizontal(id="sessions-actions"):
                 yield Button("Refresh", variant="primary", id="btn-ses-refresh")
-                yield Button("Export Measurements", variant="success", id="btn-ses-export-logs")
-                yield Button("Export Visualizations", variant="success", id="btn-ses-export-vis")
-                # the footage of a session is a time range of the streams its bases
-                # noted in its record, as the Stream Server and their capture hosts
-                # recorded them
-                yield Button("Export Streams", variant="success", id="btn-ses-export-streams")
-                # what the bases wrote on the machines they ran on (base_files)
-                yield Button("Export Base Files", variant="success", id="btn-ses-export-base-files")
-                yield Button("Export All", variant="warning", id="btn-ses-export-all")
-                # the session's raw files sent to the System Settings host (mmla ses-archive)
+                # everything of the session gathered onto this console (mmla ses-export):
+                # its measurements, recordings, streams and base files
+                yield Button("Export", variant="success", id="btn-ses-export")
+                # the console's copy sent to the System Settings host (mmla ses-archive)
                 yield Button("Archive", variant="success", id="btn-ses-archive")
                 # a session left active (its console gone before Stop) set to ended
                 yield Button("End Session", variant="warning", id="btn-ses-end")
@@ -836,14 +770,18 @@ class SessionsPanel(Widget):
             pass
 
     def _close_clients(self) -> None:
-        for client in (self._mongo_client, self._influx_client):
-            try:
-                if client is not None:
-                    client.close()
-            except Exception:
-                pass
+        clients = tuple(client for client in (self._mongo_client, self._influx_client) if client is not None)
         self._mongo_client = None
         self._influx_client = None
+        if self._job_session is not None:
+            # the Export or Archive that runs is still querying them
+            self._clients_after_job += clients
+            return
+        for client in clients:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def _refresh_target_options(self) -> None:
         try:
@@ -1025,7 +963,7 @@ class SessionsPanel(Widget):
             self.run_worker(self._async_init(self._target), exclusive=True)
             return
         if bid == "btn-ses-export-cancel":
-            self._cancel_streams_export()
+            self._cancel_job()
             return
 
         if not self._selected_session_id:
@@ -1034,16 +972,8 @@ class SessionsPanel(Widget):
 
         session_id = self._selected_session_id
 
-        if bid == "btn-ses-export-logs":
-            self.run_worker(self._run_export(session_id, logs=True, vis=False), exclusive=True)
-        elif bid == "btn-ses-export-vis":
-            self.run_worker(self._run_export(session_id, logs=True, vis=True), exclusive=True)
-        elif bid == "btn-ses-export-all":
-            self._start_streams_export(session_id, self._run_export_all, "Export All · measurements")
-        elif bid == "btn-ses-export-streams":
-            self._start_streams_export(session_id, self._run_export_streams, "Export Streams")
-        elif bid == "btn-ses-export-base-files":
-            self._start_streams_export(session_id, self._run_export_base_files, "Export Base Files")
+        if bid == "btn-ses-export":
+            self._start_export(session_id)
         elif bid == "btn-ses-archive":
             self._start_archive(session_id)
         elif bid == "btn-ses-end":
@@ -1081,68 +1011,104 @@ class SessionsPanel(Widget):
             self._pending_delete_artifacts_session_id = None
             self.run_worker(self._run_delete_artifacts(session_id), exclusive=True)
 
-    # ---- export logic ----
+    # ---- Export ----
 
-    async def _run_export(self, session_id: str, *, logs: bool, vis: bool) -> None:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._do_export, session_id, logs, vis)
+    def _start_export(self, session_id: str) -> None:
+        """Export: everything of the session gathered onto this console (mmla
+        ses-export), with the progress row and its Cancel. A row without a
+        session id that names one folder has nothing to export."""
+        if not str(session_id or "").strip() or safe_segment(session_id, "") != session_id:
+            self._log(f"[yellow]'{escape(str(session_id))}' is no session id that names one folder: nothing to "
+                      f"export.[/yellow]")
+            return
+        self._start_job(session_id, self._run_export, "Export")
 
-    async def _run_export_all(self, session_id: str) -> None:
-        """Export All: the measurements and visualizations, then the streams
-        and the base files."""
-        await self._run_export(session_id, logs=True, vis=True)
-        await self._run_export_streams(session_id)
-        if self._streams_cancel is not None and self._streams_cancel.is_set():
-            raise asyncio.CancelledError()
-        await self._run_export_base_files(session_id)
+    async def _run_export(self, session_id: str) -> None:
+        """what mmla ses-export does, in this worker, with the session's
+        document as MongoDB holds it now (else the table's row), the InfluxDB
+        the table was listed from, and the Stream Server's retention as it
+        last said."""
+        from openmmla.commands.ses import export
 
-    # ---- Export Streams ----
-
-    def _start_streams_export(self, session_id: str, run, label: str) -> None:
-        """start Export Streams, Export Base Files, or Export All, which ends
-        with both, in a worker of its own group with the progress row up, so
-        its Cancel can be reached the whole time; one at a time."""
-        if self._streams_export_session is not None:
+        record, stale = await asyncio.to_thread(self._session_record, session_id)
+        # the table's own keys (_source_kinds, a set) are no part of the session's document
+        record = {key: value for key, value in record.items() if not str(key).startswith("_")}
+        if stale:
             self._log(
-                f"[yellow]{self._streams_export_button} of '{escape(self._streams_export_session)}' is still "
-                f"running. Wait for it to finish, or press Cancel next to its progress.[/yellow]"
+                f"  [dim]Could not read '{escape(session_id)}' from MongoDB again, so this goes by the table as it "
+                f"was last listed, which may not have the streams its bases noted since. Refresh and export again "
+                f"to be sure.[/dim]"
+            )
+        source = None
+        if self._config_source:
+            source = {"target": self._config_source.target, "config": self._config_source.label}
+        await export.export_session(
+            session_id, callbacks=self._job_callbacks(), record=record or None, influx=self._influx_client,
+            retention=self._retention, database_source=source)
+
+    def _job_callbacks(self) -> stream_export.ExportCallbacks:
+        """the log lines and the progress of Export and Archive go to this
+        panel's log and its progress row; Cancel there stops them."""
+        cancel = self._job_cancel or threading.Event()
+        return stream_export.ExportCallbacks(
+            log=self._log,
+            progress_start=self._progress_start,
+            progress_update=self._progress_update,
+            progress_end=self._progress_end,
+            cancelled=cancel.is_set,
+        )
+
+    def _start_job(self, session_id: str, run, label: str) -> None:
+        """start Export or Archive in a worker of its own group with the
+        progress row up, so its Cancel can be reached the whole time; one at a
+        time."""
+        if self._job_session is not None:
+            self._log(
+                f"[yellow]{self._job_button} of '{escape(self._job_session)}' is still running. Wait for it to "
+                f"finish, or press Cancel next to its progress.[/yellow]"
             )
             return
-        self._streams_export_session = session_id
-        self._streams_cancel = threading.Event()
-        self._streams_export_button = label.split(" · ")[0]
+        self._job_session = session_id
+        self._job_cancel = threading.Event()
+        self._job_button = label
         self._progress_show(label)
-        self.run_worker(self._streams_worker(session_id, run), group=_STREAMS_WORKER_GROUP, exclusive=False)
+        self.run_worker(self._job_worker(session_id, run), group=_JOB_WORKER_GROUP, exclusive=False)
 
-    async def _streams_worker(self, session_id: str, run) -> None:
+    async def _job_worker(self, session_id: str, run) -> None:
         try:
             await run(session_id)
         except asyncio.CancelledError:
-            if self._streams_cancel is not None:
-                self._streams_cancel.set()  # a clip downloading in a thread stops at its next chunk
-            staged = ("" if self._streams_export_button in ("Export Base Files", "Archive") else
+            if self._job_cancel is not None:
+                self._job_cancel.set()  # a clip downloading in a thread stops at its next chunk
+            staged = ("" if self._job_button == "Archive" else
                       ", and cuts made on a capture host stay there until they are fetched")
             self._log(
-                f"[yellow]The export of '{escape(session_id)}' stopped. What arrived is kept{staged}: press "
-                f"{self._streams_export_button} again to go on.[/yellow]"
+                f"[yellow]The {self._job_button.lower()} of '{escape(session_id)}' stopped. What arrived is "
+                f"kept{staged}: press {self._job_button} again to go on.[/yellow]"
             )
             raise
-        except Exception as error:  # a failure is this export's, not the app's
-            self._log(f"[red]✗ The export of '{escape(session_id)}' failed: {escape(str(error))}[/red]")
+        except Exception as error:  # a failure is this job's, not the app's
+            self._log(f"[red]✗ The {self._job_button.lower()} of '{escape(session_id)}' failed: "
+                      f"{escape(str(error))}[/red]")
         finally:
             self._progress_hide()
-            self._streams_export_session = None
-            self._streams_cancel = None
+            self._job_session = None
+            self._job_cancel = None
+            clients, self._clients_after_job = self._clients_after_job, ()
+            for client in clients:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
-    def _cancel_streams_export(self) -> None:
-        """Cancel next to the progress: stop the export of streams that runs."""
-        if self._streams_export_session is None:
+    def _cancel_job(self) -> None:
+        """Cancel next to the progress: stop the Export or Archive that runs."""
+        if self._job_session is None:
             return
-        if self._streams_cancel is not None:
-            self._streams_cancel.set()
-        self._log("[yellow]Stopping the export...[/yellow]")
-        self.workers.cancel_group(self, _STREAMS_WORKER_GROUP)
+        if self._job_cancel is not None:
+            self._job_cancel.set()
+        self._log(f"[yellow]Stopping the {self._job_button.lower()}...[/yellow]")
+        self.workers.cancel_group(self, _JOB_WORKER_GROUP)
 
     def _progress_show(self, label: str) -> None:
         """put the progress row up, its bar busy until a transfer gives a size."""
@@ -1176,8 +1142,8 @@ class SessionsPanel(Widget):
             pass
 
     def _progress_end(self) -> None:
-        """a transfer is over; the row stays up for as long as the export runs."""
-        self._progress_start(self._streams_export_button, None)
+        """a transfer is over; the row stays up for as long as the job runs."""
+        self._progress_start(self._job_button, None)
 
     def _progress_hide(self) -> None:
         try:
@@ -1205,339 +1171,6 @@ class SessionsPanel(Widget):
             return row, True
         return {}, False
 
-    async def _run_export_streams(self, session_id: str) -> None:
-        """Export Streams: both copies of the session's part of every stream it
-        used, from its `sources` (read again from MongoDB at the press).
-
-        A stream is shared by the sessions that pull it: the Stream Server
-        records its path while a session that pulls it runs (START to STOP,
-        openmmla.utils.stream_recording), and with Record on the machine that
-        captures it records it whether or not one runs. Nothing of either
-        belongs to a session; each base notes in the session's document the
-        stream it takes (openmmla.utils.session_sources), and the session's
-        start and end (recordings.session_end) pick the part of it:
-          - the server copy, over HTTP: each noted path on the Stream Server of
-            System Settings, one file per unbroken stretch, into
-            artifacts/<session>/streams/server/<app>/<name>_<start>.mp4;
-          - the capture copy, over SSH: each noted stream's recording, cut on
-            its capture host and fetched (stream_export), into
-            artifacts/<session>/streams/capture/<host label>/<video|audio>/.
-        A session without that note (one begun before the bases wrote it, or
-        one no base joined) has nothing to export, and says so: whatever was
-        recorded while it ran is nothing it is known to have used. Cancel stops
-        it between steps (a clip being downloaded at once); what arrived stays."""
-        from openmmla.tui.schema.loader import _find_project_root
-        from openmmla.tui.system_services import stream_server_address
-
-        cancel = self._streams_cancel or threading.Event()
-        shown = escape(session_id)
-        self._log(f"[bold]Exporting the streams of session: {shown}[/bold]")
-        self._progress_start("Export Streams · reading the session", None)
-        record, stale = await asyncio.to_thread(self._session_record, session_id)
-        if stale:
-            self._log(
-                f"  [dim]Could not read '{shown}' from MongoDB again, so this goes by the table as it was last "
-                f"listed, which may not have the streams its bases noted since. Refresh and export again to be "
-                f"sure.[/dim]"
-            )
-        start = recordings.parse_time(record.get("start_time"))
-        if start is None:
-            self._log(
-                f"  [yellow]'{shown}' has no start time in MongoDB (it is known from its artifacts only), so there "
-                f"is no time range to cut out of the streams.[/yellow]"
-            )
-            return
-        if not session_sources.session_sources(record):
-            # the conclusion first: the log does not wrap
-            self._log(
-                f"  [yellow]Nothing to export: '{shown}' names no stream (it began before the bases noted theirs, "
-                f"or no base joined it).[/yellow]"
-            )
-            return
-        end, why = recordings.session_end(record)
-        until = f"{end:%H:%M:%S}" if end.date() == start.date() else f"{end:%Y-%m-%d %H:%M:%S}"
-        self._log(f"  {start:%Y-%m-%d %H:%M:%S} to {until} UTC ({_WINDOW_REASONS[why]})")
-
-        root = _find_project_root()
-        server = await asyncio.to_thread(stream_server_address, root)
-        # without an address no URL is known to be the Stream Server's
-        sources = await asyncio.to_thread(_server_sources, record, server) if server.get("host") else _ServerSources()
-        from_server = await self._export_server_copy(
-            root, session_id, server, sources, (start, end), why == "ended", cancel)
-        if cancel.is_set():
-            raise asyncio.CancelledError()
-        from_capture = await self._export_capture_copy(root, session_id, record, sources, (start, end), cancel)
-
-        folder = _shown_path(root, session_server_streams_dir(root, session_id).parent)
-        if from_server or from_capture:
-            self._log(
-                f"[bold green]Streams of {shown} exported: {from_server} file(s) from the Stream Server, "
-                f"{from_capture} from the capture hosts, under {folder}[/bold green]\n"
-                f"  [dim]File names carry the time they start at, so a base replays one with source: file and "
-                f"its full path as source_index.[/dim]"
-            )
-        else:
-            self._log(f"[yellow]Nothing of the streams of {shown} was exported (see above).[/yellow]")
-
-    async def _export_server_copy(
-        self, root, session_id: str, server: dict, sources: _ServerSources,
-        window: tuple[datetime, datetime], ended: bool, cancel: threading.Event,
-    ) -> int:
-        """the server copy: each unbroken stretch of the session's paths on the
-        Stream Server within its window, asked of the playback server over HTTP
-        (no SSH). A clip already here in full is not fetched again. How many
-        clips are here afterwards."""
-        from openmmla.tui.artifacts import copy_covers, ensure_session_layout
-
-        start, end = window
-        shown = escape(session_id)
-        host = str(server.get("host") or "")
-        if not host:
-            from openmmla.tui.system_services import unset_address_note
-
-            self._log(f"[yellow]Not asked of the Stream Server: {unset_address_note('StreamServer')}.[/yellow]")
-            return 0
-        playback_port = int(server.get("playback_port") or recordings.PLAYBACK_PORT)
-        out_dir = session_server_streams_dir(root, session_id)
-        self._log(f"[cyan]From the Stream Server {escape(host)} into {_shown_path(root, out_dir)}[/cyan]")
-        for name, url in sources.elsewhere:
-            self._log(
-                f"  [yellow]- {escape(name)}: published to another server ({escape(url)}), not to the Stream "
-                f"Server of System Settings, so it is skipped here.[/yellow]"
-            )
-        paths = list(sources.paths)
-        if not paths:
-            if not sources.elsewhere:
-                self._log(
-                    f"  [yellow]None of the bases of '{shown}' took a stream through the Stream Server "
-                    f"({escape(', '.join(sources.direct))}), so it holds nothing of this session.[/yellow]"
-                )
-            return 0
-        self._log(f"  Its streams, as its bases noted them: {escape(', '.join(paths))}")
-
-        def ask() -> dict:
-            # the session's own paths need no listing: the playback server is
-            # asked for those, as they are named
-            return {path: recordings.timespans(host, path, playback_port) for path in paths}
-
-        self._progress_start(f"Stream Server · asking {host}", None)
-        try:
-            spans = await asyncio.to_thread(ask)
-        except recordings.RecordingsError as error:
-            self._log(
-                f"  [red]✗ The Stream Server does not answer: {escape(str(error))}[/red]\n"
-                f"  [dim]Its host and its API/playback ports are under Launcher → System Settings → Stream Server; "
-                f"the API and the playback server are switched on in its mediamtx.yml.[/dim]"
-            )
-            return 0
-        finally:
-            self._progress_end()
-        clips = recordings.clips_for_window(spans, start, end)
-        if not clips:
-            expired = recordings.expiry(start, self._retention)
-            if expired is not None and expired <= datetime.now(timezone.utc):
-                self._log(
-                    f"  [yellow]Nothing left on the server: it keeps a recording for "
-                    f"{recordings.describe_retention(self._retention)}, and this session's footage was deleted "
-                    f"from {expired:%Y-%m-%d %H:%M} UTC on. The retention is set on the Stream Server card, "
-                    f"Config tab; its Recordings tab shows what the server still holds.[/yellow]"
-                )
-                return 0
-            held = [path for path in paths if spans.get(path)]
-            found = ("Nothing of its streams was recorded on the server in that time"
-                     + (f" (it holds {', '.join(held)} from other times)." if held
-                        else " (it holds no recording of them)."))
-            self._log(
-                f"  [yellow]{escape(found)} The server records a session's paths from its START to its STOP "
-                f"(Session Control); a session never STARTed, or a server restarted meanwhile, has none.[/yellow]"
-            )
-            return 0
-
-        await asyncio.to_thread(ensure_session_layout, root, session_id)
-        loop = asyncio.get_running_loop()
-        done = 0
-        for index, clip in enumerate(clips, 1):
-            if cancel.is_set():
-                raise asyncio.CancelledError()
-            destination = out_dir / recordings.clip_relpath(clip)
-            label = escape(f"{clip.path}  {clip.start:%H:%M:%S} +{clip.duration:.0f}s")
-            size_here = destination.stat().st_size if destination.is_file() else 0
-            if size_here:
-                # a clip is named after its start only, so a copy exported while
-                # the session was still going looks like the full one: its length
-                # tells. Without ffprobe here, an ended session's clip counts as final
-                covered = await asyncio.to_thread(copy_covers, destination, clip.duration)
-                if covered or (covered is None and ended):
-                    self._log(f"  [dim]- {label}: already exported[/dim]")
-                    done += 1
-                    continue
-                if covered is False:
-                    self._log(
-                        f"  [cyan]{label}: the copy here stops short (exported while the session was still "
-                        f"going); fetching it in full[/cyan]"
-                    )
-            self._progress_start(f"Stream Server · {index} of {len(clips)}", None)
-            try:
-                size = await asyncio.to_thread(
-                    recordings.download_clip, host, clip, str(destination), playback_port,
-                    progress=self._clip_progress(loop, clip, cancel))
-            except recordings.RecordingsError as error:
-                self._log(f"  [red]✗ {label}: {escape(str(error))}[/red]")
-                continue
-            except _ExportStopped:
-                raise asyncio.CancelledError() from None
-            finally:
-                self._progress_end()
-            done += 1
-            self._log(f"  [green]✓[/green] {label} -> {escape(recordings.clip_relpath(clip))} ({size / 1e6:.1f} MB)")
-        self._log(f"  [green]{done} of {len(clips)} clip(s) are under {_shown_path(root, out_dir)}[/green]")
-        return done
-
-    def _clip_progress(self, loop, clip: recordings.Clip, cancel: threading.Event):
-        """the progress callback of one clip's download, which runs in its
-        thread: it stops the download once Cancel was pressed, and moves the
-        progress row on the app's loop a few times a second."""
-        began = time.monotonic()
-        shown = [0.0]
-
-        def progress(written: int) -> None:
-            if cancel.is_set():
-                raise _ExportStopped()
-            now = time.monotonic()
-            if now - shown[0] < 0.25:
-                return
-            shown[0] = now
-            rate = written / max(now - began, 1e-3)
-            detail = f"{clip.path} · {recordings.human_size(written)} · {recordings.human_size(rate)}/s"
-            try:
-                loop.call_soon_threadsafe(self._progress_update, written, 0, detail)
-            except RuntimeError:  # the app's loop is closed
-                pass
-
-        return progress
-
-    async def _export_capture_copy(
-        self, root, session_id: str, record: dict, sources: _ServerSources,
-        window: tuple[datetime, datetime], cancel: threading.Event,
-    ) -> int:
-        """the capture copy: each noted stream's recording on the machine that
-        captured it, cut there to the window without re-encoding and fetched
-        (stream_export.export_session, which says what it does line by line).
-        How many cuts are here afterwards."""
-        start, end = window
-        folder = session_capture_streams_dir(root, session_id)
-        self._log(f"[cyan]From the capture hosts into {_shown_path(root, folder)}[/cyan]")
-        found = stream_export.session_streams(record, root)
-        for name, why in found.skipped:
-            reason = ("someone else publishes it (it has no SSH Profile), so no capture host of this console "
-                      "records it" if why == "external" else
-                      "Record was off for it, so its capture host holds no recording of it")
-            path = sources.by_stream.get(name)
-            other = next((url for stream, url in sources.elsewhere if stream == name), None)
-            if path:
-                where = f"on the Stream Server ({escape(path)}, above)"
-            elif other:
-                where = f"on the server it was published to ({escape(other)})"
-            else:
-                where = "on the Stream Server, if it went through one"
-            self._log(f"  [dim]- {escape(name)}: {reason}; its only copy is {where}[/dim]")
-        streams = found.streams
-        if not streams:
-            if not found.skipped:
-                self._log(
-                    "  [dim]- Its bases took no stream the console captures (a camera or microphone of their "
-                    "own, or a file), so there is nothing to cut.[/dim]"
-                )
-            return 0
-
-        callbacks = stream_export.ExportCallbacks(
-            log=self._log,
-            progress_start=self._progress_start,
-            progress_update=self._progress_update,
-            progress_end=self._progress_end,
-            cancelled=cancel.is_set,
-        )
-        self._progress_start("Capture hosts · cutting", None)
-        try:
-            result = await stream_export.export_session(
-                root, session_id, streams, start.timestamp(), end.timestamp(), callbacks)
-        finally:
-            self._progress_end()
-        if result.here:
-            self._log(
-                f"  [green]{result.here} cut(s) are under {_shown_path(root, result.folder)}"
-                + (f" ({result.present} of them were already here)" if result.present else "")
-                + "[/green]"
-            )
-        if result.unfetched:
-            hosts = ", ".join(dict.fromkeys(result.unfetched))
-            self._log(
-                f"  [yellow]The cuts made on {escape(hosts)} did not all arrive. They stay there: press Export "
-                f"Streams again to fetch them.[/yellow]"
-            )
-        elif not result.here and all(cut.listed and not cut.failed for cut in result.cuts):
-            self._log(
-                "  [yellow]None of these streams was being recorded on its capture host during the "
-                "session.[/yellow]"
-            )
-        return result.here
-
-    # ---- Export Base Files ----
-
-    async def _run_export_base_files(self, session_id: str) -> None:
-        """Export Base Files: what the session's bases and synchronizers (and
-        an older session's IPS visualizer) wrote on the machines they ran on
-        (their logs, the config they ran with, what they recorded), from the
-        host of every SSH profile, into
-        artifacts/<session>/pipelines/<pipeline>/<host>/ (base_files).
-        Those run on this machine wrote there in the first place. Cancel stops
-        it between folders (a transfer at once); what arrived stays, and a
-        transfer cut short resumes at the next press."""
-        from openmmla.tui.schema.loader import _find_project_root
-        from openmmla.tui.ssh import load_ssh_profiles
-
-        cancel = self._streams_cancel or threading.Event()
-        shown = escape(session_id)
-        root = _find_project_root()
-        folder = _shown_path(root, base_files.session_pipelines_dir(root, session_id))
-        self._log(f"[bold]Exporting the base files of session: {shown}[/bold]")
-        self._progress_start("Export Base Files · reading the session", None)
-        record, _stale = await asyncio.to_thread(self._session_record, session_id)
-        profiles = await asyncio.to_thread(load_ssh_profiles)
-        here = await asyncio.to_thread(base_files.local_parts, root, session_id)
-        if here:
-            self._log(f"  [dim]This machine's own are in {folder} already: {escape(', '.join(here))}[/dim]")
-        if not profiles:
-            self._log(
-                "  [yellow]No SSH profile to ask: a base run on another machine keeps its files there. Add that "
-                "machine under System Settings → Hosts → SSH Profiles.[/yellow]"
-            )
-            return
-        self._log(f"[cyan]Asking {len(profiles)} SSH host(s) what they hold of it, into {folder}[/cyan]")
-        callbacks = stream_export.ExportCallbacks(
-            log=self._log,
-            progress_start=self._progress_start,
-            progress_update=self._progress_update,
-            progress_end=self._progress_end,
-            cancelled=cancel.is_set,
-        )
-        result = await base_files.export_session(root, session_id, profiles, callbacks, record=record)
-        for host, keys in result.missing.items():
-            self._log(
-                f"  [yellow]{escape(', '.join(keys))} ran on {escape(host)}, which no SSH profile reached: its "
-                f"files stay there.[/yellow]"
-            )
-        if result.fetched:
-            parts = ", ".join(f"{part} from {profile}" for profile, part in result.fetched)
-            self._log(f"[bold green]Base files of {shown} exported: {escape(parts)}, under {folder}[/bold green]")
-        if result.incomplete:
-            self._log(
-                f"[yellow]Not all of it arrived from {escape(', '.join(result.incomplete))} (see above). What was "
-                f"staged is kept: press Export Base Files again to go on.[/yellow]"
-            )
-        elif not result.fetched:
-            self._log(f"[yellow]No SSH host holds base files of {shown}.[/yellow]")
-
     # ---- Archive ----
 
     def _start_archive(self, session_id: str) -> None:
@@ -1550,23 +1183,15 @@ class SessionsPanel(Widget):
         if not archive.local_session_dir(session_id).is_dir():
             self._log(f"[yellow]{escape(archive.no_local_folder(session_id))}.[/yellow]")
             return
-        self._start_streams_export(session_id, self._run_archive, "Archive")
+        self._start_job(session_id, self._run_archive, "Archive")
 
     async def _run_archive(self, session_id: str) -> None:
         """what mmla ses-archive does, in this worker, with the MongoDB the
         table was listed from."""
         from openmmla.commands.ses import archive
 
-        cancel = self._streams_cancel or threading.Event()
-        callbacks = stream_export.ExportCallbacks(
-            log=self._log,
-            progress_start=self._progress_start,
-            progress_update=self._progress_update,
-            progress_end=self._progress_end,
-            cancelled=cancel.is_set,
-        )
         try:
-            await archive.archive_session(session_id, callbacks=callbacks, mongo=self._mongo_client)
+            await archive.archive_session(session_id, callbacks=self._job_callbacks(), mongo=self._mongo_client)
         except archive.ArchiveError as error:
             self._log(f"[red]✗ The archive of '{escape(session_id)}' was not made: {escape(str(error))}[/red]")
 
@@ -1744,200 +1369,3 @@ class SessionsPanel(Widget):
             self._log(f"[bold green]Artifact delete complete for {session_id}[/bold green]")
         except Exception as e:
             self._log(f"  [red]✗ Local artifact delete failed: {e}[/red]")
-
-    def _export_parameters(self, session_id: str, measurements_dir: str) -> None:
-        """write <session>_parameters.json (openmmla.utils.session_provenance): the session's
-        fields, the streams its bases took, and what each component ran with — its flags, the
-        values it resolved, the models its servers answered — and say in the log what is there."""
-        from openmmla.utils import session_provenance
-        try:
-            record = None
-            if self._mongo_client is not None:
-                record = self._mongo_client.get_session(session_id)
-            if not isinstance(record, dict) or not record:
-                self._log("  [dim]- Parameters: the session is not in MongoDB, so what it ran with is not known[/dim]")
-                return
-            path = session_provenance.write_session_parameters(record, measurements_dir)
-            components = session_provenance.session_components(record)
-            self._log(f"  [green]✓[/green] Parameters: {len(components)} component(s) -> {os.path.basename(path)}")
-            for entry in components:
-                self._log(f"    [dim]{escape(session_provenance.component_summary(entry))}[/dim]")
-            if not components:
-                self._log("  [dim]  no component noted what it ran with (bases from before they did, or none joined)[/dim]")
-        except Exception as e:
-            self._log(f"  [red]✗ Parameters: {e}[/red]")
-
-    def _export_analysis_record(self, session_id: str, root, analysis_dir: str, vis_dir: str,
-                                inputs: list[str], steps: list[str]) -> None:
-        """write analysis/parameters.json (openmmla.utils.session_provenance): the measurement
-        files the plots were made from, with their digests, the plots made, and the software."""
-        from openmmla.utils import session_provenance
-        try:
-            outputs = sorted(
-                os.path.join(vis_dir, name) for name in os.listdir(vis_dir)
-                if os.path.isfile(os.path.join(vis_dir, name)))
-            record = session_provenance.analysis_record(
-                session_id, inputs=inputs, outputs=outputs, steps=steps, root=root, project_dir=root)
-            path = session_provenance.write_analysis_record(record, analysis_dir)
-            self._log(f"  [green]✓[/green] Analysis record: {len(steps)} step(s) from {len(inputs)} file(s) "
-                      f"-> {os.path.relpath(path, root)}")
-        except Exception as e:
-            self._log(f"  [red]✗ Analysis record: {e}[/red]")
-
-    def _do_export(self, session_id: str, logs: bool, vis: bool) -> None:
-        import time
-        import yaml
-        from openmmla.tui.artifacts import artifact_session_dir, ensure_session_layout, relative_to_root
-        from openmmla.tui.schema.loader import _find_project_root
-        from openmmla.utils.constants import (
-            EVENT_TYPE_ASR_RECOGNITION, EVENT_TYPE_ASR_TRANSCRIPTION,
-            EVENT_TYPE_VFA_ACTION, EVENT_TYPE_VFA_FEATURES,
-            EVENT_TYPE_IPS_TRANSLATION, EVENT_TYPE_IPS_ROTATION, EVENT_TYPE_IPS_RELATION,
-        )
-        from openmmla.utils.querys import fetch_and_process_data, save_to_json_file
-
-        root = _find_project_root()
-        ensure_session_layout(root, session_id)
-        session_dir = artifact_session_dir(root, session_id)
-        measurements_dir = os.path.join(session_dir, "measurements")
-        analysis_dir = os.path.join(session_dir, "analysis")
-        features_dir = os.path.join(analysis_dir, "features")
-        vis_dir = os.path.join(analysis_dir, "visualizations")
-
-        self._log(f"[bold]Exporting session: {session_id}[/bold]")
-        self._log(f"Output directory: {session_dir}")
-
-        # ---- export measurements ----
-        if logs:
-            os.makedirs(measurements_dir, exist_ok=True)
-
-            event_types = {
-                "ASR Recognition": (EVENT_TYPE_ASR_RECOGNITION, "speaker_recognition"),
-                "ASR Transcription": (EVENT_TYPE_ASR_TRANSCRIPTION, "speaker_transcription"),
-                "VFA Action": (EVENT_TYPE_VFA_ACTION, "action_recognition"),
-                "VFA Features": (EVENT_TYPE_VFA_FEATURES, "features"),
-                "IPS Translation": (EVENT_TYPE_IPS_TRANSLATION, "badge_translation"),
-                "IPS Rotation": (EVENT_TYPE_IPS_ROTATION, "badge_rotation"),
-                "IPS Relation": (EVENT_TYPE_IPS_RELATION, "badge_relation"),
-            }
-
-            exported_files: dict[str, str] = {}
-            for label, (evt, suffix) in event_types.items():
-                try:
-                    data = fetch_and_process_data(session_id, evt, self._influx_client)
-                    if data:
-                        # the features of a session (a skeleton per person per frame) are large:
-                        # written compactly, they are a fraction of the indented size
-                        path = save_to_json_file(session_id, data, suffix, measurements_dir,
-                                                 compact=(evt == EVENT_TYPE_VFA_FEATURES))
-                        exported_files[label] = path
-                        self._log(f"  [green]✓[/green] {label}: {len(data)} records -> {os.path.basename(path)}")
-                    else:
-                        self._log(f"  [dim]- {label}: no data[/dim]")
-                except Exception as e:
-                    self._log(f"  [red]✗ {label}: {e}[/red]")
-
-            # convert transcription to txt
-            if "ASR Transcription" in exported_files:
-                try:
-                    from openmmla.analytics.asr.transcription import convert_transcription_json_to_txt
-                    convert_transcription_json_to_txt(exported_files["ASR Transcription"])
-                    self._log("  [green]✓[/green] ASR Transcription -> .txt")
-                except Exception as e:
-                    self._log(f"  [red]✗ Transcription txt conversion: {e}[/red]")
-
-            # the run's parameters, next to its measurements: what every component of the
-            # session ran with, as the bases noted it in the session's document
-            self._export_parameters(session_id, measurements_dir)
-
-        # ---- export visualizations ----
-        if vis:
-            os.makedirs(vis_dir, exist_ok=True)
-            # what the plots were made from and with, for analysis/parameters.json
-            steps: list[str] = []
-            inputs: list[str] = []
-
-            # ASR visualizations
-            recognition_path = os.path.join(measurements_dir, f"{session_id}_speaker_recognition.json")
-            if os.path.isfile(recognition_path):
-                inputs.append(recognition_path)
-                try:
-                    from openmmla.analytics.asr.analyze import (
-                        plot_speaker_diarization_interactive,
-                        plot_speaking_interaction_network,
-                    )
-                    plot_speaker_diarization_interactive(recognition_path, vis_dir)
-                    steps.append("asr.plot_speaker_diarization_interactive")
-                    self._log("  [green]✓[/green] ASR: speaker diarization chart")
-                    plot_speaking_interaction_network(recognition_path, vis_dir)
-                    steps.append("asr.plot_speaking_interaction_network")
-                    self._log("  [green]✓[/green] ASR: speaking interaction network")
-                except Exception as e:
-                    self._log(f"  [red]✗ ASR visualizations: {e}[/red]")
-            else:
-                self._log("  [dim]- ASR visualizations: no recognition log file[/dim]")
-
-            # IPS visualizations
-            translation_path = os.path.join(measurements_dir, f"{session_id}_badge_translation.json")
-            relation_path = os.path.join(measurements_dir, f"{session_id}_badge_relation.json")
-            if os.path.isfile(translation_path):
-                inputs.append(translation_path)
-                try:
-                    from openmmla.analytics.ips.analyze import (
-                        plot_badge_locations_and_trajectories,
-                        plot_2d_heatmap,
-                        plot_physical_interaction_network,
-                    )
-                    plot_badge_locations_and_trajectories(translation_path, vis_dir)
-                    steps.append("ips.plot_badge_locations_and_trajectories")
-                    self._log("  [green]✓[/green] IPS: badge locations and trajectories")
-                    plot_2d_heatmap(translation_path, vis_dir)
-                    steps.append("ips.plot_2d_heatmap")
-                    self._log("  [green]✓[/green] IPS: 2D heatmap")
-                    if os.path.isfile(relation_path):
-                        inputs.append(relation_path)
-                        plot_physical_interaction_network(relation_path, vis_dir)
-                        steps.append("ips.plot_physical_interaction_network")
-                        self._log("  [green]✓[/green] IPS: physical interaction network")
-                except Exception as e:
-                    self._log(f"  [red]✗ IPS visualizations: {e}[/red]")
-            else:
-                self._log("  [dim]- IPS visualizations: no translation log file[/dim]")
-
-            # VFA has no visualizations currently
-            self._log("  [dim]- VFA visualizations: not available[/dim]")
-
-            self._export_analysis_record(session_id, root, analysis_dir, vis_dir, inputs, steps)
-
-        manifest_path = os.path.join(session_dir, "manifest.yml")
-        manifest = {}
-        if os.path.isfile(manifest_path):
-            try:
-                with open(manifest_path, "r", encoding="utf-8") as file:
-                    loaded_manifest = yaml.safe_load(file) or {}
-                    if isinstance(loaded_manifest, dict):
-                        manifest = loaded_manifest
-            except yaml.YAMLError:
-                manifest = {}
-        manifest["session_id"] = session_id
-        manifest.pop("visualizations_path", None)
-        if self._config_source:
-            manifest["database_source"] = {
-                "target": self._config_source.target,
-                "config": self._config_source.label,
-            }
-        if logs:
-            manifest["measurements_path"] = relative_to_root(root, measurements_dir)
-        analysis = manifest.get("analysis")
-        if not isinstance(analysis, dict):
-            analysis = {}
-        analysis["features_path"] = relative_to_root(root, features_dir)
-        analysis["visualizations_path"] = relative_to_root(root, vis_dir)
-        if vis:
-            analysis["visualizations_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            analysis["parameters_path"] = relative_to_root(root, os.path.join(analysis_dir, "parameters.json"))
-        manifest["analysis"] = analysis
-        with open(manifest_path, "w", encoding="utf-8") as file:
-            yaml.safe_dump(manifest, file, sort_keys=False, allow_unicode=True)
-
-        self._log(f"[bold green]Export complete for {session_id}[/bold green]")

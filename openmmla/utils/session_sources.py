@@ -3,7 +3,7 @@ document under `sources`.
 
 A base writes its entry when it joins a session (which Bases entry it is, the
 stream it takes, where that stream is captured and recorded) and notes when it
-leaves. Sessions -> Export Streams reads the entries, so it takes the
+leaves. Sessions -> Export reads the entries, so it takes the
 session's own streams and nothing else, from the Stream Server and from the
 capture hosts: a stream is
 shared infrastructure, and a session is tied to it by what its bases pulled.

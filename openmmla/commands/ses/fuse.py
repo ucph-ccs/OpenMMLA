@@ -19,8 +19,8 @@ def get_parser():
             '--measurements', shortname='-c')
     add_arg('session_id', str, None, 'the session to build the table of', shortname='-sid')
     add_arg('measurements', str, None,
-            'a Sessions -> Export Measurements folder (artifacts/<session>/measurements) to read the events from '
-            'instead of InfluxDB', shortname='-md')
+            'the measurements folder Sessions -> Export writes (artifacts/<session>/measurements) to read the '
+            'events from instead of InfluxDB', shortname='-md')
     add_arg('window', float, 10.0, 'window length in seconds', shortname='-w')
     add_arg('step', float, 10.0, 'step between windows in seconds (equal to the window for no overlap)', shortname='-st')
     add_arg('participants', str, None,

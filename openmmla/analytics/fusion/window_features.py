@@ -22,7 +22,7 @@ session whose persons were not tracked has no such column. `window_features(...,
 keeps every kept tag and carries the reads without a limit, as every table fused before
 2026-10-02.
 
-The events come from InfluxDB (a session id) or from a Sessions -> Export Measurements folder
+The events come from InfluxDB (a session id) or from the measurements folder Sessions -> Export writes
 (`<session>_<suffix>.json`), so a table can be built offline from an export.
 
 Body and gaze follow each camera on its own. Replayed cameras share one angle name, and the
@@ -167,7 +167,7 @@ from openmmla.utils.constants import (
     EVENT_TYPE_IPS_ROTATION, EVENT_TYPE_IPS_TRANSLATION, EVENT_TYPE_VFA_ACTION, EVENT_TYPE_VFA_FEATURES,
 )
 
-# the file suffix Sessions -> Export Measurements gives each event type
+# the file suffix Sessions -> Export gives each event type
 EXPORT_SUFFIXES = {
     EVENT_TYPE_ASR_RECOGNITION: 'speaker_recognition',
     EVENT_TYPE_ASR_TRANSCRIPTION: 'speaker_transcription',
@@ -349,7 +349,7 @@ def load_events_from_influx(session_id: str, influx_client) -> dict[str, list[di
 
 
 def load_events_from_export(measurements_dir: str, session_id: str | None = None) -> dict[str, list[dict]]:
-    """every event of the session, by type, from a Sessions -> Export Measurements folder; a type
+    """every event of the session, by type, from the measurements folder Sessions -> Export writes; a type
     with no file is empty."""
     from openmmla.utils.querys import deep_parse_json
     events: dict[str, list[dict]] = {}
