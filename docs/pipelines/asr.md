@@ -133,7 +133,7 @@ A voice is a stable sound, not an identified person. In a classroom the group mi
 
 ### What a session records
 
-When a base joins a session it notes in the session's MongoDB document which `Bases` entry it is and the stream it takes, and notes when it leaves, first thing on its way out, before it finishes its last audio chunks. A `stream` base names its `Streams` entry (also when it was picked from the menu); a `udp` or `tcp` base is matched to the `Streams` entry whose `target` has its port; a `pyaudio`, `lsl` or `file` base takes no stream. **Sessions → Export Streams** reads this, so it fetches the session's own streams, the Stream Server's copy and the capture host's, without being told which. Sessions from before this, or ones no base joined, have no such note: they have nothing to export, and the console says so.
+When a base joins a session it notes in the session's MongoDB document which `Bases` entry it is and the stream it takes, and notes when it leaves, first thing on its way out, before it finishes its last audio chunks. A `stream` base names its `Streams` entry (also when it was picked from the menu); a `udp` or `tcp` base is matched to the `Streams` entry whose `target` has its port; a `pyaudio`, `lsl` or `file` base takes no stream. **Sessions → Export** reads this, so it fetches the session's own streams, the Stream Server's copy and the capture host's, without being told which. Sessions from before this, or ones no base joined, have no such note: they have nothing to export, and the console says so.
 
 ## Personal microphones and energy attribution
 

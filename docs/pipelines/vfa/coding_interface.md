@@ -71,7 +71,7 @@ The export is a JSON array with one object per coded frame. Each object mirrors 
 ]
 ```
 
-Only participants that received a classification appear in a window. To compare with the pipeline, export the session's VFA actions from the TUI's Sessions tab (`Export Measurements` writes `<session>_action_recognition.json`) and join the two on `window_start_time` and the participant id. The pipeline's export labels its rows `_measurement: sensor_events` with `event_type: vfa_action` (the `action_recognition` value here is a legacy label), but the `action_recognition` block and the window times have the same layout in both files, which is all the comparison needs.
+Only participants that received a classification appear in a window. To compare with the pipeline, export the session's VFA actions from the TUI's Sessions tab (**Export** writes `measurements/<session>_action_recognition.json`) and join the two on `window_start_time` and the participant id. The pipeline's export labels its rows `_measurement: sensor_events` with `event_type: vfa_action` (the `action_recognition` value here is a legacy label), but the `action_recognition` block and the window times have the same layout in both files, which is all the comparison needs.
 
 ## Reliability
 
