@@ -10,6 +10,8 @@ from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
+from openmmla.utils.video.turn import (base_capture_turn, normalize_turn, pose_in_sensor_frame, sensor_size,
+                                       total_turn, turned_camera_matrix, turned_intrinsics, turned_size)
 from .enums import ROTATIONS
 from .input import get_base_by_id, get_bases, select_source_by_index_or_name
 from .intrinsics import FrameIntrinsics, calibration_resolution
@@ -19,6 +21,9 @@ from .vector import canonical_rotation
 class CameraTagDetector(Base):
     """Class for detecting AprilTags from camera feed"""
     logger = get_logger('camera-tag-detector')
+    # the turn the capture gave the frames (the rotate of the Streams entry the source pulls, else
+    # the Bases entry's capture_rotate)
+    capture_turn = 0
 
     def __init__(self, project_dir: str | None, config_path: str, max_badge_id: int = 15,
                  graphics: bool = True, headless: bool = False, base: str | None = None):
@@ -52,6 +57,7 @@ class CameraTagDetector(Base):
         self._source_index = entry.get('source_index')
         self._base_id_override = str(entry.get('id', base))
         self._base_source = entry.get('source')  # per-base override of Base.source
+        self._base_entry = entry  # its capture_rotate, for a source no Streams entry turns
 
         """Runtime attributes"""
         self.chosen_camera = None
@@ -61,6 +67,7 @@ class CameraTagDetector(Base):
         self.camera_configured = False
         self.base_id = None
         self.video_stream = None
+        self.stream_name = None  # the Streams entry a 'stream' source pulls
 
         self._setup_yaml()
         self._setup_objects()
@@ -71,7 +78,7 @@ class CameraTagDetector(Base):
         self.tag_size = float(base_config.get('tag_size', 0.061))
         self.families = base_config.get('families', 'tag36h11')
         self.res = tuple(base_config.get('resolution', (1920, 1080)))
-        self.rotate = int(base_config.get('rotate', 0))
+        self.rotate = normalize_turn(base_config.get('rotate', 0))  # as the IPS base reads it
         self.fps = int(base_config.get('fps', 30))
 
         # per-base source (from the Bases entry) overrides the global Base.source
@@ -178,8 +185,30 @@ class CameraTagDetector(Base):
 
         # base id comes from the selected base entry
         self.base_id = str(self._base_id_override) if self._base_id_override else '1'
+        self._set_capture_turn()
         self.camera_configured = True
         print(f'\033]0;Camera Detector {self.base_id}\007')
+
+    @property
+    def turn(self) -> int:
+        """how far the frames the detector reads are turned from the sensor's picture: the
+        capture's turn, then Base.rotate."""
+        return total_turn(self.capture_turn, self.rotate)
+
+    def _set_capture_turn(self):
+        """the turn the capture applies to the stream pulled, as the IPS base takes it: the
+        intrinsics are turned with the frames and the poses reported in the sensor's frame, which
+        is the frame the Camera Sync matrices are fitted in."""
+        self.capture_turn = base_capture_turn(self.config, getattr(self, '_base_entry', None), self.source,
+                                              self.selected_source, self.stream_name)
+        if self.capture_turn and self.rotate:
+            self.logger.warning(f"The frames of {self.selected_source} are turned {self.capture_turn} degrees "
+                                f"where they are captured and {self.rotate} more by Base.rotate: turned twice.")
+        if self.capture_turn and self.camera_info.get('fisheye'):
+            K = turned_camera_matrix(self.camera_info['K'], self.res, self.capture_turn)
+            map_1, map_2 = cv2.fisheye.initUndistortRectifyMap(K, self.camera_info['D'], np.eye(3), K,
+                                                               turned_size(*self.res, self.capture_turn), cv2.CV_16SC2)
+            self.camera_info.update({"map_1": map_1, "map_2": map_2})
 
     def _configure_camera_params(self):
         """Configure camera intrinsic parameters for the selected base's camera."""
@@ -263,6 +292,7 @@ class CameraTagDetector(Base):
             from openmmla.utils.constants import resolve_stream_source
             name, url = resolve_stream_source(self.config, self._source_index)
             self.logger.info(f"Using stream '{name}': {url}")
+            self.stream_name = name
             return url
         selected_source = select_source_by_index_or_name(self._source_index, available_sources)
         self.logger.info(f"Using video source {selected_source}")
@@ -286,8 +316,11 @@ class CameraTagDetector(Base):
             if fisheye:
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                                   interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            # the intrinsics of the sensor's picture, scaled to its size and turned with the frame
             height, width = frame.shape[:2]
-            params = self.camera_info["params"] if fisheye else self.intrinsics.for_frame(width, height)
+            size = tuple(self.res) if fisheye else sensor_size(width, height, self.capture_turn)
+            params = self.camera_info["params"] if fisheye else self.intrinsics.for_frame(*size)
+            params = turned_intrinsics(params, size, self.turn)
             if self.rotate in ROTATIONS:
                 frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
@@ -305,8 +338,10 @@ class CameraTagDetector(Base):
                 # z into the tag, as the IPS base publishes it (a rotation, not the reflection the
                 # z column alone negated made, which spoiled the pose-to-pose transform)
                 tag.pose_R = canonical_rotation(tag.pose_R, tag.pose_t)
-                normal = -tag.pose_R[:, 2]
-                tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
+                normal = -tag.pose_R[:, 2]  # drawn on the turned frame
+                # in the sensor's frame, as the IPS base reports it, whatever turned the picture
+                pose_R, pose_t = pose_in_sensor_frame(tag.pose_R, tag.pose_t, self.turn)
+                tags[tag.tag_id] = [list(pose_R.tolist()), list(pose_t.tolist())]
 
                 # Drawing annotations
                 tag_center = np.mean(corners, axis=0)
@@ -317,13 +352,13 @@ class CameraTagDetector(Base):
                 cv2.polylines(frame, [corners], True, (0, 255, 0), thickness=2)
                 cv2.putText(frame, str(tag.tag_id), org=(int(tag_center[0]) + 10, int(tag_center[1]) + 10),
                             fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.8, color=(0, 255, 0), thickness=2)
-                cv2.putText(frame, f"Rot: {tag.pose_R}",
+                cv2.putText(frame, f"Rot: {pose_R}",
                             (tag.corners[0][0].astype(int), tag.corners[0][1].astype(int) - 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                cv2.putText(frame, f"Trans: {tag.pose_t}",
+                cv2.putText(frame, f"Trans: {pose_t}",
                             (tag.corners[0][0].astype(int), tag.corners[0][1].astype(int) - 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                print(f"Tag ID: {tag.tag_id}, Rotation: {tag.pose_R}, Translation: {tag.pose_t}")
+                print(f"Tag ID: {tag.tag_id}, Rotation: {pose_R}, Translation: {pose_t}")
 
             if self.graphics:
                 display_frame = cv2.resize(frame, (960, 540))

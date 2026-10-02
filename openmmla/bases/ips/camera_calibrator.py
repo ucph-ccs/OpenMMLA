@@ -7,12 +7,30 @@ import numpy as np
 from openmmla.bases.base import Base
 from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
+from openmmla.utils.video.turn import normalize_turn, stream_capture_turn
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from .input import flush_input, get_function_calibrator
 
+# what undoes a clockwise turn of a picture, by the turn: cv2.rotate's code for the turn back
+TURN_BACK = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_CLOCKWISE}
+
+
+def sensor_picture(image, turn):
+    """`image` as the sensor gave it, of a picture turned `turn` degrees clockwise on its way (a
+    stream whose Streams entry has a rotate, openmmla.utils.video.turn); the image itself when it
+    was not turned."""
+    turn = normalize_turn(turn)
+    return cv2.rotate(image, TURN_BACK[turn]) if turn else image
+
 
 class CameraCalibrator(Base):
-    """Class for calibrating cameras with image capturing and calibration functions."""
+    """Class for calibrating cameras with image capturing and calibration functions.
+
+    A Cameras entry holds the intrinsics of the picture as the sensor gives it, which the bases turn
+    with the picture (openmmla.utils.video.turn). A stream turned where it is captured (its Streams
+    entry's rotate) sends turned pictures, so each image captured from it is turned back before it
+    is saved: the checkerboards, the intrinsics and calibration_resolution are the sensor's whatever
+    turned the stream. The live view shows the picture as it comes, turned."""
     logger = get_logger('camera-calibrator')
 
     def __init__(self, project_dir: str | None, config_path: str):
@@ -33,6 +51,8 @@ class CameraCalibrator(Base):
         self.objp[0, :, :2] = np.mgrid[0:self.CHECKERBOARD[0], 0:self.CHECKERBOARD[1]].T.reshape(-1, 2)
         self.obj_points = []  # Lists to store object points and image points
         self.img_points = []
+        # {stream url: the turn its capture applies}, of the streams offered as video seeds
+        self.seed_turns: dict = {}
 
         self._setup_from_yaml()
         self._setup_directories()
@@ -80,9 +100,13 @@ class CameraCalibrator(Base):
         cam = cv2.VideoCapture(camera_seed)
         cam.set(3, resolution[0])
         cam.set(4, resolution[1])
+        turn = self.seed_turns.get(camera_seed, 0)
+        if turn:
+            print(f"The stream is turned {turn} degrees where it is captured: each image is turned back "
+                  f"before it is saved, so the intrinsics are the sensor's.")
 
         try:
-            self.capture_and_save_image(cam, saved_directory)
+            self.capture_and_save_image(cam, saved_directory, turn=turn)
         finally:
             cam.release()
             cv2.destroyAllWindows()
@@ -100,10 +124,12 @@ class CameraCalibrator(Base):
                 available_video_seeds.append(i)
             cap.release()
 
-        from openmmla.utils.constants import get_stream_urls
-        stream_urls = get_stream_urls(self.config)
-        for url in stream_urls:
-            print(f"{number_of_detected_seeds} : Stream {url} is available.")
+        from openmmla.utils.constants import get_stream_sources
+        for name, url in get_stream_sources(self.config):
+            turn = stream_capture_turn(self.config, url, name)
+            self.seed_turns[url] = turn
+            turned = f" (turned {turn} degrees where it is captured)" if turn else ""
+            print(f"{number_of_detected_seeds} : Stream {url} is available{turned}.")
             available_video_seeds.append(url)
             number_of_detected_seeds += 1
 
@@ -129,38 +155,59 @@ class CameraCalibrator(Base):
         is_fisheye = input("Is the camera a fisheye lens? (Y/n): ").lower() == 'y'
 
         try:
-            images = glob.glob(os.path.join(selected_path, '*.jpg'))
-            for img_file in images:
-                img = cv2.imread(img_file)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                ret, corners = cv2.findChessboardCorners(gray, self.CHECKERBOARD,
-                                                         cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE)
-                if ret:
-                    self.obj_points.append(self.objp)
-                    corners2 = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1),
-                                                self.subpix_criteria) if not is_fisheye else corners
-                    self.img_points.append(corners2)
-                    cv2.drawChessboardCorners(img, self.CHECKERBOARD, corners2, ret)
-                    cv2.imshow('img', img)
-                    cv2.waitKey(0)
-            cv2.destroyAllWindows()
-            cv2.waitKey(1)
-
-            if is_fisheye:
-                ret, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
-                    self.obj_points, self.img_points, gray.shape[::-1], None, None,
-                    flags=(cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_CHECK_COND +
-                           cv2.fisheye.CALIB_FIX_SKEW),
-                    criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6))
-            else:
-                ret, K, D, rvecs, tvecs = cv2.calibrateCamera(
-                    self.obj_points, self.img_points, gray.shape[::-1], None, None)
-
-            self._update_configuration(camera_name, K, D, is_fisheye, gray.shape[::-1])
+            images = sorted(glob.glob(os.path.join(selected_path, '*.jpg')))
+            K, D, size = self.calibrate_images(images, is_fisheye, show=True)
+            self._update_configuration(camera_name, K, D, is_fisheye, size)
         except Exception as e:
             self.logger.error("Error occurred during calibration: %s", e, exc_info=True)
         finally:
             self._clean_up()
+
+    def calibrate_images(self, image_files, is_fisheye=False, show=False):
+        """(K, D, (width, height)) of the checkerboard images `image_files`, the size the
+        intrinsics hold for. The images are taken as saved, as the sensor gave them; those of
+        another size than most of them (one captured turned a quarter before ips-ccal turned the
+        images back, or at another resolution) are left out with a warning, since one calibration
+        holds for one frame size."""
+        found = []
+        for img_file in image_files:
+            img = cv2.imread(img_file)
+            if img is None:
+                continue
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            ret, corners = cv2.findChessboardCorners(gray, self.CHECKERBOARD,
+                                                     cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE)
+            if ret:
+                corners2 = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1),
+                                            self.subpix_criteria) if not is_fisheye else corners
+                found.append((img_file, gray.shape[::-1], corners2))
+                if show:
+                    cv2.drawChessboardCorners(img, self.CHECKERBOARD, corners2, ret)
+                    cv2.imshow('img', img)
+                    cv2.waitKey(0)
+        if show:
+            cv2.destroyAllWindows()
+            cv2.waitKey(1)
+        if not found:
+            raise ValueError("No checkerboard was found on the images.")
+        sizes = [size for _, size, _ in found]
+        size = max(sorted(set(sizes)), key=sizes.count)
+        others = [os.path.basename(img_file) for img_file, other, _ in found if other != size]
+        if others:
+            self.logger.warning("Left out %d image(s) of another size than %dx%d: %s", len(others), size[0], size[1],
+                                ", ".join(others))
+        self.obj_points = [self.objp for _, other, _ in found if other == size]
+        self.img_points = [corners for _, other, corners in found if other == size]
+        if is_fisheye:
+            ret, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
+                self.obj_points, self.img_points, size, None, None,
+                flags=(cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_CHECK_COND +
+                       cv2.fisheye.CALIB_FIX_SKEW),
+                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6))
+        else:
+            ret, K, D, rvecs, tvecs = cv2.calibrateCamera(
+                self.obj_points, self.img_points, size, None, None)
+        return K, D, size
 
     def _select_camera(self):
         """Select a camera folder."""
@@ -216,7 +263,9 @@ class CameraCalibrator(Base):
         return max((int(stem) for stem in stems if stem.isdigit()), default=0) + 1
 
     @staticmethod
-    def capture_and_save_image(cam, directory):
+    def capture_and_save_image(cam, directory, turn=0):
+        """capture images on 'c', saved as the sensor gave them: an image of a picture turned `turn`
+        degrees on its way is turned back first."""
         image_number = CameraCalibrator.next_image_number(directory)
         print("Press 'c' to capture the image, or 'q' to quit.")
         while cam.isOpened():
@@ -227,7 +276,7 @@ class CameraCalibrator(Base):
 
                 if key == ord('c'):
                     filename = f"{directory}/{image_number}.jpg"
-                    cv2.imwrite(filename, image)
+                    cv2.imwrite(filename, sensor_picture(image, turn))
                     print(f"Image captured as {filename}")
                     cv2.imshow("Captured Image", image)
                     cv2.waitKey(1)

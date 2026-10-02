@@ -285,6 +285,8 @@ Streams:
 
 Managed streams are started and stopped from the **Streams** tab; see the [Streaming guide](../../rtmp_streaming.md) for the FFmpeg commands and the recording layout.
 
+**Turning the picture.** A camera mounted upside down (or on its side) is turned upright once, where it is captured: its Streams entry's `rotate` (0, 90, 180 or 270, clockwise; the **Rotate** cell of the Streams tab) makes the capture host's FFmpeg turn the picture, so the frames reach the base, the VFA Server and the dashboard upright, and the session notes the turn as the stream's `sources[].capture.rotate`. `Base.rotate` stays 0; it turns the frames in the base, for a source the console does not capture. A file turned before it reached the base, such as a recording `mmla ses-tidy` flipped, says so with its `Bases` entry's `capture_rotate`; a fisheye camera's frames are then remapped as they arrive, with its `K` turned with them (its distortion `D` is radial and holds as it is), and a base whose `capture_rotate` and `Base.rotate` are both set warns at start that the picture is turned twice. The base's session parameters note `capture_turn` beside `rotate`.
+
 ## Run from the TUI
 
 1. **VFA Server**: `Launcher → Pipelines → VFA → VFA Server`, Host set to the GPU server. On the Config tab set what the outputs you will ask for need (see [Configuration](#configuration)): for the action labels the backend, models, `end_to_end` and `prompt_profile`, with the Prompts and Action Schema tabs; for the pose and the gaze the `features` block and the gaze model. Then **Start**: the card runs `docker compose -f docker/docker-compose.vfa.yml up -d --build frame-analyzer`. Start the **MLLM Server** card first if the action labels use a local vLLM model.

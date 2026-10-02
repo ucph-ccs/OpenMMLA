@@ -111,13 +111,17 @@ def audio_scope(record: dict) -> str | None:
     return default_audio_scope(record.get('device'), (record.get('imported') or {}).get('method'), record.get('host'))
 
 
-def plan_session(manifest: dict) -> dict:
+def plan_session(manifest: dict, sources: list | None = None) -> dict:
     """what a session's replay takes, from its manifest: the group microphone, the personal
     microphones of a session with several (a base each, bound to its participant), the videos,
-    the tag size, the sync time and the IPS calibration."""
+    the tag size, the sync time and the IPS calibration; and the turn each video was captured
+    with, which the video bases are told as their entry's capture_rotate: the `rotate` the
+    Collection recorder noted in the video's own manifest row, else, from the session's `sources`
+    (its exported parameters' or MongoDB document's), its stream's `capture.rotate`."""
     recordings = manifest.get('recordings') or []
     audio = {r['device']: r['path'] for r in recordings if '/audio/' in str(r.get('path'))}
-    videos = {r['device']: r['path'] for r in recordings if '/video/' in str(r.get('path'))}
+    video_rows = {r['device']: r for r in recordings if '/video/' in str(r.get('path'))}
+    videos = {device: r['path'] for device, r in video_rows.items()}
     microphone = next((device for device in AUDIO_PREFERENCE if device in audio), None)
     audio_records = [r for r in recordings if '/audio/' in str(r.get('path'))]
     personal: list[dict] = []
@@ -143,6 +147,14 @@ def plan_session(manifest: dict) -> dict:
         groups = sorted({r['device'] for r in audio_records if audio_scope(r) == 'group'}, key=natural_device_key)
         microphone = next((d for d in AUDIO_PREFERENCE if d in groups), None) or next(iter(groups), None)
     calibration, main, ips_cameras = calibration_for(manifest['session_id'], list(videos)) if videos else (None, None, [])
+    turns = {}
+    if sources:
+        # (scipy comes with the calibration module: imported only for a session that notes its sources)
+        from openmmla.bases.ips.calibration import capture_turns
+        turns = capture_turns(sources, sorted(videos))
+    # a recording that notes its own turn is taken at its word (a raw-only session has no sources)
+    from openmmla.utils.video.turn import recording_turns
+    turns = {device: turn for device, turn in {**turns, **recording_turns(video_rows)}.items() if turn}
     return {
         'session_id': manifest['session_id'],
         'experiment_id': manifest.get('experiment_id'),
@@ -156,6 +168,8 @@ def plan_session(manifest: dict) -> dict:
         'calibration': calibration,
         'ips_main': main,
         'ips_cameras': ips_cameras,
+        # the cameras whose recordings were turned where they were captured, and how far
+        'capture_turns': turns,
         'minutes': max((float(r.get('duration') or 0) for r in recordings), default=0.0) / 60.0,
     }
 
@@ -185,6 +199,14 @@ def asr_config(template: dict, plan: dict) -> dict:
     return config
 
 
+def _capture_rotate(plan: dict, device: str) -> dict:
+    """{capture_rotate: turn} of a camera whose recording was turned where it was captured, so that
+    its base turns the intrinsics with the picture and reports the poses in the sensor's frame, as
+    the live base did; {} for one that was not."""
+    turn = (plan.get('capture_turns') or {}).get(device, 0)
+    return {'capture_rotate': turn} if turn else {}
+
+
 VFA_PACE = {1: 4.0, 2: 4.0}  # frame sets per second the bases pace themselves at, by camera count; more cameras keep the template's
 
 
@@ -194,7 +216,8 @@ def vfa_config(template: dict, plan: dict) -> dict:
     config['Base']['tag_size'] = plan['tag_size']
     # the bases' pace bounds a replay, not the server (~105 ms a frame): one or two cameras can go faster
     config['Base']['processing_rate'] = VFA_PACE.get(len(plan['videos']), config['Base'].get('processing_rate', 2.0))
-    config['Bases'] = [{'id': device, 'camera': IPS_CAMERA, 'source': 'file', 'source_index': path, 'camera_angle': CAMERA_ANGLE}
+    config['Bases'] = [{'id': device, 'camera': IPS_CAMERA, 'source': 'file', 'source_index': path, 'camera_angle': CAMERA_ANGLE,
+                        **_capture_rotate(plan, device)}
                        for device, path in sorted(plan['videos'].items())]
     return config
 
@@ -204,7 +227,7 @@ def ips_config(template: dict, plan: dict) -> dict:
     config['Base']['initial_sync_time'] = plan['sync_time']
     config['Base']['tag_size'] = plan['tag_size']
     config['Bases'] = [{'id': device, 'camera': IPS_CAMERA, 'source': 'file', 'source_index': plan['videos'][device],
-                        'main': device == plan['ips_main']} for device in plan['ips_cameras']]
+                        'main': device == plan['ips_main'], **_capture_rotate(plan, device)} for device in plan['ips_cameras']]
     return config
 
 
@@ -436,9 +459,29 @@ class Runner:
         except OSError:
             return 0
 
+    def session_sources(self, sid: str) -> list:
+        """the session's `sources` (which stream each base took, and how its capture turned it): its
+        exported parameters, else its MongoDB document (not in a dry run, which opens no client);
+        none when neither has them, and the videos are taken as unturned."""
+        path = os.path.join(self.project, 'artifacts', sid, 'measurements', f'{sid}_parameters.json')
+        try:
+            sources = json.load(open(path)).get('sources')
+            if isinstance(sources, list):
+                return sources
+        except (OSError, ValueError, AttributeError):
+            pass
+        if self.dry_run:
+            return []
+        try:
+            record = self._clients()[1].get_session(sid) or {}
+        except Exception as e:
+            log(f"{sid}: the session's sources could not be read ({type(e).__name__}: {e}); the videos are taken as unturned")
+            return []
+        return record.get('sources') if isinstance(record.get('sources'), list) else []
+
     def replay(self, sid: str) -> dict:
         manifest = json.load(open(os.path.join(self.project, 'artifacts', sid, 'manifest.json')))
-        plan = plan_session(manifest)
+        plan = plan_session(manifest, self.session_sources(sid))
         wanted = [p for p in self.pipelines if self.force or self.events(sid, EVENT_OF[p]) == 0] if not self.dry_run else list(self.pipelines)
         personal = [p['id'] for p in plan.get('personal', [])]
         summary = {'session': sid, 'minutes': round(plan['minutes'], 1), 'videos': len(plan['videos']), 'microphone': plan['microphone'],
@@ -447,6 +490,10 @@ class Runner:
         log(f"{sid}: {plan['minutes']:.0f} min, {len(plan['videos'])} videos, mic {plan['microphone']}"
             f"{f', {len(personal)} personal mics' if personal else ''}, IPS main {plan['ips_main']} "
             f"with {plan['calibration'] or 'no matrices'} over {plan['ips_cameras']}; pipelines {wanted}")
+        if plan['capture_turns']:
+            summary['capture_turns'] = plan['capture_turns']
+            log(f"{sid}: recordings turned where they were captured: "
+                + ', '.join(f"{device} {turn}" for device, turn in sorted(plan['capture_turns'].items())))
         if self.dry_run or not wanted:
             summary['status'] = 'dry-run' if self.dry_run else 'skipped (events exist)'
             if not self.dry_run:

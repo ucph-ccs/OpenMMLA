@@ -8,7 +8,9 @@ Base:
 
   # Image capture settings
   resolution: [1920, 1080]                          # Image resolution in pixels (width, height)
-  rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
+  rotate: 0                                         # Turn of the image in the base, clockwise (0, 90, 180, 270): for a source
+                                                    # the console does not capture; a camera it captures is turned on its host
+                                                    # by its Streams entry's rotate (180 when mounted upside down), not here
   fps: 30                                           # Frames per second of the image capture
 
   # Display smoothing: the base's window draws each tag's pose smoothed; what the base publishes (and the database
@@ -82,6 +84,7 @@ Bases:
     source: stream              # source type (opencv/stream/lsl/file; rtmp is the old name of stream)
     source_index: 0             # opencv: camera index; stream: name of a Streams entry; lsl: stream name; file: the file to replay, by its full path (Browse… on the Config tab)
     room:                       # the room its camera is in (A, B, ...) when one config serves several rooms; empty for one room
+    capture_rotate: 0           # file: how far the file's picture was turned clockwise before it was saved (0, 90, 180, 270; 180 for a recording of a stream whose Streams entry turns it); a stream's turn is its Streams entry's rotate
     main: false                 # the main reference for sync: mark exactly one base per room
 
 Synchronizer:

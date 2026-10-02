@@ -1,5 +1,5 @@
 """The transformation matrices between the cameras of a session, from its own recordings, and a
-check of given ones. Live, IPS Camera Sync turns every moment two cameras see the same tag into
+check of given ones. Live, IPS Transforms turns every moment two cameras see the same tag into
 one pose-to-pose transform (openmmla.bases.ips.transform.direct_transform_matrices) and averages
 them. Offline, a whole session's paired sightings are at hand: the tag *positions* the two
 cameras report are fitted with one rigid transform (Kabsch), which holds steady where a small
@@ -12,13 +12,19 @@ third camera already placed (`relayed_pairs`).
 Detection runs the way the IPS base does it (pupil-apriltags, the camera's intrinsics scaled to
 the video's frame size, the tag size; weak detections and ids past the badges left out; the
 rotation turned so that its z axis points into the tag), on the frames nearest the sampled
-stamps of each video. OpenCV and pupil-apriltags are imported only by `observe` and
+stamps of each video. A video turned on its way (the capture's turn, which a session notes as
+sources[].capture.rotate, or -cr gives, and the base's own) is read
+with the intrinsics turned with it, and its poses are given in the camera's frame as the sensor
+gives it, as the IPS base reports them (openmmla.utils.video.turn), so that matrices fitted on
+turned and unturned videos agree. OpenCV and pupil-apriltags are imported only by `observe` and
 `tag_detector`, so the fitting can be tested without them."""
 from __future__ import annotations
 
 import bisect
 
 import numpy as np
+
+from openmmla.utils.video.turn import normalize_turn, pose_in_sensor_frame, sensor_size, total_turn, turned_intrinsics
 
 from .intrinsics import FrameIntrinsics, calibration_resolution
 from .transform import average_rotation_matrices, direct_transform_matrices, distance_between_rotations
@@ -39,18 +45,24 @@ class _Printer:
     warning = info
 
 
-def frame_size_before_rotation(frame, calibration_size) -> tuple[int, int]:
-    """(width, height) of a frame as the camera gave it: a frame `rotate` turned a quarter is
-    portrait where the calibration is landscape (or the other way), and is measured turned back."""
+def frame_size_before_rotation(frame, calibration_size, turn=None) -> tuple[int, int]:
+    """(width, height) of a frame as the camera gave it: a frame turned a quarter is measured turned
+    back. `turn` is the turn the frame went through (the capture's and the base's together); when
+    it is not known, a frame portrait where the calibration is landscape (or the other way) is
+    taken to be turned a quarter."""
     height, width = frame.shape[:2]
+    if turn is not None:
+        return sensor_size(width, height, turn)
     if (width < height) != (calibration_size[0] < calibration_size[1]):
         width, height = height, width
     return width, height
 
 
 def tag_detector(camera_params, tag_size: float, families: str = 'tag36h11', calibration_size=None):
-    """detect(frame) -> {tag id: (R, t)}: the tags of a BGR frame with their pose in the camera's
-    frame, as the IPS base finds them.
+    """detect(frame, turn=0) -> {tag id: (R, t)}: the tags of a BGR frame with their pose in the
+    camera's frame as the sensor gives it, as the IPS base finds them; `turn` is how far the frame
+    was turned from the sensor's picture (its intrinsics are turned with it, and the poses turned
+    back).
 
     `camera_params` is fx, fy, cx, cy, or the camera's `Cameras` entry (its `params` and
     `calibration_resolution`); they are scaled to each frame's size from `calibration_size`, else the
@@ -63,23 +75,30 @@ def tag_detector(camera_params, tag_size: float, families: str = 'tag36h11', cal
         camera_params = camera_params['params']
     intrinsics = FrameIntrinsics(camera_params, calibration_size, logger=_Printer())
 
-    def detect(frame):
-        params = intrinsics.for_frame(*frame_size_before_rotation(frame, intrinsics.calibration_size))
+    def detect(frame, turn=0):
+        turn = normalize_turn(turn)
+        size = frame_size_before_rotation(frame, intrinsics.calibration_size, turn)
+        params = turned_intrinsics(intrinsics.for_frame(*size), size, turn)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         poses = {}
         for tag in detector.detect(gray, estimate_tag_pose=True, camera_params=params, tag_size=tag_size):
             if tag.decision_margin < MIN_DECISION_MARGIN or int(tag.tag_id) > MAX_TAG_ID:
                 continue
-            t = np.asarray(tag.pose_t, dtype=float).reshape(3)
-            poses[int(tag.tag_id)] = (canonical_rotation(tag.pose_R, t), t)
+            R, t = pose_in_sensor_frame(tag.pose_R, np.asarray(tag.pose_t, dtype=float).reshape(3), turn)
+            poses[int(tag.tag_id)] = (canonical_rotation(R, t), t)
         return poses
     return detect
 
 
-def observe(video: str, start_time: float, stamps, detect, rotate: int = 0, progress=None) -> dict:
+def observe(video: str, start_time: float, stamps, detect, rotate: int = 0, progress=None,
+            capture_turn: int = 0) -> dict:
     """{stamp: {tag: (R, t)}} of one video at the given stamps (unix seconds): the frame nearest
-    each stamp is read (seeking), rotated as the base would, and `detect` gives its tags; stamps
-    before the file's start are skipped, and the video's end ends the reading."""
+    each stamp is read (seeking), rotated as the base would, and `detect` gives its tags, told how
+    far the frame is turned from the sensor's picture: `capture_turn`, the turn the capture applied
+    to the recording (sources[].capture.rotate), and `rotate`. Stamps before the file's start are
+    skipped, and the video's end ends the reading."""
+    rotate = normalize_turn(rotate)  # the frame is turned by what `detect` is told
+    turn = total_turn(capture_turn, rotate)
     import cv2
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
@@ -96,7 +115,7 @@ def observe(video: str, start_time: float, stamps, detect, rotate: int = 0, prog
                 break
             if rotate in ROTATIONS:
                 frame = cv2.rotate(frame, ROTATIONS[rotate])
-            poses = detect(frame)
+            poses = detect(frame, turn=turn)
             if poses:
                 out[float(stamp)] = poses
             if progress and i % 100 == 0:
@@ -104,6 +123,24 @@ def observe(video: str, start_time: float, stamps, detect, rotate: int = 0, prog
     finally:
         cap.release()
     return out
+
+
+def capture_turns(sources, devices) -> dict:
+    """{device: turn} the capture applied to each device's recording, from a session's `sources`
+    (its MongoDB document's, or its exported parameters'): the `capture.rotate` of the entry whose
+    stream, or the last part of whose Stream Server path, is the device; 0 for a device no entry
+    takes (a session from before the turn was noted). The sources describe the streams: a file the
+    Collection card recorded notes its own turn in its manifest row (`rotate`, read by
+    openmmla.utils.video.turn.recording_turns), which the callers put over this one."""
+    found = {}
+    for entry in sources or ():
+        if not isinstance(entry, dict):
+            continue
+        capture = entry.get('capture') if isinstance(entry.get('capture'), dict) else {}
+        names = {str(entry.get('stream') or '').strip(), str(entry.get('server_path') or '').strip('/').rsplit('/', 1)[-1]}
+        for name in names - {''}:
+            found.setdefault(name, normalize_turn(capture.get('rotate')))
+    return {device: found.get(device, 0) for device in devices}
 
 
 def pairs(main_obs: dict, alt_obs: dict) -> list[tuple]:

@@ -21,7 +21,7 @@ MATRICES_PREFIX = 'transformation_matrices_'
 
 
 def matrices_file_name(main_id) -> str:
-    """The file IPS Camera Sync exports for a main camera: transformation_matrices_<id>.json."""
+    """The file IPS Transforms exports for a main camera: transformation_matrices_<id>.json."""
     return f'{MATRICES_PREFIX}{main_id}.json'
 
 
@@ -411,7 +411,7 @@ class IPSSynchronizer(Synchronizer):
                 return main_id, ''
             there = f"camera_sync holds {listed}" if exported else "camera_sync holds no transformation files"
             return None, (f"There is no camera_sync/{matrices_file_name(main_id)} for main camera {main_id} in "
-                          f"{self.project_dir} ({there}): run IPS Camera Sync and export the transformations, "
+                          f"{self.project_dir} ({there}): run IPS Transforms and export the transformations, "
                           f"or pick another main camera on the IPS Base card.")
 
         main_bases = [base for base in get_bases(self.config) if is_main_base(base)]
@@ -435,7 +435,7 @@ class IPSSynchronizer(Synchronizer):
                           f"{len(exported)} transformation files ({listed}). Pick the main camera on the "
                           f"IPS Base card.")
         return None, (f"The IPS synchronizer has no main camera: {wanted}, and camera_sync in {self.project_dir} "
-                      f"holds no transformation files. Run IPS Camera Sync and export the transformations first.")
+                      f"holds no transformation files. Run IPS Transforms and export the transformations first.")
 
     def _use_main_camera(self) -> str:
         """Load the main camera the process was launched with (-mc, or the default).
@@ -451,9 +451,9 @@ class IPSSynchronizer(Synchronizer):
             self._set_main_camera(main_id)
         except (OSError, ValueError) as e:
             return (f"camera_sync/{file_name} could not be read ({e}): export the transformations again from "
-                    f"IPS Camera Sync, or pick another main camera on the IPS Base card.")
+                    f"IPS Transforms, or pick another main camera on the IPS Base card.")
         if self.transform_matrices_dict is None:
-            return (f"camera_sync/{file_name} is gone: run IPS Camera Sync and export the transformations "
+            return (f"camera_sync/{file_name} is gone: run IPS Transforms and export the transformations "
                     f"again, or pick another main camera on the IPS Base card.")
         self.logger.info(f"Main camera {main_id}: loaded camera_sync/{file_name}.")
         return ''

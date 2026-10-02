@@ -1,7 +1,7 @@
 """The intrinsics a tag detector needs for the frames it is given.
 
 A camera is calibrated at one frame size: its `Cameras` entry's `calibration_resolution`
-([width, height]), which IPS Camera Calibration writes from the checkerboard images. An entry
+([width, height]), which IPS Intrinsics writes from the checkerboard images. An entry
 without it (one written before the key, or saved by a form that does not carry it) says nothing
 of its size, and the principal point stands in: cx and cy lie near the centre of the calibration
 images, so frames within 10% of (2cx, 2cy) are read with the intrinsics as they are, and others

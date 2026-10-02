@@ -21,6 +21,8 @@ from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from openmmla.utils.validation import validate_unix_timestamp
+from openmmla.utils.video.turn import (base_capture_turn, normalize_turn, pose_in_sensor_frame, sensor_size,
+                                       total_turn, turned_camera_matrix, turned_intrinsics, turned_size)
 from .enums import ROTATIONS
 from .input import get_bases, get_base_by_id, select_source_by_index_or_name, compute_initial_sync_time
 from .intrinsics import FrameIntrinsics, calibration_resolution
@@ -34,6 +36,9 @@ MIN_DECISION_MARGIN = 10
 class IPSBase(Base):
     """IPSBase class for real-time indoor positioning."""
     logger = get_logger('ips-base')
+    # the turn the capture gave the frames (the rotate of the Streams entry the source pulls, else
+    # the Bases entry's capture_rotate): none until the source is known
+    capture_turn = 0
 
     def __init__(self, project_dir: str | None, config_path: str, graphics: bool | None = None,
                  store: bool = True, verbose: bool = False, session_id: str | None = None,
@@ -101,7 +106,9 @@ class IPSBase(Base):
         self.tag_size = float(base_config.get('tag_size', 0.061))
         self.families = base_config.get('families', 'tag36h11')
         self.res = tuple(base_config.get('resolution', (1920, 1080)))
-        self.rotate = int(base_config.get('rotate', 0))
+        # 0, 90, 180 or 270 (-90 is 270, anything else 0): the frame is turned by what the
+        # intrinsics and the poses are turned by
+        self.rotate = normalize_turn(base_config.get('rotate', 0))
         self.fps = int(base_config.get('fps', 30))
 
         # file processing configuration (file sources always use keyframe processing)
@@ -273,9 +280,10 @@ class IPSBase(Base):
                 parameters={
                     'base_id': self.base_id, 'main_id': self.main_id, 'camera': camera,
                     'tag_size': self.tag_size, 'families': self.families, 'max_badge_id': self.max_badge_id,
-                    'resolution': self.res, 'rotate': self.rotate, 'fps': self.fps,
+                    'resolution': self.res, 'rotate': self.rotate, 'capture_turn': self.capture_turn,
+                    'fps': self.fps,
                     'calibration_resolution': (self.intrinsics.calibration_size if self.intrinsics else None),
-                    'published_poses': 'raw', 'display_smoothing': self.display_smoothing,
+                    'published_poses': 'raw', 'pose_frame': 'sensor', 'display_smoothing': self.display_smoothing,
                     'display_reset_seconds': self.display_reset_seconds,
                     'keyframe_interval': self.keyframe_interval, 'processing_rate': self.processing_rate,
                     'enable_timing_sync': self.enable_timing_sync,
@@ -357,8 +365,43 @@ class IPSBase(Base):
         self.logger.info(f"Using source: {self.selected_source}")
 
         self.base_id = str(self._base_id_override) if self._base_id_override else '1'
+        self._set_capture_turn()
         self.camera_configured = True
         print(f'\033]0;IPS Base {self.base_id}\007')
+
+    @property
+    def turn(self) -> int:
+        """how far the frames the detector reads are turned from the sensor's picture: the
+        capture's turn, then Base.rotate."""
+        return total_turn(self.capture_turn, self.rotate)
+
+    def _set_capture_turn(self):
+        """the turn the capture applies to the stream this base pulls (openmmla.utils.video.turn):
+        the intrinsics are turned with the frames, a fisheye camera's frames are remapped turned,
+        and the poses are reported in the sensor's frame all the same."""
+        self.capture_turn = base_capture_turn(self.config, self._base_entry, self.source, self.selected_source,
+                                              self.stream_name)
+        if self.rotate:
+            # until 2026-10-02 a base turning its frames reported the poses on the turned frame
+            self.logger.warning(f"Base.rotate {self.rotate}: the poses are reported in the camera's frame as the "
+                                f"sensor gives it, not on the turned frame. Camera Sync matrices fitted with "
+                                f"ips-ctag under this Base.rotate before 2026-10-02 are in the turned frame: fit "
+                                f"them again (or with mmla ses-calibrate).")
+        if self.capture_turn and self.rotate:
+            self.logger.warning(f"The frames of {self.selected_source} are turned {self.capture_turn} degrees "
+                                f"where they are captured and {self.rotate} more by Base.rotate: turned twice. "
+                                f"Set Base.rotate to 0 when the capture already turned the picture upright.")
+        elif self.capture_turn:
+            self.logger.info(f"The frames of {self.selected_source} are turned {self.capture_turn} degrees where "
+                             f"they are captured: the intrinsics are turned with them, and the poses are reported "
+                             f"in the camera's frame as the sensor gives it.")
+        if self.capture_turn and self.camera_info.get('fisheye'):
+            # the remap takes the frame as it comes, turned: K turned with it (D, radial, holds)
+            K = turned_camera_matrix(self.camera_info['K'], self.res, self.capture_turn)
+            size = turned_size(*self.res, self.capture_turn)
+            map_1, map_2 = cv2.fisheye.initUndistortRectifyMap(K, self.camera_info['D'], np.eye(3), K, size,
+                                                               cv2.CV_16SC2)
+            self.camera_info.update({"map_1": map_1, "map_2": map_2})
 
     def _configure_camera_params(self):
         """Configure camera intrinsic parameters for the selected base's camera."""
@@ -669,22 +712,28 @@ class IPSBase(Base):
     def _process_single_frame(self, frame, acquired_time):
         """Detect the tags of a frame: (tags, tag_relations, quality), as the base publishes them.
 
-        `tags` holds the raw pose of every detection, {tag id: [R, t]} in this camera's frame, with
-        nothing carried over from earlier frames (R turned, when the detector put its z axis towards
-        the camera, so that -column 2 is the outward normal: vector.canonical_rotation). `quality`
-        holds each detection's {margin, err}: the decoder's decision margin and the pose's
-        object-space error. `tag_relations` says who faces whom on this frame's raw poses. The
-        window, when there is one, draws each tag's pose smoothed (Base.display_smoothing).
+        `tags` holds the raw pose of every detection, {tag id: [R, t]} in this camera's frame as
+        the sensor gives it, however the picture was turned on the way (the capture's turn and
+        Base.rotate), so that the Camera Sync matrices hold; nothing is carried over from earlier
+        frames (R turned, when the detector put its z axis towards the camera, so that -column 2 is
+        the outward normal: vector.canonical_rotation). `quality` holds each detection's
+        {margin, err}: the decoder's decision margin and the pose's object-space error.
+        `tag_relations` says who faces whom on this frame's raw poses, as the turned frame shows
+        them (upright, its x-z plane the floor's). The window, when there is one, draws each tag's
+        pose smoothed (Base.display_smoothing) on the turned frame.
         """
         fisheye = self.camera_info.get("fisheye", False)
         if fisheye:
             frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                               interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-        # the intrinsics are scaled to the frame's size before it is turned (a fisheye frame is
-        # remapped with the calibration's own K, so its intrinsics stay as they are)
+        # the intrinsics hold for the sensor's picture: scaled to its size (the frame's turned back
+        # by the capture's turn), then turned with the frame (a fisheye frame is remapped with the
+        # calibration's own K, so its intrinsics are not scaled)
         height, width = frame.shape[:2]
+        size = tuple(self.res) if fisheye else sensor_size(width, height, self.capture_turn)
         params = self.camera_info["params"] if fisheye or self.intrinsics is None \
-            else self.intrinsics.for_frame(width, height)
+            else self.intrinsics.for_frame(*size)
+        params = turned_intrinsics(params, size, self.turn)
         if self.rotate in ROTATIONS:
             frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
@@ -703,7 +752,8 @@ class IPSBase(Base):
         quality = {}
         tag_relations = {}
         for tag, R, t in detections:
-            tags[tag.tag_id] = [R.tolist(), t.tolist()]
+            R_sensor, t_sensor = pose_in_sensor_frame(R, t, self.turn)
+            tags[tag.tag_id] = [R_sensor.tolist(), t_sensor.tolist()]
             err = float(getattr(tag, 'pose_err', float('nan')))
             quality[tag.tag_id] = {'margin': round(float(tag.decision_margin), 2),
                                    'err': err if np.isfinite(err) else None}

@@ -25,6 +25,9 @@ def get_parser():
     add_arg('cameras', str, None, 'comma-separated devices to take; if not set, every video of the manifest', shortname='-cams')
     add_arg('camera', str, None, "the Cameras entry (intrinsics) the videos were recorded with; if not set, the config's first",
             shortname='-cam')
+    add_arg('capture_rotate', str, None, 'the turn the capture applied to the videos, for a session that does not note it '
+            '(sources[].capture.rotate): one turn for every video (180), or device=turn pairs (c920-01=180,c920-02=0); '
+            'if not set, what the session notes, else 0', shortname='-cr')
     add_arg('step', float, 2.0, 'seconds between the sampled frames', shortname='-st')
     add_arg('tag_size', float, None, "the AprilTag size in metres; if not set, the manifest's, else the config's", shortname='-ts')
     add_arg('verify', str, None, 'a transformation_matrices_<main>.json to score on the same paired sightings '
@@ -39,13 +42,52 @@ def get_parser():
     return parser
 
 
+def _session_sources(project_dir: str, session_id: str, config_path: str) -> tuple[list, str]:
+    """(sources, where they came from) of a session: its exported parameters
+    (artifacts/<session>/measurements/<session>_parameters.json), else its MongoDB document; no
+    sources when neither is there."""
+    path = os.path.join(project_dir, 'artifacts', session_id, 'measurements', f'{session_id}_parameters.json')
+    if os.path.isfile(path):
+        try:
+            sources = json.load(open(path)).get('sources')
+            if isinstance(sources, list):
+                return sources, path
+        except (OSError, ValueError, AttributeError):
+            pass
+    try:
+        from openmmla.utils.client import MongoDBClientWrapper
+        mongo = MongoDBClientWrapper(config_path)
+        try:
+            record = mongo.get_session(session_id) or {}
+        finally:
+            mongo.close()
+        sources = record.get('sources')
+        if isinstance(sources, list):
+            return sources, 'MongoDB'
+    except Exception as e:  # no MongoDB section, or it is down: the videos are taken as unturned
+        print(f"The session's sources could not be read from MongoDB ({e}).", flush=True)
+    return [], ''
+
+
+def _capture_turns(text: str | None, devices) -> dict:
+    """{device: turn} of -cr: one turn for every device, or device=turn pairs."""
+    from openmmla.utils.video.turn import normalize_turn
+    text = str(text or '').strip()
+    if not text:
+        return {}
+    if '=' not in text:
+        return {device: normalize_turn(text) for device in devices}
+    pairs = (item.split('=', 1) for item in text.split(',') if '=' in item)
+    return {device.strip(): normalize_turn(turn) for device, turn in pairs}
+
+
 def main():
     parser = get_parser()
     args = parser.parse_args()
     from openmmla.utils.args import print_arguments
     print_arguments(args)
-    from openmmla.bases.ips.calibration import (calibrate, near_pairs, near_stamps, observe, relayed_pairs, tag_detector,
-                                                verify)
+    from openmmla.bases.ips.calibration import (calibrate, capture_turns, near_pairs, near_stamps, observe, relayed_pairs,
+                                                tag_detector, verify)
     from openmmla.utils.config import load_yaml_config
 
     project_dir = os.path.abspath(args.project_dir or os.getcwd())
@@ -83,11 +125,26 @@ def main():
     stamps = [sync + k * args.step for k in range(int((end - sync) / args.step) + 1)]
     print(f"{len(stamps)} frames per camera every {args.step} s from {sync:.3f} ({(end - sync) / 60:.1f} min); "
           f"tag size {tag_size} m, family {families}, camera {camera}, main {main_camera}")
+    # the turn each recording got where it was captured: the poses are taken back to the sensor's
+    # frame, as the IPS base reports them, so that the matrices hold whatever turned the picture
+    # (-cr wins, then the turn a Collection recording notes in its own manifest row, then the sources')
+    sources, sources_from = _session_sources(project_dir, args.session_id, args.config_path)
+    from openmmla.utils.video.turn import recording_turns
+    noted = recording_turns({device: videos[device] for device in wanted})
+    given_turns = _capture_turns(args.capture_rotate, wanted)
+    turns = {**capture_turns(sources, wanted), **noted, **given_turns}
+    turned = {device: turn for device, turn in turns.items() if turn and device in wanted}
+    if turned:
+        def said_by(device):
+            return '-cr' if device in given_turns else 'manifest' if device in noted else sources_from
+        print("captured turned: "
+              + ', '.join(f"{device} {turn} ({said_by(device)})" for device, turn in sorted(turned.items())), flush=True)
     detect = tag_detector(cameras[camera], tag_size, families)  # the whole entry: its calibration_resolution too
     observations = {}
     for device in wanted:
         obs = observe(videos[device]['path'], float(videos[device]['start_time']), stamps, detect, rotate=rotate,
-                      progress=lambda i, n, d=device: print(f"  {d}: frame {i}, {n} with tags", flush=True))
+                      progress=lambda i, n, d=device: print(f"  {d}: frame {i}, {n} with tags", flush=True),
+                      capture_turn=turns.get(device, 0))
         tags = sorted({tag for poses in obs.values() for tag in poses})
         print(f"{device}: {len(obs)} of {len(stamps)} frames hold tags {tags}", flush=True)
         observations[device] = obs
@@ -105,7 +162,8 @@ def main():
         if args.near_window <= 0 or entry['pairs'] >= args.near_below:
             continue
         extra = near_stamps(observations[main_camera], observations[alt], args.step, args.near_window)
-        fine = {device: observe(videos[device]['path'], float(videos[device]['start_time']), extra, detect, rotate=rotate) if extra else {}
+        fine = {device: observe(videos[device]['path'], float(videos[device]['start_time']), extra, detect, rotate=rotate,
+                                capture_turn=turns.get(device, 0)) if extra else {}
                 for device in (main_camera, alt)}
         found = [(p, None) for p in near_pairs({**observations[main_camera], **fine[main_camera]},
                                                {**observations[alt], **fine[alt]}, args.near_window)]
@@ -131,7 +189,8 @@ def main():
     with open(matrices_path, 'w') as f:
         json.dump(matrices, f, indent=2)
     report.update({'session_id': args.session_id, 'step': args.step, 'frames': len(stamps), 'tag_size': tag_size,
-                   'camera': camera, 'verified': args.verify})
+                   'camera': camera, 'verified': args.verify, 'rotate': rotate,
+                   'capture_rotate': {device: turns.get(device, 0) for device in wanted}})
     with open(os.path.join(out_dir, 'calibration_report.json'), 'w') as f:
         json.dump(report, f, indent=2)
     for alt, entry in report['cameras'].items():

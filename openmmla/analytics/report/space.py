@@ -9,6 +9,20 @@ normal to it is the floor. `floor_basis` builds that basis and `project` maps a 
 floor coordinates (u to the right of the main camera, v away from it, h up), which keeps distances
 (the basis is orthonormal) and turns the map into a true top-down plan.
 
+The positions are in the camera's frame as the sensor gives it, whatever turned the picture on its
+way (openmmla.utils.video.turn), so a main camera hung upside down has its x axis pointing to the
+room's left and its y axis up, and one on its side has its x axis up or down. The basis therefore
+takes u from the picture's right as it hangs: the gravity says which quarter turn stands the picture
+upright (the one whose down axis lies nearest g), and the right axis of the picture so turned, laid
+flat, is u, so the plan is never a mirror image ((u, v, h) right-handed) and holds for a camera on
+its side. For a camera hung upright (rolled less than 45 degrees) that is the camera's x axis laid
+flat, as it always was. Without a basis the plan falls back on the camera's own x-z plane, which
+cannot tell which way up the camera hangs: `camera_floor` takes the main camera's turn
+(`main_camera_turn`, from the session document, which the dashboard's report job passes) and lays
+the plane of the picture as it was turned upright instead. The dashboard's live and replay stream
+does not take this fallback (stream._usable_basis): it keeps the camera's own plane until it finds
+the floor from the badges' rotations.
+
 Badge reads are noisy (5-8 mm of jitter per second, jumps when the reading camera changes) and
 flicker, so tracks are median-smoothed within runs of consecutive windows, movement ignores steps
 below the jitter and above a plausible walk, a tag seen in under 2 % of the windows in which any
@@ -25,6 +39,8 @@ import math
 from collections import defaultdict
 
 import numpy as np
+
+from openmmla.utils.video.turn import TURNS, axis_turn, normalize_turn, total_turn
 
 RARE_PRESENCE = 0.02
 MAX_PUPIL_TAG = 12
@@ -127,19 +143,33 @@ def _gravity(rotation_records) -> tuple[tuple[float, float, float], int]:
     return (sx, sy, sz), n
 
 
+def upright_turn(g) -> int:
+    """the quarter turn (0, 90, 180, 270, as openmmla.utils.video.turn turns a picture) that stands a
+    camera's picture upright, from the down direction g in its frame: the one whose turned picture's
+    down axis (row 1 of axis_turn) lies nearest g. 0 for a camera rolled less than 45 degrees, 180 for
+    one hung upside down."""
+    return max(TURNS, key=lambda turn: float(np.dot(axis_turn(turn)[1], g)))
+
+
 def floor_basis(rotation_records: list[dict], min_obs: int = 30) -> dict | None:
     """the floor plane of a session in its main camera's frame, from the badges' gravity.
 
-    g is the mean down direction of the hanging badges (their tag y axis), ex the camera's x axis
-    laid flat on the floor, ef the direction away from the camera on the floor. None when there
-    are fewer than `min_obs` rotation observations (or they do not define a plane)."""
+    g is the mean down direction of the hanging badges (their tag y axis), ex the picture's right
+    laid flat on the floor, ef the direction away from the camera on the floor. The picture's right
+    is the camera's x axis for a camera hung upright, -x for one hung upside down (whose x axis points
+    to the room's left) and -y or y for one on its side: the right axis of the quarter turn whose
+    down axis lies nearest g (`upright_turn`), so that (ex, ef, -g) is right-handed however the
+    camera hangs. None when there are fewer than `min_obs` rotation observations (or they do not
+    define a plane, as for a camera looking straight down)."""
     total, n = _gravity(rotation_records)
     if n < max(1, min_obs):
         return None
     g = _unit(total)
     if g is None:
         return None
-    ex = _unit((1.0 - g[0] * g[0], -g[0] * g[1], -g[0] * g[2]))
+    right = tuple(float(v) for v in axis_turn(upright_turn(g))[0])
+    rg = _dot(right, g)
+    ex = _unit((right[0] - rg * g[0], right[1] - rg * g[1], right[2] - rg * g[2]))
     if ex is None:
         return None
     # the camera's z axis minus its parts along g and ex (Gram-Schmidt), so ef is orthogonal to both
@@ -160,9 +190,50 @@ def floor_basis(rotation_records: list[dict], min_obs: int = 30) -> dict | None:
     }
 
 
+def camera_floor(turn=0, n: int = 0) -> dict:
+    """the fallback floor of a session whose badge rotations are too few for `floor_basis`: the main
+    camera's x-z plane as its picture was turned upright, given in the frame the positions are in
+    (the sensor's). `turn` is how far the picture was turned to be upright (the capture's turn and
+    Base.rotate, `main_camera_turn`); 0 is the camera's own x-z plane, (x, z, -y), right for a camera
+    hung upright and a mirror image for one hung upside down when its turn is not known. With p_up =
+    Q p (openmmla.utils.video.turn.axis_turn), ex, g and ef are the rows of Q."""
+    turn = normalize_turn(turn)
+    Q = axis_turn(turn)
+    row = lambda i: [round(float(v), 6) + 0.0 for v in Q[i]]  # + 0.0: no -0.0 in the report
+    return {'g': row(1), 'ex': row(0), 'ef': row(2), 'pitch_deg': None, 'n': n, 'method': 'camera-xz',
+            'turn': turn}
+
+
+def main_camera_turn(doc: dict | None) -> int:
+    """how far the main IPS camera's picture was turned to be upright, from a session document: its
+    base's parameters (`capture_turn` and `rotate`, of a base that reports its poses in the sensor's
+    frame, `pose_frame: sensor`), else the turn its stream was captured with
+    (`sources[].capture.rotate`), else 0. A base from before 2026-10-02 reported its poses on the
+    turned picture, which is upright already, so its `rotate` does not count."""
+    from openmmla.analytics.report.sessions import _components, _ips_main, _newest_first
+
+    main = _ips_main(doc)
+    if not main:
+        return 0
+    for entry in _newest_first(_components(doc)):
+        parameters = entry.get('parameters') if isinstance(entry.get('parameters'), dict) else {}
+        if entry.get('pipeline') != 'ips' or entry.get('role') != 'base' or str(parameters.get('base_id')) != main:
+            continue
+        if parameters.get('pose_frame') == 'sensor':
+            return total_turn(parameters.get('capture_turn'), parameters.get('rotate'))
+        break
+    sources = (doc or {}).get('sources')
+    for entry in sources if isinstance(sources, list) else ():
+        if isinstance(entry, dict) and entry.get('pipeline') == 'ips' and str(entry.get('base_id')) == main:
+            capture = entry.get('capture') if isinstance(entry.get('capture'), dict) else {}
+            return normalize_turn(capture.get('rotate'))
+    return 0
+
+
 def project(p, basis: dict | None) -> tuple[float, float, float]:
     """a camera-frame point (x, y, z) in metres as floor coordinates (u, v, h): u to the right of
-    the main camera, v away from it, h up. Without a basis, the camera's own x-z plane: (x, z, -y)."""
+    the main camera, v away from it, h up. Without a basis, the camera's own x-z plane: (x, z, -y)
+    (`camera_floor` is the same plane for a camera whose picture was turned upright)."""
     if p and isinstance(p[0], (list, tuple)):
         p = position(p)
     x, y, z = float(p[0]), float(p[1]), float(p[2])
@@ -300,8 +371,10 @@ def _pair_summary(offsets: list[float], distances: list[float], bucket: float, n
 
 
 def build_space(translations: list[dict], rotations: list[dict], relations: list[dict], t0: float,
-                t1: float, cameras: list[dict] | None = None) -> dict:
-    """the space part of a session report from its parsed IPS records (see the module docstring)."""
+                t1: float, cameras: list[dict] | None = None, main_turn=0) -> dict:
+    """the space part of a session report from its parsed IPS records (see the module docstring).
+    `main_turn` is how far the main camera's picture was turned to be upright (`main_camera_turn`),
+    which only the fallback floor without badge rotations needs."""
     t0 = float(t0)
     t1 = float(t1) if t1 is not None else t0
     duration = max(0.0, t1 - t0)
@@ -309,8 +382,9 @@ def build_space(translations: list[dict], rotations: list[dict], relations: list
     basis = floor_basis(rotations or [])
     if basis is None:
         _, n_obs = _gravity(rotations or [])
-        floor = {'g': [0.0, 1.0, 0.0], 'ex': [1.0, 0.0, 0.0], 'ef': [0.0, 0.0, 1.0], 'pitch_deg': None,
-                 'n': n_obs, 'method': 'camera-xz'}
+        floor = camera_floor(main_turn, n_obs)
+        # an unturned camera keeps the plain (x, z, -y) of project
+        basis = floor if floor['turn'] else None
     else:
         floor = basis
 

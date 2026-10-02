@@ -23,6 +23,7 @@ from openmmla.utils.input import select_or_create_session
 from openmmla.utils.logger import get_logger
 from openmmla.utils.session_sources import record_joined, record_left, source_entry
 from openmmla.utils.validation import validate_unix_timestamp
+from openmmla.utils.video.turn import base_capture_turn, turned_camera_matrix, turned_size
 from .enums import ROTATIONS
 from .input import get_mode
 
@@ -30,6 +31,9 @@ from .input import get_mode
 class VFABase(Base):
     """VFABase class for video frame analysis."""
     logger = get_logger('vfa-base')
+    # the turn the capture gave the frames: the rotate of the Streams entry the base pulls, or the
+    # Bases entry's capture_rotate for a file (openmmla.utils.video.turn.base_capture_turn)
+    capture_turn = 0
 
     def __init__(self, project_dir: str | None, config_path: str, mode: str = 'live', graphics: bool | None = None,
                  store: bool = False, verbose: bool = False, session_id: str | None = None,
@@ -373,7 +377,8 @@ class VFABase(Base):
                 parameters={
                     'base_id': self.base_id, 'camera': camera, 'camera_angle': self.camera_angle,
                     'tag_size': base_config.get('tag_size'), 'families': base_config.get('families'),
-                    'resolution': self.res, 'rotate': self.rotate, 'fps': self.fps,
+                    'resolution': self.res, 'rotate': self.rotate, 'capture_turn': self.capture_turn,
+                    'fps': self.fps,
                     'keyframe_interval': self.keyframe_interval, 'processing_rate': self.processing_rate,
                     'enable_timing_sync': self.enable_timing_sync,
                     'source': self.source, 'source_index': self._source_index,
@@ -439,8 +444,26 @@ class VFABase(Base):
 
         # base id comes from the selected base entry
         self.base_id = str(self._base_id_override) if self._base_id_override else '1'
+        self._set_capture_turn()
         self.camera_configured = True
         print(f'\033]0;VFA Base {self.base_id}, Camera {self.selected_source}\007')
+
+    def _set_capture_turn(self):
+        """the turn the capture applies to the stream this base pulls (openmmla.utils.video.turn):
+        a fisheye camera's frames are remapped as they come, turned, and a Base.rotate on top of it
+        is warned of."""
+        self.capture_turn = base_capture_turn(self.config, self._base_entry, self.source, self._stream_url,
+                                              self._stream_name)
+        if self.capture_turn and self.rotate:
+            self.logger.warning(f"The frames of {self.selected_source} are turned {self.capture_turn} degrees "
+                                f"where they are captured and {self.rotate} more by Base.rotate: turned twice. "
+                                f"Set Base.rotate to 0 when the capture already turned the picture upright.")
+        if self.capture_turn and self.camera_info.get('fisheye'):
+            # K turned with the frame; the fisheye distortion D is radial and holds as it is
+            K = turned_camera_matrix(self.camera_info['K'], self.res, self.capture_turn)
+            map_1, map_2 = cv2.fisheye.initUndistortRectifyMap(K, self.camera_info['D'], np.eye(3), K,
+                                                               turned_size(*self.res, self.capture_turn), cv2.CV_16SC2)
+            self.camera_info.update({"map_1": map_1, "map_2": map_2})
 
     def _configure_camera_params(self) -> dict | None:
         """Configure camera intrinsic parameters."""
