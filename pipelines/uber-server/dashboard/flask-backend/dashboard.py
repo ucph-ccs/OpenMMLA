@@ -64,6 +64,8 @@ INFLUX_ERROR_TTL = 5.0
 STATE_TTL = 2.0
 HEALTH_TTL = 10.0
 GZIP_MIN_BYTES = 32 * 1024
+# how long a browser may keep a raw recording it fetched (the live page's tiles and sound reload theirs)
+RECORDING_MAX_AGE = 86400
 EXPORT_NAMES = ("transcript.txt", "transcript.srt", "window_features.csv", "report.json")
 # a stream recording shorter than this is not offered (the TUI's Export Streams skips it too)
 SERVER_CLIP_MIN_SECONDS = 1.0
@@ -829,8 +831,11 @@ def api_recordings(sid):
 
 @app.route("/api/sessions/<sid>/recordings/<rec_id>")
 def api_recording_file(sid, rec_id):
-    """one file the recordings route lists, with HTTP ranges (a player seeks in it); a download
-    unless ?inline=1."""
+    """one file the recordings route lists, with HTTP ranges (a player seeks in it), its ETag and
+    Last-Modified; a download unless ?inline=1. The browser keeps what it fetched for a day, private
+    to it: a tile that loads its file again (the Cameras card opened again, a tile that let go of
+    it) reads the parts it has from its cache, which matters for a camera's mp4 whose index sits at
+    its end."""
     check_sid(sid)
     if not raw_recordings.REC_ID_RE.fullmatch(rec_id or ""):
         raise ApiError(400, "That is not a valid recording id.")
@@ -843,8 +848,9 @@ def api_recording_file(sid, rec_id):
     inline = request.args.get("inline") in ("1", "true", "yes")
     response = send_file(path, mimetype=raw_recordings.media_type(path), as_attachment=not inline,
                          download_name=raw_recordings.download_name(sid, rec_id, path), conditional=True,
-                         max_age=None)
-    response.headers["Cache-Control"] = "private, no-store"
+                         etag=True, max_age=None)
+    # a recording does not change once written (a file that grows has a new ETag and Last-Modified)
+    response.headers["Cache-Control"] = f"private, max-age={RECORDING_MAX_AGE}"
     return response
 
 

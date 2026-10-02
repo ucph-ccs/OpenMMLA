@@ -1789,7 +1789,11 @@ function transcriptCard(ctx) {
       text.appendChild(span);
       text.appendChild(document.createTextNode(' '));
     });
-    if (!words.length) text.appendChild(h('span', { class: 'muted', text: 'No text' }));
+    if (!words.length) {
+      // the chunk heard speech but the transcriber found no words in it
+      const length = finite(ch.t0) && finite(ch.t1) && ch.t1 > ch.t0 ? ch.t1 - ch.t0 : null;
+      text.appendChild(h('span', { class: 'muted', text: length != null ? `No words recognised in ${fmt.duration(Math.max(1, length))}` : 'No words recognised' }));
+    }
     li.append(time, chip, text);
     return li;
   }

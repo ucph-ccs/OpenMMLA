@@ -7,17 +7,25 @@
  *
  * Video costs bandwidth on the camera's uplink and the stream server, so a tile connects only while
  * the Cameras card is open, the tile is on screen and the tab is visible, and at most MAX_PLAYING
- * tiles play at once; everything else closes its RTCPeerConnection or lets go of its file. The WHEP
- * exchange lives in whepNegotiate and WhepPlayer, which take their RTCPeerConnection and fetch as
- * arguments so the offer/answer flow can be tested without a browser or a server; FilePlayer takes
- * its video element and clock the same way.
+ * tiles play at once; everything else closes its RTCPeerConnection or lets go of its file. A recorded
+ * file holds one of the browser's connections to the dashboard, so the files (and the replay's sound,
+ * counted as one) share MAX_MEDIA; a tile scrolled off screen keeps its file, paused, while that
+ * allows, so scrolling back shows the moment without loading the file again. The WHEP exchange lives
+ * in whepNegotiate and WhepPlayer, which take their RTCPeerConnection and fetch as arguments so the
+ * offer/answer flow can be tested without a browser or a server; FilePlayer takes its video element
+ * and clock the same way.
  */
 
 import { h, clear, fmt, tooltip, theme, icon } from './core.js';
 import { colorResolver } from './charts.js';
-import { CATEGORY_LABELS, gazeCategory } from './live-model.js';
+import { CATEGORY_LABELS, gazeCategory, TAG_MEMORY_SECONDS } from './live-model.js';
 
 export const MAX_PLAYING = 4;
+// the recorded files (camera videos and the replay's sound) that may hold a connection to the
+// dashboard at once: a browser opens at most six per host over HTTP/1.1, the page's live stream
+// takes one, and one stays free for the page's other requests. A paused file that keeps its place
+// counts too, as its connection stays open
+export const MAX_MEDIA = 4;
 export const RECONNECT_STEPS = [1, 2, 5, 10];
 export const ICE_TIMEOUT_MS = 2000;
 // the browser holds at most this much video back to line it up with the overlay
@@ -36,6 +44,10 @@ export const MAX_RATE = 16;
 export const STEP_MS = 1000;
 // a recording that starts within this many seconds of wall time loads before the clock reaches it
 export const RECORDING_LOOKAHEAD = 3;
+// a player that cannot play faster (the sound at its 4x limit) and lags the clock seeks ahead by
+// this much wall time (the time a seek takes), at most once per CATCH_UP_MS
+export const SEEK_LEAD = 0.1;
+export const CATCH_UP_MS = 1000;
 // COCO-17 limbs: face, arms, torso, legs
 export const COCO_LIMBS = [
   [0, 1], [0, 2], [1, 3], [2, 4],
@@ -400,14 +412,28 @@ function mediaErrorText(err) {
  * loads before start()); sync() then runs on every redraw with the media time the clock asks for:
  * the video seeks when it is more than `tolerance` off, plays at the replay speed (a tenth slower or
  * faster to close a smaller gap), pauses with the replay and, paused, shows the frame of the moment.
- * A speed the browser refuses leaves the video paused, stepping to the clock once a second.
- * onState({state: 'idle'|'loading'|'ready'|'error', message}).
+ * A speed the browser refuses leaves the video paused, stepping to the clock once a second. A file
+ * loads from the moment asked for (a media fragment, #t=), and the picture counts as shown
+ * (`showing`) only once the video stands within the tolerance of the clock: after a load, and after
+ * park() (a tile scrolled off screen keeps its file, paused) and unpark(), the tile draws the
+ * skeletons alone until the seek lands, never the file's first frame or an old one.
+ * onState({state: 'idle'|'loading'|'ready'|'error', message}). The element may be an <audio>: the
+ * replay's sound (sound.js) plays a microphone file by the same rules, with `catchUp`: at its
+ * fastest rate it cannot close a lag by playing faster, so it seeks a little ahead instead.
  */
 export class FilePlayer {
-  constructor({ video = null, onState = () => {}, now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()) } = {}) {
+  constructor({
+    video = null, onState = () => {}, now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+    muted = true, maxRate = MAX_RATE, catchUp = false,
+  } = {}) {
     this.video = video;
     this.onState = onState;
     this.now = now;
+    // a camera's video plays muted; the replay's sound (sound.js) sets muted itself
+    this.muted = muted;
+    // the fastest rate a nudge may ask for (browsers silence audio above 4x)
+    this.maxRate = maxRate;
+    this.catchUp = catchUp;
     this.wanted = false;
     this.url = null;
     this.source = null;
@@ -417,7 +443,14 @@ export class FilePlayer {
     this.target = null;
     this.seekTo = null;
     this.lastSeek = -Infinity;
+    // the seeks asked for, for checks from the browser console
+    this.seeks = 0;
     this.stepping = false;
+    this.blocked = false;
+    // the video stands at the asked moment (see checkAligned); a parked one keeps its file, paused
+    this.aligned = false;
+    this.parked = false;
+    this.tolerance = RECORDING_DRIFT;
     this.badRates = new Set();
     this.listeners = [];
   }
@@ -436,8 +469,12 @@ export class FilePlayer {
     this.wanted = true;
   }
 
-  /** point the video at `url` (`source` names the file for the caller; the url by default). */
-  load(url, source = url) {
+  /**
+   * point the video at `url` (`source` names the file for the caller; the url by default), from the
+   * media time `at` (seconds into the file): the browser fetches that part first, and the file's
+   * first frame never shows on the way to it.
+   */
+  load(url, source = url, at = null) {
     if (!this.wanted || !this.video || !url || url === this.url) return;
     this.detach();
     const v = this.video;
@@ -448,20 +485,22 @@ export class FilePlayer {
       this.listeners.push([name, fn]);
     };
     on('loadedmetadata', () => {
-      // the seek asked for before the file's length was known
-      if (this.target != null) this.seek(this.target);
+      // the seek asked for before the file's length was known (the fragment may not have been taken)
+      if (this.target != null && !this.parked && Math.abs(v.currentTime - this.target) > this.tolerance) this.seek(this.target);
     });
     on('loadeddata', () => {
       this.hadFrame = true;
+      this.checkAligned();
       this.emit('ready');
     });
     on('seeked', () => {
+      this.checkAligned();
       if (this.state !== 'error') this.emit(this.hadFrame ? 'ready' : this.state);
     });
     on('error', () => this.emit('error', mediaErrorText(v.error)));
-    v.muted = true;
+    if (this.muted) v.muted = true;
     v.preload = 'auto';
-    v.src = url;
+    v.src = finite(at) && at > 0 ? `${url}#t=${at.toFixed(3)}` : url;
     this.emit('loading');
   }
 
@@ -482,6 +521,8 @@ export class FilePlayer {
     this.url = null;
     this.source = null;
     this.hadFrame = false;
+    this.aligned = false;
+    this.parked = false;
     this.target = null;
     this.seekTo = null;
     this.lastSeek = -Infinity;
@@ -500,9 +541,37 @@ export class FilePlayer {
     return this.url && finite(d) && d > 0 ? d : null;
   }
 
-  /** true while the video shows a frame of the asked moment (the last one stays up during a seek) */
+  /**
+   * true while the video shows a frame of the asked moment (the last one stays up during a seek the
+   * clock's drift asks for, but not on the way from a load or from off screen)
+   */
   get showing() {
-    return !!(this.video && this.url && this.state !== 'error' && this.hadFrame && this.target != null);
+    return !!(this.video && this.url && this.state !== 'error' && this.hadFrame && this.aligned && !this.parked && this.target != null);
+  }
+
+  /** the video stands within the tolerance of the asked moment, no seek under way: it may be shown */
+  checkAligned() {
+    const v = this.video;
+    if (!this.aligned && v && this.url && this.hadFrame && this.target != null && !v.seeking
+        && finite(v.currentTime) && Math.abs(v.currentTime - this.target) <= this.tolerance) this.aligned = true;
+    return this.aligned;
+  }
+
+  /**
+   * off screen: the video keeps its file and place, paused, follows no clock and is not shown, so
+   * the tile comes back on screen with the skeletons of the moment, never the picture it left with
+   */
+  park() {
+    if (!this.parked) {
+      this.parked = true;
+      this.aligned = false;
+    }
+    if (this.video && this.url) this.pauseVideo();
+  }
+
+  /** back on screen: shown again once it stands at the clock's moment */
+  unpark() {
+    this.parked = false;
   }
 
   mediaTime() {
@@ -517,6 +586,7 @@ export class FilePlayer {
     }
     this.seekTo = t;
     this.lastSeek = this.now();
+    this.seeks += 1;
   }
 
   /** false when the browser refuses `rate` (a refused rate is not asked again). */
@@ -543,8 +613,15 @@ export class FilePlayer {
 
   playVideo() {
     const r = this.video.play();
-    // a play cut short by a pause rejects; the next sync asks again
-    if (r && typeof r.catch === 'function') r.catch(() => {});
+    // a play cut short by a pause rejects; the next sync asks again. One the browser's autoplay
+    // rules refused marks the player blocked until a play succeeds
+    if (r && typeof r.then === 'function') {
+      r.then(() => {
+        this.blocked = false;
+      }, (err) => {
+        if (err && err.name === 'NotAllowedError') this.blocked = true;
+      });
+    }
   }
 
   /**
@@ -554,8 +631,13 @@ export class FilePlayer {
   sync({ target = null, speed = 1, playing = false, tolerance = driftTolerance(speed) } = {}) {
     const v = this.video;
     this.target = finite(target) ? Math.max(0, target) : null;
+    this.tolerance = tolerance;
     this.stepping = false;
     if (!v || !this.url || this.state === 'error') return;
+    if (this.parked) {
+      this.pauseVideo();
+      return;
+    }
     if (this.target == null) {
       this.pauseVideo();
       return;
@@ -567,38 +649,133 @@ export class FilePlayer {
     if (!playing) {
       this.pauseVideo();
       if (Math.abs(drift) > PAUSED_DRIFT && !inFlight(PAUSED_DRIFT)) this.seek(this.target);
+      this.checkAligned();
       return;
     }
     const s = finite(speed) && speed > 0 ? speed : 1;
     const gap = Math.abs(drift);
     const nudge = gap > tolerance / 4 && gap <= tolerance && !v.seeking ? (drift > 0 ? 1 - RATE_NUDGE : 1 + RATE_NUDGE) : 1;
     const nudged = s * nudge;
-    const want = nudged >= MIN_RATE && nudged <= MAX_RATE ? nudged : s;
+    const want = nudged >= MIN_RATE && nudged <= Math.min(MAX_RATE, this.maxRate) ? nudged : s;
     let ok = this.trySetRate(want);
     if (!ok && want !== s) ok = this.trySetRate(s);
     if (!ok) {
       this.stepping = true;
       this.pauseVideo();
       if (this.now() - this.lastSeek >= STEP_MS && gap > PAUSED_DRIFT && !v.seeking) this.seek(this.target);
+      this.checkAligned();
       return;
     }
+    // behind with no faster rate left to close the gap (a nudge above the cap falls back to the
+    // speed itself): a catch-up player seeks a little ahead, as the seek takes a moment
+    const cannotHurry = drift < 0 && s * (1 + RATE_NUDGE) > Math.min(MAX_RATE, this.maxRate) + 1e-9;
     if (gap > tolerance && !inFlight(tolerance)) this.seek(this.target);
+    else if (this.catchUp && cannotHurry && gap > tolerance / 2 && !v.seeking && this.now() - this.lastSeek >= CATCH_UP_MS) {
+      this.seek(this.target + s * SEEK_LEAD);
+    }
     if (v.paused && !v.ended) this.playVideo();
+    this.checkAligned();
   }
 }
 
 // drawing
 
+/** what an untagged body is called on its tile: `track 1836`, else `unknown 2` (its person_id) */
+export function untaggedLabel(p) {
+  if (p && finite(p.tr)) return `track ${p.tr}`;
+  const id = p && p.id != null ? String(p.id).replace(/_/g, ' ').trim() : '';
+  return id || 'no badge';
+}
+
+/**
+ * what a pupil's body is called on its tile: `Tag 2`, or `Tag 2? 23 s` when the camera did not read
+ * the badge in this frame set and its tracker kept the tag from a read of the track 23 s before
+ * (`age`, set by the live model's TagMemory)
+ */
+export function taggedLabel(p, tagLabel = (t) => `Tag ${t}`) {
+  const name = tagLabel(String(p.tag));
+  return finite(p.age) ? `${name}? ${Math.round(p.age)} s` : name;
+}
+
+/** the hover text of a body without a counted badge: an untagged one, or one whose kept tag ran out */
+export function untaggedNote(p) {
+  const limit = `${TAG_MEMORY_SECONDS} s`;
+  if (p && p.xt != null) {
+    return `The camera's tracker still carries Tag ${p.xt} on this person, but their track has not read that badge in the last ${limit} (as far back as this page has loaded), so no tag's measures include them, as on the Analysis page.`;
+  }
+  // a session the VFA server did not track has no track to carry a read, here or in the Analysis
+  if (!p || !finite(p.tr)) return 'The camera read no badge on this person in this frame set, so no tag\'s measures include them.';
+  return `No badge was read on this person's track in the last ${limit}, so no tag's live measures include them. The Analysis can still count these frames for a pupil when the same track reads that pupil's badge within ${limit} before or after.`;
+}
+
+/** the hover text of a pupil whose tag the camera kept on the track without reading it */
+export function keptNote(p, tagLabel = (t) => `Tag ${t}`) {
+  const name = tagLabel(String(p.tag));
+  return `Not read in this frame set: the camera's tracker kept ${name} on this person since their track last read the badge, ${Math.round(p.age)} s ago. The measures count it for up to ${TAG_MEMORY_SECONDS} s after a read, as the Analysis does; the dashed lines mark it.`;
+}
+
+/** the COCO-17 limbs and joints of `kp` scored at least KEYPOINT_MIN_CONF (null keypoints skipped); the number of limbs drawn */
+function drawSkeleton(ctx, kp, X, Y, { color, lineWidth = 2, radius = 2, dash = null }) {
+  const sure = (pt) => Array.isArray(pt) && finite(pt[0]) && finite(pt[1]) && pt[2] >= KEYPOINT_MIN_CONF;
+  let limbs = 0;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.beginPath();
+  for (const [i, j] of COCO_LIMBS) {
+    const a = kp[i];
+    const b = kp[j];
+    if (!sure(a) || !sure(b)) continue;
+    ctx.moveTo(X(a[0]), Y(a[1]));
+    ctx.lineTo(X(b[0]), Y(b[1]));
+    limbs += 1;
+  }
+  if (dash) ctx.setLineDash(dash);
+  ctx.stroke();
+  if (dash) ctx.setLineDash([]);
+  ctx.fillStyle = color;
+  for (const pt of kp) {
+    if (!sure(pt)) continue;
+    ctx.beginPath();
+    ctx.arc(X(pt[0]), Y(pt[1]), radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return limbs;
+}
+
+/**
+ * a filled label with its text's baseline at (x, y); with `placed` (the rectangles of the labels drawn
+ * before it), moved down until it covers none of them (a few steps at most)
+ */
+function drawLabel(ctx, text, x, y, { color, size = 12, font, placed = null }) {
+  ctx.font = font(size);
+  const tw = ctx.measureText(text).width;
+  const rect = () => [x, y - size - 1, x + tw + 10, y + 3];
+  if (placed) {
+    const hits = (r) => placed.some((q) => r[0] < q[2] && q[0] < r[2] && r[1] < q[3] && q[1] < r[3]);
+    for (let i = 0; i < 6 && hits(rect()); i += 1) y += size + 5;
+    placed.push(rect());
+  }
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y - size - 1, tw + 10, size + 4);
+  ctx.fillStyle = textOn(color);
+  ctx.fillText(text, x + 5, y);
+}
+
 /**
  * Draw one camera's frame set (slim VFA camera {id, w, h, tg, ps, pr}) into a canvas context whose
  * user space is css pixels `width` x `height`. Pupils (tagged persons) in their tag colours with
- * skeleton, label and gaze ray; untagged bodies as thin grey boxes; AprilTag centres as small
- * diamonds. Returns the hit regions of the tagged persons for the hover readout. `box` ({x, y, w, h}
+ * skeleton, label and gaze ray, a tag the camera only kept on the track (`age`) with dashed box and
+ * skeleton and a label like `Tag 2? 23 s`; people without a counted badge (untagged bodies, and those
+ * whose kept tag ran out) in grey, with box, skeleton and their track as the label; AprilTag centres
+ * as small diamonds. Returns the hit regions of the persons for the hover readout (the untagged ones
+ * with `untagged: true`, the kept ones with `kept`, the seconds since the read). `box` ({x, y, w, h}
  * in css pixels) is where a video shows the camera's picture: the frame set's w x h is stretched onto
- * it; without one the frame set is fitted into the canvas.
+ * it; without one the frame set is fitted into the canvas. `stats`, given, is filled with what was
+ * drawn: {tagged, kept, untagged, untaggedSkeletons}.
  */
-export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabel = (t) => `Tag ${t}`, opacity = 1, background = null, box = null } = {}) {
+export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabel = (t) => `Tag ${t}`, opacity = 1, background = null, box = null, stats = null } = {}) {
   const regions = [];
+  if (stats) Object.assign(stats, { tagged: 0, kept: 0, untagged: 0, untaggedSkeletons: 0 });
   ctx.save();
   ctx.clearRect(0, 0, width, height);
   if (background) {
@@ -621,13 +798,29 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
   const surface = resolve('var(--surface)');
   const font = (size, weight = 600) => `${weight} ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
 
-  // untagged bodies first, under the pupils
-  for (const p of cam.ps || []) {
-    if (!p || p.tag != null || !p.b) continue;
-    ctx.strokeStyle = grey;
-    ctx.globalAlpha = opacity * 0.7;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(X(p.b[0]) + 0.5, Y(p.b[1]) + 0.5, (p.b[2] - p.b[0]) * kx, (p.b[3] - p.b[1]) * ky);
+  // untagged bodies first, under the pupils: grey box, skeleton and track, so a camera that read no
+  // badge still shows whom it detected
+  const untagged = (cam.ps || []).filter((p) => p && p.tag == null && (p.b || Array.isArray(p.k)));
+  for (const p of untagged) {
+    if (p.b) {
+      ctx.strokeStyle = grey;
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = opacity * 0.85;
+      ctx.strokeRect(X(p.b[0]), Y(p.b[1]), (p.b[2] - p.b[0]) * kx, (p.b[3] - p.b[1]) * ky);
+      ctx.globalAlpha = opacity;
+    }
+    const limbs = Array.isArray(p.k) ? drawSkeleton(ctx, p.k, X, Y, { color: grey, lineWidth: 1.5, radius: 1.5 }) : 0;
+    if (stats) {
+      stats.untagged += 1;
+      if (limbs) stats.untaggedSkeletons += 1;
+    }
+    regions.push({ untagged: true, tag: null, label: untaggedLabel(p), note: untaggedNote(p), box: p.b ? [X(p.b[0]), Y(p.b[1]), X(p.b[2]), Y(p.b[3])] : null, ray: null });
+  }
+  // their labels go over every grey skeleton, still under the pupils, and clear of each other
+  const placed = [];
+  for (const p of untagged) {
+    if (!p.b) continue;
+    drawLabel(ctx, untaggedLabel(p), X(p.b[0]), Math.max(14, Y(p.b[1]) - 4), { color: grey, size: 11, font, placed });
   }
   ctx.globalAlpha = opacity;
 
@@ -635,34 +828,24 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
     if (!p || p.tag == null) continue;
     const tag = String(p.tag);
     const color = resolve(tagColor(tag));
+    // a tag the tracker kept without reading it: dashed, so it reads as a guess
+    const kept = finite(p.age);
+    const dash = kept ? [5, 4] : null;
+    if (stats) {
+      stats.tagged += 1;
+      if (kept) stats.kept += 1;
+    }
     if (p.b) {
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
-      ctx.globalAlpha = opacity * 0.55;
+      ctx.globalAlpha = opacity * (kept ? 0.8 : 0.55);
+      if (dash) ctx.setLineDash(dash);
       ctx.strokeRect(X(p.b[0]), Y(p.b[1]), (p.b[2] - p.b[0]) * kx, (p.b[3] - p.b[1]) * ky);
+      if (dash) ctx.setLineDash([]);
       ctx.globalAlpha = opacity;
     }
     const kp = Array.isArray(p.k) ? p.k : null;
-    if (kp) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (const [i, j] of COCO_LIMBS) {
-        const a = kp[i];
-        const b = kp[j];
-        if (!a || !b || !(a[2] >= KEYPOINT_MIN_CONF) || !(b[2] >= KEYPOINT_MIN_CONF)) continue;
-        ctx.moveTo(X(a[0]), Y(a[1]));
-        ctx.lineTo(X(b[0]), Y(b[1]));
-      }
-      ctx.stroke();
-      ctx.fillStyle = color;
-      for (const pt of kp) {
-        if (!pt || !(pt[2] >= KEYPOINT_MIN_CONF)) continue;
-        ctx.beginPath();
-        ctx.arc(X(pt[0]), Y(pt[1]), 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
+    if (kp) drawSkeleton(ctx, kp, X, Y, { color, lineWidth: 2, radius: 2, dash });
     // gaze ray from the face box centre (else the nose, else the box top) to the gaze point
     let ray = null;
     const g = p.g;
@@ -690,17 +873,14 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
       }
     }
     // label above the box
-    const label = tagLabel(tag);
-    ctx.font = font(12);
-    const tw = ctx.measureText(label).width;
     const lx = p.b ? X(p.b[0]) : ray ? ray[0] : 0;
     const ly = p.b ? Math.max(16, Y(p.b[1]) - 4) : ray ? ray[1] - 8 : 16;
-    ctx.fillStyle = color;
-    ctx.fillRect(lx, ly - 13, tw + 10, 16);
-    ctx.fillStyle = textOn(color);
-    ctx.fillText(label, lx + 5, ly);
+    drawLabel(ctx, taggedLabel(p, tagLabel), lx, ly, { color, size: 12, font });
     regions.push({
       tag,
+      kept: kept ? p.age : null,
+      label: taggedLabel(p, tagLabel),
+      note: kept ? keptNote(p, tagLabel) : null,
       box: p.b ? [X(p.b[0]), Y(p.b[1]), X(p.b[2]), Y(p.b[3])] : null,
       ray,
       cat: g ? g.cat : null,
@@ -750,7 +930,10 @@ function segDistance(px, py, ax, ay, bx, by) {
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
-/** the tagged person under (x, y): the nearest gaze ray within 8 px, else a box holding the point. */
+/**
+ * the person under (x, y): the nearest gaze ray within 8 px, else a tagged person's box holding the
+ * point, else an untagged one's.
+ */
 export function hitRegion(regions, x, y) {
   let best = null;
   let bd = 8;
@@ -763,10 +946,8 @@ export function hitRegion(regions, x, y) {
     }
   }
   if (best) return best;
-  for (const r of regions || []) {
-    if (r.box && x >= r.box[0] && x <= r.box[2] && y >= r.box[1] && y <= r.box[3]) return r;
-  }
-  return null;
+  const inside = (r) => r.box && x >= r.box[0] && x <= r.box[2] && y >= r.box[1] && y <= r.box[3];
+  return (regions || []).find((r) => !r.untagged && inside(r)) || (regions || []).find((r) => r.untagged && inside(r)) || null;
 }
 
 // tiles
@@ -779,9 +960,12 @@ export function hitRegion(regions, x, y) {
  * update(state): {cameras: [ids], frameAt(t) -> vfa record, now (stream clock), mode ('follow'|'replay'),
  *                 live (the session runs), media (the /media answer | null), serverNow (epoch),
  *                 vfaLag (s | null), recordings ({enabled, files, reason} of the recordings route | null
- *                 while it is asked), speed (replay speed), running (the replay clock advances)}.
+ *                 while it is asked), speed (replay speed), running (the replay clock advances),
+ *                 mediaReserved (how many of the MAX_MEDIA connections the page's sound takes, 0 or 1)}.
  * The replay of an ended session plays each camera's recorded file (files[].device is the VFA camera
- * id) at the clock; a tile whose recording does not cover the moment draws the skeletons alone.
+ * id) at the clock; a tile whose recording does not cover the moment draws the skeletons alone. The
+ * tiles on screen hold a file first, then those scrolled away (paused, the most recently seen first),
+ * up to MAX_MEDIA less the sound's share; a tile past that lets go of its file.
  */
 export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
   const el = h('div', { class: 'cam-wall' });
@@ -795,12 +979,19 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     priority: [],
     alive: true,
     suspended: false,
+    // the media connections the sound takes, and the recorded files the tiles may hold besides
+    reserved: 0,
+    fileCap: MAX_MEDIA,
   };
+  const clockMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
   const io = typeof IntersectionObserver !== 'undefined'
     ? new IntersectionObserver((entries) => {
       for (const en of entries) {
         const tile = Array.from(tiles.values()).find((t) => t.el === en.target);
-        if (tile) tile.onScreen = en.isIntersecting;
+        if (!tile) continue;
+        // when it was last on screen: a tile scrolled away longest lets go of its file first
+        if (tile.onScreen || en.isIntersecting) tile.seenAt = clockMs();
+        tile.onScreen = en.isIntersecting;
       }
       schedulePlayback();
     }, { threshold: 0.01 })
@@ -868,8 +1059,8 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     const tileEl = h('div', { class: 'cam-tile', dataset: { camera: id } }, head, stage, note);
     const tile = {
       id, el: tileEl, name, age, stateEl, playBtn, video, fvideo, canvas, stage, note,
-      onScreen: !io, player: null, playerState: null, stream: null, regions: [], drawnKey: null, aspect: 16 / 9,
-      videoMode: false, kind: null, files: [], file: null, next: null, durations: new Map(), onVideo: false,
+      onScreen: !io, seenAt: 0, player: null, playerState: null, stream: null, regions: [], drawnKey: null, aspect: 16 / 9,
+      videoMode: false, kind: null, files: [], file: null, next: null, durations: new Map(), onVideo: false, drawn: null,
     };
     playBtn.addEventListener('click', () => {
       st.priority = [id, ...st.priority.filter((x) => x !== id)];
@@ -882,9 +1073,14 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
         tooltip.hide();
         return;
       }
+      if (hit.untagged) {
+        tooltip.show(e, { title: hit.label, note: hit.note });
+        return;
+      }
       const cat = hit.cat ? gazeCategory(hit.cat, hit.to) : null;
       tooltip.show(e, {
-        title: tagLabel(hit.tag),
+        title: hit.kept != null ? `${tagLabel(hit.tag)}?` : tagLabel(hit.tag),
+        note: hit.note || undefined,
         rows: [
           { value: cat ? CATEGORY_LABELS[cat] : fmt.na, label: 'gaze', color: tagColor(hit.tag), key: 'line' },
           hit.to != null ? { value: hit.to === 'other' ? 'someone else' : tagLabel(hit.to), label: 'target', key: 'none' } : null,
@@ -927,11 +1123,29 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
 
   function schedulePlayback() {
     if (!st.alive) return;
+    const open = st.expanded && st.docVisible && !st.suspended;
+    const canPlay = (t) => open && t.onScreen;
+    const now = clockMs();
+    for (const t of tiles.values()) if (canPlay(t)) t.seenAt = now;
     const eligible = [];
     for (const t of tiles.values()) if (t.videoMode) eligible.push(t.id);
-    const canPlay = (t) => st.expanded && st.docVisible && !st.suspended && t.onScreen;
     const order = [...st.priority.filter((id) => eligible.includes(id)), ...eligible.filter((id) => !st.priority.includes(id))];
-    const active = new Set(order.filter((id) => canPlay(tiles.get(id))).slice(0, MAX_PLAYING));
+    // live video comes over WebRTC from the stream server: up to MAX_PLAYING tiles on screen
+    const liveOn = order.filter((id) => tiles.get(id).kind === 'live' && canPlay(tiles.get(id)));
+    const live = new Set(liveOn.slice(0, MAX_PLAYING));
+    // a recorded file holds a connection to the dashboard: the tiles on screen first, then the ones
+    // scrolled away that still hold theirs (paused, kept in place), the most recently seen first
+    const cap = Math.max(0, MAX_MEDIA - st.reserved);
+    st.fileCap = cap;
+    const fileOn = order.filter((id) => tiles.get(id).kind === 'file' && canPlay(tiles.get(id)));
+    const files = new Set(fileOn.slice(0, cap));
+    const parked = new Set(open ? order
+      .filter((id) => {
+        const t = tiles.get(id);
+        return t.kind === 'file' && !canPlay(t) && t.player instanceof FilePlayer && !!t.player.url;
+      })
+      .sort((a, b) => tiles.get(b).seenAt - tiles.get(a).seenAt)
+      .slice(0, cap - files.size) : []);
     for (const t of tiles.values()) {
       if (!t.videoMode) {
         if (t.player) {
@@ -941,7 +1155,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
         t.playBtn.hidden = true;
         continue;
       }
-      if (active.has(t.id) && t.kind === 'file') {
+      if (t.kind === 'file' && (files.has(t.id) || parked.has(t.id))) {
         if (!(t.player instanceof FilePlayer)) {
           if (t.player) t.player.stop();
           t.playerState = null;
@@ -956,8 +1170,25 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
           });
           t.player.start();
         }
+        if (parked.has(t.id)) {
+          if (!t.player.parked) {
+            // off screen: the picture goes at once, so the tile comes back with the skeletons of
+            // the moment until its video stands there again
+            t.player.park();
+            t.drawnKey = null;
+            if (st.expanded && st.last) paint(t, st.last);
+          }
+        } else if (t.player.parked) {
+          // back on screen: the seek to the clock starts now, not at the next redraw
+          t.player.unpark();
+          t.drawnKey = null;
+          if (st.expanded && st.last) {
+            syncRecording(t, st.last);
+            paint(t, st.last);
+          }
+        }
         t.playBtn.hidden = true;
-      } else if (active.has(t.id)) {
+      } else if (t.kind === 'live' && live.has(t.id)) {
         if (!t.player || t.player instanceof FilePlayer || t.player.url !== t.url) {
           if (t.player) t.player.stop();
           t.player = new WhepPlayer({
@@ -977,10 +1208,19 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
           t.player = null;
         }
         // a tile that could play but lost to the limit offers Play
-        t.playBtn.hidden = !(canPlay(t) && eligible.length > MAX_PLAYING);
+        const over = t.kind === 'file' ? fileOn.length > cap : liveOn.length > MAX_PLAYING;
+        t.playBtn.hidden = !(canPlay(t) && over);
       }
       renderTileState(t);
     }
+  }
+
+  /** what a tile that lost to the limit says */
+  function limitText(t) {
+    if (t.kind !== 'file') return `Up to ${MAX_PLAYING} cameras play at once`;
+    const n = st.fileCap;
+    if (st.reserved) return n ? `Up to ${n} ${n === 1 ? 'camera plays' : 'cameras play'} beside the sound` : 'The sound takes the last connection';
+    return `Up to ${n} cameras play at once`;
   }
 
   function renderTileState(t) {
@@ -989,7 +1229,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       t.stateEl.textContent = '';
       return;
     }
-    if (!t.player) t.stateEl.textContent = t.playBtn.hidden ? 'Paused' : `Up to ${MAX_PLAYING} cameras play at once`;
+    if (!t.player) t.stateEl.textContent = t.playBtn.hidden ? 'Paused' : limitText(t);
     else if (t.player instanceof FilePlayer) {
       const loading = t.file && (!ps || ps.state === 'loading' || ps.state === 'idle');
       t.stateEl.textContent = ps && ps.state === 'error' ? 'Could not play' : loading ? 'Loading the recording' : '';
@@ -1021,6 +1261,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
 
   function render(s) {
     st.last = s;
+    st.reserved = finite(s.mediaReserved) ? Math.max(0, Math.min(MAX_MEDIA, Math.round(s.mediaReserved))) : 0;
     syncTiles(s.cameras || []);
     for (const t of tiles.values()) {
       const stream = streamFor(t.id, s);
@@ -1059,12 +1300,16 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     t.file = file;
   }
 
-  /** keep the video of the recording at the clock's moment (a coming one loads, paused) */
+  /**
+   * keep the video of the recording at the clock's moment (a coming one loads, paused, from its
+   * start); a parked one (off screen) keeps its file and place and follows no clock
+   */
   function syncRecording(t, s) {
     const p = t.player instanceof FilePlayer ? t.player : null;
     if (!p) return;
     const pick = t.file || t.next;
-    if (pick) p.load(inlineUrl(pick.url), pick.url);
+    if (pick && !p.parked) p.load(inlineUrl(pick.url), pick.url, pick === t.file ? s.now - pick.start : 0);
+    // a parked player only notes the moment
     const target = t.file && p.source === t.file.url ? s.now - t.file.start : null;
     p.sync({ target, speed: s.speed, playing: !!s.running, tolerance: driftTolerance(s.speed) });
   }
@@ -1127,6 +1372,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       const resolve = colorResolver(el);
       const ctx = t.canvas.getContext('2d');
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      t.drawn = { tagged: 0, untagged: 0, untaggedSkeletons: 0 };
       if (!showOverlay) {
         ctx.clearRect(0, 0, w, hgt);
         t.regions = [];
@@ -1135,6 +1381,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
           width: w, height: hgt, resolve, tagColor, tagLabel, box,
           opacity: onVideo ? 0.8 : 1,
           background: onVideo ? null : resolve('var(--surface-2)'),
+          stats: t.drawn,
         });
         if (!cam && !onVideo) {
           ctx.fillStyle = resolve('var(--muted)');
@@ -1186,12 +1433,19 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
           id: t.id, kind: t.kind, playing: !!t.player, state: t.playerState ? t.playerState.state : null,
           file: t.file ? t.file.id : null, target: p ? p.target : null, time: v.currentTime, paused: v.paused,
           rate: v.playbackRate, onVideo: t.onVideo, stepping: p ? p.stepping : false,
+          parked: p ? p.parked : false, aligned: p ? p.aligned : false, onScreen: t.onScreen,
+          src: t.fvideo.getAttribute('src'), visibility: t.fvideo.style.visibility,
           picture: [v.videoWidth, v.videoHeight], stage: [t.stage.clientWidth, t.stage.clientHeight], note: t.note.textContent,
+          drawn: t.drawn ? { ...t.drawn } : null,
         };
       });
     },
     playing() {
       return Array.from(tiles.values()).filter((t) => t.player).map((t) => t.id);
+    },
+    /** how many recorded files the tiles hold (each keeps a connection to the dashboard) */
+    mediaHeld() {
+      return Array.from(tiles.values()).filter((t) => t.fvideo.getAttribute('src')).length;
     },
     suspend() {
       st.suspended = true;

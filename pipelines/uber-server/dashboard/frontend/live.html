@@ -25,6 +25,16 @@
     .scrub { display: flex; align-items: center; gap: 8px; flex: 1 1 260px; min-width: 200px; }
     .scrub input[type="range"] { flex: 1 1 auto; min-width: 80px; margin: 0; height: 24px; cursor: pointer; }
     .scrub-label { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .live-sound { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+    .live-sound-label { font-size: 13px; font-weight: 500; color: var(--ink-2); }
+    .live-sound .select { height: 28px; padding-left: 8px; font-size: 13px; min-width: 64px; max-width: 220px; text-overflow: ellipsis; }
+    .live-sound .select:disabled { opacity: .55; cursor: default; }
+    .live-sound .btn.icon-btn { height: 28px; width: 28px; }
+    .live-sound-note { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .live-sound-note:empty { display: none; }
+    .live-sound .live-sound-unblock { height: 28px; }
+    /* the Cameras legend's line for a badge the tracker kept: dashed, as on the tiles */
+    .legend-item[data-key="cam-kept"] .swatch.line { background: repeating-linear-gradient(90deg, var(--swatch) 0 4px, transparent 4px 7px); width: 18px; }
     .live-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; border-radius: 8px; background: var(--surface-2); color: var(--ink-2); font-size: 13px; }
     .live-banner .icon { width: 16px; height: 16px; flex: none; }
     .live-banner[data-kind="error"] .icon { color: var(--critical); }

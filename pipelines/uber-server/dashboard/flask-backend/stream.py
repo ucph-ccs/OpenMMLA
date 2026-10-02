@@ -4,7 +4,8 @@ Records go out in the slim formats of openmmla.analytics.report.live. Follow mod
 few minutes of a session, then what its pipelines write as they write it. Replay mode walks a
 virtual clock through a finished (or earlier) part of a session at 1 to 16 times real time and
 releases each record when the clock reaches it: a window when it starts, a transcript chunk when
-it ends, since that is when its text exists.
+it ends, since that is when its text exists. A playing replay tells the page its clock at least
+once a second, with a small `tick` event when no batch went out.
 
 The followers of one session share one poller, a SessionFeed. It starts with the first follower,
 asks InfluxDB once a second for what each event type wrote after its newest record (six small
@@ -44,6 +45,11 @@ IPS_TYPES = (IPS_TRANSLATION, IPS_ROTATION, IPS_RELATION)
 
 PING_EVERY = 15.0
 STATUS_EVERY = 5.0
+# a playing replay confirms its clock at least this often (wall seconds): a `tick` goes out when no
+# batch did, so the page's clock, and the recorded video and sound that follow it, run on through
+# stretches with few records (a recognition bucket every 3 s); a replay waiting for InfluxDB sends
+# none, so the page still sees it stall
+CLOCK_EVERY = 1.0
 FOLLOW_TICK = 1.0
 FOLLOW_IDLE_TICK = 5.0
 FOLLOW_IDLE_AFTER = 60.0
@@ -1073,10 +1079,13 @@ def _replay(fetch, last_event, sid, slimmer, tracker, *, t0, t1, group_id, at, s
 
 def _replay_run(buffer, last_event, sid, slimmer, tracker, *, clock, end_bound, speed, sleep, now, error_type):
     """the playing part of a replay: the clock advances `speed` times wall time, but never past what
-    has been read (it waits, like a video buffering, rather than skip records)."""
+    has been read (it waits, like a video buffering, rather than skip records). Every event that
+    carries the clock (a batch, a status, or a `tick` when neither went out for CLOCK_EVERY) tells
+    the page it moved; a clock that cannot move sends no tick."""
     ahead = max(30.0, 15.0 * speed)
     piece = max(10.0, 2.0 * speed)
-    last_wall = last_ping = last_status = now()
+    last_wall = last_ping = last_status = last_clock = now()
+    told = clock
     errors = 0
     while True:
         sleep(REPLAY_TICK)
@@ -1110,6 +1119,7 @@ def _replay_run(buffer, last_event, sid, slimmer, tracker, *, clock, end_bound, 
         slim = slimmer.batch(due, tracker.basis)
         if _has_any(slim):
             yield _batch_event(clock, False, slim)
+            last_clock, told = wall, clock
         if proposed > end_bound and clock >= end_bound:
             yield _status(end_bound, last_event(), wall)
             yield sse("end", {"reason": "replay_end", "message": "The replay reached the end of the session."})
@@ -1117,6 +1127,11 @@ def _replay_run(buffer, last_event, sid, slimmer, tracker, *, clock, end_bound, 
         if wall - last_status >= STATUS_EVERY:
             last_status = wall
             yield _status(clock, last_event(), wall)
+            last_clock, told = wall, clock
+        # the loop wakes every REPLAY_TICK, so a tick due in the next half wake goes out now
+        if clock > told and wall - last_clock >= CLOCK_EVERY - REPLAY_TICK / 2:
+            yield sse("tick", {"clock": _r3(clock)})
+            last_clock, told = wall, clock
         if wall - last_ping >= PING_EVERY:
             last_ping = wall
             yield ": ping\n\n"

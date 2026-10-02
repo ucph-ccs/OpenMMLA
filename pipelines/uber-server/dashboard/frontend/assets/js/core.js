@@ -517,9 +517,11 @@ const ICONS = {
   clock: [['circle', { cx: 12, cy: 12, r: 10 }], ['path', { d: 'M12 6v6l4 2' }]],
   search: [['circle', { cx: 11, cy: 11, r: 7 }], ['path', { d: 'm21 21-4.3-4.3' }]],
   dot: [['circle', { cx: 12, cy: 12, r: 5, fill: 'currentColor', stroke: 'none' }]],
+  volume: [['path', { d: 'M11 5 6 9H2v6h4l5 4V5Z' }], ['path', { d: 'M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14' }]],
+  'volume-off': [['path', { d: 'M11 5 6 9H2v6h4l5 4V5Z' }], ['path', { d: 'm22 9-6 6M16 9l6 6' }]],
 };
 
-/** small inline icon (aria-hidden); names: copy check sun moon monitor play pause stop alert info download refresh reconnect table close chevron-down chevron-right external camera clock search dot */
+/** small inline icon (aria-hidden); names: copy check sun moon monitor play pause stop alert info download refresh reconnect table close chevron-down chevron-right external camera clock search dot volume volume-off */
 export function icon(name, size = 14) {
   const parts = ICONS[name] || ICONS.dot;
   return s('svg', {

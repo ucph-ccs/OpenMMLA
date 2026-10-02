@@ -1,14 +1,16 @@
 /**
  * The live page: one session as it runs (follow mode), or an ended one replayed at 1 to 16 times
- * real time from any moment. The page opens one Server-Sent Events stream at a time
- * (/api/sessions/<sid>/stream), feeds every batch into a LiveModel (live-model.js) and redraws from
- * the model at most four times a second; the heavier panels (KPIs, who looks at whom, speaking
- * share, pairs, transcript) once a second. Replay keeps no stream open while paused: Play reconnects
- * at the paused moment and backfills only what the last connection had not sent yet, a seek clears
- * the model and reconnects with five minutes of history. A dropped stream reconnects after 1, 2, 5,
- * then every 10 seconds; a page back from the back/forward cache reconnects at once. The Cameras card
- * plays live video in follow mode and, in the replay of an ended session, each camera's recorded file
- * at the replay clock (cameras.js), from the list the recordings route gives.
+ * real time from any moment; an ended session opens paused at its start. The page opens one
+ * Server-Sent Events stream at a time (/api/sessions/<sid>/stream), feeds every batch into a
+ * LiveModel (live-model.js) and redraws from the model at most four times a second; the heavier
+ * panels (KPIs, who looks at whom, speaking share, pairs, transcript) once a second. Replay keeps no
+ * stream open while paused: Play reconnects at the paused moment and backfills only what the last
+ * connection had not sent yet, a seek clears the model and reconnects with up to five minutes of
+ * history (none before the session's start). A dropped stream reconnects after 1, 2, 5, then every
+ * 10 seconds; a page back from the back/forward cache reconnects at once. The Cameras card plays live
+ * video in follow mode and, in the replay of an ended session, each camera's recorded file at the
+ * replay clock (cameras.js), from the list the recordings route gives; the Sound control plays one of
+ * the session's microphone files at the same clock (sound.js).
  */
 
 import {
@@ -19,9 +21,10 @@ import { card, timeline, barList, networkGraph, statTile, bullet } from './chart
 import { floorMap } from './floormap.js';
 import {
   LiveModel, VoiceColors, projectCameras, roomExtent, extentContains, extentUnion, pairList, CATEGORIES, CATEGORY_LABELS,
-  GROUP_LABEL_RE, JA_PAIR_MIN_SHARE,
+  GROUP_LABEL_RE, JA_PAIR_MIN_SHARE, TAG_MEMORY_SECONDS,
 } from './live-model.js';
 import { cameraWall } from './cameras.js';
+import { ReplaySound, soundSources, defaultSource, MAX_SOUND_SPEED } from './sound.js';
 
 const SPEEDS = [1, 2, 4, 8, 16];
 const WINDOWS = [
@@ -90,7 +93,7 @@ const S = {
   backfilling: false,
   backfillSecs: 0,
   // replay: the stream clock up to which the server has sent every record (the drawn clock runs
-  // ahead of it between batches); null while the model lacks the five minutes of history
+  // ahead of it between batches); null while the model lacks its history (five minutes, or back to t0)
   sent: null,
   preview: false,
   ended: false,
@@ -118,6 +121,11 @@ const S = {
   recordings: null,
   recordingsAt: 0,
   recordingsBusy: false,
+  // the Sound control: the microphone the viewer picked (its source key, 'off', or null for the
+  // default), and the mute toggle
+  soundPick: null,
+  soundMuted: false,
+  sound: null,
   camsOpen: false,
   raf: 0,
   lastFrame: 0,
@@ -191,6 +199,7 @@ function connect({ mode, at = null, backfill = 0, preview = false }) {
   on('batch', onBatch);
   on('floor', onFloor);
   on('status', onStatus);
+  on('tick', onTick);
   on('end', onEnd);
   es.onerror = () => {
     if (id !== S.connId) return;
@@ -268,11 +277,31 @@ function onStatus(d) {
   if (finite(d.clock)) {
     if (S.mode === 'follow') S.clock = S.clock == null ? d.clock : Math.max(S.clock, d.clock);
     else if (!S.preview && !S.backfilling) {
+      // a stalled replay repeats its clock in every status: the drawn clock holds (clockRunning)
+      if (S.clock == null || d.clock > S.clock) S.clockPerf = performance.now();
       S.clock = d.clock;
-      S.clockPerf = performance.now();
       S.sent = d.clock;
     }
   }
+}
+
+/**
+ * a playing replay's clock moved with no record to send (the server says so at least once a second):
+ * the clock goes on as after a batch, so the recorded video and the sound keep playing through
+ * stretches with few records. A stalled replay sends none, and its clock holds (clockRunning).
+ */
+function onTick(d) {
+  if (S.mode !== 'replay' || !finite(d.clock)) return;
+  if (S.preview) {
+    // the backfill is in; a paused view keeps no stream open
+    finishPreview();
+    return;
+  }
+  S.backfilling = false;
+  S.clock = d.clock;
+  S.clockPerf = performance.now();
+  S.sent = d.clock;
+  if (S.t1 != null && d.clock > S.t1) S.t1 = d.clock;
 }
 
 function onEnd(d) {
@@ -328,19 +357,29 @@ function reconnectNow() {
     const at = S.clock ?? S.t0;
     connect({ mode: 'replay', at, backfill: replayBackfill(at) });
   } else if (S.intent === 'preview') {
-    connect({ mode: 'replay', at: S.connectAt ?? S.clock, backfill: BACKFILL, preview: true });
+    const at = S.connectAt ?? S.clock;
+    connect({ mode: 'replay', at, backfill: historyBefore(at), preview: true });
   } else S.connState = 'idle';
   requestFrame();
 }
 
 /**
- * the backfill of a replay connection at `at`: five minutes while the model lacks that history (a
- * seek or the opening preview still loading), else what the last connection had not sent yet (the
- * drawn clock runs ahead of the batches), plus a second of overlap the model drops.
+ * the backfill of a replay connection at `at`: its history while the model lacks it (a seek or the
+ * opening preview still loading), else what the last connection had not sent yet (the drawn clock
+ * runs ahead of the batches), plus a second of overlap the model drops.
  */
 function replayBackfill(at) {
-  if (S.sent == null) return BACKFILL;
+  if (S.sent == null) return historyBefore(at);
   return at > S.sent ? Math.ceil(at - S.sent) + 1 : 0;
+}
+
+/**
+ * the history a replay loads before the moment `at`: five minutes, never reaching back before the
+ * session's start (the second it adds holds the records stamped at the start itself).
+ */
+function historyBefore(at) {
+  if (S.t0 == null || !finite(at)) return BACKFILL;
+  return Math.max(1, Math.min(BACKFILL, Math.ceil(at - S.t0) + 1));
 }
 
 function serverNow() {
@@ -378,17 +417,15 @@ function startPreview(at) {
   S.ended = false;
   S.clock = at;
   S.attempt = 0;
-  connect({ mode: 'replay', at, backfill: BACKFILL, preview: true });
+  connect({ mode: 'replay', at, backfill: historyBefore(at), preview: true });
 }
 
 /**
- * where an ended session opens: five minutes before its end, with the five minutes before that in
- * view; a shorter session opens late enough that its whole start is in view (at its end when it is
- * shorter than five minutes).
+ * where an ended session opens (and the banner's Replay this session goes): paused at its start,
+ * with nothing before it loaded; Play plays it from there, Jump to end goes to its last moments.
  */
 function openingMoment() {
-  const end = S.t1 ?? S.t0;
-  return Math.min(end, Math.max(S.t0 + BACKFILL, end - BACKFILL));
+  return S.t0;
 }
 
 function atEnd() {
@@ -407,7 +444,7 @@ function play() {
   S.ended = false;
   S.intent = 'play';
   S.attempt = 0;
-  // a preview still loading asks for its whole five minutes again; the model drops what it holds
+  // a preview still loading asks for its whole history again; the model drops what it holds
   connect({ mode: 'replay', at, backfill: replayBackfill(at) });
 }
 
@@ -446,7 +483,7 @@ function seek(target) {
   S.attempt = 0;
   if (S.playing) {
     S.intent = 'play';
-    connect({ mode: 'replay', at: t, backfill: BACKFILL });
+    connect({ mode: 'replay', at: t, backfill: historyBefore(t) });
   } else startPreview(t);
   announce(`Moved to ${fmt.clock(t - S.t0)}`);
 }
@@ -460,7 +497,7 @@ function replayFromStart() {
   S.clock = S.t0;
   S.clockPerf = performance.now();
   S.attempt = 0;
-  connect({ mode: 'replay', at: S.t0, backfill: 0 });
+  connect({ mode: 'replay', at: S.t0, backfill: historyBefore(S.t0) });
 }
 
 function setFloor(basis) {
@@ -522,13 +559,19 @@ function build(root) {
     if (S.mode !== 'follow') startFollow();
   });
   UI.playBtn = h('button', { class: 'btn icon-btn', attrs: { type: 'button', 'aria-label': 'Play' } }, icon('play', 14));
-  UI.playBtn.addEventListener('click', () => (S.playing ? pause() : play()));
+  UI.playBtn.addEventListener('click', () => {
+    // the click lets the replay's sound play (autoplay rules want a gesture), Pause's too
+    S.sound.arm();
+    if (S.playing) pause();
+    else play();
+  });
   UI.speed = segmented({
     label: 'Replay speed',
     value: S.speed,
     options: SPEEDS.map((v) => ({ value: v, label: `${v}x` })),
     onChange: (v) => setSpeed(v),
   });
+  buildSound();
   UI.scrub = h('input', {
     attrs: { type: 'range', min: 0, max: 1, step: 1, 'aria-label': 'Position in the session' },
     value: '0',
@@ -557,9 +600,12 @@ function build(root) {
   UI.backLive = h('button', { class: 'btn', attrs: { type: 'button' } }, h('span', { class: 'dot', style: { '--swatch': 'var(--good)' } }), h('span', { text: 'Back to live' }));
   UI.backLive.addEventListener('click', () => startFollow());
   UI.fromStart = h('button', { class: 'btn', attrs: { type: 'button' } }, icon('reconnect', 14), h('span', { text: 'Replay from start' }));
-  UI.fromStart.addEventListener('click', () => replayFromStart());
+  UI.fromStart.addEventListener('click', () => {
+    S.sound.arm();
+    replayFromStart();
+  });
   root.appendChild(h('div', { class: 'live-controls', attrs: { role: 'group', 'aria-label': 'Playback' } },
-    UI.followBtn, UI.playBtn, UI.speed,
+    UI.followBtn, UI.playBtn, UI.speed, UI.sound.el,
     h('div', { class: 'scrub' }, UI.scrubStart, UI.scrub, UI.scrubEnd),
     UI.fromStart, UI.jumpEnd, UI.backLive));
 
@@ -580,7 +626,7 @@ function build(root) {
     UI.kpi[key] = statTile({ label, pending: 'Waiting for data' });
     kpiRow.appendChild(UI.kpi[key]);
   }
-  UI.kpi.ja.title = `The pairs' share of frames with the gaze on the same spot, minus each pair's own rate 20 to 40 s earlier, pooled over the pairs seen together in at least ${Math.round(JA_PAIR_MIN_SHARE * 60)} frames a minute and weighted by their frames. Live counts only the frames in which the camera read both badges.`;
+  UI.kpi.ja.title = `The pairs' share of frames with the gaze on the same spot, minus each pair's own rate 20 to 40 s earlier, pooled over the pairs seen together in at least ${Math.round(JA_PAIR_MIN_SHARE * 60)} frames a minute and weighted by their frames. Live counts only the frames in which the camera read both badges, or kept them on their tracks for at most ${TAG_MEMORY_SECONDS} s after a read.`;
   UI.kpi.social.title = 'Share of the camera frames each pupil was seen in with the gaze on a partner\'s face or hands, unreadable frames included, all pupils pooled.';
   root.appendChild(kpiRow);
 
@@ -674,7 +720,12 @@ function build(root) {
   const overlayBtn = toggleButton('Overlay', true, (v) => UI.cams.wall.setOptions({ overlay: v }), 'Draw the skeletons over the video');
   const syncBtn = toggleButton('Sync overlay', true, (v) => UI.cams.wall.setOptions({ sync: v }), 'Hold the video back so the skeletons line up');
   const videoToggles = h('span', { class: 'cam-toggles', hidden: true }, overlayBtn, syncBtn);
-  const camCard = card({ title: 'Cameras', subtitle: 'Skeletons, gaze rays and AprilTags of the newest frame set; live video when the session streams it, the recorded video in a replay', span: 12, actions: [videoToggles, camToggle] });
+  const camCard = card({ title: 'Cameras', subtitle: 'Skeletons, gaze rays and AprilTags of the newest frame set, pupils in their tag colour; live video when the session streams it, the recorded video in a replay', span: 12, actions: [videoToggles, camToggle] });
+  // the kept line is dashed by the page's style (its data-key)
+  const camLegend = [
+    { key: 'cam-kept', label: `Dashed: badge not read now, kept from a read under ${TAG_MEMORY_SECONDS} s ago`, color: 'var(--ink-2)', kind: 'line' },
+    { key: 'cam-untagged', label: `Grey: no badge read now or on its track in the last ${TAG_MEMORY_SECONDS} s`, color: 'var(--tag-other)', kind: 'line' },
+  ];
   const wall = cameraWall({ tagColor: (t) => S.ident.tag(t).color, tagLabel: (t) => `Tag ${t}` });
   camCard.body.appendChild(wall.el);
   camCard.body.hidden = true;
@@ -685,6 +736,7 @@ function build(root) {
     // the card's own state shows its body again, so a closed card goes back to ready first
     if (!S.camsOpen) camCard.setState('ready');
     camCard.body.hidden = !S.camsOpen;
+    camCard.setLegend(S.camsOpen ? camLegend : null);
     wall.setExpanded(S.camsOpen);
     if (S.camsOpen) {
       loadMedia(true);
@@ -716,8 +768,9 @@ function endedReplay() {
 }
 
 /**
- * ask for the session's recordings (once, and again when the card is opened; a failed answer again
- * after a minute). Only the video files are kept: the tiles play no sound.
+ * ask for the session's recordings (once, when the replay of an ended session opens, and again when
+ * the Cameras card is opened; a failed answer again after a minute). The tiles play the video files,
+ * the Sound control the audio files.
  */
 async function loadRecordings(force = false) {
   if (S.recordingsBusy) return;
@@ -730,7 +783,7 @@ async function loadRecordings(force = false) {
   if (d) {
     S.recordings = {
       enabled: !!d.enabled,
-      files: (Array.isArray(d.files) ? d.files : []).filter((f) => f && f.modality === 'video'),
+      files: (Array.isArray(d.files) ? d.files : []).filter((f) => f && (f.modality === 'video' || f.modality === 'audio')),
       reason: typeof d.reason === 'string' ? d.reason : null,
       failed: false,
     };
@@ -745,9 +798,114 @@ async function loadRecordings(force = false) {
 /** whether the replay clock advances now (displayNow interpolates it), so recorded video plays */
 function clockRunning(now) {
   if (!(S.mode === 'replay' && S.playing && S.connState === 'open' && !S.backfilling && !S.preview)) return false;
-  // the drawn clock holds 1.5 s after the newest batch, and at the session's end
+  // the drawn clock holds 1.5 s after the newest batch, status or tick (a stalled stream), and at
+  // the session's end
   if ((performance.now() - S.clockPerf) / 1000 >= 1.5) return false;
   return !(S.t1 != null && now != null && now >= S.t1);
+}
+
+// sound
+
+const SOUND_FOLLOW = 'No sound in follow mode: the microphones stream AAC, which WebRTC does not carry. The replay of an ended session plays its recorded microphones.';
+
+/** the Sound control of the session bar: Off or one of the session's microphones, and a mute toggle */
+function buildSound() {
+  const audio = h('audio', { class: 'live-audio', attrs: { preload: 'none' }, hidden: true });
+  S.sound = new ReplaySound({ audio });
+  const select = h('select', { class: 'select', attrs: { id: 'live-sound-select' } }, h('option', { attrs: { value: 'off' }, text: 'Off' }));
+  select.addEventListener('change', () => {
+    S.soundPick = select.value;
+    // picking a microphone is a gesture too: it may play from now on
+    if (select.value !== 'off') S.sound.arm();
+    S.force = true;
+    requestFrame();
+  });
+  const mute = h('button', { class: 'btn icon-btn', attrs: { type: 'button', 'aria-pressed': 'false', 'aria-label': 'Mute the sound', title: 'Mute the sound' } }, icon('volume', 14));
+  mute.addEventListener('click', () => {
+    S.soundMuted = !S.soundMuted;
+    if (!S.soundMuted) S.sound.arm();
+    S.force = true;
+    requestFrame();
+  });
+  const note = h('span', { class: 'live-sound-note' });
+  // a sound the browser held back plays from a click on this note, in one click
+  const unblock = h('button', { class: 'btn sm live-sound-unblock', attrs: { type: 'button', title: 'The browser held the sound back until a click on the page; this click lets it play.' }, hidden: true }, icon('volume', 12), h('span', { text: 'Play the sound' }));
+  unblock.addEventListener('click', () => {
+    S.sound.arm();
+    S.force = true;
+    requestFrame();
+  });
+  const label = h('label', { class: 'live-sound-label', attrs: { for: 'live-sound-select' }, text: 'Sound' });
+  const el = h('div', { class: 'live-sound', attrs: { role: 'group', 'aria-label': 'Sound' } }, label, select, mute, note, unblock, audio);
+  UI.sound = { el, select, mute, note, unblock, audio, sig: '', optionsSig: '' };
+}
+
+let soundCache = { rec: null, sources: [] };
+
+/** whether this view has sound: {ok, sources} or {ok: false, reason} */
+function soundState() {
+  if (S.mode === 'follow') return { ok: false, reason: SOUND_FOLLOW };
+  if (S.live) return { ok: false, reason: 'Sound plays in the replay of an ended session, from its microphone recordings.' };
+  const rec = S.recordings;
+  if (!rec) return { ok: false, reason: 'Looking for the session\'s microphone recordings.' };
+  if (!rec.enabled) return { ok: false, reason: rec.reason || 'The recordings are not available on this dashboard.' };
+  if (soundCache.rec !== rec) soundCache = { rec, sources: soundSources(rec.files) };
+  if (!soundCache.sources.length) return { ok: false, reason: 'The dashboard\'s machine holds no microphone recording of this session that has a start time.' };
+  return { ok: true, sources: soundCache.sources };
+}
+
+/** the microphone that plays: the viewer's pick while it is listed, else the default; null for Off */
+function soundSource(st) {
+  if (!st.ok || S.soundPick === 'off') return null;
+  return (S.soundPick && st.sources.find((s) => s.key === S.soundPick)) || defaultSource(st.sources);
+}
+
+/** the small note beside the control: what the sound does now */
+function soundNote(res) {
+  switch (res.state) {
+    case 'fast': return { text: `Muted above ${MAX_SOUND_SPEED}x`, title: `Speech played faster than ${MAX_SOUND_SPEED}x cannot be understood, so the sound pauses; it plays at 1x to ${MAX_SOUND_SPEED}x.` };
+    case 'gap': return { text: 'No recording at this moment', title: 'The microphone\'s file does not cover this moment of the session.' };
+    case 'loading': return { text: 'Loading', title: '' };
+    case 'error': return { text: 'Could not play', title: res.message || 'The recording could not be played.' };
+    // the note becomes a button (UI.sound.unblock)
+    case 'blocked': return { text: '', title: '' };
+    default: return { text: '', title: '' };
+  }
+}
+
+/** keep the replay's sound on the clock and the control up to date (every redraw) */
+function renderSound(now) {
+  if (endedReplay()) loadRecordings(false);
+  const st = soundState();
+  const source = soundSource(st);
+  const res = S.sound.update({ source, now, speed: S.speed, running: clockRunning(now), muted: S.soundMuted });
+  const U = UI.sound;
+  const optionsSig = st.ok ? st.sources.map((s) => `${s.key}=${s.label}`).join('\n') : '';
+  if (optionsSig !== U.optionsSig) {
+    U.optionsSig = optionsSig;
+    clear(U.select).appendChild(h('option', { attrs: { value: 'off' }, text: 'Off' }));
+    for (const s of st.ok ? st.sources : []) U.select.appendChild(h('option', { attrs: { value: s.key }, text: s.label }));
+  }
+  const value = source ? source.key : 'off';
+  if (U.select.value !== value) U.select.value = value;
+  const note = soundNote(res);
+  const sig = [st.ok, st.reason, value, S.soundMuted, res.state, note.text, note.title].join('|');
+  if (sig === U.sig) return;
+  U.sig = sig;
+  U.el.dataset.state = res.state;
+  U.select.disabled = !st.ok;
+  // a disabled control shows no tooltip of its own: the group says why
+  U.el.title = st.ok ? '' : st.reason;
+  U.select.title = st.ok ? 'The microphone the replay plays, at the replay clock' : st.reason;
+  U.mute.disabled = !source;
+  U.mute.setAttribute('aria-pressed', S.soundMuted ? 'true' : 'false');
+  const label = S.soundMuted ? 'Unmute the sound' : 'Mute the sound';
+  U.mute.setAttribute('aria-label', label);
+  U.mute.title = label;
+  clear(U.mute).appendChild(icon(S.soundMuted ? 'volume-off' : 'volume', 14));
+  U.note.textContent = note.text;
+  U.note.title = note.title;
+  U.unblock.hidden = res.state !== 'blocked';
 }
 
 // colours
@@ -863,6 +1021,7 @@ function frame() {
     renderRoom(now);
     renderCameras(now);
   }
+  renderSound(now);
   S.force = false;
 }
 
@@ -949,7 +1108,7 @@ function renderBanner() {
   if (action === 'retry') {
     UI.banner.appendChild(h('button', { class: 'btn sm', attrs: { type: 'button' }, on: { click: () => reconnectNow() } }, h('span', { text: 'Retry now' })));
   } else if (action === 'replay') {
-    UI.banner.appendChild(h('button', { class: 'btn sm primary', attrs: { type: 'button' }, on: { click: () => startPreview(openingMoment()) } }, icon('play', 12), h('span', { text: 'Replay this session' })));
+    UI.banner.appendChild(h('button', { class: 'btn sm primary', attrs: { type: 'button', title: 'Open the replay paused at the session\'s start' }, on: { click: () => startPreview(openingMoment()) } }, icon('play', 12), h('span', { text: 'Replay this session' })));
   }
 }
 
@@ -1492,7 +1651,11 @@ function chunkNode(r) {
       p.appendChild(span);
     });
   } else if (r.text) p.textContent = r.text;
-  else p.appendChild(h('span', { class: 'tr-empty-text', text: 'No text' }));
+  else {
+    // the chunk heard speech but the transcriber found no words in it
+    const length = finite(r.e) && finite(r.t) && r.e > r.t ? r.e - r.t : null;
+    p.appendChild(h('span', { class: 'tr-empty-text', text: length != null ? `No words recognised in ${fmt.duration(Math.max(1, length))}` : 'No words recognised' }));
+  }
   return h('li', { class: 'tr-chunk' }, meta, p);
 }
 
@@ -1562,6 +1725,8 @@ function renderCameras(now) {
     else if (endedReplay()) loadRecordings(false);
   }
   const newestVfa = S.model.vfa.last;
+  // the sound's file takes one of the connections the tiles' recorded files share
+  const reserved = S.sound.takesMedia(soundSource(soundState()), S.speed) ? 1 : 0;
   wall.update({
     cameras: ids,
     frameAt: (t) => S.model.vfaAt(t),
@@ -1574,6 +1739,7 @@ function renderCameras(now) {
     recordings: S.recordings,
     speed: S.speed,
     running: clockRunning(now),
+    mediaReserved: reserved,
   });
   UI.cams.videoToggles.hidden = !wall.hasVideo();
   // holding the video back only concerns live video
@@ -1695,13 +1861,18 @@ function start(root) {
     if (document.visibilityState !== 'hidden') {
       S.force = true;
       requestFrame();
-    } else tooltip.hide();
+    } else {
+      tooltip.hide();
+      // a hidden page lets go of the sound's file, as the tiles do of theirs; the next redraw loads it again
+      S.sound.release();
+    }
   });
   window.addEventListener('pagehide', (e) => {
     // a playing replay goes on from the moment drawn; the backfill covers what was not sent yet
     if (S.mode === 'replay' && S.playing) S.clock = displayNow() ?? S.clock;
     stopStream();
     S.connState = 'idle';
+    S.sound.release();
     // a page kept in the back/forward cache keeps its tiles, with every video closed
     if (e.persisted) UI.cams.wall.suspend();
     else UI.cams.wall.destroy();
@@ -1718,7 +1889,7 @@ function start(root) {
     reconnectNow();
   });
   // a hook for checks from the browser console
-  window.__live = { S, UI, seek, play, pause, setSpeed, startFollow, startPreview, replayFromStart };
+  window.__live = { S, UI, seek, play, pause, setSpeed, startFollow, startPreview, replayFromStart, sound: () => S.sound.inspect() };
 }
 
 main();

@@ -7,8 +7,11 @@
  * checked in node against a recorded stream.
  *
  * The rules follow the analysis (report/speech.py, fusion/window_features.py) where the slim records
- * allow it. One approximation: a slim recognition bucket drops the segment starts, so a speaker
- * segment several bases reported is recognised by its (name, duration) instead of (name, segment).
+ * allow it. A tag the VFA server kept on a camera's track counts for TAG_MEMORY_SECONDS after the
+ * track last read it (TagMemory), as in the analysis; the analysis also names the untagged frames of
+ * a track after its nearest read, before or after them, which a live view cannot do. One
+ * approximation: a slim recognition bucket drops the segment starts, so a speaker segment several
+ * bases reported is recognised by its (name, duration) instead of (name, segment).
  */
 
 import { sortTags, isPupilTag, voiceLabel } from './core.js';
@@ -36,6 +39,11 @@ export const JA_MIN = 10;
 export const JA_PAIR_MIN_SHARE = 0.2;
 // a tag counts as a participant (and gets a colour) once seen in this many distinct seconds
 export const ROSTER_MIN_SECONDS = 5;
+// how long after a camera's track last read a tag the page trusts that tag on the track: the VFA
+// server keeps a read tag on its ByteTrack track with no time limit (tag_match 'track', sent as
+// rm: 1), and the analysis trusts it this long (openmmla/analytics/fusion/window_features.py
+// TAG_MEMORY_SECONDS, expire_track_tags); a body with an older kept tag counts for nobody
+export const TAG_MEMORY_SECONDS = 60;
 export const CATEGORIES = ['partner_face', 'partner_hands', 'other_people', 'task', 'elsewhere', 'unreadable'];
 export const CATEGORY_LABELS = {
   partner_face: 'Partner face',
@@ -212,6 +220,95 @@ export function extentUnion(a, b) {
   return { u: [Math.min(a.u[0], b.u[0]), Math.max(a.u[1], b.u[1])], v: [Math.min(a.v[0], b.v[0]), Math.max(a.v[1], b.v[1])] };
 }
 
+/**
+ * The badge reads of each camera's tracks, learnt from the frame sets in time order: per (camera id,
+ * track id) the time and tag of the track's last read (a tagged body with rm 0, or an older record
+ * without rm). apply(rec) settles the kept tags of a frame set (rm 1) by the analysis's rule
+ * (window_features.expire_track_tags): a kept tag whose track last read the same tag at most
+ * TAG_MEMORY_SECONDS before stays on the body, with `age`, the seconds since that read; any other
+ * (an older read, another tag read last, or no read in the page's history) is taken off, and the
+ * body is an untagged one (tag null, `id` track_<n>, `xt` the tag it was kept as), its camera's
+ * pairs with that tag dropped and the gazes that landed on it aimed at 'other', unless another body
+ * of the camera still carries the tag. The records are changed in place, so the tiles, the roster
+ * and every measure see the same bodies. The page's history is what the model holds: a seek or a
+ * new start clears it with the model and rebuilds it from the history it loads (up to five minutes).
+ */
+export class TagMemory {
+  constructor(memory = TAG_MEMORY_SECONDS) {
+    this.memory = memory;
+    this.reads = new Map();
+  }
+
+  reset() {
+    this.reads.clear();
+  }
+
+  /** settle the kept tags of a frame set (in time order); returns how many bodies lost their tag */
+  apply(rec) {
+    if (!rec || !finite(rec.t) || !Array.isArray(rec.c)) return 0;
+    const t = rec.t;
+    let taken = 0;
+    let pairsChanged = false;
+    for (const c of rec.c) {
+      if (!c || !Array.isArray(c.ps)) continue;
+      const cam = String(c.id);
+      // this frame set's reads first, as the analysis learns them before it judges the kept tags
+      for (const p of c.ps) {
+        if (!p || p.tag == null || p.rm === 1 || !finite(p.tr)) continue;
+        const key = `${cam}\u0000${p.tr}`;
+        const prev = this.reads.get(key);
+        if (!prev || prev.t <= t) this.reads.set(key, { t, tag: String(p.tag) });
+      }
+      const lost = new Set();
+      for (const p of c.ps) {
+        if (!p || p.tag == null || p.rm !== 1) continue;
+        const tag = String(p.tag);
+        const read = finite(p.tr) ? this.reads.get(`${cam}\u0000${p.tr}`) : null;
+        if (read && read.tag === tag && t - read.t <= this.memory) {
+          p.age = Math.max(0, t - read.t);
+          continue;
+        }
+        p.xt = tag;
+        p.tag = null;
+        p.id = finite(p.tr) ? `track_${p.tr}` : (p.id ?? null);
+        delete p.age;
+        lost.add(tag);
+        taken += 1;
+      }
+      if (!lost.size) continue;
+      // a tag another body of the camera still carries keeps its pairs and the looks at it
+      for (const p of c.ps) if (p && p.tag != null) lost.delete(String(p.tag));
+      if (!lost.size) continue;
+      if (c.pr && typeof c.pr === 'object') {
+        for (const key of Object.keys(c.pr)) {
+          if (key.split('|').some((x) => lost.has(x))) {
+            delete c.pr[key];
+            pairsChanged = true;
+          }
+        }
+      }
+      for (const p of c.ps) if (p && p.g && p.g.to != null && lost.has(String(p.g.to))) p.g.to = 'other';
+    }
+    if (pairsChanged) {
+      // the frame set's pairs again, as slim_vfa picks them: from the first camera that measured
+      // the pair's gaze distance, else the first that holds the pair
+      const pairs = {};
+      for (const c of rec.c) {
+        for (const [key, v] of Object.entries((c && c.pr) || {})) {
+          if (!(key in pairs) || (pairs[key][0] == null && Array.isArray(v) && v[0] != null)) pairs[key] = v;
+        }
+      }
+      rec.pr = pairs;
+    }
+    return taken;
+  }
+
+  /** forget the reads made before `before` (no later frame set can trust them) */
+  forget(before) {
+    for (const [key, read] of this.reads) if (read.t < before) this.reads.delete(key);
+  }
+}
+
 /** records sorted by t, unique by key; `range(a, b)` is [a, b). */
 class TimeStore {
   constructor(keyOf) {
@@ -312,6 +409,7 @@ export class LiveModel {
     this.tr = new TimeStore((r) => `${k3(r.t)}|${k3(r.e)}|${r.pt ?? ''}|${r.sp ?? ''}`);
     this.ips = new TimeStore((r) => k3(r.t));
     this.vfa = new TimeStore((r) => k3(r.t));
+    this.tagMemory = new TagMemory();
     this.tagSeen = new Map();
     this.voiceOrder = [];
     this.voiceSet = new Set();
@@ -383,6 +481,8 @@ export class LiveModel {
 
   onVfa(r) {
     if (!Array.isArray(r.c)) r.c = [];
+    // a tag kept on a track for longer than the analysis trusts it counts for nobody, here too
+    this.tagMemory.apply(r);
     this.maxCameras = Math.max(this.maxCameras, r.c.length);
     for (const c of r.c) {
       if (c && c.id != null) this.cameraIds.add(String(c.id));
@@ -435,11 +535,14 @@ export class LiveModel {
     const newest = this.newestTime();
     if (newest == null) return;
     const before = newest - this.keep;
+    // the reads are judged by frame sets only, which can lag the other records in follow mode
+    const lastVfa = this.vfa.last;
     this.asr.trim(before);
     // a chunk starts up to 30 s before its end
     this.tr.trim(before - 60);
     this.ips.trim(before);
     this.vfa.trim(before);
+    if (lastVfa) this.tagMemory.forget(lastVfa.t - this.tagMemory.memory - 10);
   }
 
   newestTime() {

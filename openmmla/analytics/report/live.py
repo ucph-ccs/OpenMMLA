@@ -2,10 +2,11 @@
 
 A browser following a session gets every record its pipelines write, about one IPS window and
 one VFA frame set a second and a recognition bucket every 3 s, for as long as it watches. Sent
-as stored, a frame set alone is about 24 KB (every untagged body's skeleton, every pair of 14
-bodies); slimmed it is a few KB: tagged persons keep their skeletons and gaze, untagged ones only
-a box, pairs only among tagged persons with distances in frame widths. Recognition drops the
-level traces (about 5 MB a session), transcripts keep words, their times and voice keys.
+as stored, a frame set alone is about 24 KB (every body's skeleton with its scores, every pair of
+14 bodies); slimmed it is a few KB: tagged persons keep their skeletons and gaze, untagged ones a
+box, their track and the keypoints the pose model is sure of (the rest null), pairs only among
+tagged persons with distances in frame widths. Recognition drops the level traces (about 5 MB a
+session), transcripts keep words, their times and voice keys.
 
 Times stay absolute (epoch seconds, 3 decimals); word and turn times are relative to their
 chunk's start (2 decimals). A worn microphone's words carry their class (wearer, crosstalk,
@@ -13,7 +14,9 @@ other) as the analysis decides it, from the level traces of every worn microphon
 few minutes the stream has seen (WornWords), so the live page can dim the neighbours' words. IPS positions are laid on the floor with space.project, so the live
 map and the analysis map share one coordinate system. The VFA gaze targets are remade with the
 fusion's hand circle (window_features.relabel_hand_circles), so what the live page counts as a
-look at someone's hands is what the analysis counts."""
+look at someone's hands is what the analysis counts. A tagged body says whether its tag was read
+in that frame or only kept on its track (`rm`), so the live page can give a kept tag the fusion's
+time limit."""
 
 from __future__ import annotations
 
@@ -23,6 +26,10 @@ from openmmla.analytics.report.common import (
     VoiceKeys, chunk_turns, chunk_words, finite_number, is_pupil_tag, parsed_value, round_or_none, tag_sort_key,
 )
 from openmmla.utils.asr_scope import participant_of
+
+# an untagged body keeps only the keypoints the pose model scored at least this (the live page
+# draws no keypoint below it either, cameras.js KEYPOINT_MIN_CONF)
+UNTAGGED_MIN_CONFIDENCE = 0.3
 
 
 def _space():
@@ -230,18 +237,27 @@ def _person_tag(person: dict) -> str | None:
     return text if text.isascii() and text.isdigit() else None
 
 
-def _keypoints(values) -> list | None:
+def _keypoints(values, min_confidence: float | None = None) -> list | None:
+    """[x, y, confidence] per keypoint (pixels as ints, confidence 2 decimals). With
+    `min_confidence`, a keypoint scored below it (or unreadable) is None, which keeps the
+    untagged bodies' skeletons small."""
     if not isinstance(values, list) or not values:
         return None
     out = []
     for point in values:
         if not isinstance(point, (list, tuple)) or len(point) < 2:
-            out.append([0, 0, 0.0])
+            out.append(None if min_confidence is not None else [0, 0, 0.0])
             continue
         x, y = finite_number(point[0]), finite_number(point[1])
         confidence = finite_number(point[2]) if len(point) > 2 else None
+        if min_confidence is not None and (x is None or y is None or confidence is None
+                                           or confidence < min_confidence):
+            out.append(None)
+            continue
         out.append([int(round(x)) if x is not None else 0, int(round(y)) if y is not None else 0,
                     round(confidence, 2) if confidence is not None else 0.0])
+    if min_confidence is not None and all(point is None for point in out):
+        return None
     return out
 
 
@@ -259,15 +275,27 @@ def _gaze(person: dict) -> dict:
 
 
 def _slim_person(person: dict) -> tuple[dict, str | None]:
+    """a body: tagged ones with every keypoint, head yaw, gaze and face box, and `rm`: 0 when the
+    camera read the tag in this frame (`tag_match` torso or box, or an older event that does not
+    say), 1 when the features endpoint only kept it on the body's track (`tag_match` track), which
+    the live page trusts for TAG_MEMORY_SECONDS after the track last read it, as the fusion does
+    (window_features.expire_track_tags); untagged ones with their person_id (`id`, track_<n> or
+    unknown_<n>) and the keypoints scored at least UNTAGGED_MIN_CONFIDENCE, so the live page can
+    draw them as people without a badge read."""
     tag = _person_tag(person)
     track = finite_number(person.get('track_id'))
     slim = {'tag': tag, 'tr': int(track) if track is not None and track.is_integer() else None,
             'b': _int_points(person.get('bbox'), 4), 'k': None, 'yaw': None, 'g': None}
     if tag is not None:
+        slim['rm'] = 1 if person.get('tag_match') == 'track' else 0
         slim['k'] = _keypoints(person.get('keypoints'))
         slim['yaw'] = round_or_none(person.get('head_yaw'), 1)
         slim['g'] = _gaze(person)
         slim['fb'] = _int_points(person.get('face_bbox'), 4)
+    else:
+        slim['k'] = _keypoints(person.get('keypoints'), UNTAGGED_MIN_CONFIDENCE)
+        name = person.get('person_id')
+        slim['id'] = str(name) if name is not None and str(name) else None
     return slim, tag
 
 
@@ -286,7 +314,8 @@ def _camera_order(frame: dict) -> tuple:
 
 def slim_vfa(rec: dict, relabel: bool = True) -> dict | None:
     """a frame set: per camera (by id) its size, the AprilTag centres it decoded, every body
-    (tagged ones with skeleton, head yaw, face box and gaze; untagged ones as a box) and the
+    (tagged ones with skeleton, head yaw, face box, gaze and whether the tag was read or kept;
+    untagged ones with a box, their person_id and the skeleton's sure keypoints) and the
     pairs of tagged bodies (`pr`, gaze and hand distance in frame widths). The top-level `pr`
     holds each pair once per frame set: from the first camera that measured its gaze distance,
     else the first that holds the pair. None for a record without a time."""
