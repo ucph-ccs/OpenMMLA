@@ -1,5 +1,29 @@
 import numpy as np
 
+# half a turn about the tag's y axis: negates its x and z axes, keeps y
+_HALF_TURN_ABOUT_Y = np.diag([-1.0, 1.0, -1.0])
+
+
+def canonical_rotation(R, t) -> np.ndarray:
+    """A detected tag's rotation with its z axis pointing away from the camera, into the tag.
+
+    A tag the camera sees faces the camera, so the outward normal (-column 2) must point back
+    towards it; a pose whose z axis points at the camera is turned half a turn about the tag's y
+    axis. Column 1 (the tag's y axis, which hangs down on a badge) stays as detected, and the
+    matrix stays a rotation (the base used to negate column 2 alone, which left a reflection).
+
+    Args:
+        R: 3x3 rotation of the tag in the camera's frame
+        t: the tag's position in the camera's frame (3 or 3x1)
+
+    Returns:
+        the 3x3 rotation, a new array
+    """
+    R = np.array(R, dtype=float).reshape(3, 3)
+    if float(np.dot(R[:, 2], np.asarray(t, dtype=float).ravel())) < 0:
+        R = R @ _HALF_TURN_ABOUT_Y
+    return R
+
 
 def is_tag_looking_at_another(tag1, tag2, cosine_threshold, distance_threshold):
     """Check if tag1 is looking at tag2 considering their orientation and distance."""

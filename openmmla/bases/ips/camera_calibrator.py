@@ -156,7 +156,7 @@ class CameraCalibrator(Base):
                 ret, K, D, rvecs, tvecs = cv2.calibrateCamera(
                     self.obj_points, self.img_points, gray.shape[::-1], None, None)
 
-            self._update_configuration(camera_name, K, D, is_fisheye)
+            self._update_configuration(camera_name, K, D, is_fisheye, gray.shape[::-1])
         except Exception as e:
             self.logger.error("Error occurred during calibration: %s", e, exc_info=True)
         finally:
@@ -176,8 +176,12 @@ class CameraCalibrator(Base):
         self.obj_points = []
         self.img_points = []
 
-    def _update_configuration(self, camera_name, K, D, is_fisheye):
-        """Update the configuration file with calibration results."""
+    def _update_configuration(self, camera_name, K, D, is_fisheye, image_size=None):
+        """Update the configuration file with calibration results.
+
+        image_size is the (width, height) of the checkerboard images: the frame size the intrinsics
+        hold for, kept as the camera's calibration_resolution so that the IPS base scales them to
+        frames of another size."""
         k_list = K.tolist()
         d_list = D.tolist()
         params = [float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])]
@@ -194,6 +198,8 @@ class CameraCalibrator(Base):
             'K': k_list,
             'D': d_list
         })
+        if image_size is not None:
+            self.config['Cameras'][camera_name]['calibration_resolution'] = [int(image_size[0]), int(image_size[1])]
 
         # Write updated config to file
         dump_yaml_pretty(self.config, self.config_path)

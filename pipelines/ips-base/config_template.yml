@@ -11,6 +11,11 @@ Base:
   rotate: 180                                       # Rotation of the image in clockwise degrees (e.g., 0, 90, 180, 270)
   fps: 30                                           # Frames per second of the image capture
 
+  # Display smoothing: the base's window draws each tag's pose smoothed; what the base publishes (and the database
+  # keeps) is the raw pose of every detection, never smoothed
+  display_smoothing: 0.7                            # weight of a tag's history in the drawn pose (0 draws the raw pose)
+  display_reset_seconds: 2.0                        # a tag not seen for longer starts again from its raw pose
+
   # File processing settings (file sources always use keyframe processing for synchronization)
   keyframe_interval: 1.0                           # Interval between keyframes in seconds (1.0 = 1 FPS, 0.033 = ~30 FPS, 0.5 = 2 FPS)
   processing_rate: 1.0                             # Real-time rate multiplier (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
@@ -81,6 +86,8 @@ Bases:
 
 Synchronizer:
   bucket_duration: 1                                # time bucket duration (seconds) for synchronized result
+  max_lateness: 5.0                                 # seconds of frame time a base may fall behind the newest frame before the buckets are written without it
+  fusion_gate: 0.25                                 # metres a camera's position of a tag may lie from the cameras' median and still be averaged
 
 # streams settings
 # each entry defines a video stream source. streams with ssh_profile can be started/stopped
@@ -152,6 +159,10 @@ Gateway:
 #   your-camera:
 #     fisheye: false                # true for a fisheye lens
 #     params: [fx, fy, cx, cy]      # what the tag detector uses
+#     calibration_resolution: [1920, 1080]  # frame size (width, height) the intrinsics were calibrated at; frames of
+#                                   # another size get fx, fy, cx, cy scaled by the width and height ratios
+#                                   # (an entry without it goes by its principal point: frames near (2cx, 2cy) are read
+#                                   # as they are, others are scaled from the common frame size nearest (2cx, 2cy))
 #     K:                            # 3x3 intrinsic matrix
 #       - [fx, 0.0, cx]
 #       - [0.0, fy, cy]

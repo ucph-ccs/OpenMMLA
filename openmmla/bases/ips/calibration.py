@@ -9,8 +9,9 @@ residuals on the same pairs, and, for a camera with few pairs, on near-simultane
 (`near_pairs`, the frames around them found by `near_stamps`) and on its sightings shared with a
 third camera already placed (`relayed_pairs`).
 
-Detection runs the way the IPS base does it (pupil-apriltags, the camera's intrinsics, the tag
-size; weak detections and ids past the badges left out), on the frames nearest the sampled
+Detection runs the way the IPS base does it (pupil-apriltags, the camera's intrinsics scaled to
+the video's frame size, the tag size; weak detections and ids past the badges left out; the
+rotation turned so that its z axis points into the tag), on the frames nearest the sampled
 stamps of each video. OpenCV and pupil-apriltags are imported only by `observe` and
 `tag_detector`, so the fitting can be tested without them."""
 from __future__ import annotations
@@ -19,27 +20,58 @@ import bisect
 
 import numpy as np
 
+from .intrinsics import FrameIntrinsics, calibration_resolution
 from .transform import average_rotation_matrices, direct_transform_matrices, distance_between_rotations
+from .vector import canonical_rotation
 
 MAX_TAG_ID = 12  # the badge ids IPS reads (IPSBase.max_badge_id)
 MIN_DECISION_MARGIN = 10.0  # a weaker detection is not a badge
 ROTATIONS = {90: 0, 180: 1, 270: 2}  # cv2.ROTATE_90_CLOCKWISE, ROTATE_180, ROTATE_90_COUNTERCLOCKWISE
 
 
-def tag_detector(camera_params, tag_size: float, families: str = 'tag36h11'):
+class _Printer:
+    """says what FrameIntrinsics logs on the console, where ses-calibrate reports."""
+
+    @staticmethod
+    def info(message):
+        print(message, flush=True)
+
+    warning = info
+
+
+def frame_size_before_rotation(frame, calibration_size) -> tuple[int, int]:
+    """(width, height) of a frame as the camera gave it: a frame `rotate` turned a quarter is
+    portrait where the calibration is landscape (or the other way), and is measured turned back."""
+    height, width = frame.shape[:2]
+    if (width < height) != (calibration_size[0] < calibration_size[1]):
+        width, height = height, width
+    return width, height
+
+
+def tag_detector(camera_params, tag_size: float, families: str = 'tag36h11', calibration_size=None):
     """detect(frame) -> {tag id: (R, t)}: the tags of a BGR frame with their pose in the camera's
-    frame, as the IPS base finds them."""
+    frame, as the IPS base finds them.
+
+    `camera_params` is fx, fy, cx, cy, or the camera's `Cameras` entry (its `params` and
+    `calibration_resolution`); they are scaled to each frame's size from `calibration_size`, else the
+    entry's, else the size their principal point gives (intrinsics.FrameIntrinsics)."""
     import cv2
     from pupil_apriltags import Detector
     detector = Detector(families=families, nthreads=4)
+    if isinstance(camera_params, dict):
+        calibration_size = calibration_size or calibration_resolution(camera_params)
+        camera_params = camera_params['params']
+    intrinsics = FrameIntrinsics(camera_params, calibration_size, logger=_Printer())
 
     def detect(frame):
+        params = intrinsics.for_frame(*frame_size_before_rotation(frame, intrinsics.calibration_size))
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         poses = {}
-        for tag in detector.detect(gray, estimate_tag_pose=True, camera_params=camera_params, tag_size=tag_size):
+        for tag in detector.detect(gray, estimate_tag_pose=True, camera_params=params, tag_size=tag_size):
             if tag.decision_margin < MIN_DECISION_MARGIN or int(tag.tag_id) > MAX_TAG_ID:
                 continue
-            poses[int(tag.tag_id)] = (np.asarray(tag.pose_R, dtype=float), np.asarray(tag.pose_t, dtype=float).reshape(3))
+            t = np.asarray(tag.pose_t, dtype=float).reshape(3)
+            poses[int(tag.tag_id)] = (canonical_rotation(tag.pose_R, t), t)
         return poses
     return detect
 

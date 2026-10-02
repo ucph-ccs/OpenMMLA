@@ -7,9 +7,9 @@ Camera-based indoor positioning with AprilTags. Several cameras watch the room, 
 ![Indoor positioning system](../img/indoor_positioning_system.png)
 
 1. Video capture from one camera per base: a USB camera, an RTMP stream, LSL, or a recorded file
-2. AprilTag detection and pose estimation with the calibrated camera intrinsics
+2. AprilTag detection and pose estimation with the calibrated camera intrinsics (scaled to the frame size), the raw pose of every detection published as it is
 3. Transformation of every camera's coordinates into the main camera's frame, using the matrices produced by camera sync
-4. Synchronization of all bases into time buckets, written as `ips_translation`, `ips_rotation` and `ips_relation` events
+4. Synchronization of all bases into time buckets, the cameras of each bucket fused per tag, written as `ips_translation`, `ips_rotation` and `ips_relation` events (see [What is stored](#what-is-stored))
 5. The positions, headings and who faces whom are shown live on the [dashboard](../dashboard.md)'s Live page (its Room card), and summarized on its Analysis page
 
 | Component | Runs on | Command | Environment |
@@ -29,10 +29,10 @@ An alternative input path skips the cameras entirely: a Nicla Vision badge runni
 
 | Section | What it holds |
 |---|---|
-| `Base` | settings shared by every base: `tag_size` and `families` of the AprilTags, `resolution`, `rotate`, `fps`, the file-replay pacing (`keyframe_interval`, `processing_rate`, `enable_timing_sync`), and `stream_kwargs` |
+| `Base` | settings shared by every base: `tag_size` and `families` of the AprilTags, `resolution`, `rotate`, `fps`, the file-replay pacing (`keyframe_interval`, `processing_rate`, `enable_timing_sync`), the window's smoothing (`display_smoothing`, `display_reset_seconds`), and `stream_kwargs` |
 | `Bases` | one entry per camera position: `id`, `camera` (a calibrated profile from `Cameras`), `source`, `source_index`, `room` (optional, see [Several rooms](#several-rooms)) and `main` (exactly one `true`, one per room). Camera sync, the bases and the transform matrices all key on these ids. |
-| `Cameras` | the intrinsic parameters per camera model, written by the calibration tool (or filled in by hand); the template ships profiles for a Logitech C920, a MacBook Air camera and an iPhone |
-| `Synchronizer` | `bucket_duration` |
+| `Cameras` | the intrinsic parameters per camera model, written by the calibration tool (or filled in by hand), with `calibration_resolution`, the frame size they were calibrated at (**Intrinsics and frame size** under [What is stored](#what-is-stored) says what an entry without it gets); the template ships profiles for a Logitech C920, a MacBook Air camera and an iPhone |
+| `Synchronizer` | `bucket_duration`, `max_lateness`, `fusion_gate` (see [What is stored](#what-is-stored)) |
 | `Streams` | managed and external streams, see below |
 | `InfluxDB`, `MongoDB`, `MQTT`, `Redis`, `Gateway` | mirrored from System Settings, see [System Services](../system_services.md) |
 
@@ -85,6 +85,31 @@ Streams:
 
 Managed streams are started and stopped from the **Streams** tab; see the [Streaming guide](../rtmp_streaming.md) for the FFmpeg commands and the recording layout.
 
+## What is stored
+
+**Raw poses.** A base publishes, for every frame, the pose of every tag it detects as the detector gave it: the rotation and position in its camera's frame, the decoder's decision margin and the pose error, and the frame's time. Nothing is carried over from earlier frames, so a position is where the tag was on that frame, not an average lagging behind it, and a tag seen again after a while is placed where it is. The one change made to a pose: a tag the camera sees faces the camera, so a rotation whose z axis points at the camera (a misread of a small tag) is turned half a turn about the tag's y axis, which keeps the badge's y axis (gravity) and makes -column 2 the outward normal, as every reader takes it.
+
+**Display smoothing.** Only the base's window (Graphics on) draws a smoothed pose: `display_smoothing` (0.7) is the weight of a tag's history in the drawn pose (0 draws the raw pose), rotations are smoothed along the shorter arc between their quaternions, and a tag not seen for more than `display_reset_seconds` (2), or turned by more than 45 degrees, is drawn from its raw pose again. The dashboard draws the stored poses.
+
+**Buckets.** The synchronizer files each frame into the bucket of its time: buckets of `bucket_duration` seconds from the first frame it gets, so a file replay, whose frames lie on whole seconds from the shared start, puts one frame per camera in each bucket. A bucket is written once every base still sending has moved past it. A base more than `max_lateness` seconds (of frame time, 5 by default) behind the newest frame no longer holds the buckets up; a frame of a bucket already written is left out. The synchronizer's log names a base's first such frame with how far it was behind the newest frame and why it came late (the base joined after the bucket was written, it was more than `max_lateness` behind when the bucket was written, or the frame is older than one it sent before), and counts such frames per base at the end of the run, when the buckets still open are written too. For the first `max_lateness` seconds a base the matrices place that has sent nothing yet holds them up as well, so a base that starts a little later keeps its first frames.
+
+**Fusing the cameras.** Each camera's detection is taken into the main camera's frame with its matrix. A live camera that sent several frames in a bucket stands for the one nearest the median of their positions. Per tag, the cameras whose positions lie within `fusion_gate` metres (0.25) of the cameras' median position are averaged, each weighted by 1 / distance^4 from the camera that saw the tag (a tag's depth error, the larger part of its error, grows with the square of its distance, so its variance grows with the fourth power and the weight is its inverse); a camera further off is left out, and when none lies within the gate (two cameras that disagree) the best camera is taken alone. The best camera is the one nearest the tag, the decision margin breaking a tie, and the stored rotation is its rotation: averaging two readings of a small tag's rotation can give one neither camera saw.
+
+**Who faces whom.** A tag faces another (`is_tag_looking_at_another_2d`: its outward normal within about 20 degrees of the direction to the other on the x-z plane, the two within 1 m) when a camera that saw both saw it on at least half of its frames of the bucket that held both, on their raw poses in that camera's frame, or on the fused poses in the main camera's frame (within 1.2 m). There is no history from one bucket to the next: the fusion table counts the facing over its 10 s windows.
+
+The three events of a bucket share `window_start_time` and `window_end_time`:
+
+| Event | Field | Holds |
+|---|---|---|
+| `ips_translation` | `translations` | `{tag: [[x], [y], [z]]}`: the fused position in metres, in the main camera's frame |
+| | `detections` | `{tag: {camera: {t, f, d, m, dt, n, out}}}`: every camera's own detection of the tag in the bucket, for analyses that use or fuse the cameras themselves. `t` is its position in the main camera's frame, `f` its outward normal there, `d` its distance from that camera (metres), `m` the decision margin (null from a base that sent none), `dt` the frame's time after the bucket's start, `n` how many frames it stands for (a live camera; absent for one), `out` true when the fused position left it out |
+| `ips_rotation` | `rotations` | `{tag: 3x3}`: the rotation of the tag's best detection, in the main camera's frame |
+| `ips_relation` | `graph` | `{tag: [tags it faces]}`, every tag of the bucket a key |
+
+Sessions written before 2026-10-02 hold smoothed poses (an exponential average of factor 0.7 over each tag's whole history, never reset), and the last camera's value per bucket; they are made raw by replaying IPS again.
+
+**Intrinsics and frame size.** A camera's intrinsics hold for the frame size they were calibrated at, `calibration_resolution` in its `Cameras` entry (IPS Camera Calibration writes it from the checkerboard images). An entry without it, written before the key or saved from a form that does not carry it, goes by its principal point, which lies near the centre of the calibration images: frames within 10% of (2cx, 2cy) are read with the intrinsics as they are, and frames of another size are scaled from the common frame size nearest (2cx, 2cy), 1920x1080 for the Logitech C920, MacBook Air and iPhone profiles. The base's log says which size it took. A frame of another size, such as a 960x540 recording, gets fx and cx scaled by the width ratio and fy and cy by the height ratio, measured before `rotate` turns the frame; the base's log says so once. Without it every tag of such a recording comes out twice as far away and off to one side. A frame of another aspect than the calibration's is scaled all the same, with a warning that the result is only approximate, and a principal point that lands more than 10% off the frame's centre is warned of too: the intrinsics were then calibrated at another size than the entry says. A fisheye camera's frames are remapped with its own K and are not scaled. The distortion coefficients `D` of a pinhole camera are not used.
+
 ## Camera calibration and synchronization
 
 One-time setup for a camera arrangement, done in this order from the leaves under `Launcher → Pipelines → IPS`. Redo the synchronization whenever a camera moves.
@@ -103,7 +128,7 @@ The **Transform Matrix** tab of the IPS Base card shows the exported files as ed
 
 ### Calibrate from a recorded session
 
-A recorded session calibrates itself: whenever two cameras saw the same tag at the same moment, the tag's position in both camera frames is one sample of the transform between them. `mmla ses-calibrate` reads the session's videos (from `artifacts/<session>/manifest.json`), detects the tags on a frame every `-st` seconds with the same detector, intrinsics (`Cameras`) and tag size as the IPS base, pairs the sightings of the main camera with each other camera's, fits one rigid transform per camera to the paired positions (with the pairs that disagree thrown out) and writes `artifacts/<session>/analysis/calibration/transformation_matrices_<main>.json`, ready for `camera_sync/`, next to a `calibration_report.json` with the residuals. Given matrices are scored on the same pairs with `-v`, which is how a calibration made on another day is checked against a session:
+A recorded session calibrates itself: whenever two cameras saw the same tag at the same moment, the tag's position in both camera frames is one sample of the transform between them. `mmla ses-calibrate` reads the session's videos (from `artifacts/<session>/manifest.json`), detects the tags on a frame every `-st` seconds with the same detector, intrinsics (`Cameras`, scaled to the videos' frame size as the base scales them) and tag size as the IPS base, on the raw poses, pairs the sightings of the main camera with each other camera's, fits one rigid transform per camera to the paired positions (with the pairs that disagree thrown out) and writes `artifacts/<session>/analysis/calibration/transformation_matrices_<main>.json`, ready for `camera_sync/`, next to a `calibration_report.json` with the residuals. Given matrices are scored on the same pairs with `-v`, which is how a calibration made on another day is checked against a session:
 
 ```bash
 mmla ses-calibrate -c pipelines/ips-base/config.yml -sid <session-id> -v pipelines/ips-base/camera_sync/calibrations/<calibration>/transformation_matrices_<main>.json

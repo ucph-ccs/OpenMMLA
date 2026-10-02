@@ -83,7 +83,7 @@ def main():
     stamps = [sync + k * args.step for k in range(int((end - sync) / args.step) + 1)]
     print(f"{len(stamps)} frames per camera every {args.step} s from {sync:.3f} ({(end - sync) / 60:.1f} min); "
           f"tag size {tag_size} m, family {families}, camera {camera}, main {main_camera}")
-    detect = tag_detector(cameras[camera]['params'], tag_size, families)
+    detect = tag_detector(cameras[camera], tag_size, families)  # the whole entry: its calibration_resolution too
     observations = {}
     for device in wanted:
         obs = observe(videos[device]['path'], float(videos[device]['start_time']), stamps, detect, rotate=rotate,

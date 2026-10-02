@@ -12,7 +12,8 @@ from openmmla.utils.input import show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .enums import ROTATIONS
 from .input import get_base_by_id, get_bases, select_source_by_index_or_name
-from .vector import get_outward_normal_vector
+from .intrinsics import FrameIntrinsics, calibration_resolution
+from .vector import canonical_rotation
 
 
 class CameraTagDetector(Base):
@@ -55,6 +56,7 @@ class CameraTagDetector(Base):
         """Runtime attributes"""
         self.chosen_camera = None
         self.camera_info = {}
+        self.intrinsics = None  # the detector's intrinsics per frame size (FrameIntrinsics)
         self.selected_source = None
         self.camera_configured = False
         self.base_id = None
@@ -197,7 +199,11 @@ class CameraTagDetector(Base):
         camera_config = cameras[self.chosen_camera]
         fisheye = camera_config['fisheye']
         params = camera_config['params']
-        camera_info = {"fisheye": fisheye, "params": params, "res": self.res}
+        # the intrinsics scaled to the frames' size, as the IPS base scales them
+        self.intrinsics = FrameIntrinsics(params, calibration_resolution(camera_config), camera=self.chosen_camera,
+                                          logger=self.logger)
+        camera_info = {"fisheye": fisheye, "params": params, "res": self.res,
+                       "calibration_resolution": self.intrinsics.calibration_size}
 
         if fisheye:
             K = np.array(camera_config['K'])
@@ -276,14 +282,17 @@ class CameraTagDetector(Base):
             frame = video_frame.data
             acquired_time = video_frame.timestamp
 
-            if self.camera_info.get("fisheye", False):
+            fisheye = self.camera_info.get("fisheye", False)
+            if fisheye:
                 frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                                   interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            height, width = frame.shape[:2]
+            params = self.camera_info["params"] if fisheye else self.intrinsics.for_frame(width, height)
             if self.rotate in ROTATIONS:
                 frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=self.camera_info["params"],
+            results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=params,
                                            tag_size=self.tag_size)
 
             tags = {}
@@ -293,7 +302,10 @@ class CameraTagDetector(Base):
                     continue
 
                 corners = np.int32(tag.corners)
-                normal, tag = get_outward_normal_vector(tag)
+                # z into the tag, as the IPS base publishes it (a rotation, not the reflection the
+                # z column alone negated made, which spoiled the pose-to-pose transform)
+                tag.pose_R = canonical_rotation(tag.pose_R, tag.pose_t)
+                normal = -tag.pose_R[:, 2]
                 tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
 
                 # Drawing annotations

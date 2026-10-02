@@ -1,8 +1,11 @@
 import gc
 import json
 import logging
+import math
 import os
 import threading
+
+import numpy as np
 
 from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
@@ -11,9 +14,8 @@ from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, M
 from openmmla.utils.config import base_room, is_main_base
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
+from .fusion import DEFAULT_GATE, fuse_bucket, place
 from .input import get_bases, get_function_synchronizer
-from .transform import transform_point, transform_rotation
-from .vector import is_tag_looking_at_another_2d
 
 MATRICES_PREFIX = 'transformation_matrices_'
 
@@ -29,9 +31,23 @@ def main_id_of(file_name: str) -> str:
     return stem[len(MATRICES_PREFIX):]
 
 
+def new_bucket() -> dict:
+    """an open time bucket: {'tags': {tag: {camera: [detection]}}, 'votes': {camera: {(a, b): [seen,
+    both]}}, 'nicla': {badge: set of tags}} (see fusion.fuse_bucket)."""
+    return {'tags': {}, 'votes': {}, 'nicla': {}}
+
+
 class IPSSynchronizer(Synchronizer):
     """IPSSynchronizer class for synchronizing detection results from multiple cameras under a unified spatial
-    coordinate and uploading them to InfluxDB"""
+    coordinate and uploading them to InfluxDB.
+
+    The bases publish the raw pose of every detection. The synchronizer files each into the time
+    bucket of its frame (buckets of `bucket_duration` seconds from the first frame it got), keeps a
+    bucket open until every base that is still sending has moved past it (a base more than
+    `max_lateness` seconds behind the newest frame no longer holds it up), and then fuses the
+    cameras' detections of each tag (openmmla.bases.ips.fusion) and writes the bucket. A frame of
+    a bucket already written is left out, and counted.
+    """
     logger = get_logger('ips-synchronizer')
 
     def __init__(self, project_dir: str | None, config_path: str, verbose: bool = False,
@@ -55,14 +71,11 @@ class IPSSynchronizer(Synchronizer):
         # Runtime attributes
         self.main_id = None
         self.transform_matrices_dict = None
-        self.merged_tags = None
-        self.merged_relations = None
         self.session_id = None
         self.allowed_tag_ids = None
         self.unregistered_tag_ids = set()  # detected tags this session has no individual for, logged once each
         self.unplaced_base_ids = set()  # bases the main camera's matrices do not place, logged once each
-        self.time_bucket_key = None  # start timestamp of time bucket
-        self.time_bucket_end = None
+        self._reset_buckets()
         self.alive = False
 
         # Threading attributes
@@ -75,7 +88,22 @@ class IPSSynchronizer(Synchronizer):
         self._setup_objects()
 
     def _setup_yaml(self):
-        self.bucket_duration = float(self.config['Synchronizer']['bucket_duration'])
+        sync_config = self.config['Synchronizer']
+        self.bucket_duration = float(sync_config['bucket_duration'])
+        # how far (seconds of frame time) a base may fall behind the newest frame before the buckets are
+        # written without it; a file replay at processing_rate 4 runs four of them per second of its own
+        self.max_lateness = float(sync_config.get('max_lateness', 5.0))
+        # how far (metres) a camera's position of a tag may lie from the cameras' median and still be averaged
+        self.fusion_gate = float(sync_config.get('fusion_gate', DEFAULT_GATE))
+
+    def _reset_buckets(self):
+        """Forget the open buckets and the bases' progress, for a new run."""
+        self.buckets = {}  # bucket start -> new_bucket()
+        self.bucket_origin = None  # the first frame's time: buckets start at it plus whole bucket durations
+        self.newest_time = None  # the newest frame any base sent
+        self.base_last = {}  # base id -> the newest frame it sent
+        self.written_until = None  # the end of the newest bucket written
+        self.late_frames = {}  # base id -> frames that came after their bucket was written
 
     def _setup_directories(self):
         """Set up directories."""
@@ -101,8 +129,7 @@ class IPSSynchronizer(Synchronizer):
         self.allowed_tag_ids = None
         self.unregistered_tag_ids = set()
         self.unplaced_base_ids = set()
-        self.merged_relations = None
-        self.merged_tags = None
+        self._reset_buckets()
         gc.collect()
 
     def _close_clients(self):
@@ -206,8 +233,7 @@ class IPSSynchronizer(Synchronizer):
             self.logger.warning("Main camera id or transformation matrices not set, please set them first.")
             return self._set_main_camera()
 
-        self.merged_relations = {}
-        self.merged_tags = {}
+        self._reset_buckets()
 
         # select or create bucket
         self.session_id = self.launch_session_id or select_or_create_session(self.mongo_client)
@@ -269,6 +295,8 @@ class IPSSynchronizer(Synchronizer):
                 arguments={'verbose': self.verbose, 'session_id': self.launch_session_id,
                            'main_camera': self.launch_main_camera or None},
                 parameters={'main_id': self.main_id, 'bucket_duration': self.bucket_duration,
+                            'max_lateness': self.max_lateness, 'fusion_gate': self.fusion_gate,
+                            'stored_poses': 'raw detections, cameras fused per bucket',
                             'allowed_tag_ids': None if self.allowed_tag_ids is None else sorted(
                                 self.allowed_tag_ids, key=str)},
                 files={'transformation_matrices': matrices},
@@ -356,6 +384,7 @@ class IPSSynchronizer(Synchronizer):
             self._stop_threads()
         else:
             self.logger.info("All threads stopped properly.")
+        self._write_remaining_buckets()
         self._clean_up()
 
     def _exported_matrices(self) -> list[str]:
@@ -441,117 +470,164 @@ class IPSSynchronizer(Synchronizer):
                                 "sync first.")
 
     def _handle_base_result(self, client, userdata, msg):
-        """Handle the received base result.
+        """Handle the received base result: file its detections into the bucket of its frame, and
+        write the buckets every base still sending has moved past.
 
         Args:
             client: the client instance for this callback
             userdata: the private user data as a set in Client() or user_data_set()
             message: an instance of MQTTMessage
         """
-        if not self.stop_event.is_set():
-            self.alive = True
-            base_result = json.loads(msg.payload)
-            base_id = base_result["base_id"]
-            base_result_time = float(base_result["acquired_time"])
+        if self.stop_event.is_set():
+            return
+        self.alive = True
+        base_result = json.loads(msg.payload)
+        base_id = str(base_result["base_id"])
+        base_result_time = float(base_result["acquired_time"])
+        nicla = base_id.isnumeric() and int(base_id) > 50000  # nicla vision's onboard apriltag detection (if used)
 
-            # unified timing logic for both file and real-time modes
-            if self.time_bucket_key is None:
-                self.time_bucket_key = base_result_time
-                self.time_bucket_end = self.time_bucket_key + self.bucket_duration
-                self.logger.info(
-                    f"Initialized time bucket: {self.time_bucket_key:.2f}s - {self.time_bucket_end:.2f}s")
+        if not nicla and base_id != self.main_id and base_id not in self.transform_matrices_dict:
+            # another room's base (or one never synced to this main): its tags are in a frame
+            # this session cannot place, and its relations are about another room's people
+            if base_id not in self.unplaced_base_ids:
+                self.unplaced_base_ids.add(base_id)
+                self.logger.warning(
+                    f"Base {base_id} has no matrix in camera_sync/{matrices_file_name(self.main_id)}: "
+                    f"it is in another room, or was not synced to main camera {self.main_id}. Its "
+                    f"detections are left out of this session.")
+            return
 
-            # check if we need to upload current bucket and advance to next
-            elif base_result_time >= self.time_bucket_end:
-                self._upload_current_bucket()
-                self.time_bucket_key = base_result_time
-                self.time_bucket_end = self.time_bucket_key + self.bucket_duration
-                self.logger.info(
-                    f"Advanced to time bucket: {self.time_bucket_key:.2f}s - {self.time_bucket_end:.2f}s)")
+        with self.lock:
+            # a badge's own clock is not the cameras': its frames join the buckets, but never decide
+            # how far the run has got
+            bucket = self._bucket_of(base_id, base_result_time, track=not nicla)
+            if bucket is not None:
+                if nicla:
+                    if self._tag_allowed(base_id):
+                        detected = [tag_id for tag_id in base_result.get('detected_tags') or []
+                                    if self._tag_allowed(tag_id)]
+                        bucket['nicla'].setdefault(base_id, set()).update(detected)
+                else:
+                    self._add_detections(bucket, base_id, base_result_time, base_result)
+            self._write_ready_buckets()
 
-            # check if result falls within current bucket
-            valid = self.time_bucket_key <= base_result_time < self.time_bucket_end
-            if valid:
-                if base_id.isnumeric() and int(base_id) > 50000:  # msg from nicla vision's onboard apriltag detection (if used)
-                    if not self._tag_allowed(base_id):
-                        return
-                    detected_tags = [
-                        tag_id for tag_id in base_result['detected_tags']
-                        if self._tag_allowed(tag_id)
-                    ]
-                    if base_id not in self.merged_relations:
-                        self.merged_relations[base_id] = set()
-                    self.merged_relations[base_id].update(detected_tags)
-                else:  # msg from environmental camera
-                    tags = self._filter_tags(base_result["tags"])
-                    tag_relations = self._filter_relations(base_result["tag_relations"])
+    def _bucket_of(self, base_id: str, frame_time: float, track: bool = True) -> dict | None:
+        """The open bucket a base's frame belongs to, noting how far the base has got (`track`);
+        None when that bucket was written already (the frame is counted, and the base named once)."""
+        if self.bucket_origin is None:
+            self.bucket_origin = frame_time
+            self.logger.info(f"First frame at {frame_time:.2f}s: buckets of {self.bucket_duration:g}s from there.")
+        previous = self.base_last.get(base_id)  # the base's newest frame before this one
+        if track:
+            self.base_last[base_id] = max(self.base_last.get(base_id, frame_time), frame_time)
+            self.newest_time = frame_time if self.newest_time is None else max(self.newest_time, frame_time)
+        index = math.floor((frame_time - self.bucket_origin) / self.bucket_duration + 1e-6)
+        start = self.bucket_origin + index * self.bucket_duration
+        if self.written_until is not None and start < self.written_until - 1e-6:
+            self.late_frames[base_id] = self.late_frames.get(base_id, 0) + 1
+            if self.late_frames[base_id] == 1:
+                behind = max(0.0, self.newest_time - frame_time) if self.newest_time is not None else 0.0
+                if not track:
+                    why = "a badge's frames never hold the buckets up"
+                elif previous is None:
+                    why = "the base joined after that bucket was written"
+                elif frame_time < previous:
+                    why = f"the frame is older than one the base sent before ({previous:.2f}s)"
+                else:
+                    why = (f"the base was more than {self.max_lateness:g}s behind the newest frame when the "
+                           f"bucket was written")
+                self.logger.warning(
+                    f"Base {base_id} sent a frame of {frame_time:.2f}s, {behind:.1f}s behind the newest frame, "
+                    f"after its bucket was written: {why}. Its late frames are left out (counted, the count is "
+                    f"logged at the end).")
+            return None
+        return self.buckets.setdefault(start, new_bucket())
 
-                    if base_id != self.main_id and base_id not in self.transform_matrices_dict:
-                        # another room's base (or one never synced to this main): its tags are in a frame
-                        # this session cannot place, and its relations are about another room's people
-                        if base_id not in self.unplaced_base_ids:
-                            self.unplaced_base_ids.add(base_id)
-                            self.logger.warning(
-                                f"Base {base_id} has no matrix in camera_sync/{matrices_file_name(self.main_id)}: "
-                                f"it is in another room, or was not synced to main camera {self.main_id}. Its "
-                                f"detections are left out of this session.")
-                        return
-                    if base_id != self.main_id:  # convert to main coordinates
-                        R = self.transform_matrices_dict[base_id]['R']
-                        T = self.transform_matrices_dict[base_id]['T']
-                        for tag_id, tag_data in tags.items():
-                            main_rotation = transform_rotation(R, tag_data[0])
-                            main_translation = transform_point(tag_data[1], R, T)
-                            self.merged_tags[tag_id] = [main_rotation, main_translation]
-                    else:
-                        self.merged_tags.update(tags)
+    def _add_detections(self, bucket: dict, base_id: str, frame_time: float, base_result: dict):
+        """File a camera frame's raw detections into a bucket, in the main camera's frame, and count
+        on this camera's frames who faced whom."""
+        tags = self._filter_tags(base_result.get("tags") or {})
+        relations = self._filter_relations(base_result.get("tag_relations") or {})
+        quality = base_result.get("quality") or {}
+        matrix = None if base_id == self.main_id else self.transform_matrices_dict[base_id]
+        for tag_id, (rotation, translation) in tags.items():
+            tag_id = str(tag_id)
+            # the tag's distance from the camera that saw it, which weighs the cameras against each other
+            distance = float(np.linalg.norm(np.asarray(translation, dtype=float)))
+            R, t = place(rotation, translation, matrix)
+            margin = (quality.get(tag_id) or {}).get('margin')
+            bucket['tags'].setdefault(tag_id, {}).setdefault(base_id, []).append(
+                {'t': t, 'R': R, 'd': distance, 'm': margin, 'time': frame_time})
+        seen = [str(tag_id) for tag_id in tags]
+        faced = {str(tag_id): {str(target) for target in targets} for tag_id, targets in relations.items()}
+        votes = bucket['votes'].setdefault(base_id, {})
+        for a in seen:
+            for b in seen:
+                if a != b:
+                    count = votes.setdefault((a, b), [0, 0])
+                    count[0] += b in faced.get(a, ())
+                    count[1] += 1
 
-                    # store tag relations into graph (avoid duplicates)
-                    for tag_id, look_at_tags in tag_relations.items():
-                        if tag_id not in self.merged_relations:
-                            self.merged_relations[tag_id] = set()
-                        self.merged_relations[tag_id].update(look_at_tags)
+    def _bucket_done(self, start: float) -> bool:
+        """Whether every base still sending has moved past the bucket: a base whose newest frame is
+        more than max_lateness behind the newest of all no longer holds it up. For the first
+        max_lateness seconds a base the matrices place that has sent nothing yet holds it up too,
+        so that a base that starts a little later keeps its first frames."""
+        if self.newest_time is None:
+            return True
+        if self.newest_time - self.bucket_origin <= self.max_lateness:
+            expected = {str(self.main_id), *(str(base_id) for base_id in (self.transform_matrices_dict or {}))}
+            if any(base_id not in self.base_last for base_id in expected):
+                return False
+        end = start + self.bucket_duration
+        return all(last >= end - 1e-6 or last < self.newest_time - self.max_lateness
+                   for last in self.base_last.values())
 
-                    # detect tag relations again under main camera's coordinate system
-                    for tag_id, tag_data in self.merged_tags.items():
-                        if tag_id not in self.merged_relations:
-                            self.merged_relations[tag_id] = set()
-                        for target_id, target_data in self.merged_tags.items():
-                            if target_id != tag_id and target_id not in self.merged_relations[tag_id]:
-                                if is_tag_looking_at_another_2d(tag_data, target_data, cosine_threshold=-0.94,
-                                                                distance_threshold=1.2):
-                                    self.merged_relations[tag_id].add(target_id)
+    def _write_ready_buckets(self):
+        """Write the open buckets, oldest first, as long as the oldest is done."""
+        while self.buckets:
+            start = min(self.buckets)
+            if not self._bucket_done(start):
+                break
+            self._upload_bucket(start, self.buckets.pop(start))
 
-    def _upload_current_bucket(self):
-        """Upload the current time bucket's aggregated results for both file and real-time modes."""
+    def _write_remaining_buckets(self):
+        """Write every bucket still open, at the end of the run, and say how many late frames were
+        left out."""
+        with self.lock:
+            for start in sorted(self.buckets):
+                try:
+                    self._upload_bucket(start, self.buckets.pop(start))
+                except Exception as e:
+                    self.logger.warning(f"Could not write the bucket at {start:.2f}s at the end of the run: {e}")
+            if self.late_frames:
+                self.logger.warning("Frames left out for coming after their bucket was written: " + ', '.join(
+                    f"base {base_id}: {count}" for base_id, count in sorted(self.late_frames.items())))
+
+    def _upload_bucket(self, start: float, bucket: dict):
+        """Upload a time bucket: the cameras' detections fused per tag (positions and rotations in
+        the main camera's frame), who faced whom, and every camera's own detection."""
         from openmmla.utils.constants import (
             EVENT_TYPE_IPS_TRANSLATION, EVENT_TYPE_IPS_ROTATION, EVENT_TYPE_IPS_RELATION,
         )
 
-        rotations_dict = {}
-        translations_dict = {}
-        for tag_id, (rotation, translation) in self.merged_tags.items():
-            rotations_dict[tag_id] = rotation
-            translations_dict[tag_id] = translation
+        end = start + self.bucket_duration
+        translations_dict, rotations_dict, relations_dict, detections = fuse_bucket(bucket, start, self.fusion_gate)
 
         translation_fields = {
-            "window_start_time": self.time_bucket_key,
-            "window_end_time": self.time_bucket_end,
+            "window_start_time": start,
+            "window_end_time": end,
             "translations": json.dumps(translations_dict),
+            "detections": json.dumps(detections),
         }
         rotation_fields = {
-            "window_start_time": self.time_bucket_key,
-            "window_end_time": self.time_bucket_end,
+            "window_start_time": start,
+            "window_end_time": end,
             "rotations": json.dumps(rotations_dict),
         }
-
-        relations_dict = {}
-        for tag_id, relations in self.merged_relations.items():
-            relations_dict[tag_id] = list(relations)
-
         relation_fields = {
-            "window_start_time": self.time_bucket_key,
-            "window_end_time": self.time_bucket_end,
+            "window_start_time": start,
+            "window_end_time": end,
             "graph": json.dumps(relations_dict),
         }
 
@@ -562,13 +638,11 @@ class IPSSynchronizer(Synchronizer):
         self.influx_client.write_event(self.session_id, EVENT_TYPE_IPS_TRANSLATION, translation_fields)
         self.influx_client.write_event(self.session_id, EVENT_TYPE_IPS_ROTATION, rotation_fields)
         self.influx_client.write_event(self.session_id, EVENT_TYPE_IPS_RELATION, relation_fields)
+        self.written_until = end if self.written_until is None else max(self.written_until, end)
 
-        self.logger.info(f"Uploaded bucket: {self.time_bucket_key:.2f}s - {self.time_bucket_end:.2f}s "
-                         f"({len(self.merged_tags)} tags, {len(self.merged_relations)} relations)")
-
-        # reset for next cycle
-        self.merged_relations.clear()
-        self.merged_tags.clear()
+        cameras = {camera for by_camera in detections.values() for camera in by_camera}
+        self.logger.info(f"Uploaded bucket: {start:.2f}s - {end:.2f}s ({len(translations_dict)} tags from "
+                         f"{len(cameras)} cameras, {len(relations_dict)} relations)")
 
     def _load_transform_matrices(self, main_id: str | None = None):
         """Load transformation matrices.

@@ -158,32 +158,59 @@ def average_transform_matrices(rotation_matrices, translation_matrices):
     return avg_rot_mat.tolist(), avg_trans_mat.tolist()
 
 
-def average_rotation_matrices(rot_matrices):
+def average_rotation_matrices(rot_matrices, weights=None):
     """Calculate the average rotation matrix from a list of rotation matrices.
+
+    A quaternion and its negative are one rotation, and which of the two a conversion gives flips
+    for rotations near half a turn, so a plain mean of quaternions can cancel out. The mean here is
+    the sign-invariant one (Markley et al., 2007): the eigenvector of the largest eigenvalue of
+    the (weighted) sum of q q^T.
 
     Args:
         rot_matrices (np.ndarray): A list of 3x3 rotation matrices.
+        weights (list of float, optional): a weight per matrix; equal weights if None.
 
     Returns:
         np.ndarray: A 3x3 average rotation matrix calculated from the input list of rotation matrices.
     """
-    quaternions = []
+    quaternions = Rotation.from_matrix(np.asarray(rot_matrices, dtype=float).reshape(-1, 3, 3)).as_quat()
+    w = np.ones(len(quaternions)) if weights is None else np.asarray(weights, dtype=float).reshape(-1)
+    scatter = (quaternions * w[:, None]).T @ quaternions
+    _, vectors = np.linalg.eigh(scatter)
+    return Rotation.from_quat(vectors[:, -1]).as_matrix()
 
-    # Convert each rotation matrix to quaternion
-    for rot_matrix in rot_matrices:
-        rot = Rotation.from_matrix(rot_matrix)
-        quat = rot.as_quat()
-        quaternions.append(quat)
 
-    # Average quaternions and normalize it
-    avg_quat = np.mean(quaternions, axis=0)
-    avg_quat = avg_quat / np.linalg.norm(avg_quat)
+def rotation_to_quaternion(R) -> np.ndarray:
+    """the unit quaternion (x, y, z, w) of a 3x3 rotation matrix."""
+    return Rotation.from_matrix(np.asarray(R, dtype=float).reshape(3, 3)).as_quat()
 
-    # Convert back to a rotation matrix
-    avg_rot = Rotation.from_quat(avg_quat)
-    avg_rot_matrix = avg_rot.as_matrix()
 
-    return avg_rot_matrix
+def quaternion_to_rotation(q) -> np.ndarray:
+    """the 3x3 rotation matrix of a quaternion (x, y, z, w), normalized first."""
+    return Rotation.from_quat(np.asarray(q, dtype=float).reshape(4)).as_matrix()
+
+
+def quaternion_angle_degrees(q0, q1) -> float:
+    """the angle in degrees of the rotation between two unit quaternions; q and -q are one rotation."""
+    d = abs(float(np.dot(np.asarray(q0, dtype=float), np.asarray(q1, dtype=float))))
+    return math.degrees(2.0 * math.acos(min(1.0, d)))
+
+
+def slerp_quaternions(q0, q1, fraction: float) -> np.ndarray:
+    """the unit quaternion `fraction` of the way from q0 to q1 along the shorter arc (q1's sign is
+    aligned with q0's first, as q and -q are one rotation)."""
+    q0 = np.asarray(q0, dtype=float) / np.linalg.norm(q0)
+    q1 = np.asarray(q1, dtype=float) / np.linalg.norm(q1)
+    d = float(np.dot(q0, q1))
+    if d < 0.0:
+        q1, d = -q1, -d
+    if d > 0.9995:
+        # nearly one rotation: the straight line is as good and avoids dividing by sin(0)
+        q = q0 + fraction * (q1 - q0)
+        return q / np.linalg.norm(q)
+    theta = math.acos(d)
+    q = (math.sin((1.0 - fraction) * theta) * q0 + math.sin(fraction * theta) * q1) / math.sin(theta)
+    return q / np.linalg.norm(q)
 
 
 def find_transformation_paths(data, start, end, path=None):

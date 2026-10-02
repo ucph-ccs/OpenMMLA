@@ -23,8 +23,12 @@ from openmmla.utils.session_sources import record_joined, record_left, source_en
 from openmmla.utils.validation import validate_unix_timestamp
 from .enums import ROTATIONS
 from .input import get_bases, get_base_by_id, select_source_by_index_or_name, compute_initial_sync_time
-from .track_utils import PoseStabilizer, NormalVectorStabilizer, TagRelationTracker
-from .vector import is_tag_looking_at_another_2d, get_2d_outward_normal_vector
+from .intrinsics import FrameIntrinsics, calibration_resolution
+from .track_utils import PoseStabilizer, outward_normal_2d
+from .vector import canonical_rotation, is_tag_looking_at_another_2d
+
+# a weaker detection is not a badge (calibration.MIN_DECISION_MARGIN)
+MIN_DECISION_MARGIN = 10
 
 
 class IPSBase(Base):
@@ -71,6 +75,7 @@ class IPSBase(Base):
         # Runtime attributes
         self.chosen_camera = None
         self.camera_info = {}
+        self.intrinsics = None  # the detector's intrinsics per frame size (FrameIntrinsics)
         self.selected_source = None
         self.base_id = None  # the base camera id
         self.main_id = None  # the main camera id
@@ -103,6 +108,10 @@ class IPSBase(Base):
         self.keyframe_interval = float(base_config.get('keyframe_interval', 1.0))
         self.processing_rate = float(base_config.get('processing_rate', 1.0))
         self.enable_timing_sync = base_config.get('enable_timing_sync', True)
+
+        # the window's drawing alone is smoothed; what the base publishes is the raw pose of every detection
+        self.display_smoothing = float(base_config.get('display_smoothing', 0.7))
+        self.display_reset_seconds = float(base_config.get('display_reset_seconds', 2.0))
 
         # source comes from the per-base Bases entry (single source of truth);
         # Base.source has been removed, so a base must define its own source
@@ -140,9 +149,9 @@ class IPSBase(Base):
         self.redis_client = RedisClientWrapper(self.config_path)
         self.mqtt_client = MQTTClientWrapper(self.config_path)
         self.detector = Detector(families=self.families, nthreads=4)
-        self.pose_stabilizer = PoseStabilizer(smoothing=0.7)
-        self.normal_stabilizer = NormalVectorStabilizer(smoothing=0.7)
-        self.relation_tracker = TagRelationTracker(min_consistent_frames=2)
+        # for the window only: never on the poses the base publishes
+        self.display_stabilizer = PoseStabilizer(smoothing=self.display_smoothing,
+                                                 reset_seconds=self.display_reset_seconds)
 
     def _clean_up(self):
         """Clean up runtime variables and free memory."""
@@ -238,6 +247,8 @@ class IPSBase(Base):
         self.logger = get_logger(f'ips-base-{self.session_id}',
                                  os.path.join(self.bucket_logger_dir, f'ips_base_{self.base_id}.log'),
                                  console_level=logging.DEBUG if self.verbose else logging.INFO)
+        if self.intrinsics is not None:
+            self.intrinsics.logger = self.logger  # a scaling of the intrinsics is said in the session's log
 
     def _record_provenance(self):
         """Note in the session what this base runs with (openmmla.utils.session_provenance): its
@@ -263,6 +274,9 @@ class IPSBase(Base):
                     'base_id': self.base_id, 'main_id': self.main_id, 'camera': camera,
                     'tag_size': self.tag_size, 'families': self.families, 'max_badge_id': self.max_badge_id,
                     'resolution': self.res, 'rotate': self.rotate, 'fps': self.fps,
+                    'calibration_resolution': (self.intrinsics.calibration_size if self.intrinsics else None),
+                    'published_poses': 'raw', 'display_smoothing': self.display_smoothing,
+                    'display_reset_seconds': self.display_reset_seconds,
                     'keyframe_interval': self.keyframe_interval, 'processing_rate': self.processing_rate,
                     'enable_timing_sync': self.enable_timing_sync,
                     'source': self.source, 'source_index': self._source_index,
@@ -363,7 +377,13 @@ class IPSBase(Base):
         camera_config = cameras[self.chosen_camera]
         fisheye = camera_config['fisheye']
         params = camera_config['params']
-        camera_info = {"fisheye": fisheye, "params": params, "res": self.res}
+        # the frame size the intrinsics were calibrated at (the entry's, else the one its principal
+        # point gives): the detector scales them to the frames it gets (a 960x540 recording read
+        # with 1920x1080 intrinsics places every tag twice as far)
+        self.intrinsics = FrameIntrinsics(params, calibration_resolution(camera_config), camera=self.chosen_camera,
+                                          logger=self.logger)
+        camera_info = {"fisheye": fisheye, "params": params, "res": self.res,
+                       "calibration_resolution": self.intrinsics.calibration_size}
 
         if fisheye:
             K = np.array(camera_config['K'])
@@ -568,7 +588,7 @@ class IPSBase(Base):
             acquired_time = current_video_time + timestamp_offset
             
             # process the frame
-            tags, tag_relations = self._process_single_frame(frame, acquired_time)
+            tags, tag_relations, quality = self._process_single_frame(frame, acquired_time)
             
             # save frame if store is enabled
             if self.store:
@@ -578,6 +598,7 @@ class IPSBase(Base):
             message = {
                 "base_id": self.base_id,
                 "tags": tags,
+                "quality": quality,
                 "tag_relations": tag_relations,
                 "acquired_time": acquired_time
             }
@@ -625,7 +646,7 @@ class IPSBase(Base):
             acquired_time = video_frame.timestamp
 
             # process the frame
-            tags, tag_relations = self._process_single_frame(frame, acquired_time)
+            tags, tag_relations, quality = self._process_single_frame(frame, acquired_time)
 
             if self.store and frames_count % self.fps == 0:
                 frames_count = 0
@@ -634,6 +655,7 @@ class IPSBase(Base):
             message = {
                 "base_id": self.base_id,
                 "tags": tags,
+                "quality": quality,
                 "tag_relations": tag_relations,
                 "acquired_time": acquired_time
             }
@@ -645,53 +667,59 @@ class IPSBase(Base):
                 break
 
     def _process_single_frame(self, frame, acquired_time):
-        """Process a single frame and return detected tags and relations."""
-        if self.camera_info.get("fisheye", False):
+        """Detect the tags of a frame: (tags, tag_relations, quality), as the base publishes them.
+
+        `tags` holds the raw pose of every detection, {tag id: [R, t]} in this camera's frame, with
+        nothing carried over from earlier frames (R turned, when the detector put its z axis towards
+        the camera, so that -column 2 is the outward normal: vector.canonical_rotation). `quality`
+        holds each detection's {margin, err}: the decoder's decision margin and the pose's
+        object-space error. `tag_relations` says who faces whom on this frame's raw poses. The
+        window, when there is one, draws each tag's pose smoothed (Base.display_smoothing).
+        """
+        fisheye = self.camera_info.get("fisheye", False)
+        if fisheye:
             frame = cv2.remap(frame, self.camera_info["map_1"], self.camera_info["map_2"],
                               interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        # the intrinsics are scaled to the frame's size before it is turned (a fisheye frame is
+        # remapped with the calibration's own K, so its intrinsics stay as they are)
+        height, width = frame.shape[:2]
+        params = self.camera_info["params"] if fisheye or self.intrinsics is None \
+            else self.intrinsics.for_frame(width, height)
         if self.rotate in ROTATIONS:
             frame = cv2.rotate(frame, ROTATIONS[self.rotate])
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=self.camera_info["params"],
+        results = self.detector.detect(gray, estimate_tag_pose=True, camera_params=params,
                                        tag_size=self.tag_size)
 
-        self.relation_tracker.step()
+        detections = []
+        for tag in results:
+            if tag.decision_margin < MIN_DECISION_MARGIN or int(tag.tag_id) > self.max_badge_id:
+                continue
+            t = np.asarray(tag.pose_t, dtype=float).reshape(3, 1)
+            detections.append((tag, canonical_rotation(tag.pose_R, t), t))
 
         tags = {}
+        quality = {}
         tag_relations = {}
+        for tag, R, t in detections:
+            tags[tag.tag_id] = [R.tolist(), t.tolist()]
+            err = float(getattr(tag, 'pose_err', float('nan')))
+            quality[tag.tag_id] = {'margin': round(float(tag.decision_margin), 2),
+                                   'err': err if np.isfinite(err) else None}
+            # who this tag faces on this frame alone: the synchronizer counts it over its bucket
+            facing = tag_relations.setdefault(tag.tag_id, [])
+            for other, other_R, other_t in detections:
+                if other.tag_id != tag.tag_id and is_tag_looking_at_another_2d(
+                        [R, t], [other_R, other_t], cosine_threshold=-0.94, distance_threshold=1):
+                    facing.append(str(other.tag_id))
 
-        for tag in results:
-            if tag.decision_margin < 10 or int(tag.tag_id) > self.max_badge_id:
-                continue
-
-            # stabilize pose
-            stabilized_R, stabilized_t = self.pose_stabilizer.update(tag.tag_id, tag.pose_R, tag.pose_t)
-            tag.pose_R = stabilized_R
-            tag.pose_t = stabilized_t
-
-            # stabilize normal
-            normal, tag = get_2d_outward_normal_vector(tag)
-            smoothed_normal = self.normal_stabilizer.update(tag.tag_id, normal)
-
-            tags[tag.tag_id] = [list(tag.pose_R.tolist()), list(tag.pose_t.tolist())]
-            tag_relations.setdefault(tag.tag_id, [])
-
-            # decide if the tag is looking at another tag
-            other_tags = [t for t in results if t.tag_id != tag.tag_id]
-            for other_tag in other_tags:
-                is_seeing = is_tag_looking_at_another_2d(tag, other_tag, cosine_threshold=-0.94,
-                                                         distance_threshold=1)
-                self.relation_tracker.update(tag.tag_id, other_tag.tag_id, is_seeing)
-
-                if self.relation_tracker.is_confirmed(tag.tag_id, other_tag.tag_id):
-                    tag_relations[tag.tag_id].append(str(other_tag.tag_id))
-
-            # draw visualizations
+            # draw visualizations, from the smoothed pose
             if self.graphics:
+                shown_R, _ = self.display_stabilizer.update(tag.tag_id, R, t, acquired_time)
                 corners = np.int32(tag.corners)
                 tag_center = np.mean(corners, axis=0)
-                arrow_dir = smoothed_normal[:2]
+                arrow_dir = outward_normal_2d(shown_R)[:2]
                 scale_factor = 50
                 end_point = tag_center + scale_factor * arrow_dir
                 cv2.arrowedLine(frame, tuple(np.int32(tag_center)), tuple(np.int32(end_point)), (0, 0, 255), 2)
@@ -706,7 +734,7 @@ class IPSBase(Base):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.imshow(f'AprilTags Detection from camera {self.base_id}', display_frame)
 
-        return tags, tag_relations
+        return tags, tag_relations, quality
 
     def _load_transform_matrices(self):
         """Load the transformation matrices of this base's room: the file camera sync exported for
