@@ -198,7 +198,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.gaze_head_box_fallback = _head_box_fallback(analyzer_config)
         # RetinaFace takes BGR but has always been handed the RGB frame: true hands it BGR (more
         # faces found; the gazes and the face check then differ from sessions analysed before)
-        self.gaze_face_detector_bgr = _as_bool(analyzer_config.get('gaze_face_detector_bgr'), False)
+        self.gaze_face_detector_bgr = _as_bool(analyzer_config.get('gaze_face_detector_bgr'), True)
 
         # Only load families if AprilTag detection is enabled
         if self.april_tag_enabled:
@@ -378,7 +378,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         if self.gaze_detect_enabled:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             try:
-                bgr = bool(getattr(self, 'gaze_face_detector_bgr', False))
+                bgr = bool(getattr(self, 'gaze_face_detector_bgr', True))
                 self.face_detector = self._load_face_detector(bgr=bgr)
                 self.logger.info(f"Face detector loaded: RetinaFace, handed the frame in {'BGR' if bgr else 'RGB'}")
             except Exception as e:
@@ -532,7 +532,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'gaze_head_scale': getattr(self.gaze, 'head_scale', None),
             'gaze_head_box_fallback': bool(getattr(self, 'gaze_head_box_fallback', True)) if self.gaze_detect_enabled else None,
             # the channel order RetinaFace is handed: which faces it finds depends on it
-            'gaze_face_detector_bgr': bool(getattr(self, 'gaze_face_detector_bgr', False)) if self.gaze_detect_enabled else None,
+            'gaze_face_detector_bgr': bool(getattr(self, 'gaze_face_detector_bgr', True)) if self.gaze_detect_enabled else None,
             # the features endpoint: what its geometry ran with, since nothing else records
             # the server's config (openmmla.utils.session_provenance reads this answer)
             'features': {'enabled': bool(self.features_enabled),
