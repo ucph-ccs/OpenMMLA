@@ -2,10 +2,16 @@
 # (torch for gaze detection, transformers for the PaGE gaze model (its checkpoints and code come
 #  from HuggingFace; Gaze-LLE comes from torch.hub), tensorflow/retina-face for face detection,
 #  ultralytics (8.4, the first line that ships the YOLO26 weights) for the pose model behind /vllm/features,
+#  onnxruntime for the tracker's optional face check (InsightFace's ArcFace),
 #  OpenAI-compatible client for the VLM/LLM backends)
 # The pose weights are fetched once, at the first start, into /project/weights
 # (pipelines/vfa-server/weights on the host), so a rebuild does not fetch them again; the gaze
-# checkpoints land in the hf-cache and torch-cache volumes.
+# checkpoints land in the hf-cache and torch-cache volumes. With the face check switched on
+# (features.tracking.appearance.face.enabled), its ArcFace model (and SCRFD, when detection_model
+# names it) is fetched the same way, once, into /project/weights/face from InsightFace's buffalo_l
+# pack (non-commercial research only), and never baked into the image.
+# onnxruntime-gpu 1.22 is the CUDA 12 / cuDNN 9 build, the line torch 2.7's wheels ship: it loads
+# their CUDA libraries (onnxruntime.preload_dlls) and falls back to the CPU without them.
 # PaGE's code is MIT; its checkpoints carry Meta's DINOv3 licence (redistribution under the same
 # terms, trade-control clause), which is not an obligation on serving the model.
 # Licence note: ultralytics (and ultralytics-thop) are AGPL-3.0. openmmla's own code stays
@@ -42,6 +48,7 @@ RUN pip install \
         "huggingface-hub==1.32.0" \
         "transformers==5.6.2" "safetensors>=0.4.3" \
         "ultralytics==8.4.157" \
+        "onnxruntime-gpu==1.22.0" \
         "flask==3.0.3" "gunicorn==22.0.0" "gevent==24.2.1" \
         "pyyaml" "cryptography>=42.0.0"
 

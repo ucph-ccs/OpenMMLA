@@ -327,11 +327,15 @@ def _yaw_between(nose, left, right, gain: float) -> float:
 
 def _face(face: dict, source: str) -> dict:
     """the face a person keeps: its box, gaze point and in-frame probability, and where the box
-    came from."""
-    return {'bbox': [float(v) for v in face['bbox']],
+    came from; the face detector's five landmarks when it gave them, which the tracker's face
+    check aligns the face by (openmmla.services.vfa.appearance) and no answer carries."""
+    kept = {'bbox': [float(v) for v in face['bbox']],
             'gaze_point': [float(v) for v in face['gaze_point']] if face.get('gaze_point') else None,
             'inout': float(face['inout']) if face.get('inout') is not None else None,
             'face_source': source}
+    if face.get('landmarks') is not None:
+        kept['landmarks'] = face['landmarks']
+    return kept
 
 
 def assign_faces(persons: list[dict], faces: list[dict], min_confidence: float,
@@ -601,12 +605,14 @@ def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: di
                    pose_faces: dict[int, dict] | None = None) -> dict:
     """the features of one frame: `persons`, each with person_id, tag_id, tag_match, track_id, bbox, score,
     keypoints (left out with `keypoints=False`), head_yaw, face_bbox, gaze {point, inout,
-    target} and face_source ('pose' on a person whose face is a head box made from their pose,
-    absent otherwise); `tags` as seen; `zones` as resolved, in pixels; `pairs`; and the frame's
-    angle, width and height; and `scoring`, what the targets and pairs were made with (the hand
-    circle's version, the keypoint confidence and the inout threshold), so a later relabel can
-    score as this answer did. `tags` maps tag id -> (x, y) pixel centre; `faces` are [{bbox,
-    gaze_point, inout}] from the gaze model; `pose_faces` are {index into `persons`: face} the
+    target}, face_source ('pose' on a person whose face is a head box made from their pose,
+    absent otherwise) and reid (the tracker's appearance checks on the person in this frame,
+    {check: {kind, score, verdict, ...}}, absent otherwise); `tags` as seen; `zones` as resolved,
+    in pixels; `pairs`; and the frame's angle, width and height; and `scoring`, what the targets
+    and pairs were made with (the hand circle's version, the keypoint confidence and the inout
+    threshold), so a later relabel can score as this answer did. `tags` maps tag id -> (x, y)
+    pixel centre; `faces` are [{bbox, gaze_point, inout}] from the gaze model (with `landmarks`
+    when the face detector gave them); `pose_faces` are {index into `persons`: face} the
     gaze model found in the head boxes made for persons the face detector missed. `remember`,
     given, runs on the persons once the tags are matched (PersonTracker.assign: a tracked person
     without a tag gets the one their track wore), and the persons are then named again, a
@@ -641,6 +647,10 @@ def frame_features(persons: list[dict], tags: dict, faces: list[dict], zones: di
         if face and face.get('face_source') == FACE_SOURCE_POSE:
             # only a head-box face says so: a frame without one answers exactly as before
             entry['face_source'] = FACE_SOURCE_POSE
+        if person.get('reid'):
+            # the tracker's appearance checks on this person in this frame: a kind, a score and
+            # a verdict per check, never a descriptor (openmmla.services.vfa.tracking)
+            entry['reid'] = {check: dict(record) for check, record in person['reid'].items()}
         if keypoints:
             entry['keypoints'] = [[round(float(x), 1), round(float(y), 1), round(float(c), 3)] for x, y, c in person['keypoints']]
         answer.append(entry)

@@ -18,7 +18,10 @@ from retinaface import RetinaFace
 from openmmla.services.server import Server
 from openmmla.services.vfa.features import (HAND_CIRCLE_VERSION, HAND_NUDGE, face_from_result, fallback_head_boxes,
                                             frame_features, head_box_detections, pose_faces_from_results)
-from openmmla.services.vfa.tracking import DEFAULT_BUFFER_FRAMES, DEFAULT_IDLE_SECONDS, PersonTracker
+from openmmla.services.vfa.appearance import (AppearanceParams, FaceEmbedder, ScrfdDetector, TagGallery,
+                                              describe_persons, ensure_face_models)
+from openmmla.services.vfa.tracking import (DEFAULT_BUFFER_FRAMES, DEFAULT_FRAME_SECONDS, DEFAULT_IDLE_SECONDS,
+                                            DEFAULT_SPLIT_GAP_SECONDS, PersonTracker)
 from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
@@ -29,6 +32,10 @@ SUPPORTED_BACKENDS = (
     'ollama', 'vllm', 'openai', 'qwen', 'gemini',
     'deepseek', 'llamacpp', 'grok', 'zhipuai', 'intern',
 )
+
+# frames in a row whose face models fail (a GPU out of memory, say) before the face check is
+# switched off, the colour check staying on
+FACE_CHECK_MAX_FAILURES = 10
 
 # what the console tells the user to do about a config field it cannot supply
 _FILL_IN_HINT = (
@@ -107,6 +114,37 @@ def _zones_for(zones, angle: str) -> dict:
     return {**every, **own} if isinstance(own, dict) else every
 
 
+class _FaceDetector:
+    """the face detector (RetinaFace's detect_faces), answering one call at a time, which keeps
+    each thread's last answer until it is taken: the gaze code passes only the face boxes on, and
+    the tracker's face check aligns a face by the landmarks the answer also holds.
+
+    The gaze code hands it the frame in RGB, while RetinaFace takes a numpy array as BGR (and
+    swaps the channels itself); with `bgr` the frame's channels are swapped back first. In an
+    A/B on 500 stored frames (2026-10-02) that found a face on 66.5 % of the pupils' heads
+    instead of 47.4 %, losing none found before, at the same 42 ms a frame."""
+
+    def __init__(self, detect, bgr: bool = False):
+        self.detect = detect
+        self.bgr = bool(bgr)
+        self.lock = threading.Lock()
+        self.local = threading.local()
+
+    def __call__(self, image):
+        if self.bgr and isinstance(image, np.ndarray) and image.ndim == 3 and image.shape[2] == 3:
+            image = np.ascontiguousarray(image[:, :, ::-1])
+        with self.lock:
+            answer = self.detect(image)
+        self.local.answer = answer
+        return answer
+
+    def take_answer(self):
+        """the answer of this thread's last call, once."""
+        answer = getattr(self.local, 'answer', None)
+        self.local.answer = None
+        return answer
+
+
 class MultiAngleVLLMFrameAnalyzer(Server):
     """Multi-angle VLLM frame analyzer that processes multiple images captured simultaneously from different angles.
     It combines information from different views for more comprehensive analysis of individuals' activities,
@@ -158,6 +196,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.gaze_head_scale = _number(analyzer_config.get('gaze_head_scale'), None)
         # a person the face detector missed gets a head box from the pose's nose, eyes and ears (/features)
         self.gaze_head_box_fallback = _head_box_fallback(analyzer_config)
+        # RetinaFace takes BGR but has always been handed the RGB frame: true hands it BGR (more
+        # faces found; the gazes and the face check then differ from sessions analysed before)
+        self.gaze_face_detector_bgr = _as_bool(analyzer_config.get('gaze_face_detector_bgr'), False)
 
         # Only load families if AprilTag detection is enabled
         if self.april_tag_enabled:
@@ -263,9 +304,29 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.tracking_enabled = _as_bool(tracking_config.get('enabled'), True)
         self.tracking_buffer_frames = int(_number(tracking_config.get('buffer_frames'), DEFAULT_BUFFER_FRAMES))
         self.tracking_idle_seconds = float(_number(tracking_config.get('idle_seconds'), DEFAULT_IDLE_SECONDS))
+        # a lost track found again after split_gap_seconds (0: never) is a new track unless the
+        # appearance (the clothing colour, the face when switched on) confirms the person; with
+        # the cascade the tracks in view take the frame's persons first, and frozen lost tracks
+        # stay where they were last seen (both off: they added errors in the replay of 20 sessions)
+        self.tracking_cascade = _as_bool(tracking_config.get('cascade'), False)
+        self.tracking_freeze_lost = _as_bool(tracking_config.get('freeze_lost'), False)
+        split_gap = _number(tracking_config.get('split_gap_seconds'), DEFAULT_SPLIT_GAP_SECONDS)
+        self.tracking_split_gap_seconds = float(split_gap) if split_gap and split_gap > 0 else None
+        frame_seconds = _number(tracking_config.get('frame_seconds'), DEFAULT_FRAME_SECONDS)
+        self.tracking_frame_seconds = float(frame_seconds) if frame_seconds and frame_seconds > 0 else DEFAULT_FRAME_SECONDS
+        self.tracking_appearance = AppearanceParams.from_config(tracking_config.get('appearance'))
         self.trackers: dict[tuple[str, str], PersonTracker] = {}
+        # each session's tags as they looked when read on the torso, shared by its cameras'
+        # trackers and dropped with them; in this process's memory only
+        self.galleries: dict[str, TagGallery] = {}
         self.trackers_lock = threading.Lock()
         self.tracking_error = None
+        if self.features_enabled and self.tracking_enabled:
+            appearance = self.tracking_appearance
+            split = f"{self.tracking_split_gap_seconds:g} s" if self.tracking_split_gap_seconds else "never"
+            self.logger.info(f"Tracking: cascade {self.tracking_cascade}, lost tracks frozen {self.tracking_freeze_lost}, "
+                             f"a lost track found again is split after {split}, colour check "
+                             f"{appearance.colour.enabled}, face check {appearance.face.enabled}")
         self.logger.info(f"Features endpoint: {self.features_enabled}"
                          f"{f' (pose model {self.pose_model} under {self.pose_weights_dir})' if self.features_enabled else ''}")
 
@@ -297,7 +358,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.logger.error(f"Error loading prompt templates: {e}")
 
     @staticmethod
-    def _load_face_detector():
+    def _load_face_detector(bgr: bool = False):
         """RetinaFace built and warmed up now, before any request, and answering one call at a
         time. Its model is a lazy singleton that the first call builds, downloading the weights
         on the way; two requests arriving together (the action overlay and a features request,
@@ -307,13 +368,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         RetinaFace.build_model()
         # the first call traces the graph and claims the GPU memory; better now than in a request
         RetinaFace.detect_faces(np.zeros((320, 320, 3), dtype=np.uint8))
-        lock = threading.Lock()
-
-        def detect_faces(image):
-            with lock:
-                return RetinaFace.detect_faces(image)
-
-        return detect_faces
+        return _FaceDetector(RetinaFace.detect_faces, bgr=bgr)
 
     def _setup_gaze(self):
         """the face detector and the gaze backend, both before the first request"""
@@ -323,8 +378,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         if self.gaze_detect_enabled:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             try:
-                self.face_detector = self._load_face_detector()
-                self.logger.info("Face detector loaded: RetinaFace")
+                bgr = bool(getattr(self, 'gaze_face_detector_bgr', False))
+                self.face_detector = self._load_face_detector(bgr=bgr)
+                self.logger.info(f"Face detector loaded: RetinaFace, handed the frame in {'BGR' if bgr else 'RGB'}")
             except Exception as e:
                 self.logger.error(f"Error loading the face detector (RetinaFace): {e}")
             try:
@@ -383,6 +439,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                                   f"/features answers 503 until it can. The vfa-server extra installs "
                                   f"ultralytics, and the weights are fetched into {self.pose_weights_dir}.")
 
+        self._setup_face_check()
+
         # Setup VLM/LLM clients (required for analysis)
         if self.backend == 'zhipuai':
             try:
@@ -409,6 +467,38 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 base_url=self.llm_base_url
             )
 
+
+    def _setup_face_check(self):
+        """the tracker's face check (features.tracking.appearance.face): InsightFace's ArcFace
+        model, and SCRFD when `detection_model` names it (for the landmarks of a person the face
+        detector missed), ONNX files under the project (fetched once, now, when missing), loaded
+        now and never during a request. The faces come from the face detector the gaze runs, so
+        without it (and without SCRFD) the face check has nothing to compare. A model that cannot
+        be fetched or loaded leaves the face check off and the colour check on, and so does one
+        that fails on FACE_CHECK_MAX_FAILURES frames in a row (_face_failures)."""
+        self.face_embedder = None
+        self.face_landmarker = None
+        self.face_check_error = None
+        appearance = getattr(self, 'tracking_appearance', None)
+        if not (self.features_enabled and getattr(self, 'tracking_enabled', False) and appearance is not None
+                and appearance.face.enabled):
+            return
+        try:
+            recognition, detection = ensure_face_models(appearance.face, self.project_dir, self.logger)
+            self.face_embedder = FaceEmbedder(recognition).load()
+            if detection is not None:
+                self.face_landmarker = ScrfdDetector(detection, appearance.face.detection_size,
+                                                     appearance.face.detection_threshold).load()
+            self.logger.info(f"Face check on: {os.path.basename(recognition)} on {self.face_embedder.provider}"
+                             f"{f', SCRFD {os.path.basename(detection)} for the landmarks the face detector misses' if detection else ''}")
+            if getattr(self, 'face_detector', None) is None and self.face_landmarker is None:
+                self.logger.warning("The face check has no faces to compare: the face detector (RetinaFace) is not "
+                                    "loaded, so the tracker checks the clothing colour alone")
+        except Exception as e:
+            self.face_embedder = self.face_landmarker = None
+            self.face_check_error = f"{type(e).__name__}: {e}"
+            self.logger.error(f"The face check is off: its model could not be loaded ({self.face_check_error}); "
+                              f"the tracker checks the clothing colour alone")
 
     def describe(self) -> dict:
         """What this analyzer runs with, for GET /vllm/info: the backend, its models and
@@ -441,6 +531,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'face_detector_loaded': self.face_detector is not None,
             'gaze_head_scale': getattr(self.gaze, 'head_scale', None),
             'gaze_head_box_fallback': bool(getattr(self, 'gaze_head_box_fallback', True)) if self.gaze_detect_enabled else None,
+            # the channel order RetinaFace is handed: which faces it finds depends on it
+            'gaze_face_detector_bgr': bool(getattr(self, 'gaze_face_detector_bgr', False)) if self.gaze_detect_enabled else None,
             # the features endpoint: what its geometry ran with, since nothing else records
             # the server's config (openmmla.utils.session_provenance reads this answer)
             'features': {'enabled': bool(self.features_enabled),
@@ -525,26 +617,70 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         if not camera or not getattr(self, 'tracking_enabled', False):
             return None
         key = (str(session_id or ''), str(camera))
+        galleries = getattr(self, 'galleries', None)
+        if galleries is None:
+            galleries = self.galleries = {}
         with self.trackers_lock:
             now = time.monotonic()
             for idle in [k for k, tracker in self.trackers.items() if now - tracker.touched > self.tracking_idle_seconds]:
-                del self.trackers[idle]
+                self.trackers.pop(idle).drop()
+            # a session's gallery goes with the last of its trackers, this request's session too: a
+            # tracker made again after every camera of it fell silent starts with an empty gallery
+            sessions = {session for session, _ in self.trackers}
+            for session in [session for session in galleries if session not in sessions]:
+                galleries.pop(session).clear()
             tracker = self.trackers.get(key)
             if tracker is None and self.tracking_error is None:
+                appearance = getattr(self, 'tracking_appearance', None)
+                gallery = None
+                if appearance is not None and appearance.active:
+                    gallery = galleries.get(key[0]) or galleries.setdefault(
+                        key[0], TagGallery(appearance.gallery_size, appearance.sample_spacing_seconds))
                 try:
-                    tracker = self.trackers[key] = PersonTracker(buffer_frames=self.tracking_buffer_frames)
+                    tracker = self.trackers[key] = PersonTracker(
+                        buffer_frames=self.tracking_buffer_frames,
+                        cascade=getattr(self, 'tracking_cascade', False),
+                        freeze_lost=getattr(self, 'tracking_freeze_lost', False),
+                        split_gap_seconds=getattr(self, 'tracking_split_gap_seconds', DEFAULT_SPLIT_GAP_SECONDS),
+                        frame_seconds=getattr(self, 'tracking_frame_seconds', DEFAULT_FRAME_SECONDS),
+                        appearance=appearance, gallery=gallery, camera=key[1])
                 except Exception as e:
                     self.tracking_error = f"{type(e).__name__}: {e}"
                     self.logger.error(f"The person tracker could not be made ({self.tracking_error}): /features "
                                       f"answers without track ids. The vfa-server extra installs ultralytics.")
+            if key[0] in galleries and not any(session == key[0] for session, _ in self.trackers):
+                galleries.pop(key[0]).clear()
         return tracker
 
     def _tracking_info(self) -> dict:
-        """what /features tracks with, for describe()."""
-        return {'enabled': bool(getattr(self, 'tracking_enabled', False)),
+        """what /features tracks with, for describe(): the settings and the switches of the
+        appearance checks, never anything they hold."""
+        info = {'enabled': bool(getattr(self, 'tracking_enabled', False)),
                 'buffer_frames': getattr(self, 'tracking_buffer_frames', None),
                 'cameras': len(getattr(self, 'trackers', {}) or {}),
                 'error': getattr(self, 'tracking_error', None)}
+        appearance = getattr(self, 'tracking_appearance', None)
+        if appearance is not None:
+            info.update({'cascade': bool(getattr(self, 'tracking_cascade', False)),
+                         'freeze_lost': bool(getattr(self, 'tracking_freeze_lost', False)),
+                         'split_gap_seconds': getattr(self, 'tracking_split_gap_seconds', None),
+                         'frame_seconds': getattr(self, 'tracking_frame_seconds', None),
+                         'appearance': {
+                             'colour': {'enabled': appearance.colour.enabled, 'same': appearance.colour.same,
+                                        'different': appearance.colour.different},
+                             'face': {'enabled': appearance.face.enabled,
+                                      'loaded': getattr(self, 'face_embedder', None) is not None,
+                                      'model': os.path.basename(appearance.face.recognition_model) if appearance.face.enabled else None,
+                                      'same': appearance.face.same, 'different': appearance.face.different,
+                                      'min_face_px': appearance.face.min_face_px, 'max_face_yaw': appearance.face.max_face_yaw,
+                                      'landmarks': 'detector' + ('+scrfd' if getattr(self, 'face_landmarker', None) is not None else ''),
+                                      'error': getattr(self, 'face_check_error', None)},
+                             'descriptor_frames': appearance.descriptor_frames,
+                             'gallery_size': appearance.gallery_size,
+                             'sample_spacing_seconds': appearance.sample_spacing_seconds,
+                             'different_frames': appearance.different_frames,
+                             'rival_looks': appearance.rival_looks}})
+        return info
 
     def _run_gaze(self, image: np.ndarray, face_detector, inout_threshold: float) -> list[dict]:
         """the gaze model on the faces `face_detector` answers in `image` (the frame as decoded
@@ -558,8 +694,21 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         return gaze_results
 
     def _detector_faces(self, image: np.ndarray, inout_threshold: float) -> list[dict]:
-        """the faces the face detector finds, each with the gaze the gaze model gives it."""
-        return [face_from_result(result) for result in self._run_gaze(image, self.face_detector, inout_threshold)]
+        """the faces the face detector finds, each with the gaze the gaze model gives it and the
+        five landmarks the detector gave (RetinaFace does), which the face check aligns by."""
+        take = getattr(self.face_detector, 'take_answer', None)
+        if callable(take):
+            take()  # an answer left by a call that failed is not this frame's
+        results = self._run_gaze(image, self.face_detector, inout_threshold)
+        faces = [face_from_result(result) for result in results]
+        answer = take() if callable(take) else None
+        found = list(answer.values()) if isinstance(answer, dict) else []
+        for face, result in zip(faces, results):
+            index = result.get('original_index')
+            if isinstance(index, int) and 0 <= index < len(found) and isinstance(found[index], dict) \
+                    and found[index].get('landmarks'):
+                face['landmarks'] = found[index]['landmarks']
+        return faces
 
     def _pose_faces(self, image: np.ndarray, persons: list[dict], faces: list[dict], inout_threshold: float) -> dict[int, dict]:
         """{person index: face} for the persons the face detector missed: the gaze model runs once
@@ -569,6 +718,47 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             return {}  # nobody missed, or no missed head seen: no second pass
         found = head_box_detections(boxes)
         return pose_faces_from_results(self._run_gaze(image, lambda rgb: found, inout_threshold), list(boxes))
+
+    def _looks(self, image: np.ndarray, persons: list[dict], faces: list[dict], tracker: PersonTracker):
+        """what each person of the frame looks like to the tracker's appearance checks (their
+        clothing colour, their face when the face check is on), or None without checks; a frame
+        the checks fail on is tracked without them, and the log says why once, never what they
+        saw."""
+        appearance = getattr(tracker, 'appearance', None)
+        if appearance is None or not persons:
+            return None
+        errors = []
+        try:
+            looks = describe_persons(image, persons, faces, self.keypoint_confidence, appearance,
+                                     embedder=getattr(self, 'face_embedder', None),
+                                     landmarker=getattr(self, 'face_landmarker', None), errors=errors)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            if error != getattr(self, 'appearance_error', None):
+                self.appearance_error = error
+                self.logger.error(f"The tracker's appearance checks failed on a frame ({error}): tracked without them")
+            return None
+        self._face_failures(errors, looks)
+        return looks
+
+    def _face_failures(self, errors: list, looks: list) -> None:
+        """counts the frames in a row on which the face models failed (a face embedded ends the
+        count): the error is logged once, and FACE_CHECK_MAX_FAILURES frames in a row switch the
+        face check off for this process, the colour check staying on."""
+        if not errors:
+            if any(look.face is not None for look in looks):
+                self.face_failures = 0
+            return
+        self.face_failures = getattr(self, 'face_failures', 0) + 1
+        error = f"{type(errors[0]).__name__}: {errors[0]}"
+        if error != getattr(self, 'face_failure_logged', None):
+            self.face_failure_logged = error
+            self.logger.error(f"The face check failed on a frame ({error}): the frame's faces left out, its colours kept")
+        if self.face_failures >= FACE_CHECK_MAX_FAILURES and getattr(self, 'face_embedder', None) is not None:
+            self.face_embedder = self.face_landmarker = None
+            self.face_check_error = f"failed on {self.face_failures} frames in a row ({error})"
+            self.logger.error(f"The face check is off: it {self.face_check_error}; the tracker checks the clothing "
+                              f"colour alone until the server restarts")
 
     def _frame_features(self, image_bytes: bytes, angle: str, zones: dict, inout_threshold: float,
                         keypoints: bool = True, gaze: bool = True, tracker: PersonTracker | None = None) -> dict:
@@ -604,10 +794,14 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                                    min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
                                    keypoints=keypoints, pose_faces=pose_faces)
         else:
+            looks = self._looks(image, persons, faces, tracker)
             # this camera's frames go through its tracker one at a time: the track ids first,
             # then, once the tags are matched, the tag each track wore before
             with tracker.lock:
-                tracker.track(persons)
+                if looks is None:
+                    tracker.track(persons)
+                else:
+                    tracker.track(persons, looks)
                 frame = frame_features(persons, tags, faces, zones, width, height, angle,
                                        min_confidence=self.keypoint_confidence, inout_threshold=inout_threshold,
                                        keypoints=keypoints, remember=tracker.assign, pose_faces=pose_faces)
