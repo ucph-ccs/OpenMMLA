@@ -20,7 +20,14 @@ take the tag of the track's nearest read when that read is at most TAG_MEMORY_SE
 seats, and `n_vfa_propagated` says how many of the window's person frames were named that way; a
 session whose persons were not tracked has no such column. `window_features(..., tag_memory=None)`
 keeps every kept tag and carries the reads without a limit, as every table fused before
-2026-10-02.
+2026-10-02. Right after the expiry, a kept tag the face kept refusing is taken off too: the
+features endpoint checks a person whose track remembers a tag against that tag's gallery and
+records the verdict (`reid.tag`), and a run of FACE_REFUSAL_FRAMES or more 'different' face
+verdicts on the tag, with no read of it and no 'same' verdict on it between, takes the tag off the
+track from the first of them to the last, the frames without a face between included
+(refuse_track_tags). The persons of that stretch are marked (TAG_REFUSED), and the propagation does
+not give them the tag back. `window_features(..., face_refusal=None)` leaves the checks unread; a
+session whose persons carry none gives the same table either way.
 
 The events come from InfluxDB (a session id) or from the measurements folder Sessions -> Export writes
 (`<session>_<suffix>.json`), so a table can be built offline from an export.
@@ -226,8 +233,22 @@ TRACK_GAP_SECONDS = 60.0
 # two minutes and in 7 to 22 % beyond; at a minute the cleaner sessions keep 87 to 97 % of their
 # tagged frames
 TAG_MEMORY_SECONDS = 60.0
+# how many face checks in a row must call the person under a remembered tag someone else before the
+# fusion takes the tag off (refuse_track_tags): the features endpoint checks every person whose
+# track remembers a tag against that tag's gallery (`reid.tag`, since 2026-10-02) and, by default,
+# only records the verdict. A single 'different' verdict is usually wrong (70 of the 82 that a later
+# read on the track could check, in a pilot re-run), and so are short runs: in the re-run of one
+# session (2026-10-02) a pupil the tracker carried under another pupil's tag was called someone else
+# 271 times in a row, while the longest run on any other track was 12, on a track that read the tag
+# it carried 9 s before and 50 s after with no jump between. 13 is the smallest run that takes off no
+# identity a read confirms there (any value up to 271 gives that session the same table); one
+# session only, so the full batch must check it again
+FACE_REFUSAL_FRAMES = 13
 # the tag_match of a person whose tag the fusion carried along their track
 PROPAGATED = 'propagated'
+# the field of a person whose remembered tag the fusion took off on the face's word: the tag (a list
+# when more than one), which the propagation never gives them back
+TAG_REFUSED = 'tag_refused'
 # the features endpoint's keypoint_confidence and inout_threshold, which every replay used (the
 # server's defaults): the hand relabel must score as the server did, and reads them from a frame that
 # states them (its `scoring`, every answer from version 2 of the hand circle on); these stand in for
@@ -1574,6 +1595,128 @@ def expire_track_tags(records: Iterable[dict], layout: tuple[int | None, frozens
     return out
 
 
+def _refused_tags(person: dict) -> set[str]:
+    """the tags the fusion refused the person on the face's word (TAG_REFUSED)."""
+    refused = person.get(TAG_REFUSED)
+    if refused is None:
+        return set()
+    return {str(tag) for tag in refused} if isinstance(refused, list) else {str(refused)}
+
+
+def _face_verdict(person: dict) -> tuple[str, str] | None:
+    """(tag, verdict) of the face check the features endpoint made of the person against the tag
+    their track remembers (`reid.tag` of kind 'face'; the tag the check names, else the one the
+    person carries from the track's memory); None without one."""
+    reid = person.get('reid')
+    check = reid.get('tag') if isinstance(reid, dict) else None
+    if not isinstance(check, dict) or check.get('kind') != 'face':
+        return None
+    tag = check.get('tag_id')
+    if tag is None:
+        if person.get('tag_id') is None or person.get('tag_match') != 'track':
+            return None
+        tag = person['tag_id']
+    return str(tag), str(check.get('verdict'))
+
+
+def face_refusal_runs(persons: list[dict], frames: int = FACE_REFUSAL_FRAMES) -> list[tuple[str, int, int]]:
+    """the runs of one track's persons (in time order) in which the face refused a remembered tag
+    at least `frames` times in a row: (tag, place of the run's first 'different' verdict, place of
+    its last). A read of the tag or a 'same' verdict on it ends a run; a person without a face
+    check of the tag, an 'unknown' verdict or a check by the colour does not."""
+    found: list[tuple[str, int, int]] = []
+    # tag -> the places of the open run's 'different' verdicts
+    runs: dict[str, list[int]] = {}
+
+    def close(tag: str) -> None:
+        places = runs.pop(tag, [])
+        if len(places) >= frames:
+            found.append((tag, places[0], places[-1]))
+
+    for n, person in enumerate(persons):
+        if _decoded(person):
+            close(str(person['tag_id']))
+        verdict = _face_verdict(person)
+        if verdict is None:
+            continue
+        tag, said = verdict
+        if said == 'different':
+            runs.setdefault(tag, []).append(n)
+        elif said == 'same':
+            close(tag)
+    for tag in list(runs):
+        close(tag)
+    return sorted(found, key=lambda run: (run[1], run[2]))
+
+
+def refuse_track_tags(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None,
+                      frames: int = FACE_REFUSAL_FRAMES, gap: float = TRACK_GAP_SECONDS) -> list[dict]:
+    """the vfa_features records with a remembered tag taken off where the face kept refusing it:
+    on a track of a camera, a run of at least `frames` face checks that called the person someone
+    else than the tag the track remembers (`reid.tag`, kind 'face', verdict 'different'), with no
+    read of that tag and no 'same' verdict on it in between (a frame without a check, an 'unknown'
+    verdict or a check by the colour does not end the run), takes the tag off every frame of the
+    track from the run's first such verdict to its last, those without a face included, since the
+    fusion is offline. Such a person is an untagged body again (`person_id` track_<id>), and every
+    person of that stretch is marked refused for the tag (TAG_REFUSED), which propagate_track_tags
+    never gives them back (it may give them another); the frame's pairs and gaze targets follow the
+    new name. A track id not seen for more than `gap` seconds is another track from then on, and a
+    track id twice in one frame is not followed there. Records nothing changes in are returned as
+    they were, so a session whose persons carry no face checks gives the same records; `layout` is
+    the session's frame_set_layout, worked out from the records when not given."""
+    records = list(records)
+    if frames is None or frames < 1:
+        return records
+    _, shared = layout if layout is not None else frame_set_layout(records)
+    parsed = [_frames_of(record) for record in records]
+    # (camera, track id) -> [(time, record, frame, person)]
+    tracks: dict[tuple[str, Any], list[tuple[float, int, int, int]]] = defaultdict(list)
+    for i, (record, frames_here) in enumerate(zip(records, parsed)):
+        moment = _time(record)
+        if moment <= 0:
+            continue
+        for j, (frame, camera) in enumerate(zip(frames_here, camera_keys(frames_here, shared))):
+            persons = frame.get('persons') or []
+            counts = Counter(person.get('track_id') for person in persons if person.get('track_id') is not None)
+            for k, person in enumerate(persons):
+                track = person.get('track_id')
+                if track is not None and counts[track] == 1:
+                    tracks[(camera, track)].append((moment, i, j, k))
+    # (record, frame) -> {person: refused tags}
+    refused: dict[tuple[int, int], dict[int, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for occurrences in tracks.values():
+        occurrences.sort()
+        for segment in _track_segments(occurrences, gap):
+            for tag, first, last in face_refusal_runs([parsed[i][j]['persons'][k] for _, i, j, k in segment], frames):
+                for _, i, j, k in segment[first:last + 1]:
+                    refused[(i, j)][k].add(tag)
+    if not refused:
+        return records
+    out = list(records)
+    changed: dict[int, dict[int, dict]] = defaultdict(dict)
+    for (i, j), marks in refused.items():
+        frame = parsed[i][j]
+        persons = list(frame.get('persons') or [])
+        names: dict[str, str] = {}
+        for k, tags in marks.items():
+            person = persons[k]
+            every = sorted(_refused_tags(person) | tags, key=_tag_key)
+            update: dict[str, Any] = {TAG_REFUSED: every[0] if len(every) == 1 else every}
+            if (person.get('tag_id') is not None and str(person['tag_id']) in tags
+                    and person.get('tag_match') == 'track'):
+                name = f"track_{person.get('track_id')}"
+                if person.get('person_id') is not None:
+                    names[str(person['person_id'])] = name
+                update.update(tag_id=None, tag_match=None, person_id=name)
+            persons[k] = dict(person, **update)
+        # a name another person of the frame still holds keeps its pairs and targets
+        held = {str(person.get('person_id')) for person in persons}
+        changed[i][j] = _renamed(frame, persons, {old: new for old, new in names.items() if old not in held})
+    for i, frames_here in changed.items():
+        out[i] = dict(records[i], features=[frames_here.get(j, frame) for j, frame in enumerate(parsed[i])])
+    return out
+
+
 def propagate_track_tags(records: Iterable[dict], layout: tuple[int | None, frozenset[str]] | None = None,
                          gap: float = TRACK_GAP_SECONDS, memory: float | None = None) -> list[dict]:
     """the vfa_features records with the tags carried along the tracks, offline, over the whole
@@ -1584,11 +1727,12 @@ def propagate_track_tags(records: Iterable[dict], layout: tuple[int | None, froz
     frame going to the read nearest it. A track id not seen for more than `gap` seconds is
     another track from then on. A tag is only ever given to a person without one, and not in a
     frame where another person already carries it or where two tracks would get it (then
-    neither does); a track id twice in one frame names nobody. With `memory` a person takes the
-    nearest read's tag only when that read is at most `memory` seconds away. The pairs and gaze
-    targets of a renamed person's frame follow the new name. Records nothing changes in are
-    returned as they were; `layout` is the session's frame_set_layout, worked out from the records
-    when not given."""
+    neither does); a track id twice in one frame names nobody. A person the face refused a tag
+    (TAG_REFUSED, refuse_track_tags) is not given that tag, and another person of the frame may
+    then take it. With `memory` a person takes the nearest read's tag only when that read is at
+    most `memory` seconds away. The pairs and gaze targets of a renamed person's frame follow the
+    new name. Records nothing changes in are returned as they were; `layout` is the session's
+    frame_set_layout, worked out from the records when not given."""
     records = list(records)
     _, shared = layout if layout is not None else frame_set_layout(records)
     parsed = [_frames_of(record) for record in records]
@@ -1617,13 +1761,18 @@ def propagate_track_tags(records: Iterable[dict], layout: tuple[int | None, froz
                 continue
             times = [moment for moment, _ in anchors]
             for moment, i, j, k in segment:
-                if parsed[i][j]['persons'][k].get('tag_id') is not None:
+                person = parsed[i][j]['persons'][k]
+                if person.get('tag_id') is not None:
                     continue
                 if memory is not None:
                     at = bisect.bisect_left(times, moment)
                     if min(abs(moment - times[n]) for n in (at - 1, at) if 0 <= n < len(times)) > memory:
                         continue
-                proposed[(i, j)].append((k, _nearest_tag(anchors, times, moment)))
+                tag = _nearest_tag(anchors, times, moment)
+                # a person the face refused the tag (refuse_track_tags) is not given it back
+                if str(tag) in _refused_tags(person):
+                    continue
+                proposed[(i, j)].append((k, tag))
     if not proposed:
         return records
     out = list(records)
@@ -2550,7 +2699,8 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
                     participants: list[str] | None = None, speakers: list[str] | None = None,
                     track_tags: bool = True, pupils: list[str] | None = None,
                     work_area: bool = True, seat_partners: bool = True, hand_relabel: bool = True,
-                    joint_split: bool = False, tag_memory: float | None = TAG_MEMORY_SECONDS) -> list[dict]:
+                    joint_split: bool = False, tag_memory: float | None = TAG_MEMORY_SECONDS,
+                    face_refusal: int | None = FACE_REFUSAL_FRAMES) -> list[dict]:
     """the fusion table: one row per window over the session's span. `pupils` are the session's
     pupils, the in-group set whose faces and hands are a partner's (default_pupils of the
     participants when not given). With `hand_relabel` (the default) every stored frame's gaze
@@ -2562,7 +2712,10 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     (the default) a gaze the server called elsewhere that lands in its camera's work area is
     work_area (label_work_areas). A tag the features endpoint kept on a track more than
     `tag_memory` seconds after the track last read it is taken off first, before anything learns
-    from the tags (expire_track_tags); None keeps every kept tag. With `track_tags` (the default)
+    from the tags (expire_track_tags); None keeps every kept tag. Right after it, a remembered tag
+    the face check refused at least `face_refusal` times in a row on a track is taken off that
+    stretch of the track, and the propagation does not give it back there (refuse_track_tags);
+    None or 0 leaves the face checks unread. With `track_tags` (the default)
     the tags are then carried along the tracks of the features endpoint, up to `tag_memory` seconds
     from a read (propagate_track_tags), and a session whose persons were tracked gets
     `n_vfa_propagated`. With `seat_partners` (the default) a gaze on an untagged body
@@ -2596,6 +2749,10 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     # areas, the seats, the pupils' tracks and the propagation learn from the tags
     if tag_memory is not None and _tracked(raw):
         raw = expire_track_tags(raw, layout, tag_memory)
+    # and so is a remembered tag the face kept calling someone else's on its track; the persons of
+    # that stretch are marked, so the propagation does not give it back to them
+    if face_refusal and _tracked(raw):
+        raw = refuse_track_tags(raw, layout, face_refusal)
     # the gaze targets and hand distances made again with the current hand circle, from the frames
     # as the server stored and named them; it touches no box, tag or name. Without the relabel, the
     # work area and the hand columns read the circle the stored targets were made with

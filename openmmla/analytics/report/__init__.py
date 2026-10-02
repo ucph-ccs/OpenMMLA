@@ -10,4 +10,4 @@ caller pays only for what it uses."""
 
 # the version of what the parts hold: a cached part written by another version is recomputed, so
 # raise it whenever a change alters what a part computes (not for a change that only moves code)
-REPORT_VERSION = 3
+REPORT_VERSION = 4

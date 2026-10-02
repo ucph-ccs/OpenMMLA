@@ -83,8 +83,10 @@ def build_video(events: dict[str, list[dict]], t0: float, t1: float, progress: P
     records = events.get(EVENT_TYPE_VFA_FEATURES) or []
     # the hand circle the fusion remade the gaze targets with (window_features' default relabel)
     nudge = WF.vfa_features.HAND_NUDGES[WF.table_hand_circle(records, True)]
-    # without the tags the server kept on a track too long after its last read, as the fusion
-    records = WF.expire_track_tags(records)
+    # without the tags the server kept on a track too long after its last read, nor those the face
+    # kept refusing on their track, as the fusion
+    layout = WF.frame_set_layout(records)
+    records = WF.refuse_track_tags(WF.expire_track_tags(records, layout), layout)
     scan = _scan(records, pupils, starts, lambda done, total: report(STEPS[3], done, total), nudge)
 
     report(STEPS[4], 0, 1)

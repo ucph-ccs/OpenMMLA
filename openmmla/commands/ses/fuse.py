@@ -39,6 +39,13 @@ def get_parser():
             'seconds after a track last read a tag that the tag stays on the track: a tag the server kept on it '
             'longer is taken off, and a read is carried along its track no further; 0 keeps every kept tag and '
             'carries the reads without a limit, as every table fused before 2026-10-02', shortname='-tm')
+    add_arg('face_refusal', int, 13,
+            "how many face checks in a row must call a tracked person someone else than the tag their track "
+            "remembers (the reid.tag verdicts the VFA server records since 2026-10-02) before the fusion takes "
+            "that tag off the track from the first such verdict to the last, frames without a face between "
+            "included, and does not carry it back there; a read of the tag or a 'same' verdict on it ends a run, "
+            "a frame without a check or an 'unknown' verdict does not; 0 leaves the checks unread, as every "
+            "table fused before 2026-10-02 (window_features.FACE_REFUSAL_FRAMES)", shortname='-fr')
     add_arg('out', str, None,
             'where to write the table (.csv, else JSON lines); if not set, '
             'artifacts/<session>/analysis/features/<session>_window_features.csv', shortname='-o')
@@ -60,6 +67,9 @@ def main():
     if args.tag_memory < 0:
         parser.error("-tm/--tag_memory must be 0 (no limit) or more")
     tag_memory = args.tag_memory or None
+    if args.face_refusal < 0:
+        parser.error("-fr/--face_refusal must be 0 (off) or more")
+    face_refusal = args.face_refusal or None
     project_dir = args.project_dir or os.getcwd()
     session_id = args.session_id
     inputs: list[str] = []
@@ -93,7 +103,8 @@ def main():
             parser.error(str(e))
         pupils_source = 'manifest' if pupils is not None else 'trust bound'
     rows = fusion.window_features(events, window=args.window, step=args.step, participants=participants, pupils=pupils,
-                                  hand_relabel=args.hand_relabel, joint_split=args.joint_split, tag_memory=tag_memory)
+                                  hand_relabel=args.hand_relabel, joint_split=args.joint_split, tag_memory=tag_memory,
+                                  face_refusal=face_refusal)
     if not rows:
         print(f"No events found for session {session_id}: nothing to build a table from.")
         return
@@ -184,6 +195,8 @@ def main():
                                              'joint_split': joint_split,
                                              # None: every tag the server kept, reads carried without a limit
                                              'tag_memory_seconds': tag_memory,
+                                             # None: the face checks of remembered tags left unread
+                                             'face_refusal_frames': face_refusal,
                                              'events': counts, 'source': args.measurements or 'influxdb'},
                                  root=project_dir, project_dir=project_dir)
         write_analysis_record(record, os.path.join(os.path.dirname(path), 'fusion'))
