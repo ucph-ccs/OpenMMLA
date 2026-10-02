@@ -304,10 +304,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.tracking_enabled = _as_bool(tracking_config.get('enabled'), True)
         self.tracking_buffer_frames = int(_number(tracking_config.get('buffer_frames'), DEFAULT_BUFFER_FRAMES))
         self.tracking_idle_seconds = float(_number(tracking_config.get('idle_seconds'), DEFAULT_IDLE_SECONDS))
-        # a lost track found again after split_gap_seconds (0: never) is a new track unless the
-        # appearance (the clothing colour, the face when switched on) confirms the person; with
-        # the cascade the tracks in view take the frame's persons first, and frozen lost tracks
-        # stay where they were last seen (both off: they added errors in the replay of 20 sessions)
+        # a lost track found again after split_gap_seconds (0: never) is checked by the appearance
+        # and continues under a new id by appearance.split_on (by default only on a 'different'
+        # verdict); with the cascade the tracks in view take the frame's persons first, and frozen
+        # lost tracks stay where they were last seen (both off: they added errors in the replay of
+        # 20 sessions)
         self.tracking_cascade = _as_bool(tracking_config.get('cascade'), False)
         self.tracking_freeze_lost = _as_bool(tracking_config.get('freeze_lost'), False)
         split_gap = _number(tracking_config.get('split_gap_seconds'), DEFAULT_SPLIT_GAP_SECONDS)
@@ -325,8 +326,9 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             appearance = self.tracking_appearance
             split = f"{self.tracking_split_gap_seconds:g} s" if self.tracking_split_gap_seconds else "never"
             self.logger.info(f"Tracking: cascade {self.tracking_cascade}, lost tracks frozen {self.tracking_freeze_lost}, "
-                             f"a lost track found again is split after {split}, colour check "
-                             f"{appearance.colour.enabled}, face check {appearance.face.enabled}")
+                             f"a lost track found again after {split} is split on {appearance.split_on!r}, "
+                             f"tag checks act {appearance.tag_check_acts}, colour check {appearance.colour.enabled}, "
+                             f"face check {appearance.face.enabled}")
         self.logger.info(f"Features endpoint: {self.features_enabled}"
                          f"{f' (pose model {self.pose_model} under {self.pose_weights_dir})' if self.features_enabled else ''}")
 
@@ -664,6 +666,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             info.update({'cascade': bool(getattr(self, 'tracking_cascade', False)),
                          'freeze_lost': bool(getattr(self, 'tracking_freeze_lost', False)),
                          'split_gap_seconds': getattr(self, 'tracking_split_gap_seconds', None),
+                         'split_on': appearance.split_on, 'tag_check_acts': appearance.tag_check_acts,
                          'frame_seconds': getattr(self, 'tracking_frame_seconds', None),
                          'appearance': {
                              'colour': {'enabled': appearance.colour.enabled, 'same': appearance.colour.same,

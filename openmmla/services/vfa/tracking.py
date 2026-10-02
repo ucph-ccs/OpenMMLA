@@ -10,26 +10,34 @@ lost ones, and a lost track's box keeps moving at its last velocity; so a lost t
 detection from the track in view of the same person, drift onto someone else, and hand them its
 tag. The tracker here (a small subclass of Ultralytics' BYTETracker, below) adds:
 
-- **split** (on, `split_gap_seconds` 3): a lost track found again 3 s or more after it last saw
-  its person (two missed frame sets at one a second) continues under a new track id, which
-  inherits no tag, unless the appearance confirms the person;
+- **split** (`split_gap_seconds` 3, `split_on` 'different'): a lost track found again 3 s or
+  more after it last saw its person (two missed frame sets at one a second) continues under a
+  new track id, which inherits no tag, when the appearance calls the person someone else; with
+  `split_on` 'unconfirmed' (the first rule) it does unless the appearance confirms the person;
 - **cascade** (off): the tracks in view take the frame's persons first; a lost track is offered
   only a person none of them took;
 - **freeze_lost** (off): a lost track stays where its person was last seen, with no velocity,
   and a track found again starts its motion afresh from where it is found.
 
-The defaults come from a replay of the stored boxes of 20 sessions (36.9 camera-hours, 2026-10-02):
-a track found again after 3 to 4 s already holds someone else as often as after a longer gap
-(14 to 17 % of the reads across it disagree, against 4 to 5 % after 2 s and 0.1 % in view), and
-splitting there cuts the fused frames whose tag a read on the same track contradicts by almost
-two thirds (2.84 % to 1.02 % with ByteTrack's own association, when no appearance ever confirms). The cascade
-keeps a person whose box a lost track would take on their own track, but swaps more persons
-between tracks in view, which no split catches (1.52 % with the split); freezing adds errors in
-every pairing. Both stay as switches.
+The cascade and freezing were weighed in a replay of the stored boxes of 20 sessions (36.9
+camera-hours, 2026-10-02), with the first split rule: a track found again after 3 to 4 s already
+holds someone else as often as after a longer gap (14 to 17 % of the reads across it disagree,
+against 4 to 5 % after 2 s and 0.1 % in view), and splitting every such track cut the fused
+frames whose tag a read on the same track contradicts from 2.84 % to 1.02 %. The cascade keeps a
+person whose box a lost track would take on their own track, but swaps more persons between
+tracks in view, which no split catches (1.52 % with the split); freezing adds errors in every
+pairing. Both stay as switches. A pilot re-run of three sessions then found that splitting every
+re-found track the face did not confirm cost more presence than it saved in wrong tags (the face
+had nothing to compare for 3,978 of 4,013 splits, and 84 % of the re-finds after 3 s were the
+same person), so by default only a 'different' verdict splits.
 
-The appearance (openmmla.services.vfa.appearance: the clothing colour, and the face when it is
-switched on) also blocks a lost track from a person it says is someone else, and lets a track
-carry its remembered tag only while the person still matches that tag's gallery."""
+The appearance (openmmla.services.vfa.appearance: the face when it is switched on, and the
+clothing colour, off by default) also blocks a lost track from a person it says is someone
+else, and for the REFUSAL_HOLD_FRAMES frames after from any person it does not confirm, so a
+refused newcomer whose face is not seen in the next frame is not taken by it either (while it
+is on, a lost track overlapping a track in view also gives way to it in ByteTrack's duplicate
+check), and checks a track's remembered tag against that tag's gallery:
+the verdict is recorded, and only with `tag_check_acts` withholds the tag and splits the track."""
 from __future__ import annotations
 
 import inspect
@@ -40,13 +48,17 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from openmmla.services.vfa.appearance import (VERDICT_DIFFERENT, VERDICT_SAME, AppearanceParams, Check, Look,
-                                              TagGallery, TrackLooks, decide, tag_check)
+from openmmla.services.vfa.appearance import (SPLIT_ON_UNCONFIRMED, SPLIT_RULES, VERDICT_DIFFERENT, VERDICT_SAME,
+                                              AppearanceParams, Check, Look, TagGallery, TrackLooks, decide, tag_check)
 
 DEFAULT_BUFFER_FRAMES = 30  # frames a person out of view keeps their track (and their tag)
 DEFAULT_IDLE_SECONDS = 600.0  # a camera not heard from for this long forgets its tracks
-DEFAULT_SPLIT_GAP_SECONDS = 3.0  # a lost track found again after this long is a new track unless the appearance confirms it
+DEFAULT_SPLIT_GAP_SECONDS = 3.0  # a lost track found again sooner keeps its id and tag; one found later is split as split_on says
 DEFAULT_FRAME_SECONDS = 1.0  # the time between two frames of a camera: the synchronizer sends one frame set a second
+# frames after the appearance refused a lost track a person in which that track takes only a
+# person the appearance confirms: a newcomer's track is confirmed on its second frame, so the
+# refused person has one of their own by then even when the pose model misses them once
+REFUSAL_HOLD_FRAMES = 3
 
 
 class _Detections:
@@ -126,6 +138,7 @@ def _tracker_classes():
         _owner = None  # a weak reference to the PersonByteTracker that made it
         _observed = None  # the box state the last detection left, before the next prediction
         _started = None  # the true start frame while lost (start_frame then says it never outlives a track in view)
+        _refused = None  # the frame the appearance last refused it a person while lost (the refusal holds REFUSAL_HOLD_FRAMES)
 
         def next_id(self):
             owner = self._owner() if self._owner is not None else None
@@ -151,6 +164,7 @@ def _tracker_classes():
             split = owner.on_refound(self, new_track) if owner is not None else False
             if self._started is not None:
                 self.start_frame, self._started = self._started, None
+            self._refused = None
             super().re_activate(new_track, frame_id, new_id=bool(new_id or split))
             if owner is not None and owner.freeze:
                 # the motion before the gap says nothing about the motion after it
@@ -209,41 +223,59 @@ def _tracker_classes():
             matches, _, _ = matching.linear_assignment(costs[np.ix_(rows, columns)], thresh=threshold)
             return [(rows[int(r)], columns[int(c)]) for r, c in matches]
 
+        def _pairs(self, costs, in_view, lost, count, threshold):
+            """the first assignment over `costs`: one over every track, or with the cascade the
+            tracks in view first and the lost ones over the persons they left."""
+            if not self.cascade:
+                return self._assign(costs, sorted(in_view + lost), range(count), threshold)
+            pairs = self._assign(costs, in_view, range(count), threshold)
+            taken = {j for _, j in pairs}
+            return pairs + self._assign(costs, lost, [j for j in range(count) if j not in taken], threshold)
+
         def _decide_first_pass(self, tracks, detections, dists):
             """the first assignment, decided here: a lost track is never matched to a person its
-            appearance calls someone else, and with the cascade the tracks in view go first.
-            Answers a matrix that admits exactly the pairs chosen (0 for them, above the
-            threshold elsewhere), so ultralytics' own assignment on it applies these."""
+            appearance calls someone else, nor, for REFUSAL_HOLD_FRAMES frames after such a
+            refusal, to one its appearance does not confirm; with the cascade the tracks in view
+            go first. Answers a matrix that admits exactly the pairs chosen (0 for them, above
+            the threshold elsewhere), so ultralytics' own assignment on it applies these."""
             threshold = float(self.args.match_thresh)
             owner = self.owner()
             blocked = max(1.0, threshold) + 1.0
             in_view = [i for i, track in enumerate(tracks) if track.state == TrackState.Tracked]
             lost = [i for i, track in enumerate(tracks) if track.state != TrackState.Tracked]
-            gated, checks = dists.copy(), {}
+            gated, checks, refused = dists.copy(), {}, {}  # refused: (i, j) -> the check that refused it (None: nothing compared)
             for i in lost:
+                # a refusal holds: the person it refused may show no face in the next frames,
+                # before a track of their own is confirmed
+                held = tracks[i]._refused is not None and self.frame_id - tracks[i]._refused <= REFUSAL_HOLD_FRAMES
                 for j in range(len(detections)):
                     if gated[i, j] >= threshold or owner is None:
                         continue
                     check = owner.reactivation_check(tracks[i], int(detections[j].idx))
                     if check is not None:
                         checks[(i, j)] = check
-                        if check.verdict == VERDICT_DIFFERENT:
-                            gated[i, j] = blocked
-            if self.cascade:
-                pairs = self._assign(gated, in_view, range(len(detections)), threshold)
-                taken = {j for _, j in pairs}
-                pairs += self._assign(gated, lost, [j for j in range(len(detections)) if j not in taken], threshold)
-            else:
-                pairs = self._assign(gated, range(len(tracks)), range(len(detections)), threshold)
+                    verdict = check.verdict if check is not None else None
+                    if verdict == VERDICT_DIFFERENT or (held and verdict != VERDICT_SAME):
+                        gated[i, j] = blocked
+                        refused[(i, j)] = check
+            pairs = self._pairs(gated, in_view, lost, len(detections), threshold)
             decided = np.full(dists.shape, blocked)
             for i, j in pairs:
                 decided[i, j] = 0.0
                 if tracks[i].state != TrackState.Tracked:
                     self.found[id(tracks[i])] = (int(detections[j].idx), self.frame_id - tracks[i].frame_id, checks.get((i, j)))
-            if owner is not None:
+            if owner is not None and refused:
                 matched = {j for _, j in pairs}
-                for (i, j), check in sorted(checks.items(), key=lambda item: item[1].score):
-                    if check.verdict == VERDICT_DIFFERENT and j not in matched:
+                # a refusal is recorded on a person no track took, and on one it kept from the
+                # lost track that would have taken them (who then went to another track); such
+                # a 'different' refusal starts (or renews) the track's hold
+                decisive = set(refused) & set(self._pairs(dists, in_view, lost, len(detections), threshold))
+                order = sorted(refused.items(), key=lambda item: (item[1] is None or item[1].verdict != VERDICT_DIFFERENT,
+                                                                  item[1].score if item[1] is not None else 0.0))
+                for (i, j), check in order:
+                    if j not in matched or (i, j) in decisive:
+                        if check is not None and check.verdict == VERDICT_DIFFERENT:
+                            tracks[i]._refused = self.frame_id
                         owner.note(int(detections[j].idx), 'track', check, gap_frames=self.frame_id - tracks[i].frame_id,
                                    blocked=True)
             return decided
@@ -297,15 +329,26 @@ class PersonTracker:
     `looks` (openmmla.services.vfa.appearance.describe_persons, one per person) feed the
     appearance checks when `appearance` is given: each track's own looks (its last few, a
     couple of seconds apart), and the session's `gallery` of the tags read on the torso, shared
-    by the session's cameras. Without them every check is skipped: a lost track found within
-    `split_gap_seconds` keeps its id and tag, one found later is split, and a remembered tag is
-    carried as before."""
+    by the session's cameras. Without them every check is skipped: a lost track keeps its id and
+    tag whenever it is found again (with `split_on` 'unconfirmed', one found after
+    `split_gap_seconds` is split), and a remembered tag is carried as before.
+
+    `split_on` and `tag_check_acts` default to the `appearance` parameters' (or their defaults
+    without them): which verdict splits a lost track found again after `split_gap_seconds`
+    ('different', or 'unconfirmed': any but 'same'), and whether a 'different' verdict on a
+    remembered tag withholds it and splits the track, or is only recorded."""
 
     def __init__(self, buffer_frames: int = DEFAULT_BUFFER_FRAMES, new_track_threshold: float = 0.25,
                  match_threshold: float = 0.8, cascade: bool = False, freeze_lost: bool = False,
                  split_gap_seconds: float | None = DEFAULT_SPLIT_GAP_SECONDS,
                  frame_seconds: float = DEFAULT_FRAME_SECONDS, appearance: AppearanceParams | None = None,
-                 gallery: TagGallery | None = None, camera: str | None = None):
+                 gallery: TagGallery | None = None, camera: str | None = None, split_on: str | None = None,
+                 tag_check_acts: bool | None = None):
+        rules = appearance if appearance is not None else AppearanceParams()
+        self.split_on = str(rules.split_on if split_on is None else split_on).strip().lower()
+        if self.split_on not in SPLIT_RULES:
+            raise ValueError(f"split_on is {self.split_on!r}, not one of {', '.join(SPLIT_RULES)}")
+        self.tag_check_acts = bool(rules.tag_check_acts if tag_check_acts is None else tag_check_acts)
         PersonByteTracker, _, _ = _tracker_classes()  # the vfa-server extra
         # the first threshold at 0: the pose model already kept the persons it believes in, and
         # a detection below it would be matched in a second pass whose indices are its own
@@ -318,11 +361,14 @@ class PersonTracker:
         self.frame_seconds = float(frame_seconds) if frame_seconds and float(frame_seconds) > 0 else DEFAULT_FRAME_SECONDS
         self.appearance = appearance if appearance is not None and appearance.active else None
         self.gallery = gallery if self.appearance is not None else None
+        # the gate: with the appearance checks on, a lost track is refused a person its check
+        # calls someone else, and gives way to a track in view in ByteTrack's duplicate check,
+        # whatever split_on and tag_check_acts say
         self.tracker.gated = self.appearance is not None
         self.camera = camera
         self.tags: dict[int, tuple[int, int]] = {}  # track id -> (tag id, the frame it was seen on)
-        self.doubts: dict[int, int] = {}  # track id -> 'different' verdicts in a row on the tag it carries
-        self.provisional: dict[int, int] = {}  # track id -> the id its doubted person has meanwhile
+        self.doubts: dict[int, int] = {}  # track id -> 'different' verdicts in a row on the tag it carries (tag_check_acts)
+        self.provisional: dict[int, int] = {}  # track id -> the id its doubted person has meanwhile (tag_check_acts)
         self.descriptors: dict[int, TrackLooks] = {}  # track id -> its last looks (memory only)
         self.frame = 0
         self.touched = time.monotonic()
@@ -368,12 +414,13 @@ class PersonTracker:
     def assign(self, persons: list[dict]) -> None:
         """once the frame's tags are matched: a tag seen now is remembered by its track (and
         forgotten by any other), and feeds the session's gallery when read on the torso; a
-        tracked person without a tag gets the one their track wore, while their appearance still
-        matches that tag's gallery. A 'different' verdict withholds the tag in that frame and
-        answers the person under a provisional id of their own, so that the fusion, which carries
-        reads along a track id, gives that frame no tag either; the `different_frames`-th in a row
-        (2) continues the track under that id, without the tag, and a verdict that is not
-        'different' (or a read) puts the person back on their track."""
+        tracked person without a tag gets the one their track wore, and is checked against that
+        tag's gallery, the verdict going into their `reid`. Only with `tag_check_acts` does a
+        'different' verdict act: it withholds the tag in that frame and answers the person under
+        a provisional id of their own, so that the fusion, which carries reads along a track id,
+        gives that frame no tag either; the `different_frames`-th in a row (2) continues the
+        track under that id, without the tag, and a verdict that is not 'different' (or a read)
+        puts the person back on their track."""
         looks = self._looks
         alive = self.alive()
         self.tags = {track: seen for track, seen in self.tags.items() if track in alive}
@@ -399,7 +446,7 @@ class PersonTracker:
             check = self._tag_check(tag, look)
             if check is not None:
                 record = check.as_dict()
-                if check.verdict == VERDICT_DIFFERENT:
+                if check.verdict == VERDICT_DIFFERENT and self.tag_check_acts:
                     self.doubts[track] = self.doubts.get(track, 0) + 1
                     if track not in self.provisional:
                         self.provisional[track] = self.tracker.new_id()
@@ -455,12 +502,23 @@ class PersonTracker:
 
     def refound(self, index: int, gap_frames: int, check: Check | None) -> bool:
         """a lost track was found again on the person at `index`, `gap_frames` after it last saw
-        its person: whether it continues under a new id (a gap of split_gap_seconds or more the
-        appearance does not confirm)."""
+        its person: whether it continues under a new id. Only after a gap of split_gap_seconds or
+        more, and then on a 'different' verdict (split_on 'different'), or on any verdict but
+        'same', none included ('unconfirmed'). A re-find after that gap is recorded whatever
+        happens to it (`verdict` 'unknown' and `kind` None when nothing could be compared), a
+        sooner one when a check ran."""
         gap = gap_frames * self.frame_seconds
-        split = self.split_gap_seconds is not None and gap >= self.split_gap_seconds and \
-            (check is None or check.verdict != VERDICT_SAME)
-        if check is not None or split:
+        after = self.split_gap_seconds is not None and gap >= self.split_gap_seconds
+        verdict = check.verdict if check is not None else None
+        if self.split_on == SPLIT_ON_UNCONFIRMED:
+            split = after and verdict != VERDICT_SAME
+        else:
+            # the gate refuses a lost track a person its check calls someone else before the
+            # match is made (that person starts a track of their own, and for
+            # REFUSAL_HOLD_FRAMES after the track takes only a person it confirms), so no
+            # re-find reaches here with 'different' while it does
+            split = after and verdict == VERDICT_DIFFERENT
+        if check is not None or after:
             self.note(index, 'track', check, gap_frames=gap_frames, split=split)
         return split
 

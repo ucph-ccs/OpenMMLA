@@ -31,7 +31,7 @@ VLLMFrameAnalyzer:
       enabled: true  # false answers without track ids, every frame standing alone
       buffer_frames: 30  # frames a person out of view keeps their track and tag: at the bases' keyframe_interval 1.0 that is 30 s
       idle_seconds: 600  # a camera not heard from for this long forgets its tracks, and a session whose cameras all did forgets its tag galleries
-      split_gap_seconds: 3.0  # a lost track found again after this long continues under a new track id, without its tag, unless the appearance confirms the person (3: two missed frame sets at one a second); 0 never splits
+      split_gap_seconds: 3.0  # a lost track found again sooner keeps its id and tag; one found after this long continues under a new track id, without its tag, when appearance.split_on says so (3: two missed frame sets at one a second); 0 never splits
       frame_seconds: 1.0  # the time between two frames of a camera (the bases' keyframe_interval), which turns split_gap_seconds into frames
       cascade: false  # true: the tracks in view take the frame's persons first and a lost track gets only a person none of them took (it keeps a robbed person on their own track, but swapped more persons between tracks in view in a replay of 20 sessions)
       freeze_lost: false  # true: a lost track stays where its person was last seen instead of moving on at its last velocity (it added errors in the same replay)
@@ -39,7 +39,9 @@ VLLMFrameAnalyzer:
         descriptor_frames: 10  # a track keeps its last this many looks, sample_spacing_seconds apart
         gallery_size: 10  # a tag's gallery (frames where it was read on the torso) keeps this many faces, and this many colours per camera
         sample_spacing_seconds: 2.0  # the looks a track or a tag keeps of one camera are at least this far apart
-        different_frames: 2  # a track in view whose person is called someone else than its remembered tag this many frames in a row continues under a new id; before that the tag is withheld and the person answered under a provisional id (the one the track then continues under), so the fusion carries no tag onto them either
+        split_on: different  # which verdict splits a lost track found again after split_gap_seconds: different (the face calls the person someone else; as such a match is refused in the first place, and the lost track then takes only a person the appearance confirms for 3 frames, the person starts a track of their own) or unconfirmed (any verdict but same, none included, the first rule of 2026-10-02: in the pilot re-run 3,978 of its 4,013 splits had no face to compare, and 75 % of the 3 to 5 s splits that could be judged were the same person)
+        tag_check_acts: false  # true: a remembered tag the person is called someone else than is withheld under a provisional id, and different_frames such verdicts in a row continue the track under that id (the first rule of 2026-10-02); false only records the verdict in reid, as the face's different against a tag's gallery was wrong in 70 of 82 checkable cases of the pilot re-run
+        different_frames: 2  # with tag_check_acts: a track in view whose person is called someone else than its remembered tag this many frames in a row continues under a new id; before that the tag is withheld and the person answered under a provisional id (the one the track then continues under), so the fusion carries no tag onto them either
         max_overlap: 0.3  # a person whose box overlaps another's by this IoU or more adds no colour to a track's or tag's looks
         colour:  # the upper-body clothing: an HSV histogram over the torso, compared by its Hellinger distance (0 for the same) against the same camera's looks
           enabled: false  # off: in the pilot re-run its 'different' verdicts were right only 4 to 9 % of the time; true switches it on

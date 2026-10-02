@@ -59,6 +59,11 @@ from openmmla.services.vfa import features as F
 VERDICT_SAME = 'same'
 VERDICT_DIFFERENT = 'different'
 VERDICT_UNKNOWN = 'unknown'
+# what splits a lost track found again after split_gap_seconds (AppearanceParams.split_on): a
+# 'different' verdict only, or any verdict but 'same' (no check at all included)
+SPLIT_ON_DIFFERENT = 'different'
+SPLIT_ON_UNCONFIRMED = 'unconfirmed'
+SPLIT_RULES = (SPLIT_ON_DIFFERENT, SPLIT_ON_UNCONFIRMED)
 KIND_COLOUR = 'colour'
 KIND_FACE = 'face'
 REGION_TORSO = 'torso'
@@ -165,20 +170,31 @@ class FaceParams:
 
 @dataclass
 class AppearanceParams:
-    """the appearance checks of the tracker: the colour, the face and their memories."""
+    """the appearance checks of the tracker: the colour, the face, their memories, and what the
+    tracker does with their verdicts.
+
+    `split_on` and `tag_check_acts` come from the pilot re-run of three sessions (2026-10-02)
+    with the first rules (`unconfirmed`, and tag checks that act): 3,978 of its 4,013 splits had
+    no face to compare, 75 % of the 3 to 5 s splits that reads on both sides could judge were the
+    same person, and they cost the pupils 2.8 points of fused presence pooled (one pupil 12.7)
+    for 33 fewer wrong tags; a face 'different' against a remembered tag's gallery was wrong in
+    70 of 82 checkable cases, at every score. A face 'same' (right 99.6 % of the time on tags) and
+    a 'different' refusing a lost track a person (right in 4 of 4) act as before."""
     colour: ColourParams = field(default_factory=ColourParams)
     face: FaceParams = field(default_factory=FaceParams)
     descriptor_frames: int = 10  # a track keeps its last this many looks
     gallery_size: int = 10  # a tag keeps this many faces, and this many colours per camera
     sample_spacing_seconds: float = 2.0  # the looks a memory keeps of one camera are at least this far apart
-    different_frames: int = 2  # a track in view continues under a new id after this many 'different' tag verdicts in a row (before, the person has a provisional one)
+    split_on: str = SPLIT_ON_DIFFERENT  # a lost track found again after split_gap_seconds continues under a new id on a 'different' verdict ('different'), or on any verdict but 'same', none included ('unconfirmed', the first rule)
+    tag_check_acts: bool = False  # a 'different' verdict on a remembered tag withholds it and, different_frames in a row, splits the track (true, the first rule); false only records the verdict
+    different_frames: int = 2  # with tag_check_acts: a track in view continues under a new id after this many 'different' tag verdicts in a row (before, the person has a provisional one)
     rival_looks: int = 3  # another tag counts in the nearest-tag rule once its gallery holds this many looks (a badge misread once does not)
     max_overlap: float = 0.3  # a person whose box overlaps another's by this IoU or more adds no colour to a memory, nor is their colour compared
 
     @classmethod
     def from_config(cls, config: dict | None) -> AppearanceParams:
         """the `appearance` block of the tracking config: `colour` and `face` are each a block
-        of their keys or a bare true/false."""
+        of their keys or a bare true/false; a `split_on` that names no rule keeps the default."""
         params = _apply(cls(), config)
         config = config if isinstance(config, dict) else {}
         for name, kind in (('colour', ColourParams), ('face', FaceParams)):
@@ -187,6 +203,8 @@ class AppearanceParams:
                 setattr(params, name, _apply(kind(), value))
             elif not _unfilled(value):
                 setattr(params, name, kind(enabled=_flag(value, kind().enabled)))
+        rule = str(params.split_on).strip().lower()
+        params.split_on = rule if rule in SPLIT_RULES else cls().split_on
         params.descriptor_frames = max(1, params.descriptor_frames)
         params.gallery_size = max(1, params.gallery_size)
         params.different_frames = max(1, params.different_frames)
