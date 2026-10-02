@@ -174,6 +174,28 @@ class InfluxDBClientWrapper:
             logger.warning("count_session_events failed: %s", e)
             return 0
 
+    def count_session_events_by_type(self, session_id: str) -> dict[str, int]:
+        """the number of events of each event_type the session has ({} for
+        none). An event is one point, with a value in each of its fields, so
+        it is the largest count among its type's fields. Raises when InfluxDB
+        cannot be asked: no answer is not "no events"."""
+        query = f'''
+            from(bucket: "{self.bucket}")
+            |> range(start: 0)
+            |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}")
+            |> filter(fn: (r) => r.session_id == "{session_id}")
+            |> group(columns: ["event_type", "_field"])
+            |> count()
+            |> group(columns: ["event_type"])
+            |> max()
+        '''
+        counts: dict[str, int] = {}
+        for table in self.query_api.query(org=self.org, query=query):
+            for record in table.records:
+                event_type = str(record.values.get("event_type") or "")
+                counts[event_type] = max(counts.get(event_type, 0), int(record.get_value() or 0))
+        return counts
+
     def query(self, query_str: str):
         """execute a raw Flux query (backward compatibility)."""
         return self.query_api.query(query_str)

@@ -55,6 +55,7 @@ OPTIONAL_DEP_MAP = {
     "ses-calibrate": "ips-base",
     "ses-archive": "tui",
     "ses-export": "tui",
+    "ses-delete": "tui",
     "tui": "tui",
     "crypto": "tui",
 }
@@ -188,6 +189,10 @@ COMMANDS = {
     "ses-export": (
         "openmmla.commands.ses.export:main",
         "Gather a session's measurements, recordings, stream cuts and base files onto this console."
+    ),
+    "ses-delete": (
+        "openmmla.commands.ses.delete:main",
+        "Delete a session everywhere central (archive, InfluxDB, MongoDB), or its files on one host."
     ),
     "tui": (
         "openmmla.commands.tui:main",

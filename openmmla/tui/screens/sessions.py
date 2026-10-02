@@ -6,7 +6,6 @@ import copy
 import json
 import os
 import shlex
-import shutil
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -304,12 +303,14 @@ def _local_collection_sessions(root: str | os.PathLike[str]) -> list[dict]:
     return sessions
 
 
-def _source_label(kinds: set[str], db_host: str = "") -> str:
+def _source_label(kinds: set[str], db_host: str = "", files_host: str = "") -> str:
     parts = []
-    for kind in ("MongoDB", "Artifacts", "Collection Files"):
+    for kind in ("MongoDB", "Artifacts", "Collection Files", "Files"):
         if kind in kinds:
             if kind == "MongoDB" and db_host:
                 parts.append(f"MongoDB@{db_host}")
+            elif kind == "Files" and files_host:
+                parts.append(f"Files@{files_host}")
             else:
                 parts.append(kind)
     return " + ".join(parts) or "-"
@@ -363,6 +364,37 @@ def _merge_session_rows(mongo_sessions: list[dict], artifact_sessions: list[dict
     for row in rows:
         row["_source"] = _source_label(set(row.get("_source_kinds") or []), db_host)
     return sorted(rows, key=lambda row: _coerce_start_timestamp(row.get("start_time")), reverse=True)
+
+
+def _with_host_files(rows: list[dict], listing, db_host: str = "") -> list[dict]:
+    """the rows with the session folders a remote host holds (a
+    delete.HostListing of the host picked): a session MongoDB knows gains
+    `Files@<host>` in its Source, one it does not gets a row of its own. The
+    rows a listing added before are dropped first, so a folder deleted since
+    leaves the table. Local's folders are rows already (_local_artifact_sessions)."""
+    out = []
+    for row in rows:
+        if row.get("_host_only"):
+            continue
+        row = dict(row)
+        row["_source_kinds"] = set(row.get("_source_kinds") or []) - {"Files"}
+        out.append(row)
+    files_host = ""
+    if listing is not None and listing.ok and listing.host != "local":
+        files_host = listing.host
+        by_id = {str(row.get("session_id") or ""): row for row in out}
+        for session_id, entry in listing.sessions.items():
+            row = by_id.get(session_id)
+            if row is None:
+                status = "artifact" if entry["whats"] - {"collection"} else "collection"
+                row = {"session_id": session_id, "experiment_id": "", "group_id": "", "status": status,
+                       "start_time": "", "_source_kinds": set(), "_host_only": True}
+                out.append(row)
+                by_id[session_id] = row
+            row["_source_kinds"].add("Files")
+    for row in out:
+        row["_source"] = _source_label(row["_source_kinds"], db_host, files_host)
+    return sorted(out, key=lambda row: _coerce_start_timestamp(row.get("start_time")), reverse=True)
 
 
 # ---- Export and Archive ----
@@ -440,9 +472,13 @@ class SessionsPanel(Widget):
     _job_session: str | None = None
     _job_cancel: threading.Event | None = None
     _job_button: str = "Export"
-    # database clients let go of (Refresh, a Host change) while a job held
-    # them: closed once it is over
+    # database clients let go of (Refresh, a Host change) while a job or a
+    # deletion held them: closed once it is over
     _clients_after_job: tuple = ()
+    # the session Delete Session or Delete Files is deleting; None while none is
+    _deleting: str | None = None
+    # the session folders of the host picked (delete.HostListing); None until listed
+    _files_listing = None
 
     class SessionEnded(Message):
         """End Session marked a session ended here: the Launcher's base cards
@@ -453,9 +489,9 @@ class SessionsPanel(Widget):
             self.session_id = session_id
 
     class SessionDeleted(Message):
-        """a session's database records were deleted here: the Launcher must
-        stop offering its id, or the next recording goes to a session MongoDB
-        no longer knows."""
+        """Delete Session removed a session (its archive, InfluxDB events and
+        MongoDB document) here: the Launcher must stop offering its id, or the
+        next recording goes to a session MongoDB no longer knows."""
 
         def __init__(self, session_id: str) -> None:
             super().__init__()
@@ -567,10 +603,15 @@ class SessionsPanel(Widget):
         self._influx_client = None
         self._sessions: list[dict] = []
         self._selected_session_id: str | None = None
-        self._pending_delete_session_id: str | None = None
-        self._pending_delete_artifacts_session_id: str | None = None
+        # the session Delete Session was pressed on once, and what it said would go
+        self._pending_delete: tuple | None = None
+        # the session and host Delete Files was pressed on once, and what it said would go
+        self._pending_files: tuple | None = None
         # the session End Session was pressed on once, and the end it announced
         self._pending_end: tuple[str, datetime] | None = None
+        # one more at every button press and every new table: a first press
+        # still reading keeps its question only while this has not moved
+        self._question = 0
         self._target = "local"
         self._suppress_select = False
         self._bootstrapping = False
@@ -592,8 +633,10 @@ class SessionsPanel(Widget):
                 yield Button("Archive", variant="success", id="btn-ses-archive")
                 # a session left active (its console gone before Stop) set to ended
                 yield Button("End Session", variant="warning", id="btn-ses-end")
+                # the session everywhere central: its archive, InfluxDB events and MongoDB document
                 yield Button("Delete Session", variant="error", id="btn-ses-delete")
-                yield Button("Delete Artifacts", variant="error", id="btn-ses-delete-artifacts")
+                # the session's folders on the host the Host selector picks, nowhere else
+                yield Button("Delete Files", variant="error", id="btn-ses-delete-files")
             with Horizontal(id="sessions-progress"):
                 yield Static("", id="ses-progress-label")
                 yield ProgressBar(total=None, show_eta=False, id="ses-progress-bar")
@@ -603,7 +646,8 @@ class SessionsPanel(Widget):
 
     def on_mount(self) -> None:
         table = self.query_one("#sessions-table", DataTable)
-        table.add_columns("Session ID", "Experiment", "Group", "Status", "Started", "Recordings until", "Source")
+        table.add_columns("Session ID", "Experiment", "Group", "Status", "Started", "Recordings until", "Files here",
+                          "Source")
         table.cursor_type = "row"
         self._start_bootstrap()
 
@@ -761,8 +805,9 @@ class SessionsPanel(Widget):
     def _clear_sessions(self) -> None:
         self._sessions = []
         self._selected_session_id = None
-        self._pending_delete_session_id = None
-        self._pending_delete_artifacts_session_id = None
+        self._question += 1
+        self._pending_delete = None
+        self._pending_files = None
         self._pending_end = None
         try:
             self.query_one("#sessions-table", DataTable).clear()
@@ -773,8 +818,8 @@ class SessionsPanel(Widget):
         clients = tuple(client for client in (self._mongo_client, self._influx_client) if client is not None)
         self._mongo_client = None
         self._influx_client = None
-        if self._job_session is not None:
-            # the Export or Archive that runs is still querying them
+        if self._job_session is not None or self._deleting is not None:
+            # the Export, Archive or deletion that runs is still querying them
             self._clients_after_job += clients
             return
         for client in clients:
@@ -870,8 +915,28 @@ class SessionsPanel(Widget):
         text = until.strftime("%Y-%m-%d %H:%M UTC")
         return Text(text, style="yellow") if until - now < timedelta(hours=24) else text
 
-    def _render_sessions(self, sessions: list[dict]) -> None:
-        self._sessions = sessions
+    def _current_listing(self):
+        """the files listing of the host picked; None while it has not come."""
+        listing = self._files_listing
+        return listing if listing is not None and listing.host == self._target else None
+
+    def _files_here(self, session: dict) -> Text | str:
+        """what the session's folders weigh on the host picked: `-` for none,
+        `...` while the host is being asked, `?` when it did not answer."""
+        listing = self._current_listing()
+        if listing is None:
+            return Text("...", style="dim")
+        if not listing.ok:
+            return Text("?", style="dim")
+        size = listing.size(str(session.get("session_id") or ""))
+        return "-" if size is None else Text(recordings.human_size(size), justify="right")
+
+    def _render_sessions(self, sessions: list[dict], list_files: bool = True) -> None:
+        """the table, from `sessions` with the folders of the host picked
+        (_with_host_files); then, unless `list_files` is False, that host is
+        asked again what it holds, off the UI thread."""
+        db_host = _db_host_from_config(self._config_source.config) if self._config_source else ""
+        self._sessions = _with_host_files(sessions, self._current_listing(), db_host)
         table = self.query_one("#sessions-table", DataTable)
         selected = self._selected_session_id
         table.clear()
@@ -883,7 +948,8 @@ class SessionsPanel(Widget):
             status = ses.get("status", "unknown")
             start = ses.get("start_time")
             start_str = _format_start_time(start)
-            table.add_row(sid, exp, grp, status, start_str, self._recordings_until(ses), ses.get("_source", "-"))
+            table.add_row(sid, exp, grp, status, start_str, self._recordings_until(ses), self._files_here(ses),
+                          ses.get("_source", "-"))
 
         source = self._config_source.label if self._config_source else self._target
         detail = f"Config: {source}"
@@ -891,8 +957,11 @@ class SessionsPanel(Widget):
             endpoints = _db_endpoint_summary(self._config_source.config)
             if endpoints:
                 detail += f" | {endpoints}"
+        listing = self._current_listing()
         if self._target == "local":
             detail += " + local artifacts"
+        elif listing is not None and listing.ok:
+            detail += f" + files on {self._target}"
         if self._retention is not None:
             detail += f" | recordings kept {recordings.describe_retention(self._retention)}"
         self._update_summary(f"Sessions: {len(self._sessions)} found | {detail}")
@@ -900,6 +969,37 @@ class SessionsPanel(Widget):
         ids = [ses.get("session_id", "") for ses in self._sessions]
         if selected in ids:
             table.move_cursor(row=ids.index(selected))
+        if list_files:
+            self._start_files_listing()
+
+    # ---- the files of the host picked ----
+
+    def _start_files_listing(self) -> None:
+        """ask the host picked what session folders it holds and what they
+        weigh (one call; du there), in a worker: the Files here column."""
+        if not self.is_attached:
+            return
+        self.run_worker(self._async_list_files(self._target), group="sessions-files", exclusive=True)
+
+    async def _async_list_files(self, target: str) -> None:
+        from openmmla.commands.ses import delete
+        from openmmla.tui.schema.loader import _find_project_root
+
+        try:
+            listing = await asyncio.to_thread(delete.list_host_files, target, _find_project_root())
+        except Exception as error:  # a listing that breaks says so; the app goes on
+            listing = delete.HostListing(target, why=type(error).__name__)
+        if target != self._target or not self.is_attached:
+            return
+        previous, self._files_listing = self._files_listing, listing
+        if not listing.ok and (previous is None or previous.ok or previous.host != target):
+            if target == "local":
+                self._log(f"[yellow]The session folders here could not be measured "
+                          f"({escape(listing.why)}).[/yellow]")
+            else:
+                self._log(f"[yellow]{escape(target)} did not answer ({escape(listing.why)}): the table shows the "
+                          f"MongoDB rows only, without what that host holds.[/yellow]")
+        self._render_sessions(self._sessions, list_files=False)
 
     # ---- event handlers ----
 
@@ -907,10 +1007,9 @@ class SessionsPanel(Widget):
         table = self.query_one("#sessions-table", DataTable)
         try:
             row_data = table.get_row(event.row_key)
+            # a question asked of a row stays tied to that row's session; a
+            # reload (the files listing arriving) highlights rows again
             self._selected_session_id = str(row_data[0])
-            self._pending_delete_session_id = None
-            self._pending_delete_artifacts_session_id = None
-            self._pending_end = None
         except Exception:
             self._selected_session_id = None
 
@@ -955,6 +1054,13 @@ class SessionsPanel(Widget):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
+        # any press lets a question go, one still being read too: only a
+        # second press of the same button on the same session acts on it
+        self._question += 1
+        question = self._question
+        pending_delete, self._pending_delete = self._pending_delete, None
+        pending_files, self._pending_files = self._pending_files, None
+        pending_end, self._pending_end = self._pending_end, None
         if bid == "sessions-target-refresh":
             self.query_one("#sessions-log", RichLog).write("[yellow]Testing connections to all hosts...[/yellow]")
             self.run_worker(self._async_probe_hosts(), group="sessions-host-probe", exclusive=True)
@@ -977,39 +1083,26 @@ class SessionsPanel(Widget):
         elif bid == "btn-ses-archive":
             self._start_archive(session_id)
         elif bid == "btn-ses-end":
-            self._pending_delete_session_id = None
-            self._pending_delete_artifacts_session_id = None
-            pending, self._pending_end = self._pending_end, None
-            if pending is not None and pending[0] == session_id:
-                self.run_worker(self._run_end(session_id, pending[1]), group="sessions-end", exclusive=True)
+            if pending_end is not None and pending_end[0] == session_id:
+                self.run_worker(self._run_end(session_id, pending_end[1]), group="sessions-end", exclusive=True)
             else:
-                self.run_worker(self._run_end_ask(session_id), group="sessions-end", exclusive=True)
-        elif bid == "btn-ses-delete":
-            if self._pending_delete_session_id != session_id:
-                self._pending_delete_session_id = session_id
-                self._pending_delete_artifacts_session_id = None
-                self._pending_end = None
-                self._log(
-                    f"[red]Delete session '{session_id}' will remove MongoDB metadata, "
-                    "and InfluxDB measurements. Local artifacts and downloaded logs are preserved. "
-                    "Click Delete Session again to confirm.[/red]"
-                )
+                self.run_worker(self._run_end_ask(session_id, question), group="sessions-end", exclusive=True)
+        elif bid in ("btn-ses-delete", "btn-ses-delete-files"):
+            if not self._may_delete(session_id):
                 return
-            self._pending_delete_session_id = None
-            self.run_worker(self._run_delete(session_id), exclusive=True)
-        elif bid == "btn-ses-delete-artifacts":
-            if self._pending_delete_artifacts_session_id != session_id:
-                self._pending_delete_artifacts_session_id = session_id
-                self._pending_delete_session_id = None
-                self._pending_end = None
-                self._log(
-                    f"[red]Delete artifacts for '{session_id}' will remove local artifacts/files only. "
-                    "MongoDB metadata and InfluxDB measurements are preserved. "
-                    "Click Delete Artifacts again to confirm.[/red]"
-                )
-                return
-            self._pending_delete_artifacts_session_id = None
-            self.run_worker(self._run_delete_artifacts(session_id), exclusive=True)
+            if bid == "btn-ses-delete":
+                if pending_delete is not None and pending_delete[0] == session_id:
+                    self._deleting = session_id  # at once: a third press must not start another
+                    self.run_worker(self._run_delete(session_id, pending_delete[1]), group="sessions-delete")
+                else:
+                    self.run_worker(self._run_delete_ask(session_id, question), group="sessions-delete-ask",
+                                    exclusive=True)
+            elif pending_files is not None and pending_files[:2] == (session_id, self._target):
+                self._deleting = session_id
+                self.run_worker(self._run_delete_files(session_id, pending_files[2]), group="sessions-delete")
+            else:
+                self.run_worker(self._run_delete_files_ask(session_id, self._target, question),
+                                group="sessions-delete-ask", exclusive=True)
 
     # ---- Export ----
 
@@ -1068,6 +1161,9 @@ class SessionsPanel(Widget):
                 f"finish, or press Cancel next to its progress.[/yellow]"
             )
             return
+        if self._deleting == session_id:
+            self._log(f"[yellow]'{escape(session_id)}' is being deleted: wait for it to finish.[/yellow]")
+            return
         self._job_session = session_id
         self._job_cancel = threading.Event()
         self._job_button = label
@@ -1094,7 +1190,10 @@ class SessionsPanel(Widget):
             self._progress_hide()
             self._job_session = None
             self._job_cancel = None
-            clients, self._clients_after_job = self._clients_after_job, ()
+            # while a deletion runs, it closes them once it is over
+            clients = ()
+            if self._deleting is None:
+                clients, self._clients_after_job = self._clients_after_job, ()
             for client in clients:
                 try:
                     client.close()
@@ -1195,22 +1294,136 @@ class SessionsPanel(Widget):
         except archive.ArchiveError as error:
             self._log(f"[red]✗ The archive of '{escape(session_id)}' was not made: {escape(str(error))}[/red]")
 
-    async def _run_delete(self, session_id: str) -> None:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._do_delete, session_id)
-        self.post_message(self.SessionDeleted(session_id))
-        self._refresh_sessions()
+    # ---- Delete Session and Delete Files ----
 
-    async def _run_delete_artifacts(self, session_id: str) -> None:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._do_delete_artifacts, session_id)
-        self._refresh_sessions()
+    def _may_delete(self, session_id: str) -> bool:
+        """whether a deletion of `session_id` may start now: not while another
+        deletion runs, nor while Export or Archive of the same session does."""
+        if self._deleting is not None:
+            self._log(f"[yellow]The deletion of '{escape(self._deleting)}' is still running: wait for it to "
+                      f"finish.[/yellow]")
+            return False
+        if self._job_session == session_id:
+            self._log(f"[yellow]{self._job_button} of '{escape(session_id)}' is still running. Wait for it to "
+                      f"finish, or press Cancel next to its progress, then delete.[/yellow]")
+            return False
+        return True
+
+    def _log_from_thread(self, msg: str) -> None:
+        """a log line written in a worker thread, put on the log by the app's own."""
+        try:
+            self.app.call_from_thread(self._log, msg)
+        except Exception:  # no app (a test), or already on its thread
+            self._log(msg)
+
+    def _databases_named(self) -> tuple[bool, bool]:
+        """whether the config the panel reads names InfluxDB and MongoDB."""
+        config = self._config_source.config if self._config_source else {}
+        return _database_url_set(config, "InfluxDB"), _database_url_set(config, "MongoDB")
+
+    def _still_asked(self, question: int, session_id: str) -> bool:
+        """whether a first press's question still stands once its read is
+        over: no button was pressed and no new table drawn since, and the row
+        is the same."""
+        return self._question == question and self._selected_session_id == session_id
+
+    async def _run_delete_ask(self, session_id: str, question: int) -> None:
+        """Delete Session, first press: read what goes (the archive on the
+        archive host, the InfluxDB events, the MongoDB document) and what
+        stays, and say it; nothing is deleted yet."""
+        from openmmla.commands.ses import delete
+        from openmmla.tui.schema.loader import _find_project_root
+
+        problem = delete.session_id_problem(session_id)
+        if problem:
+            self._log(f"[yellow]{escape(problem)}: nothing to delete.[/yellow]")
+            return
+        self._log(f"[dim]Reading what Delete Session would remove of '{escape(session_id)}'...[/dim]")
+        influx_named, mongo_named = self._databases_named()
+        try:
+            plan = await asyncio.to_thread(
+                delete.plan_session, session_id, influx=self._influx_client, influx_configured=influx_named,
+                mongo=self._mongo_client, mongo_configured=mongo_named, project_root=_find_project_root())
+        except Exception as error:  # a failure is this question's, not the app's
+            self._log(f"[red]✗ What Delete Session would remove could not be read: {escape(str(error))}. Nothing "
+                      f"is deleted.[/red]")
+            return
+        for line in delete.describe_session_plan(plan):
+            self._log(line)
+        if plan.ready and self._still_asked(question, session_id):
+            self._pending_delete = (session_id, plan)
+
+    async def _run_delete(self, session_id: str, plan) -> None:
+        """Delete Session, second press: what the first press named, in its
+        order, stopping at the first step that fails."""
+        from openmmla.commands.ses import delete
+
+        self._deleting = session_id
+        try:
+            done = await asyncio.to_thread(delete.delete_session, plan, influx=self._influx_client,
+                                           mongo=self._mongo_client, log=self._log_from_thread)
+        except Exception as error:  # a failure is this deletion's, not the app's
+            self._log(f"[red]✗ Delete Session of '{escape(session_id)}' failed: {escape(str(error))}[/red]")
+            done = False
+        finally:
+            self._deletion_over()
+        if done:
+            self.post_message(self.SessionDeleted(session_id))
+        await self._async_reload()
+
+    async def _run_delete_files_ask(self, session_id: str, target: str, question: int) -> None:
+        """Delete Files, first press: the session's folders on the host
+        picked, each with its size, read on that host; nothing is deleted yet."""
+        from openmmla.commands.ses import delete
+        from openmmla.tui.schema.loader import _find_project_root
+
+        problem = delete.session_id_problem(session_id)
+        if problem:
+            self._log(f"[yellow]{escape(problem)}: nothing to delete.[/yellow]")
+            return
+        where = "this machine" if target == "local" else target
+        self._log(f"[dim]Looking for the files of '{escape(session_id)}' on {escape(where)}...[/dim]")
+        try:
+            record, _stale = await asyncio.to_thread(self._session_record, session_id)
+            record = {key: value for key, value in record.items() if not str(key).startswith("_")}
+            plan = await asyncio.to_thread(delete.plan_files, target, session_id, project_root=_find_project_root(),
+                                           record=record or None)
+        except Exception as error:  # a failure is this question's, not the app's
+            self._log(f"[red]✗ The files on {escape(where)} could not be read: {escape(str(error))}. Nothing is "
+                      f"deleted.[/red]")
+            return
+        for line in delete.describe_files_plan(plan):
+            self._log(line)
+        if plan.ready and self._still_asked(question, session_id) and self._target == target:
+            self._pending_files = (session_id, target, plan)
+
+    async def _run_delete_files(self, session_id: str, plan) -> None:
+        """Delete Files, second press: exactly the folders the first press
+        named, on that host only."""
+        from openmmla.commands.ses import delete
+
+        self._deleting = session_id
+        try:
+            await asyncio.to_thread(delete.delete_files, plan, self._log_from_thread)
+        except Exception as error:
+            self._log(f"[red]✗ Delete Files of '{escape(session_id)}' failed: {escape(str(error))}[/red]")
+        finally:
+            self._deletion_over()
+        await self._async_reload()
+
+    def _deletion_over(self) -> None:
+        self._deleting = None
+        if self._job_session is None:
+            clients, self._clients_after_job = self._clients_after_job, ()
+            for client in clients:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     # ---- End Session ----
 
-    async def _run_end_ask(self, session_id: str) -> None:
+    async def _run_end_ask(self, session_id: str, question: int) -> None:
         """End Session, first press: read the session's document again and say
         the end the second press writes; nothing changes yet."""
         shown = escape(session_id)
@@ -1237,7 +1450,8 @@ class SessionsPanel(Widget):
                 f"  [yellow]Never noted leaving: {escape(', '.join(still_in))}. If still running, stop it "
                 f"instead (STOP in Session Control), which ends the session too.[/yellow]"
             )
-        self._pending_end = (session_id, end)
+        if self._question == question:  # no button pressed while it read
+            self._pending_end = (session_id, end)
 
     async def _run_end(self, session_id: str, end: datetime) -> None:
         """End Session, second press: the end announced at the first."""
@@ -1289,43 +1503,6 @@ class SessionsPanel(Widget):
                 return session
         return {}
 
-    def _do_delete(self, session_id: str) -> None:
-        from openmmla.tui.artifacts import artifact_session_dir
-        from openmmla.tui.schema.loader import _find_project_root
-
-        session = self._session_by_id(session_id)
-        self._log(f"[bold red]Deleting session: {session_id}[/bold red]")
-
-        if self._influx_client is not None:
-            try:
-                if self._influx_client.delete_session_data(session_id):
-                    self._log("  [green]✓[/green] InfluxDB measurements deleted")
-                else:
-                    self._log("  [yellow]- InfluxDB measurements not deleted or not found[/yellow]")
-            except Exception as e:
-                self._log(f"  [red]✗ InfluxDB delete failed: {e}[/red]")
-        else:
-            self._log("  [dim]- InfluxDB not connected[/dim]")
-
-        if self._mongo_client is not None:
-            try:
-                if self._mongo_client.delete_session(session_id):
-                    self._log("  [green]✓[/green] MongoDB session deleted")
-                else:
-                    self._log("  [yellow]- MongoDB session not found[/yellow]")
-            except Exception as e:
-                self._log(f"  [red]✗ MongoDB delete failed: {e}[/red]")
-        else:
-            self._log("  [dim]- MongoDB not connected[/dim]")
-
-        artifact_dir = Path(session.get("_artifact_dir") or artifact_session_dir(_find_project_root(), session_id))
-        if artifact_dir.exists():
-            self._log(f"  [dim]- Local artifacts preserved: {artifact_dir}[/dim]")
-        else:
-            self._log("  [dim]- No local artifact directory[/dim]")
-
-        self._log(f"[bold green]Delete complete for {session_id}[/bold green]")
-
     def _local_artifact_path_for_session(self, session_id: str) -> Path:
         from openmmla.tui.artifacts import artifact_session_dir
         from openmmla.tui.schema.loader import _find_project_root
@@ -1334,38 +1511,3 @@ class SessionsPanel(Widget):
         if session.get("_artifact_dir"):
             return Path(str(session["_artifact_dir"])).expanduser().resolve()
         return artifact_session_dir(_find_project_root(), session_id).resolve()
-
-    @staticmethod
-    def _is_safe_local_artifact_path(path: Path, project_root: Path) -> bool:
-        allowed_roots = [
-            (project_root / "artifacts").resolve(),
-            (project_root / "collection").resolve(),
-        ]
-        try:
-            return any(path == root or path.is_relative_to(root) for root in allowed_roots)
-        except ValueError:
-            return False
-
-    def _do_delete_artifacts(self, session_id: str) -> None:
-        from openmmla.tui.schema.loader import _find_project_root
-
-        project_root = Path(_find_project_root()).resolve()
-        artifact_path = self._local_artifact_path_for_session(session_id)
-        self._log(f"[bold red]Deleting local artifacts for session: {session_id}[/bold red]")
-
-        if not self._is_safe_local_artifact_path(artifact_path, project_root):
-            self._log(f"  [red]✗ Refusing to delete path outside local artifact roots: {artifact_path}[/red]")
-            return
-        if not artifact_path.exists():
-            self._log(f"  [yellow]- No local artifact directory found: {artifact_path}[/yellow]")
-            return
-        if not artifact_path.is_dir():
-            self._log(f"  [red]✗ Refusing to delete non-directory artifact path: {artifact_path}[/red]")
-            return
-
-        try:
-            shutil.rmtree(artifact_path)
-            self._log(f"  [green]✓[/green] Local artifacts deleted: {artifact_path}")
-            self._log(f"[bold green]Artifact delete complete for {session_id}[/bold green]")
-        except Exception as e:
-            self._log(f"  [red]✗ Local artifact delete failed: {e}[/red]")

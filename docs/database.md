@@ -219,6 +219,20 @@ sudo systemctl start mongod
 
 </details>
 
+## Deleting a session
+
+The Sessions tab's **Delete Session** (or `mmla ses-delete <session> --yes`) removes one session everywhere central: first its archive on the archive host (`artifacts/<session>/` there, and the dashboard's cached report of it), then every point of InfluxDB tagged with its `session_id` (all event types, over all time), then its document in MongoDB's `sessions` collection. Each step runs only once the one before it succeeded: the archive goes before the databases, so a session whose archive could not be deleted is still listed, and InfluxDB is counted again after the delete, so events that are still there stop it before MongoDB. Copies on other machines, the console's own `artifacts/<session>/` among them, are left alone; **Delete Files** removes those, one host at a time ([TUI](tui.md#sessions-tab)). Without `--yes`, `mmla ses-delete` says what would go (the archive's size, the events by type, whether the document exists) and deletes nothing.
+
+By hand, for one session, the same two database steps are:
+
+```bash
+influx delete --bucket mmla-data --org admin --start 1970-01-01T00:00:00Z --stop $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --predicate 'session_id="<session-id>"'
+mongosh openmmla --eval 'db.sessions.deleteOne({session_id: "<session-id>"})'
+```
+
+An InfluxDB delete with an empty predicate removes **every** point of the bucket in that time range: check the predicate before running it.
+
 ## Backups
 
 Native installs:
