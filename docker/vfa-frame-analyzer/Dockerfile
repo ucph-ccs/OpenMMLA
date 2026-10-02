@@ -22,8 +22,12 @@
 #   docker build -f docker/vfa-frame-analyzer/Dockerfile -t openmmla/vfa-frame-analyzer .
 FROM python:3.11-slim
 
+# pip waits up to 2 min for a stalled read and retries 10 times: the layer below fetches several
+# GB (tensorflow alone is 645 MB), and one slow read used to fail the whole build
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
     DEBIAN_FRONTEND=noninteractive
 
 # libgl1/libglib2.0-0 for opencv, fonts for annotated overlays
