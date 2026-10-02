@@ -126,8 +126,11 @@ def _apply(params, config: dict | None):
 
 @dataclass
 class ColourParams:
-    """the clothing colour check, as calibrated on stored classroom frames (2026-10-02)."""
-    enabled: bool = True
+    """the clothing colour check, as calibrated on stored classroom frames (2026-10-02). Off by
+    default: in the pilot re-run of 2026-10-02 its 'different' verdicts on remembered tags were
+    right only 4 to 9 % of the time (lighting, posture and occlusion move the histogram as much as
+    a change of person), so the face alone checks identities."""
+    enabled: bool = False
     same: float = 0.12  # a Hellinger distance at or below it confirms the person (a tag only when it is also the nearest)
     different: float = 0.35  # above it: someone else; in between, unknown
     hue_bins: int = 16  # the hue, each pixel weighted by its saturation, plus one grey bin

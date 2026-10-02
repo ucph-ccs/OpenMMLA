@@ -42,7 +42,7 @@ VLLMFrameAnalyzer:
         different_frames: 2  # a track in view whose person is called someone else than its remembered tag this many frames in a row continues under a new id; before that the tag is withheld and the person answered under a provisional id (the one the track then continues under), so the fusion carries no tag onto them either
         max_overlap: 0.3  # a person whose box overlaps another's by this IoU or more adds no colour to a track's or tag's looks
         colour:  # the upper-body clothing: an HSV histogram over the torso, compared by its Hellinger distance (0 for the same) against the same camera's looks
-          enabled: true  # false: no colour check
+          enabled: false  # off: in the pilot re-run its 'different' verdicts were right only 4 to 9 % of the time; true switches it on
           same: 0.12  # at or below: the same person (a tag only when it is also the nearest tag)
           different: 0.35  # above: someone else; in between, unknown
         face:  # an ArcFace embedding (InsightFace) of the face aligned from RetinaFace's five landmarks, compared by its cosine distance; where both sides have a usable face it decides, not the colour
