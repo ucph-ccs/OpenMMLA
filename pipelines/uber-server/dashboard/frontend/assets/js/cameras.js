@@ -22,7 +22,8 @@ import { h, clear, fmt, tooltip, theme, icon } from './core.js';
 import { colorResolver } from './charts.js';
 import { CATEGORY_LABELS, gazeCategory, TAG_MEMORY_SECONDS } from './live-model.js';
 
-export const MAX_PLAYING = 4;
+// live tiles that play at once (the IPS cameras' tiles play video too)
+export const MAX_PLAYING = 6;
 // a browser opens at most six connections per origin (scheme, host and port) over HTTP/1.1, and a
 // recorded file (a camera's video or the replay's sound) holds one while it plays, and while it is
 // paused in place. The page loads the files from the dashboard's media port, an origin of their
@@ -851,9 +852,11 @@ function drawLabel(ctx, text, x, y, { color, size = 12, font, placed = null }) {
  * with `untagged: true`, the kept ones with `kept`, the seconds since the read). `box` ({x, y, w, h}
  * in css pixels) is where a video shows the camera's picture: the frame set's w x h is stretched onto
  * it; without one the frame set is fitted into the canvas. `stats`, given, is filled with what was
- * drawn: {tagged, kept, untagged, untaggedSkeletons}.
+ * drawn: {tagged, kept, untagged, untaggedSkeletons}. `turn` draws it turned 180° (x -> w - x,
+ * y -> h - y), over a picture the tile shows turned: boxes, labels and hit regions keep their corners
+ * in order on the canvas.
  */
-export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabel = (t) => `Tag ${t}`, opacity = 1, background = null, box = null, stats = null } = {}) {
+export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabel = (t) => `Tag ${t}`, opacity = 1, background = null, box = null, stats = null, turn = false } = {}) {
   const regions = [];
   if (stats) Object.assign(stats, { tagged: 0, kept: 0, untagged: 0, untaggedSkeletons: 0 });
   ctx.save();
@@ -869,8 +872,16 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
   const fit = box && box.w > 0 && box.h > 0 ? box : containBox(cam.w, cam.h, width, height);
   const kx = fit.w / cam.w;
   const ky = fit.h / cam.h;
-  const X = (x) => fit.x + x * kx;
-  const Y = (y) => fit.y + y * ky;
+  const X = turn ? (x) => fit.x + (cam.w - x) * kx : (x) => fit.x + x * kx;
+  const Y = turn ? (y) => fit.y + (cam.h - y) * ky : (y) => fit.y + y * ky;
+  // a box [x0, y0, x1, y1] on the canvas, left top first however the picture is turned
+  const rect = (b) => {
+    const xa = X(b[0]);
+    const xb = X(b[2]);
+    const ya = Y(b[1]);
+    const yb = Y(b[3]);
+    return [Math.min(xa, xb), Math.min(ya, yb), Math.max(xa, xb), Math.max(ya, yb)];
+  };
   ctx.globalAlpha = opacity;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -883,10 +894,11 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
   const untagged = (cam.ps || []).filter((p) => p && p.tag == null && (p.b || Array.isArray(p.k)));
   for (const p of untagged) {
     if (p.b) {
+      const r = rect(p.b);
       ctx.strokeStyle = grey;
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = opacity * 0.85;
-      ctx.strokeRect(X(p.b[0]), Y(p.b[1]), (p.b[2] - p.b[0]) * kx, (p.b[3] - p.b[1]) * ky);
+      ctx.strokeRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
       ctx.globalAlpha = opacity;
     }
     const limbs = Array.isArray(p.k) ? drawSkeleton(ctx, p.k, X, Y, { color: grey, lineWidth: 1.5, radius: 1.5 }) : 0;
@@ -894,13 +906,14 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
       stats.untagged += 1;
       if (limbs) stats.untaggedSkeletons += 1;
     }
-    regions.push({ untagged: true, tag: null, label: untaggedLabel(p), note: untaggedNote(p), box: p.b ? [X(p.b[0]), Y(p.b[1]), X(p.b[2]), Y(p.b[3])] : null, ray: null });
+    regions.push({ untagged: true, tag: null, label: untaggedLabel(p), note: untaggedNote(p), box: p.b ? rect(p.b) : null, ray: null });
   }
   // their labels go over every grey skeleton, still under the pupils, and clear of each other
   const placed = [];
   for (const p of untagged) {
     if (!p.b) continue;
-    drawLabel(ctx, untaggedLabel(p), X(p.b[0]), Math.max(14, Y(p.b[1]) - 4), { color: grey, size: 11, font, placed });
+    const r = rect(p.b);
+    drawLabel(ctx, untaggedLabel(p), r[0], Math.max(14, r[1] - 4), { color: grey, size: 11, font, placed });
   }
   ctx.globalAlpha = opacity;
 
@@ -915,12 +928,13 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
       stats.tagged += 1;
       if (kept) stats.kept += 1;
     }
-    if (p.b) {
+    const pr = p.b ? rect(p.b) : null;
+    if (pr) {
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = opacity * (kept ? 0.8 : 0.55);
       if (dash) ctx.setLineDash(dash);
-      ctx.strokeRect(X(p.b[0]), Y(p.b[1]), (p.b[2] - p.b[0]) * kx, (p.b[3] - p.b[1]) * ky);
+      ctx.strokeRect(pr[0], pr[1], pr[2] - pr[0], pr[3] - pr[1]);
       if (dash) ctx.setLineDash([]);
       ctx.globalAlpha = opacity;
     }
@@ -953,15 +967,15 @@ export function drawCamera(ctx, cam, { width, height, resolve, tagColor, tagLabe
       }
     }
     // label above the box
-    const lx = p.b ? X(p.b[0]) : ray ? ray[0] : 0;
-    const ly = p.b ? Math.max(16, Y(p.b[1]) - 4) : ray ? ray[1] - 8 : 16;
+    const lx = pr ? pr[0] : ray ? ray[0] : 0;
+    const ly = pr ? Math.max(16, pr[1] - 4) : ray ? ray[1] - 8 : 16;
     drawLabel(ctx, taggedLabel(p, tagLabel), lx, ly, { color, size: 12, font });
     regions.push({
       tag,
       kept: kept ? p.age : null,
       label: taggedLabel(p, tagLabel),
       note: kept ? keptNote(p, tagLabel) : null,
-      box: p.b ? [X(p.b[0]), Y(p.b[1]), X(p.b[2]), Y(p.b[3])] : null,
+      box: pr,
       ray,
       cat: g ? g.cat : null,
       to: g ? g.to : null,
@@ -1032,20 +1046,153 @@ export function hitRegion(regions, x, y) {
 
 // tiles
 
+/** "c920-05 · VFA", "c920-01 · IPS", "c920-04 · VFA + IPS" */
+export function itemLabel(item) {
+  const what = item.vfa != null && item.ips != null ? 'VFA + IPS' : item.vfa != null ? 'VFA' : 'IPS';
+  return `${item.key} · ${what}`;
+}
+
+/**
+ * one tile's camera: {key, label, vfa, ips, paths, rotate} of a video item of the session meta
+ * (`vfa` the VFA base id that names the camera in the frame sets, `ips` the IPS base's, `paths` its
+ * stream paths, `rotate` how the capture turned the picture), or of a bare id (a VFA camera of the
+ * frame sets that the session's document does not name); null for anything else.
+ */
+export function tileItem(x) {
+  if (typeof x === 'string' || typeof x === 'number') {
+    const id = String(x);
+    return id ? { key: id, label: `${id} · VFA`, vfa: id, ips: null, paths: [], rotate: 0 } : null;
+  }
+  if (!x || x.key == null || String(x.key) === '') return null;
+  const item = {
+    key: String(x.key),
+    label: null,
+    vfa: x.vfa != null && x.vfa !== '' ? String(x.vfa) : null,
+    ips: x.ips != null && x.ips !== '' ? String(x.ips) : null,
+    paths: Array.isArray(x.paths) ? x.paths.filter((v) => typeof v === 'string' && v).map(String) : [],
+    rotate: [90, 180, 270].includes(Number(x.rotate)) ? Number(x.rotate) : 0,
+  };
+  if (item.vfa == null && item.ips == null) item.vfa = item.key;
+  item.label = typeof x.label === 'string' && x.label ? x.label : itemLabel(item);
+  return item;
+}
+
+/**
+ * the tiles' cameras: the session's video items (meta.video: VFA cameras first, then the IPS ones),
+ * with the VFA cameras of the frame sets (`vfaIds`) that no item names placed after the named VFA
+ * ones; an id that is an IPS-only item's key joins that item.
+ */
+export function cameraItems(video, vfaIds) {
+  const items = [];
+  const byKey = new Map();
+  for (const raw of Array.isArray(video) ? video : []) {
+    const item = tileItem(raw && typeof raw === 'object' ? raw : null);
+    if (!item || byKey.has(item.key)) continue;
+    byKey.set(item.key, item);
+    items.push(item);
+  }
+  const named = new Set(items.filter((it) => it.vfa != null).map((it) => it.vfa));
+  const extra = [];
+  for (const raw of vfaIds || []) {
+    const id = String(raw);
+    if (!id || named.has(id)) continue;
+    named.add(id);
+    const same = byKey.get(id);
+    if (same) {
+      if (same.vfa == null) {
+        same.vfa = id;
+        same.label = itemLabel(same);
+      }
+      continue;
+    }
+    const item = tileItem(id);
+    byKey.set(id, item);
+    extra.push(item);
+  }
+  return [...items.filter((it) => it.vfa != null), ...extra, ...items.filter((it) => it.vfa == null)];
+}
+
+/** the ready live stream of a tile's camera: by its stream paths, else its stream name, else (a session whose document names no paths) by base id */
+export function tileStream(streams, item) {
+  const list = (streams || []).filter((x) => x && x.kind === 'video' && x.ready);
+  const paths = item.paths || [];
+  const byPath = list.find((x) => paths.includes(String(x.path)));
+  if (byPath) return byPath;
+  const byName = list.find((x) => x.stream != null && String(x.stream) === item.key);
+  if (byName || paths.length) return byName || null;
+  const ids = [item.vfa, item.ips, item.key].filter((v) => v != null);
+  return list.find((x) => ids.includes(String(x.camera)) || ids.includes(String(x.base_id))) || null;
+}
+
+/**
+ * whether a recordings route file is of a tile's camera: an archived stream cut by its stream path
+ * (or, when the tile knows no paths, its stream name or camera), a capture file by its device, the
+ * tile's key or one of its base ids
+ */
+export function fileOfTile(f, item) {
+  if (!f) return false;
+  const ids = [item.key, item.vfa, item.ips].filter((v) => v != null);
+  const paths = item.paths || [];
+  if (f.source === 'stream') {
+    if (f.stream_path && paths.length) return paths.includes(String(f.stream_path));
+    return String(f.device) === item.key || (f.camera != null && ids.includes(String(f.camera)));
+  }
+  return f.device != null && ids.includes(String(f.device));
+}
+
+/**
+ * whether Sync overlay holds this tile's live video back: only a tile that draws VFA frame sets has an
+ * overlay to wait for, so an IPS camera's video plays as it comes
+ */
+export function holdsBack(tile) {
+  return !!tile && tile.vfa != null;
+}
+
+const TURN_KEY = 'openmmla.dashboard.turn180';
+
+/** whether the viewer turned this camera's tile of this session 180° (kept in this browser only) */
+export function readTurn(sid, key, storage) {
+  try {
+    // the page's storage is looked up inside the try: a browser that blocks site data throws on the lookup
+    const s = storage === undefined ? globalThis.localStorage : storage;
+    return !!s && s.getItem(`${TURN_KEY}.${sid}.${key}`) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function writeTurn(sid, key, on, storage) {
+  try {
+    const s = storage === undefined ? globalThis.localStorage : storage;
+    if (!s) return;
+    if (on) s.setItem(`${TURN_KEY}.${sid}.${key}`, '1');
+    else s.removeItem(`${TURN_KEY}.${sid}.${key}`);
+  } catch {
+    // private windows and blocked storage keep the turn for this page only
+  }
+}
+
 /**
  * The tiles of the Cameras card. opts: {tagColor(tag), tagLabel(tag), onNote(text)}.
  * Returns {el, update(state), setExpanded(bool), setOptions({overlay, sync}), hasVideo(), hasLiveVideo(),
  * inspect(), suspend(), resume(), destroy()}. suspend() closes every video but keeps the tiles (a page
  * going into the back/forward cache); resume() lets them play again.
- * update(state): {cameras: [ids], frameAt(t) -> vfa record, now (stream clock), mode ('follow'|'replay'),
+ * update(state): {cameras: [items (cameraItems) or VFA ids], sid (the session, whose tiles the viewer may
+ *                 have turned 180°), frameAt(t) -> vfa record, now (stream clock), mode ('follow'|'replay'),
  *                 live (the session runs), media (the /media answer | null), serverNow (epoch),
  *                 vfaLag (s | null), recordings ({enabled, files, reason} of the recordings route | null
  *                 while it is asked), speed (replay speed), running (the replay clock advances),
  *                 mediaOrigin (where the files load from, the dashboard's media port; null: the page's origin),
  *                 mediaReserved (how many of the MAX_MEDIA connections the page's sound takes, 0 or 1;
  *                 it counts only without a mediaOrigin)}.
- * The replay of an ended session plays each camera's recorded file (files[].device is the VFA camera
- * id) at the clock; a tile whose recording does not cover the moment draws the skeletons alone. The
+ * A tile is a camera (its key the stream's name, else the base id): a VFA camera's tile draws the
+ * frame sets of its VFA id over the video, an IPS camera's shows the video alone (its badges are on
+ * the Room card). The replay of an ended session plays each camera's recorded file (fileOfTile: an
+ * archived stream cut of its stream path, a capture file of its device) at the clock; a tile whose
+ * recording does not cover the moment draws the skeletons alone. A tile of a camera whose capture
+ * did not turn its picture (rotate 0) offers Turn 180°, for a camera mounted upside down before the
+ * capture turned pictures: the video and the overlay turn together, remembered per session and
+ * camera in this browser. The
  * tiles on screen hold a file first, then those scrolled away (paused, the most recently seen first),
  * up to videoCap() (MAX_MEDIA_VIDEOS from the media origin, else MAX_MEDIA less the sound's share); a
  * tile past that lets go of its file.
@@ -1062,6 +1209,8 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     priority: [],
     alive: true,
     suspended: false,
+    // the session whose turned tiles are remembered
+    sid: null,
     // where the recorded files load from (null: the page's origin), the connections the sound takes
     // there, and the recorded files the tiles may hold besides
     origin: null,
@@ -1098,43 +1247,73 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     })
     : null;
 
-  /** why a tile draws skeletons instead of video */
-  function skeletonNote(id, s) {
+  /** why a tile draws skeletons instead of video (an IPS camera's tile: why it shows nothing) */
+  function skeletonNote(t, s) {
+    const lead = t.vfa == null ? 'No video' : 'Skeleton view';
+    const tail = t.vfa == null ? ' This IPS camera\'s badge positions are on the Room card.' : '';
     if (s.mode !== 'follow') {
-      if (s.live) return 'Skeleton view: recorded video plays once the session has ended.';
+      if (s.live) return `${lead}: recorded video plays once the session has ended.${tail}`;
       const rec = s.recordings;
-      if (!rec) return 'Skeleton view: looking for the camera recordings.';
-      if (!rec.enabled) return rec.reason ? `Skeleton view. ${rec.reason}` : 'Skeleton view: the recordings are not available.';
-      const unplaced = (rec.files || []).some((f) => f && f.modality === 'video' && String(f.device) === id && !finite(f.start));
-      if (unplaced) return 'Skeleton view: the recording of this camera has no start time, so it cannot follow the clock.';
-      return 'Skeleton view: the dashboard\'s machine holds no recording of this camera.';
+      if (!rec) return `${lead}: looking for the camera recordings.${tail}`;
+      if (!rec.enabled) return rec.reason ? `${lead}. ${rec.reason}${tail}` : `${lead}: the recordings are not available.${tail}`;
+      const unplaced = (rec.files || []).some((f) => f && f.modality === 'video' && fileOfTile(f, t) && !finite(f.start));
+      if (unplaced) return `${lead}: the recording of this camera has no start time, so it cannot follow the clock.${tail}`;
+      return `${lead}: the dashboard's machine holds no recording of this camera.${tail}`;
     }
     const media = s.media;
-    if (!media) return 'Skeleton view: this session has no live video.';
+    if (!media) return `${lead}: this session has no live video.${tail}`;
     const others = (media.streams || []).some((x) => x && x.kind === 'video' && x.ready);
-    if (media.webrtc && others) return 'Skeleton view: this camera has no live stream.';
-    return media.reason ? `Skeleton view. ${media.reason}` : 'Skeleton view: this session has no live video.';
+    if (media.webrtc && others) return `${lead}: this camera has no live stream.${tail}`;
+    return media.reason ? `${lead}. ${media.reason}${tail}` : `${lead}: this session has no live video.${tail}`;
   }
 
-  function streamFor(id, s) {
+  function streamFor(t, s) {
     const media = s && s.media;
     if (!media || !media.webrtc || s.mode !== 'follow') return null;
-    return (media.streams || []).find((x) => x && x.kind === 'video' && x.ready && (x.camera === id || x.base_id === id)) || null;
+    return tileStream(media.streams, t);
   }
 
   /** the camera's recorded video files, in the replay of an ended session */
-  function recordingsFor(id, s) {
+  function recordingsFor(t, s) {
     const rec = s && s.recordings;
     if (!rec || !rec.enabled || s.mode !== 'replay' || s.live) return [];
-    return (rec.files || []).filter((f) => f && f.modality === 'video' && String(f.device) === id && finite(f.start) && f.url);
+    return (rec.files || []).filter((f) => f && f.modality === 'video' && fileOfTile(f, t) && finite(f.start) && f.url);
   }
 
-  function makeTile(id) {
-    const name = h('span', { class: 'cam-name', text: id });
+  /** show a tile turned 180° (the video by CSS, the overlay by drawCamera) or upright */
+  function applyTurn(t) {
+    const turned = t.rotate === 0 && t.turned;
+    t.stage.classList.toggle('is-turned', turned);
+    t.turnBtn.hidden = t.rotate !== 0;
+    t.turnBtn.setAttribute('aria-pressed', turned ? 'true' : 'false');
+    t.drawnKey = null;
+  }
+
+  /** a tile's camera changed what the session says of it: its name, base ids, paths and turn */
+  function setItem(t, item) {
+    const same = t.label === item.label && t.vfa === item.vfa && t.ips === item.ips && t.rotate === item.rotate
+      && t.paths.join('\n') === item.paths.join('\n');
+    if (same) return;
+    Object.assign(t, { label: item.label, vfa: item.vfa, ips: item.ips, paths: item.paths.slice(), rotate: item.rotate });
+    t.name.textContent = item.label;
+    t.canvas.setAttribute('aria-label', item.vfa == null
+      ? `Camera ${item.label}: video only`
+      : `Camera ${item.label}: skeletons of the newest frame set`);
+    t.age.hidden = item.vfa == null;
+    applyTurn(t);
+  }
+
+  function makeTile(item) {
+    const id = item.key;
+    const name = h('span', { class: 'cam-name', text: item.label });
     const age = h('span', { class: 'badge cam-age num', text: fmt.na, title: 'Age of the frame set drawn' });
     const stateEl = h('span', { class: 'cam-state muted' });
     const playBtn = h('button', { class: 'btn sm', attrs: { type: 'button' }, hidden: true }, icon('play', 12), h('span', { text: 'Play' }));
-    const head = h('div', { class: 'cam-head' }, name, age, stateEl, h('span', { class: 'spacer' }), playBtn);
+    const turnBtn = h('button', {
+      class: 'btn sm',
+      attrs: { type: 'button', 'aria-pressed': 'false', title: 'Turn the video and the overlay 180° (a camera mounted upside down, recorded before the capture turned its pictures)' },
+    }, h('span', { text: 'Turn 180°' }));
+    const head = h('div', { class: 'cam-head' }, name, age, stateEl, h('span', { class: 'spacer' }), playBtn, turnBtn);
     const video = h('video', { class: 'cam-video', attrs: { muted: true, playsinline: true, autoplay: true }, muted: true, hidden: true });
     // the recorded file of a replay: hidden (not display: none, so it keeps loading) until it has a frame
     const fvideo = h('video', { class: 'cam-video cam-file', attrs: { muted: true, playsinline: true, preload: 'auto', disablepictureinpicture: true }, muted: true, style: { visibility: 'hidden' } });
@@ -1143,13 +1322,20 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     const note = h('p', { class: 'cam-note' });
     const tileEl = h('div', { class: 'cam-tile', dataset: { camera: id } }, head, stage, note);
     const tile = {
-      id, el: tileEl, name, age, stateEl, playBtn, video, fvideo, canvas, stage, note,
+      id, el: tileEl, name, age, stateEl, playBtn, turnBtn, video, fvideo, canvas, stage, note,
+      label: null, vfa: null, ips: null, paths: [], rotate: 0, turned: !!st.sid && readTurn(st.sid, id), turnSid: st.sid,
       onScreen: !io, seenAt: 0, player: null, playerState: null, stream: null, regions: [], drawnKey: null, aspect: 16 / 9,
       videoMode: false, kind: null, files: [], file: null, next: null, durations: new Map(), onVideo: false, drawn: null,
     };
     playBtn.addEventListener('click', () => {
       st.priority = [id, ...st.priority.filter((x) => x !== id)];
       schedulePlayback();
+    });
+    turnBtn.addEventListener('click', () => {
+      tile.turned = !tile.turned;
+      if (st.sid) writeTurn(st.sid, id, tile.turned);
+      applyTurn(tile);
+      if (st.expanded && st.last) paint(tile, st.last);
     });
     stage.addEventListener('pointermove', (e) => {
       const r = canvas.getBoundingClientRect();
@@ -1178,11 +1364,18 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     stage.addEventListener('pointerleave', () => tooltip.hide());
     if (io) io.observe(tileEl);
     if (ro) ro.observe(stage);
+    setItem(tile, item);
+    applyTurn(tile);
     return tile;
   }
 
-  function syncTiles(ids) {
-    const want = Array.from(new Set(ids.map(String)));
+  function syncTiles(list) {
+    const items = [];
+    for (const raw of list) {
+      const item = tileItem(raw);
+      if (item && !items.some((it) => it.key === item.key)) items.push(item);
+    }
+    const want = items.map((it) => it.key);
     let changed = false;
     for (const [id, t] of tiles) {
       if (!want.includes(id)) {
@@ -1194,10 +1387,19 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
         changed = true;
       }
     }
-    for (const id of want) {
-      if (!tiles.has(id)) {
-        tiles.set(id, makeTile(id));
+    for (const item of items) {
+      const t = tiles.get(item.key);
+      if (!t) {
+        tiles.set(item.key, makeTile(item));
         changed = true;
+        continue;
+      }
+      setItem(t, item);
+      // the session the page shows came later than the tile
+      if (t.turnSid !== st.sid) {
+        t.turnSid = st.sid;
+        t.turned = !!st.sid && readTurn(st.sid, t.id);
+        applyTurn(t);
       }
     }
     if (changed) {
@@ -1350,11 +1552,12 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     st.last = s;
     st.origin = typeof s.mediaOrigin === 'string' && s.mediaOrigin ? s.mediaOrigin : null;
     st.reserved = finite(s.mediaReserved) ? Math.max(0, Math.min(MAX_MEDIA, Math.round(s.mediaReserved))) : 0;
+    if (s.sid != null) st.sid = String(s.sid);
     syncTiles(s.cameras || []);
     for (const t of tiles.values()) {
-      const stream = streamFor(t.id, s);
+      const stream = streamFor(t, s);
       const url = stream ? whepUrl(s.media.webrtc, stream.path) : null;
-      t.files = stream ? [] : recordingsFor(t.id, s);
+      t.files = stream ? [] : recordingsFor(t, s);
       const kind = stream ? 'live' : t.files.length ? 'file' : null;
       pickRecording(t, s, kind);
       // a recorded camera takes a player (and one of the videoCap() places) only while a file holds the clock
@@ -1414,8 +1617,12 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     if (!t.file) return 'No recording at this moment.';
     if (!p) return '';
     if (p.stepping) return `This browser cannot play the video at ${s.speed}x: it steps once a second.`;
+    if (t.file.source === 'stream') return 'Recorded video: the stream server\'s cut, archived.';
     return t.file.host ? `Recorded video from ${t.file.host}.` : 'Recorded video.';
   }
+
+  /** what an IPS camera's tile adds under its video */
+  const IPS_NOTE = 'IPS camera: video only, its badge positions are on the Room card.';
 
   /** draw one tile: the overlay of a video shows the frame set at the video's own time */
   function paint(t, s) {
@@ -1427,7 +1634,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       if (finite(s.serverNow)) {
         const lag = finite(s.vfaLag) ? Math.max(0, s.vfaLag) : 0;
         let applied = 0;
-        if (st.sync && t.player && supportsVideoDelay()) {
+        if (st.sync && holdsBack(t) && t.player && supportsVideoDelay()) {
           applied = Math.min(lag, MAX_VIDEO_DELAY);
           if (t.player.setDelay(applied) && applied >= 0.2) delayNote = `Video delayed ${fmt.num(applied, 1)} s to match the overlay.`;
         } else if (t.player) t.player.setDelay(0);
@@ -1447,14 +1654,16 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       t.drawnKey = null;
     }
     t.fvideo.style.visibility = onVideo && t.kind === 'file' ? 'visible' : 'hidden';
-    const rec = s.frameAt ? s.frameAt(at) : null;
-    const cam = rec ? (rec.c || []).find((c) => String(c.id) === t.id) : null;
+    // an IPS camera's tile has no frame sets: the video alone
+    const rec = s.frameAt && t.vfa != null ? s.frameAt(at) : null;
+    const cam = rec ? (rec.c || []).find((c) => String(c.id) === t.vfa) : null;
+    const turned = t.rotate === 0 && t.turned;
     const { w, h: hgt, dpr } = sizeCanvas(t, cam);
     // object-fit: contain letterboxes a picture whose shape differs from the frame set's
     const box = picture ? containBox(picture.videoWidth, picture.videoHeight, w, hgt) : null;
     const showOverlay = !onVideo || st.overlay;
     const boxKey = box ? `${box.x.toFixed(1)},${box.y.toFixed(1)},${box.w.toFixed(1)},${box.h.toFixed(1)}` : '';
-    const key = `${rec ? rec.t : 'none'}|${w}x${hgt}|${showOverlay}|${t.kind}|${onVideo}|${boxKey}`;
+    const key = `${rec ? rec.t : 'none'}|${w}x${hgt}|${showOverlay}|${t.kind}|${onVideo}|${boxKey}|${turned}`;
     if (key !== t.drawnKey) {
       t.drawnKey = key;
       const resolve = colorResolver(el);
@@ -1466,7 +1675,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
         t.regions = [];
       } else {
         t.regions = drawCamera(ctx, cam, {
-          width: w, height: hgt, resolve, tagColor, tagLabel, box,
+          width: w, height: hgt, resolve, tagColor, tagLabel, box, turn: turned,
           opacity: onVideo ? 0.8 : 1,
           background: onVideo ? null : resolve('var(--surface-2)'),
           stats: t.drawn,
@@ -1475,7 +1684,8 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
           ctx.fillStyle = resolve('var(--muted)');
           ctx.font = '500 13px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText(rec ? 'This camera is missing from the newest frame set.' : 'No frame set yet.', w / 2, hgt / 2);
+          const empty = t.vfa == null ? 'No video of this IPS camera now.' : rec ? 'This camera is missing from the newest frame set.' : 'No frame set yet.';
+          ctx.fillText(empty, w / 2, hgt / 2);
           ctx.textAlign = 'start';
         }
       }
@@ -1483,9 +1693,10 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     const ageS = rec ? (finite(s.serverNow) && s.mode === 'follow' ? s.serverNow - rec.t : at - rec.t) : null;
     t.age.textContent = ageS == null ? 'no frame' : ageS < 1.5 ? 'now' : fmt.ago(ageS);
     t.age.dataset.stale = ageS != null && ageS > 10 ? 'true' : 'false';
-    if (t.kind === 'live') t.note.textContent = delayNote;
-    else if (t.kind === 'file') t.note.textContent = recordingNote(t, s);
-    else t.note.textContent = skeletonNote(t.id, s);
+    const ips = t.vfa == null && t.kind ? ` ${IPS_NOTE}` : '';
+    if (t.kind === 'live') t.note.textContent = `${delayNote}${ips}`.trim();
+    else if (t.kind === 'file') t.note.textContent = `${recordingNote(t, s)}${ips}`.trim();
+    else t.note.textContent = skeletonNote(t, s);
   }
 
   return {
@@ -1510,7 +1721,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       return Array.from(tiles.values()).some((t) => t.videoMode);
     },
     hasLiveVideo() {
-      return Array.from(tiles.values()).some((t) => t.kind === 'live');
+      return Array.from(tiles.values()).some((t) => t.kind === 'live' && holdsBack(t));
     },
     /** each tile's video as it stands, for checks from the browser console */
     inspect() {

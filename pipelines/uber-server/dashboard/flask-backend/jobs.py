@@ -222,10 +222,11 @@ def compute_job(client, store: ReportStore, sid: str, job: str, *, runner: str,
             report("Computing space", None, None, force=True)
             try:
                 from openmmla.analytics.report.sessions import ips_cameras
-                from openmmla.analytics.report.space import build_space
+                from openmmla.analytics.report.space import build_space, main_camera_turn
                 cameras = ips_cameras(mongo_doc) if mongo_doc else None
+                # the main camera's turn sets the fallback plan of a session with too few badge rotations
                 space = build_space(ips["ips_translation"], ips["ips_rotation"], ips["ips_relation"],
-                                    t0, t1, cameras=cameras)
+                                    t0, t1, cameras=cameras, main_turn=main_camera_turn(mongo_doc) if mongo_doc else 0)
                 store.write_part(sid, "space", jsonable(space), last_event, REPORT_VERSION)
             except Exception as exc:
                 logger.exception("space part of %s failed", sid)

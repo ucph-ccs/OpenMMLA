@@ -26,13 +26,14 @@ function finite(v) {
 /**
  * the microphones among the recordings route's files: one source per device (a recorder that was
  * restarted left several files), each {key, label, scope, participant, files (by start), seconds}.
- * A file without a start cannot follow the clock and is left out.
+ * The archived stream cuts of a sound stream (source "stream") are sources of their own, apart from
+ * a capture file of the same device. A file without a start cannot follow the clock and is left out.
  */
 export function soundSources(files) {
   const by = new Map();
   for (const f of files || []) {
     if (!f || f.modality !== 'audio' || !finite(f.start) || !f.url) continue;
-    const key = ['device', 'host', 'scope', 'participant'].map((k) => (f[k] == null ? '' : String(f[k]))).join('|');
+    const key = ['source', 'device', 'host', 'scope', 'participant'].map((k) => (f[k] == null ? '' : String(f[k]))).join('|');
     let src = by.get(key);
     if (!src) {
       src = { key, label: f.label || f.device || 'Microphone', host: f.host || null, scope: f.scope || null, participant: f.participant ?? null, files: [], seconds: 0 };

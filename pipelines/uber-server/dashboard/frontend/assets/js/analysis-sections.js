@@ -2536,6 +2536,26 @@ function serverRow(entry) {
     : [h('span', { class: 'muted an-small', text: 'Playback is off' })]);
 }
 
+/**
+ * the line that says where `mmla ses-archive` put the session: "Archive: complete, 32 files, 99 MB,
+ * verified 2 Oct 2026 16:29, on this machine" (an archive that is not complete in the warning
+ * colour), "Not archived" without one.
+ */
+export function archiveLine(archive) {
+  if (!archive || typeof archive !== 'object') return { text: 'Not archived', state: 'none' };
+  const status = archive.status ? String(archive.status) : 'unknown';
+  const files = finite(archive.files) ? `${fmt.int(archive.files)} ${archive.files === 1 ? 'file' : 'files'}` : null;
+  const where = archive.here ? 'on this machine' : archive.location ? `on ${archive.location}` : null;
+  const parts = [status, files, fileSize(archive.bytes), finite(archive.verified_at) ? `verified ${fmt.dateTime(archive.verified_at)}` : null, where];
+  return { text: `Archive: ${parts.filter(Boolean).join(', ')}`, state: status === 'complete' ? 'complete' : 'partial' };
+}
+
+function archiveRow(archive) {
+  const line = archiveLine(archive);
+  return h('p', { class: 'muted an-rec-state an-archive', dataset: { state: line.state } },
+    line.state === 'partial' ? icon('alert', 14) : null, h('span', { text: line.text }));
+}
+
 function dataSection(ctx) {
   const sec = sectionShell('data', 'Data and exports');
   const covCard = card({ title: 'Coverage', subtitle: 'Records per modality against one per bucket over the session', span: 7 });
@@ -2612,13 +2632,22 @@ function dataSection(ctx) {
       out.push(quiet(d.reason || 'Raw recordings are turned off on this dashboard.'));
       return out;
     }
+    out.push(archiveRow(d.archive));
     const files = d.files.filter((f) => f && f.url);
-    out.push(files.length
-      ? h('ul', { class: 'an-dl an-recs' }, files.map(fileRow))
-      : quiet("No recordings of this session on the dashboard's machine."));
+    const collection = files.filter((f) => f.source !== 'stream');
+    const cuts = files.filter((f) => f.source === 'stream');
+    if (collection.length || !cuts.length) out.push(h('h3', { class: 'an-sub', text: 'Collection recordings' }));
+    if (collection.length) out.push(h('ul', { class: 'an-dl an-recs' }, collection.map(fileRow)));
+    else if (!cuts.length) out.push(quiet("No recordings of this session on the dashboard's machine."));
+    if (cuts.length) {
+      out.push(h('h3', { class: 'an-sub', text: 'Stream cuts (archived)' }));
+      if (!collection.length) out.push(quiet('There were no Collection recordings of this session; the stream server\'s cuts below are its video and sound.'));
+      out.push(h('ul', { class: 'an-dl an-recs' }, cuts.map(fileRow)));
+    }
+    // the backend leaves out the stretches an archived cut holds
     const server = (Array.isArray(d.server) ? d.server : []).filter((e) => e && e.path && Array.isArray(e.spans) && e.spans.length);
     if (server.length) {
-      out.push(h('h3', { class: 'an-sub', text: 'Stream recordings (MediaMTX, kept 72 h)' }),
+      out.push(h('h3', { class: 'an-sub', text: cuts.length ? 'Stream recordings not archived (MediaMTX, kept 72 h)' : 'Stream recordings (MediaMTX, kept 72 h)' }),
         h('ul', { class: 'an-dl an-recs' }, server.map(serverRow)));
     }
     return out;

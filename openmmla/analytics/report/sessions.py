@@ -298,10 +298,109 @@ def _ips_main(doc: dict | None) -> str | None:
     return None
 
 
+def _turn(value) -> int:
+    """0, 90, 180 or 270 of a source's capture.rotate (how the capture host turned the picture,
+    clockwise); anything else, and a session from before the capture turned pictures, is 0."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number in (0, 90, 180, 270) else 0
+
+
+def _text(value) -> str | None:
+    if value is None or isinstance(value, (dict, list, bool)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _video_items(sources: list[dict], components: list[dict]) -> list[dict]:
+    """one item per camera the session's IPS and VFA bases took: {key, label, vfa, ips, paths,
+    rotate}. The bases are grouped by the stream's name (sources[].stream), else by the file a
+    file-mode base read, else by the base id, so the IPS and the VFA base on one camera share an
+    item; its key is the stream's name when there is one, else the VFA base id, else the IPS one
+    (a file-mode camera's key is its base id, not its file). `vfa` and `ips` are
+    the bases' ids (the VFA one names the camera in the frame sets), `paths` the stream paths on the
+    Stream Server, `rotate` how the capture turned the picture. VFA cameras first, then IPS-only
+    ones, each by name."""
+    items: dict[str, dict] = {}
+    names: dict[str, str] = {}
+    for entry in sources:
+        pipeline = entry.get('pipeline')
+        base_id = _text(entry.get('base_id'))
+        if pipeline not in ('ips', 'vfa') or base_id is None:
+            continue
+        capture = entry.get('capture') if isinstance(entry.get('capture'), dict) else {}
+        if capture.get('kind') not in (None, '', 'video'):
+            continue
+        stream = _text(entry.get('stream'))
+        source_file = _text(entry.get('source_index')) if entry.get('source') == 'file' else None
+        group = f'stream:{stream}' if stream else f'file:{source_file}' if source_file else f'base:{base_id}'
+        item = items.get(group)
+        if item is None:
+            item = items[group] = {'key': None, 'label': None, 'vfa': None, 'ips': None, 'paths': [], 'rotate': 0}
+            names[group] = stream or ''
+        if item[pipeline] is None:
+            item[pipeline] = base_id
+        path = str(entry.get('server_path') or '').strip('/')
+        if path and path not in item['paths']:
+            item['paths'].append(path)
+        item['rotate'] = item['rotate'] or _turn(capture.get('rotate'))
+    if not sources:
+        for entry in components:
+            parameters = entry.get('parameters') if isinstance(entry.get('parameters'), dict) else {}
+            base_id = _text(entry.get('id') or parameters.get('base_id') or parameters.get('id'))
+            pipeline = entry.get('pipeline')
+            if entry.get('role') != 'base' or pipeline not in ('ips', 'vfa') or base_id is None:
+                continue
+            item = items.setdefault(f'base:{base_id}', {'key': None, 'label': None, 'vfa': None, 'ips': None,
+                                                        'paths': [], 'rotate': 0})
+            names.setdefault(f'base:{base_id}', '')
+            item[pipeline] = item[pipeline] or base_id
+    by_key: dict[str, dict] = {}
+    for group, item in items.items():
+        key = names[group] or item['vfa'] or item['ips']
+        kept = by_key.get(key)
+        if kept is None:
+            by_key[key] = dict(item, key=key)
+            continue
+        # two groups that came to one key (a stream name that is also another camera's base id)
+        # are one camera
+        for pipeline in ('vfa', 'ips'):
+            kept[pipeline] = kept[pipeline] or item[pipeline]
+        kept['paths'] += [path for path in item['paths'] if path not in kept['paths']]
+        kept['rotate'] = kept['rotate'] or item['rotate']
+    out = list(by_key.values())
+    for item in out:
+        both = 'VFA + IPS' if item['vfa'] and item['ips'] else 'VFA' if item['vfa'] else 'IPS'
+        item['label'] = f"{item['key']} · {both}"
+    out.sort(key=lambda item: (item['vfa'] is None, _natural_key(item['key'])))
+    return out
+
+
+def archive_summary(value) -> dict | None:
+    """{status, files, bytes, location, verified_at (epoch)} of an `archive` block `mmla
+    ses-archive` wrote (the session document's or the manifest's); None for anything else."""
+    if not isinstance(value, dict) or not value:
+        return None
+    status = _text(value.get('status'))
+    if status is None and value.get('location') in (None, ''):
+        return None
+
+    def count(key):
+        number = value.get(key)
+        return int(number) if isinstance(number, (int, float)) and not isinstance(number, bool) and number >= 0 else None
+
+    return {'status': status, 'files': count('files'), 'bytes': count('bytes'),
+            'location': _text(value.get('location')), 'verified_at': to_epoch(value.get('verified_at'))}
+
+
 def mongo_devices(doc: dict | None) -> dict:
     """the cameras (IPS and VFA bases) and microphones (ASR bases) a session used, the Stream Server
-    paths its bases pulled, and its IPS main camera; from the document's `sources`, else from its
-    base components."""
+    paths its bases pulled (each with the stream's name and how its capture turned the picture),
+    one video item per camera (_video_items), and its IPS main camera; from the document's
+    `sources`, else from its base components."""
     cameras: list[str] = []
     microphones: list[str] = []
     streams: list[dict] = []
@@ -322,7 +421,8 @@ def mongo_devices(doc: dict | None) -> dict:
             capture = entry.get('capture') if isinstance(entry.get('capture'), dict) else {}
             kind = capture.get('kind') or ('audio' if pipeline == 'asr' else 'video')
             streams.append({'path': path, 'pipeline': pipeline, 'base_id': str(entry.get('base_id') or ''),
-                            'kind': str(kind)})
+                            'kind': str(kind), 'stream': _text(entry.get('stream')),
+                            'rotate': _turn(capture.get('rotate'))})
     if not sources:
         for entry in _components(doc):
             if entry.get('role') == 'base':
@@ -332,6 +432,7 @@ def mongo_devices(doc: dict | None) -> dict:
         'cameras': sorted(cameras, key=_natural_key),
         'microphones': sorted(microphones, key=_natural_key),
         'streams': sorted(streams, key=lambda stream: _natural_key(stream['path'])),
+        'video': _video_items(sources, _components(doc)),
         'ips_main': _ips_main(doc),
     }
 
@@ -523,8 +624,9 @@ def _type_summary(stats: dict | None, duration: float | None, bucket: float) -> 
 
 def session_meta(client, sid: str, mongo_db=None) -> dict | None:
     """the description of one session (the meta object of the dashboard's API): identity, span,
-    live state, per-modality counts and coverage, and, from MongoDB, devices, streams, the IPS
-    main camera and its cameras' placement, and provenance. None when neither InfluxDB nor MongoDB
+    live state, per-modality counts and coverage, and, from MongoDB, devices, streams, the video
+    items (one per camera), where the session is archived, the IPS main camera and its cameras'
+    placement, and provenance. None when neither InfluxDB nor MongoDB
     knows the session. Raises ValueError for an invalid id, InfluxUnavailable when InfluxDB cannot
     be asked. `report` is left None for the server to fill."""
     if not valid_session_id(sid):
@@ -560,6 +662,8 @@ def session_meta(client, sid: str, mongo_db=None) -> dict | None:
         'modalities': modalities,
         'devices': {'cameras': devices['cameras'], 'microphones': devices['microphones']} if devices else None,
         'streams': devices['streams'] if devices else [],
+        'video': devices['video'] if devices else [],
+        'archive': archive_summary(doc.get('archive')) if doc is not None else None,
         'ips_main': devices['ips_main'] if devices else None,
         'ips_cameras': ips_cameras(doc) if doc is not None else [],
         'provenance': _provenance(doc, stats.get('pose_model')),

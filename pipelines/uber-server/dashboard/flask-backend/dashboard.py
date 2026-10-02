@@ -830,23 +830,43 @@ def _server_recordings(mongo_ok: bool, doc, devices, t0, t1) -> list[dict]:
     return out
 
 
+def _archive_state(sid: str, doc, files: list[dict]) -> dict | None:
+    """where and how completely `mmla ses-archive` archived the session: the session document's
+    `archive`, else the one in its manifest on this machine; `here` says whether this machine's
+    session folder is the archive (its manifest carries the archive, or it holds archived cuts)."""
+    root = raw_recordings.artifacts_root()
+    try:
+        noted = raw_recordings.manifest_archive(root, sid)
+    except Exception as exc:
+        logger.info("manifest archive of %s: %s", sid, type(exc).__name__)
+        noted = None
+    archive = sessions.archive_summary((doc or {}).get("archive")) or sessions.archive_summary(noted)
+    if archive is None:
+        return None
+    archive["here"] = noted is not None or any(f.get("source") == "stream" for f in files)
+    return archive
+
+
 @app.route("/api/sessions/<sid>/recordings")
 def api_recordings(sid):
-    """the session's raw camera and microphone files on this machine (artifacts/<sid>/collection/)
-    and MediaMTX's recordings of its streams, for the downloads; nothing while Exports.raw_media
-    (or DASHBOARD_RAW_MEDIA) turns them off. The files are listed without InfluxDB or MongoDB;
-    those only add each file's offset from the session start and the stream recordings."""
+    """the session's raw camera and microphone files on this machine (artifacts/<sid>/collection/),
+    the stream cuts `mmla ses-archive` keeps there (streams/server/), where the session's archive is,
+    and MediaMTX's recordings of its streams that no archived cut holds, for the downloads; nothing
+    while Exports.raw_media (or DASHBOARD_RAW_MEDIA) turns them off. The files are listed without
+    InfluxDB or MongoDB; those only add each file's offset from the session start, the camera of
+    each cut, the archive's state and the stream recordings."""
     check_sid(sid)
     enabled, reason = raw_media_state()
     if not enabled:
-        return json_response({"enabled": False, "files": [], "server": [], "reason": reason, "media_port": None,
-                              "media_instance": None})
+        return json_response({"enabled": False, "files": [], "server": [], "archive": None, "reason": reason,
+                              "media_port": None, "media_instance": None})
     files = raw_recordings.list_recordings(raw_recordings.artifacts_root(), sid)
     try:
         mongo_ok, doc, devices, t0, t1, _ = _media_inputs(sid)
     except Exception as exc:
         logger.info("span of %s for its recordings: %s", sid, type(exc).__name__)
         mongo_ok, doc, devices, t0, t1 = False, None, None, None, None
+    raw_recordings.place_cuts(files, (doc or {}).get("sources"))
     for record in files:
         record["url"] = f"/api/sessions/{sid}/recordings/{quote(record['id'], safe='')}"
         start = record.get("start")
@@ -856,10 +876,13 @@ def api_recordings(sid):
     except Exception as exc:
         logger.info("stream recordings of %s: %s", sid, type(exc).__name__)
         server = []
+    # a stretch the archive cut and keeps here is offered once, as its cut
+    server = raw_recordings.unarchived_spans(server, [f for f in files if f.get("source") == "stream"])
+    archive = _archive_state(sid, doc, files)
     # the files' urls are paths: the Live page loads them from the media port when this process
     # answers there (media_instance)
-    return json_response({"enabled": True, "files": files, "server": server, "reason": None, "media_port": MEDIA_PORT,
-                          "media_instance": MEDIA_INSTANCE})
+    return json_response({"enabled": True, "files": files, "server": server, "archive": archive, "reason": None,
+                          "media_port": MEDIA_PORT, "media_instance": MEDIA_INSTANCE})
 
 
 def _sibling_origin() -> str | None:

@@ -23,7 +23,7 @@ import {
   LiveModel, VoiceColors, projectCameras, roomExtent, extentContains, extentUnion, pairList, CATEGORIES, CATEGORY_LABELS,
   GROUP_LABEL_RE, JA_PAIR_MIN_SHARE, TAG_MEMORY_SECONDS,
 } from './live-model.js';
-import { cameraWall, mediaOriginFor, probeMediaOrigin } from './cameras.js';
+import { cameraWall, cameraItems, mediaOriginFor, probeMediaOrigin } from './cameras.js';
 import { ReplaySound, soundSources, defaultSource, MAX_SOUND_SPEED } from './sound.js';
 
 const SPEEDS = [1, 2, 4, 8, 16];
@@ -1744,7 +1744,12 @@ function renderTranscript(now, loading) {
 
 function renderCameras(now) {
   const wall = UI.cams.wall;
-  const ids = sortTags(S.model.cameraIds.size ? Array.from(S.model.cameraIds) : ((S.meta && S.meta.devices && S.meta.devices.cameras) || []));
+  // one tile per camera the session's document names (VFA first, then IPS), and the VFA cameras of
+  // the frame sets it does not; without a document, the cameras it would have listed
+  const video = S.meta && Array.isArray(S.meta.video) ? S.meta.video : [];
+  const vfaIds = sortTags(Array.from(S.model.cameraIds));
+  const fallback = !video.length && !vfaIds.length ? sortTags((S.meta && S.meta.devices && S.meta.devices.cameras) || []) : [];
+  const ids = cameraItems(video, vfaIds.length ? vfaIds : fallback);
   if (S.camsOpen) {
     if (!ids.length) {
       const noVfa = S.meta && S.meta.modalities && !S.meta.modalities.vfa;
@@ -1759,6 +1764,7 @@ function renderCameras(now) {
   const reserved = S.sound.takesMedia(soundSource(soundState()), S.speed) ? 1 : 0;
   wall.update({
     cameras: ids,
+    sid: S.sid,
     frameAt: (t) => S.model.vfaAt(t),
     now,
     mode: S.mode,

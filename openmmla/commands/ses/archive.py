@@ -1647,7 +1647,8 @@ async def archive_session(session_id: str, *, host: str | None = None, dry_run: 
             result.manifest = "written"
             rows = len(merged.get("recordings") or [])
             cuts = len(merged.get(STREAM_CUTS_KEY) or [])
-            log(f"  [green]✓[/green] Manifest written there: {rows} recording(s) with their paths there"
+            log(f"  [green]✓[/green] Manifest written there: "
+                + (f"{rows} recording(s) with their paths there" if rows else "no Collection recordings")
                 + (f", {cuts} stream cut(s) under {STREAM_CUTS_KEY}" if cuts else "")
                 + (f" ({unresolved} row(s) of this manifest name a file the archive does not hold)" if unresolved
                    else ""))

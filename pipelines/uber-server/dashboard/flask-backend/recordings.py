@@ -6,10 +6,17 @@ scope and wearer. A file is found by the manifest's `path` when that path exists
 folder (the path was written on the machine that recorded or imported the session, often another
 one), else by its place in collection/; a session without a manifest is read from collection/ alone.
 
+The cuts `mmla ses-archive` took of the session's streams from the stream server are listed too:
+artifacts/<session>/streams/server/<stream path>_<start>.<ext> (fMP4), from the manifest's
+`stream_cuts` rows (their `relpath`, or a `path` spelled inside the session folder), else from a
+scan of streams/server/. Each is listed with `source` "stream" and its stream path; the capture
+files have `source` "collection".
+
 Nothing else of the session folder is ever listed or served: not the speaker profiles (voice
-biometrics of children), the coding clips under labels/, raw/, analysis/, pipelines/ or the
-manifests themselves, and nothing a symlink or a manifest path leads to outside the session folder.
-Every file is checked on its real path (os.path.realpath), whichever way it was found.
+biometrics of children), the coding clips under labels/, raw/, analysis/, pipelines/, the archive's
+ledger under .archive/ or the manifests themselves, and nothing a symlink or a manifest path leads
+to outside the session folder. Every file is checked on its real path (os.path.realpath), whichever
+way it was found.
 
 Standard library only.
 """
@@ -32,6 +39,15 @@ RECORDING_NAME_RE = re.compile(r"^(?P<modality>audio|video)_(?P<host>.+?)_(?P<de
 # refused even inside collection/ (a host folder that happens to carry such a name included)
 PRIVATE_PARTS = frozenset({"profiles", "labels", "raw", "analysis", "pipelines"})
 MANIFEST = "manifest.json"
+# where the archive keeps the stream server's cuts: streams/server/<stream path>_<start>.<ext>
+STREAM_CUTS_DIR = ("streams", "server")
+STREAM_CUT_NAME_RE = re.compile(r"^(?P<name>.+)_(?P<start>\d+(?:\.\d+)?)$")
+# a stream path is at most this many folders deep below streams/server/ (MediaMTX's are app/name)
+STREAM_CUT_DEPTH = 4
+SOURCES = ("collection", "stream")
+# a stream server's recording is the same stretch as an archived cut of its path when it starts
+# within this many seconds of the cut, or lies inside it give or take as much
+CUT_MATCH_SECONDS = 2.0
 
 
 def repo_root() -> str:
@@ -58,12 +74,16 @@ def download_name(sid: str, rec_id: str, path: str) -> str:
 
 
 def list_recordings(root: str, sid: str) -> list[dict]:
-    """the session's recordings that exist on this machine, video first, then audio, by device:
-    {id, modality, host, device, format, size, duration, start, scope, participant, channels,
+    """the session's recordings that exist on this machine: the capture files first, then the
+    archived stream cuts, each video first, then audio, by device: {id, source, modality, kind,
+    host, device, stream_path, format, size, duration, start, scope, participant, channels,
     sample_rate, label}; [] for a session folder that does not exist."""
     records = [_record(path, host, modality, rec_id, row) for rec_id, modality, host, path, row in _found(root, sid)]
-    records.sort(key=lambda r: (MODALITIES.index(r["modality"]), (r["device"] or "").lower(),
-                                (r["host"] or "").lower(), r["start"] or 0.0, r["id"]))
+    taken = {record["id"] for record in records}
+    records += [_cut_record(cut) for cut in _found_cuts(root, sid) if cut["id"] not in taken]
+    records.sort(key=lambda r: (SOURCES.index(r["source"]), MODALITIES.index(r["modality"]),
+                                (r["device"] or "").lower(), (r["host"] or r["stream_path"] or "").lower(),
+                                r["start"] or 0.0, r["id"]))
     return records
 
 
@@ -71,12 +91,87 @@ def resolve(root: str, sid: str, rec_id: str) -> str | None:
     """the real path of one recording list_recordings lists, None for any other id."""
     if not isinstance(rec_id, str) or not REC_ID_RE.fullmatch(rec_id):
         return None
-    return next((path for found_id, _, _, path, _ in _found(root, sid) if found_id == rec_id), None)
+    found = next((path for found_id, _, _, path, _ in _found(root, sid) if found_id == rec_id), None)
+    if found is not None:
+        return found
+    return next((cut["path"] for cut in _found_cuts(root, sid) if cut["id"] == rec_id), None)
+
+
+def manifest_archive(root: str, sid: str) -> dict | None:
+    """the `archive` block of the session's manifest on this machine (what `mmla ses-archive`
+    wrote there when this machine holds the archive), None without one."""
+    base = _session_dir(root, sid)
+    data = _manifest(base) if base is not None else None
+    archive = data.get("archive") if data else None
+    return archive if isinstance(archive, dict) else None
+
+
+def place_cuts(records: list[dict], sources) -> list[dict]:
+    """give each archived stream cut among `records` (in place) what the session's document says of
+    its stream path (`sources`, the document's sources[]): `camera`, the IPS or VFA base that took
+    it (None for sound, or a path no base took), `pipeline`, and as `device` the session's name of
+    the stream (sources[].stream) when it has one. The capture files get `camera` None."""
+    by_path: dict[str, list[dict]] = {}
+    for entry in sources if isinstance(sources, list) else []:
+        if isinstance(entry, dict):
+            path = str(entry.get("server_path") or "").strip("/")
+            if path:
+                by_path.setdefault(path, []).append(entry)
+    for record in records:
+        record.setdefault("camera", None)
+        if record.get("source") != "stream":
+            continue
+        entries = by_path.get(str(record.get("stream_path") or ""), [])
+        if not entries:
+            record["camera"] = record["pipeline"] = None
+            continue
+        # a camera's base names the cut; an IPS and a VFA base on one path take the VFA one
+        bases = sorted((e for e in entries if e.get("pipeline") in ("vfa", "ips") and _text(e.get("base_id"))),
+                       key=lambda e: 0 if e.get("pipeline") == "vfa" else 1)
+        first = bases[0] if bases else entries[0]
+        record["camera"] = _text(bases[0].get("base_id")) if bases and record.get("modality") == "video" else None
+        record["pipeline"] = _text(first.get("pipeline"))
+        stream = next((_text(e.get("stream")) for e in entries if _text(e.get("stream"))), None)
+        if stream:
+            record["device"] = stream
+    return records
+
+
+def unarchived_spans(server: list[dict], cuts: list[dict], tolerance: float = CUT_MATCH_SECONDS) -> list[dict]:
+    """the stream server's recordings (one span each, {path, spans: [[start, seconds]]}) that no
+    archived cut of the same path holds: a cut holds a span that starts within `tolerance` seconds
+    of it or lies inside it, give or take as much."""
+    by_path: dict[str, list[tuple[float, float]]] = {}
+    for cut in cuts or []:
+        path, start = cut.get("stream_path"), _number(cut.get("start"))
+        if path and start is not None:
+            by_path.setdefault(str(path), []).append((start, max(_number(cut.get("duration")) or 0.0, 0.0)))
+
+    def held(path: str, span) -> bool:
+        try:
+            start, seconds = float(span[0]), float(span[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        for cut_start, cut_seconds in by_path.get(path, ()):
+            if abs(start - cut_start) <= tolerance:
+                return True
+            if start >= cut_start - tolerance and start + seconds <= cut_start + cut_seconds + tolerance:
+                return True
+        return False
+
+    out = []
+    for entry in server or []:
+        spans = [span for span in entry.get("spans") or [] if not held(str(entry.get("path")), span)]
+        if spans:
+            out.append(dict(entry, spans=spans))
+    return out
 
 
 def label(record: dict) -> str:
     """the line a person reads: Camera c920-05 on raspi5-01, Group mic jabra-0, Worn mic vimo-0,
-    Tag 0, Worn mic badge-0, Microphone mic-9."""
+    Tag 0, Worn mic badge-0, Microphone mic-9; Stream vfa/c920-05 for an archived stream cut."""
+    if record.get("source") == "stream":
+        return f"Stream {record.get('stream_path') or record.get('device') or ''}".rstrip()
     device, host = record.get("device"), record.get("host")
     if record.get("modality") == "video":
         if device and host:
@@ -137,8 +232,8 @@ def _capture_file(base: str, candidate: str) -> tuple[str, str, str, str] | None
     return real, parts[1], parts[2], stem
 
 
-def _read_manifest(base: str) -> list | None:
-    """the manifest's recordings list, None when there is no readable manifest with one."""
+def _manifest(base: str) -> dict | None:
+    """the session's manifest.json, None when there is no readable one inside the session folder."""
     path = os.path.join(base, MANIFEST)
     try:
         real = os.path.realpath(path)
@@ -148,7 +243,14 @@ def _read_manifest(base: str) -> list | None:
             data = json.load(handle)
     except (OSError, ValueError):
         return None
-    rows = data.get("recordings") if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else None
+
+
+def _read_manifest(base: str, key: str = "recordings") -> list | None:
+    """one list of the manifest (its recordings unless `key` says otherwise), None when there is no
+    readable manifest with one."""
+    data = _manifest(base)
+    rows = data.get(key) if data else None
     return rows if isinstance(rows, list) else None
 
 
@@ -202,8 +304,9 @@ def _record(path: str, host: str | None, modality: str, rec_id: str, row: dict) 
     except OSError:
         size = None
     record = {
-        "id": rec_id, "modality": modality, "host": host or _text(row.get("host")) or named.get("host"),
-        "device": device, "format": _extension(path), "size": size,
+        "id": rec_id, "source": "collection", "modality": modality, "kind": modality,
+        "host": host or _text(row.get("host")) or named.get("host"),
+        "device": device, "stream_path": None, "camera": None, "format": _extension(path), "size": size,
         "duration": round(duration, 3) if duration else None,
         "start": round(start, 3) if start is not None else None,
         "scope": None, "participant": None, "channels": None, "sample_rate": None,
@@ -283,16 +386,144 @@ def _scan(base: str) -> list[tuple[str, str, str, str, dict]]:
 
 def _found(root: str, sid: str) -> list[tuple[str, str, str, str, dict]]:
     """(id, modality, host folder, real path, manifest row) of each capture recording of the
-    session, from its manifest when it has one, else from collection/; the first of an id only."""
+    session: its manifest's rows, then what collection/ holds besides (a file the manifest does not
+    list, a manifest with an empty list); the first of an id and of a file only."""
     base = _session_dir(root, sid)
     if base is None:
         return []
     rows = _read_manifest(base)
     folders = (os.path.abspath(os.path.join(root, sid)), base)
-    found = _from_manifest(base, rows, folders) if rows is not None else _scan(base)
-    unique, seen = [], set()
+    found = (_from_manifest(base, rows, folders) if rows is not None else []) + _scan(base)
+    unique, seen, paths = [], set(), set()
     for item in found:
-        if item[0] not in seen:
+        if item[0] not in seen and item[3] not in paths:
             seen.add(item[0])
+            paths.add(item[3])
             unique.append(item)
     return unique
+
+
+# ---- the archived stream cuts ----
+
+def _stream_cut_file(base: str, candidate: str) -> dict | None:
+    """{id, path (real), stream_path, start, format} when `candidate` is an archived stream cut of
+    the session at base, i.e. its real path is base/streams/server/<stream path>_<start>.<ext> with
+    a media extension, no dot or private folder on the way; None for anything else. The id is the
+    archive's: stream_<stream path with / as _>_<start>."""
+    try:
+        real = os.path.realpath(candidate)
+        if os.path.commonpath([base, real]) != base:
+            return None
+        parts = os.path.relpath(real, base).split(os.sep)
+    except (OSError, ValueError):
+        return None
+    head = len(STREAM_CUTS_DIR)
+    if tuple(parts[:head]) != STREAM_CUTS_DIR or not head + 1 < len(parts) <= head + STREAM_CUT_DEPTH:
+        return None
+    if any(not part or part.startswith(".") or part.lower() in PRIVATE_PARTS for part in parts):
+        return None
+    stem, dot, ext = parts[-1].rpartition(".")
+    named = STREAM_CUT_NAME_RE.fullmatch(stem) if dot else None
+    if not named or ext.lower() not in MEDIA_TYPES:
+        return None
+    stream_path = "/".join(parts[head:-1] + [named.group("name")])
+    rec_id = f"stream_{stream_path.replace('/', '_')}_{named.group('start')}"
+    if not REC_ID_RE.fullmatch(rec_id):
+        return None
+    try:
+        if not os.path.isfile(real):
+            return None
+    except (OSError, ValueError):
+        return None
+    return {"id": rec_id, "path": real, "stream_path": stream_path, "start": float(named.group("start")),
+            "format": ext.lower()}
+
+
+def _cuts_from_manifest(base: str, rows: list, folders: tuple[str, ...]) -> list[dict]:
+    """the files of the manifest's stream_cuts rows: a row's `relpath`, else its `path` when that is
+    spelled inside the session folder; the file has to carry the row's id."""
+    found = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        rec_id = row.get("id")
+        if not isinstance(rec_id, str) or not REC_ID_RE.fullmatch(rec_id):
+            continue
+        candidates = []
+        relpath = _text(row.get("relpath"))
+        if relpath and not os.path.isabs(relpath):
+            candidates.append(os.path.join(base, relpath))
+        path = _text(row.get("path"))
+        if path:
+            path = path if os.path.isabs(path) else os.path.join(base, path)
+            if _lexically_inside(path, folders):
+                candidates.append(path)
+        for candidate in candidates:
+            if not _lexically_inside(os.path.abspath(candidate), folders):
+                continue
+            checked = _stream_cut_file(base, candidate)
+            if checked and checked["id"] == rec_id:
+                found.append(dict(checked, row=row))
+                break
+    return found
+
+
+def _scan_cuts(base: str) -> list[dict]:
+    found = []
+    top = os.path.join(base, *STREAM_CUTS_DIR)
+    if not os.path.isdir(top):
+        return found
+    for folder, dirs, names in os.walk(top):
+        depth = len(os.path.relpath(folder, top).split(os.sep)) if folder != top else 0
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d.lower() not in PRIVATE_PARTS
+                         and depth + 1 < STREAM_CUT_DEPTH)
+        for name in sorted(names):
+            checked = _stream_cut_file(base, os.path.join(folder, name))
+            if checked:
+                found.append(dict(checked, row={}))
+    return found
+
+
+def _found_cuts(root: str, sid: str) -> list[dict]:
+    """the session's archived stream cuts on this machine, {id, path, stream_path, start, format,
+    row}: the manifest's stream_cuts rows, then what streams/server/ holds besides; the first of an
+    id and of a file only."""
+    base = _session_dir(root, sid)
+    if base is None:
+        return []
+    rows = _read_manifest(base, "stream_cuts")
+    folders = (os.path.abspath(os.path.join(root, sid)), base)
+    found = (_cuts_from_manifest(base, rows, folders) if rows is not None else []) + _scan_cuts(base)
+    unique, seen, paths = [], set(), set()
+    for item in found:
+        if item["id"] not in seen and item["path"] not in paths:
+            seen.add(item["id"])
+            paths.add(item["path"])
+            unique.append(item)
+    return unique
+
+
+def _cut_record(cut: dict) -> dict:
+    """the listing entry of one archived stream cut: its modality from its manifest row, else from
+    the stream's app (an asr/ stream is sound); its device the stream's name (the last part of its
+    path, which the dashboard replaces with the session's own name of the stream when it knows it)."""
+    row = cut.get("row") or {}
+    stream_path = _text(row.get("stream_path")) or cut["stream_path"]
+    modality = row.get("modality") if row.get("modality") in MODALITIES else (
+        "audio" if stream_path.split("/", 1)[0] == "asr" else "video")
+    start = _number(row.get("start_time"))
+    duration = _number(row.get("duration"))
+    try:
+        size = os.path.getsize(cut["path"])
+    except OSError:
+        size = None
+    record = {
+        "id": cut["id"], "source": "stream", "modality": modality, "kind": modality, "host": None,
+        "device": stream_path.rsplit("/", 1)[-1], "stream_path": stream_path, "camera": None, "format": cut["format"],
+        "size": size,
+        "duration": round(duration, 3) if duration and duration > 0 else None,
+        "start": round(start if start is not None else cut["start"], 6),
+        "scope": None, "participant": None, "channels": None, "sample_rate": None,
+    }
+    record["label"] = label(record)
+    return record

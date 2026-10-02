@@ -290,6 +290,8 @@ class MediaServer:
             out["streams"].append({
                 "path": path, "pipeline": stream.get("pipeline"), "base_id": stream.get("base_id"),
                 "camera": stream.get("base_id") if kind == "video" else None, "kind": kind,
+                # the stream's name (the camera's tile key) and how its capture turned the picture
+                "stream": stream.get("stream") or None, "rotate": stream.get("rotate") or 0,
                 "ready": bool(ready is not None and path in ready),
             })
         if ready is None:
