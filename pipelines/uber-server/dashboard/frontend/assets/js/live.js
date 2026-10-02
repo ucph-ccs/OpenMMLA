@@ -23,7 +23,7 @@ import {
   LiveModel, VoiceColors, projectCameras, roomExtent, extentContains, extentUnion, pairList, CATEGORIES, CATEGORY_LABELS,
   GROUP_LABEL_RE, JA_PAIR_MIN_SHARE, TAG_MEMORY_SECONDS,
 } from './live-model.js';
-import { cameraWall } from './cameras.js';
+import { cameraWall, mediaOriginFor, probeMediaOrigin } from './cameras.js';
 import { ReplaySound, soundSources, defaultSource, MAX_SOUND_SPEED } from './sound.js';
 
 const SPEEDS = [1, 2, 4, 8, 16];
@@ -121,6 +121,10 @@ const S = {
   recordings: null,
   recordingsAt: 0,
   recordingsBusy: false,
+  // where the recorded files load from: the dashboard's media port once it answered (null: the
+  // page's own origin, with fewer files at once), and the last time it was asked
+  mediaOrigin: null,
+  mediaProbe: null,
   // the Sound control: the microphone the viewer picked (its source key, 'off', or null for the
   // default), and the mute toggle
   soundPick: null,
@@ -778,8 +782,10 @@ async function loadRecordings(force = false) {
   S.recordingsBusy = true;
   S.recordingsAt = performance.now();
   const res = await api(`/api/sessions/${encodeURIComponent(S.sid)}/recordings`);
-  S.recordingsBusy = false;
   const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
+  // the files wait for the media port's answer, so none loads from the page's origin first
+  if (d && d.enabled) S.mediaOrigin = await mediaOrigin(d.media_port, d.media_instance);
+  S.recordingsBusy = false;
   if (d) {
     S.recordings = {
       enabled: !!d.enabled,
@@ -793,6 +799,29 @@ async function loadRecordings(force = false) {
   }
   S.force = true;
   requestFrame();
+}
+
+/**
+ * the origin the recorded files load from: the page's host on the dashboard's media port when this
+ * same dashboard answers there, named by `instance` (waited for up to cameras.js MEDIA_PROBE_MS),
+ * else null: the page's own origin, where the files share fewer connections (MAX_MEDIA). The answer
+ * is kept for the page while the recordings name the same port and instance; one that came back
+ * empty is asked again with the recordings, at most once a minute
+ */
+async function mediaOrigin(port, instance) {
+  const origin = mediaOriginFor(window.location, port);
+  if (!origin) return null;
+  const last = S.mediaProbe;
+  if (!last || last.origin !== origin || last.instance !== instance
+      || (last.ok === false && performance.now() - last.at >= RECORDINGS_RETRY_MS)) {
+    const probe = { origin, instance, at: performance.now(), ok: null, answer: null };
+    probe.answer = probeMediaOrigin(origin, port, instance).then((ok) => {
+      probe.ok = ok;
+      return ok;
+    });
+    S.mediaProbe = probe;
+  }
+  return (await S.mediaProbe.answer) ? origin : null;
 }
 
 /** whether the replay clock advances now (displayNow interpolates it), so recorded video plays */
@@ -878,7 +907,7 @@ function renderSound(now) {
   if (endedReplay()) loadRecordings(false);
   const st = soundState();
   const source = soundSource(st);
-  const res = S.sound.update({ source, now, speed: S.speed, running: clockRunning(now), muted: S.soundMuted });
+  const res = S.sound.update({ source, now, speed: S.speed, running: clockRunning(now), muted: S.soundMuted, origin: S.mediaOrigin });
   const U = UI.sound;
   const optionsSig = st.ok ? st.sources.map((s) => `${s.key}=${s.label}`).join('\n') : '';
   if (optionsSig !== U.optionsSig) {
@@ -1725,7 +1754,8 @@ function renderCameras(now) {
     else if (endedReplay()) loadRecordings(false);
   }
   const newestVfa = S.model.vfa.last;
-  // the sound's file takes one of the connections the tiles' recorded files share
+  // the sound's file takes one of the connections the tiles' recorded files share (on the page's
+  // origin; from the media port it has one of its own)
   const reserved = S.sound.takesMedia(soundSource(soundState()), S.speed) ? 1 : 0;
   wall.update({
     cameras: ids,
@@ -1739,6 +1769,7 @@ function renderCameras(now) {
     recordings: S.recordings,
     speed: S.speed,
     running: clockRunning(now),
+    mediaOrigin: S.mediaOrigin,
     mediaReserved: reserved,
   });
   UI.cams.videoToggles.hidden = !wall.hasVideo();

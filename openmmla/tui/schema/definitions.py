@@ -113,7 +113,8 @@ SHARED_SECTIONS = {
                 "default": UBER_SERVER_PLACEHOLDER,
             },
             "port": {
-                "description": "Dashboard backend (gunicorn) port; `make flask` binds to it (default 5050)",
+                "description": "Dashboard backend (gunicorn) port; `make flask` binds to it and to the next port, "
+                               "the media port the Live page loads recorded video from (default 5050)",
                 "field_type": "int",
                 "default": 5050,
             },

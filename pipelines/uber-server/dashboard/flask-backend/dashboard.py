@@ -6,10 +6,13 @@ replay views, and the report parts, which openmmla.analytics.report computes and
 The report jobs run on the Celery worker of `celery -A dashboard.celery worker` when one listens on
 the dashboard's queue, else in a `python dashboard.py precompute` process this one starts.
 
-Run it as the Makefile does, from this folder: `gunicorn -k gevent -w 1 -b 0.0.0.0:5050 dashboard:app`
+Run it as the Makefile does, from this folder:
+`DASHBOARD_MEDIA_PORT=5051 gunicorn -k gevent -w 1 -b <address>:5050 -b <address>:5051 dashboard:app`
 (one worker: the job bookkeeping and the live feeds that every follower of a session shares live in
-this process, see stream.py). For development, `python dashboard.py serve`; to fill the cache ahead
-of a meeting, `python dashboard.py precompute --all`.
+this process, see stream.py). The second port is the media port: the same app, from which the Live
+page loads the recorded videos and sound of a replay, so they hold browser connections of their own
+(see media_port_env). For development, `python dashboard.py serve`; to fill the cache ahead of a
+meeting, `python dashboard.py precompute --all`.
 """
 
 import os
@@ -26,6 +29,7 @@ import gzip
 import json
 import logging
 import mimetypes
+import secrets
 import threading
 import time
 from urllib.parse import quote, urlencode, urlsplit
@@ -156,6 +160,31 @@ def _int_env(name: str, default: int) -> int:
         return max(1, int(os.environ.get(name) or default))
     except ValueError:
         return default
+
+
+def media_port_env() -> int | None:
+    """DASHBOARD_MEDIA_PORT: the second port this app listens on (`make flask` binds it beside the
+    dashboard's port, on the same addresses), from which the Live page loads the recorded files of a
+    replay. A browser opens at most six HTTP/1.1 connections per origin (scheme, host and port), and
+    every recorded video or sound it plays holds one: from an origin of their own they leave the
+    page's API requests and live stream theirs. None when unset, empty, 0 or not a port; the page then
+    loads the files from its own origin, fewer at once."""
+    text = (os.environ.get("DASHBOARD_MEDIA_PORT") or "").strip()
+    try:
+        port = int(text)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+# the port the recordings route names to the page; `python dashboard.py serve` sets it to the port
+# it opened
+MEDIA_PORT = media_port_env()
+# a mark of this process, which the recordings route and /api/media-origin both name: the page takes
+# the media port only when this same process answers there, not another dashboard that holds that
+# port number on the page's host (a page opened through a tunnel on another local port, beside a
+# dashboard run on the browser's machine)
+MEDIA_INSTANCE = secrets.token_hex(8)
 
 
 def make_celery(flask_app: Flask) -> Celery:
@@ -810,7 +839,8 @@ def api_recordings(sid):
     check_sid(sid)
     enabled, reason = raw_media_state()
     if not enabled:
-        return json_response({"enabled": False, "files": [], "server": [], "reason": reason})
+        return json_response({"enabled": False, "files": [], "server": [], "reason": reason, "media_port": None,
+                              "media_instance": None})
     files = raw_recordings.list_recordings(raw_recordings.artifacts_root(), sid)
     try:
         mongo_ok, doc, devices, t0, t1, _ = _media_inputs(sid)
@@ -826,7 +856,43 @@ def api_recordings(sid):
     except Exception as exc:
         logger.info("stream recordings of %s: %s", sid, type(exc).__name__)
         server = []
-    return json_response({"enabled": True, "files": files, "server": server, "reason": None})
+    # the files' urls are paths: the Live page loads them from the media port when this process
+    # answers there (media_instance)
+    return json_response({"enabled": True, "files": files, "server": server, "reason": None, "media_port": MEDIA_PORT,
+                          "media_instance": MEDIA_INSTANCE})
+
+
+def _sibling_origin() -> str | None:
+    """the request's Origin when it names this request's host (a page of this dashboard on its other
+    port), else None"""
+    origin = (request.headers.get("Origin") or "").strip()
+    if not origin:
+        return None
+    try:
+        parts = urlsplit(origin)
+        hostname = parts.hostname
+    except ValueError:
+        return None
+    host = _request_hostname()
+    if parts.scheme not in ("http", "https") or not hostname or not host or hostname != host.lower():
+        return None
+    return origin
+
+
+@app.route("/api/media-origin")
+def api_media_origin():
+    """`{"media_port", "media_instance"}`: the port the Live page loads recorded files from (null
+    without one) and the mark of this process (MEDIA_INSTANCE). The page asks it on the media port
+    itself before it uses that port, and takes the port only when both match what the recordings
+    route told it, so the answer says this same dashboard is there; a page of the same host on the
+    dashboard's port may read it (CORS), nothing else is answered across origins. The files
+    themselves need no CORS: a <video> or <audio> may play them from another origin."""
+    response = json_response({"media_port": MEDIA_PORT, "media_instance": MEDIA_INSTANCE})
+    origin = _sibling_origin()
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.route("/api/sessions/<sid>/recordings/<rec_id>")
@@ -973,18 +1039,39 @@ def _precompute(argv: list[str]) -> int:
 
 
 def _serve(argv: list[str]) -> int:
+    global MEDIA_PORT
     parser = argparse.ArgumentParser(prog="dashboard.py serve", description="development server (gevent)")
     parser.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT") or DEFAULT_PORT))
     parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--media-port", type=int, default=None,
+                        help="the second port the Live page loads recorded files from (default "
+                             "DASHBOARD_MEDIA_PORT, else --port + 1; 0 opens none)")
     args = parser.parse_args(argv)
     from gevent.pywsgi import WSGIServer
-    print(f"dashboard on http://{args.host}:{args.port} (cache {STORE.cache_dir}, jobs {RUNNER.mode})",
+    if args.media_port is None:
+        env = (os.environ.get("DASHBOARD_MEDIA_PORT") or "").strip()
+        args.media_port = (media_port_env() or 0) if env else args.port + 1
+    MEDIA_PORT = None
+    media_server = None
+    if 0 < args.media_port < 65536 and args.media_port != args.port:
+        media_server = WSGIServer((args.host, args.media_port), app)
+        try:
+            media_server.start()
+            MEDIA_PORT = args.media_port
+        except OSError as exc:
+            media_server = None
+            print(f"media port {args.media_port} not opened ({exc.strerror or exc}): the Live page loads recorded "
+                  "files from the dashboard's port", file=sys.stderr)
+    media = f", media port {MEDIA_PORT}" if MEDIA_PORT else ""
+    print(f"dashboard on http://{args.host}:{args.port}{media} (cache {STORE.cache_dir}, jobs {RUNNER.mode})",
           file=sys.stderr)
     server = WSGIServer((args.host, args.port), app)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         server.stop()
+        if media_server is not None:
+            media_server.stop()
     return 0
 
 
@@ -992,7 +1079,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     if not argv or argv[0] in ("-h", "--help"):
-        print("usage: python dashboard.py serve [--port N] | precompute <sid>... | --all [--job light|video|all]")
+        print("usage: python dashboard.py serve [--port N] [--media-port N] | precompute <sid>... | --all "
+              "[--job light|video|all]")
         return 0
     command, rest = argv[0], argv[1:]
     if command == "serve":

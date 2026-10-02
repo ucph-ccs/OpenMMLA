@@ -4,8 +4,9 @@
  * clock minus the file's start, it plays at the replay speed, pauses with the replay, seeks after a
  * jump, and is silent outside the file. At its 4x limit it cannot catch up by playing faster, so a lag
  * makes it seek a little ahead. Above 4x it is silent and lets go of its file: pitch-preserved speech
- * is unintelligible there (and browsers mute it themselves), and the file's connection is one of the
- * MAX_MEDIA the camera tiles share (takesMedia()).
+ * is unintelligible there (and browsers mute it themselves), and without the dashboard's media port
+ * the file's connection is one of the MAX_MEDIA the camera tiles share (takesMedia()). With it
+ * (`origin`, see cameras.js mediaOriginFor) the file loads from there, beside the tiles' videos.
  *
  * Nothing loads before the viewer's first gesture on the page's controls (arm(), called from Play,
  * Pause, Replay from start, unmuting, a pick in the control, or the note a blocked sound shows), so
@@ -58,8 +59,9 @@ export function defaultSource(sources) {
 }
 
 /**
- * One <audio> element kept on the replay clock. update({source, now, speed, running, muted}) runs on
- * every redraw and returns what the sound does now: {state, message} with state 'off' (no source),
+ * One <audio> element kept on the replay clock. update({source, now, speed, running, muted, origin})
+ * runs on every redraw (`origin`: where the file loads from, the dashboard's media port, or null for
+ * the page's origin) and returns what the sound does now: {state, message} with state 'off' (no source),
  * 'idle' (not armed yet), 'fast' (above MAX_SOUND_SPEED, no file held), 'gap' (no file at this
  * moment), 'loading', 'error', 'blocked' (the browser's autoplay rules refused it), 'playing' or
  * 'paused'; 'released' after release() until the next update.
@@ -92,8 +94,9 @@ export class ReplaySound {
   }
 
   /**
-   * whether the sound takes one of the page's MAX_MEDIA connections to the dashboard: it holds a
-   * file, or it is armed with a source at a speed it plays (it loads one on its next update)
+   * whether the sound takes one of the page's MAX_MEDIA connections to the dashboard (they count only
+   * while the files load from the page's own origin): it holds a file, or it is armed with a source
+   * at a speed it plays (it loads one on its next update)
    */
   takesMedia(source, speed) {
     const holds = !!(this.audio && typeof this.audio.getAttribute === 'function' && this.audio.getAttribute('src'));
@@ -110,7 +113,7 @@ export class ReplaySound {
     this.set('released');
   }
 
-  update({ source = null, now = null, speed = 1, running = false, muted = false } = {}) {
+  update({ source = null, now = null, speed = 1, running = false, muted = false, origin = null } = {}) {
     if (!source || !this.audio) {
       this.release();
       return this.set('off');
@@ -137,7 +140,7 @@ export class ReplaySound {
     const next = file || !finite(now) ? null : nextRecording(source.files, now, RECORDING_LOOKAHEAD * s);
     const pick = file || next;
     // a file loads from the clock's moment (a coming one from its start)
-    if (pick) p.load(inlineUrl(pick.url), pick.url, pick === file ? now - file.start : 0);
+    if (pick) p.load(inlineUrl(pick.url, origin), pick.url, pick === file ? now - file.start : 0);
     else if (p.source && !source.files.some((f) => f.url === p.source)) {
       // another source's file: let it go
       p.stop();

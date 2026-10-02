@@ -24,7 +24,7 @@ Redis:
   db: 1                               # a db other than 0 keeps the Celery queue apart from the control bus
 Dashboard:
   host: <uber-server>                 # where make flask runs; the Status tab probes host:port
-  port: 5050
+  port: 5050                          # make flask also binds port + 1, the media port of the Live page's recordings
 Gateway:
   host: <uber-server>                 # nginx load balancer the bases reach the AI services through
   http_port: 8080
