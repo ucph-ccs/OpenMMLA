@@ -17,6 +17,8 @@ from openmmla.collection.recording import (
     DEFAULT_VIDEO_SIZE,
     DEFAULT_VIDEO_SOURCE_FORMAT_LINUX,
     DEFAULT_VIDEO_SOURCE_FORMAT_MACOS,
+    VIDEO_TURNS,
+    video_turn,
 )
 
 
@@ -29,6 +31,18 @@ def _strtobool(value) -> bool:
     if text in {"0", "false", "f", "no", "n", "off"}:
         return False
     raise argparse.ArgumentTypeError("expected a boolean value")
+
+
+def _turn(value) -> int:
+    """a turn of the picture in degrees: 0, 90, 180 or 270 (-90 is 270)."""
+    try:
+        degrees = float(str(value).strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected 0, 90, 180 or 270") from None
+    turn = video_turn(degrees)
+    if degrees % 360 != turn:
+        raise argparse.ArgumentTypeError("expected 0, 90, 180 or 270")
+    return turn
 
 
 def _default_video_input_format() -> str:
@@ -85,6 +99,15 @@ def get_parser():
         default=None,
         help="the device this records, as the pipeline config's Streams name it (c920-01); "
              "the device slot of the output file name",
+    )
+    parser.add_argument(
+        "--rotate", "--video-rotate",
+        dest="rotate",
+        type=_turn,
+        default=0,
+        metavar="{" + ",".join(str(turn) for turn in VIDEO_TURNS) + "}",
+        help="turn the picture clockwise by this many degrees as it is recorded (180 for a camera "
+             "mounted upside down), as a Streams entry's rotate turns a stream",
     )
     parser.add_argument(
         "--interactive", "--video-interactive",
@@ -144,6 +167,7 @@ def main():
         bufsize=args.bufsize,
         preset=args.preset,
         device_label=args.device_label,
+        rotate=args.rotate,
     ))
 
 

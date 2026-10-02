@@ -59,6 +59,21 @@ DEFAULT_VIDEO_MAXRATE_LINUX = "6M"
 DEFAULT_VIDEO_BUFSIZE_MACOS = "4M"
 DEFAULT_VIDEO_BUFSIZE_LINUX = "10M"
 DEFAULT_VIDEO_PRESET = "veryfast"
+# how a recorder turns a camera's picture, clockwise as cv2.rotate turns it and as
+# a Streams entry's rotate does (transpose=1 is 90 clockwise, transpose=2 90
+# counter-clockwise): a camera mounted upside down is recorded upright
+VIDEO_TURNS = (0, 90, 180, 270)
+VIDEO_TURN_FILTERS = {90: "transpose=1", 180: "hflip,vflip", 270: "transpose=2"}
+
+
+def video_turn(value: Any) -> int:
+    """0, 90, 180 or 270 of a turn in degrees, as a number or its text (-90 is
+    270); anything else, an empty value included, is 0."""
+    try:
+        degrees = int(round(float(str(value).strip()))) % 360
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return degrees if degrees in VIDEO_TURNS else 0
 
 
 # whose voice an audio recording holds: one person's (a worn microphone) or the group's (a room microphone)
@@ -1135,8 +1150,10 @@ def record_video(
     bufsize: str,
     preset: str,
     device_label: str | None,
+    rotate: Any = 0,
 ) -> int:
     ensure_command("ffmpeg")
+    turn = video_turn(rotate)
     start_time = time.time()
     start_text = format_epoch_ms(start_time)
     host = sanitize_label(host_label, short_hostname())
@@ -1182,14 +1199,21 @@ def record_video(
         "maxrate": maxrate,
         "bufsize": bufsize,
         "preset": preset,
+        # how the recorder turned the picture, clockwise: the file is upright by it
+        "rotate": turn,
     }
     update_manifest(session_dir, session, sync_time, recording)
 
+    turn_filter = VIDEO_TURN_FILTERS.get(turn)
+    if turn_filter:
+        print(f"Picture turned by {turn}° clockwise")
     if input_format == "avfoundation":
         command = [
             "ffmpeg",
             "-hide_banner",
             *input_options,
+            # the turn alone: the encoder takes the camera's 4:2:0 (or converts what it gets)
+            *(["-vf", turn_filter] if turn_filter else []),
             "-c:v",
             "h264_videotoolbox",
             "-realtime",
@@ -1213,6 +1237,10 @@ def record_video(
             "ffmpeg",
             "-hide_banner",
             *input_options,
+            # a v4l2 camera's MJPEG is 4:2:2, which H.264 would keep (a High 4:2:2
+            # stream few players decode): 4:2:0 after the turn
+            "-vf",
+            ",".join([*([turn_filter] if turn_filter else []), "format=yuv420p"]),
             "-c:v",
             "libx264",
             "-preset",

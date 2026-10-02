@@ -124,6 +124,7 @@ from openmmla.collection.recording import (
     natural_device_key,
     participant_roster,
     sanitize_label,
+    video_turn,
 )
 from openmmla.utils.asr_scope import (
     LAUNCH_GROUP, LAUNCH_SPEAKERS, normalize_asr_scope, participant_of, resolve_speaker_verification,
@@ -253,7 +254,20 @@ _COLLECTION_HOST_FLAGS = {
 # the cells of a recorder's row that picking its Device Label fills from that
 # name's Streams entry (its machine and its device), unless the user picked
 # them by hand
-_COLLECTION_FILLED_FLAGS = {"--audio-host", "--audio-device", "--video-host", "--video-device"}
+_COLLECTION_FILLED_FLAGS = {"--audio-host", "--audio-device", "--video-host", "--video-device", "--video-rotate"}
+# how each Collection camera recorder turns its picture, clockwise: the Rotate
+# column of its row, 0° unless picked, or the rotate of its Device Label's
+# Streams entry (a camera mounted upside down is 180° for its stream and for
+# its recordings alike). Passed as the recorder's own --video-rotate, and not
+# at all for 0°, so an unturned recorder's command line is what it was
+_COLLECTION_ROTATE_FLAG = "--video-rotate"
+_COLLECTION_ROTATE_CHOICES = [("0°", "0"), ("180°", "180"), ("90°", "90"), ("270°", "270")]
+_COLLECTION_ROTATE_OPTIONS = [
+    ("0°  (as the camera gives it)", "0"),
+    ("180°  (camera mounted upside down)", "180"),
+    ("90°  (turned clockwise)", "90"),
+    ("270°  (turned counter-clockwise)", "270"),
+]
 # the pipeline configs whose Streams entries make up that vocabulary, with the
 # kind a stream of each is when nothing else says (_card_stream_kind)
 _COLLECTION_DEVICE_CONFIGS = (
@@ -550,10 +564,16 @@ _STREAM_FIELDS_TEMPLATE = [
     ("record_keep_days", "int", 0,
      "days the capture host keeps those recordings: older ones are deleted at the stream's Start and at "
      "Refresh on the Streams tab, whose Manage lists them. 0 = until deleted"),
+    ("rotate", "int", 0,
+     "how the capture host turns the picture, clockwise: 180 for a camera mounted upside down (90 or 270 "
+     "for one on its side), so the bases, recordings and players get it upright. A video stream's only"),
+    ("steady_fps", "bool", True,
+     "hold a Linux camera at its fps in dim light: no frame is exposed longer, so a C920 gives 30 fps, "
+     "not 15, and a darker picture. Off = brighter, slower"),
 ]
 
 # stream fields shown as a dropdown; empty stays a choice (the blank)
-_STREAM_FIELD_CHOICES = {"kind": ["audio", "video"]}
+_STREAM_FIELD_CHOICES = {"kind": ["audio", "video"], "rotate": [0, 90, 180, 270]}
 # what the Streams tab picks for a stream, and a Config tab Save keeps
 _STREAMS_TAB_KEYS = ("ssh_profile", "device")
 
@@ -3516,6 +3536,8 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
 
     services.append(ServiceDef(
         name="IPS Camera Calibration",
+        # what it calibrates: each camera's intrinsic parameters (the name stays the key)
+        label="IPS Intrinsics",
         category="IPS",
         conda_env="ips-base",
         config_dir=os.path.join(root, "pipelines", "ips-base"),
@@ -3531,11 +3553,13 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
 
     services.append(ServiceDef(
         name="IPS Camera Sync",
+        # what it fits: the transform matrices between the cameras of a room (the name stays the key)
+        label="IPS Transforms",
         category="IPS",
         conda_env="ips-base",
         config_dir=os.path.join(root, "pipelines", "ips-base"),
         launch_type="bash",
-        description="Synchronize multi-camera coordinates (tag detectors + sync manager)",
+        description="Calibrate the transform matrices between the cameras (tag detectors + sync manager)",
         params=[
             ParamDef("-nc", "Num Tag Detectors", "int", 2),
             ParamDef("-ns", "Num Sync Managers", "int", 1),
@@ -3581,6 +3605,7 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
                     "--video-interactive",
                     "--framerate", "--size", "--bitrate", "--maxrate", "--bufsize",
                     "--preset", "--video-host", "--video-device", "--video-device-label",
+                    "--video-rotate",
                 ],
             ),
         ],
@@ -5403,8 +5428,10 @@ class ServicePanel(Widget):
             cat_node.expand()
             for svc in svcs:
                 cat_node.add_leaf(f"{svc.display_name}{self._svc_markers(svc)}", data=svc.name)
-        # a session start/stop spans every pipeline, so it is not filed under one
-        tree.root.add_leaf("Session Control", data="__session_control__")
+        # START and STOP reach the ASR, IPS and VFA bases and synchronizers of a
+        # session at once, so the leaf sits under Pipelines after them, not
+        # under one of them
+        pipeline_node.add_leaf("Session Control", data="__session_control__")
 
     def _svc_markers(self, svc: ServiceDef) -> str:
         """build status marker string for a service tree leaf.
@@ -5692,6 +5719,8 @@ class ServicePanel(Widget):
                     stream_server=self._stream_server_address,
                     default_kind=_card_stream_kind(svc.name),
                     app=_card_stream_app(svc.name),
+                    card=svc.name,
+                    configured=self._every_card_stream,
                 )
                 await stream_scroll.mount(panel)
 
@@ -6083,6 +6112,8 @@ class ServicePanel(Widget):
             self._collection_channel_menu(card, table, index)
         elif column == "Device Label":
             self._collection_label_menu(card, table, role, index)
+        elif column == "Rotate":
+            self._collection_rotate_menu(card, table, index)
         elif column == "Participant":
             self._collection_participant_menu(card, table, index, None)
 
@@ -6346,6 +6377,20 @@ class ServicePanel(Widget):
 
         self.app.push_screen(StreamProfileMenu(options, current, anchor), picked)
 
+    def _collection_rotate_menu(self, card: ServiceCard, table: CollectionTable, index: int) -> None:
+        """how video recorder `index` turns its picture, clockwise: 180° for a
+        camera mounted upside down, as its stream is turned."""
+        anchor = self._collection_cell(table, index, None, "Rotate")
+        if anchor is None:
+            return
+        current = str(video_turn(card.collection_value(_COLLECTION_ROTATE_FLAG, index)))
+
+        def picked(turn: str | None) -> None:
+            if turn is not None:
+                card.set_collection_value(_COLLECTION_ROTATE_FLAG, index, turn, by_hand=True)
+
+        self.app.push_screen(StreamProfileMenu(_COLLECTION_ROTATE_OPTIONS, current, anchor), picked)
+
     def _collection_set_label(self, card: ServiceCard, role: str, index: int, label: str) -> None:
         """recorder `index` of `role` is `label`: where its Streams entry says
         that device is captured fills its Host and Device (not a cell the user
@@ -6357,6 +6402,7 @@ class ServicePanel(Widget):
         card.set_collection_value(flag, index, label)
         self._collection_fill_from_streams(card, role, index, label)
         if role != "audio":
+            self._collection_fill_rotate(card, index, label)
             return
         relabelled = default_audio_scope(label) != default_audio_scope(current)
         if relabelled or self._collection_recorder_channels(card, index) != before:
@@ -6411,6 +6457,26 @@ class ServicePanel(Widget):
         if kept:
             parts.append("kept " + " and ".join(kept) + ", picked by hand")
         self._log(f"{role.title()} {index + 1}: {said}; {'; '.join(parts)}.")
+
+    def _collection_fill_rotate(self, card: ServiceCard, index: int, label: str) -> None:
+        """the Rotate of a camera recorder whose Device Label was just picked:
+        the rotate of the first video Streams entry of that name, so the
+        camera's recordings are turned as its stream is (a Rotate picked by
+        hand stays). Says what it filled or kept, in one line."""
+        rotate = next((capture.get("rotate") for name, kind, capture in self._collection_stream_entries()
+                       if name == str(label or "").strip() and kind == "video"), None)
+        if rotate is None:
+            return
+        turn = str(video_turn(rotate))
+        now = str(video_turn(card.collection_value(_COLLECTION_ROTATE_FLAG, index)))
+        if turn == now:
+            return
+        said = f"Video {index + 1}: {label}'s Streams entry turns it by {turn}°"
+        if card.collection_by_hand(_COLLECTION_ROTATE_FLAG, index):
+            self._log(f"{said}; kept Rotate {now}°, picked by hand.")
+            return
+        card.set_collection_value(_COLLECTION_ROTATE_FLAG, index, turn, by_hand=False)
+        self._log(f"{said}; filled Rotate {turn}°.")
 
     def _collection_participant_menu(self, card: ServiceCard, table: CollectionTable, index: int,
                                      channel: int | None) -> None:
@@ -6713,7 +6779,7 @@ class ServicePanel(Widget):
                 # recorder records on this machine (ParamDef.instance_default)
                 if not isinstance(default, (list, tuple)):
                     default = []
-            elif param.flag in _COLLECTION_RECORDER_FLAGS:
+            elif param.flag in _COLLECTION_RECORDER_FLAGS or param.flag == _COLLECTION_ROTATE_FLAG:
                 # what each recorder was last given in its row; never the
                 # host's preset, which the recorder takes when it has none
                 if not isinstance(default, (list, tuple)):
@@ -6824,6 +6890,18 @@ class ServicePanel(Widget):
                     ))
                     existing.add(flag)
                     continue
+                if flag == _COLLECTION_ROTATE_FLAG:
+                    # how each camera recorder turns its picture: 0° until
+                    # picked in its row, or filled from its Device Label
+                    params.append(ParamDef(
+                        flag, "Rotate", "choice", [],
+                        choices=list(_COLLECTION_ROTATE_CHOICES),
+                        per_instance="-nv",
+                        fill=False,
+                        instance_default="0",
+                    ))
+                    existing.add(flag)
+                    continue
                 if flag in _COLLECTION_DEVICE_LABEL_FLAGS:
                     # one per recorder, following that role's counter: two
                     # microphones are two devices, and say so. The Streams
@@ -6888,7 +6966,7 @@ class ServicePanel(Widget):
                         continue
                     entry = entry if isinstance(entry, dict) else {}
                     capture = {key: str(entry.get(key) if entry.get(key) is not None else "").strip()
-                               for key in ("ssh_profile", "device", "channels")}
+                               for key in ("ssh_profile", "device", "channels", "rotate")}
                     rows.append((str(name).strip(), stream_kind(entry, default_kind), capture))
                 cached = (stamp, rows)
                 cache[path] = cached
@@ -8867,7 +8945,7 @@ class ServicePanel(Widget):
             form_fields, values, self._stream_server_address())
         if has_cameras:
             section_notes["Cameras"] = (
-                "The cameras of this config: written by IPS Camera Calibration (Calibrate), synced from "
+                "The cameras of this config: written by IPS Intrinsics (Calibrate), synced from "
                 "another machine (Calibration Cameras, Sync to Host or Sync from Host), or added here with "
                 "+ Add Camera.")
         form = ConfigForm(pipeline.name, form_fields, values, dynamic_sections,
@@ -9167,6 +9245,18 @@ class ServicePanel(Widget):
         state = "on" if event.record else "off"
         self._log(
             f"[green]{event.stream_name}: recording on the capture device is {state} "
+            f"(takes effect at its next Start).[/green]"
+        )
+        self._reshow_config_form()
+
+    def on_stream_panel_rotate_change_requested(self, event: StreamPanel.RotateChangeRequested) -> None:
+        """the Rotate column of the Streams tab: write the stream's `rotate` into
+        the config of the host the card is on, then show it in both tabs."""
+        event.stop()
+        if self._write_stream_entry(event.stream_name, "rotate", int(event.rotate)) is None:
+            return
+        self._log(
+            f"[green]{event.stream_name}: its picture is turned by {int(event.rotate)}° on the capture device "
             f"(takes effect at its next Start).[/green]"
         )
         self._reshow_config_form()
@@ -12333,7 +12423,7 @@ class ServicePanel(Widget):
         problem = camera_sync_problem(config)
         if problem:
             where = "this machine" if target == "local" else f"'{target}'"
-            self._log(f"[yellow]IPS Camera Sync on {where}: {rich_escape(problem)}[/yellow]")
+            self._log(f"[yellow]IPS Transforms on {where}: {rich_escape(problem)}[/yellow]")
             return False
         return True
 
@@ -14105,6 +14195,13 @@ class ServicePanel(Widget):
         # each recorder's own device, from what the card sent now; a recorder
         # with one asks for nothing in its terminal
         self._collection_recorder_devices(prepared, params)
+        # each camera recorder's turn, from what the card sent now: 0° passes no flag
+        turns = params.get(_COLLECTION_ROTATE_FLAG)
+        if isinstance(turns, (list, tuple)):
+            prepared[_COLLECTION_ROTATE_FLAG] = [
+                str(video_turn(turn)) if video_turn(turn) else "" for turn in turns]
+        else:
+            prepared.pop(_COLLECTION_ROTATE_FLAG, None)
         raw_session_id = str(prepared.get("--session-id") or "").strip()
         if raw_session_id:
             prepared["--session-id"] = _safe_session_id(raw_session_id)

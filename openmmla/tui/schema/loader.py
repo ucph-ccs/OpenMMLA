@@ -79,6 +79,14 @@ class StreamDef:
     # days the capture host keeps the stream's recordings: older ones are
     # deleted at its Start and at Refresh on the Streams tab; 0 keeps them
     record_keep_days: int = 0
+    # how the capture host turns the picture, clockwise (0, 90, 180, 270): 180
+    # for a camera mounted upside down, so every base, recording and player
+    # gets it upright
+    rotate: int = 0
+    # a Linux camera keeps its frame rate in dim light: its auto exposure may
+    # not lengthen the exposure past a frame (v4l2 exposure_dynamic_framerate=0),
+    # so the C920s give the 30 fps asked for, not 15, and a darker picture
+    steady_fps: bool = True
 
     @property
     def read_url(self) -> str:
@@ -89,6 +97,15 @@ def _stream_bool(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _stream_turn(value) -> int:
+    """0, 90, 180 or 270 of a turn in degrees, as a number or its text; anything else is 0."""
+    try:
+        degrees = int(round(float(str(value).strip()))) % 360
+    except (TypeError, ValueError):
+        return 0
+    return degrees if degrees in (0, 90, 180, 270) else 0
 
 
 def _stream_days(value) -> int:
@@ -139,6 +156,9 @@ def streams_from_config(data: dict) -> list[StreamDef]:
             record_root=_clean_stream_optional(props.get("record_root")),
             bitrate=_clean_stream_optional(props.get("bitrate")),
             record_keep_days=_stream_days(props.get("record_keep_days")),
+            rotate=_stream_turn(props.get("rotate")),
+            # on unless the entry says otherwise
+            steady_fps=_stream_bool(props["steady_fps"]) if _clean_stream_optional(props.get("steady_fps")) else True,
         ))
     return streams
 

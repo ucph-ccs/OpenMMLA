@@ -37,7 +37,7 @@ from openmmla.tui.system_services import stream_server_path
 from openmmla.tui.widgets.stream_panel import (
     STREAM_EXITED, STREAM_RUNNING, STREAM_STARTING, STREAM_STOP_GRACE_SECONDS, STREAM_STOPPED,
     STREAM_UNKNOWN, StreamPanel, _build_stop_stream_cmd, _parse_stream_state, _run_on_host, _stream_app,
-    _stream_state_cmd, _tmux_pane_target, _tmux_session_name, _with_stream_path,
+    _stream_key, _stream_state_cmd, _tmux_pane_target, _tmux_session_name, _with_stream_path,
 )
 from openmmla.utils.stream_registry import load_stream_registry, mark_stream_stopped
 
@@ -76,6 +76,7 @@ class StreamRow:
     noted: bool = False               # the stream registry says this console started it
     live: recordings.Published | None = None
     publisher: str = ""               # where an unclaimed path comes from
+    clash: bool = False               # cards give its name to more than one capture
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -110,7 +111,11 @@ def capture_rows(configured: list[tuple[str, StreamDef]], registry: dict, server
     """the rows the console knows of before it asks anyone: every Streams entry
     of the cards, then each capture the registry notes as running that no entry
     names on that machine. A stream two cards name on the same machine is one
-    capture, as its tmux session is named after the stream alone."""
+    capture, as its tmux session is named after the stream alone. A name the
+    cards give to another target, or run on more than one machine, is a name
+    clash: marked here on every row of that name, and refused by the cards
+    (stream_panel._rivals). One external entry with the target of a managed
+    one is the same stream, pulled by two cards."""
     rows: dict[tuple[str, str], StreamRow] = {}
     for card, stream in configured:
         machine = (stream.ssh_profile or "").strip()
@@ -138,6 +143,17 @@ def capture_rows(configured: list[tuple[str, StreamDef]], registry: dict, server
         rows[key] = StreamRow(
             str(name), machine, (), _stream_app(read, server), target,
             stream_server_path(target, server) or stream_server_path(read, server), ASKING, noted=True)
+    keys: dict[str, set[str]] = {}
+    machines: dict[str, set[str]] = {}
+    for _card, stream in configured:
+        keys.setdefault(stream.name, set()).add(_stream_key(stream, server))
+        machine = (stream.ssh_profile or "").strip()
+        if machine:
+            machines.setdefault(stream.name, set()).add(machine)
+    clashes = {name for name in keys if len(keys[name]) > 1 or len(machines.get(name, ())) > 1}
+    for row in rows.values():
+        if row.in_config and row.name in clashes:
+            row.clash = True
     return list(rows.values())
 
 
@@ -519,10 +535,15 @@ class StreamServerStreamsPanel(Widget):
 
     def _cells(self, row: StreamRow) -> list:
         name: Text | str = row.name
+        suffixes = []
         if row.machine and not row.in_config:
-            name = Text.assemble(row.name, ("  (in no Streams)", "yellow"))
+            suffixes.append(("  (in no Streams)", "yellow"))
         elif row.state == EXTERNAL and row.live is not None and not row.in_config:
-            name = Text.assemble(row.name, ("  (not from here)", "yellow"))
+            suffixes.append(("  (not from here)", "yellow"))
+        if row.clash:
+            suffixes.append(("  (name clash)", "red"))
+        if suffixes:
+            name = Text.assemble(row.name, *suffixes)
         cards = ", ".join(_card_label(card) for card in row.cards) or (row.app.upper() if row.app else "-")
         machine = row.machine or row.publisher or "-"
         state, style = _STATE_CELLS.get(row.state, (row.state, ""))

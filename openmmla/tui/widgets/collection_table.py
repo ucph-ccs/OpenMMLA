@@ -18,7 +18,9 @@ from textual.widgets import DataTable
 from openmmla.collection.recording import audio_channel_selection
 
 AUDIO_COLUMNS = ("#", "Host", "Device", "Channel", "Device Label", "Participant")
-VIDEO_COLUMNS = ("#", "Host", "Device", "Device Label")
+# Rotate: how a camera's recorder turns its picture, clockwise (a camera mounted
+# upside down is 180°), as the Rotate of a Streams entry turns its stream
+VIDEO_COLUMNS = ("#", "Host", "Device", "Device Label", "Rotate")
 
 # what a dropdown cell ends on, as on the Streams tab
 _ARROW = "  ▾"
@@ -56,6 +58,12 @@ def joined_picks(picks: list[str]) -> str:
     if not any(picks):
         return ""
     return ",".join(pick or "none" for pick in picks)
+
+
+def rotate_text(rotate: object) -> str:
+    """a Rotate pick as the table shows it: 180°, and 0° for none."""
+    text = str(rotate or "").strip() or "0"
+    return f"{text}°" if text.lstrip("-").isdigit() else text
 
 
 def channel_text(channel: object) -> str:

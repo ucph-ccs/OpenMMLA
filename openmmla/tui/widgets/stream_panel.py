@@ -26,6 +26,7 @@ from textual.widgets import Static, Button, DataTable, Input, Label, OptionList
 
 from openmmla.tui import capture_recordings, host_tools, recordings
 from openmmla.tui import devices as capture_devices
+from openmmla.collection.recording import VIDEO_TURN_FILTERS, video_turn
 from openmmla.tui.schema.loader import StreamDef, load_streams
 from openmmla.tui.ssh import get_profile_by_name, load_ssh_profiles, remote_platform, ssh_run_sync
 from openmmla.tui.system_services import get_sudo_password, stream_server_path
@@ -142,6 +143,9 @@ STREAM_STOPPED = "stopped"
 STREAM_UNKNOWN = "unknown"
 # the console's own: Start is installing what the host lacks (host_tools)
 STREAM_INSTALLING = "installing"
+# the console's own too: the machine runs, under this stream's name, another
+# card's stream (_published_urls), so this one does not run there
+STREAM_FOREIGN = "foreign"
 
 
 def _noted_ffmpeg_cmd(session: str) -> str:
@@ -188,6 +192,135 @@ def _stream_state(profile, session: str) -> str | None:
     except Exception:
         return None
     return _parse_stream_state(result.stdout)
+
+
+def _stream_path(stream: StreamDef, server: dict) -> str | None:
+    """a stream's path on the Stream Server of System Settings, None when it
+    goes elsewhere (another server, or udp/tcp to an ASR base)."""
+    return stream_server_path(stream.target, server) or stream_server_path(stream.read_url, server)
+
+
+def _stream_key(stream: StreamDef, server: dict) -> str:
+    """what a stream is, whatever its name: its path on the Stream Server
+    (an rtmp target and the rtsp read URL of the same path are one stream).
+    While System Settings name no Stream Server, or another one, the URL's
+    own host and path stand for it, so the rtmp publish and the rtsp read of
+    one path still meet (server-01/vfa/c920-05); a URL with no path (udp or
+    tcp to an ASR base) is its target, or the URL it is read from, as written."""
+    path = _stream_path(stream, server)
+    if path:
+        return path
+    for url in (stream.target, stream.read_url):
+        text = str(url or "").strip()
+        try:
+            host = urlsplit(text).hostname
+        except ValueError:
+            host = None
+        own = stream_server_path(text, {"host": host}) if host else None
+        if own:
+            return f"{host.lower()}/{own}"
+    return str(stream.target or stream.read_url or "").strip()
+
+
+def _rivals(stream: StreamDef, others: list[tuple[str, StreamDef]], server: dict) -> list[tuple[str, StreamDef]]:
+    """the (card, entry) pairs of other cards that give this stream's name to
+    another capture. A name is one capture: one tmux session on its machine,
+    one entry in the stream registry. Two cards that name the same stream on
+    the same machine, or one of them external, share it (an IPS and a VFA
+    Base pulling one camera); another stream under the name, or the same one
+    run on two machines, is a rival."""
+    key = _stream_key(stream, server)
+    machine = (stream.ssh_profile or "").strip()
+    found = []
+    for card, other in others:
+        if other.name != stream.name:
+            continue
+        other_machine = (other.ssh_profile or "").strip()
+        if _stream_key(other, server) != key or (machine and other_machine and machine != other_machine):
+            found.append((card, other))
+    return found
+
+
+def _same_machine(stream: StreamDef, rivals: list[tuple[str, StreamDef]]) -> list[tuple[str, StreamDef]]:
+    """the rivals run on the stream's own machine, where they would take its tmux session."""
+    machine = (stream.ssh_profile or "").strip()
+    return [(card, other) for card, other in rivals if machine and (other.ssh_profile or "").strip() == machine]
+
+
+# the last line _published_cmd prints: an answer without it is no answer
+_PUBLISHED_MARK = "PUBLISHED"
+
+
+def _published_cmd(session: str) -> str:
+    """print the command line of each ffmpeg a stream's session runs (the
+    pane's children, and the one a Mac's Terminal window started, whose pid
+    was noted), then what the session was started with (the pane's start
+    command, and a Mac's window script), then the end mark. Every command
+    _build_ffmpeg_cmd builds holds the stream's target as it is written, so
+    the lines tell which stream runs under the session's name, and the start
+    commands tell whose it is while its ffmpeg is still to come up or has
+    ended (STARTING, EXITED). The window script is the session's own only
+    while the session is there: each start on a Mac writes it anew."""
+    noted = _noted_ffmpeg_cmd(session)
+    pane = _tmux_pane_target(session)
+    return (
+        f"p=$(tmux list-panes -t {pane} -F '#{{pane_pid}}' 2>/dev/null | head -n1); "
+        f'if [ -n "$p" ]; then pgrep -P "$p" -x ffmpeg 2>/dev/null | '
+        f'while read c; do ps -ww -o args= -p "$c" 2>/dev/null; done; '
+        f"tmux display -p -t {pane} '#{{pane_start_command}}' 2>/dev/null; "
+        f'cat "{_stream_file(session, "command")}" 2>/dev/null; fi; '
+        f'if {noted}; then ps -ww -o args= -p "$q" 2>/dev/null; fi; '
+        f"echo {_PUBLISHED_MARK}"
+    )
+
+
+def _parse_published(output: str | None) -> set[str] | None:
+    """the URLs in the ffmpeg command lines _published_cmd printed: the words
+    with "://" in them, a tee output's [f=...] options taken off its front
+    ([f=flv:onfail=ignore]rtmp://...|[f=matroska]/path), and the quotes,
+    backslashes and semicolons of a start command around them. None without
+    the end mark, as the host did not answer; an empty set when nothing runs."""
+    lines = (output or "").splitlines()
+    if not any(line.strip() == _PUBLISHED_MARK for line in lines):
+        return None
+    urls: set[str] = set()
+    for line in lines:
+        for token in re.split(r"[\s|\"';\\]+", line):
+            token = re.sub(r"^\[[^\]]*\]", "", token)
+            if "://" in token:
+                urls.add(token)
+    return urls
+
+
+def _published_urls(profile, session: str) -> set[str] | None:
+    """the URLs the ffmpeg of a stream's session publishes to, on its host
+    (profile None: this machine); None when the host did not answer."""
+    try:
+        result = _run_on_host(profile, _with_stream_path(_published_cmd(session)), 8.0)
+    except Exception:
+        return None
+    return _parse_published(result.stdout)
+
+
+def _foreign_rival(stream: StreamDef, published: set[str] | None,
+                   rivals: list[tuple[str, StreamDef]]) -> tuple[str, StreamDef] | None:
+    """the rival on the stream's machine whose target the session's ffmpeg
+    publishes to when it does not publish the stream's own: then what runs
+    under the name is that card's stream. Targets are compared whole, so
+    c920-05 is not c920-05-mic."""
+    if not published or stream.target in published:
+        return None
+    return next(((card, other) for card, other in rivals if other.target and other.target in published), None)
+
+
+def _rival_label(card: str, stream: StreamDef) -> str:
+    """another card's entry as the log names it: ASR Base's c920-05
+    (rtmp://server-01:1935/asr/c920-05 on raspi5-05)."""
+    url = rich_escape(stream.target or stream.read_url or "no target")
+    machine = (stream.ssh_profile or "").strip()
+    if not machine:
+        return f"{card}'s {stream.name} ({url}, published elsewhere)"
+    return f"{card}'s {stream.name} ({url} on {'this machine' if machine == 'local' else machine})"
 
 
 # the last line the wrappers write into a stream's pane: what comes before it
@@ -308,10 +441,13 @@ def _build_tmux_stream_cmd(
     ffmpeg_cmd: str,
     record_dir: str | None = None,
     record_path: str | None = None,
+    before: str = "",
 ) -> str:
     """wrap the ffmpeg command in a detached tmux session that first notes the
     capture-side start time and, when recording, creates the recording folder and
-    notes the file path (the ${START_TIME} in it expands on the host)."""
+    notes the file path (the ${START_TIME} in it expands on the host). `before`
+    runs before ffmpeg (the camera's controls, _steady_fps_cmd), while the
+    stream's opening mark is still there."""
     start_file = _stream_start_file(session)
     record_file = _stream_record_file(session)
     if record_dir and record_path:
@@ -326,6 +462,9 @@ def _build_tmux_stream_cmd(
         f"START_TIME=$(python3 -c \"import time; print('%.6f' % time.time())\" 2>/dev/null || date +%s); "
         f"printf '%s\\n' \"$START_TIME\" > {start_file}; "
         f"{record_part}"
+        # the controls run while the stream is still marked as opening: a check
+        # that finds neither ffmpeg nor the mark would read the start as exited
+        f"{f'{before}; ' if before else ''}"
         f'rm -f "{_stream_file(session, "opening")}"; '
         f"{ffmpeg_cmd}; "
         f"{_AFTER_FFMPEG}"
@@ -568,6 +707,63 @@ def _record_path(stream: StreamDef, record_dir: str, kind: str = "") -> str:
     return f"{record_dir.rstrip('/')}/{stream.name}_${{START_TIME}}.{extension}"
 
 
+# ffmpeg's filter for each turn of a Streams entry's rotate, clockwise as
+# cv2.rotate turns (transpose=1 is 90 clockwise, transpose=2 90 counter-clockwise):
+# the Collection card's camera recorders turn theirs with the same
+_TURN_FILTERS = VIDEO_TURN_FILTERS
+
+
+def _steady_fps_cmd(stream: StreamDef, platform: str = "linux", kind: str = "") -> str:
+    """what keeps a Linux camera at the frame rate asked for, run before its
+    ffmpeg; "" for anything else, or a stream with steady_fps off. A UVC
+    camera's auto exposure (aperture priority, the C920's default) may stretch
+    the exposure past a frame in a dim room, and a C920 then gives 15 fps for
+    the 30 asked: the control that lets it is turned off. It is named
+    exposure_dynamic_framerate on newer kernels and exposure_auto_priority on
+    older ones, and the driver keeps it until the camera is unplugged. A host
+    without v4l2-ctl, or a camera without either control, starts as before."""
+    kind = kind or _stream_kind(stream)
+    if kind != "video" or platform == "darwin" or not stream.steady_fps:
+        return ""
+    device = shlex.quote(stream.device or "/dev/video0")
+    return (
+        f"{{ v4l2-ctl -d {device} -c exposure_dynamic_framerate=0 || "
+        f"v4l2-ctl -d {device} -c exposure_auto_priority=0; }} >/dev/null 2>&1 || true"
+    )
+
+
+def _parse_turn(output: str | None) -> int | None:
+    """the turn the ffmpeg command lines _published_cmd printed give the
+    picture, by the -vf _build_ffmpeg_cmd puts in them: 0 for a command
+    without one (a stream started before streams were turned, or not turned);
+    None without the end mark (the host did not answer) or without an ffmpeg
+    command line."""
+    lines = (output or "").splitlines()
+    if not any(line.strip() == _PUBLISHED_MARK for line in lines):
+        return None
+    commands = [line for line in lines if re.search(r"(^|[\s;'\"/])ffmpeg\s", line)]
+    if not commands:
+        return None
+    for line in commands:
+        match = re.search(r"-vf\s+['\"]?([^\s'\";]+)", line)
+        if not match:
+            continue
+        chain = match.group(1).split(",")
+        return next((turn for turn, turn_filter in _TURN_FILTERS.items()
+                     if all(part in chain for part in turn_filter.split(","))), 0)
+    return 0
+
+
+def _running_turn(profile, session: str) -> int | None:
+    """the turn the ffmpeg of a stream's session gives the picture, on its
+    host (profile None: this machine); None when it does not say."""
+    try:
+        result = _run_on_host(profile, _with_stream_path(_published_cmd(session)), 8.0)
+    except Exception:
+        return None
+    return _parse_turn(result.stdout)
+
+
 def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform: str = "linux",
                       kind: str = "") -> str:
     """build the ffmpeg command string from a stream definition.
@@ -620,6 +816,12 @@ def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform
     bitrate = stream.bitrate or "1M"
     peak = _double_rate(bitrate)
     muxer, options = _publish_muxer(target)
+    # the picture turned upright here, once, for every base, recording and
+    # player that gets it (a camera mounted upside down is 180)
+    turn = _TURN_FILTERS.get(stream.rotate)
+    if turn and codec == "copy":
+        raise ValueError(f"a stream copied as the camera gives it (codec copy) cannot be turned by "
+                         f"{stream.rotate}; set codec to libx264, or rotate to 0")
     if mac:
         # nv12 is 4:2:0, which Mac cameras deliver (one that does not gets its
         # own format from ffmpeg, hence the yuv420p the players expect). Unlike
@@ -631,11 +833,16 @@ def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform
             f"-f avfoundation -pixel_format nv12 -framerate {fps} -video_size {resolution} "
             f"-i {shlex.quote(device)} "
         )
-        output = f"-pix_fmt yuv420p -r {fps} "
+        output = f"{f'-vf {turn} ' if turn else ''}-pix_fmt yuv420p -r {fps} "
     else:
         device = stream.device or "/dev/video0"
         capture = f"-f v4l2 -input_format mjpeg -framerate {fps} -video_size {resolution} -i {device} "
-        output = ""
+        # a camera's MJPEG is 4:2:2, which H.264 keeps unless told: 4:2:0 is
+        # what browsers and hardware decoders play
+        filters = [turn] if turn else []
+        if codec != "copy":
+            filters.append("format=yuv420p")
+        output = f"-vf {','.join(filters)} " if filters else ""
     encode = (
         f"ffmpeg -fflags +genpts -use_wallclock_as_timestamps 1 {capture}"
         f"-c:v {codec} {output}-preset ultrafast -tune zerolatency "
@@ -690,13 +897,15 @@ _probe_rtmp_target = _probe_stream_target
 PROFILE_COLUMN = 1
 DEVICE_COLUMN = 2
 RECORD_COLUMN = 4
+ROTATE_COLUMN = 5
 
 
 class StreamTable(DataTable):
     """the Streams table. A click on a row's SSH Profile cell, or Enter on a
     row, asks for the list of machines that can capture the stream; a click
     on its Device cell, for the devices of that machine; on its Record cell,
-    for whether it records there."""
+    for whether it records there; on its Rotate cell, for how the picture is
+    turned there."""
 
     class ProfileMenuRequested(Message):
         def __init__(self, row: int) -> None:
@@ -713,6 +922,11 @@ class StreamTable(DataTable):
             super().__init__()
             self.row = row
 
+    class RotateMenuRequested(Message):
+        def __init__(self, row: int) -> None:
+            super().__init__()
+            self.row = row
+
     def on_click(self, event: events.Click) -> None:
         # runs before DataTable's own handler, which moves the cursor to the row
         meta = event.style.meta
@@ -725,6 +939,8 @@ class StreamTable(DataTable):
             self.post_message(self.DeviceMenuRequested(row))
         elif meta.get("column") == RECORD_COLUMN:
             self.post_message(self.RecordMenuRequested(row))
+        elif meta.get("column") == ROTATE_COLUMN:
+            self.post_message(self.RotateMenuRequested(row))
 
     def action_select_cursor(self) -> None:
         super().action_select_cursor()
@@ -750,6 +966,9 @@ class StreamTable(DataTable):
 
     def record_cell_region(self, row: int) -> Region:
         return self.cell_region(row, RECORD_COLUMN)
+
+    def rotate_cell_region(self, row: int) -> Region:
+        return self.cell_region(row, ROTATE_COLUMN)
 
 
 class StreamProfileMenu(ModalScreen):
@@ -911,10 +1130,37 @@ class StreamPanel(Widget):
         stream_server: Callable[[], dict] | None = None,
         default_kind: str = "video",
         app: str = "",
+        card: str = "",
+        configured: Callable[[], tuple[list[tuple[str, StreamDef]], list[str]]] | None = None,
     ) -> None:
         super().__init__()
         self._streams = list(streams)
         self._config_path = config_path
+        # the card's service name (VFA Base), and every card's Streams entries,
+        # each read from the config of the host its card is on (it may ask
+        # another host over SSH, so it runs off the UI thread): a name is one
+        # capture, and another card's entry that gives it to another stream is
+        # a rival (_rivals) that Start and Stop look out for
+        self._card = card
+        self._configured = configured
+        # the other cards' entries, None until they are first read
+        self._others: list[tuple[str, StreamDef]] | None = None
+        # the rivals of each row by name, and the rows whose machine runs a
+        # rival's stream under their name (STREAM_FOREIGN): which one
+        self._rivals: dict[str, list[tuple[str, StreamDef]]] = {}
+        self._foreign: dict[str, tuple[str, StreamDef]] = {}
+        # the read of the other cards' entries under way, whether the last one
+        # read every card, and what it could not read that the log has said
+        self._others_task: asyncio.Future | None = None
+        self._others_complete = True
+        self._noted: set[str] = set()
+        # the turn the ffmpeg of each running camera gives its picture, as its
+        # Start noted it in the stream registry or, for one started before
+        # that, as its machine says (by start: a start keeps its turn). The
+        # bases read the config's turn, so a running stream whose config was
+        # given another one is marked until it is restarted
+        self._runs_turn: dict[str, int] = {}
+        self._turn_asked: dict[tuple[str, str, str], int] = {}
         # the app this card's streams live under on the Stream Server (ips,
         # asr, vfa): which left-over captures are its own to stop
         self._app = str(app or "").strip().lower()
@@ -980,6 +1226,8 @@ class StreamPanel(Widget):
                 target=target,
                 read_target=read_target,
                 kind=str(entry.get("kind") or ""),
+                # what it runs with, as its Start noted it
+                rotate=video_turn(entry.get("rotate")),
             ))
         return found
 
@@ -1068,6 +1316,16 @@ class StreamPanel(Widget):
             self.stream_name = stream_name
             self.record = record
 
+    class RotateChangeRequested(Message):
+        """a row's Rotate was picked: how the machine that captures the stream
+        turns its picture, clockwise (0, 90, 180, 270). The launcher writes it
+        into the config of the host the card is on, as it does for Record."""
+
+        def __init__(self, stream_name: str, rotate: int) -> None:
+            super().__init__()
+            self.stream_name = stream_name
+            self.rotate = rotate
+
     class KeepDaysChangeRequested(Message):
         """Manage set how long the recordings of the streams here stay on their
         capture hosts; the launcher writes it into the config of the host the
@@ -1106,8 +1364,9 @@ class StreamPanel(Widget):
         "it is here for.\n"
         "SSH Profile (click it, or Enter on a row): the machine whose ffmpeg publishes it, - for a stream someone "
         "else publishes; Device (click it): its camera or microphone there; Record (click it): whether it also "
-        "records there. The Stream Server records on its side the streams of a running session, START to STOP "
-        "(its card, Config tab).\n"
+        "records there; Rotate (click it): how it turns the picture there, 180 for a camera mounted upside down. "
+        "The Stream Server records on its side the streams of a running session, START to STOP (its card, "
+        "Config tab).\n"
         "Recordings are filed by day on the capture device, not by session. Manage lists them there, deletes "
         "them, and sets how long they are kept. A session's part of them (and of the Stream Server's) is "
         "Sessions → Export."
@@ -1117,6 +1376,14 @@ class StreamPanel(Widget):
     _RECORD_OPTIONS = [
         ("yes  (also record on the capture device)", "yes"),
         ("no  (publish only)", "no"),
+    ]
+
+    # what a Rotate cell offers: how the capture turns the picture, clockwise
+    _ROTATE_OPTIONS = [
+        ("0  (as the camera gives it)", "0"),
+        ("180  (camera mounted upside down)", "180"),
+        ("90  (turned clockwise)", "90"),
+        ("270  (turned counter-clockwise)", "270"),
     ]
 
     # how a stream stops being external
@@ -1146,7 +1413,7 @@ class StreamPanel(Widget):
 
     def on_mount(self) -> None:
         table = self.query_one("#stream-table", DataTable)
-        table.add_columns("Name", "SSH Profile", "Device", "Target", "Record", "Status", "Stream Server")
+        table.add_columns("Name", "SSH Profile", "Device", "Target", "Record", "Rotate", "Status", "Stream Server")
         table.cursor_type = "row"
         self._rebuild_table()
         # even with no Streams entry there may be a capture left over from one
@@ -1163,9 +1430,167 @@ class StreamPanel(Widget):
         self._states[name] = state or STREAM_UNKNOWN
         self._statuses[name] = state in (STREAM_RUNNING, STREAM_STARTING)
 
+    def _other_cards_streams(self) -> tuple[list[tuple[str, StreamDef]], list[str]] | None:
+        """the Streams entries of the other cards, as `configured` reads them,
+        and what it could not read; none without it, None when it fails. Off
+        the UI thread."""
+        if self._configured is None:
+            return [], []
+        try:
+            configured, notes = self._configured()
+        except Exception:
+            return None
+        return ([(card, stream) for card, stream in configured if card != self._card],
+                [str(note) for note in notes or []])
+
+    async def _load_others(self) -> None:
+        """read the other cards' entries. A read that fails keeps what an
+        earlier one found, and one that misses a card (its host does not
+        answer) keeps that card's entries from before: a card that cannot be
+        read is no card without streams. What could not be read is said once,
+        and until it can be, Stop checks what runs before it stops (_async_stop)."""
+        if self._configured is None:
+            return
+        read = await asyncio.to_thread(self._other_cards_streams)
+        if read is None:
+            self._others_complete = False
+            if self._others is None:
+                self._others = []
+            notes = ["The other cards' Streams could not be read."]
+        else:
+            others, notes = read
+            if notes and self._others:
+                cards = {card for card, _stream in others}
+                others = others + [(card, stream) for card, stream in self._others if card not in cards]
+            self._others = others
+            self._others_complete = not notes
+        for note in notes:
+            if note not in self._noted:
+                self._noted.add(note)
+                self._log(f"[yellow]{rich_escape(note)} Names on this card are not checked against what "
+                          f"could not be read until it can be.[/yellow]")
+        if self._others_complete:
+            self._noted.clear()
+
+    def _others_loading(self) -> asyncio.Future | None:
+        """the read of the other cards' entries, one at a time: a refresh and the
+        Start or Stop of every row (Start All) wait on the same one."""
+        if self._configured is None:
+            return None
+        if self._others_task is None or self._others_task.done():
+            self._others_task = asyncio.ensure_future(self._load_others())
+        return self._others_task
+
+    async def _others_read(self) -> None:
+        loading = self._others_loading()
+        if loading is not None:
+            # shielded: a refresh cancelled by the next one leaves the read to it
+            await asyncio.shield(loading)
+
+    def _rivals_of(self, stream: StreamDef) -> list[tuple[str, StreamDef]]:
+        return _rivals(stream, self._others or [], self._server_address())
+
+    def _rivals_by_name(self) -> dict[str, list[tuple[str, StreamDef]]]:
+        found = {}
+        for stream in self._rows():
+            rivals = self._rivals_of(stream)
+            if rivals:
+                found[stream.name] = rivals
+        return found
+
+    def _left_rivals(self, stream: StreamDef) -> list[tuple[str, StreamDef]]:
+        """the capture the stream registry notes as running under this stream's
+        name on its machine when it is another stream: one that an entry
+        renamed or deleted on another card (or on this one) left running, which
+        no card's Streams name any more. It is listed on the tab of the card its
+        target names (_left_over_captures), and named after that card here."""
+        machine = (stream.ssh_profile or "").strip()
+        if self._configured is None or not machine:
+            return []
+        try:
+            entry = load_stream_registry(self._project_dir).get("streams", {}).get(stream.name)
+        except Exception:
+            return []
+        if not isinstance(entry, dict) or entry.get("status") != "running":
+            return []
+        if str(entry.get("ssh_profile") or "").strip() != machine:
+            return []
+        other = StreamDef(
+            name=stream.name,
+            ssh_profile=machine,
+            device=str(entry.get("device") or ""),
+            target=str(entry.get("target") or ""),
+            read_target=str(entry.get("read_target") or ""),
+            kind=str(entry.get("kind") or ""),
+        )
+        server = self._server_address()
+        if not other.target or _stream_key(other, server) == _stream_key(stream, server):
+            return []
+        app = _stream_app(other.read_url or other.target, server)
+        return [(f"{app.upper()} Base" if app else "another card", other)]
+
+    def _is_left_rival(self, foreign: tuple[str, StreamDef]) -> bool:
+        return foreign not in (self._others or [])
+
+    def _suspects(self, stream: StreamDef, rivals: list[tuple[str, StreamDef]]) -> list[tuple[str, StreamDef]]:
+        """what may run under this stream's name on its machine: the rivals
+        there, and a capture left running there under the name (_left_rivals)."""
+        same = _same_machine(stream, rivals)
+        targets = {other.target for _card, other in same}
+        return same + [(card, other) for card, other in self._left_rivals(stream) if other.target not in targets]
+
+    async def _published(self, stream: StreamDef, profile) -> set[str] | None:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _published_urls, profile, _tmux_session_name(stream.name))
+
+    async def _find_foreign(self, stream: StreamDef, profile,
+                            rivals: list[tuple[str, StreamDef]]) -> tuple[str, StreamDef] | None:
+        """the rival whose stream runs under this stream's name on its machine,
+        if one does. Only a stream with something that may run there in its
+        place (_suspects) costs the round trip that asks."""
+        suspects = self._suspects(stream, rivals)
+        if not suspects:
+            return None
+        return _foreign_rival(stream, await self._published(stream, profile), suspects)
+
+    @staticmethod
+    def _where(stream: StreamDef) -> str:
+        return "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
+
+    def _whose(self, foreign: tuple[str, StreamDef]) -> str:
+        """the stream that runs in a row's place, as the log names it."""
+        card, other = foreign
+        if self._is_left_rival(foreign):
+            return (f"a capture {card} started from an entry its Streams no longer have "
+                    f"({rich_escape(other.target)})")
+        return f"{card}'s stream ({rich_escape(other.target)})"
+
+    def _left_advice(self, foreign: tuple[str, StreamDef]) -> str:
+        card = foreign[0]
+        where = "that card's" if card == "another card" else f"{card}'s"
+        return f"Stop it on {where} Streams tab, where it is listed below the entries"
+
+    def _clash_note(self, stream: StreamDef, rivals: list[tuple[str, StreamDef]],
+                    foreign: tuple[str, StreamDef] | None) -> str:
+        """the line a refresh logs for a row with rivals."""
+        if foreign is not None and self._is_left_rival(foreign):
+            return (f"[yellow]{stream.name}: what runs as {stream.name} on {self._where(stream)} is "
+                    f"{self._whose(foreign)}, not this card's ({rich_escape(stream.target)}). "
+                    f"{self._left_advice(foreign)}, then Start this one.[/yellow]")
+        if foreign is not None:
+            said = (f"what runs as {stream.name} on {self._where(stream)} is {_rival_label(*foreign)}, "
+                    f"not this card's ({rich_escape(stream.target)})")
+        else:
+            said = f"{'; '.join(_rival_label(card, other) for card, other in rivals)} has the same name"
+        return (f"[yellow]{stream.name}: {said}. A name is one capture, so one of them needs another name on "
+                f"its card's Config tab (its target can stay).[/yellow]")
+
     async def _async_refresh_all(self) -> None:
         loop = asyncio.get_event_loop()
         self._left_over = await asyncio.to_thread(self._left_over_captures)
+        # the other cards' entries are read while the machines are asked
+        loading = self._others_loading()
+        asked: list[tuple[StreamDef, object, str | None]] = []
         for stream in self._rows():
             if not stream.ssh_profile:
                 continue
@@ -1176,7 +1601,21 @@ class StreamPanel(Widget):
                     self._set_state(stream.name, None)
                     continue
             state = await loop.run_in_executor(None, _stream_state, profile, _tmux_session_name(stream.name))
+            asked.append((stream, profile, state))
+        if loading is not None:
+            await asyncio.shield(loading)
+        self._rivals = self._rivals_by_name()
+        foreign_now: dict[str, tuple[str, StreamDef]] = {}
+        for stream, profile, state in asked:
+            foreign = None
+            if state in (STREAM_RUNNING, STREAM_STARTING, STREAM_EXITED):
+                # a session of the name is there: whose stream it holds
+                foreign = await self._find_foreign(stream, profile, self._rivals.get(stream.name, []))
+            if foreign is not None:
+                foreign_now[stream.name] = foreign
+                state = STREAM_FOREIGN
             self._set_state(stream.name, state)
+        self._foreign = foreign_now
         # a left-over whose host has nothing left of it (no session, no
         # ffmpeg) is over: the registry is told so, and its row goes
         done = [stream for stream in self._left_over
@@ -1186,13 +1625,114 @@ class StreamPanel(Widget):
         if done:
             names = {stream.name for stream in done}
             self._left_over = [stream for stream in self._left_over if stream.name not in names]
+        for stream in self._rows():
+            if stream.name in self._rivals or stream.name in self._foreign:
+                self._log(self._clash_note(stream, self._rivals.get(stream.name, []),
+                                           self._foreign.get(stream.name)))
+        await self._read_running_turns(asked)
+        for stream in self._rows():
+            runs = self._turn_differs(stream)
+            if runs is not None:
+                self._log(self._turn_note(stream, runs))
+            sharers = self._turn_sharers(stream)
+            if sharers:
+                self._log(self._sharers_note(stream, sharers))
         self._live = await self._server_states()
         self._rebuild_table()
+
+    def _registered_starts(self) -> dict[str, dict]:
+        """the stream registry's running entries, by name. Off the UI thread."""
+        try:
+            entries = load_stream_registry(self._project_dir).get("streams", {})
+        except Exception:
+            return {}
+        return {str(name): entry for name, entry in entries.items()
+                if isinstance(entry, dict) and entry.get("status") == "running"}
+
+    async def _read_running_turns(self, asked: list[tuple[StreamDef, object, str | None]]) -> None:
+        """the turn each running camera of this card's Streams runs with, as
+        its Start noted it in the stream registry. One whose Start noted none
+        (started before turns were noted) is asked once per start: its
+        ffmpeg's command line on its machine says. A stream the registry does
+        not know (started from another console) is not known here either."""
+        registered = await asyncio.to_thread(self._registered_starts)
+        loop = asyncio.get_event_loop()
+        turns: dict[str, int] = {}
+        for stream, profile, _state in asked:
+            if (not self._statuses.get(stream.name, False) or stream.name in self._foreign
+                    or self._is_left_over(stream) or self._kind(stream) != "video"):
+                continue
+            entry = registered.get(stream.name) or {}
+            if (str(entry.get("ssh_profile") or "").strip() != stream.ssh_profile
+                    or entry.get("target") != stream.target):
+                continue
+            if entry.get("rotate") is not None:
+                turns[stream.name] = video_turn(entry.get("rotate"))
+                continue
+            key = (stream.name, stream.ssh_profile, str(entry.get("stream_start_time")))
+            turn = self._turn_asked.get(key)
+            if turn is None:
+                turn = await loop.run_in_executor(None, _running_turn, profile, _tmux_session_name(stream.name))
+                if turn is not None:
+                    self._turn_asked[key] = turn
+            if turn is not None:
+                turns[stream.name] = turn
+        self._runs_turn = turns
+
+    def _turn_sharers(self, stream: StreamDef) -> list[tuple[str, StreamDef]]:
+        """the other cards' entries of the same camera (the same path on the
+        Stream Server, run on the same machine or pulled as external, by any
+        name) that give it another turn. The capture is turned once, by the
+        entry it was started from, while each card's bases read the turn of
+        their own entry: one of them reads a turn the picture does not have."""
+        if self._is_left_over(stream) or self._kind(stream) != "video":
+            return []
+        server = self._server_address()
+        key = _stream_key(stream, server)
+        machine = (stream.ssh_profile or "").strip()
+        found = []
+        for card, other in self._others or []:
+            other_machine = (other.ssh_profile or "").strip()
+            if (other.rotate == stream.rotate or _stream_kind(other, "video") != "video"
+                    or _stream_key(other, server) != key
+                    or (machine and other_machine and machine != other_machine)):
+                continue
+            found.append((card, other))
+        return found
+
+    def _sharers_note(self, stream: StreamDef, sharers: list[tuple[str, StreamDef]]) -> str:
+        """the line a refresh logs for a camera another card turns otherwise."""
+        others = "; ".join(f"{card}'s {other.name} turns it by {other.rotate}°" for card, other in sharers)
+        return (
+            f"[yellow]{stream.name}: this card turns the picture by {stream.rotate}°, but the same camera on "
+            f"{others}. It is turned once, as the card that starts it says, and the bases of each card read "
+            f"their own entry's turn: give the entries the same Rotate.[/yellow]"
+        )
+
+    def _turn_differs(self, stream: StreamDef) -> int | None:
+        """the turn a running camera's ffmpeg gives its picture when the
+        config now says another (the Config tab, or another console, changed
+        it after its Start); None when they agree or it is not known."""
+        if (not stream.ssh_profile or not self._statuses.get(stream.name, False)
+                or stream.name in self._foreign or self._is_left_over(stream) or self._kind(stream) != "video"):
+            return None
+        runs = self._runs_turn.get(stream.name)
+        return runs if runs is not None and runs != stream.rotate else None
+
+    def _turn_note(self, stream: StreamDef, runs: int) -> str:
+        """the line a refresh logs for a running camera that runs with another
+        turn than its config's."""
+        return (
+            f"[yellow]{stream.name}: its config turns the picture by {stream.rotate}°, but its ffmpeg on "
+            f"{self._where(stream)} runs with {runs}°. The bases read the config's turn, so until "
+            f"{stream.name} is stopped and started again they turn its intrinsics and poses for a picture "
+            f"that is not turned so (its tags come out mirrored through the camera's axis).[/yellow]"
+        )
 
     def _server_path(self, stream: StreamDef, server: dict) -> str | None:
         """the stream's path on the Stream Server of System Settings, None when
         it goes elsewhere (another server, or udp/tcp to an ASR base)."""
-        return stream_server_path(stream.target, server) or stream_server_path(stream.read_url, server)
+        return _stream_path(stream, server)
 
     def _server_address(self) -> dict:
         try:
@@ -1243,6 +1783,7 @@ class StreamPanel(Widget):
         width = max([len("SSH Profile") - 3] + [cell_len(stream.ssh_profile or "-") for stream in rows])
         device_width = max([len("Device") - 3] + [cell_len(stream.device or "-") for stream in rows])
         record_width = max([len("Record") - 3] + [cell_len(self._record_cell(stream)) for stream in rows])
+        rotate_width = max([len("Rotate") - 3] + [cell_len(self._rotate_cell(stream)) for stream in rows])
         for stream in rows:
             # a left-over capture has no entry to edit: its cells are plain,
             # and only Stop, Logs and Probe do anything on its row
@@ -1253,6 +1794,9 @@ class StreamPanel(Widget):
                 status = "External"
             elif self._statuses.get(stream.name, False):
                 status = "Starting" if state == STREAM_STARTING else "Running"
+            elif state == STREAM_FOREIGN:
+                # its machine runs another card's stream under this name
+                status = Text("Name in use", "red")
             elif state == STREAM_INSTALLING:
                 status = "Installing"
             elif state == STREAM_EXITED:
@@ -1260,6 +1804,9 @@ class StreamPanel(Widget):
                 status = "Exited"
             elif state == STREAM_UNKNOWN:
                 status = "No answer"
+            elif stream.name in self._rivals:
+                # another card gives its name to another stream: Start refuses it
+                status = Text("Name clash", "red")
             else:
                 status = "Stopped"
             live = self._live.get(stream.name)
@@ -1278,6 +1825,12 @@ class StreamPanel(Widget):
                 # console does not run its ffmpeg
                 "n/a" if left_over else
                 Text.assemble(record + " " * (record_width - cell_len(record)),
+                              ("  ▾", "dim")) if stream.ssh_profile else "n/a",
+                # a dropdown of the turns; a microphone has no picture to turn,
+                # and an external stream is turned by whoever publishes it
+                self._rotate_cell(stream) if left_over or self._kind(stream) == "audio" else
+                Text.assemble((self._rotate_cell(stream) + " " * (rotate_width - cell_len(self._rotate_cell(stream))),
+                               "yellow" if self._turn_differs(stream) is not None else ""),
                               ("  ▾", "dim")) if stream.ssh_profile else "n/a",
                 status,
                 Text("● live", "green") if live == "live" else
@@ -1447,6 +2000,39 @@ class StreamPanel(Widget):
 
         self.app.push_screen(menu, picked)
 
+    def on_stream_table_rotate_menu_requested(self, event: StreamTable.RotateMenuRequested) -> None:
+        """a Rotate cell was clicked: how the machine that captures the stream
+        turns its picture, once, so every base, recording and player gets it
+        upright (180 for a camera mounted upside down)."""
+        event.stop()
+        rows = self._rows()
+        if not 0 <= event.row < len(rows):
+            return
+        stream = rows[event.row]
+        if self._is_left_over(stream):
+            self._log(self._left_over_note(stream))
+            return
+        if self._kind(stream) == "audio":
+            self._log(f"[yellow]{stream.name} is a microphone: it has no picture to turn.[/yellow]")
+            return
+        if not stream.ssh_profile:
+            self._log(
+                f"[yellow]{stream.name} is external: the console does not run its ffmpeg, so whoever publishes it "
+                f"turns its picture. {self._EXTERNAL_HINT}[/yellow]"
+            )
+            return
+        if self._statuses.get(stream.name, False):
+            self._log(f"[yellow]Stop {stream.name} first: its ffmpeg was started without the change.[/yellow]")
+            return
+        table = self.query_one("#stream-table", StreamTable)
+        menu = StreamProfileMenu(self._ROTATE_OPTIONS, str(stream.rotate), table.rotate_cell_region(event.row))
+
+        def picked(choice: str | None) -> None:
+            if choice is not None and int(choice) != stream.rotate:
+                self.post_message(self.RotateChangeRequested(stream.name, int(choice)))
+
+        self.app.push_screen(menu, picked)
+
     def _get_selected_stream(self) -> StreamDef | None:
         try:
             table = self.query_one("#stream-table", DataTable)
@@ -1522,6 +2108,15 @@ class StreamPanel(Widget):
             self._log("[cyan]Refreshing stream status from the current target config.[/cyan]")
         self.run_worker(self._prune_recordings(), group="stream-prune", exclusive=True)
         self._refresh_all()
+
+    def _rotate_cell(self, stream: StreamDef) -> str:
+        """the Rotate column: how the capture turns the picture, "-" for a
+        microphone; with the turn a running stream was started with when the
+        config now says another (_turn_differs): 180° (runs 0°)."""
+        if self._kind(stream) == "audio":
+            return "-"
+        runs = self._turn_differs(stream)
+        return f"{stream.rotate}°" if runs is None else f"{stream.rotate}° (runs {runs}°)"
 
     @staticmethod
     def _record_cell(stream: StreamDef) -> str:
@@ -1679,13 +2274,51 @@ class StreamPanel(Widget):
                 self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                 return
         where = "this machine" if is_local else stream.ssh_profile
+        if self._others is None:
+            await self._others_read()
+        rivals = self._rivals_of(stream)
+        if rivals:
+            self._rivals[stream.name] = rivals
+        else:
+            self._rivals.pop(stream.name, None)
 
         state = await loop.run_in_executor(None, _stream_state, profile, session)
+        # a session of the name that holds another card's stream is left alone,
+        # whether its ffmpeg runs, is still to come up or has ended
+        foreign = None
+        if state in (STREAM_RUNNING, STREAM_STARTING, STREAM_EXITED):
+            foreign = await self._find_foreign(stream, profile, rivals)
+        if foreign is not None:
+            if self._is_left_rival(foreign):
+                advice = f"{self._left_advice(foreign)}, then Start this one."
+            else:
+                advice = ("One name is one capture, so give one of them another name on its card's Config tab "
+                          "(the target can stay) and start both.")
+            self._log(
+                f"[red]{stream.name} was not started: what runs as {stream.name} on {where} is "
+                f"{self._whose(foreign)}, not this one ({rich_escape(stream.target)}). {advice}[/red]"
+            )
+            self._foreign[stream.name] = foreign
+            self._set_state(stream.name, STREAM_FOREIGN)
+            self._rebuild_table()
+            return
         if state in (STREAM_RUNNING, STREAM_STARTING, None):
             if state is None:
                 self._log(f"[red]{where} does not answer, so {stream.name} was not started.[/red]")
             else:
                 self._log(f"[yellow]{stream.name} is already running.[/yellow]")
+            self._foreign.pop(stream.name, None)
+            self._set_state(stream.name, state)
+            self._rebuild_table()
+            return
+        self._foreign.pop(stream.name, None)
+        if rivals:
+            self._log(
+                f"[red]{stream.name} was not started: "
+                f"{'; '.join(_rival_label(card, other) for card, other in rivals)} has the same name, and one "
+                f"name is one capture (one tmux session on its machine, one entry in the stream registry). "
+                f"Give one of them another name on its card's Config tab (the target can stay), then Start.[/red]"
+            )
             self._set_state(stream.name, state)
             self._rebuild_table()
             return
@@ -1706,16 +2339,20 @@ class StreamPanel(Widget):
             self._log(f"[red]Cannot start {stream.name}: {e}[/red]")
             return
         record_path = _record_path(stream, record_dir, self._kind(stream)) if record_dir else None
+        # a Linux camera held at its frame rate in dim light (steady_fps)
+        controls = _steady_fps_cmd(stream, platform, self._kind(stream))
         if desktop:
             launch_cmd = _build_desktop_stream_cmd(session, ffmpeg_cmd, record_dir, record_path, stream.name)
         else:
-            launch_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd, record_dir, record_path)
+            launch_cmd = _build_tmux_stream_cmd(session, ffmpeg_cmd, record_dir, record_path, before=controls)
         if state == STREAM_EXITED:
             # the tmux session outlived its ffmpeg: a new one takes its name
             self._log(f"[yellow]{stream.name}: its ffmpeg on {where} had stopped by itself; starting it again.[/yellow]")
             launch_cmd = _with_stream_path(f"tmux kill-session -t {_tmux_session_target(session)} 2>/dev/null; {launch_cmd}")
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[green]Starting {stream.name} {target_label}...[/green]")
+        if controls:
+            self._log(f"  {rich_escape(controls)}")
         self._log(f"  {rich_escape(ffmpeg_cmd)}")
         if desktop:
             self._log(
@@ -1771,7 +2408,10 @@ class StreamPanel(Widget):
                     device=stream.device,
                     read_target=stream.read_target,
                     record_path=recorded_file or "",
+                    rotate=stream.rotate if self._kind(stream) == "video" else 0,
                 )
+                # the turn it runs with, which a later change of the config's does not move
+                self._runs_turn[stream.name] = stream.rotate
                 self._log(f"[green]{stream.name} started.[/green]")
                 self._log(f"  stream_start_time={start_time:.6f}")
                 if recorded_file:
@@ -1890,6 +2530,52 @@ class StreamPanel(Widget):
                 self._log(f"[red]SSH profile '{stream.ssh_profile}' not found.[/red]")
                 return
 
+        if self._others is None:
+            await self._others_read()
+        rivals = self._rivals_of(stream)
+        if rivals:
+            self._rivals[stream.name] = rivals
+        else:
+            self._rivals.pop(stream.name, None)
+        # the session of this name may hold another card's stream, which this
+        # Stop must leave alone: asked when something may run there in this
+        # one's place, or when another card's entries could not be read
+        suspects = self._suspects(stream, rivals)
+        if suspects or not self._others_complete:
+            published = await self._published(stream, None if is_local else profile)
+            foreign = _foreign_rival(stream, published, suspects)
+            if foreign is not None:
+                if self._is_left_rival(foreign):
+                    advice = f"{self._left_advice(foreign)}."
+                else:
+                    advice = "Stop it on that card, or rename one of the two first."
+                self._log(
+                    f"[yellow]{stream.name} was not stopped: what runs as {stream.name} on {self._where(stream)} "
+                    f"is {self._whose(foreign)}. {advice}[/yellow]"
+                )
+                self._foreign[stream.name] = foreign
+                self._set_state(stream.name, STREAM_FOREIGN)
+                self._rebuild_table()
+                return
+            if published is None and stream.name in self._foreign:
+                self._log(
+                    f"[yellow]{stream.name} was not stopped: {self._where(stream)} did not say what runs as "
+                    f"{stream.name} there, which at the last look was {_rival_label(*self._foreign[stream.name])}. "
+                    f"Refresh asks again.[/yellow]"
+                )
+                self._rebuild_table()
+                return
+            if published and stream.target not in published and not self._others_complete:
+                self._log(
+                    f"[yellow]{stream.name} was not stopped: what runs as {stream.name} on {self._where(stream)} "
+                    f"publishes to {rich_escape(', '.join(sorted(published)))}, not this card's target "
+                    f"({rich_escape(stream.target)}), and another card's Streams could not be read, so it may be "
+                    f"that card's stream. Stop it on its own card, or here once a Refresh has read them.[/yellow]"
+                )
+                self._rebuild_table()
+                return
+        self._foreign.pop(stream.name, None)
+
         stop_cmd = _with_stream_path(_build_stop_stream_cmd(session))
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[red]Stopping {stream.name} {target_label}...[/red]")
@@ -1904,6 +2590,7 @@ class StreamPanel(Widget):
                 self._log(f"[red]{stream.name} stopped.[/red]")
                 recorded = self._registered_record_path(stream.name)
                 mark_stream_stopped(stream.name, project_dir=self._project_dir)
+                self._runs_turn.pop(stream.name, None)
                 self._set_state(stream.name, STREAM_STOPPED)
                 if self._is_left_over(stream):
                     # it was on the tab to be stopped: its row goes with it
@@ -1929,6 +2616,10 @@ class StreamPanel(Widget):
         session = _tmux_session_name(stream.name)
         is_local = stream.ssh_profile == "local"
         loop = asyncio.get_event_loop()
+        if stream.name in self._foreign:
+            self._log(f"[yellow]{session} on {self._where(stream)} holds "
+                      f"{_rival_label(*self._foreign[stream.name])}, not this card's {stream.name}: "
+                      f"the pane below is that stream's.[/yellow]")
         self._log(f"[cyan]── Logs for {stream.name} ({session}) ──[/cyan]")
         try:
             if is_local:
@@ -1994,6 +2685,9 @@ class StreamPanel(Widget):
             if stream.name in self._statuses and hosts.get(stream.name) == stream.ssh_profile
         }
         self._states = {name: self._states[name] for name in self._statuses if name in self._states}
+        self._foreign = {name: self._foreign[name] for name in self._statuses if name in self._foreign}
+        # with the other cards' entries read before: the refresh reads them again
+        self._rivals = self._rivals_by_name()
         self._live = {stream.name: self._live[stream.name] for stream in self._rows() if stream.name in self._live}
         self._rebuild_table()
         self._refresh_all()

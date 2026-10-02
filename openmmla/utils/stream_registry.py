@@ -61,8 +61,11 @@ def register_stream_start(
     device: str = "",
     read_target: str = "",
     record_path: str = "",
+    rotate: int | None = None,
 ) -> dict[str, Any]:
-    """record that a managed stream has started."""
+    """record that a managed stream has started. `rotate` is the turn its
+    ffmpeg gives the picture (0, 90, 180, 270): the Streams tab compares it
+    with the config's, which the bases read, until the stream is restarted."""
     data = load_stream_registry(project_dir, registry_path)
     streams = data.setdefault("streams", {})
     entry = {
@@ -76,6 +79,8 @@ def register_stream_start(
         "registered_at": time.time(),
         "status": "running",
     }
+    if rotate is not None:
+        entry["rotate"] = int(rotate)
     streams[stream_name] = entry
     save_stream_registry(data, project_dir, registry_path)
     return entry

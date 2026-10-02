@@ -11,7 +11,7 @@ from textual.widget import Widget
 from textual.widgets import Static, Button, Input, Rule, Select, TabbedContent, TabPane
 
 from openmmla.tui.widgets.collection_table import (
-    CollectionTable, TableRow, channel_picks, channel_text, file_channels,
+    CollectionTable, TableRow, channel_picks, channel_text, file_channels, rotate_text,
 )
 
 
@@ -1280,6 +1280,10 @@ class ServiceCard(Widget):
                           shown("participant", worn)]
             else:
                 cells.append(shown("device-label", label))
+                # how the recorder turns the picture: 0° unless picked
+                if "--video-rotate" in params:
+                    menus.add("Rotate")
+                cells.append(shown("rotate", rotate_text(value("rotate", index))))
             rows.append(TableRow(index, None, tuple(cells), frozenset(menus)))
             for number, pick in zip(channels, channel_picks(participant, len(channels))):
                 rows.append(TableRow(

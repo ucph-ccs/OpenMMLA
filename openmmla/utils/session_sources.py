@@ -39,6 +39,15 @@ def source_key(pipeline: str, base_id, stream: str | None = None) -> str:
 _UNSET = ("", "Select.NULL", "Select.BLANK", "None", "null")
 
 
+def _turn(value) -> int:
+    """0, 90, 180 or 270 of a Streams entry's rotate; anything else is 0."""
+    try:
+        degrees = int(round(float(str(value).strip()))) % 360
+    except (TypeError, ValueError):
+        return 0
+    return degrees if degrees in (0, 90, 180, 270) else 0
+
+
 def _clean(value) -> str:
     text = str(value if value is not None else "").strip()
     return "" if text in _UNSET else text
@@ -162,6 +171,9 @@ def source_entry(pipeline: str, base: dict, config: dict, *, stream: str | None 
             "record": _yes(entry.get("record")),
             "record_root": _clean(entry.get("record_root")),
             "kind": _kind(entry, pipeline, url or ""),
+            # how the capture host turned the picture, clockwise: what is recorded
+            # and played of this stream is upright by it
+            "rotate": _turn(entry.get("rotate")),
         }
     source_index = base.get("source_index")
     return {

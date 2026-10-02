@@ -250,6 +250,9 @@ class FieldRow(Widget):
             val = w.value
             if val is Select.BLANK or val is getattr(Select, "NULL", None) or val is None:
                 return self.field_def.default
+            # a number picked from a list (a stream's rotate) is written as the number
+            if self.field_def.field_type in ("int", "float"):
+                return _parse_value(str(val), self.field_def.field_type)
             return str(val)
 
         raw = w.text.strip() if isinstance(w, TextArea) else w.value.strip()
@@ -343,17 +346,22 @@ class DictListField(Widget):
     # the saved entry. A field not listed here is for every source. This is
     # what the bases read: asr_base takes port, host and packet_format for
     # udp/tcp, channel_select for pyaudio and source_index for the rest; the
-    # video bases source_index alone
+    # video bases source_index, and capture_rotate for a file (a stream's turn
+    # is its Streams entry's rotate)
     _FIELDS_BY_SOURCE = {
         "source_index": {"pyaudio", "opencv", "stream", "lsl", "file"},
         "channel_select": {"pyaudio"},
         "port": {"udp", "tcp"},
         "host": {"udp", "tcp"},
         "packet_format": {"udp", "tcp"},
+        "capture_rotate": {"file"},
     }
     # what a base takes for a field left empty, shown in its row so the entry
     # says what runs (and saved with it)
-    _FIELD_DEFAULTS = {"host": "0.0.0.0", "packet_format": "auto"}
+    _FIELD_DEFAULTS = {"host": "0.0.0.0", "packet_format": "auto", "capture_rotate": 0}
+    # the values a field can take whatever the config holds, offered in a
+    # dropdown when the card gives the field no choices of its own
+    _FIELD_CHOICES = {"capture_rotate": ("0", "90", "180", "270")}
     _FIELD_HINTS = {
         "port": "→ the port this base listens on: the badge or FFmpeg stream pushes to it",
         "host": "→ the address it listens on: 0.0.0.0 is every interface",
@@ -365,6 +373,9 @@ class DictListField(Widget):
                         "Base is saved)",
         "room": "→ the room this camera is in (A, B, …) when the config serves several: each room has one main "
                 "base and runs as sessions of its own; empty with one room",
+        "capture_rotate": "→ how far the file's picture was turned clockwise before it was recorded or saved (180 "
+                          "for a recording of a stream turned upright, or one ses-tidy flipped): the base turns the "
+                          "camera's intrinsics with it",
     }
     # a field's earlier name: an entry that still holds it shows its value under
     # the new name, and Save writes the new name alone
@@ -409,7 +420,7 @@ class DictListField(Widget):
 
     def _entry_widget(self, key: str, val, widget_id: str):
         """build a Switch (bool), Select (choices) or Input for one entry field."""
-        choices = self._choices.get(key)
+        choices = self._choices.get(key) or self._FIELD_CHOICES.get(key)
         if choices:
             options = [(str(c), str(c)) for c in choices]
             cur = str(val) if val not in (None, "") else None
