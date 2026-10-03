@@ -62,10 +62,12 @@ CONDA_ACTIVATE := . $(CONDA_PREFIX)/etc/profile.d/conda.sh && conda activate $(E
 SERVICES := influxdb redis mosquitto mongodb nginx flask celery
 FILTERED_SERVICES = $(filter-out $(subst $(comma),$(space),$(without)),$(SERVICES))
 
-# Helper variables for parsing
+# Helper variables for parsing. A space is an empty variable on each side of one: `space :=` then
+# `space +=` gave one under macOS make 3.81 but nothing under GNU Make 4.3 (server-01), which turned
+# without=nginx,celery into nginxcelery and excluded nothing
 comma := ,
-space :=
-space +=
+empty :=
+space := $(empty) $(empty)
 
 
 # ======= Default task =======
