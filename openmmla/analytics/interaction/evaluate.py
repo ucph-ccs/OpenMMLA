@@ -58,6 +58,21 @@ floors and Jev read no feature and run in the full arm only. The headline, the c
 state shares are the full arm's, which is the run without the ablation; ablation.csv sets the arms
 side by side (exploratory, no Holm correction). An ablated arm's variant key ends in ':<arm>'.
 
+The session split (`split='session'`, decided 2026-10-03, when the TEST sessions' data quality
+turned out too poor to stand for the model) pools DEV and TEST: every session the named coder
+labelled that S1 keeps is held out in turn and the models train on all the others
+(splits.session_folds), with leave-one-session-out inner folds within the training sessions
+(splits.session_inner_folds) and the session as the unit everywhere (the lesson column, the
+bootstrap). Everything fitted is still fitted on a fold's training sessions only, as above. The
+truth is the coder's own labels file alone (adjudicated.jsonl is not read for it); a session the
+coder did not label, or coded only unclear or absent, is left out with the reason, which names a
+labels file there whose name differs from the coder's only in case (case_hint). Each held-out
+session is scored on its own (session_scores: macro-F1, accuracy, per-class F1, kappa, binary F1,
+AUROC, Brier, NLL), and every variant gets the mean and SD over the sessions beside its pooled
+value (session_summary). There is no headline and no contrast, since nothing here was declared in
+advance. coder_agreement scores two coders against each other on the same sessions after the
+same join, training nothing.
+
 Deferred by decision, with their places kept: the other ablation grids of 4.6 (temporal, fusion,
 ladder, weights), the causal network row, the lexicon feature, masked-modality pretraining, and
 the task-transfer run (splits.task_transfer exists; the driver does not run it yet).
@@ -107,8 +122,9 @@ RULE_MODELS = {'r0': TB.RULE_VERSION, 'r0-v1': 1}
 HEADLINE_MODELS = ('late-lr', 'late-hgb')
 TEMPORAL = ('T0', 'T1c', 'T2')
 HMM_MODES = ('none', 'fb', 'filter')
-# 'date' leaves one date out of DEV (the unit of every split); 'test' scores TEST once
-SPLITS = ('date', 'test')
+# 'date' leaves one date out of DEV (the unit of every split); 'test' scores TEST once; 'session' leaves
+# one session out over every session the coder labelled, DEV and TEST alike
+SPLITS = ('date', 'test', 'session')
 TARGETS = ('3class', 'binary')
 # the network reads its sequence through its own temporal blocks, not through lag columns
 NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair': 'tcn'}
@@ -126,6 +142,12 @@ FEATURELESS = ('majority', 'stratified') + JEV_MODELS
 
 MIN_CLASS_WINDOWS = 30
 INNER_FOLDS = 4
+# the session split: a held-out session with fewer class-coded windows than this, or with fewer than two
+# classes of at least metrics.MIN_SUPPORT windows, is flagged in per_session.csv and in the summary
+MIN_SESSION_WINDOWS = 30
+# the per-session scores the session split averages, beside each class's F1 (session_metric_names)
+SESSION_METRICS = ('macro_f1', 'accuracy', 'balanced_accuracy', 'kappa', 'f1_interaction', 'binary_macro_f1',
+                   'auroc', 'brier', 'nll')
 BOOTSTRAP = 2000
 # fewer units than this give no bootstrap interval or contrast: a resample of 2 dates is one of
 # them, the other or both, so its percentiles are those dates' own scores, not an interval
@@ -161,8 +183,10 @@ class Refused(RuntimeError):
 @dataclass
 class Config:
     """what a run does (mmla ses-classify fills it from its flags). `models`, `temporal` and `hmm`
-    are lists; `coder` is the truth (default: the coder with the most windows over the DEV
-    sessions; a test run must name it); `test_coder`, in a test run only, scores the TEST sessions
+    are lists; `split` is 'date', 'test' or 'session' (leave one session out over every session
+    the coder labelled, DEV and TEST alike); `coder` is the truth (default: the coder with the most
+    windows over the DEV sessions; a test or session run must name it, and a session run reads
+    that coder's own file only); `test_coder`, in a test run only, scores the TEST sessions
     against another coder than the one that trains (a model's DEV labels train, the human coders'
     TEST labels score; adjudication overrules it as it does any coder); `quick` swaps in the QUICK
     grids and training lengths;
@@ -283,6 +307,44 @@ def primary_coder(directories) -> str | None:
     return L.primary_coder(pd.concat(frames, ignore_index=True)) if frames else None
 
 
+def label_names(directories) -> list:
+    """the names of every labels file (labels/<name>.jsonl: coders, adjudicated, model files) under
+    the given session folders, sorted."""
+    names = set()
+    for directory in directories:
+        folder = Path(directory) / 'labels'
+        if folder.is_dir():
+            names |= {path.stem for path in folder.glob('*.jsonl')}
+    return sorted(names)
+
+
+def require_coder(coder: str, directories) -> None:
+    """raise FileNotFoundError when no given session has labels/<coder>.jsonl. A coder is the file
+    name, matched exactly, case included (labels.load_labels compares the stem), so 'arthur' never
+    reads Arthur.jsonl; the error names the files found and a name that differs only in case."""
+    names = label_names(directories)
+    if coder in names:
+        return
+    near = [name for name in names if name.lower() == str(coder).lower()]
+    hint = f" (names match exactly, case included: did you mean {near[0]}?)" if near else ''
+    raise FileNotFoundError(f"no session has labels/{coder}.jsonl{hint}; the labels files found are "
+                            f"{', '.join(names) or 'none'}")
+
+
+def case_hint(directory, coder: str) -> str | None:
+    """what a session that holds no labels of `coder` holds instead: its labels files whose name
+    differs from the coder's only in case (labels/Zaibei.jsonl for coder zaibei), which are never
+    read as that coder's, since ses-code keeps a name as the coder typed it; None when there is
+    none. require_coder passes as soon as one session has the exact name, so a session coded under
+    another case would otherwise be left out as if nobody had labelled it."""
+    near = [name for name in label_names([directory]) if name != coder and name.lower() == str(coder).lower()]
+    if not near:
+        return None
+    files = ' and '.join(f'labels/{name}.jsonl' for name in near)
+    return (f"{files} {'is' if len(near) == 1 else 'are'} there, not labels/{coder}.jsonl: coder names match "
+            f"exactly, case included, so rename it if it is the same coder")
+
+
 def same_class_of(directory) -> tuple:
     """the session ids a session's manifest marks as the same school class (`same_class_as`,
     written by mmla ses-tidy --same-class-as); () when it names none or has no manifest."""
@@ -295,10 +357,15 @@ def same_class_of(directory) -> tuple:
     return tuple(str(s) for s in linked or () if s)
 
 
-def link_lessons(data: dict) -> None:
+def link_lessons(data: dict, by_session: bool = False) -> None:
     """every session's lesson widened to its unit (splits.class_units over the loaded sessions:
     its date, with the dates their same_class_as reach), so predictions, the bootstrap and the
-    refusal group what the folds group."""
+    refusal group what the folds group. `by_session` (the session split) makes every session its
+    own unit instead."""
+    if by_session:
+        for session, d in data.items():
+            d.lesson = session
+        return
     units = S.class_units(list(data), {s: d.same_class_as for s, d in data.items()})
     for session, d in data.items():
         d.lesson = units[session]
@@ -314,7 +381,8 @@ def ablated(d: SessionData, modalities) -> SessionData:
 
 
 def load_session(session: str, table_path, coder: str | None = None, join: str = 'exact',
-                 target: str = '3class', models: set | None = None) -> tuple[SessionData, pd.DataFrame]:
+                 target: str = '3class', models: set | None = None,
+                 adjudicated: bool = True) -> tuple[SessionData, pd.DataFrame]:
     """a session and its fused table: roster (the manifest's pupils when it declares them),
     unscaled tokens and pooled view, and the coder's labels joined to the table's grid (a join
     that leaves more than 1 % of labels without a window raises labels.LabelJoinError, which
@@ -322,7 +390,8 @@ def load_session(session: str, table_path, coder: str | None = None, join: str =
     for the inter-coder kappa; one of theirs that does not join is left out, not fatal, and so is a
     model's labels file (`models`, run() passes labels.model_names of every session; default: this
     session's). The join report counts the truth's rows from the coder's own file and from
-    adjudicated.jsonl."""
+    adjudicated.jsonl; with `adjudicated` False (the session split) adjudicated.jsonl is not read
+    for the truth, which is the coder's own file alone."""
     from openmmla.utils.session_provenance import file_digest
     table_path = Path(table_path)
     table = LY.read_table(table_path)
@@ -330,7 +399,7 @@ def load_session(session: str, table_path, coder: str | None = None, join: str =
     # the pupils the session's manifest declares, else the roster rules
     ros = LY.session_roster(table, directory)
     tokens = LY.window_tokens(table, ros)
-    truth = L.load_labels(directory, coder=coder)
+    truth = L.load_labels(directory, coder=coder, adjudicated=adjudicated)
     if len(truth):
         y, report = L.join_labels(table, truth, mode=join)
         y = y.to_numpy(dtype=float)
@@ -441,9 +510,12 @@ def class_names(k: int) -> tuple:
 
 def make_folds(split: str, data: dict) -> list:
     """the outer folds: one per DEV date with coded windows (date), dates joined by same_class_as
-    together, or the one scoring of the TEST sessions (test). Raises splits.SplitError when a DEV
+    together, the one scoring of the TEST sessions (test), or one per session with coded windows,
+    DEV and TEST alike (session). Raises splits.SplitError when, in the date or test split, a DEV
     session shares a date or a same_class_as link with a TEST one."""
     sessions = list(data)
+    if split == 'session':
+        return S.session_folds(sessions, coded={s: d.n_coded for s, d in data.items()})
     links = {s: d.same_class_as for s, d in data.items()}
     if split == 'date':
         return S.date_folds(sessions, coded={s: d.n_coded for s, d in data.items()}, same_class=links)
@@ -483,14 +555,15 @@ def label_counts(data: dict) -> pd.DataFrame:
     return counts
 
 
-def absent_class_policy(data: dict) -> dict:
+def absent_class_policy(data: dict, all_sessions: bool = False) -> dict:
     """the pre-registered policy: with fewer than 200 coded social windows on dev, or social at
     least 5 times in fewer than 6 lessons, the confirmatory target becomes the binary one. The
     lessons are counted as registered, by splits.lesson_key, not by the date units the folds hold
-    out, so neither the date unit nor a same_class_as link changes the target."""
+    out, so neither the date unit nor a same_class_as link changes the target. `all_sessions` (the
+    session split, which pools DEV and TEST) counts every given session."""
     social, by_lesson = 0, {}
     for d in data.values():
-        if d.session in S.TEST_SESSIONS:
+        if d.session in S.TEST_SESSIONS and not all_sessions:
             continue
         n = int((d.y == 1).sum())
         social += n
@@ -518,7 +591,7 @@ class _Fold:
     lags, the rows of the training side with their units, the inner folds (as row positions for
     the tabular models, as session names for the network), the training prior and transitions."""
 
-    def __init__(self, fold, data: dict, k: int, learned: bool = True, scheme: str = 'mix'):
+    def __init__(self, fold, data: dict, k: int, learned: bool = True, scheme: str = 'mix', split: str = 'date'):
         self.fold, self.k, self.scheme = fold, k, scheme
         self.train = [data[s] for s in fold.train]
         self.test = [data[s] for s in fold.test]
@@ -529,13 +602,18 @@ class _Fold:
         self.at = {'train': _offsets(self.train), 'test': _offsets(self.test)}
         self.y = np.concatenate([d.target for d in self.train])
         sessions = np.concatenate([np.full(len(d), d.session, dtype=object) for d in self.train])
-        # a date (with its same_class_as dates) is one group, as in the outer folds
-        links = {d.session: d.same_class_as for d in self.train}
-        self.units = S.class_units(fold.train, links)
-        self.groups = np.concatenate([np.full(len(d), self.units[d.session], dtype=object) for d in self.train])
+        sizes = {d.session: d.n_coded for d in self.train}
         # the rule and zero-shot Jev choose nothing, so they need no inner folds (nor two coded dates)
-        self.inner = S.inner_folds(fold.train, k=INNER_FOLDS, sizes={d.session: d.n_coded for d in self.train},
-                                   same_class=links) if learned else []
+        if split == 'session':
+            # the session split: every training session is its own group, held out alone in the inner folds
+            self.units = {s: s for s in fold.train}
+            self.inner = S.session_inner_folds(fold.train, sizes=sizes) if learned else []
+        else:
+            # a date (with its same_class_as dates) is one group, as in the outer folds
+            links = {d.session: d.same_class_as for d in self.train}
+            self.units = S.class_units(fold.train, links)
+            self.inner = S.inner_folds(fold.train, k=INNER_FOLDS, sizes=sizes, same_class=links) if learned else []
+        self.groups = np.concatenate([np.full(len(d), self.units[d.session], dtype=object) for d in self.train])
         self.pairs = [S.fold_indices(inner, sessions) for inner in self.inner]
         self.prior = TB.class_prior(self.y, k)
         self.A = H.transitions({d.session: d.series() for d in self.train}, n_states=k)
@@ -756,7 +834,7 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
     started = time.time()
     k = plan['k']
     fd = _Fold(fold, data, k, learned=any(model not in UNLEARNED for model in plan['models']),
-               scheme=plan.get('scaling', 'mix'))
+               scheme=plan.get('scaling', 'mix'), split=plan.get('split', 'date'))
     results, details, extras = {}, {}, {}
     n_test = sum(len(d) for d in fd.test)
     for model in plan['models']:
@@ -898,12 +976,13 @@ def _complete(variant: dict, base: pd.DataFrame) -> bool:
     return share['answered'] == share['coded']
 
 
-def score_variant(variant: dict, base: pd.DataFrame, k: int, n_boot: int) -> tuple[dict, list]:
+def score_variant(variant: dict, base: pd.DataFrame, k: int, n_boot: int, unit: str = 'date') -> tuple[dict, list]:
     """every metric of 4.4 for one variant over the pooled held-out windows it answered
     (metrics.report), the unit-bootstrap interval of its pooled macro-F1 (three-class and
     binary; left out, with the reason, below MIN_BOOTSTRAP_UNITS units), the onset latency of an online variant, the seed mean of the stratified floor, the
     2-state HMM check and its coverage; and its per-session rows. A coded window the variant gave
-    no answer for is left out rather than counted as a miss, and `coverage` says how many."""
+    no answer for is left out rather than counted as a miss, and `coverage` says how many. `unit`
+    names the bootstrap's unit in the reason an interval is left out ('date', or 'session')."""
     # a window without an answer is scored as not coded; its share is the coverage
     y = np.where(np.asarray(variant['y_pred']) >= 0, _labels_int(base['y_true']), -1)
     sessions, lessons = base['session'].to_numpy(), base['lesson'].to_numpy()
@@ -917,9 +996,9 @@ def score_variant(variant: dict, base: pd.DataFrame, k: int, n_boot: int) -> tup
     coded = y >= 0
     yc, pc, gc = y[coded], y_pred[coded], lessons[coded]
     truth, binary = _binary_truth(y)[coded], y_binary[coded]
-    report['macro_f1_ci'] = _interval(lambda rows: M.macro_f1(yc[rows], pc[rows]), gc, n_boot)
+    report['macro_f1_ci'] = _interval(lambda rows: M.macro_f1(yc[rows], pc[rows]), gc, n_boot, unit)
     report['binary_macro_f1_ci'] = _interval(
-        lambda rows: M.macro_f1(truth[rows], binary[rows], n_classes=2), gc, n_boot)
+        lambda rows: M.macro_f1(truth[rows], binary[rows], n_classes=2), gc, n_boot, unit)
     if variant['hmm'] == 'filter' and k == 3:
         report['onset_latency'] = M.onset_latency(y, y_pred, blocks, sessions)
     if variant.get('seed_preds'):
@@ -936,25 +1015,143 @@ def _drop_samples(result: dict) -> dict:
     return {key: value for key, value in result.items() if key != 'samples'}
 
 
-def _too_few_units(units: int) -> str | None:
-    """why a bootstrap over this many units is left out, or None when it is not."""
+def _too_few_units(units: int, unit: str = 'date') -> str | None:
+    """why a bootstrap over this many units is left out, or None when it is not; `unit` names what
+    a unit is: 'date' (the date and test splits) or 'session' (the session split)."""
     if units >= MIN_BOOTSTRAP_UNITS:
         return None
-    return (f"{units} unit(s) (dates) to resample, fewer than {MIN_BOOTSTRAP_UNITS}: "
-            f"the percentiles would be those dates' own scores")
+    return (f"{units} unit(s) ({unit}s) to resample, fewer than {MIN_BOOTSTRAP_UNITS}: "
+            f"the percentiles would be those {unit}s' own scores")
 
 
-def _interval(fn, groups, n_boot: int) -> dict:
+def _interval(fn, groups, n_boot: int, unit: str = 'date') -> dict:
     """the unit-bootstrap interval of a pooled metric (metrics.session_bootstrap) with the number
     of units it resampled; with fewer than MIN_BOOTSTRAP_UNITS the estimate stands alone, lo and
-    hi are None and `left_out` says why."""
+    hi are None and `left_out` says why (_too_few_units, naming the `unit`)."""
     units = len(pd.unique(np.asarray(groups, dtype=object)))
-    why = _too_few_units(units)
+    why = _too_few_units(units, unit)
     if why is None:
         return dict(_drop_samples(M.session_bootstrap(fn, groups, n=n_boot)), units=units)
     estimate = float(fn(np.arange(len(groups))))
     return {'estimate': estimate if np.isfinite(estimate) else None, 'lo': None, 'hi': None, 'n': 0,
             'n_undefined': 0, 'units': units, 'left_out': why}
+
+
+# ---- the session split: every held-out session scored on its own ----
+
+def _session_metrics(y, p, y_pred, y_binary, k: int, min_support: int) -> dict:
+    """the scores of one set of rows (a held-out session, or every held-out window pooled), with
+    `y` the truth on the coded windows the variant answered and -1 elsewhere. Macro-F1, three-class
+    and binary, averages the classes with at least `min_support` true windows; a class's F1 is None
+    where it has no true window, and so is the binary F1 without an interaction window; AUROC
+    (p_interaction against interaction) needs both sides of the binary target; Brier (multi-class)
+    and NLL need posteriors, which the rule does not give."""
+    y, y_pred, y_binary = np.asarray(y), np.asarray(y_pred), np.asarray(y_binary)
+    names = class_names(k)
+    coded = y >= 0
+    truth = _binary_truth(y)
+    f1, support = M.f1_per_class(y, y_pred, k)
+    out = {'n': int(coded.sum()), 'classes': int((support >= max(min_support, 1)).sum()),
+           'macro_f1': M._float(M.macro_f1(y, y_pred, min_support, k)),
+           'accuracy': float((y_pred[coded] == y[coded]).mean()) if coded.any() else None,
+           'balanced_accuracy': M._float(M.balanced_accuracy(y, y_pred, k)),
+           'kappa': M._float(M.kappa(y, y_pred, k))}
+    out.update({f'f1_{name}': M._float(f1[c]) if support[c] > 0 else None for c, name in enumerate(names)})
+    # for the binary target the interaction class's F1 is the binary F1 itself
+    out.update({'f1_interaction': M._float(M.f1_per_class(truth, y_binary, 2)[0][1]) if (truth == 1).any() else None,
+                'binary_macro_f1': M._float(M.macro_f1(truth, y_binary, min_support, 2)),
+                'auroc': None, 'brier': None, 'nll': None})
+    out.update({f'support_{name}': int(support[c]) for c, name in enumerate(names)})
+    if p is not None:
+        p = np.asarray(p, dtype=float)
+        score = p[:, 1:].sum(1)
+        keep = coded & np.isfinite(score)
+        if len(np.unique(truth[keep])) == 2:
+            from sklearn.metrics import roc_auc_score
+            out['auroc'] = M._float(roc_auc_score(truth[keep], score[keep]))
+        out['brier'], out['nll'] = M._float(M.brier(y, p)), M._float(M.nll(y, p))
+    return out
+
+
+def session_metric_names(k: int) -> list:
+    """the per-session scores the session split averages: SESSION_METRICS and each class's F1."""
+    return list(dict.fromkeys(list(SESSION_METRICS) + [f'f1_{name}' for name in class_names(k)]))
+
+
+def session_scores(variant: dict, base: pd.DataFrame, k: int) -> pd.DataFrame:
+    """the session split's per_session.csv rows of one variant: per held-out session with coded
+    windows, its scores on the coded windows the variant answered (_session_metrics, macro-F1 over
+    the classes with at least metrics.MIN_SUPPORT true windows there), the coder's class-coded
+    windows and the coverage, and the flags: few_windows (fewer than MIN_SESSION_WINDOWS scored
+    windows), single_class (fewer than two classes with metrics.MIN_SUPPORT true windows, so its
+    macro-F1 is one class's F1) and flagged (either)."""
+    truth_all = _labels_int(base['y_true'])
+    y_pred, y_binary = np.asarray(variant['y_pred']), np.asarray(variant['y_pred_binary'])
+    y = np.where(y_pred >= 0, truth_all, -1)
+    sessions, tasks = base['session'].to_numpy(), base['task'].to_numpy(dtype=object)
+    p = variant['p']
+    rows = []
+    for session in pd.unique(sessions):
+        at = sessions == session
+        n_coded = int((truth_all[at] >= 0).sum())
+        if not n_coded:
+            continue
+        scores = _session_metrics(y[at], None if p is None else p[at], y_pred[at], y_binary[at], k, M.MIN_SUPPORT)
+        few, single = scores['n'] < MIN_SESSION_WINDOWS, scores['classes'] < 2
+        rows.append({'session': session, 'task': tasks[at][0], 'n': scores['n'], 'n_coded': n_coded,
+                     'coverage': scores['n'] / n_coded, 'classes': scores['classes'], 'few_windows': few,
+                     'single_class': single, 'flagged': few or single, **scores})
+    return pd.DataFrame(rows)
+
+
+def _spread(values) -> tuple:
+    """(mean, sample SD with ddof 1, count) of the finite values; None where there are too few."""
+    finite = np.array([v for v in values if v is not None and np.isfinite(v)], dtype=float)
+    return (float(finite.mean()) if len(finite) else None, float(finite.std(ddof=1)) if len(finite) > 1 else None,
+            int(len(finite)))
+
+
+def session_summary(rows: pd.DataFrame, variant: dict, base: pd.DataFrame, k: int) -> dict:
+    """the session split's figures of one variant (metrics.json `across_sessions`): per score, the
+    mean and sample SD over the held-out sessions where it is defined and how many they are, the
+    same without the flagged sessions, and the pooled value over every held-out window the variant
+    answered (macro-F1 there over every class present, as the pooled report counts it). Every
+    held-out session enters the mean of each score it defines, flagged or not: a single-class
+    session's macro-F1 is that class's F1, and a session without both sides of the binary target
+    has no AUROC and stays out of its mean."""
+    truth_all = _labels_int(base['y_true'])
+    y_pred = np.asarray(variant['y_pred'])
+    pooled = _session_metrics(np.where(y_pred >= 0, truth_all, -1), variant['p'], y_pred,
+                              np.asarray(variant['y_pred_binary']), k, 1)
+    flagged = rows['flagged'].to_numpy(dtype=bool) if len(rows) else np.zeros(0, dtype=bool)
+    out = {'n_sessions': int(len(rows)), 'sessions': list(rows['session']) if len(rows) else [],
+           'flagged': sorted(rows.loc[flagged, 'session']) if len(rows) else [],
+           'pooled_windows': pooled['n'], 'metrics': {}}
+    for name in session_metric_names(k):
+        values = list(rows[name]) if name in rows else []
+        mean, sd, n = _spread(values)
+        kept = [value for value, flag in zip(values, flagged) if not flag]
+        mean_kept, sd_kept, n_kept = _spread(kept)
+        out['metrics'][name] = {'mean': mean, 'sd': sd, 'n': n, 'mean_unflagged': mean_kept,
+                                'sd_unflagged': sd_kept, 'n_unflagged': n_kept, 'pooled': pooled.get(name)}
+    return out
+
+
+# the session split's columns of results.csv: per score its mean and SD over the sessions
+SESSION_RESULT_METRICS = ('macro_f1', 'accuracy', 'kappa', 'f1_interaction', 'auroc', 'brier', 'nll')
+
+
+def _session_columns(summary: dict, k: int) -> dict:
+    """results.csv's extra columns in the session split: the number of sessions, each score's mean
+    and SD over them, and the pooled accuracy and Brier (the other pooled scores are already in
+    the row)."""
+    scores = summary['metrics']
+    out = {'sessions': summary['n_sessions'], 'sessions_flagged': len(summary['flagged'])}
+    for name in list(SESSION_RESULT_METRICS) + [f'f1_{name}' for name in class_names(k)]:
+        if name in scores and f'{name}_mean' not in out:
+            out[f'{name}_mean'], out[f'{name}_sd'] = scores[name]['mean'], scores[name]['sd']
+    out['accuracy'], out['brier'] = scores['accuracy']['pooled'], scores['brier']['pooled']
+    return out
 
 
 def _result_row(key: str, variant: dict, report: dict) -> dict:
@@ -1068,14 +1265,14 @@ ABLATION_COLUMNS = ('ablation', 'removed', 'variant', 'model', 'temporal', 'hmm'
 
 
 def ablation_frame(variants: dict, arm_of: dict, reports: dict, base: pd.DataFrame, n_boot: int,
-                   arms: dict = MODALITY_ARMS) -> pd.DataFrame:
+                   arms: dict = MODALITY_ARMS, unit: str = 'date') -> pd.DataFrame:
     """ablation.csv: per model variant (the floors and Jev left out) and arm, the pooled macro-F1
     (three-class) and binary macro-F1 with their unit-bootstrap intervals as score_variant gives
     them, Cohen's kappa and the binary kappa (with its interval on the same resamples), and the
     change against the same variant's full arm, paired on the same unit resamples. Exploratory: no
     Holm correction. Below MIN_BOOTSTRAP_UNITS units the intervals are left out, `left_out` says
-    why. `arm_of` maps a variant key to (arm, the full arm's key); a variant's arms sit together,
-    in the full arm's order, then the arms' order."""
+    why, naming the `unit` ('date', or 'session'). `arm_of` maps a variant key to (arm, the full
+    arm's key); a variant's arms sit together, in the full arm's order, then the arms' order."""
     truth_all = _labels_int(base['y_true'])
     lessons_all = base['lesson'].to_numpy()
 
@@ -1104,7 +1301,7 @@ def ablation_frame(variants: dict, arm_of: dict, reports: dict, base: pd.DataFra
             rows = rows_of(key)
             truth, binary = _binary_truth(truth_all)[rows], np.asarray(variant['y_pred_binary'])[rows]
             kappa_ci = _interval(lambda sample: M.kappa(truth[sample], binary[sample], n_classes=2),
-                                 lessons_all[rows], n_boot)
+                                 lessons_all[rows], n_boot, unit)
             row = {'ablation': arm, 'removed': '+'.join(arms.get(arm, ())), 'variant': base_key,
                    'model': variant['model'], 'temporal': variant['temporal'], 'hmm': variant['hmm'],
                    'group': 'online' if variant['hmm'] == 'filter' else GROUPS[variant['model']],
@@ -1117,7 +1314,7 @@ def ablation_frame(variants: dict, arm_of: dict, reports: dict, base: pd.DataFra
             if arm != 'full' and full is not None:
                 paired = rows_of(full)
                 if np.array_equal(paired, rows):
-                    few = _too_few_units(len(pd.unique(np.asarray(lessons_all[rows], dtype=object))))
+                    few = _too_few_units(len(pd.unique(np.asarray(lessons_all[rows], dtype=object))), unit)
                     for name, binary_scale in (('delta_macro_f1', False), ('delta_binary_macro_f1', True)):
                         a, b = scorer(key, rows, binary_scale), scorer(full, rows, binary_scale)
                         if few:
@@ -1151,6 +1348,113 @@ def inter_coder(data: dict, primary: str | None) -> dict:
         if a:
             out[name] = L.agreement(pd.concat(a), pd.concat(b))
     return out
+
+
+AGREEMENT_COLUMNS = ('session', 'task', 'windows_a', 'windows_b', 'both_coded', 'windows', 'percent_agreement',
+                     'kappa', 'percent_agreement_binary', 'kappa_binary', 'percent_agreement_codes', 'kappa_codes',
+                     'unclear_a', 'unclear_b', 'absent_a', 'absent_b')
+
+
+def _agreement_row(a: pd.Series, b: pd.Series) -> dict:
+    """two coders' joined labels (aligned Series) as one row of agreement.csv: labels.agreement's
+    kappas with the percent agreement beside each (three classes on the windows both gave a class,
+    the derived binary on the same windows, the five codes on every window both coded) and the
+    windows each coded."""
+    score = L.agreement(a, b)
+    binary = np.asarray(score['confusion_binary'])
+    return {'windows_a': int(np.isfinite(a.to_numpy(dtype=float)).sum()),
+            'windows_b': int(np.isfinite(b.to_numpy(dtype=float)).sum()),
+            'both_coded': score['both_coded'], 'windows': score['windows'],
+            'percent_agreement': M._float(score['accuracy']), 'kappa': M._float(score['kappa']),
+            'percent_agreement_binary': float(np.trace(binary) / binary.sum()) if binary.sum() else None,
+            'kappa_binary': M._float(score['kappa_binary']),
+            'percent_agreement_codes': M._float(score['accuracy_codes']), 'kappa_codes': M._float(score['kappa_codes']),
+            'unclear_a': score['unclear_a'], 'unclear_b': score['unclear_b'], 'absent_a': score['absent_a'],
+            'absent_b': score['absent_b'], 'confusion': score['confusion'], 'confusion_binary': score['confusion_binary'],
+            'confusion_codes': score['confusion_codes']}
+
+
+def coder_agreement(artifacts, coders, sessions: str | None = None, join: str = 'exact', out=None, log=None) -> Path:
+    """two coders against each other, training nothing (mmla ses-classify --agreement A,B): over
+    every session with a fused table, DEV and TEST alike, that the inclusion rule S1 keeps, each
+    coder's own labels file (labels/<coder>.jsonl, the last line of a window winning; adjudicated.jsonl
+    is not read) is joined to the table's grid by the classifier's join (`join`), and Cohen's kappa
+    and the percent agreement are computed on the windows both labelled, per session and pooled
+    over the sessions both coded. Writes agreement.csv (a row per session and a pooled row) and
+    agreement.json (the same with the confusion matrices, each coder's coded windows per session,
+    and the sessions left out and why) to `out` (default artifacts/_analysis/interaction/
+    agreement-<time>) and returns that folder. A session whose labels do not join is left out
+    with every failing coder's join message, not fatal; each coder's coverage counts every session
+    their own labels joined, whatever the other coder's did. A coder with no labels in a session
+    where a file differs from their name only in case is told so (case_hint)."""
+    say = log or (lambda message: None)
+    first, second = coders
+    if first == second:
+        raise ValueError("name two different coders")
+    artifacts = Path(artifacts).resolve()
+    found = session_tables(artifacts, sessions)
+    if not found:
+        raise FileNotFoundError(f"no fused table under {artifacts} for {sessions or 'any session'}: run mmla ses-fuse")
+    directories = [path.parents[2] for _, path in found]
+    for coder in coders:
+        require_coder(coder, directories)
+    rows, joined, excluded, coverage = [], {first: [], second: []}, {}, {first: {}, second: {}}
+    for session, path in found:
+        directory = path.parents[2]
+        table = LY.read_table(path)
+        included, reason = LY.session_inclusion(table, LY.session_roster(table, directory))
+        if not included:
+            excluded[session] = reason
+            say(f"{session} left out: {reason}")
+            continue
+        everyone = L.load_labels(directory, all_coders=True)
+        # each coder is joined on their own, so one coder's failure never hides the other's coverage
+        labels, errors, hints = {}, [], []
+        for coder in coders:
+            mine = everyone[everyone['coder'] == coder] if len(everyone) else everyone
+            if not len(mine):
+                hint = case_hint(directory, coder)
+                if hint:
+                    hints.append(hint)
+                continue
+            try:
+                labels[coder] = L.join_labels(table, mine, mode=join)[0]
+            except L.LabelJoinError as error:
+                errors.append(f"labels/{coder}.jsonl does not join the fused table: {error}")
+                continue
+            coverage[coder][session] = int(np.isfinite(labels[coder].to_numpy(dtype=float)).sum())
+        if len(labels) < 2:
+            head = errors or [f"only {next(iter(labels))} coded it" if labels else "neither coder coded it"]
+            excluded[session] = '; '.join(head + hints)
+            continue
+        a, b = labels[first], labels[second]
+        row = _agreement_row(a, b)
+        if not row['both_coded']:
+            excluded[session] = 'no window both coded'
+            continue
+        rows.append({'session': session, 'task': S.task_of(session), **row})
+        for coder, series in ((first, a), (second, b)):
+            joined[coder].append(series.set_axis(pd.MultiIndex.from_arrays([[session] * len(series), series.index])))
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    run_dir = Path(out) if out else artifacts / '_analysis' / 'interaction' / f'agreement-{stamp}'
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pooled = {'session': 'pooled', 'task': None, **_agreement_row(pd.concat(joined[first]), pd.concat(joined[second]))} \
+        if rows else None
+    table = pd.DataFrame(rows + ([pooled] if pooled else []), columns=list(AGREEMENT_COLUMNS))
+    table.to_csv(run_dir / 'agreement.csv', index=False)
+    write_json(run_dir / 'agreement.json', {
+        'run': run_dir.name, 'created_at': datetime.now(timezone.utc).isoformat(), 'coders': [first, second],
+        'join': join, 'all_sessions': True,
+        'labels': "each coder's own labels/<coder>.jsonl (the last line of a window wins, a null label undoes it); "
+                  "adjudicated.jsonl and other coders' files are not read",
+        'windows': "kappa and percent_agreement: the windows both gave a class (individual, social, collaborative); "
+                   "_binary: the same windows as individual against interaction; _codes: every window both coded, "
+                   "over the five codes (the three classes, unclear, absent)",
+        'sessions': {row['session']: row for row in rows}, 'pooled': pooled, 'excluded': excluded,
+        'coverage': coverage,
+        'files': {s: {'table': str(path)} for s, path in found}})
+    say(f"{len(rows)} session(s) both coded, {len(excluded)} left out -> {run_dir}")
+    return run_dir
 
 
 def predictions_frame(base: pd.DataFrame, variants: dict, k: int) -> pd.DataFrame:
@@ -1226,11 +1530,41 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(_jsonable(value), indent=2, ensure_ascii=False), encoding='utf-8')
 
 
+def _session_split_record(coder: str, folds: list, excluded: dict) -> dict:
+    """what config.json and metrics.json say of a session split, so no one takes it for the frozen
+    TEST scoring: every session the coder labelled is a fold, DEV and TEST alike, the sessions left
+    out with why, whose labels and how the per-session figures are read."""
+    sessions = [session for fold in folds for session in fold.test]
+    return {
+        'split': 'session', 'all_sessions': True, 'held_out_test': False,
+        'note': "leave one session out over every session the coder labelled, DEV and TEST alike (decided "
+                "2026-10-03: the TEST sessions' data quality is too poor to stand for the model): cross-validated "
+                "estimates with no untouched hold-out, not the frozen TEST evaluation (split test)",
+        'coder': coder,
+        'truth': f"labels/{coder}.jsonl alone: adjudicated.jsonl is not read for the truth, and the other coders' "
+                 f"files only for the inter-coder ceiling",
+        'sessions': sessions, 'tasks': {s: S.task_of(s) for s in sessions},
+        'excluded': {s: record.get('reason') for s, record in excluded.items()},
+        'inner_folds': 'leave one session out within the training sessions',
+        'across_sessions': {
+            'n_sessions': len(sessions), 'sessions': sessions,
+            'excluded': {s: record.get('reason') for s, record in excluded.items()},
+            'macro_f1_per_session': f"the classes with at least {M.MIN_SUPPORT} true windows in the session",
+            'flags': {'few_windows': f"fewer than {MIN_SESSION_WINDOWS} scored windows",
+                      'single_class': f"fewer than two classes with {M.MIN_SUPPORT} true windows (its macro-F1 is "
+                                      f"one class's F1)"},
+            'mean': "every held-out session enters the mean and SD (ddof 1) of each score it defines, flagged or "
+                    "not; *_unflagged repeat them without the flagged sessions; AUROC needs both sides of the binary "
+                    "target, a class's F1 a true window of the class, Brier and NLL posteriors",
+            'pooled': "every held-out window the variant answered, macro-F1 over every class present"}}
+
+
 def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: Path, run_dir: Path,
-                   coder: str | None = None) -> dict:
+                   coder: str | None = None, session_record: dict | None = None) -> dict:
     """config.json: what the run read (every fused table and label file by sha256), whose labels
     were the truth and how that coder was chosen, with what (feature lists, grids, seeds, the
-    layout version) and which software, secrets masked."""
+    layout version) and which software, secrets masked. A session split adds `session_record`
+    (_session_split_record) at the top."""
     from openmmla.utils.session_provenance import git_commit, redact_secrets, software_info
     values = LY.GROUP_VALUES + LY.PERSON_VALUES + LY.PAIR_VALUES
     record = {
@@ -1270,6 +1604,11 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
                   for s, d in data.items()},
         'software': software_info(artifacts.parent), 'git_commit': git_commit(artifacts.parent),
     }
+    if session_record:
+        extra = {key: value for key, value in session_record.items() if key != 'across_sessions'}
+        # the split's own record first, after the run's name; its coder and inner folds replace the defaults
+        record = {**{key: record[key] for key in ('run', 'created_at')}, **extra,
+                  **{key: value for key, value in record.items() if key not in extra}}
     return redact_secrets(_jsonable(record))
 
 
@@ -1325,8 +1664,8 @@ def _check(cfg: Config):
     if not cfg.models:
         raise ValueError("name at least one model")
     if cfg.split not in SPLITS:
-        hint = " ('loso' became 'date': the same group on one date is never on both sides)" \
-            if cfg.split == 'loso' else ' (task transfer is deferred)'
+        hint = " ('loso' became 'date': the same group on one date is never on both sides; 'session' leaves one " \
+               "session out over DEV and TEST alike)" if cfg.split == 'loso' else ' (task transfer is deferred)'
         raise ValueError(f"split {cfg.split!r} is not built: one of {', '.join(SPLITS)}{hint}")
     if cfg.target not in TARGETS:
         raise ValueError(f"target must be one of {', '.join(TARGETS)}")
@@ -1338,6 +1677,9 @@ def _check(cfg: Config):
     if cfg.split == 'test' and not cfg.coder:
         raise ValueError("the TEST scoring names its truth coder: pass the coder the date runs were chosen on "
                          "(their config.json 'coder')")
+    if cfg.split == 'session' and not cfg.coder:
+        raise ValueError("the session split reads one coder's labels at a time: name the coder (its labels file "
+                         "name, e.g. 'Arthur' for labels/Arthur.jsonl)")
     if cfg.test_coder and cfg.split != 'test':
         raise ValueError("test_coder is the truth of the TEST sessions: it goes with split 'test' only")
     barren = _barren(cfg)
@@ -1383,6 +1725,7 @@ def _plan(cfg: Config) -> dict:
             'max_epochs': quick.get('max_epochs', 300), 'patience': quick.get('patience', 25),
             'seeds': int(cfg.seeds), 'small': cfg.small, 'epochs': cfg.epochs, 'jev_variant': cfg.jev_variant,
             'bootstrap': cfg.bootstrap or quick.get('bootstrap', BOOTSTRAP), 'jobs': jobs, 'scaling': cfg.scaling,
+            'split': cfg.split,
             'threads': max(1, (os.cpu_count() or 1) // jobs) if jobs > 1 else None,
             'device': device, 'torch': build}
 
@@ -1449,6 +1792,10 @@ def run(config, log=None) -> Path:
     if not found:
         raise FileNotFoundError(f"no fused table under {artifacts} for {cfg.sessions or 'any session'}: "
                                 f"run mmla ses-fuse")
+    by_session = cfg.split == 'session'
+    if by_session:
+        # one coder's own file is the truth, matched by its exact name
+        require_coder(cfg.coder, [path.parents[2] for _, path in found])
     # the truth coder is chosen on the DEV sessions in every split, so TEST labels never decide it
     coder = cfg.coder or primary_coder([path.parents[2] for s, path in found if s not in S.TEST_SESSIONS])
     # a test run may score TEST against another coder than the one that trains; DEV always reads `coder`
@@ -1457,18 +1804,32 @@ def run(config, log=None) -> Path:
     data, tables, excluded = {}, {}, {}
     for session, path in found:
         loaded, table = load_session(session, path, test_coder if session in S.TEST_SESSIONS else coder,
-                                     cfg.join, cfg.target, models)
+                                     cfg.join, cfg.target, models, adjudicated=not by_session)
         # S1, the inclusion rule: a session that never shows two persons together is left out whole
         included, reason = LY.session_inclusion(table, loaded.roster)
         if not included:
             excluded[session] = {**loaded.roster.record(), 'included': False, 'reason': reason}
+            if by_session:
+                excluded[session]['coded_windows'] = loaded.n_coded
+            say(f"{session} left out: {reason}")
+            continue
+        if by_session and not loaded.n_coded:
+            # the session split folds over the sessions the coder labelled; the others train nothing either
+            hint = case_hint(loaded.directory, coder)
+            reason = (f"no labels of coder {coder} ({hint or f'labels/{coder}.jsonl missing or empty'})"
+                      if not loaded.join.get('own') else
+                      f"coder {coder} gave no window of it a class (only unclear or absent)")
+            excluded[session] = {**loaded.roster.record(), 'included': False, 'reason': reason, 'coded_windows': 0}
             say(f"{session} left out: {reason}")
             continue
         data[session], tables[session] = loaded, table
     if not data:
+        if by_session:
+            raise Refused(f"every session is left out (the inclusion rule S1, or no class coded by {coder}): "
+                          + '; '.join(f"{s} ({r['reason']})" for s, r in excluded.items()), [], None)
         raise Refused("every session is left out by the inclusion rule S1: "
                       + '; '.join(f"{s} ({r['reason']})" for s, r in excluded.items()))
-    link_lessons(data)
+    link_lessons(data, by_session=by_session)
     if any(m in JEV_MODELS for m in plan['models']):
         for d in data.values():
             d.jev, d.jev_note = jev_log_proba(d, cfg.jev_variant)
@@ -1506,7 +1867,9 @@ def run(config, log=None) -> Path:
     elif not plan['models']:
         why = f"every model named was left out ({', '.join(dropped)}: no usable Jev maps, see left_out and notes)"
     elif not folds:
-        why = 'no TEST session has a fused table' if cfg.split == 'test' else 'no date has coded windows to hold out'
+        why = 'no TEST session has a fused table' if cfg.split == 'test' else \
+            f'no session has windows coded by {coder} to hold out' if by_session else \
+            'no date has coded windows to hold out'
     elif unmet:
         why = (f"the TEST truth coder {test_coder!r} has no labels of their own in {', '.join(unmet)} "
                f"(labels/{test_coder}.jsonl missing or empty there): check the name, or wait until they coded it")
@@ -1514,7 +1877,7 @@ def run(config, log=None) -> Path:
         why = 'the held-out sessions have no coded window to score'
     elif problems:
         why = f"{len(problems)} outer-training fold(s) lack {cfg.min_class_windows} coded windows of a class " \
-              f"(or two coded dates for the inner folds)"
+              f"(or two coded {'sessions' if by_session else 'dates'} for the inner folds)"
     if why:
         write_json(run_dir / 'metrics.json', {'run': run_dir.name, 'refused': why, 'problems': problems,
                                               'models': plan['models'], 'target': cfg.target,
@@ -1526,6 +1889,9 @@ def run(config, log=None) -> Path:
         if earlier:
             say(f"the TEST sessions were scored before ({len(earlier)} line(s) in test_runs.jsonl): "
                 f"this run is recorded as another look")
+    if by_session:
+        say(f"leave one session out over every session coder {coder} labelled, DEV and TEST alike "
+            f"(inner folds: one training session out); {len(excluded)} session(s) left out")
     say(f"{len(folds)} fold(s) over {len(data)} session(s): {', '.join(plan['models'])}")
     arms = ABLATIONS[cfg.ablate]
     if len(arms) == 1:
@@ -1557,11 +1923,21 @@ def run(config, log=None) -> Path:
         raise Refused("the folds gave no variant to score", [], run_dir)
     # the headline, the contrasts and the state shares read the full arm only, as pre-registered
     full = {key: variant for key, variant in variants.items() if variant['ablation'] == 'full'}
+    # what the bootstrap resamples, as the reason an interval is left out names it
+    unit = 'session' if by_session else 'date'
     reports, per_session = {}, []
     for key, variant in variants.items():
-        reports[key], rows = score_variant(variant, base, k, plan['bootstrap'])
-        per_session += [dict(row, variant=key, ablation=variant['ablation']) for row in rows]
-    policy = absent_class_policy(data)
+        reports[key], rows = score_variant(variant, base, k, plan['bootstrap'], unit)
+        if by_session:
+            # each held-out session is a fold: its own scores, flags, and the mean and SD over them
+            frame = session_scores(variant, base, k)
+            reports[key]['across_sessions'] = session_summary(frame, variant, base, k)
+            per_session += [{'variant': key, 'model': variant['model'], 'temporal': variant['temporal'],
+                             'hmm': variant['hmm'], 'ablation': variant['ablation'], **row}
+                            for row in frame.to_dict('records')]
+        else:
+            per_session += [dict(row, variant=key, ablation=variant['ablation']) for row in rows]
+    policy = absent_class_policy(data, all_sessions=by_session)
     binary_confirmatory = policy['confirmatory_target'] == 'binary' or k == 2
     headline = select_headline(full, reports, binary_confirmatory) if cfg.split == 'date' else None
     tests = contrasts(headline, full, base, plan['bootstrap'], binary_confirmatory) if headline else {}
@@ -1583,11 +1959,17 @@ def run(config, log=None) -> Path:
     confusion_frame(reports, k, {key: variant['ablation'] for key, variant in variants.items()}).to_csv(
         run_dir / 'confusion.csv', index=False)
     if cfg.ablate != 'none':
-        ablation_frame(variants, arm_of, reports, base, plan['bootstrap'], arms).to_csv(run_dir / 'ablation.csv',
-                                                                                       index=False)
-    results = pd.DataFrame([_result_row(key, variants[key], reports[key]) for key in variants])
-    # the ceiling is read on the sessions this run scores, against their truth coder
-    ceiling = inter_coder({s: d for s, d in data.items() if (s in S.TEST_SESSIONS) == (cfg.split == 'test')},
+        ablation_frame(variants, arm_of, reports, base, plan['bootstrap'], arms, unit).to_csv(
+            run_dir / 'ablation.csv', index=False)
+    if by_session:
+        results = pd.DataFrame([dict(_result_row(key, variants[key], reports[key]),
+                                     **_session_columns(reports[key]['across_sessions'], k)) for key in variants])
+    else:
+        results = pd.DataFrame([_result_row(key, variants[key], reports[key]) for key in variants])
+    # the ceiling is read on the sessions this run scores (in the session split, all of them), against their
+    # truth coder
+    ceiling = inter_coder(data if by_session else
+                          {s: d for s, d in data.items() if (s in S.TEST_SESSIONS) == (cfg.split == 'test')},
                           test_coder if cfg.split == 'test' else coder)
     for name, agreement in ceiling.items():
         results = pd.concat([results, pd.DataFrame([{'group': 'ceiling', 'variant': f'inter-coder {name}',
@@ -1631,8 +2013,14 @@ def run(config, log=None) -> Path:
             # the full arm's folds are 'folds' above
             'folds': {arm: [{key: out[key] for key in ('name', 'models', 'seconds')} for out in outputs[arm]]
                       for arm in arms if arm != 'full'}}
+    session_record = None
+    if by_session:
+        session_record = _session_split_record(coder, folds, excluded)
+        metrics['all_sessions'] = True
+        metrics['across_sessions'] = session_record['across_sessions']
     write_json(run_dir / 'metrics.json', metrics)
-    write_json(run_dir / 'config.json', _config_record(cfg, plan, data, folds, artifacts, run_dir, coder))
+    write_json(run_dir / 'config.json', _config_record(cfg, plan, data, folds, artifacts, run_dir, coder,
+                                                       session_record))
     if cfg.split == 'test':
         _record_test_run(artifacts, run_dir, cfg, 'finished')
     say(f"{len(variants)} variant(s) scored in {metrics['seconds']} s -> {run_dir}")

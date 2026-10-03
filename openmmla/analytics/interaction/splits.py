@@ -21,6 +21,13 @@ is refused (SplitError) in every split: the one scoring of TEST would train on t
 
 A fold is (name, train, test), lists of session ids. Only units with coded windows are held out;
 a session without labels still trains, since the label-free fits (scalers) read every window.
+
+The session split (session_folds, session_inner_folds) is the all-sessions evaluation the user
+chose on 2026-10-03, when the TEST sessions' data quality turned out too poor to stand for the
+model: one session at a time is held out, DEV and TEST alike, and the inner folds leave one
+training session out. Neither the date, nor same_class_as, nor TEST plays a part in it, so a
+group's other lesson of the same morning trains the model a session is scored with; its numbers
+are cross-validated estimates with no untouched hold-out, never the frozen TEST scoring.
 """
 from __future__ import annotations
 
@@ -174,6 +181,29 @@ def date_folds(sessions, coded=None, same_class=None) -> list:
     for value in sorted({unit[session] for session in dev if session in held}):
         folds.append(Fold(value, [s for s in dev if unit[s] != value], [s for s in dev if unit[s] == value]))
     return folds
+
+
+def session_folds(sessions, coded=None) -> list:
+    """leave one session out over every given session, DEV and TEST alike: one fold per session with
+    coded windows (`coded` as in date_folds), named by the session, in session-id order, holding it
+    out alone and training on every other given session. No date unit, no same_class_as merge and
+    no TEST check: the caller passes only the sessions the evaluation covers."""
+    sessions = list(dict.fromkeys(sessions))
+    held = _coded(sessions, coded)
+    return [Fold(session, [s for s in sessions if s != session], [session])
+            for session in sorted(s for s in sessions if s in held)]
+
+
+def session_inner_folds(sessions, sizes=None) -> list:
+    """leave one session out within an outer-training set, the inner folds of the session split:
+    one fold per session with coded windows (`sizes`: session -> coded windows; every session
+    counts when None), in the order given; a session with nothing coded always trains. Fewer than
+    two sessions to hold out raise."""
+    sessions = list(dict.fromkeys(sessions))
+    held = [s for s in sessions if sizes is None or (sizes.get(s) or 0) > 0]
+    if len(held) < 2:
+        raise ValueError(f"inner folds need at least 2 sessions with coded windows, got {len(held)}")
+    return [Fold(f'inner-{n}', [s for s in sessions if s != session], [session]) for n, session in enumerate(held)]
 
 
 def task_transfer(sessions, source: str = 'microbit', target: str = 'wegrow', same_class=None) -> list:

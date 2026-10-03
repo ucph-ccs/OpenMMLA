@@ -128,14 +128,16 @@ def primary_coder(labels: pd.DataFrame) -> str | None:
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
-def load_labels(session_dir, coder: str | None = None, all_coders: bool = False) -> pd.DataFrame:
+def load_labels(session_dir, coder: str | None = None, all_coders: bool = False,
+                adjudicated: bool = True) -> pd.DataFrame:
     """a session's labels (LABEL_COLUMNS, one row per window, in time order): the given coder's,
     else the one with the most windows in this session, with adjudicated.jsonl overruling them for
     the windows it holds. Every row of that truth carries the chosen coder's name (it is one
     truth, which join_labels takes), and `source` says which rows adjudication decided. With
-    `all_coders` every coder's resolved labels come back (for agreement), one row per coder and
-    window, adjudication among them as coder 'adjudicated'. Labels are never averaged across
-    coders."""
+    `adjudicated` False the overrule is skipped and the truth is the coder's own file alone (one
+    coder's labels at a time, as the session split reads them). With `all_coders` every coder's
+    resolved labels come back (for agreement), one row per coder and window, adjudication among
+    them as coder 'adjudicated'. Labels are never averaged across coders."""
     session_dir = Path(session_dir)
     folder = session_dir / 'labels'
     frames, skipped = [], 0
@@ -151,9 +153,9 @@ def load_labels(session_dir, coder: str | None = None, all_coders: bool = False)
         return records
     chosen = coder or primary_coder(records)
     truth = records[records['coder'] == chosen]
-    adjudicated = records[records['coder'] == ADJUDICATED]
-    if len(adjudicated):
-        truth = pd.concat([truth[~truth['window_start'].isin(adjudicated['window_start'])], adjudicated])
+    overrule = records[records['coder'] == ADJUDICATED] if adjudicated else records.iloc[:0]
+    if len(overrule):
+        truth = pd.concat([truth[~truth['window_start'].isin(overrule['window_start'])], overrule])
     truth = truth.sort_values('window_start', kind='stable').reset_index(drop=True)
     # adjudicated rows join the chosen coder's truth; a session only adjudication labelled is its own
     truth['coder'] = chosen if chosen is not None else ADJUDICATED

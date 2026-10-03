@@ -12,6 +12,19 @@ another coder, e.g. a model's DEV labels train and a human coder's TEST labels s
 recorded in artifacts/_analysis/interaction/test_runs.jsonl). --split loso, leave one lesson out, is gone: it
 put a group's two lessons of one morning on both sides.
 
+--split session (decided 2026-10-03, when the TEST sessions' data quality turned out too poor to stand
+for the model) pools DEV and TEST: every session the --coder labelled (their own labels/<coder>.jsonl,
+adjudicated.jsonl not read) that the inclusion rule S1 keeps is held out in turn, the models train on
+all the others, and every choice is made on leave-one-session-out inner folds within those. Each
+held-out session is scored on its own (per_session.csv, with flags for a session of one class or few
+windows) and every variant gets the mean and SD over the sessions beside the pooled value (results.csv,
+metrics.json across_sessions); config.json says all_sessions true. There is no headline and no
+contrast, and nothing is recorded in test_runs.jsonl: it is not the frozen TEST scoring.
+
+--agreement A,B trains nothing: Cohen's kappa and the percent agreement of two coders on the windows
+both labelled, per session and pooled, over the same sessions after the same label join, written to
+agreement.csv and agreement.json (default folder artifacts/_analysis/interaction/agreement-<time>).
+
 Every run lands in artifacts/_analysis/interaction/<split>-<time>/ (or -o): predictions.csv,
 metrics.json, results.csv, per_session.csv, confusion.csv, label_counts.csv, state_shares.csv,
 roster.json, data_checks.json, config.json (and coefficients.csv for lr, ablation.csv with --ablate
@@ -44,12 +57,15 @@ def get_parser():
     parser = argparse.ArgumentParser(
         prog='mmla ses-classify',
         description="Train and evaluate the 10 s interaction classifier (individual, social, collaborative) across "
-                    "sessions: leave one date out on the DEV sessions, or score the TEST sessions once.")
+                    "sessions: leave one date out on the DEV sessions, score the TEST sessions once, or leave one "
+                    "session out over every session a coder labelled, DEV and TEST alike; or, with --agreement, "
+                    "score two coders against each other.")
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
     parser.add_argument('-s', '--sessions', default=None, help="only sessions whose id contains this text")
     parser.add_argument('--coder', default=None,
-                        help="whose labels are the truth (default: the coder with the most windows over the DEV "
-                             "sessions; required with --split test)")
+                        help="whose labels are the truth, by the labels file's exact name (Arthur reads "
+                             "labels/Arthur.jsonl; default: the coder with the most windows over the DEV sessions; "
+                             "required with --split test and --split session)")
     parser.add_argument('--test-coder', default=None,
                         help="with --split test: whose labels score the TEST sessions, when not --coder's (e.g. "
                              "train on a model's DEV labels, score on a human coder's TEST labels; "
@@ -59,9 +75,16 @@ def get_parser():
                              "(zero-shot, from mmla ses-jev's answers), "
                              "majority, stratified, r1 (fitted tree), jev-cal, lr, hgb, late-lr, late-hgb, pooled-net, "
                              f"net-notcn, net, net-pair (default {DEFAULT_MODELS})")
-    parser.add_argument('--split', choices=('date', 'task', 'test'), default='date',
+    parser.add_argument('--split', choices=('date', 'task', 'test', 'session'), default='date',
                         help="date: leave one DEV date out, all its sessions together (default); test: train on "
-                             "DEV, score TEST once (needs --confirm-frozen and --coder); task is not built yet")
+                             "DEV, score TEST once (needs --confirm-frozen and --coder); session: leave one session "
+                             "out over every session the --coder labelled, DEV and TEST alike, with the mean and SD "
+                             "over the sessions and the pooled value (needs --coder); task is not built yet")
+    parser.add_argument('--agreement', default=None, metavar='CODER_A,CODER_B',
+                        help="train nothing: Cohen's kappa and percent agreement of two coders (labels file names) on "
+                             "the windows both labelled, per session and pooled, over every session S1 keeps (DEV "
+                             "and TEST alike) after the classifier's label join (--join); writes agreement.csv and "
+                             "agreement.json to -o")
     parser.add_argument('--temporal', default='all',
                         help="comma list of T0 (no lags), T1c (causal lags), T2 (centred lags), or all (default all)")
     parser.add_argument('--hmm', default='all',
@@ -102,7 +125,8 @@ def get_parser():
     parser.add_argument('--confirm-frozen', action='store_true',
                         help="with --split test: every choice is frozen, score the TEST sessions")
     parser.add_argument('-o', '--out', default=None,
-                        help="run folder (default artifacts/_analysis/interaction/<split>-<time>)")
+                        help="run folder (default artifacts/_analysis/interaction/<split>-<time>, or agreement-<time> "
+                             "with --agreement)")
     return parser
 
 
@@ -140,6 +164,57 @@ def _summary(run_dir) -> str:
         'switches_per_hour_true')
     columns = [c for c in names if c in table.columns]
     return table[columns].round(3).to_string(index=False, na_rep='n/a')
+
+
+def _session_summary(run_dir) -> str:
+    """the session split's results table: per variant the sessions, the mean and SD over them and
+    the pooled value of macro-F1 and accuracy, and the means of kappa, AUROC, Brier and NLL."""
+    import pandas as pd
+    table = pd.read_csv(run_dir / 'results.csv')
+    table = table[table['group'] != 'ceiling']
+    arms = 'ablation' in table.columns and table['ablation'].dropna().ne('full').any()
+    names = ('group', 'variant') + (('ablation',) if arms else ()) + (
+        'sessions', 'sessions_flagged', 'macro_f1_mean', 'macro_f1_sd', 'macro_f1', 'accuracy_mean', 'accuracy_sd',
+        'accuracy', 'kappa_mean', 'auroc_mean', 'auroc', 'brier_mean', 'nll_mean')
+    columns = [c for c in names if c in table.columns]
+    return ("leave one session out over DEV and TEST alike: the mean and SD over the held-out sessions, and the "
+            "pooled value over their windows (macro_f1, accuracy, auroc):\n"
+            + table[columns].round(3).to_string(index=False, na_rep='n/a'))
+
+
+def _agreement_summary(run_dir) -> str:
+    """agreement.csv as printed: per session and pooled, the windows both gave a class, kappa and
+    percent agreement (three classes, binary, five codes)."""
+    import pandas as pd
+    table = pd.read_csv(run_dir / 'agreement.csv')
+    columns = ['session', 'windows', 'kappa', 'percent_agreement', 'kappa_binary', 'percent_agreement_binary',
+               'both_coded', 'kappa_codes', 'percent_agreement_codes']
+    return table[columns].round(3).to_string(index=False, na_rep='n/a')
+
+
+def _agreement(args) -> int:
+    """--agreement A,B: the two coders against each other, nothing trained."""
+    import json
+    from openmmla.analytics.interaction import evaluate as E
+    from openmmla.analytics.interaction.labels import LabelJoinError
+    coders = [name.strip() for name in args.agreement.split(',') if name.strip()]
+    if len(coders) != 2 or coders[0] == coders[1]:
+        print(f"--agreement takes two different coders, e.g. Arthur,zaibei, not {args.agreement!r}")
+        return 2
+    try:
+        run_dir = E.coder_agreement(args.artifacts or os.path.join(os.getcwd(), 'artifacts'), coders,
+                                    sessions=args.sessions, join=args.join, out=args.out, log=print)
+    except (FileNotFoundError, ValueError, LabelJoinError) as error:
+        print(str(error))
+        return 1
+    print(_agreement_summary(run_dir))
+    record = json.loads((run_dir / 'agreement.json').read_text(encoding='utf-8'))
+    for session, why in record['excluded'].items():
+        print(f"left out, {session}: {why}")
+    for coder, sessions in record['coverage'].items():
+        print(f"{coder} coded {sum(sessions.values())} window(s) in {len(sessions)} session(s) the rule S1 keeps")
+    print(f"-> {run_dir}")
+    return 0
 
 
 def _ablation_summary(run_dir) -> str | None:
@@ -200,6 +275,8 @@ def main(argv=None):
     if missing:
         print(f"missing {', '.join(missing)}: pip install \"openmmla[analysis]\"")
         return 1
+    if args.agreement:
+        return _agreement(args)
     from openmmla.analytics.interaction import evaluate as E
     models = _choices(parser, args.models, E.MODELS, '-m/--models')
     temporal = _choices(parser, args.temporal, E.TEMPORAL, '--temporal')
@@ -218,6 +295,9 @@ def main(argv=None):
     if args.split == 'test' and not args.coder:
         parser.error("--split test names its truth: add --coder, the coder of the date runs "
                      "(their config.json 'coder')")
+    if args.split == 'session' and not args.coder:
+        parser.error("--split session reads one coder's labels at a time: add --coder (the labels file's name, "
+                     "e.g. Arthur or zaibei)")
     if args.test_coder and args.split != 'test':
         parser.error("--test-coder names the truth of the TEST sessions: it goes with --split test")
     if args.seeds < 1 or args.jobs < 1 or (args.epochs is not None and args.epochs < 1):
@@ -252,12 +332,13 @@ def main(argv=None):
         run_dir = E.run(config, log=print)
     except E.Refused as refusal:
         print(str(refusal))
+        unit = 'session(s)' if args.split == 'session' else 'date(s)'
         for problem in refusal.problems:
             print(f"  fold {problem['fold']}: {problem['counts']} coded windows in training, "
-                  f"{problem['coded_units']} coded date(s)")
+                  f"{problem['coded_units']} coded {unit}")
         if refusal.problems:
             print(f"code more windows (mmla ses-code), or try --target binary; label counts in {refusal.run_dir}")
-        for line in _caveats(_metrics(refusal.run_dir)):
+        for line in _caveats(_metrics(refusal.run_dir) if refusal.run_dir else {}):
             print(line)
         return 1
     except LabelJoinError as error:
@@ -268,7 +349,17 @@ def main(argv=None):
         return 1
 
     metrics = _metrics(run_dir)
-    print(_summary(run_dir))
+    if args.split == 'session':
+        print(_session_summary(run_dir))
+        flagged = sorted({session for report in (metrics.get('variants') or {}).values()
+                          for session in (report.get('across_sessions') or {}).get('flagged', [])})
+        if flagged:
+            print(f"flagged held-out sessions (fewer than {E.MIN_SESSION_WINDOWS} scored windows, or one class): "
+                  f"{', '.join(flagged)}; they enter the means, *_unflagged in metrics.json leave them out")
+        for session, why in ((metrics.get('across_sessions') or {}).get('excluded') or {}).items():
+            print(f"left out, {session}: {why}")
+    else:
+        print(_summary(run_dir))
     ablation = _ablation_summary(run_dir)
     if ablation:
         print(ablation)
@@ -287,7 +378,10 @@ def main(argv=None):
     for line in _caveats(metrics):
         print(line)
     policy = metrics['absent_class_policy']
-    if policy['confirmatory_target'] == 'binary':
+    if args.split == 'session':
+        print(f"social windows over every session: {policy['social_windows']}, social in "
+              f"{policy['lessons_with_social']} lesson(s); no headline or contrast in the session split")
+    elif policy['confirmatory_target'] == 'binary':
         print(f"absent-class policy: {policy['social_windows']} social windows, social in "
               f"{policy['lessons_with_social']} lesson(s): the confirmatory target is binary")
     if config.quick:
