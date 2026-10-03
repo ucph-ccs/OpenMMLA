@@ -19,6 +19,7 @@ import time
 from collections import deque
 
 from openmmla.analytics.report import REPORT_VERSION
+from recordings import artifacts_root
 from store import JOBS, PART_JOB, ReportStore
 
 logger = logging.getLogger("dashboard.jobs")
@@ -237,7 +238,8 @@ def compute_job(client, store: ReportStore, sid: str, job: str, *, runner: str,
             from openmmla.analytics.report.video import build_video
             session_dir = None
             if repo_root:
-                candidate = os.path.join(repo_root, "artifacts", sid)
+                # the session folder the recordings route reads too (DASHBOARD_ARTIFACTS_DIR moves both)
+                candidate = os.path.join(artifacts_root(repo_root), sid)
                 session_dir = candidate if os.path.isdir(candidate) else None
             attention, timeline, rows = build_video(
                 events, t0, t1, session_dir=session_dir,

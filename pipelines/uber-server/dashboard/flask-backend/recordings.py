@@ -67,10 +67,11 @@ def repo_root() -> str:
     return os.path.abspath(os.path.join(here, "..", "..", "..", ".."))
 
 
-def artifacts_root() -> str:
-    """DASHBOARD_ARTIFACTS_DIR when set, else <repo>/artifacts."""
+def artifacts_root(repo: str | None = None) -> str:
+    """DASHBOARD_ARTIFACTS_DIR when set, else <repo>/artifacts (this backend's repository unless `repo`
+    names another)."""
     configured = (os.environ.get("DASHBOARD_ARTIFACTS_DIR") or "").strip()
-    return os.path.abspath(os.path.expanduser(configured)) if configured else os.path.join(repo_root(), "artifacts")
+    return os.path.abspath(os.path.expanduser(configured)) if configured else os.path.join(repo or repo_root(), "artifacts")
 
 
 def media_type(path: str) -> str:
