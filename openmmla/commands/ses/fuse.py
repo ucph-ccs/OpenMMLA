@@ -39,13 +39,19 @@ def get_parser():
             'seconds after a track last read a tag that the tag stays on the track: a tag the server kept on it '
             'longer is taken off, and a read is carried along its track no further; 0 keeps every kept tag and '
             'carries the reads without a limit, as every table fused before 2026-10-02', shortname='-tm')
-    add_arg('face_refusal', int, 13,
+    add_arg('face_refusal', int, 60,
             "how many face checks in a row must call a tracked person someone else than the tag their track "
             "remembers (the reid.tag verdicts the VFA server records since 2026-10-02) before the fusion takes "
             "that tag off the track from the first such verdict to the last, frames without a face between "
             "included, and does not carry it back there; a read of the tag or a 'same' verdict on it ends a run, "
             "a frame without a check or an 'unknown' verdict does not; 0 leaves the checks unread, as every "
             "table fused before 2026-10-02 (window_features.FACE_REFUSAL_FRAMES)", shortname='-fr')
+    add_arg('path_rule', bool, True,
+            "count each badge's path over the whole session on the floor plan's plane: positions smoothed by a "
+            "median of 3 within runs of reads at most 10 s apart, a step counted from 0.05 m up to 1.0 m for each "
+            "second between its positions (at a run's first and last step its raw step too), in the window of its "
+            "later position; false sums every raw step between the window's own positions in 3D, as every table "
+            "fused before 2026-10-03", shortname='-pr')
     add_arg('out', str, None,
             'where to write the table (.csv, else JSON lines); if not set, '
             'artifacts/<session>/analysis/features/<session>_window_features.csv', shortname='-o')
@@ -104,7 +110,7 @@ def main():
         pupils_source = 'manifest' if pupils is not None else 'trust bound'
     rows = fusion.window_features(events, window=args.window, step=args.step, participants=participants, pupils=pupils,
                                   hand_relabel=args.hand_relabel, joint_split=args.joint_split, tag_memory=tag_memory,
-                                  face_refusal=face_refusal)
+                                  face_refusal=face_refusal, path_rule=args.path_rule)
     if not rows:
         print(f"No events found for session {session_id}: nothing to build a table from.")
         return
@@ -179,6 +185,20 @@ def main():
                                 'duplicate_body_iou': fusion.DUPLICATE_BODY_IOU,
                                 'contained_body_share': fusion.CONTAINED_BODY_SHARE,
                                 'duplicate_hand_sw': fusion.DUPLICATE_HAND_SW}})
+        # how p<tag>_path_m was counted (window_features.path_steps), and on which plane: the floor from
+        # the badges' gravity (the dashboard's floor plan, from the same rotations), else the main
+        # camera's own x-z plane
+        from openmmla.utils.constants import EVENT_TYPE_IPS_ROTATION
+        if args.path_rule:
+            floor = fusion.path_floor(events.get(EVENT_TYPE_IPS_ROTATION, []))
+            path_rule = {'on': True, 'series': 'per tag over the whole session',
+                         'plane': floor['method'] if floor else 'camera-xz',
+                         'floor_pitch_deg': floor['pitch_deg'] if floor else None,
+                         'smooth': 'median of 3 within runs', 'run_gap_seconds': fusion.PATH_RUN_GAP,
+                         'step_min_m': fusion.PATH_STEP_MIN, 'step_max_m_per_second': fusion.PATH_STEP_MAX,
+                         'run_end_steps': 'raw step within the step max too', 'window': 'of the later position'}
+        else:
+            path_rule = {'on': False, 'sum': "every raw step between the window's own positions, in 3D"}
         from openmmla.utils.session_provenance import analysis_record, write_analysis_record
         record = analysis_record(session_id, inputs=inputs, outputs=[path], steps=['fusion.window_features'],
                                  parameters={'window': args.window, 'step': args.step, 'participants': participants,
@@ -197,6 +217,7 @@ def main():
                                              'tag_memory_seconds': tag_memory,
                                              # None: the face checks of remembered tags left unread
                                              'face_refusal_frames': face_refusal,
+                                             'path_rule': path_rule,
                                              'events': counts, 'source': args.measurements or 'influxdb'},
                                  root=project_dir, project_dir=project_dir)
         write_analysis_record(record, os.path.join(os.path.dirname(path), 'fusion'))

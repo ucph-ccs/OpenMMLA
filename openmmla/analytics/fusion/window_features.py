@@ -32,6 +32,17 @@ session whose persons carry none gives the same table either way.
 The events come from InfluxDB (a session id) or from the measurements folder Sessions -> Export writes
 (`<session>_<suffix>.json`), so a table can be built offline from an export.
 
+The path a badge walked (`p<tag>_path_m`) is counted over the whole session's positions of the tag,
+not window by window: each position is laid on the floor plane the dashboard's floor plan uses (the
+plane normal to the badges' mean gravity, report.space.floor_basis, else the main camera's own x-z
+plane), the positions are smoothed by a median of 3 within runs of reads at most PATH_RUN_GAP seconds
+apart, and a step between two smoothed positions of a run counts only when it is at least
+PATH_STEP_MIN metres long and at most PATH_STEP_MAX metres for each second between them (at a run's
+first and last step the raw step too, since a run's end position is the mean of two reads); a counted
+step belongs to the window of its later position (path_steps). The cell is empty when no step of a
+run ends in the window. `window_features(..., path_rule=False)` sums every raw step between the
+window's own positions in 3D instead, as every table fused before 2026-10-03.
+
 Body and gaze follow each camera on its own. Replayed cameras share one angle name, and the
 frames of one frame set share its moment, so a sequence keyed by the angle alternates between
 two viewpoints: every wrist speed became a jump from one camera to the other, the gaze switches
@@ -165,6 +176,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from openmmla.analytics.report import space as floor_plan
 from openmmla.bases.asr.attribution import ENERGY_MARGIN_DB, WORD_WEARER, as_levels, attribute_word, count_once, once_across, power_db, span_powers, word_lead
 from openmmla.services.vfa import features as vfa_features
 from openmmla.services.vfa.work_area import WorkArea, apply_work_area
@@ -237,13 +249,28 @@ TAG_MEMORY_SECONDS = 60.0
 # fusion takes the tag off (refuse_track_tags): the features endpoint checks every person whose
 # track remembers a tag against that tag's gallery (`reid.tag`, since 2026-10-02) and, by default,
 # only records the verdict. A single 'different' verdict is usually wrong (70 of the 82 that a later
-# read on the track could check, in a pilot re-run), and so are short runs: in the re-run of one
-# session (2026-10-02) a pupil the tracker carried under another pupil's tag was called someone else
-# 271 times in a row, while the longest run on any other track was 12, on a track that read the tag
-# it carried 9 s before and 50 s after with no jump between. 13 is the smallest run that takes off no
-# identity a read confirms there (any value up to 271 gives that session the same table); one
-# session only, so the full batch must check it again
-FACE_REFUSAL_FRAMES = 13
+# read on the track could check, in a pilot re-run), and so are runs of dozens: over the 20 replayed
+# sessions after the VFA and IPS re-runs (2026-10-03), six runs of 12 to 48 'different' verdicts in a
+# row were on the right pupil (clean torso reads of the tag and, independently, the pupil's learned
+# seat said so), while apart from one run of 271 (a pupil the tracker carried under another pupil's
+# tag, found in the pilot) no run confirmed to be on the wrong person was longer than 10. Every value
+# from 49 to 271 gives the 20 sessions the same tables, refusing only that run of 271; 60 leaves a
+# margin above the right pupils' 48
+FACE_REFUSAL_FRAMES = 60
+# the path a badge walked (p<tag>_path_m, path_steps). Since the IPS bases store the raw fused pose of
+# every second (84d8758), the sum of every raw step grew 1.74 times over the 20 replayed sessions (2.47
+# times in the sessions a single camera saw), and 36 % of the new path was steps under 5 cm: the
+# badge's jitter, not a walk. So each tag's positions over the whole session are smoothed by a median of
+# 3 within runs whose reads are at most PATH_RUN_GAP seconds apart (a longer gap starts a new run, and
+# no step crosses it), on the floor plan's plane, and a step between two smoothed positions counts only
+# from PATH_STEP_MIN metres up to PATH_STEP_MAX metres for each second between them (a longer one is a
+# jump between cameras or a misread). A run's first and last position are the mean of two reads, as
+# the floor plan's, which a misread moves by half, so a run's first and last step also need their raw
+# step within PATH_STEP_MAX. The two bounds are the floor plan's own (report.space.STEP_MIN,
+# STEP_MAX), there per 1 s window
+PATH_RUN_GAP = 10.0
+PATH_STEP_MIN = 0.05
+PATH_STEP_MAX = 1.0
 # the tag_match of a person whose tag the fusion carried along their track
 PROPAGATED = 'propagated'
 # the field of a person whose remembered tag the fusion took off on the face's word: the tag (a list
@@ -1151,10 +1178,76 @@ def _position(translation) -> tuple[float, float, float] | None:
     return (values[0], values[1], values[2]) if len(values) >= 3 else None
 
 
+def path_floor(rotations: Iterable[dict]) -> dict | None:
+    """the floor the paths are measured on, as the dashboard's floor plan finds it from the same
+    ips_rotation records: the plane normal to the badges' mean gravity (report.space.floor_basis);
+    None when the rotations are too few, for the main camera's own x-z plane (report.space.project)."""
+    return floor_plan.floor_basis(list(rotations or []))
+
+
+def _median3(values: list[float], i: int, lo: int, hi: int) -> float:
+    """the median of the 3 values centred on i within the run [lo, hi); at a run's end the mean of
+    the two, in a run of one the value itself (as the floor plan smooths its tracks)."""
+    window = values[max(lo, i - 1):min(hi, i + 2)]
+    return sorted(window)[1] if len(window) == 3 else sum(window) / len(window)
+
+
+def path_steps(translations: Iterable[dict], floor: dict | None) -> dict[str, tuple[list[float], list[float]]]:
+    """every tag's steps over the whole session, by tag: the moment of the later position of every two
+    consecutive positions of a run, in time order, and the length the path counts for that step.
+
+    The positions are laid on the floor (`floor`, path_floor; report.space.project), a tag read twice
+    at one moment keeping the later record's position, and split into runs wherever two consecutive
+    reads of the tag are more than PATH_RUN_GAP seconds apart. Within a run each coordinate is the
+    median of 3 (_median3), and a step between two smoothed positions counts its length when that is
+    at least PATH_STEP_MIN metres and at most PATH_STEP_MAX metres for each second between them, else
+    0. A run's first and last step, whose end position is the mean of two reads, count only when the
+    raw step between the two reads is at most PATH_STEP_MAX metres a second too."""
+    seen: dict[str, dict[float, tuple[float, float]]] = defaultdict(dict)
+    for record in translations:
+        moment = _time(record)
+        translation = record.get('translations') or {}
+        if moment <= 0 or not isinstance(translation, dict):
+            continue
+        for tag, value in translation.items():
+            position = floor_plan.position(value)
+            if position is not None:
+                u, v, _ = floor_plan.project(position, floor)
+                seen[str(tag)][moment] = (u, v)
+    steps: dict[str, tuple[list[float], list[float]]] = {}
+    for tag, at in seen.items():
+        times = sorted(at)
+        us, vs = [at[t][0] for t in times], [at[t][1] for t in times]
+        moments, lengths = [], []
+        lo = 0
+        for hi in range(1, len(times) + 1):
+            if hi < len(times) and times[hi] - times[hi - 1] <= PATH_RUN_GAP:
+                continue
+            # [lo, hi) is one run
+            su = [_median3(us, i, lo, hi) for i in range(lo, hi)]
+            sv = [_median3(vs, i, lo, hi) for i in range(lo, hi)]
+            for k in range(1, hi - lo):
+                length = math.hypot(su[k] - su[k - 1], sv[k] - sv[k - 1])
+                seconds = times[lo + k] - times[lo + k - 1]
+                counted = PATH_STEP_MIN <= length <= PATH_STEP_MAX * seconds
+                if counted and k in (1, hi - lo - 1):
+                    # a run's first and last positions are the mean of two reads, which no median
+                    # guards: a misread there moves them by half, so the raw step must be a walk too
+                    raw = math.hypot(us[lo + k] - us[lo + k - 1], vs[lo + k] - vs[lo + k - 1])
+                    counted = raw <= PATH_STEP_MAX * seconds
+                moments.append(times[lo + k])
+                lengths.append(length if counted else 0.0)
+            lo = hi
+        steps[tag] = (moments, lengths)
+    return steps
+
+
 def space_features(translations: EventIndex, relations: EventIndex, ws: float, we: float,
-                   participants: list[str]) -> dict:
+                   participants: list[str], steps: dict[str, tuple[list[float], list[float]]] | None = None) -> dict:
     """where everyone was in the window: presence and movement per person, distance per pair,
-    and who faced whom (the IPS relation graph)."""
+    and who faced whom (the IPS relation graph). With `steps` (path_steps) a person's path is the sum
+    of the steps whose later position falls in the window, empty when none does; without, the sum of
+    every raw step between the window's own positions, in 3D."""
     out: dict[str, Any] = {}
     records = translations.between(ws, we)
     out['n_ips'] = len(records)
@@ -1170,7 +1263,12 @@ def space_features(translations: EventIndex, relations: EventIndex, ws: float, w
     for tag in participants:
         seen = sorted(positions.get(tag, []))
         out[f'p{tag}_present_ratio'] = _round(len(seen) / len(records)) if records else None
-        out[f'p{tag}_path_m'] = _round(sum(math.dist(a[1], b[1]) for a, b in zip(seen, seen[1:]))) if len(seen) > 1 else None
+        if steps is None:
+            out[f'p{tag}_path_m'] = _round(sum(math.dist(a[1], b[1]) for a, b in zip(seen, seen[1:]))) if len(seen) > 1 else None
+        else:
+            moments, lengths = steps.get(tag, ([], []))
+            first, last = bisect_left(moments, ws), bisect_left(moments, we)
+            out[f'p{tag}_path_m'] = _round(sum(lengths[first:last])) if last > first else None
     for a, b in _pairs(participants):
         at_a = {start: position for start, position in positions.get(a, [])}
         distances = [math.dist(at_a[start], position) for start, position in positions.get(b, []) if start in at_a]
@@ -2700,7 +2798,7 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
                     track_tags: bool = True, pupils: list[str] | None = None,
                     work_area: bool = True, seat_partners: bool = True, hand_relabel: bool = True,
                     joint_split: bool = False, tag_memory: float | None = TAG_MEMORY_SECONDS,
-                    face_refusal: int | None = FACE_REFUSAL_FRAMES) -> list[dict]:
+                    face_refusal: int | None = FACE_REFUSAL_FRAMES, path_rule: bool = True) -> list[dict]:
     """the fusion table: one row per window over the session's span. `pupils` are the session's
     pupils, the in-group set whose faces and hands are a partner's (default_pupils of the
     participants when not given). With `hand_relabel` (the default) every stored frame's gaze
@@ -2725,7 +2823,10 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     split by where it met (pair<a>_<b>_joint_member_ratio ..., body_gaze_features) and the group gets
     nm_at_table_ratio, nm_hands_in_table_ratio and n_vfa_non_members (non_member_features, before the
     seat trace, which stays last); without it the table is the one fused before 2026-09-29, byte for
-    byte."""
+    byte. With `path_rule` (the default) a person's path is counted over the whole session on the
+    floor, smoothed, without the jitter and the jumps, each step in the window of its later position
+    (path_steps); without it every raw step between the window's own positions is summed in 3D, as in
+    every table fused before 2026-10-03."""
     if window <= 0 or step <= 0:
         raise ValueError("window and step must be greater than 0")
     span = session_span(events)
@@ -2743,6 +2844,9 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     transcription = EventIndex(events.get(EVENT_TYPE_ASR_TRANSCRIPTION, []), 1.0)
     translations = EventIndex(events.get(EVENT_TYPE_IPS_TRANSLATION, []), 1.0)
     relations = EventIndex(events.get(EVENT_TYPE_IPS_RELATION, []), 1.0)
+    # every badge's path over the whole session, on the floor plan's plane, smoothed and without the
+    # jitter and the jumps; None sums each window's raw steps in 3D, as before 2026-10-03
+    steps = path_steps(translations.records, path_floor(events.get(EVENT_TYPE_IPS_ROTATION, []))) if path_rule else None
     raw = events.get(EVENT_TYPE_VFA_FEATURES, [])
     layout = frame_set_layout(raw)
     # a tag the server kept on a track too long after its last read is taken off before the work
@@ -2802,7 +2906,7 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     for index, ws, we in windows(span[0], span[1], window, step):
         row: dict[str, Any] = {'window_index': index, 'window_start': round(ws, 3), 'window_end': round(we, 3)}
         row.update(speech_features(recognition, transcription, ws, we, speakers, personal=personal))
-        row.update(space_features(translations, relations, ws, we, participants))
+        row.update(space_features(translations, relations, ws, we, participants, steps=steps))
         row.update(body_gaze_features(features, ws, we, participants, layout, pupils=pupils, gaze_index=gaze_index,
                                       work_area=work_area, seats=pupil_seats, nudge=nudge,
                                       pupil_tracks=pupil_tracks, referents=referents))
