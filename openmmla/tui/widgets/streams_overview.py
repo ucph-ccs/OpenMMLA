@@ -29,6 +29,7 @@ from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Static
 
+from openmmla.tui import capture_recordings as cr
 from openmmla.tui import recordings
 from openmmla.tui.schema.loader import StreamDef
 from openmmla.tui.ssh import TARGET_PLATFORMS, TARGET_STATES, get_profile_by_name, load_ssh_profiles
@@ -37,8 +38,10 @@ from openmmla.tui.system_services import stream_server_path
 from openmmla.tui.widgets.stream_panel import (
     STREAM_EXITED, STREAM_RUNNING, STREAM_STARTING, STREAM_STOP_GRACE_SECONDS, STREAM_STOPPED,
     STREAM_UNKNOWN, StreamPanel, _build_stop_stream_cmd, _parse_stream_state, _run_on_host, _stream_app,
-    _stream_key, _stream_state_cmd, _tmux_pane_target, _tmux_session_name, _with_stream_path,
+    _stream_key, _stream_kind, _stream_state_cmd, _tmux_pane_target, _tmux_session_name, _with_stream_path,
+    stream_host_label, stream_record_root,
 )
+from openmmla.tui.widgets.stream_recordings import StreamRecordingsScreen
 from openmmla.utils.stream_registry import load_stream_registry, mark_stream_stopped
 
 # the Streams entries of the pipeline cards, (card, stream), and what could not be read
@@ -155,6 +158,43 @@ def capture_rows(configured: list[tuple[str, StreamDef]], registry: dict, server
         if row.in_config and row.name in clashes:
             row.clash = True
     return list(rows.values())
+
+
+def capture_streams(configured: list[tuple[str, StreamDef]], project_dir: str) -> list[cr.CaptureStream]:
+    """every stream a pipeline card captures, as Manage sees them: where it
+    records and for how long its recordings stay. One capture that two cards
+    name (an IPS and a VFA Base pulling one camera) is listed once, kept for
+    the longer of their two times (0, until deleted, the longest), so Delete
+    Expired never takes what one of them keeps."""
+    found: dict[tuple, cr.CaptureStream] = {}
+    for card, stream in configured:
+        machine = (stream.ssh_profile or "").strip()
+        if not machine:
+            continue
+        # what the card itself counts it as when nothing else tells: audio on ASR
+        # (launcher._card_stream_kind), so its files are looked for where it wrote them
+        kind = _stream_kind(stream, "audio" if card == "ASR Base" else "video")
+        folder = cr.CaptureFolder(machine, stream_record_root(machine, stream.record_root, project_dir),
+                                  stream_host_label(machine))
+        key = (stream.name, folder, kind)
+        days = int(stream.record_keep_days or 0)
+        if key in found:
+            kept = found[key].keep_days
+            days = 0 if 0 in (kept, days) else max(kept, days)
+        found[key] = cr.CaptureStream(stream.name, folder, kind, days)
+    return list(found.values())
+
+
+def live_record_paths(project_dir: str) -> set[str]:
+    """the files the streams this console started are writing, as their Start noted them."""
+    try:
+        entries = load_stream_registry(project_dir).get("streams", {})
+    except Exception:
+        return set()
+    return {
+        str(entry["record_path"]).strip() for entry in entries.values()
+        if isinstance(entry, dict) and entry.get("status") == "running" and entry.get("record_path")
+    }
 
 
 def scan_command(names, discover: bool = True) -> str:
@@ -382,6 +422,8 @@ class StreamServerStreamsPanel(Widget):
         self._server = server
         self._project_dir = project_dir
         self._rows: list[StreamRow] = []
+        # the Streams entries of the cards as last read: Manage lists what they recorded
+        self._configured_streams: list[tuple[str, StreamDef]] | None = None
         self._server_answered = True
         self._loaded = False
         self._busy = False  # a Stop is under way: it is not cut short by a Refresh
@@ -396,6 +438,7 @@ class StreamServerStreamsPanel(Widget):
             yield Button("Stop", variant="error", id="btn-sp-stop")
             yield Button("Stop All", variant="error", id="btn-sp-stop-all")
             yield Button("Logs", variant="primary", id="btn-sp-logs")
+            yield Button("Manage", variant="primary", id="btn-sp-manage")
         yield Static("", id="sp-log", classes="sp-muted")
 
     def on_mount(self) -> None:
@@ -438,6 +481,7 @@ class StreamServerStreamsPanel(Widget):
             configured, notes = await asyncio.to_thread(self._configured)
         except Exception as error:
             configured, notes = [], [f"The pipeline configs could not be read ({type(error).__name__})."]
+        self._configured_streams = list(configured)
         server = self._server_address()
         try:
             registry = load_stream_registry(self._project_dir).get("streams", {})
@@ -638,6 +682,24 @@ class StreamServerStreamsPanel(Widget):
                 self._set_log(f"{escape(row.name)} is not run from here: it has no capture to read the logs of.")
             else:
                 self.run_worker(self._show_logs(row), group="sp-logs", exit_on_error=False)
+        elif button == "btn-sp-manage":
+            self._pending = None
+            self._manage()
+
+    def _manage(self) -> None:
+        """the recordings every pipeline's streams left on the machines that
+        capture them, host by host, to look at and delete from one place. How
+        long they stay is each card's (its own Manage)."""
+        if self._configured_streams is None:
+            self._set_log("The pipeline configs are still being read: press Manage once the table is filled.")
+            return
+        configured, project_dir = self._configured_streams, self._project_dir
+        if not capture_streams(configured, project_dir):
+            self._set_log("No pipeline's Streams name a machine that captures them, so nothing records anywhere.")
+            return
+        self.app.push_screen(StreamRecordingsScreen(
+            lambda: capture_streams(configured, project_dir), lambda: live_record_paths(project_dir),
+            every_pipeline=True))
 
     def _stop(self, row: StreamRow) -> None:
         if self._busy:

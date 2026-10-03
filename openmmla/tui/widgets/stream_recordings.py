@@ -40,6 +40,15 @@ HELP = (
     "longer ago is deleted at its stream's next Start and at Refresh on the Streams tab. The Stream Server's "
     "own recordings are on its card."
 )
+# the same, opened from the Stream Server card for the streams of every pipeline
+HELP_EVERY_PIPELINE = (
+    "What the streams of every pipeline recorded on the machines that capture them (Record: yes): one file per "
+    "Start, filed under the day it started. A dim name is a stream no pipeline's Streams name any more.\n"
+    "The file a stream is writing now is never deleted: Stop it first. A session's part of the streams is "
+    "copied to this machine with Sessions → Export.\n"
+    "Delete Expired deletes what is past each stream's own keep time, which its pipeline card's Manage sets. "
+    "The Stream Server's own recordings are on its Recordings tab."
+)
 
 
 class StreamRecordingsScreen(DismissOnce, ModalScreen):
@@ -106,11 +115,15 @@ class StreamRecordingsScreen(DismissOnce, ModalScreen):
         streams: Callable[[], list[cr.CaptureStream]],
         live_paths: Callable[[], Iterable[str]] | None = None,
         on_keep_days: Callable[[int], None] | None = None,
+        every_pipeline: bool = False,
     ) -> None:
         """`streams` gives the card's managed streams as they are now, `live_paths`
         the files the console noted its running streams write, and `on_keep_days`
-        is asked to store a new keep time for all of them."""
+        is asked to store a new keep time for all of them. `every_pipeline` is
+        the Stream Server card's: the streams of all three cards, whose keep
+        times stay theirs, so it offers no Keep choice."""
         super().__init__()
+        self._every_pipeline = every_pipeline
         self._stream_source = streams
         self._live_source = live_paths or (lambda: ())
         self._on_keep_days = on_keep_days
@@ -124,14 +137,16 @@ class StreamRecordingsScreen(DismissOnce, ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="sr-dialog"):
-            yield Static("Recordings on the capture hosts", id="sr-title")
-            yield Static(HELP, classes="sr-muted")
+            yield Static("Recordings on the capture hosts" + (", every pipeline" if self._every_pipeline else ""),
+                         id="sr-title")
+            yield Static(HELP_EVERY_PIPELINE if self._every_pipeline else HELP, classes="sr-muted")
             yield Static("", id="sr-summary", classes="sr-muted")
             yield DataTable(id="sr-table")
             with Horizontal(classes="sr-row"):
-                yield Label("Keep recordings for:")
-                options, value = self._keep_options()
-                yield Select(options, value=value, allow_blank=False, id="sr-keep")
+                if not self._every_pipeline:
+                    yield Label("Keep recordings for:")
+                    options, value = self._keep_options()
+                    yield Select(options, value=value, allow_blank=False, id="sr-keep")
                 yield Button("Delete Expired", variant="error", id="btn-sr-expired")
                 yield Static("", id="sr-keep-note", classes="sr-muted")
             with Horizontal(classes="sr-row"):
@@ -249,6 +264,9 @@ class StreamRecordingsScreen(DismissOnce, ModalScreen):
         return options, days
 
     def _show_keep(self) -> None:
+        if self._every_pipeline:
+            self._show_keep_note()
+            return
         select = self.query_one("#sr-keep", Select)
         options, value = self._keep_options()
         with select.prevent(Select.Changed):
