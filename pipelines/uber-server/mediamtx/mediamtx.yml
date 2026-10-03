@@ -9,6 +9,24 @@
 
 logLevel: info
 
+# how long a connection may stay silent before the server closes it (MediaMTX's
+# default is 10s). The capture hosts reach this server over Tailscale, through a
+# DERP relay where no direct path exists, and a relay hiccup can stall a
+# publisher's TCP for longer than that: MediaMTX then closed it ("closed: read
+# tcp ...: i/o timeout") and the stream was gone until its FFmpeg was started
+# again. readTimeout bounds each read from a publisher (RTMP, RTSP over TCP; for
+# SRT it is also the peer idle timeout) and the reading of an HTTP request;
+# writeTimeout bounds each write to a reader (a base pulling RTSP, a playback
+# download, the API's answers), so the server keeps a reader behind the same
+# relay through such a stall too (a video base reopens its own pull after 10 s
+# without a frame, and a capture host its push after 15 s blocked). The price: a publisher that vanished without
+# closing its connection (a Pi that lost power or its network) keeps its path
+# listed as ready, with nothing arriving, until readTimeout runs out. MediaMTX
+# applies a change to either only by closing every connection, publishers and
+# readers alike, so change them between sessions (docs/rtmp_streaming.md)
+readTimeout: 30s
+writeTimeout: 30s
+
 # control API (curl http://<stream-server>:9997/v3/paths/list) and Prometheus metrics
 api: yes
 apiAddress: :9997

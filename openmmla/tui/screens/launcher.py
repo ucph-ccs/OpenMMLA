@@ -3395,9 +3395,14 @@ class StreamServerConfigPanel(Widget):
     }
     """ + _SYNC_BAR_CSS
 
-    # what a Save says, and a copy that landed on a host: how it takes effect
-    _APPLY_NOTE = ("MediaMTX reloads the file when it changes; Stop and Start on the Launch tab if a change "
-                   "does not show.")
+    # what a Save says, and a copy that landed on a host: how it takes effect.
+    # a native MediaMTX watches its file; a container keeps the file it started
+    # with (a host-side write never reaches its watcher), so only a new start
+    # reads it. A new start also forgets the paths START switched on through
+    # the API, and nothing switches them on again, so the note says so
+    _APPLY_NOTE = ("A native MediaMTX reloads the file when it changes; one in docker reads it when its "
+                   "container starts: Stop and Start on the Launch tab, which closes every stream, then Send "
+                   "START again for a session that is running (a new start records none of its paths).")
     # seconds MediaMTX is given to read a changed file before the running
     # sessions' paths are switched on again
     _RELOAD_SECONDS = 3.0
@@ -3469,8 +3474,9 @@ class StreamServerConfigPanel(Widget):
     def set_status_elsewhere(self, text: str) -> None:
         """what a Sync to Host from this tab has to say: the copy landed on
         another host, whose MediaMTX this card's Launch tab does not drive."""
-        self._set_status(f"{text}. MediaMTX there reloads the file when it changes."
-                         if text.startswith("Synced ") else text)
+        self._set_status(f"{text}. A native MediaMTX there reloads the file when it changes; one in docker "
+                         "reads it when its container starts, and a session that is running then needs Send "
+                         "START again." if text.startswith("Synced ") else text)
         if text.startswith("Synced "):
             self._reapply_session_recording()
 
