@@ -12,18 +12,25 @@ artifacts/<session>/streams/server/<stream path>_<start>.<ext> (fMP4), from the 
 scan of streams/server/. Each is listed with `source` "stream" and its stream path; the capture
 files have `source` "collection".
 
+Every file is listed with a length: the manifest row's `duration`, else what the file holds (a wav's
+header, else ffprobe's, kept per path, size and modification time so a listing probes a file once),
+else what the recorder noted (`audio_seconds`, or `stopped_at` - `start_time`). The replay ends a file
+where its listed length does, so a file listed without one would hold the clock to the session's end.
+
 Nothing else of the session folder is ever listed or served: not the speaker profiles (voice
 biometrics of children), the coding clips under labels/, raw/, analysis/, pipelines/, the archive's
 ledger under .archive/ or the manifests themselves, and nothing a symlink or a manifest path leads
 to outside the session folder. Every file is checked on its real path (os.path.realpath), whichever
 way it was found.
 
-Standard library only.
+Standard library only (and ffprobe, when it is on the PATH).
 """
 
 import json
 import os
 import re
+import shutil
+import subprocess
 import wave
 
 MEDIA_TYPES = {
@@ -48,6 +55,9 @@ SOURCES = ("collection", "stream")
 # a stream server's recording is the same stretch as an archived cut of its path when it starts
 # within this many seconds of the cut, or lies inside it give or take as much
 CUT_MATCH_SECONDS = 2.0
+# how long one ffprobe of a file's length may take, and how many lengths are kept (the oldest go)
+PROBE_TIMEOUT_SECONDS = 20.0
+PROBED_MAX = 4096
 
 
 def repo_root() -> str:
@@ -286,6 +296,57 @@ def _wav_header(path: str) -> tuple[int, int, float | None] | None:
     return channels, rate, (round(frames / rate, 3) if rate > 0 else None)
 
 
+# (real path, size, mtime_ns) -> seconds or None, so a file is probed once while it stays the same
+_PROBED: dict[tuple[str, int, int], float | None] = {}
+
+
+def _probe_seconds(path: str) -> float | None:
+    """the length ffprobe reads from a media file (its container's duration; a fragmented MP4's
+    fragments counted through), None without ffprobe or when it cannot say."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    lines = (result.stdout or "").split()
+    seconds = _number(lines[0]) if result.returncode == 0 and lines else None
+    return seconds if seconds is not None and seconds > 0 else None
+
+
+def _media_seconds(path: str) -> float | None:
+    """the length of the file at path by ffprobe, kept while its size and modification time stay."""
+    try:
+        real = os.path.realpath(path)
+        stat = os.stat(real)
+    except (OSError, ValueError):
+        return None
+    key = (real, stat.st_size, stat.st_mtime_ns)
+    if key in _PROBED:
+        return _PROBED[key]
+    seconds = _probe_seconds(real)
+    if len(_PROBED) >= PROBED_MAX:
+        _PROBED.pop(next(iter(_PROBED)))
+    _PROBED[key] = seconds
+    return seconds
+
+
+def _noted_seconds(row: dict) -> float | None:
+    """the length a capture recorder noted in its manifest row: the samples its audio file holds, else
+    the time from its start to its stop; None when it noted neither."""
+    audio = _number(row.get("audio_seconds"))
+    if audio is not None and audio > 0:
+        return audio
+    start, stopped = _number(row.get("start_time")), _number(row.get("stopped_at"))
+    if start is not None and stopped is not None and stopped > start:
+        return stopped - start
+    return None
+
+
 def _record(path: str, host: str | None, modality: str, rec_id: str, row: dict) -> dict:
     """the listing entry of one file in the host folder `host`, from its manifest row (empty for a
     scanned file) and, where the row says nothing, from the recorder's file name."""
@@ -299,6 +360,8 @@ def _record(path: str, host: str | None, modality: str, rec_id: str, row: dict) 
     header = _wav_header(path) if _extension(path) == "wav" else None
     if not duration or duration < 0:
         duration = header[2] if header else None
+    if not duration or duration < 0:
+        duration = _media_seconds(path) or _noted_seconds(row)
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -513,6 +576,8 @@ def _cut_record(cut: dict) -> dict:
         "audio" if stream_path.split("/", 1)[0] == "asr" else "video")
     start = _number(row.get("start_time"))
     duration = _number(row.get("duration"))
+    if not duration or duration < 0:
+        duration = _media_seconds(cut["path"])
     try:
         size = os.path.getsize(cut["path"])
     except OSError:

@@ -9,10 +9,11 @@
  * the Cameras card is open, the tile is on screen and the tab is visible, and at most MAX_PLAYING
  * tiles play at once; everything else closes its RTCPeerConnection or lets go of its file. A recorded
  * file holds one of the browser's connections to the dashboard, so the files load from the
- * dashboard's media port, where up to MAX_MEDIA_VIDEOS play beside the replay's sound; without one
- * they load from the page's origin and share MAX_MEDIA with the sound. A tile scrolled off screen
- * keeps its file, paused, while that allows, so scrolling back shows the moment without loading the
- * file again. The WHEP exchange lives
+ * dashboard's media ports: up to MAX_MEDIA_VIDEOS beside the replay's sound on the first that
+ * answers, up to MAX_ORIGIN_FILES on each other one (mediaPools, assignFiles); without one they load
+ * from the page's origin and share MAX_MEDIA with the sound. A tile scrolled off screen keeps its
+ * file, paused, while that allows, so scrolling back shows the moment without loading the file
+ * again, and a tile keeps the port its file loads from while it holds one. The WHEP exchange lives
  * in whepNegotiate and WhepPlayer, which take their RTCPeerConnection and fetch as arguments so the
  * offer/answer flow can be tested without a browser or a server; FilePlayer takes its video element
  * and clock the same way.
@@ -26,17 +27,21 @@ import { CATEGORY_LABELS, gazeCategory, TAG_MEMORY_SECONDS } from './live-model.
 export const MAX_PLAYING = 6;
 // a browser opens at most six connections per origin (scheme, host and port) over HTTP/1.1, and a
 // recorded file (a camera's video or the replay's sound) holds one while it plays, and while it is
-// paused in place. The page loads the files from the dashboard's media port, an origin of their
-// own (mediaOriginFor): up to MAX_MEDIA_VIDEOS camera videos and the sound beside them, which leaves
-// one of the six free there for a seek. The page's own origin keeps its six for the API requests and
-// the live stream
-export const MAX_MEDIA_VIDEOS = 4;
+// paused in place. The page loads the files from the dashboard's media ports, origins of their own
+// (mediaOriginFor): on each, up to MAX_ORIGIN_FILES files, which leaves one of the six free there for
+// a seek. The page's own origin keeps its six for the API requests and the live stream
+export const MAX_ORIGIN_FILES = 5;
+// the first media origin that answers carries the replay's sound too: up to MAX_MEDIA_VIDEOS camera
+// videos beside it (the place stays the sound's while it is off, so no video moves when it comes on)
+export const MAX_MEDIA_VIDEOS = MAX_ORIGIN_FILES - 1;
 // without a media port (or when it does not answer) the files load from the page's origin, where
 // the live stream takes one connection and one stays free for the page's other requests: the
 // videos and the sound share the other four
 export const MAX_MEDIA = 4;
 // how long the page waits for the media port's answer before it loads the files from its own origin
 export const MEDIA_PROBE_MS = 3000;
+// once one media port answered, the others are waited for this long only (awaitMediaAnswers)
+export const MEDIA_PROBE_GRACE_MS = 300;
 export const RECONNECT_STEPS = [1, 2, 5, 10];
 export const ICE_TIMEOUT_MS = 2000;
 // the browser holds at most this much video back to line it up with the overlay
@@ -362,26 +367,30 @@ export function driftTolerance(speed) {
 
 /**
  * [start, end] of a recording in epoch seconds, null without a start. The end comes from the listed
- * duration or the one the browser read from the file, the shorter of the two; Infinity while neither
- * is known.
+ * duration, Infinity without one (the recordings route lists a length for every file the dashboard's
+ * machine can read, from its manifest, ffprobe or the recorder's start and stop). Never from the length the browser reads: Firefox reads a
+ * fragmented MP4 whose header names no length (a stream server's cut, a CMAF segment) one fragment
+ * at a time, so its duration grows from the first fragment's as the file loads and stops where the
+ * download pauses, and a span cut to it would leave the tile without its file, and without the
+ * player that could read further, for the rest of the replay.
  */
-export function recordingSpan(file, mediaDuration = null) {
-  const lengths = [file && file.duration, mediaDuration].filter((d) => finite(d) && d > 0);
+export function recordingSpan(file) {
   const start = file && finite(file.start) ? file.start : null;
   if (start == null) return null;
-  return [start, lengths.length ? start + Math.min(...lengths) : Infinity];
+  const d = file.duration;
+  return [start, finite(d) && d > 0 ? start + d : Infinity];
 }
 
 /**
  * the recording of `files` that holds the moment t (epoch), the one that started last when several
  * do (its last frame stays up at its very end, where a replay that reaches the session's end stops);
- * null when none does. `durations` maps a file's url to the length the browser read from it.
+ * null when none does.
  */
-export function recordingAt(files, t, durations = null) {
+export function recordingAt(files, t) {
   if (!finite(t)) return null;
   let best = null;
   for (const f of files || []) {
-    const span = recordingSpan(f, durations && f ? durations.get(f.url) : null);
+    const span = recordingSpan(f);
     if (span && t >= span[0] && t <= span[1] && (!best || f.start > best.start)) best = f;
   }
   return best;
@@ -415,9 +424,9 @@ export function inlineUrl(url, origin = null) {
 }
 
 /**
- * the origin the recorded files load from: the page's scheme and host on the dashboard's media port
- * (`port`, the recordings route's media_port), so the files hold connections of their own; null
- * without a media port, for one that is the page's own port, or for a page not served over http(s).
+ * an origin the recorded files load from: the page's scheme and host on a media port of the
+ * dashboard (`port`, one of the recordings route's media_ports), so the files hold connections of
+ * their own; null without a port, for the page's own port, or for a page not served over http(s).
  */
 export function mediaOriginFor(loc, port) {
   const p = Number(port);
@@ -432,11 +441,36 @@ export function mediaOriginFor(loc, port) {
 }
 
 /**
+ * resolves once one of `answers` (promises of true or false, the media ports' probes) came back true
+ * and the others had `graceMs` more, or once all came back, whichever is first; never rejects. A port
+ * a firewall drops gives up only after MEDIA_PROBE_MS, and the files would otherwise wait for it on
+ * every load while another port already answered.
+ */
+export function awaitMediaAnswers(answers, { graceMs = MEDIA_PROBE_GRACE_MS, setTimer = (fn, ms) => setTimeout(fn, ms) } = {}) {
+  const list = (answers || []).map((a) => Promise.resolve(a).then((ok) => ok === true, () => false));
+  if (!list.length) return Promise.resolve();
+  return new Promise((resolve) => {
+    let left = list.length;
+    let timer = false;
+    for (const p of list) {
+      p.then((ok) => {
+        left -= 1;
+        if (!left) resolve();
+        else if (ok && !timer) {
+          timer = true;
+          setTimer(resolve, graceMs);
+        }
+      });
+    }
+  });
+}
+
+/**
  * whether this same dashboard answers on `origin` within `timeoutMs`: its /api/media-origin names
- * `port` and `instance` (the recordings route's media_port and media_instance, a mark of the
- * dashboard's process), so another dashboard that holds that port number on the page's host (a page
- * opened through a tunnel on another local port) is not taken for it; false for no answer, another
- * server, or an error. Never throws.
+ * `port` among its media ports and `instance` (the recordings route's media_ports and media_instance,
+ * a mark of the dashboard's process), so another dashboard that holds that port number on the page's
+ * host (a page opened through a tunnel on another local port) is not taken for it; false for no
+ * answer, another server, or an error. Never throws.
  */
 export async function probeMediaOrigin(origin, port, instance, {
   fetchImpl = globalThis.fetch ? globalThis.fetch.bind(globalThis) : null, timeoutMs = MEDIA_PROBE_MS,
@@ -458,7 +492,10 @@ export async function probeMediaOrigin(origin, port, instance, {
       });
       if (!res || !res.ok) return false;
       const data = await res.json();
-      return !!data && Number(data.media_port) === Number(port) && data.media_instance === instance;
+      if (!data || data.media_instance !== instance) return false;
+      // a dashboard of one media port answers media_port alone
+      const ports = Array.isArray(data.media_ports) ? data.media_ports : [data.media_port];
+      return ports.some((p) => p != null && p !== '' && Number(p) === Number(port));
     } catch {
       return false;
     }
@@ -478,6 +515,136 @@ export function videoCap(separate, reserved = 0) {
   if (separate) return MAX_MEDIA_VIDEOS;
   const r = finite(reserved) ? Math.max(0, Math.round(reserved)) : 0;
   return Math.max(0, MAX_MEDIA - r);
+}
+
+/** the media origins as a list, each once, in order: from a list, one origin, or nothing */
+export function mediaOriginList(origins) {
+  const list = Array.isArray(origins) ? origins : [origins];
+  const out = [];
+  for (const o of list) if (typeof o === 'string' && o && !out.includes(o)) out.push(o);
+  return out;
+}
+
+/**
+ * where the tiles' recorded videos may load from, each {origin, cap}: the media origins that
+ * answered (`origins`, in the dashboard's order), MAX_MEDIA_VIDEOS on the first (it carries the
+ * replay's sound) and MAX_ORIGIN_FILES on each other one; without one, the page's own origin (origin
+ * null) with what the sound (`reserved`) leaves of MAX_MEDIA (videoCap)
+ */
+export function mediaPools(origins, reserved = 0) {
+  const list = mediaOriginList(origins);
+  if (!list.length) return [{ origin: null, cap: videoCap(false, reserved) }];
+  return list.map((origin, i) => ({ origin, cap: i === 0 ? MAX_MEDIA_VIDEOS : MAX_ORIGIN_FILES }));
+}
+
+/**
+ * which tiles hold a recorded video, and the origin each loads it from. `playing`: the tiles on
+ * screen that want one, in priority order; `parked`: the tiles scrolled away that hold one, the most
+ * recently seen first; `held`: the origin each tile's file loads from now (Map id -> origin, null for
+ * the page's origin), for the tiles that hold one; `pools`: mediaPools(). The tiles on screen come
+ * first and the parked ones take what they leave, up to the pools' caps together; every pool holds
+ * at most its cap. A tile keeps its origin while that pool has room for it, so another tile letting
+ * go of its file reloads nothing; a parked tile keeps its file only on its own origin (a parked video
+ * loads nothing). A tile that holds no file yet goes to its home origin (`homes`, homeOrigins) while
+ * that has room, else where the most room is left, the first pool on a tie: the browser keeps a
+ * file in its cache by origin, so the same camera loading from the same origin finds its file there
+ * after a scroll back or a reopen. Returns {playing: Map id -> origin, parked: Map id -> origin,
+ * cap: the pools' caps together}.
+ */
+export function assignFiles({ playing = [], parked = [], held = new Map(), pools = [], homes = new Map() } = {}) {
+  const caps = new Map();
+  for (const p of pools) if (p && !caps.has(p.origin)) caps.set(p.origin, Math.max(0, Math.round(Number(p.cap) || 0)));
+  const used = new Map(Array.from(caps.keys(), (o) => [o, 0]));
+  let cap = 0;
+  for (const c of caps.values()) cap += c;
+  let total = 0;
+  const kept = new Map();
+  const fresh = [];
+  const room = (o) => caps.has(o) && used.get(o) < caps.get(o);
+  const keep = (id, o) => {
+    used.set(o, used.get(o) + 1);
+    kept.set(id, o);
+    total += 1;
+  };
+  const onScreen = [];
+  for (const id of playing) {
+    if (total >= cap) break;
+    onScreen.push(id);
+    if (held.has(id) && room(held.get(id))) keep(id, held.get(id));
+    else {
+      fresh.push(id);
+      total += 1;
+    }
+  }
+  // a camera on screen that holds no file goes home first, before a parked one keeps its place
+  // there: a parked tile is the lesser loss, as it loads from its own home again later
+  const left = [];
+  for (const id of fresh) {
+    if (homes.has(id) && room(homes.get(id))) {
+      used.set(homes.get(id), used.get(homes.get(id)) + 1);
+      kept.set(id, homes.get(id));
+    } else left.push(id);
+  }
+  const away = [];
+  for (const id of parked) {
+    if (total >= cap) break;
+    if (held.has(id) && room(held.get(id))) {
+      keep(id, held.get(id));
+      away.push(id);
+    }
+  }
+  // the kept ones fit their pools and all of them fit the caps together: the others fit what is left
+  for (const id of left) {
+    let best;
+    let free = 0;
+    for (const [o, c] of caps) {
+      if (c - used.get(o) > free) {
+        free = c - used.get(o);
+        best = o;
+      }
+    }
+    if (best === undefined) break;
+    used.set(best, used.get(best) + 1);
+    kept.set(id, best);
+  }
+  return {
+    playing: new Map(onScreen.filter((id) => kept.has(id)).map((id) => [id, kept.get(id)])),
+    parked: new Map(away.map((id) => [id, kept.get(id)])),
+    cap,
+  };
+}
+
+/**
+ * the origin each camera's recorded files load from first (Map key -> origin): `keys`, the cameras
+ * that have recordings, in the order of their names, each to the pool whose homes fill the least of
+ * its cap (the larger cap, then the earlier pool, on a tie), so any set of cameras that fits the
+ * caps together fits at home. `kept`: homes dealt before over the same pools, which stay as they
+ * are (a camera that joins later gets a home of its own and moves no other one).
+ */
+export function homeOrigins(keys, pools, kept = null) {
+  const usable = (pools || []).filter((p) => p && p.cap > 0);
+  const homes = new Map();
+  if (!usable.length) return homes;
+  const count = new Map(usable.map((p) => [p.origin, 0]));
+  const sorted = Array.from(keys || []).map(String).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  for (const key of sorted) {
+    if (kept && kept.has(key) && count.has(kept.get(key))) {
+      homes.set(key, kept.get(key));
+      count.set(kept.get(key), count.get(kept.get(key)) + 1);
+    }
+  }
+  for (const key of sorted) {
+    if (homes.has(key)) continue;
+    let best = usable[0];
+    for (const p of usable.slice(1)) {
+      const a = count.get(p.origin) / p.cap;
+      const b = count.get(best.origin) / best.cap;
+      if (a < b || (a === b && p.cap > best.cap)) best = p;
+    }
+    homes.set(key, best.origin);
+    count.set(best.origin, count.get(best.origin) + 1);
+  }
+  return homes;
 }
 
 function mediaErrorText(err) {
@@ -614,12 +781,6 @@ export class FilePlayer {
     this.wanted = false;
     this.detach();
     this.emit('idle');
-  }
-
-  /** the file's length as the browser read it, null before its metadata */
-  get duration() {
-    const d = this.video ? this.video.duration : null;
-    return this.url && finite(d) && d > 0 ? d : null;
   }
 
   /**
@@ -1149,6 +1310,8 @@ export function holdsBack(tile) {
 }
 
 const TURN_KEY = 'openmmla.dashboard.turn180';
+// a camera whose video the viewer hid on this machine (a slow one need not decode every camera)
+const HIDE_KEY = 'openmmla.dashboard.hidevideo';
 
 /** whether the viewer turned this camera's tile of this session 180° (kept in this browser only) */
 export function readTurn(sid, key, storage) {
@@ -1172,6 +1335,27 @@ export function writeTurn(sid, key, on, storage) {
   }
 }
 
+/** whether the viewer hid this camera's video of this session (kept in this browser only) */
+export function readHidden(sid, key, storage) {
+  try {
+    const s = storage === undefined ? globalThis.localStorage : storage;
+    return !!s && s.getItem(`${HIDE_KEY}.${sid}.${key}`) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function writeHidden(sid, key, on, storage) {
+  try {
+    const s = storage === undefined ? globalThis.localStorage : storage;
+    if (!s) return;
+    if (on) s.setItem(`${HIDE_KEY}.${sid}.${key}`, '1');
+    else s.removeItem(`${HIDE_KEY}.${sid}.${key}`);
+  } catch {
+    // private windows and blocked storage keep it hidden for this page only
+  }
+}
+
 /**
  * The tiles of the Cameras card. opts: {tagColor(tag), tagLabel(tag), onNote(text)}.
  * Returns {el, update(state), setExpanded(bool), setOptions({overlay, sync}), hasVideo(), hasLiveVideo(),
@@ -1182,9 +1366,10 @@ export function writeTurn(sid, key, on, storage) {
  *                 live (the session runs), media (the /media answer | null), serverNow (epoch),
  *                 vfaLag (s | null), recordings ({enabled, files, reason} of the recordings route | null
  *                 while it is asked), speed (replay speed), running (the replay clock advances),
- *                 mediaOrigin (where the files load from, the dashboard's media port; null: the page's origin),
- *                 mediaReserved (how many of the MAX_MEDIA connections the page's sound takes, 0 or 1;
- *                 it counts only without a mediaOrigin)}.
+ *                 mediaOrigins (where the files load from: the dashboard's media origins that answered, in
+ *                 its order, the first carrying the sound; empty: the page's origin; a single mediaOrigin
+ *                 does too), mediaReserved (how many of the MAX_MEDIA connections the page's sound takes,
+ *                 0 or 1; it counts only without a media origin)}.
  * A tile is a camera (its key the stream's name, else the base id): a VFA camera's tile draws the
  * frame sets of its VFA id over the video, an IPS camera's shows the video alone (its badges are on
  * the Room card). The replay of an ended session plays each camera's recorded file (fileOfTile: an
@@ -1194,8 +1379,9 @@ export function writeTurn(sid, key, on, storage) {
  * capture turned pictures: the video and the overlay turn together, remembered per session and
  * camera in this browser. The
  * tiles on screen hold a file first, then those scrolled away (paused, the most recently seen first),
- * up to videoCap() (MAX_MEDIA_VIDEOS from the media origin, else MAX_MEDIA less the sound's share); a
- * tile past that lets go of its file.
+ * up to the caps of mediaPools() (MAX_MEDIA_VIDEOS on the first media origin, MAX_ORIGIN_FILES on each
+ * other one; without one, MAX_MEDIA less the sound's share on the page's origin), each tile on the
+ * origin it holds its file from (assignFiles); a tile past that lets go of its file.
  */
 export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
   const el = h('div', { class: 'cam-wall' });
@@ -1211,9 +1397,10 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     suspended: false,
     // the session whose turned tiles are remembered
     sid: null,
-    // where the recorded files load from (null: the page's origin), the connections the sound takes
-    // there, and the recorded files the tiles may hold besides
-    origin: null,
+    // where the recorded files load from (the media origins that answered; none: the page's origin),
+    // the connections the sound takes on the page's origin, and the recorded files the tiles may hold
+    // besides, on all origins together
+    origins: [],
     reserved: 0,
     fileCap: MAX_MEDIA,
   };
@@ -1289,6 +1476,19 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     t.drawnKey = null;
   }
 
+  /**
+   * show a tile's video or hide it: a hidden one plays nothing (its connection and its decoding go
+   * to the others, and a camera waiting for a place plays), a VFA camera keeps its skeletons and an
+   * IPS camera, which has none, folds to its heading
+   */
+  function applyHidden(t) {
+    t.el.classList.toggle('is-video-hidden', t.hidden);
+    t.el.classList.toggle('is-video-only', t.vfa == null);
+    t.hideBtn.setAttribute('aria-pressed', t.hidden ? 'true' : 'false');
+    t.hideLabel.textContent = t.hidden ? 'Show video' : 'Hide video';
+    t.drawnKey = null;
+  }
+
   /** a tile's camera changed what the session says of it: its name, base ids, paths and turn */
   function setItem(t, item) {
     const same = t.label === item.label && t.vfa === item.vfa && t.ips === item.ips && t.rotate === item.rotate
@@ -1301,6 +1501,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       : `Camera ${item.label}: skeletons of the newest frame set`);
     t.age.hidden = item.vfa == null;
     applyTurn(t);
+    applyHidden(t);
   }
 
   function makeTile(item) {
@@ -1313,7 +1514,12 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       class: 'btn sm',
       attrs: { type: 'button', 'aria-pressed': 'false', title: 'Turn the video and the overlay 180° (a camera mounted upside down, recorded before the capture turned its pictures)' },
     }, h('span', { text: 'Turn 180°' }));
-    const head = h('div', { class: 'cam-head' }, name, age, stateEl, h('span', { class: 'spacer' }), playBtn, turnBtn);
+    const hideLabel = h('span', { text: 'Hide video' });
+    const hideBtn = h('button', {
+      class: 'btn sm',
+      attrs: { type: 'button', 'aria-pressed': 'false', title: 'Hide this camera\'s video on this machine, or show it again: every camera plays until you hide one' },
+    }, hideLabel);
+    const head = h('div', { class: 'cam-head' }, name, age, stateEl, h('span', { class: 'spacer' }), playBtn, hideBtn, turnBtn);
     const video = h('video', { class: 'cam-video', attrs: { muted: true, playsinline: true, autoplay: true }, muted: true, hidden: true });
     // the recorded file of a replay: hidden (not display: none, so it keeps loading) until it has a frame
     const fvideo = h('video', { class: 'cam-video cam-file', attrs: { muted: true, playsinline: true, preload: 'auto', disablepictureinpicture: true }, muted: true, style: { visibility: 'hidden' } });
@@ -1322,14 +1528,25 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     const note = h('p', { class: 'cam-note' });
     const tileEl = h('div', { class: 'cam-tile', dataset: { camera: id } }, head, stage, note);
     const tile = {
-      id, el: tileEl, name, age, stateEl, playBtn, turnBtn, video, fvideo, canvas, stage, note,
+      id, el: tileEl, name, age, stateEl, playBtn, hideBtn, hideLabel, turnBtn, video, fvideo, canvas, stage, note,
       label: null, vfa: null, ips: null, paths: [], rotate: 0, turned: !!st.sid && readTurn(st.sid, id), turnSid: st.sid,
+      hidden: !!st.sid && readHidden(st.sid, id),
       onScreen: !io, seenAt: 0, player: null, playerState: null, stream: null, regions: [], drawnKey: null, aspect: 16 / 9,
-      videoMode: false, kind: null, files: [], file: null, next: null, durations: new Map(), onVideo: false, drawn: null,
+      videoMode: false, kind: null, files: [], file: null, next: null, onVideo: false, drawn: null,
+      // the origin its recorded file loads from while it holds one (null: the page's), else undefined
+      fileOrigin: undefined,
     };
     playBtn.addEventListener('click', () => {
       st.priority = [id, ...st.priority.filter((x) => x !== id)];
       schedulePlayback();
+    });
+    hideBtn.addEventListener('click', () => {
+      tile.hidden = !tile.hidden;
+      if (st.sid) writeHidden(st.sid, id, tile.hidden);
+      applyHidden(tile);
+      schedulePlayback();
+      renderTileState(tile);
+      if (st.expanded && st.last) paint(tile, st.last);
     });
     turnBtn.addEventListener('click', () => {
       tile.turned = !tile.turned;
@@ -1399,7 +1616,9 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       if (t.turnSid !== st.sid) {
         t.turnSid = st.sid;
         t.turned = !!st.sid && readTurn(st.sid, t.id);
+        t.hidden = !!st.sid && readHidden(st.sid, t.id);
         applyTurn(t);
+        applyHidden(t);
       }
     }
     if (changed) {
@@ -1411,7 +1630,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
   function schedulePlayback() {
     if (!st.alive) return;
     const open = st.expanded && st.docVisible && !st.suspended;
-    const canPlay = (t) => open && t.onScreen;
+    const canPlay = (t) => open && t.onScreen && !t.hidden;
     const now = clockMs();
     for (const t of tiles.values()) if (canPlay(t)) t.seenAt = now;
     const eligible = [];
@@ -1421,28 +1640,43 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     const liveOn = order.filter((id) => tiles.get(id).kind === 'live' && canPlay(tiles.get(id)));
     const live = new Set(liveOn.slice(0, MAX_PLAYING));
     // a recorded file holds a connection to the dashboard: the tiles on screen first, then the ones
-    // scrolled away that still hold theirs (paused, kept in place), the most recently seen first
-    const cap = videoCap(!!st.origin, st.reserved);
-    st.fileCap = cap;
+    // scrolled away that still hold theirs (paused, kept in place), the most recently seen first, on
+    // the media origins each up to its cap (assignFiles)
     const fileOn = order.filter((id) => tiles.get(id).kind === 'file' && canPlay(tiles.get(id)));
-    const files = new Set(fileOn.slice(0, cap));
-    const parked = new Set(open ? order
+    const away = open ? order
       .filter((id) => {
         const t = tiles.get(id);
-        return t.kind === 'file' && !canPlay(t) && t.player instanceof FilePlayer && !!t.player.url;
+        return t.kind === 'file' && !t.hidden && !canPlay(t) && t.player instanceof FilePlayer && !!t.player.url;
       })
-      .sort((a, b) => tiles.get(b).seenAt - tiles.get(a).seenAt)
-      .slice(0, cap - files.size) : []);
+      .sort((a, b) => tiles.get(b).seenAt - tiles.get(a).seenAt) : [];
+    const held = new Map();
+    for (const t of tiles.values()) if (t.player instanceof FilePlayer && t.fileOrigin !== undefined) held.set(t.id, t.fileOrigin);
+    const pools = mediaPools(st.origins, st.reserved);
+    const poolsKey = JSON.stringify(pools);
+    if (st.homesKey !== poolsKey) {
+      st.homesKey = poolsKey;
+      st.homes = new Map();
+    }
+    const recorded = Array.from(tiles.values()).filter((t) => t.files && t.files.length).map((t) => t.id);
+    st.homes = homeOrigins(recorded, pools, st.homes);
+    const homes = st.homes;
+    const { playing: files, parked, cap } = assignFiles({ playing: fileOn, parked: away, held, pools, homes });
+    st.fileCap = cap;
     for (const t of tiles.values()) {
+      const fileOrigin = t.kind === 'file' && t.videoMode ? (files.has(t.id) ? files.get(t.id) : parked.get(t.id)) : undefined;
+      // a tile that holds no file has no origin; one that holds a file (or is about to) loads it from
+      // its own (syncRecording), and a new origin loads the file again from there
+      t.fileOrigin = fileOrigin;
       if (!t.videoMode) {
         if (t.player) {
           t.player.stop();
           t.player = null;
         }
         t.playBtn.hidden = true;
+        renderTileState(t);
         continue;
       }
-      if (t.kind === 'file' && (files.has(t.id) || parked.has(t.id))) {
+      if (fileOrigin !== undefined) {
         if (!(t.player instanceof FilePlayer)) {
           if (t.player) t.player.stop();
           t.playerState = null;
@@ -1507,13 +1741,17 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     if (t.kind !== 'file') return `Up to ${MAX_PLAYING} cameras play at once`;
     const n = st.fileCap;
     const plays = `${n} ${n === 1 ? 'camera plays' : 'cameras play'}`;
-    // from the media origin the sound has a connection of its own
-    if (st.reserved && !st.origin) return n ? `Up to ${plays} beside the sound` : 'The sound takes the last connection';
+    // from the media origins the sound has a connection of its own
+    if (st.reserved && !st.origins.length) return n ? `Up to ${plays} beside the sound` : 'The sound takes the last connection';
     return `Up to ${plays} at once`;
   }
 
   function renderTileState(t) {
     const ps = t.playerState;
+    if (t.hidden) {
+      t.stateEl.textContent = 'Video hidden';
+      return;
+    }
     if (!t.videoMode) {
       t.stateEl.textContent = '';
       return;
@@ -1550,7 +1788,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
 
   function render(s) {
     st.last = s;
-    st.origin = typeof s.mediaOrigin === 'string' && s.mediaOrigin ? s.mediaOrigin : null;
+    st.origins = mediaOriginList(s.mediaOrigins !== undefined ? s.mediaOrigins : s.mediaOrigin);
     st.reserved = finite(s.mediaReserved) ? Math.max(0, Math.min(MAX_MEDIA, Math.round(s.mediaReserved))) : 0;
     if (s.sid != null) st.sid = String(s.sid);
     syncTiles(s.cameras || []);
@@ -1560,7 +1798,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
       t.files = stream ? [] : recordingsFor(t, s);
       const kind = stream ? 'live' : t.files.length ? 'file' : null;
       pickRecording(t, s, kind);
-      // a recorded camera takes a player (and one of the videoCap() places) only while a file holds the clock
+      // a recorded camera takes a player (and one of the mediaPools() places) only while a file holds the clock
       const videoMode = kind === 'live' || (kind === 'file' && !!(t.file || t.next));
       if (kind !== t.kind || url !== t.url || videoMode !== t.videoMode) {
         t.kind = kind;
@@ -1581,10 +1819,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
 
   /** the recording that holds the clock (t.file) or, when none does, the one about to (t.next) */
   function pickRecording(t, s, kind) {
-    const p = t.player instanceof FilePlayer ? t.player : null;
-    // the length the browser read ends a file that is shorter than its listing says
-    if (p && p.source && p.duration != null) t.durations.set(p.source, p.duration);
-    const file = kind === 'file' ? recordingAt(t.files, s.now, t.durations) : null;
+    const file = kind === 'file' ? recordingAt(t.files, s.now) : null;
     const speed = finite(s.speed) && s.speed > 0 ? s.speed : 1;
     t.next = kind === 'file' && !file ? nextRecording(t.files, s.now, RECORDING_LOOKAHEAD * speed) : null;
     if (file !== t.file) t.drawnKey = null;
@@ -1599,7 +1834,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     const p = t.player instanceof FilePlayer ? t.player : null;
     if (!p) return;
     const pick = t.file || t.next;
-    if (pick && !p.parked) p.load(inlineUrl(pick.url, st.origin), pick.url, pick === t.file ? s.now - pick.start : 0);
+    if (pick && !p.parked) p.load(inlineUrl(pick.url, t.fileOrigin), pick.url, pick === t.file ? s.now - pick.start : 0);
     // a parked player only notes the moment
     const target = t.file && p.source === t.file.url ? s.now - t.file.start : null;
     p.sync({ target, speed: s.speed, playing: !!s.running, tolerance: driftTolerance(s.speed) });
@@ -1629,7 +1864,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     let at = s.now;
     let delayNote = '';
     let picture = null;
-    if (t.kind === 'live') {
+    if (t.kind === 'live' && !t.hidden) {
       picture = t.video;
       if (finite(s.serverNow)) {
         const lag = finite(s.vfaLag) ? Math.max(0, s.vfaLag) : 0;
@@ -1694,7 +1929,8 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     t.age.textContent = ageS == null ? 'no frame' : ageS < 1.5 ? 'now' : fmt.ago(ageS);
     t.age.dataset.stale = ageS != null && ageS > 10 ? 'true' : 'false';
     const ips = t.vfa == null && t.kind ? ` ${IPS_NOTE}` : '';
-    if (t.kind === 'live') t.note.textContent = `${delayNote}${ips}`.trim();
+    if (t.hidden) t.note.textContent = t.vfa == null ? '' : 'Video hidden on this machine: the skeletons of the frame set.';
+    else if (t.kind === 'live') t.note.textContent = `${delayNote}${ips}`.trim();
     else if (t.kind === 'file') t.note.textContent = `${recordingNote(t, s)}${ips}`.trim();
     else t.note.textContent = skeletonNote(t, s);
   }
@@ -1733,7 +1969,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
           file: t.file ? t.file.id : null, target: p ? p.target : null, time: v.currentTime, paused: v.paused,
           rate: v.playbackRate, onVideo: t.onVideo, stepping: p ? p.stepping : false,
           parked: p ? p.parked : false, aligned: p ? p.aligned : false, onScreen: t.onScreen,
-          src: t.fvideo.getAttribute('src'), visibility: t.fvideo.style.visibility,
+          origin: t.fileOrigin, src: t.fvideo.getAttribute('src'), visibility: t.fvideo.style.visibility,
           picture: [v.videoWidth, v.videoHeight], stage: [t.stage.clientWidth, t.stage.clientHeight], note: t.note.textContent,
           drawn: t.drawn ? { ...t.drawn } : null,
         };
@@ -1745,6 +1981,12 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     /** how many recorded files the tiles hold (each keeps a connection to the dashboard) */
     mediaHeld() {
       return Array.from(tiles.values()).filter((t) => t.fvideo.getAttribute('src')).length;
+    },
+    /** each origin the tiles' files may load from, with its cap and the files the tiles hold there */
+    mediaUse() {
+      return mediaPools(st.origins, st.reserved).map(({ origin, cap }) => ({
+        origin, cap, held: Array.from(tiles.values()).filter((t) => t.fileOrigin === origin && t.fvideo.getAttribute('src')).length,
+      }));
     },
     suspend() {
       st.suspended = true;

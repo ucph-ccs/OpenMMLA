@@ -10,7 +10,7 @@ The services below are shared by every pipeline. They usually run together on on
 | [Mosquitto](#mosquitto) | 1883 | yes | MQTT broker that carries results between *Bases* and *Synchronizers* |
 | [Nginx](#nginx-optional) | 8080 | optional | load balancer in front of the AI services |
 | [MediaMTX](#mediamtx-optional) | 1935 RTMP, 8554 RTSP, 8890 SRT, 9997 API | optional | streaming server: cameras and microphones publish to it, the bases pull from it, and it records the paths of a running session, START to STOP ([On the server](rtmp_streaming.md#on-the-server)) |
-| [Dashboard](#dashboard-optional) | 5050, 5051 (media port, Dashboard port + 1) | optional | Flask backend and static frontend for live and post-time views |
+| [Dashboard](#dashboard-optional) | 5050, 5051 and 5052 (media ports, the two after the Dashboard port) | optional | Flask backend and static frontend for live and post-time views |
 
 InfluxDB, MongoDB and MediaMTX can run natively (this page) or as containers from `docker/docker-compose.infra.yml`; see [Docker: Database stack](docker.md#database-stack-influxdb-and-mongodb). Redis, Mosquitto, Nginx and the dashboard run natively. What is stored in the two databases is described in the [Database Reference](database.md).
 
@@ -142,7 +142,7 @@ make flask celery                       # dashboard backend + worker (uber-serve
 make mediamtx                           # streaming server in a tmux session (needs the mediamtx binary)
 make stop                               # stop everything
 make stop-redis                         # stop one service
-make clean-ports 8086 5050 5051         # kill whatever holds those ports
+make clean-ports 8086 5050 5051 5052    # kill whatever holds those ports
 ```
 
 `make all` and `make clean-ports` send `kill -9` to whatever listens on the default ports, including the `docker-proxy` of containerized databases. On a host that runs the Docker database stack use `make all without=influxdb,mongodb`.

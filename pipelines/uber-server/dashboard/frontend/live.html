@@ -92,6 +92,9 @@
     .cam-stage video { object-fit: contain; background: #000; }
     /* a camera mounted upside down, recorded before the capture turned its pictures (Turn 180°) */
     .cam-stage.is-turned video { transform: rotate(180deg); }
+    /* a camera whose video the viewer hid: a VFA camera keeps its skeletons, an IPS camera folds to its heading */
+    .cam-tile.is-video-hidden .cam-stage video { display: none; }
+    .cam-tile.is-video-hidden.is-video-only .cam-stage, .cam-tile.is-video-hidden.is-video-only .cam-note { display: none; }
     .cam-note { margin: 0; font-size: 12px; color: var(--muted); min-height: 16px; }
     .cam-toggles { display: inline-flex; gap: 6px; }
 

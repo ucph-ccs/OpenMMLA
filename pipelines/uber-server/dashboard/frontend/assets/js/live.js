@@ -23,7 +23,7 @@ import {
   LiveModel, VoiceColors, projectCameras, roomExtent, extentContains, extentUnion, pairList, CATEGORIES, CATEGORY_LABELS,
   GROUP_LABEL_RE, JA_PAIR_MIN_SHARE, TAG_MEMORY_SECONDS,
 } from './live-model.js';
-import { cameraWall, cameraItems, mediaOriginFor, probeMediaOrigin } from './cameras.js';
+import { cameraWall, cameraItems, mediaOriginFor, probeMediaOrigin, awaitMediaAnswers } from './cameras.js';
 import { ReplaySound, soundSources, defaultSource, MAX_SOUND_SPEED } from './sound.js';
 
 const SPEEDS = [1, 2, 4, 8, 16];
@@ -121,10 +121,12 @@ const S = {
   recordings: null,
   recordingsAt: 0,
   recordingsBusy: false,
-  // where the recorded files load from: the dashboard's media port once it answered (null: the
-  // page's own origin, with fewer files at once), and the last time it was asked
-  mediaOrigin: null,
-  mediaProbe: null,
+  // where the recorded files load from: the dashboard's media origins that answered, in its order
+  // (empty: the page's own origin, with fewer files at once), and the last probe of each origin
+  mediaOrigins: [],
+  mediaProbes: new Map(),
+  // which mediaOrigins call the list belongs to, so a port that answers late joins only its own
+  mediaOriginsGen: 0,
   // the Sound control: the microphone the viewer picked (its source key, 'off', or null for the
   // default), and the mute toggle
   soundPick: null,
@@ -783,8 +785,12 @@ async function loadRecordings(force = false) {
   S.recordingsAt = performance.now();
   const res = await api(`/api/sessions/${encodeURIComponent(S.sid)}/recordings`);
   const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
-  // the files wait for the media port's answer, so none loads from the page's origin first
-  if (d && d.enabled) S.mediaOrigin = await mediaOrigin(d.media_port, d.media_instance);
+  // the files wait for the media ports' answers, so none loads from the page's origin first (a
+  // dashboard of one media port names media_port alone)
+  if (d && d.enabled) {
+    const ports = Array.isArray(d.media_ports) ? d.media_ports : [d.media_port];
+    S.mediaOrigins = await mediaOrigins(ports, d.media_instance);
+  }
   S.recordingsBusy = false;
   if (d) {
     S.recordings = {
@@ -802,26 +808,46 @@ async function loadRecordings(force = false) {
 }
 
 /**
- * the origin the recorded files load from: the page's host on the dashboard's media port when this
- * same dashboard answers there, named by `instance` (waited for up to cameras.js MEDIA_PROBE_MS),
- * else null: the page's own origin, where the files share fewer connections (MAX_MEDIA). The answer
- * is kept for the page while the recordings name the same port and instance; one that came back
- * empty is asked again with the recordings, at most once a minute
+ * the origins the recorded files load from: the page's host on each of the dashboard's media ports
+ * where this same dashboard answers, named by `instance`, in the dashboard's order; the first carries
+ * the sound. The ports are asked together; the list is ready once one answers and the others had
+ * cameras.js MEDIA_PROBE_GRACE_MS more (awaitMediaAnswers; all of MEDIA_PROBE_MS while none has), and
+ * a port that answers after that joins S.mediaOrigins then. Empty: the page's own origin, where the files share
+ * fewer connections (MAX_MEDIA). Each answer is kept for the page while the recordings name the same
+ * instance; one that came back empty is asked again with the recordings, at most once a minute
  */
-async function mediaOrigin(port, instance) {
-  const origin = mediaOriginFor(window.location, port);
-  if (!origin) return null;
-  const last = S.mediaProbe;
-  if (!last || last.origin !== origin || last.instance !== instance
-      || (last.ok === false && performance.now() - last.at >= RECORDINGS_RETRY_MS)) {
-    const probe = { origin, instance, at: performance.now(), ok: null, answer: null };
-    probe.answer = probeMediaOrigin(origin, port, instance).then((ok) => {
-      probe.ok = ok;
-      return ok;
-    });
-    S.mediaProbe = probe;
+async function mediaOrigins(ports, instance) {
+  const wanted = [];
+  for (const port of ports || []) {
+    const origin = mediaOriginFor(window.location, port);
+    if (origin && !wanted.some((w) => w.origin === origin)) wanted.push({ origin, port });
   }
-  return (await S.mediaProbe.answer) ? origin : null;
+  const answers = wanted.map(({ origin, port }) => {
+    const last = S.mediaProbes.get(origin);
+    if (!last || last.instance !== instance || (last.ok === false && performance.now() - last.at >= RECORDINGS_RETRY_MS)) {
+      const probe = { instance, at: performance.now(), ok: null, answer: null };
+      probe.answer = probeMediaOrigin(origin, port, instance).then((ok) => {
+        probe.ok = ok;
+        return ok;
+      });
+      S.mediaProbes.set(origin, probe);
+    }
+    return S.mediaProbes.get(origin);
+  });
+  const gen = ++S.mediaOriginsGen;
+  const answered = () => wanted.filter((_, i) => answers[i].ok === true).map((w) => w.origin);
+  await awaitMediaAnswers(answers.map((a) => a.answer));
+  // a port that answers after that joins the list of this same call
+  for (const a of answers) {
+    if (a.ok !== null) continue;
+    a.answer.then((ok) => {
+      if (!ok || gen !== S.mediaOriginsGen) return;
+      S.mediaOrigins = answered();
+      S.force = true;
+      requestFrame();
+    });
+  }
+  return answered();
 }
 
 /** whether the replay clock advances now (displayNow interpolates it), so recorded video plays */
@@ -907,7 +933,7 @@ function renderSound(now) {
   if (endedReplay()) loadRecordings(false);
   const st = soundState();
   const source = soundSource(st);
-  const res = S.sound.update({ source, now, speed: S.speed, running: clockRunning(now), muted: S.soundMuted, origin: S.mediaOrigin });
+  const res = S.sound.update({ source, now, speed: S.speed, running: clockRunning(now), muted: S.soundMuted, origin: S.mediaOrigins[0] || null });
   const U = UI.sound;
   const optionsSig = st.ok ? st.sources.map((s) => `${s.key}=${s.label}`).join('\n') : '';
   if (optionsSig !== U.optionsSig) {
@@ -1760,7 +1786,7 @@ function renderCameras(now) {
   }
   const newestVfa = S.model.vfa.last;
   // the sound's file takes one of the connections the tiles' recorded files share (on the page's
-  // origin; from the media port it has one of its own)
+  // origin; from the media ports it has one of its own, on the first)
   const reserved = S.sound.takesMedia(soundSource(soundState()), S.speed) ? 1 : 0;
   wall.update({
     cameras: ids,
@@ -1775,7 +1801,7 @@ function renderCameras(now) {
     recordings: S.recordings,
     speed: S.speed,
     running: clockRunning(now),
-    mediaOrigin: S.mediaOrigin,
+    mediaOrigins: S.mediaOrigins,
     mediaReserved: reserved,
   });
   UI.cams.videoToggles.hidden = !wall.hasVideo();

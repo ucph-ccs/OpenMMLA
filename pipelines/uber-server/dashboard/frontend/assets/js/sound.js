@@ -4,9 +4,10 @@
  * clock minus the file's start, it plays at the replay speed, pauses with the replay, seeks after a
  * jump, and is silent outside the file. At its 4x limit it cannot catch up by playing faster, so a lag
  * makes it seek a little ahead. Above 4x it is silent and lets go of its file: pitch-preserved speech
- * is unintelligible there (and browsers mute it themselves), and without the dashboard's media port
- * the file's connection is one of the MAX_MEDIA the camera tiles share (takesMedia()). With it
- * (`origin`, see cameras.js mediaOriginFor) the file loads from there, beside the tiles' videos.
+ * is unintelligible there (and browsers mute it themselves), and without the dashboard's media ports
+ * the file's connection is one of the MAX_MEDIA the camera tiles share (takesMedia()). With them
+ * (`origin`: the first media origin that answered, see cameras.js mediaOriginFor and mediaPools) the
+ * file loads from there, beside the MAX_MEDIA_VIDEOS camera videos that origin carries.
  *
  * Nothing loads before the viewer's first gesture on the page's controls (arm(), called from Play,
  * Pause, Replay from start, unmuting, a pick in the control, or the note a blocked sound shows), so
@@ -61,8 +62,8 @@ export function defaultSource(sources) {
 
 /**
  * One <audio> element kept on the replay clock. update({source, now, speed, running, muted, origin})
- * runs on every redraw (`origin`: where the file loads from, the dashboard's media port, or null for
- * the page's origin) and returns what the sound does now: {state, message} with state 'off' (no source),
+ * runs on every redraw (`origin`: where the file loads from, the dashboard's first media origin that
+ * answered, or null for the page's origin) and returns what the sound does now: {state, message} with state 'off' (no source),
  * 'idle' (not armed yet), 'fast' (above MAX_SOUND_SPEED, no file held), 'gap' (no file at this
  * moment), 'loading', 'error', 'blocked' (the browser's autoplay rules refused it), 'playing' or
  * 'paused'; 'released' after release() until the next update.
@@ -74,8 +75,6 @@ export class ReplaySound {
     this.armed = false;
     this.file = null;
     this.status = { state: 'off', message: null };
-    // a file's length as the browser read it, by url (it ends a file shorter than its listing says)
-    this.durations = new Map();
   }
 
   /**
@@ -136,8 +135,7 @@ export class ReplaySound {
       this.player.start();
     }
     const p = this.player;
-    if (p.source && p.duration != null) this.durations.set(p.source, p.duration);
-    const file = finite(now) ? recordingAt(source.files, now, this.durations) : null;
+    const file = finite(now) ? recordingAt(source.files, now) : null;
     const next = file || !finite(now) ? null : nextRecording(source.files, now, RECORDING_LOOKAHEAD * s);
     const pick = file || next;
     // a file loads from the clock's moment (a coming one from its start)

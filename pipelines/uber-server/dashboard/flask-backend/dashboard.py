@@ -7,11 +7,11 @@ The report jobs run on the Celery worker of `celery -A dashboard.celery worker` 
 the dashboard's queue, else in a `python dashboard.py precompute` process this one starts.
 
 Run it as the Makefile does, from this folder:
-`DASHBOARD_MEDIA_PORT=5051 gunicorn -k gevent -w 1 -b <address>:5050 -b <address>:5051 dashboard:app`
+`DASHBOARD_MEDIA_PORTS=5051,5052 gunicorn -k gevent -w 1 -b <address>:5050 -b <address>:5051 -b <address>:5052 dashboard:app`
 (one worker: the job bookkeeping and the live feeds that every follower of a session shares live in
-this process, see stream.py). The second port is the media port: the same app, from which the Live
+this process, see stream.py). The other ports are the media ports: the same app, from which the Live
 page loads the recorded videos and sound of a replay, so they hold browser connections of their own
-(see media_port_env). For development, `python dashboard.py serve`; to fill the cache ahead of a
+(see media_ports_env). For development, `python dashboard.py serve`; to fill the cache ahead of a
 meeting, `python dashboard.py precompute --all`.
 """
 
@@ -162,26 +162,45 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def parse_media_ports(text: str | None) -> list[int]:
+    """the ports `text` names, spaces or commas between them, in order and each once; an entry that is
+    not a port (0 among them) is left out"""
+    ports: list[int] = []
+    for part in (text or "").replace(",", " ").split():
+        try:
+            port = int(part)
+        except ValueError:
+            continue
+        if 0 < port < 65536 and port not in ports:
+            ports.append(port)
+    return ports
+
+
+def media_ports_env() -> list[int]:
+    """DASHBOARD_MEDIA_PORTS (`5051 5052` or `5051,5052`), else DASHBOARD_MEDIA_PORT (one port): the
+    other ports this app listens on (`make flask` binds them beside the dashboard's port, on the same
+    addresses), from which the Live page loads the recorded files of a replay. A browser opens at most
+    six HTTP/1.1 connections per origin (scheme, host and port), and every recorded video or sound it
+    plays holds one: from origins of their own they leave the page's API requests and live stream
+    theirs, and two media ports carry more videos at once than one. DASHBOARD_MEDIA_PORTS wins when
+    it is set at all, empty included; none when neither names a port (empty, 0); the page then loads
+    the files from its own origin, fewer at once."""
+    if "DASHBOARD_MEDIA_PORTS" in os.environ:
+        return parse_media_ports(os.environ.get("DASHBOARD_MEDIA_PORTS"))
+    return parse_media_ports(os.environ.get("DASHBOARD_MEDIA_PORT"))
+
+
 def media_port_env() -> int | None:
-    """DASHBOARD_MEDIA_PORT: the second port this app listens on (`make flask` binds it beside the
-    dashboard's port, on the same addresses), from which the Live page loads the recorded files of a
-    replay. A browser opens at most six HTTP/1.1 connections per origin (scheme, host and port), and
-    every recorded video or sound it plays holds one: from an origin of their own they leave the
-    page's API requests and live stream theirs. None when unset, empty, 0 or not a port; the page then
-    loads the files from its own origin, fewer at once."""
-    text = (os.environ.get("DASHBOARD_MEDIA_PORT") or "").strip()
-    try:
-        port = int(text)
-    except ValueError:
-        return None
-    return port if 0 < port < 65536 else None
+    """the first of media_ports_env(), None without one"""
+    ports = media_ports_env()
+    return ports[0] if ports else None
 
 
-# the port the recordings route names to the page; `python dashboard.py serve` sets it to the port
-# it opened
-MEDIA_PORT = media_port_env()
+# the media ports the recordings route and /api/media-origin name to the page, in order (the replay's
+# sound loads from the first that answers); `python dashboard.py serve` sets them to the ports it opened
+MEDIA_PORTS = media_ports_env()
 # a mark of this process, which the recordings route and /api/media-origin both name: the page takes
-# the media port only when this same process answers there, not another dashboard that holds that
+# a media port only when this same process answers there, not another dashboard that holds that
 # port number on the page's host (a page opened through a tunnel on another local port, beside a
 # dashboard run on the browser's machine)
 MEDIA_INSTANCE = secrets.token_hex(8)
@@ -859,7 +878,7 @@ def api_recordings(sid):
     enabled, reason = raw_media_state()
     if not enabled:
         return json_response({"enabled": False, "files": [], "server": [], "archive": None, "reason": reason,
-                              "media_port": None, "media_instance": None})
+                              "media_port": None, "media_ports": [], "media_instance": None})
     files = raw_recordings.list_recordings(raw_recordings.artifacts_root(), sid)
     try:
         mongo_ok, doc, devices, t0, t1, _ = _media_inputs(sid)
@@ -879,10 +898,17 @@ def api_recordings(sid):
     # a stretch the archive cut and keeps here is offered once, as its cut
     server = raw_recordings.unarchived_spans(server, [f for f in files if f.get("source") == "stream"])
     archive = _archive_state(sid, doc, files)
-    # the files' urls are paths: the Live page loads them from the media port when this process
-    # answers there (media_instance)
+    # the files' urls are paths: the Live page loads them from the media ports where this process
+    # answers (media_instance)
     return json_response({"enabled": True, "files": files, "server": server, "archive": archive, "reason": None,
-                          "media_port": MEDIA_PORT, "media_instance": MEDIA_INSTANCE})
+                          **media_answer()})
+
+
+def media_answer() -> dict:
+    """`{"media_port", "media_ports", "media_instance"}`: the media ports in order (media_port, the
+    first or null, is what a page of an older dashboard reads) and the mark of this process"""
+    ports = list(MEDIA_PORTS)
+    return {"media_port": ports[0] if ports else None, "media_ports": ports, "media_instance": MEDIA_INSTANCE}
 
 
 def _sibling_origin() -> str | None:
@@ -904,13 +930,14 @@ def _sibling_origin() -> str | None:
 
 @app.route("/api/media-origin")
 def api_media_origin():
-    """`{"media_port", "media_instance"}`: the port the Live page loads recorded files from (null
-    without one) and the mark of this process (MEDIA_INSTANCE). The page asks it on the media port
-    itself before it uses that port, and takes the port only when both match what the recordings
-    route told it, so the answer says this same dashboard is there; a page of the same host on the
-    dashboard's port may read it (CORS), nothing else is answered across origins. The files
-    themselves need no CORS: a <video> or <audio> may play them from another origin."""
-    response = json_response({"media_port": MEDIA_PORT, "media_instance": MEDIA_INSTANCE})
+    """`{"media_port", "media_ports", "media_instance"}` (media_answer): the ports the Live page loads
+    recorded files from (none: null and []) and the mark of this process (MEDIA_INSTANCE). The page
+    asks it on each media port itself before it uses that port, and takes the port only when the
+    answer names it and the mark matches what the recordings route told it, so the answer says this
+    same dashboard is there; a page of the same host on the dashboard's port may read it (CORS),
+    nothing else is answered across origins. The files themselves need no CORS: a <video> or <audio>
+    may play them from another origin."""
+    response = json_response(media_answer())
     origin = _sibling_origin()
     if origin:
         response.headers["Access-Control-Allow-Origin"] = origin
@@ -1061,31 +1088,49 @@ def _precompute(argv: list[str]) -> int:
     return 1 if failures else 0
 
 
+def serve_media_ports(port: int, media_ports: str | None = None, media_port: int | None = None) -> list[int]:
+    """the media ports `python dashboard.py serve` opens beside `port`: --media-ports, else
+    --media-port, else DASHBOARD_MEDIA_PORTS or DASHBOARD_MEDIA_PORT when one names something, else the
+    two ports after `port`; 0 opens none, and `port` itself is never one"""
+    if media_ports is not None:
+        wanted = parse_media_ports(media_ports)
+    elif media_port is not None:
+        wanted = parse_media_ports(str(media_port))
+    elif (os.environ.get("DASHBOARD_MEDIA_PORTS") or "").strip():
+        wanted = parse_media_ports(os.environ["DASHBOARD_MEDIA_PORTS"])
+    elif (os.environ.get("DASHBOARD_MEDIA_PORT") or "").strip():
+        wanted = parse_media_ports(os.environ["DASHBOARD_MEDIA_PORT"])
+    else:
+        wanted = parse_media_ports(f"{port + 1} {port + 2}")
+    return [p for p in wanted if p != port]
+
+
 def _serve(argv: list[str]) -> int:
-    global MEDIA_PORT
+    global MEDIA_PORTS
     parser = argparse.ArgumentParser(prog="dashboard.py serve", description="development server (gevent)")
     parser.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT") or DEFAULT_PORT))
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--media-port", type=int, default=None,
-                        help="the second port the Live page loads recorded files from (default "
-                             "DASHBOARD_MEDIA_PORT, else --port + 1; 0 opens none)")
+    parser.add_argument("--media-ports", default=None,
+                        help="the ports the Live page loads recorded files from, as `5051 5052` or `5051,5052` "
+                             "(default DASHBOARD_MEDIA_PORTS or DASHBOARD_MEDIA_PORT, else the two ports after "
+                             "--port; 0 opens none)")
+    parser.add_argument("--media-port", type=int, default=None, help="one media port instead (0 opens none)")
     args = parser.parse_args(argv)
     from gevent.pywsgi import WSGIServer
-    if args.media_port is None:
-        env = (os.environ.get("DASHBOARD_MEDIA_PORT") or "").strip()
-        args.media_port = (media_port_env() or 0) if env else args.port + 1
-    MEDIA_PORT = None
-    media_server = None
-    if 0 < args.media_port < 65536 and args.media_port != args.port:
-        media_server = WSGIServer((args.host, args.media_port), app)
+    opened: list[int] = []
+    media_servers = []
+    for media_port in serve_media_ports(args.port, args.media_ports, args.media_port):
+        media_server = WSGIServer((args.host, media_port), app)
         try:
             media_server.start()
-            MEDIA_PORT = args.media_port
         except OSError as exc:
-            media_server = None
-            print(f"media port {args.media_port} not opened ({exc.strerror or exc}): the Live page loads recorded "
-                  "files from the dashboard's port", file=sys.stderr)
-    media = f", media port {MEDIA_PORT}" if MEDIA_PORT else ""
+            print(f"media port {media_port} not opened ({exc.strerror or exc}): the Live page loads recorded "
+                  "files from the other media ports, or from the dashboard's port", file=sys.stderr)
+            continue
+        opened.append(media_port)
+        media_servers.append(media_server)
+    MEDIA_PORTS = opened
+    media = f", media ports {' '.join(map(str, opened))}" if opened else ""
     print(f"dashboard on http://{args.host}:{args.port}{media} (cache {STORE.cache_dir}, jobs {RUNNER.mode})",
           file=sys.stderr)
     server = WSGIServer((args.host, args.port), app)
@@ -1093,7 +1138,7 @@ def _serve(argv: list[str]) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         server.stop()
-        if media_server is not None:
+        for media_server in media_servers:
             media_server.stop()
     return 0
 
@@ -1102,7 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     if not argv or argv[0] in ("-h", "--help"):
-        print("usage: python dashboard.py serve [--port N] [--media-port N] | precompute <sid>... | --all "
+        print("usage: python dashboard.py serve [--port N] [--media-ports 'N M' | --media-port N] | precompute <sid>... | --all "
               "[--job light|video|all]")
         return 0
     command, rest = argv[0], argv[1:]

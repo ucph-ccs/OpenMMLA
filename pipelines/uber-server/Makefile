@@ -11,13 +11,17 @@ OPENMMLA_BIND_ADDRESS ?= 0.0.0.0
 OPENMMLA_MQTT_ALLOW_ANONYMOUS ?= true
 # dashboard backend port; the TUI passes the Dashboard section's value
 DASHBOARD_PORT ?= 5050
-# the dashboard's media port: the same app on a second port, bound on the same addresses, from which
+# the dashboard's media ports: the same app on more ports, bound on the same addresses, from which
 # the Live page loads the recorded videos and sound of a replay. A browser opens at most six HTTP/1.1
-# connections per origin and every file it plays holds one, so from a port of their own they leave
-# the page's requests and live stream theirs. One above DASHBOARD_PORT unless set; empty or 0 opens
-# none (the page then loads the files from DASHBOARD_PORT, fewer at once)
-DASHBOARD_MEDIA_PORT ?= $(shell expr '$(DASHBOARD_PORT)' + 1 2>/dev/null)
-DASHBOARD_MEDIA_LISTEN = $(strip $(filter-out 0 $(DASHBOARD_PORT),$(DASHBOARD_MEDIA_PORT)))
+# connections per origin and every file it plays holds one, so from ports of their own they leave the
+# page's requests and live stream theirs, and two ports carry six videos and the sound at once. The
+# two ports above DASHBOARD_PORT unless set (spaces or commas between them); DASHBOARD_MEDIA_PORT
+# names one port instead; empty or 0 opens none (the page then loads the files from DASHBOARD_PORT,
+# fewer at once)
+# each word once, in order (comma and space are the parsing helpers further down)
+uniq = $(if $1,$(firstword $1) $(call uniq,$(filter-out $(firstword $1),$1)))
+DASHBOARD_MEDIA_PORTS ?= $(if $(filter undefined,$(origin DASHBOARD_MEDIA_PORT)),$(shell expr '$(DASHBOARD_PORT)' + 1 2>/dev/null) $(shell expr '$(DASHBOARD_PORT)' + 2 2>/dev/null),$(DASHBOARD_MEDIA_PORT))
+DASHBOARD_MEDIA_LISTEN = $(strip $(call uniq,$(filter-out 0 $(DASHBOARD_PORT),$(subst $(comma),$(space),$(DASHBOARD_MEDIA_PORTS)))))
 # where the dashboard listens: where the docker stack publishes InfluxDB, MongoDB and MediaMTX
 # (INFRA_BIND_ADDRESS and INFRA_LOOPBACK_ADDRESS of docker/.env), so a host that keeps them on its
 # tailnet address keeps the dashboard, its transcripts and recordings off its other networks too;
@@ -325,7 +329,7 @@ flask:
 	tmux new-session -d -s flask -n flask bash
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t flask 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
-	tmux send-keys -t flask 'DASHBOARD_MEDIA_PORT=$(DASHBOARD_MEDIA_LISTEN) gunicorn -k gevent -w 1 $(foreach address,$(DASHBOARD_BIND),-b $(address):$(DASHBOARD_PORT)$(if $(DASHBOARD_MEDIA_LISTEN), -b $(address):$(DASHBOARD_MEDIA_LISTEN))) dashboard:app' C-m
+	tmux send-keys -t flask 'DASHBOARD_MEDIA_PORTS=$(subst $(space),$(comma),$(DASHBOARD_MEDIA_LISTEN)) gunicorn -k gevent -w 1 $(foreach address,$(DASHBOARD_BIND),$(strip -b $(address):$(DASHBOARD_PORT) $(foreach port,$(DASHBOARD_MEDIA_LISTEN),-b $(address):$(port)))) dashboard:app' C-m
 
 celery:
 	@echo "🔁 Starting Celery worker"
