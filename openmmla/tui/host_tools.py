@@ -1,5 +1,6 @@
-"""the programs a stream needs on the machine that captures it, and installing
-the ones that machine lacks.
+"""the programs a stream needs on the machine that captures it, and what each
+conda env of the Environment tab needs of its host, and installing the ones a
+host lacks.
 
 A stream's ffmpeg runs in a tmux session on the host its camera or
 microphone is attached to (widgets.stream_panel), and the Device column asks
@@ -11,20 +12,54 @@ or System Settings -> Sudo for this machine) and with Homebrew on a Mac.
 Without tmux or ffmpeg nothing can start; the other two only fill the
 Device lists, so a host still lacking them starts its stream all the same.
 
+The Environment tab asks a host for what its envs' programs need (ENV_TOOLS:
+an ASR base's ffmpeg and PortAudio, the tmux of the dashboard and the MLLM
+Server, ...) and installs it the same way, on a button.
+
 Everything here builds commands or reads what they printed, and is tested
-without a host; running them is the caller's."""
+without a host; running them is the caller's, one install at a time on a host
+(install_lock)."""
 
 from __future__ import annotations
 
+import asyncio
 import shlex
+import weakref
 from dataclasses import dataclass
 
-# program -> (Debian package, Homebrew formula); "" where there is none
+# program -> (Debian package, Homebrew formula); "" where there is none. A
+# Mac's C compiler comes with Xcode's command line tools, not from Homebrew
 PACKAGES = {
     "tmux": ("tmux", "tmux"),
     "ffmpeg": ("ffmpeg", "ffmpeg"),
     "v4l2-ctl": ("v4l-utils", ""),
     "arecord": ("alsa-utils", ""),
+    "portaudio": ("portaudio19-dev", "portaudio"),
+    "cc": ("build-essential", ""),
+    "git": ("git", "git"),
+    "sshpass": ("sshpass", "sshpass"),
+}
+# what is asked for by a test of its own rather than by `command -v`: PortAudio
+# is a library, and pip builds PyAudio against its header
+_PROBES = {
+    "portaudio": " || ".join(
+        f"[ -f {folder}/include/portaudio.h ]"
+        for folder in ("/usr", "/usr/local", "/opt/homebrew", "/opt/local")
+    ),
+}
+# conda env group -> platform -> what its programs need on the host: an ASR
+# base pulls its stream through ffmpeg and imports PyAudio, which pip builds
+# against PortAudio with a C compiler (a Mac has one with Xcode's tools); the
+# dashboard, Celery and the MLLM Server run in tmux; the analysis commands cut
+# media with ffmpeg; the console reaches hosts with sshpass and clones with
+# git. The VFA and IPS bases read video through OpenCV, which brings its own
+# FFmpeg, and need nothing
+ENV_TOOLS = {
+    "asr-base": {"darwin": ["ffmpeg", "portaudio"], "linux": ["ffmpeg", "portaudio", "cc"]},
+    "vfa-vllm-runtime": {"darwin": ["tmux"], "linux": ["tmux"]},
+    "uber-base": {"darwin": ["ffmpeg"], "linux": ["ffmpeg"]},
+    "uber-server": {"darwin": ["tmux"], "linux": ["tmux"]},
+    "tui": {"darwin": ["git", "sshpass"], "linux": ["git", "sshpass"]},
 }
 # what no stream starts without
 REQUIRED = ("tmux", "ffmpeg")
@@ -39,6 +74,17 @@ LOCK_WAIT = 120
 _CHECKED = "OPENMMLA_TOOLS_CHECKED"
 
 
+def env_tools(group: str, platform: str) -> list[str]:
+    """what the env of `group` needs on a host of `platform` ("darwin" or "linux")."""
+    return list(ENV_TOOLS.get(group, {}).get(platform, []))
+
+
+def all_env_tools() -> list[str]:
+    """everything any env needs on any platform, for one check of a host."""
+    return list(dict.fromkeys(tool for platforms in ENV_TOOLS.values()
+                              for tools in platforms.values() for tool in tools))
+
+
 def stream_programs(platform: str, kind: str) -> list[str]:
     """the programs a stream of `kind` ("audio" or "video") needs on a host of
     `platform` ("darwin" or "linux"). A Mac lists its devices with ffmpeg itself."""
@@ -49,10 +95,12 @@ def stream_programs(platform: str, kind: str) -> list[str]:
 
 @dataclass
 class HostTools:
-    """what a host said: the programs it lacks, and what it installs with
-    ("apt", "brew", or "" for neither)."""
+    """what a host said: the programs it lacks, what it installs with
+    ("apt", "brew", or "" for neither) and what it is ("darwin", "linux", or
+    "" when it did not say)."""
     missing: list[str]
     installer: str
+    platform: str = ""
 
     @property
     def lacking_required(self) -> list[str]:
@@ -61,13 +109,15 @@ class HostTools:
 
 def check_command(programs: list[str]) -> str:
     """a shell command that prints MISSING <program> for each program the host
-    lacks, INSTALLER apt|brew for what it installs with, and an end mark."""
+    lacks, INSTALLER apt|brew for what it installs with, PLATFORM and an end mark."""
     probes = "".join(
-        f"command -v {shlex.quote(program)} >/dev/null 2>&1 || echo MISSING {shlex.quote(program)}; "
+        f"{{ {_PROBES[program]}; }} || echo MISSING {shlex.quote(program)}; " if program in _PROBES
+        else f"command -v {shlex.quote(program)} >/dev/null 2>&1 || echo MISSING {shlex.quote(program)}; "
         for program in programs
     )
     return (
         f"{probes}"
+        'echo PLATFORM "$(uname -s)"; '
         "if command -v apt-get >/dev/null 2>&1; then echo INSTALLER apt; "
         "elif command -v brew >/dev/null 2>&1; then echo INSTALLER brew; fi; "
         f"echo {_CHECKED}"
@@ -81,7 +131,8 @@ def parse_check(output: str) -> HostTools | None:
         return None
     missing = [words[1] for words in lines if len(words) == 2 and words[0] == "MISSING"]
     installer = next((words[1] for words in lines if len(words) == 2 and words[0] == "INSTALLER"), "")
-    return HostTools(missing, installer)
+    system = next((words[1] for words in lines if len(words) == 2 and words[0] == "PLATFORM"), "")
+    return HostTools(missing, installer, {"Darwin": "darwin", "Linux": "linux"}.get(system, ""))
 
 
 def packages(tools: HostTools) -> list[str]:
@@ -111,6 +162,18 @@ def install_command(installer: str, names: list[str]) -> str:
         f"-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold {quoted}"
     )
     return f"sudo -S -p '' sh -c {shlex.quote(script)}"
+
+
+# one install at a time on a host, whichever tab asked: apt takes one at a
+# time, and the second then finds the programs in place. Per event loop, as an
+# asyncio lock belongs to the one it was first used in
+_INSTALL_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def install_lock(host: str) -> asyncio.Lock:
+    """the lock an install on `host` ("local" or an SSH profile's name) holds."""
+    locks = _INSTALL_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return locks.setdefault(host, asyncio.Lock())
 
 
 def manual_command(installer: str, names: list[str]) -> str:

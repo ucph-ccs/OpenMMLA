@@ -7,7 +7,6 @@ import shlex
 import subprocess
 import sys
 import time
-import weakref
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -112,15 +111,9 @@ def _host_tools(profile, programs: list[str]) -> host_tools.HostTools | None:
     return host_tools.parse_check(result.stdout)
 
 
-# one install at a time on a host, whichever card's stream it is for: apt takes
-# one at a time, and a second stream there then finds the programs in place.
-# Per event loop, as an asyncio lock belongs to the one it was first used in
-_PROGRAM_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-
-
-def _programs_lock(host: str) -> asyncio.Lock:
-    locks = _PROGRAM_LOCKS.setdefault(asyncio.get_running_loop(), {})
-    return locks.setdefault(host, asyncio.Lock())
+# one install at a time on a host, whichever card's stream it is for, and the
+# Environment tab's Install Tools takes the same lock
+_programs_lock = host_tools.install_lock
 
 
 def _by_name(streams: list[StreamDef]) -> list[StreamDef]:

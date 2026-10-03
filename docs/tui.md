@@ -37,15 +37,16 @@ Once a session has been started, a remote host needs the same things a local one
 
 | You launch | The remote host needs |
 |---|---|
-| ASR / IPS / VFA bases, camera tools, MLLM Server | conda with the pipeline environment (create it from the Environment tab), tmux, the repository at `remote_project_path` |
+| ASR / IPS / VFA bases, camera tools | conda with the pipeline environment and the repository at `remote_project_path`; an ASR base also FFmpeg and PortAudio. The Environment tab creates the environment and installs what the host lacks (**Install Tools**) |
+| MLLM Server | conda with the `vfa-vllm` environment, tmux, the repository at `remote_project_path` |
 | ASR Server / VFA Server, InfluxDB / MongoDB in `docker` mode | Docker Engine with compose, the NVIDIA container toolkit for the AI stacks, the user in the `docker` group, the repository (for `docker/`) |
-| System services in `native` mode | `make` and `sudo`; Redis, Mosquitto and Nginx are installed by Start when the host has none (brew on macOS, apt on Debian and Ubuntu), InfluxDB and MongoDB natively need their vendor repositories (see [System Services](system_services.md)) |
+| System services in `native` mode | `make` and `sudo`, and tmux for the dashboard, its worker and a native MediaMTX, which run in it; Redis, Mosquitto and Nginx are installed by Start when the host has none (brew on macOS, apt on Debian and Ubuntu), InfluxDB and MongoDB natively need their vendor repositories (see [System Services](system_services.md)) |
 | Streams | `ffmpeg` and `tmux`; Start installs them when the host lacks them (apt on Debian and Raspberry Pi OS, brew on macOS; see the Streams tab below) |
 | Collection Session | only `python3` and `ffmpeg`; the recorder code is pushed to `~/.openmmla/collection-runtime` automatically. A Mac also needs someone logged in on its screen, with Terminal allowed to use the camera and the microphone (see below) |
 
 ## Environment tab
 
-A table of the conda environments OpenMMLA uses, on the selected host, with columns `Conda Env`, `Dep Group`, `Python`, `Status`, `Description`:
+A table of the conda environments OpenMMLA uses, on the selected host, with columns `Conda Env`, `Dep Group`, `Python`, `Status`, `System`, `Description`:
 
 | Conda env | Extra in `pyproject.toml` | Python | Used by |
 |---|---|---|---|
@@ -59,12 +60,17 @@ A table of the conda environments OpenMMLA uses, on the selected host, with colu
 
 The ASR and VFA server services have no conda environment any more; they run as Docker images (see the [Docker guide](docker.md)).
 
-`Status` is computed live from the `[project.optional-dependencies]` groups in `pyproject.toml`: `Missing` (no such env), `Partial: pkg, pkg +N` (env exists, packages missing), `Ready`. The buttons run these commands, locally or over SSH:
+`Status` is computed live from the `[project.optional-dependencies]` groups in `pyproject.toml`: `Missing` (no such env), `Partial: pkg, pkg +N` (env exists, packages missing), `Ready`.
+
+`System` is what the environment's programs need of the host and the host lacks: `lacks ffmpeg, portaudio`, `ok`, `-` for an environment that needs nothing of its host, or `?` when the host did not answer. `asr-base` needs FFmpeg, through which an ASR base pulls its stream, and PortAudio, which PyAudio is built against (on Linux also a C compiler, `build-essential`); `uber-base` needs FFmpeg for the session commands; `uber-server` and `vfa-vllm` need tmux, which the dashboard, its worker and the MLLM Server run in; `tui` needs git, and sshpass while an SSH profile signs in with a password. The VFA and IPS bases read video through OpenCV, which brings its own FFmpeg. The host is asked at **Connect** and **Refresh** with the PATH of what the console runs there over SSH, Homebrew's folders included, so a tool that is installed but off that PATH reads as lacking, as it would to a launch.
+
+The buttons run these commands, locally or over SSH:
 
 | Button | Command |
 |---|---|
 | **Create Env** | `conda create -n <env> python=<version> -y` |
-| **Install Deps** | `conda run -n <env> pip install -e '.[<group>]'` in the repository |
+| **Install Deps** | `conda run -n <env> pip install -e '.[<group>]'` in the repository; what the host lacks of the env's `System` needs is named first |
+| **Install Tools** | installs what the selected env lacks (`System`): `apt-get install` through `sudo` on Debian, Ubuntu and Raspberry Pi OS, which is handed the SSH profile's password (on this machine the Sudo password of System Settings) on its input, never on a command line; `brew install` on a Mac. One install runs on a host at a time, the Streams tab's included (a second press while one runs there is refused), and the column is read again afterwards |
 | **Delete Env** | `conda env remove -n <env> -y`, after a second press to confirm |
 | **Git Clone** | remote hosts only: `git clone <origin url> <remote_project_path>` |
 | **Git Pull** | remote hosts only: `cd <remote_project_path> && git pull` |

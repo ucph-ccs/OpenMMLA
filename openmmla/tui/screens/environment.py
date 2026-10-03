@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import subprocess
+import time
 
 from rich.markup import escape as rich_escape
 from textual.app import ComposeResult
@@ -12,11 +13,13 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static, DataTable, Button, Select, Label
 
+from openmmla.tui import host_tools
 from openmmla.tui.schema.loader import _find_project_root
 from openmmla.tui.ssh import (
-    TARGET_PLATFORMS, load_ssh_profiles, get_profile_by_name, probe_all_profiles, ssh_run_async,
+    MAC_TOOL_PATH, TARGET_PLATFORMS, load_ssh_profiles, get_profile_by_name, probe_all_profiles, ssh_run_async,
     git_remote_url, wrap_remote,
 )
+from openmmla.tui.system_services import get_sudo_password
 from openmmla.tui.widgets.command_session import CommandSession, _list_conda_envs_sync, _parse_conda_envs
 
 
@@ -48,7 +51,7 @@ ENV_GROUPS = [
     {"group": "uber-base", "env": "uber-base", "python": "3.10",
      "description": "Analysis framework"},
     {"group": "uber-server", "env": "uber-server", "python": "3.10",
-     "description": "Dashboard, Celery & Gateway (on their host only)"},
+     "description": "Dashboard, Celery & Gateway"},
     {"group": "tui", "env": "tui", "python": "3.10",
      "description": "TUI management console"},
 ]
@@ -283,6 +286,70 @@ async def env_statuses_remote(profile) -> dict[str, str]:
     }
 
 
+async def _check_tools_remote(profile) -> host_tools.HostTools | None:
+    """what the host behind `profile` lacks of what the envs need
+    (host_tools.ENV_TOOLS), asked with the PATH its components start with
+    (wrap_remote); None when it did not say."""
+    command = wrap_remote(host_tools.check_command(host_tools.all_env_tools()))
+    proc = None
+    try:
+        proc = await ssh_run_async(profile, command)
+        assert proc.stdout is not None
+        output = await asyncio.wait_for(proc.stdout.read(), host_tools.CHECK_TIMEOUT)
+        await proc.wait()
+    except Exception:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+        return None
+    return host_tools.parse_check(output.decode(errors="replace"))
+
+
+def _check_tools_local() -> host_tools.HostTools | None:
+    """the same for this machine, with Homebrew's folders on the PATH as the
+    zsh a component starts in has them."""
+    command = f"{MAC_TOOL_PATH}; {host_tools.check_command(host_tools.all_env_tools())}"
+    try:
+        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
+                                timeout=host_tools.CHECK_TIMEOUT)
+    except Exception:
+        return None
+    return host_tools.parse_check(result.stdout)
+
+
+def _profiles_use_passwords() -> bool:
+    try:
+        return any(getattr(profile, "password", "") for profile in load_ssh_profiles())
+    except Exception:
+        return True
+
+
+def _env_needs(entry: dict, platform: str) -> list[str]:
+    """what the env of `entry` needs of a host of `platform`: sshpass only
+    while an SSH profile signs in with a password."""
+    needs = host_tools.env_tools(entry["group"], platform)
+    if "sshpass" in needs and not _profiles_use_passwords():
+        needs.remove("sshpass")
+    return needs
+
+
+def _lacking_tools(entry: dict, tools: host_tools.HostTools | None) -> list[str]:
+    """what the host lacks of what the env of `entry` needs; empty when it did not say."""
+    if tools is None or not tools.platform:
+        return []
+    return [tool for tool in _env_needs(entry, tools.platform) if tool in tools.missing]
+
+
+def _system_status(entry: dict, tools: host_tools.HostTools | None) -> str:
+    """the System column of an env's row: `-` for an env that needs nothing of
+    its host, `ok`, `lacks ffmpeg, portaudio`, or `?` when the host did not say."""
+    if tools is None or not tools.platform:
+        return "?"
+    if not _env_needs(entry, tools.platform):
+        return "-"
+    lacking = _lacking_tools(entry, tools)
+    return f"lacks {', '.join(lacking)}" if lacking else "ok"
+
+
 def _format_env_status(
     entry: dict,
     conda_envs: set[str],
@@ -368,6 +435,14 @@ class EnvironmentPanel(Widget):
         self._selected_group: str | None = None
         self._pending_delete: tuple[str, str] | None = None
         self._target = "local"
+        # what the host lacks of the envs' system tools: None until it said.
+        # Each check is stamped when it starts, and only a later one replaces
+        # it: a Refresh that began during an install must not put back what
+        # the host lacked before it
+        self._host_tools: host_tools.HostTools | None = None
+        self._host_tools_stamp = 0.0
+        # the hosts an Install Tools is running on
+        self._installing_tools: set[str] = set()
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -388,6 +463,7 @@ class EnvironmentPanel(Widget):
                 yield Button("Git Pull All", variant="warning", id="btn-git-pull-all")
                 yield Button("Create Env", variant="success", id="btn-create-env")
                 yield Button("Install Deps", variant="success", id="btn-install-deps")
+                yield Button("Install Tools", variant="success", id="btn-install-tools")
                 yield Button("Delete Env", variant="error", id="btn-delete-env")
             yield CommandSession(show_target=False, id="env-cmd-session")
 
@@ -413,6 +489,8 @@ class EnvironmentPanel(Widget):
         normalized = _normalize_target(target)
         if normalized != self._target:
             self._pending_delete = None
+            self._host_tools = None
+            self._host_tools_stamp = 0.0
         self._target = normalized
         try:
             self._cmd.set_target(self._target)
@@ -422,9 +500,17 @@ class EnvironmentPanel(Widget):
     def _log(self, msg: str) -> None:
         self._cmd.log(msg)
 
+    def _keep_tools(self, target: str, tools: host_tools.HostTools | None, stamp: float) -> bool:
+        """keep what a check of `target` begun at `stamp` found, unless the
+        host changed since or a later check is kept already."""
+        if target != self._get_target() or stamp < self._host_tools_stamp:
+            return False
+        self._host_tools, self._host_tools_stamp = tools, stamp
+        return True
+
     def on_mount(self) -> None:
         table = self.query_one("#env-table", DataTable)
-        table.add_columns("Conda Env", "Dep Group", "Python", "Status", "Description")
+        table.add_columns("Conda Env", "Dep Group", "Python", "Status", "System", "Description")
         table.cursor_type = "row"
         self._refresh_table()
 
@@ -504,10 +590,13 @@ class EnvironmentPanel(Widget):
     async def _refresh_table_local(self, target: str) -> None:
         if target != self._get_target():
             return
-        conda_envs = await asyncio.to_thread(_list_conda_envs_sync)
+        stamp = time.monotonic()
+        conda_envs, tools = await asyncio.gather(
+            asyncio.to_thread(_list_conda_envs_sync), asyncio.to_thread(_check_tools_local))
         env_packages = await asyncio.to_thread(self._list_selected_conda_packages, conda_envs)
         if target != self._get_target():
             return
+        self._keep_tools(target, tools, stamp)
         self._conda_envs = conda_envs
         self._env_packages = env_packages
         self._required_packages = self._build_required_map(self._read_local_pyproject())
@@ -545,7 +634,8 @@ class EnvironmentPanel(Widget):
                 eg, self._conda_envs, self._env_packages, self._required_packages
             )
             table.add_row(
-                eg["env"], eg["group"], eg["python"], status, eg["description"],
+                eg["env"], eg["group"], eg["python"], status, _system_status(eg, self._host_tools),
+                eg["description"],
             )
 
     async def _refresh_table_remote(self, profile_name: str) -> None:
@@ -557,6 +647,8 @@ class EnvironmentPanel(Widget):
                 self._log("[red]SSH profile not found.[/red]")
             return
         self._log(f"[yellow]Checking conda envs on '{profile_name}'...[/yellow]")
+        stamp = time.monotonic()
+        tools_check = asyncio.ensure_future(_check_tools_remote(profile))
         proc = await ssh_run_async(profile, wrap_remote("conda env list"))
         output = ""
         assert proc.stdout is not None
@@ -568,8 +660,10 @@ class EnvironmentPanel(Widget):
         self._conda_envs = _parse_conda_envs(output)
         env_packages = await self._list_remote_conda_packages(profile_name, self._conda_envs)
         pyproject_text = await self._read_remote_pyproject(profile)
+        tools = await tools_check
         if profile_name != self._get_target():
             return
+        self._keep_tools(profile_name, tools, stamp)
         self._env_packages = env_packages
         self._required_packages = self._build_required_map(pyproject_text)
         self._populate_table()
@@ -618,6 +712,8 @@ class EnvironmentPanel(Widget):
             self._create_selected_env()
         elif bid == "btn-install-deps":
             self._install_selected_deps()
+        elif bid == "btn-install-tools":
+            self._install_selected_tools()
         elif bid == "btn-delete-env":
             self._delete_selected_env()
         elif bid == "btn-git-clone":
@@ -935,6 +1031,12 @@ class EnvironmentPanel(Widget):
         if env_name not in self._conda_envs:
             self._log(f"[yellow]Env '{env_name}' does not exist. Create it first.[/yellow]")
             return
+        lacking = _lacking_tools(entry, self._host_tools)
+        if lacking:
+            build = (" pip builds PyAudio against PortAudio with a C compiler, so Install Tools first."
+                     if {"portaudio", "cc"} & set(lacking) else "")
+            self._log(f"[yellow]{rich_escape(self._where())} lacks {', '.join(lacking)}, which '{env_name}' "
+                      f"needs (System column).{build}[/yellow]")
         self._log(f"[green]Installing deps '{rich_escape(f'[{group}]')}' into env '{env_name}'...[/green]")
         if self._is_remote:
             self.run_worker(
@@ -1005,3 +1107,157 @@ class EnvironmentPanel(Widget):
             self._log(f"[red]Remote install failed (exit {rc}).[/red]")
         self._refresh_table()
         self.post_message(self.EnvsChanged(profile_name))
+
+    # -- system tools ----------------------------------------------------------
+
+    def _where(self) -> str:
+        return "this machine" if not self._is_remote else f"'{self._get_target()}'"
+
+    def _install_selected_tools(self) -> None:
+        """install on the host what the selected env needs of it and it lacks
+        (the System column), with apt-get or Homebrew."""
+        entry = self._get_selected_entry()
+        if entry is None:
+            return
+        tools = self._host_tools
+        where = self._where()
+        target = self._get_target()
+        if TARGET_PLATFORMS.get(target) == "windows":
+            self._log("[yellow]Install Tools installs with apt-get or Homebrew, on Linux and macOS hosts.[/yellow]")
+            return
+        if target in self._installing_tools:
+            self._log(f"[yellow]An install is already running on {rich_escape(where)}: its output is above, "
+                      f"and the System column is read again when it ends.[/yellow]")
+            return
+        if tools is None or not tools.platform:
+            self._log(f"[yellow]{rich_escape(where)} has not said what it has: Refresh, then Install Tools.[/yellow]")
+            return
+        lacking = _lacking_tools(entry, tools)
+        if not lacking:
+            needed = _env_needs(entry, tools.platform)
+            listed = f" ({', '.join(needed)})" if needed else ""
+            self._log(f"[green]{rich_escape(where)} has what '{entry['env']}' needs of it{listed}.[/green]")
+            return
+        names = host_tools.packages(host_tools.HostTools(lacking, tools.installer, tools.platform))
+        column = {"apt": 0, "brew": 1}.get(tools.installer)
+        by_hand = [tool for tool in lacking
+                   if column is None or not host_tools.PACKAGES.get(tool, ("", ""))[column]]
+        if by_hand:
+            how = ("has neither apt-get nor Homebrew" if column is None
+                   else f"{'Homebrew' if tools.installer == 'brew' else 'apt-get'} has no package for it")
+            self._log(f"[red]{rich_escape(where)} lacks {', '.join(by_hand)} and {how}: that has to be "
+                      f"done there by hand.[/red]")
+        if not names:
+            return
+        # a worker of its own per host, never exclusive: cancelling an install
+        # would cut its SSH session, and apt-get with it, halfway through
+        # unpacking. A second press for the same host is refused above
+        self._installing_tools.add(target)
+        self.run_worker(
+            self._run_install_tools(target, entry, lacking, names, tools.installer),
+            name=f"env-install-tools-{target}", group=f"env-install-tools-{target}", exclusive=False,
+        )
+
+    def _sudo_password(self, target: str, profile) -> tuple[str | None, str]:
+        """the password sudo is answered with on `target`, and where it comes
+        from: the SSH profile's, or System Settings -> Sudo for this machine."""
+        if profile is None:
+            try:
+                password = get_sudo_password(self._root)
+            except Exception:
+                password = None
+            return password, "System Settings → Sudo (local admin)"
+        return (getattr(profile, "password", "") or None), f"the SSH profile '{target}'"
+
+    async def _run_install_tools(self, target: str, entry: dict, lacking: list[str], names: list[str],
+                                 installer: str) -> None:
+        try:
+            await self._install_tools(target, entry, lacking, names, installer)
+        finally:
+            self._installing_tools.discard(target)
+
+    async def _install_tools(self, target: str, entry: dict, lacking: list[str], names: list[str],
+                             installer: str) -> None:
+        remote = target != "local"
+        profile = get_profile_by_name(target) if remote else None
+        if remote and profile is None:
+            self._log("[red]SSH profile not found.[/red]")
+            return
+        where = "this machine" if not remote else f"'{target}'"
+        # Homebrew runs as the user and asks for no password; apt-get runs under
+        # sudo -S, which reads it on stdin, never from a command line
+        password, source = (None, "") if installer == "brew" else self._sudo_password(target, profile)
+        command = host_tools.install_command(installer, names)
+        self._log(f"[yellow]{rich_escape(where)} lacks {', '.join(lacking)} for '{entry['env']}': installing "
+                  f"{' '.join(names)} with {'Homebrew' if installer == 'brew' else 'apt-get'}, which may take "
+                  f"a few minutes.[/yellow]")
+        self._log(f"  {'remote' if remote else ''}$ {rich_escape(command)}")
+        output: list[str] = []
+        rc = None
+        lock = host_tools.install_lock(target)
+        if lock.locked():
+            self._log(f"[yellow]Waiting for the install already running on {rich_escape(where)} "
+                      f"(a stream's Start) to finish...[/yellow]")
+        async with lock:
+            proc = None
+            try:
+                if remote:
+                    proc = await ssh_run_async(profile, wrap_remote(command), pipe_stdin=True)
+                else:
+                    proc = await asyncio.create_subprocess_exec(
+                        "bash", "-c", f"{MAC_TOOL_PATH}; {command}",
+                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT, env=_unbuffered_env(),
+                    )
+                assert proc.stdin is not None and proc.stdout is not None
+                if password:
+                    proc.stdin.write(f"{password}\n".encode())
+                    await proc.stdin.drain()
+                proc.stdin.close()
+                rc = await asyncio.wait_for(self._stream_output(proc, output), host_tools.INSTALL_TIMEOUT)
+            except asyncio.TimeoutError:
+                if proc is not None and proc.returncode is None:
+                    proc.kill()
+                self._log(f"[red]Installing on {rich_escape(where)} took longer than "
+                          f"{int(host_tools.INSTALL_TIMEOUT // 60)} minutes and was given up; apt-get or brew "
+                          f"may still be running there.[/red]")
+            except Exception as e:
+                self._log(f"[red]Could not install on {rich_escape(where)}: {rich_escape(str(e))}[/red]")
+        stamp = time.monotonic()
+        after = await (_check_tools_remote(profile) if remote else asyncio.to_thread(_check_tools_local))
+        if after is not None and self._keep_tools(target, after, stamp):
+            self._populate_table()
+        if after is not None:
+            still = [tool for tool in lacking if tool in after.missing]
+        else:
+            still = [] if rc == 0 else lacking
+        if not still:
+            self._log(f"[green]{rich_escape(where)}: {' '.join(names)} installed.[/green]")
+            return
+        if rc is not None and rc != 0:
+            reason = host_tools.install_failure("\n".join(output), source)
+            self._log(f"[red]Installing on {rich_escape(where)} failed: {rich_escape(reason)}.[/red]")
+        still_names = host_tools.packages(host_tools.HostTools(still, installer))
+        by_hand = f" ({rich_escape(host_tools.manual_command(installer, still_names))})" if still_names else ""
+        self._log(f"[red]{rich_escape(where)} still lacks {', '.join(still)}: install it there by hand"
+                  f"{by_hand}, then Refresh.[/red]")
+
+    async def _stream_output(self, proc, kept: list[str]) -> int:
+        """log what `proc` prints line by line as it comes, keep it in `kept`,
+        and return its exit code."""
+        assert proc.stdout is not None
+        pending = ""
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+            pending += chunk.decode(errors="replace")
+            *lines, pending = pending.split("\n")
+            for line in lines:
+                if line.strip():
+                    kept.append(line)
+                    self._log(rich_escape(line.rstrip()))
+        if pending.strip():
+            kept.append(pending)
+            self._log(rich_escape(pending.rstrip()))
+        return await proc.wait()

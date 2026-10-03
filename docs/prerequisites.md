@@ -1,14 +1,14 @@
 # System Prerequisites
 
-Every machine that runs an OpenMMLA component needs the tools below: base stations, base servers (AI services) and the uber server (system services). A device that only pushes a camera or microphone stream, such as a Raspberry Pi, needs FFmpeg alone; see the [Raspberry Pi setup](raspi_config.md).
+Every machine that runs an OpenMMLA component needs the tools below: base stations, base servers (AI services) and the uber server (system services). A device that only pushes a camera or microphone stream, such as a Raspberry Pi, needs FFmpeg alone; see the [Raspberry Pi setup](raspi_config.md). The TUI's Environment tab shows in its `System` column what a host lacks of these for each conda environment, and **Install Tools** installs it there with apt or Homebrew (see the [Environment tab](tui.md#environment-tab)).
 
 | Tool | Used for |
 |---|---|
 | Conda | one isolated Python environment per pipeline; the TUI's Environment tab creates and fills them |
 | Git | cloning the repository; the TUI runs from a checkout and can clone it onto remote hosts |
-| tmux | services and pipeline components run in detached tmux sessions, so they survive a closed terminal |
-| PortAudio | audio input for ASR base stations and raw audio collection (PyAudio builds against it) |
-| FFmpeg | streaming to MediaMTX, raw audio/video collection and file replay |
+| tmux | the dashboard and its worker, the MLLM Server, a native MediaMTX and streams run in detached tmux sessions, so they survive a closed terminal |
+| PortAudio | audio input for ASR base stations (PyAudio builds against it) |
+| FFmpeg | streaming to MediaMTX, an ASR base pulling its stream, raw audio/video collection, file replay and the session commands |
 
 ## Conda
 
@@ -43,7 +43,7 @@ sudo apt install -y build-essential git tmux ffmpeg portaudio19-dev python3-pyau
 ## Optional tools
 
 - **Docker Engine** (plus the NVIDIA container toolkit on GPU hosts): runs the ASR/VFA AI services and, optionally, InfluxDB and MongoDB as containers. See the [Docker guide](docker.md).
-- **sshpass**: only for TUI SSH profiles that authenticate with a password; key-based profiles do not need it. `sudo apt install sshpass` on Debian/Ubuntu. On macOS it is not in Homebrew core: `brew install hudochenkov/sshpass/sshpass`.
+- **sshpass**: only for TUI SSH profiles that authenticate with a password; key-based profiles do not need it. `sudo apt install sshpass` on Debian/Ubuntu, `brew install sshpass` on macOS.
 - **Lab Streaming Layer**: only for `lsl` audio/video sources. Inside the pipeline environment run `pip install pylsl==1.17.6` and `conda install -c conda-forge liblsl=1.16.2`.
 - **NVIDIA driver and CUDA**: for GPU inference on base servers. See the [FAQ](faq.md#nvidia-driver-installation).
 
