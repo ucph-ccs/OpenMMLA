@@ -676,12 +676,76 @@ def _cli_options(options: dict[str, str]) -> str:
     return "".join(f"-{key} {value} " for key, value in options.items())
 
 
-def _tee_slave(muxer: str, options: dict[str, str], url: str, onfail_ignore: bool = False) -> str:
-    """one output of the tee muxer: [f=<muxer>:<opt>=<val>:...]<url>."""
-    parts = [f"f={muxer}", *(f"{key}={value}" for key, value in options.items())]
+# the push to a stream server goes through FFmpeg's fifo muxer, which opens it
+# again when it fails, every 5 s for as long as it takes. A Tailscale relay
+# hiccup stalled a capture host's push past MediaMTX's readTimeout, the server
+# closed it ("closed: read tcp ...: i/o timeout"), and its ffmpeg exited, or,
+# with record on, went on recording and pushed nothing more, until someone
+# started it again: the bases that pulled it had nothing to read for the rest
+# of the session. In a queue of its own the push never holds up the capture or
+# its recording, which stays one unbroken file: a push that stalls loses its
+# packets once its queue is full, and one opened again starts at a keyframe,
+# with what is being captured then
+PUSH_RECOVERY = {
+    "attempt_recovery": "1",
+    "recover_any_error": "1",
+    "max_recovery_attempts": "0",
+    "recovery_wait_time": "5",
+    "drop_pkts_on_overflow": "1",
+    "restart_with_keyframe": "1",
+}
+# microseconds one read or write of a push may block: a server that accepts the
+# connection and never answers held a reconnect for good, and with it ffmpeg's
+# end and its file's (Stop, a microphone that came loose). Shorter than
+# MediaMTX's readTimeout (30 s), so the capture host gives up on a stalled
+# connection first and its new one takes the path over (overridePublisher)
+PUSH_IO_TIMEOUT = "15000000"
+
+
+def _push_options(muxer: str, options: dict[str, str]) -> dict[str, str]:
+    """a push's muxer options with its i/o bounded (PUSH_IO_TIMEOUT): rtmp's
+    and srt's protocols take rw_timeout; rtsp's push keeps its one option, as a
+    tee output takes one."""
+    if muxer in ("flv", "mpegts"):
+        return {**options, "rw_timeout": PUSH_IO_TIMEOUT}
+    return dict(options)
+
+
+def _tee_slave(muxer: str, options: dict[str, str], url: str, onfail_ignore: bool = False,
+               recover: bool = False, select: str = "") -> str:
+    """one output of the tee muxer: [f=<muxer>:<opt>=<val>:...]<url>. recover
+    makes the output a fifo around the muxer, which opens it again when it
+    fails (PUSH_RECOVERY): its options are the fifo's own, so nothing needs the
+    escaping tee's use_fifo/fifo_options would (a colon escaped for ffmpeg twice
+    over, through tmux, ssh and a Mac's window script), and the muxer's option
+    goes to it as format_opts. select names the output stream the slave
+    takes, by index (no colon to escape)."""
+    if recover:
+        options = _push_options(muxer, options)
+        if len(options) > 1:
+            raise ValueError(f"a recovering push takes one muxer option, not {sorted(options)}")
+        parts = ["f=fifo", f"fifo_format={muxer}",
+                 *(f"format_opts={key}={value}" for key, value in options.items())]
+    else:
+        parts = [f"f={muxer}", *(f"{key}={value}" for key, value in options.items())]
+    if select:
+        parts.append(f"select={select}")
     if onfail_ignore:
         parts.append("onfail=ignore")
+    if recover:
+        parts += [f"{key}={value}" for key, value in PUSH_RECOVERY.items()]
     return f"[{':'.join(parts)}]{url}"
+
+
+def _recovering_output(muxer: str, options: dict[str, str], url: str) -> str:
+    """a push as an output of its own, in a fifo that opens it again when it
+    fails (PUSH_RECOVERY): the muxer's options go to it as format_opts. The
+    encoder writes its headers out of band, which the muxer in the fifo takes."""
+    options = _push_options(muxer, options)
+    format_opts = f"-format_opts {':'.join(f'{key}={value}' for key, value in options.items())} " if options else ""
+    recovery = "".join(f"-{key} {value} " for key, value in PUSH_RECOVERY.items())
+    # quoted as the tee outputs are: an srt URL's ? and & are the shell's otherwise
+    return f'-flags +global_header -f fifo -fifo_format {muxer} {format_opts}{recovery}"{url}"'
 
 
 def _double_rate(rate: str) -> str:
@@ -797,7 +861,21 @@ def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform
             file_codec = f"pcm_{fmt}"
         else:
             muxer, options = _publish_muxer(target)
-            live = f"{convert}-c:a aac -b:a 128k -f {muxer} {_cli_options(options)}{target}"
+            if record_to:
+                # one output with two streams, AAC for the push and PCM for the
+                # file, through a tee whose push opens again when it fails: as two
+                # outputs, ffmpeg spun on every core it could get, and never ended,
+                # when its microphone went away while the push was down
+                # The file comes first: tee closes its outputs in order, and a push
+                # that cannot be closed (its server stalled) must not keep the
+                # file from its end
+                push = _tee_slave(muxer, options, target, onfail_ignore=True, recover=True, select="0")
+                return (f'{capture}-filter_complex "[0:a]asplit=2[push][rec]" '
+                        f'-map "[push]" -c:a:0 aac -b:a:0 128k -map "[rec]" -c:a:1 pcm_s16le {convert}'
+                        f'-flags +global_header -f tee "[f=wav:select=1]{record_to}|{push}"')
+            # a push that fails no longer ends ffmpeg. The fifo muxer names no
+            # codec of its own, so ffmpeg maps nothing to it unless told
+            live = f"-map 0:a {convert}-c:a aac -b:a 128k {_recovering_output(muxer, options, target)}"
             file_codec = "pcm_s16le"
         if not record_to:
             return capture + live
@@ -843,14 +921,14 @@ def _build_ffmpeg_cmd(stream: StreamDef, record_dir: str | None = None, platform
         f'-x264-params "keyint={fps}:min-keyint={fps}:no-scenecut=1:repeat-headers=1" '
         f"-b:v {bitrate} -maxrate {peak} -bufsize {peak} "
     )
-    if not record_to:
-        return f"{encode}-f {muxer} {_cli_options(options)}{target}"
-    # one encode, two outputs: the tee muxer needs the global-header flag spelled
-    # out, and onfail=ignore keeps the recording going when the server is down
-    return (
-        f"{encode}-flags +global_header -map 0:v -f tee "
-        f'"{_tee_slave(muxer, options, target, onfail_ignore=True)}|[f=matroska]{record_to}"'
-    )
+    # the push is a tee output in a fifo that opens it again when it fails; with
+    # record_dir one encode has two outputs: the tee muxer needs the global-header
+    # flag spelled out, onfail=ignore keeps the recording going should the push's
+    # fifo itself give up, and the file comes first, as tee closes its outputs in
+    # order and a push that cannot be closed must not keep the file from its end
+    push = _tee_slave(muxer, options, target, onfail_ignore=bool(record_to), recover=True)
+    outputs = f"[f=matroska]{record_to}|{push}" if record_to else push
+    return f'{encode}-flags +global_header -map 0:v -f tee "{outputs}"'
 
 
 def _probe_stream_target(target: str, timeout: float = 10.0) -> tuple[bool, str]:
@@ -2251,7 +2329,8 @@ class StreamPanel(Widget):
                 )
                 self._log(
                     f"[yellow]{stream.name}: ffmpeg runs on {where}, but nothing has reached the Stream Server "
-                    f"yet. Logs shows what ffmpeg says.{hint}[/yellow]"
+                    f"yet; it tries again every {PUSH_RECOVERY['recovery_wait_time']} s for as long as it runs. "
+                    f"Logs shows what ffmpeg says.{hint}[/yellow]"
                 )
         self._rebuild_table()
 
