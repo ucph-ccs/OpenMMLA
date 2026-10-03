@@ -17,6 +17,7 @@ from openmmla.bases.base import Base
 from openmmla.services.asr.requests import request_speech_transcription, request_speech_separation, \
     request_speech_enhancement, request_voice_activity_detection
 from openmmla.streams.audio_stream import AudioStream, write_frame_to_wav
+from openmmla.streams.stream_receiver import StreamUnavailable
 from openmmla.utils.audio.files import format_wav
 from openmmla.utils.audio.auga import normalize_decibel, apply_gain
 from openmmla.utils.audio.augf import resample_audio
@@ -40,6 +41,21 @@ from .speaker_profiles import REGISTRATION_SENTENCES, name_problem, parse_speake
 from .enums import BLUE, ENDC, GREEN, PURPLE, GREY, RED, YELLOW
 from .input import get_base_type, get_function_base, get_name, get_base_mode, get_input_device_index, get_channel_selection, get_edit_speaker_options, get_speaker_selection, get_speaker_deletion, explain_cannot_start
 from openmmla.utils.config import get_bases, get_base_by_id
+
+# a live run that ends on a recording error goes on in its session, after a pause (which STOP ends), at most
+# MAX_RESUMES times within RESUME_WINDOW_SECONDS: an error that comes back every time ends the run instead
+RESUME_PAUSE_SECONDS = 5.0
+MAX_RESUMES = 3
+RESUME_WINDOW_SECONDS = 60.0
+# a segment stamped this long after the previous segment's nominal end follows a gap in the audio
+SEGMENT_GAP_SECONDS = 0.5
+
+
+class _GoesOn:
+    """what a run that ended on a recording error returns when it goes on: the session it goes on in"""
+
+    def __init__(self, session_id: str | None):
+        self.session_id = session_id
 
 
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = False,
@@ -95,6 +111,10 @@ class ASRBase(Base):
     logger = get_logger(f'asr-base')
     participant: str | None = None  # the tag of whoever wears this base's microphone (Bases.participant)
     _noise_floor = None  # the base's running noise floor (NoiseFloor), fresh each run
+    # (stamp, end, connection) of the segment last assembled into a chunk, fresh each run: a gap after it
+    # ends the open chunk
+    _last_segment = None
+    _resumed_at = ()  # when this Start's run went on after a recording error (monotonic seconds)
     # the voices this base heard in its session (VoiceRegistry): kept while the session stays, so a run
     # restarted after a recording error goes on numbering them; the session it is of, and its key
     # (voice_registry in the transcripts), which a base launched again into the session changes
@@ -810,12 +830,16 @@ class ASRBase(Base):
         prepare them for registration (gain, noise reduction, VAD): the wav to register, or None
         when no speech was found in it."""
         output_path = os.path.join(self.temp_dir, f'{self.base_type}_{self.id}_register.wav')
-        self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
+        # a stream source that is not up yet is waited for (connect_wait), then ends the registration with
+        # its URL and ffmpeg's reason
+        self.audio_stream = AudioStream(source=self.source, log=self.logger, **self.stream_kwargs)
         self.audio_stream.start()
         try:
             audio_frame = self.audio_stream.read(duration=duration or self.register_duration, latest=True)
         finally:
             self.audio_stream.stop()
+        if audio_frame is None:
+            raise RuntimeError(f"No audio came from base {self.id}'s {self.source} source.")
         write_frame_to_wav(output_path, audio_frame)
 
         apply_gain(output_path, self.gain)
@@ -983,12 +1007,31 @@ class ASRBase(Base):
           - Continuous transcription (if enabled).
           - Listening for stop signals.
 
+        A live run that ends on a recording error goes on in its session without waiting for START again
+        (_recognition_handler says when), in this loop: a run that goes on many times does not grow the stack.
+
         Args:
             session_id: The bucket name for storing recognition results. If not provided, it is obtained interactively.
 
         Returns:
             True when the run ended with STOP, False when it ended with an error, and None when it
             could not start (speaker verification without a selected speaker profile).
+        """
+        self._resumed_at = []
+        resume = False
+        while True:
+            outcome = self._run_recognition(session_id, resume=resume)
+            if not isinstance(outcome, _GoesOn):
+                return outcome
+            session_id, resume = outcome.session_id, True
+
+    def _run_recognition(self, session_id: str | None = None, resume: bool = False):
+        """One run of _start_recognition: True when it ended with STOP, False when it ended with an error,
+        None when it could not start, and _GoesOn when it goes on after a recording error.
+
+        Args:
+            session_id: The bucket name for storing recognition results. If not provided, it is obtained interactively.
+            resume: the run goes on after a recording error, without waiting for START again
         """
         # a stream the session's Collection Start noted a wearer for is that person's, for this run
         self._apply_session_wearer(session_id or self.launch_session_id)
@@ -1048,6 +1091,7 @@ class ASRBase(Base):
 
         # reset attributes
         self.last_speaker = None
+        self._last_segment = None
         self._noise_floor = NoiseFloor()
         self._voices_for_session()
         self.audio_queue = queue.Queue()
@@ -1055,7 +1099,19 @@ class ASRBase(Base):
         self.speaker_frames_dict = {}
 
         self._prepare_directories()
-        if not self._listen_for_start_signal():
+        if resume:
+            # the run goes on after a recording error: its START came already, and Redis keeps none for a
+            # later subscriber, so waiting for one would wait until STOP and record nothing. A pause first, so
+            # that an error that comes back at once does not loop
+            if self._stop_during_pause(RESUME_PAUSE_SECONDS):
+                self.logger.info(f"Received STOP on {self.session_control} before the run went on; "
+                                 f"ASR base {self.id} leaves the session.")
+                self._drop_control_subscription()
+                self._leave_session()
+                self._clean_up()
+                return True
+            self.logger.info(f"ASR base {self.id} records again in session {self.session_id} after a recording error.")
+        elif not self._listen_for_start_signal():
             # STOP came before START: the run ended before anything was recorded
             self.logger.info(f"The run of session {self.session_id} was stopped before it started; "
                              f"ASR base {self.id} leaves the session.")
@@ -1081,6 +1137,7 @@ class ASRBase(Base):
             if self.tr:
                 self._create_thread(self._continuous_transcribing)
         self._create_thread(self._listen_for_stop_signal)
+        self._stop_heard = False
 
         # start and join threads, handling exceptions if they occur
         exception_occurred = None
@@ -1260,16 +1317,23 @@ class ASRBase(Base):
         """Handle exceptions during the recognition process and perform cleanup.
 
         Stop all threads and external clients, cleans up runtime variables, and if a RecordingError
-        occurred, restarts the recognition service with the current bucket.
+        occurred in a live run, has the run go on with the current bucket (_goes_on_after says when).
 
         Args:
             e: The exception that occurred during recognition, if any.
 
         Returns:
-            True when the run ended with STOP, False when it ended with an error.
+            True when the run ended with STOP, False when it ended with an error, and _GoesOn when it
+            goes on after a recording error (_start_recognition runs it again).
         """
-        restart = isinstance(e, RecordingError)
-        if not restart:
+        restart = isinstance(e, RecordingError) and not self._stop_heard and self._goes_on_after()
+        next_subscription = None
+        if restart:
+            # made before this run's threads stop, for the run that goes on: a STOP sent while this one ends is
+            # kept for it. A subscription of its own, which this run's STOP listener cannot take
+            channel = f"{self.session_control}"
+            next_subscription = (channel, self.redis_client.subscribe(channel))
+        else:
             # noted first: the thread joins and the last chunks' HTTP calls below can take long, and
             # a process killed meanwhile (a closed terminal window) would never note that it left
             self._leave_session()
@@ -1284,10 +1348,55 @@ class ASRBase(Base):
 
         current_bucket = self.session_id  # assign bucket name before cleaning up
         self._clean_up()
-        if restart:
+        # whatever this run's listeners left kept, nobody reads it any more
+        self._drop_control_subscription()
+        if restart and not self._stop_heard:
+            self._control_subscription = next_subscription
             self.logger.info("Restarting recognizing service.")
-            return self._start_recognition(current_bucket) is True
+            return _GoesOn(current_bucket)
+        if restart:
+            # this run's STOP listener heard STOP while the run ended: it does not go on
+            self.logger.info(f"Received STOP on {next_subscription[0]} as the run ended; ASR base {self.id} "
+                             f"leaves the session.")
+            self._close_control_subscription(next_subscription)
+            self._leave_session()
+            return True
+        if isinstance(e, RecordingError) and self._stop_heard:
+            return True  # STOP came as it ended on a recording error: it would have gone on, and STOP ended it
         return e is None
+
+    def _goes_on_after(self) -> bool:
+        """whether a run that ended on a recording error goes on, without waiting for START: a live source
+        only, at most MAX_RESUMES times within RESUME_WINDOW_SECONDS. A file or analyze run would start over
+        from its first segment and publish its results again, and an error that keeps coming back would loop:
+        those runs end."""
+        if self.source == 'file' or self.mode == 'analyze':
+            self.logger.error(f"ASR base {self.id} reads {'a file' if self.source == 'file' else 'recorded segments'}"
+                              f": after a recording error it would start over from the beginning and publish its "
+                              f"results again, so its run ends.")
+            return False
+        now = time.monotonic()
+        recent = [at for at in self._resumed_at if now - at < RESUME_WINDOW_SECONDS]
+        if len(recent) >= MAX_RESUMES:
+            self.logger.error(f"ASR base {self.id} had {len(recent) + 1} recording errors within "
+                              f"{RESUME_WINDOW_SECONDS:g} s, so its run ends.")
+            return False
+        self._resumed_at = recent + [now]
+        return True
+
+    def _stop_during_pause(self, seconds: float) -> bool:
+        """wait `seconds` before a run goes on after a recording error, reading the control subscription
+        kept for it: True as soon as STOP comes"""
+        kept = self._control_subscription
+        pubsub = kept[1] if kept and kept[0] == f"{self.session_control}" else None
+        deadline = time.monotonic() + seconds
+        while (left := deadline - time.monotonic()) > 0:
+            message = pubsub.get_message(timeout=min(0.5, left)) if pubsub is not None else None
+            if message and message.get('data') == b'STOP':
+                return True
+            if not message:
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        return False
 
     def _reset(self):
         """Reset the ASR base.
@@ -1326,13 +1435,29 @@ class ASRBase(Base):
             
         first_time = True
         sub_dir = 'records' if self.mode == 'capture' else 'temp'
-        self.audio_stream = AudioStream(source=self.source, **self.stream_kwargs)
+        # the base's STOP ends a wait for the stream (connect_wait now, reconnect_wait after a drop); neither
+        # it nor the logger goes in stream_kwargs, which the session's provenance stores as JSON. A stream
+        # not up within connect_wait raises StreamUnavailable here, outside the RecordingError wrapping:
+        # the run ends on it
+        self.audio_stream = AudioStream(source=self.source, abort_event=self.stop_event, log=self.logger,
+                                        **self.stream_kwargs)
         self.audio_stream.start()
 
         while not self.stop_event.is_set():
             try:
                 audio_frame = self.audio_stream.read(duration=self.recognize_duration, latest=first_time)
-                first_time = False
+            except StreamUnavailable:
+                # it did not come back: the run ends on this. A RecordingError would restart the run, which
+                # would only fail the same way
+                raise
+            except Exception as e:
+                raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
+            if audio_frame is None:
+                # nothing within read()'s timeout: the stream dropped and is opened again (it says so in
+                # the log), or a badge is quiet. This was an error that restarted the run
+                continue
+            first_time = False
+            try:
                 frames = audio_frame.to_bytes()
                 acquired_time = audio_frame.timestamp
                 output_path = os.path.join(self.audio_dir, sub_dir,
@@ -1341,7 +1466,10 @@ class ASRBase(Base):
                     write_frame_to_wav(output_path, audio_frame)
                     print(f"{BLUE}[Recording]{ENDC} {os.path.basename(output_path)} {len(frames)} frames")
                 else:
-                    self.audio_queue.put((output_path, frames))
+                    # the connection of a network stream's segment goes with it: a reconnect between two
+                    # segments ends the open chunk (_assemble_chunk_with_hsr)
+                    metadata = audio_frame.metadata if isinstance(audio_frame.metadata, dict) else {}
+                    self.audio_queue.put((output_path, frames, metadata.get('connection')))
             except Exception as e:
                 raise RecordingError(f'RecordingError occurred when continuous recording: {e}') from e
 
@@ -1500,7 +1628,10 @@ class ASRBase(Base):
         """
         while not self.stop_event.is_set():
             try:
-                segment_audio_path, frames = self.audio_queue.get(timeout=1)
+                # a live segment comes with its connection (None for a file, a recorded segment or a
+                # source without connections)
+                segment_audio_path, frames, *connection = self.audio_queue.get(timeout=1)
+                connection = connection[0] if connection else None
                 segment_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
                 # the level of the raw segment, before any gain, against this base's noise floor
@@ -1538,7 +1669,7 @@ class ASRBase(Base):
                     else:
                         similarity = self.threshold * self._energy_ratio(rms_value, peak_value, energy)
 
-                self._assemble_chunk_with_hsr(speaker, segment_start_time, frames)
+                self._assemble_chunk_with_hsr(speaker, segment_start_time, frames, connection=connection)
                 self._publish_recognition(segment_start_time, recognize_start_time, [speaker],
                                           [np.round(np.float64(similarity), 4)], [duration], energy=energy,
                                           levels=self._segment_levels(frames, energy))
@@ -1570,7 +1701,8 @@ class ASRBase(Base):
         """
         while not self.stop_event.is_set():
             try:
-                segment_audio_path, frames = self.audio_queue.get(timeout=1)
+                segment_audio_path, frames, *connection = self.audio_queue.get(timeout=1)
+                connection = connection[0] if connection else None
                 segment_start_time = float(os.path.basename(segment_audio_path).split('_')[-1][:-4])
                 recognize_start_time = time.time()
                 # the relative gate needs the raw segment's level against this base's floor
@@ -1629,7 +1761,8 @@ class ASRBase(Base):
                     speaker = 'silent'
 
                 resampled_segment_bytes = read_bytes_from_wav(segment_audio_path)
-                self._assemble_chunk_with_hsr(speaker, segment_start_time, resampled_segment_bytes, best_separate_frames)
+                self._assemble_chunk_with_hsr(speaker, segment_start_time, resampled_segment_bytes, best_separate_frames,
+                                              connection=connection)
                 self._publish_recognition(segment_start_time, recognize_start_time, [speaker],
                                           [np.round(np.float64(similarity), 4)], [duration])
 
@@ -1699,22 +1832,29 @@ class ASRBase(Base):
                 raise TranscribingError(f'TranscribingError occurred when transcribing: {e}') from e
 
     def _assemble_chunk_with_hsr(self, speaker: str, segment_start_time: float, origin_frames: bytes,
-                                 separate_frames: bytes | None = None):
+                                 separate_frames: bytes | None = None, connection: int | None = None):
         """Assemble and process audio chunks with half-scaled recognition (HSR) at speaker boundaries.
 
         If the current recognized speaker matches the previous speaker, appends the audio frames.
         Otherwise, performs HSR by processing half-segments before and after the speaker change,
         updating the internal speaker frames dictionary accordingly. Also, adds transcribed chunks
-        to the transcription queue if applicable.
+        to the transcription queue if applicable. A gap in the audio before this segment ends the open
+        chunk first (_end_chunk_at_gap).
 
         Args:
             speaker: Recognized speaker of the current segment.
             segment_start_time: Start time of the current segment.
             origin_frames: Original audio frames of the current segment.
             separate_frames (Optional): Speech separated frames from the current segment.
+            connection (Optional): the connection of a network stream the segment came on.
         """
         frames = separate_frames if separate_frames else origin_frames
         fr = 8000 if self.sp and self.speaker_verification else 16000
+
+        previous = self._last_segment
+        self._last_segment = (segment_start_time, segment_start_time + len(origin_frames) / (2 * fr), connection)
+        if previous is not None and self.last_speaker and self._follows_gap(previous, segment_start_time, connection):
+            self._end_chunk_at_gap(previous[1], segment_start_time, fr)
 
         if not self.last_speaker:
             self.speaker_frames_dict[speaker] = (segment_start_time, frames)
@@ -1788,6 +1928,28 @@ class ASRBase(Base):
                 self.speaker_frames_dict[speaker] = (segment_start_time, frames)
 
         self.last_speaker = speaker
+
+    def _follows_gap(self, previous: tuple, segment_start_time: float, connection: int | None) -> bool:
+        """whether audio is missing between the previous segment (stamp, end, connection) and this one: the
+        network stream was opened again (another connection), or this segment is stamped more than
+        SEGMENT_GAP_SECONDS after the previous one's nominal end (a recorded segment or a source without
+        connections that lost audio)"""
+        previous_start, _, previous_connection = previous
+        if connection is not None and previous_connection is not None and connection != previous_connection:
+            return True
+        nominal_end = previous_start + float(self.recognize_duration or 0)
+        return segment_start_time - nominal_end > SEGMENT_GAP_SECONDS
+
+    def _end_chunk_at_gap(self, previous_end: float, segment_start_time: float, framerate: int):
+        """the open chunk ends where the audio before the gap ended, and the segment after it starts a new
+        one: joined, its words would be stamped from the chunk's start as if no audio were missing"""
+        speaker, self.last_speaker = self.last_speaker, None
+        chunk_start_time, chunk_frames = self.speaker_frames_dict.pop(speaker, (None, b''))
+        self.logger.debug(f"Audio is missing from {previous_end:.2f} to {segment_start_time:.2f}: the chunk of "
+                          f"{speaker} ends there.")
+        if chunk_frames:
+            self._finish_chunk(speaker, chunk_start_time, max(previous_end, chunk_start_time), chunk_frames,
+                               framerate)
 
     def _quiet_cuts(self) -> bool:
         """whether a chunk that reaches its cap is cut at its quietest moment before it

@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from openmmla.bases.base import Base
+from openmmla.streams.stream_receiver import StreamUnavailable
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
@@ -304,6 +305,9 @@ class VFABase(Base):
                 self._start()
             else:
                 self.logger.error("Camera setup failed (no camera/source resolved from config).")
+        except StreamUnavailable as e:
+            # in plain words, without a traceback: the stream is not there
+            self.logger.error(f"{e} VFA base {self.base_id} exits.")
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning(
                 f"VFA base stopped: "
@@ -329,6 +333,9 @@ class VFABase(Base):
         self._join_session()
         self._record_provenance()
 
+        # subscribed first: a stream that is not up yet is waited for (connect_wait), and a START or STOP
+        # sent meanwhile is heard once it is up
+        self._subscribe_control()
         if self.mode != 'analyze':
             self._configure_video_stream()
 
@@ -354,6 +361,9 @@ class VFABase(Base):
         try:
             self._start_threads()
             self._process_frames()
+        except StreamUnavailable as e:
+            # the stream did not come back after a drop: said in plain words, and the run ends
+            self.logger.error(f"{e} VFA base {self.base_id} exits.")
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("Interrupted: %s", e)
         finally:
@@ -395,7 +405,9 @@ class VFABase(Base):
     def _configure_video_stream(self):
         """Configure video stream."""
         self.stream_kwargs['project_dir'] = self.project_dir
-        self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
+        # the session's logger goes as its own argument, never into stream_kwargs, which the session's
+        # provenance stores as JSON: the stream's waits and drops are then in the session's log
+        self.video_stream = VideoStream(source=self.source, log=self.logger, **self.stream_kwargs)
         self.video_stream.start()
 
     def _create_bucket_logger(self):
@@ -707,9 +719,14 @@ class VFABase(Base):
         last_saved_time = 0
 
         while not self.stop_event.is_set():
-            video_frame = self.video_stream.read()[-1]  # read latest frame
-            if video_frame is None:
+            # a short timeout: while the stream is opened again after a drop no frame comes, and STOP is
+            # heard within a second; one that does not come back raises StreamUnavailable, which ends the run
+            frames = self.video_stream.read(timeout=1.0)
+            if not frames:
+                if self.graphics:
+                    cv2.waitKey(1)  # the window stays responsive through the gap
                 continue
+            video_frame = frames[-1]  # read latest frame
 
             frame = video_frame.data
             acquired_time = video_frame.timestamp

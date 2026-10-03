@@ -43,6 +43,9 @@ class Base(ABC):
         self.stop_event: threading.Event | None = None
         self.session_id: str | None = None
         self.redis_client: RedisClientWrapper | None = None
+        # (channel, pubsub) subscribed ahead of the listening: Redis keeps no message for a later subscriber
+        self._control_subscription = None
+        self._stop_heard = False  # the STOP listener heard STOP in this run
 
     @property
     def session_control(self):
@@ -131,6 +134,41 @@ class Base(ABC):
                 except Exception as e:
                     self.logger.warning(f"During thread stopping, catch: {e}", exc_info=True)
 
+    def _subscribe_control(self):
+        """Subscribe to the control channel now, ahead of the listening: a START or STOP sent while the
+        base still opens its stream (which may wait for it) is heard when the listening begins. Redis
+        pubsub keeps nothing for a subscriber that comes later, and Session Control counts no
+        subscribers."""
+        channel = f"{self.session_control}"
+        kept = getattr(self, '_control_subscription', None)
+        if not kept or kept[0] != channel:
+            self._drop_control_subscription()
+            self._control_subscription = (channel, self.redis_client.subscribe(channel))
+        return self._control_subscription[1]
+
+    def _take_control_subscription(self):
+        """the subscription made ahead for this session's channel, once; one made for another session is
+        closed, never read. Without one, a fresh subscription."""
+        channel = f"{self.session_control}"
+        kept = getattr(self, '_control_subscription', None)
+        if kept and kept[0] == channel:
+            self._control_subscription = None
+            return kept[1]
+        self._drop_control_subscription()
+        return self.redis_client.subscribe(channel)
+
+    def _drop_control_subscription(self):
+        kept, self._control_subscription = getattr(self, '_control_subscription', None), None
+        self._close_control_subscription(kept)
+
+    def _close_control_subscription(self, kept):
+        """close a (channel, pubsub) that nobody reads any more"""
+        if kept and hasattr(kept[1], 'close'):
+            try:
+                kept[1].close()
+            except Exception as e:
+                self.logger.debug(f"Closing the control subscription of {kept[0]}: {e}")
+
     def _listen_for_start_signal(self) -> bool:
         """Listen on the redis bucket control channel for the START signal.
 
@@ -138,13 +176,16 @@ class Base(ABC):
             True on START; False when STOP comes first: the run ended before it started, and the
             caller starts no work, cleans up and ends the run as it would on STOP.
         """
-        p = self.redis_client.subscribe(f"{self.session_control}")
+        p = self._take_control_subscription()
         self.logger.info(f"Wait for START signal on {self.session_control}...")
 
         while True:
             message = p.get_message(timeout=5)
             if message and message['data'] == b'START':
                 self.logger.info("Received START signal, start...")
+                # kept for the STOP listener, which reads on from here: a STOP queued behind this START is
+                # heard, and nothing sent before the listener begins is lost
+                self._control_subscription = (f"{self.session_control}", p)
                 return True
             if message and message['data'] == b'STOP':
                 self.logger.info(f"Received STOP on {self.session_control} before START: the run ends "
@@ -154,13 +195,15 @@ class Base(ABC):
 
     def _listen_for_stop_signal(self):
         """Listen on the redis bucket control channel for the STOP signal."""
-        p = self.redis_client.subscribe(f"{self.session_control}")
+        p = self._take_control_subscription()
         self.logger.info(f"Listening for STOP signal on {self.session_control}...")
 
         while not self.stop_event.is_set():
             message = p.get_message(timeout=5)
             if message and message['data'] == b'STOP':
                 self.logger.info("Received STOP signal, stop...")
+                # noted: a run that is ending for another reason (an ASR recording error) must not go on
+                self._stop_heard = True
                 self._stop_threads()
             time.sleep(0.05)
 

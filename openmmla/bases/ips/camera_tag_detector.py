@@ -6,6 +6,7 @@ import numpy as np
 from pupil_apriltags import Detector
 
 from openmmla.bases.base import Base
+from openmmla.streams.stream_receiver import StreamUnavailable
 from openmmla.streams.video_stream import VideoStream
 from openmmla.utils.client import MQTTClientWrapper
 from openmmla.utils.input import show_error_and_pause
@@ -129,6 +130,9 @@ class CameraTagDetector(Base):
                 self._start_detection()
             else:
                 self.logger.error("Camera setup failed (no camera/source resolved from config).")
+        except StreamUnavailable as e:
+            # in plain words, without a traceback: the stream did not come up
+            self.logger.error(f"{e} The tag detector stops.")
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning(
                 f"Tag detector stopped: "
@@ -152,6 +156,9 @@ class CameraTagDetector(Base):
 
         try:
             self._process_frames()
+        except StreamUnavailable as e:
+            # the stream did not come back after a drop: said in plain words
+            self.logger.error(f"{e} Capture interrupted.")
         except (Exception, KeyboardInterrupt) as e:
             self.logger.warning("%s, capture interrupted.", e, exc_info=False)
         finally:
@@ -301,14 +308,21 @@ class CameraTagDetector(Base):
     def _configure_video_stream(self):
         """Configure video stream."""
         self.stream_kwargs['project_dir'] = self.project_dir
-        self.video_stream = VideoStream(source=self.source, **self.stream_kwargs)
+        self.video_stream = VideoStream(source=self.source, log=self.logger, **self.stream_kwargs)
         self.video_stream.start()
 
     def _process_frames(self):
         print("Processing frames...")
 
         while True:
-            video_frame = self.video_stream.read()[-1]
+            # a short timeout: while the stream is opened again after a drop no frame comes; one that does
+            # not come back raises StreamUnavailable, which ends the detection
+            frames = self.video_stream.read(timeout=1.0)
+            if not frames:
+                if self.graphics:
+                    cv2.waitKey(1)  # the window stays responsive through the gap
+                continue
+            video_frame = frames[-1]
             frame = video_frame.data
             acquired_time = video_frame.timestamp
 

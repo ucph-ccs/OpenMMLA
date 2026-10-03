@@ -1,4 +1,6 @@
 import datetime
+import os
+import select
 import socket
 import struct
 import subprocess
@@ -24,9 +26,17 @@ from openmmla.utils.sockets import clear_socket_udp
 from openmmla.utils.threads import RaisingThread
 from .frame import AudioFrame
 from .stream_buffer import RingBuffer
-from .stream_receiver import StreamReceiver
+from .stream_receiver import StreamReceiver, StreamUnavailable, as_sentence
+from . import stream_receiver as receiver
 
 logger = get_logger(__name__)
+
+# how long one try at a network stream waits for ffmpeg's first chunk: an unreachable Stream Server costs
+# this, and an RTMP pull probes ~6 s before it decodes
+OPEN_TIMEOUT = 15.0
+# no byte from ffmpeg for this long: the pull stalled without ending (a relay stall, a server gone without
+# closing the connection), which ffmpeg itself never notices. As VideoStream's STALL_SECONDS
+STALL_SECONDS = 10.0
 
 # Define supported formats for our module.
 SUPPORTED_FORMATS = {
@@ -97,6 +107,12 @@ def parse_socket_header(data: bytes) -> float | None:
     return timestamp
 
 
+def _connection_of(frame) -> int | None:
+    """the connection a network stream's chunk came on; None for every other source, which is never cut"""
+    metadata = getattr(frame, 'metadata', None)
+    return metadata.get('connection') if isinstance(metadata, dict) else None
+
+
 def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
     """Write AudioFrame to a wave file. The default format is PCM_16.
 
@@ -111,6 +127,8 @@ def write_frame_to_wav(output_path: str, audio_frames: AudioFrame):
 
 class AudioStream(StreamReceiver):
     """Audio stream implementation for continuous audio data capture."""
+
+    default_log = logger
 
     def __init__(self, source: str, **kwargs):
         """Initialize audio stream.
@@ -136,6 +154,12 @@ class AudioStream(StreamReceiver):
             file_path (str, optional): Path to the audio file (required for 'file' source)
             timestamp_offset (float, optional): seconds added to every live chunk's stamp, the measured
                 delay of this stream as a negative number (default: 0)
+            connect_wait (float, optional): seconds a 'stream' or 'lsl' source that is not up yet is waited
+                for at start (default: 30); a microphone, a socket or a file is tried at once
+            reconnect_wait (float, optional): seconds a 'stream' or 'lsl' source that dropped is opened
+                again for before read() raises StreamUnavailable (default: 3600)
+            log (logging.Logger, optional): the caller's logger, for the waits and drops of the stream
+            abort_event (threading.Event, optional): the caller's stop, which ends a wait for the stream
         """
         super().__init__(**kwargs)
         self.source = normalize_source(source)
@@ -179,6 +203,11 @@ class AudioStream(StreamReceiver):
             self.url = self.require_kwarg(kwargs, 'url', "Stream source requires a 'url' parameter")
             self.rtmp_url = self.url  # name from before MediaMTX, kept for callers
             self.ffmpeg_proc: subprocess.Popen | None = None
+            self._first_chunk = None          # what the probe of a try read, handed to the buffer first
+            self._stream_ended = False        # ffmpeg's output ended, or stalled: the stream dropped
+            self._stalled_for = None          # seconds without a byte, when it stalled rather than ended
+            self._ffmpeg_tail = deque(maxlen=5)  # ffmpeg's last lines, the reason a try failed
+            self._proc_lock = threading.Lock()
 
         # LSL objects
         if self.source == 'lsl':
@@ -193,12 +222,19 @@ class AudioStream(StreamReceiver):
             self.file_sample_rate = None
             self._converted_file_path = None  # Track if we created a temporary converted file
 
+        # only a network stream is waited for: a microphone, a socket or a file is there or it is not
+        self._set_waits(kwargs)
+
         # Frame metadata
         self._frame_metadata = {
             'sample_rate': self.rate,
             'channels': self.channels if not self.channel_select else 1,
             'format': self.format
         }
+        # the network stream's chunks carry the number of their connection: read() never joins audio from
+        # both sides of a reconnect into one segment
+        self._connection = 0
+        self._connection_metadata = self._frame_metadata
 
         # Calculate buffer size in frames
         # never fewer than two slots: the tail of a one-slot ring never moves,
@@ -214,50 +250,83 @@ class AudioStream(StreamReceiver):
         self._receive_thread = None
 
     def start(self) -> None:
-        """Start the audio stream and initialize data capturing source."""
+        """Start the audio stream and initialize data capturing source. A network stream that is not up
+        yet is waited for, up to connect_wait seconds, and start() returns once ffmpeg delivered its first
+        chunk; one that does not come up raises StreamUnavailable. A stop() from another thread or the
+        abort_event (the ASR base's STOP) ends the wait, and start() then starts nothing."""
         self.stop()
-
-        if self.source == 'pyaudio':
-            self._initialize_pyaudio()
-        elif self.source == 'udp':
-            self._initialize_udp()
-        elif self.source == 'tcp':
-            self._initialize_tcp()
-        elif self.source == 'stream':
-            self._initialize_rtmp()
-        elif self.source == 'lsl':
-            self._initialize_lsl()
-        elif self.source == 'file':
-            self._initialize_file()
-            # File source doesn't need a receive thread - data is read on demand
-            logger.info(f"Audio stream started with source: {self.source}")
-            return
-        else:
-            raise ValueError(f"Unsupported source type: {self.source}")
-
+        # cleared before the opening, which may wait: a stop() from another thread then ends that wait
         self._stop_event.clear()
-        self._receive_thread = RaisingThread(target=self._receive_loop)
+        self.state, self.failure = 'connecting', None
+        try:
+            if self.source == 'pyaudio':
+                self._initialize_pyaudio()
+            elif self.source == 'udp':
+                self._initialize_udp()
+            elif self.source == 'tcp':
+                self._initialize_tcp()
+            elif self.source == 'stream':
+                self._initialize_rtmp()
+            elif self.source == 'lsl':
+                self._initialize_lsl()
+            elif self.source == 'file':
+                self._initialize_file()
+                # File source doesn't need a receive thread - data is read on demand
+                self.state = 'live'
+                self.log.info(f"Audio stream started with source: {self.source}")
+                return
+            else:
+                raise ValueError(f"Unsupported source type: {self.source}")
+        except Exception as e:
+            self.state, self.failure = 'failed', as_sentence(e)
+            raise
+        except BaseException:
+            self.state = 'stopped'
+            raise
+        if self._stopping():
+            # the base's STOP came during the wait: no error, nothing started
+            self._cleanup_source()
+            self.state = 'stopped'
+            return
+
+        self.state = 'live'
+        self._receive_thread = RaisingThread(target=self._receive_loop, name=f'audio-{self.source}')
         self._receive_thread.daemon = True
         self._receive_thread.start()
-
-        if self.source == 'stream':
-            time.sleep(3)
-
-        logger.info(f"Audio stream started with source: {self.source}")
+        self.log.info(f"Audio stream started with source: {self.source}")
 
     def stop(self) -> None:
         """Stop the audio stream and clean up resources."""
         self._stop_event.set()  # Signal the thread to stop
+        if self.source == 'stream':
+            # first: a receive thread blocked on ffmpeg's stdout (a stall MediaMTX has not ended) returns
+            # once ffmpeg is gone
+            self._cleanup_rtmp()
 
-        if self._receive_thread:
+        thread, self._receive_thread = self._receive_thread, None
+        if thread is not None and threading.current_thread() is not thread:
             try:
-                if threading.current_thread() != self._receive_thread:
-                    self._receive_thread.join(timeout=5)
+                thread.join(timeout=5)
             except Exception as e:
-                logger.warning(f"During thread stopping, caught: {e}", exc_info=True)
-            finally:
-                self._receive_thread = None
+                self.log.warning(f"During thread stopping, caught: {e}", exc_info=True)
+            if thread.is_alive():
+                # still inside a read of its source, which must not be closed under it: the thread closes
+                # it itself when that read returns
+                self.log.warning(f"{self._what()} is still in a read; it is closed when that read returns.")
+                self._gap_summary(self._what())
+                self._last_read_pos = -1
+                if self.state != 'failed':
+                    self.state = 'stopped'
+                return
 
+        self._cleanup_source()
+        self._gap_summary(self._what())
+        self._last_read_pos = -1
+        if self.state != 'failed':
+            self.state = 'stopped'
+
+    def _cleanup_source(self) -> None:
+        """release what the source holds; safe to call again"""
         if self.source == 'pyaudio':
             self._cleanup_pyaudio()
         elif self.source in ['udp', 'tcp']:
@@ -269,7 +338,17 @@ class AudioStream(StreamReceiver):
         elif self.source == 'file':
             self._cleanup_file()
 
-        self._last_read_pos = -1
+    def _what(self) -> str:
+        """the stream, as the log lines name it"""
+        if self.source == 'stream':
+            return f"Audio stream {self.url}"
+        if self.source == 'lsl':
+            return f"LSL stream '{self.lsl_name}'"
+        if self.source in ('udp', 'tcp'):
+            return f"Audio {self.source} source {self.host}:{self.port}"
+        if self.source == 'pyaudio':
+            return f"Microphone {self.input_device_index}"
+        return f"Audio file {getattr(self, 'file_path', '')}"
 
     def read(self, duration: float, target_rate: int | None = None, timeout: float = 5.0,
              latest: bool = False, start_time: float = 0.0) -> AudioFrame | None:
@@ -288,7 +367,11 @@ class AudioStream(StreamReceiver):
         # File source - direct read without buffering
         if self.source == 'file':
             return self._read_from_file(start_time, duration, target_rate)
-        
+
+        # a stream that did not come back, or a source that stopped for good: the base ends its run on it
+        if self.state == 'failed':
+            raise StreamUnavailable(self.failure)
+
         # Other sources
         frames_needed = int(duration * self.rate / self.chunk_size)
         total_frames = []
@@ -305,8 +388,12 @@ class AudioStream(StreamReceiver):
                 continue
 
             if current_tail == self._last_read_pos:
+                if self.state == 'failed':
+                    raise StreamUnavailable(self.failure)
                 if time.time() - start_time_actual > timeout:
-                    logger.warning("Timeout reached while waiting for frames.")
+                    # while the stream is opened again it says so itself; a live one that falls silent is
+                    # worth a line
+                    self._say_quietly_unless_live("Timeout reached while waiting for frames.")
                     break
                 time.sleep(1)
                 continue
@@ -317,11 +404,25 @@ class AudioStream(StreamReceiver):
                 if available_frames >= remaining_frames else current_tail
 
             new_frames = self.buffer.get(start_pos=self._last_read_pos, end_pos=end_pos)
+            first = (total_frames or new_frames)[0] if (total_frames or new_frames) else None
+            connection = _connection_of(first)
+            cut = next((i for i, frame in enumerate(new_frames) if _connection_of(frame) != connection), None)
+            if cut is not None:
+                # audio from before a reconnect and after it is never one segment: the stamp of its first
+                # chunk would be put on audio that came a gap later. The rest is the next read's
+                total_frames.extend(new_frames[:cut])
+                self._last_read_pos = (self._last_read_pos + cut) % self.buffer.size
+                break
             total_frames.extend(new_frames)
             self._last_read_pos = end_pos
             start_time_actual = time.time()
 
         return self._process_frames(total_frames, target_rate)
+
+    def _say_quietly_unless_live(self, message: str) -> None:
+        """a warning while the stream is live; a debug line while it is opened again (or not started),
+        which its own lines already say, so that a long outage does not print it every few seconds"""
+        (self.log.warning if self.state == 'live' else self.log.debug)(message)
 
     def _process_frames(self, frames: list[AudioFrame], target_rate: int | None) -> AudioFrame | None:
         """Process collected frames and apply resampling if needed.
@@ -334,7 +435,7 @@ class AudioStream(StreamReceiver):
             AudioFrame: Processed AudioFrame or None if no frames available.
         """
         if not frames:
-            logger.warning("No frames collected within timeout period.")
+            self._say_quietly_unless_live("No frames collected within timeout period.")
             return None
 
         audio_data = np.concatenate([frame.data for frame in frames])
@@ -353,6 +454,11 @@ class AudioStream(StreamReceiver):
             'channels': frames[0].channels,
             'format': frames[0].format,
         }
+        connection = _connection_of(frames[0])
+        if connection is not None:
+            # the segment's connection goes with it (read() never joins two): the base then sees a reconnect
+            # between two segments, and closes its open chunk there
+            metadata['connection'] = connection
 
         return AudioFrame(timestamp=start_timestamp, data=audio_data, metadata=metadata)
 
@@ -487,17 +593,36 @@ class AudioStream(StreamReceiver):
         else:
             logger.info(f"Successfully initialized TCP audio stream on {self.host}:{self.port}")
 
-    def _initialize_rtmp(self, max_retries: int = 3) -> None:
-        """Initialize a network stream (rtmp/rtsp/srt) using FFmpeg.
+    def _initialize_rtmp(self, wait: float | None = None, after_drop: bool = False) -> None:
+        """Open a network stream (rtmp/rtsp/srt): an ffmpeg pulls the URL and writes raw PCM on stdout,
+        with read-ahead buffering off to keep latency low. It counts as open once ffmpeg wrote a first
+        chunk (kept for the buffer); one that ends at once (404 while nobody publishes on the path) is
+        tried again every RETRY_INTERVAL s for up to `wait` seconds (connect_wait at start, reconnect_wait
+        after a drop), never spawned in a loop. Returns without ffmpeg when a stop came meanwhile; raises
+        StreamUnavailable, with ffmpeg's reason, when the stream did not come up."""
+        wait = self.connect_wait if wait is None else wait
+        self._ffmpeg_tail.clear()
+        if self._wait_for(self._open_rtmp_once, self._what(), wait):
+            self._connection += 1
+            # every chunk of this connection carries its number: read() never joins audio from both sides
+            # of a gap
+            self._connection_metadata = dict(self._frame_metadata, connection=self._connection)
+            self._stream_ended = False
+            self.log.info(f"Successfully initialized audio stream from {self.url}")
+            return
+        if self._stopping():
+            return  # a stop came meanwhile: the caller starts nothing
+        said = f" ffmpeg said: {self._ffmpeg_tail[-1]}" if self._ffmpeg_tail else ""
+        came = 'come back' if after_drop else 'come up'
+        raise StreamUnavailable(f"Audio stream {self.url} did not {came} within {wait:g} s.{said} Is its stream "
+                                f"running (Streams tab, Status and Stream Server columns)?")
 
-        Spawns an FFmpeg process that connects to the stream URL and outputs raw
-        PCM audio on stdout, with read-ahead buffering off to keep latency low.
-        """
-        # Determine the correct format and codec based on self.format.
+    def _ffmpeg_command(self) -> list[str]:
         fmt = RTMP_FORMATS[self.format]
         codec = RTMP_CODEC[self.format]
-
-        command = ['ffmpeg', '-fflags', 'nobuffer', '-flags', 'low_delay']
+        # errors only on stderr: it is read for the reason a try failed, never shown line by line
+        command = ['ffmpeg', '-hide_banner', '-nostats', '-loglevel', 'error',
+                   '-fflags', 'nobuffer', '-flags', 'low_delay']
         if self.url.startswith('rtsp://'):
             command += ['-rtsp_transport', 'tcp']  # no packet loss on Wi-Fi
         command += [
@@ -508,41 +633,116 @@ class AudioStream(StreamReceiver):
             '-ac', str(self.channels),
             '-'  # Output to stdout
         ]
-        try:
-            self.ffmpeg_proc = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-            )
-            if self.ffmpeg_proc.stdout is None:
-                if max_retries > 0:
-                    logger.warning("Failed to capture stdout from ffmpeg process, retrying...")
-                    self._cleanup_rtmp()
-                    self._initialize_rtmp(max_retries=max_retries - 1)
-                else:
-                    raise RuntimeError(f"Failed to initialize audio stream from {self.url}")
-            else:
-                logger.info(f"Successfully initialized audio stream from {self.url}")
-        except Exception as e:
-            raise RuntimeError(f"Error initializing stream: {e}") from e
+        return command
 
-    def _initialize_lsl(self, max_retries: int = 3):
-        """Initialize lab streaming layer stream."""
+    def _open_rtmp_once(self) -> bool:
+        """one try: ffmpeg is started and given OPEN_TIMEOUT seconds for its first chunk. False leaves no
+        ffmpeg behind (it is ended and waited for); a missing ffmpeg raises at once, there is nothing to
+        wait for"""
+        self._cleanup_rtmp()
+        try:
+            # unbuffered: no byte waits in a reader's buffer where select() cannot see it, so a wait on the
+            # pipe is a wait for ffmpeg (_pipe_read)
+            proc = subprocess.Popen(self._ffmpeg_command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    bufsize=0)
+        except FileNotFoundError as e:
+            raise RuntimeError("ffmpeg is not installed on this machine: the base decodes network audio "
+                               "streams with it.") from e
+        with self._proc_lock:
+            self.ffmpeg_proc = proc
+        self._drain_stderr(proc)
+        expected = self.chunk_size * self.channels * self.sample_width
+        first = b''
+        try:
+            if not self._stopping():  # else stopped while it started: ended below
+                # a select() bounds a try at an unreachable server: ffmpeg's own -timeout means 'listen' for
+                # RTSP in ffmpeg 4. The base's STOP ends this wait too
+                first = self._pipe_read(proc, expected, OPEN_TIMEOUT, self._stopping) or b''
+        except (OSError, ValueError) as e:
+            # a stop() ended ffmpeg and closed its pipe under this read
+            self.log.debug(f"Reading ffmpeg's first chunk ended: {e}")
+        if len(first) == expected and not self._stopping():
+            self._first_chunk = first
+            return True
+        self._cleanup_rtmp()
+        return False
+
+    def _pipe_read(self, proc, size: int, timeout: float, stopping=None) -> bytes | None:
+        """`size` bytes of ffmpeg's stdout, which is unbuffered (a read returns what the pipe holds, so the
+        pieces are joined here): fewer at its end (ffmpeg exited), None when no byte came for `timeout`
+        seconds or `stopping()` came meanwhile (default: stop()). Each wait is a select() in slices of
+        0.5 s; on Windows, where select() takes no pipes, the reads block as before and nothing stalls"""
+        stopping = stopping or self._stop_event.is_set
+        data = b''
+        while len(data) < size:
+            if os.name != 'nt' and not self._readable(proc.stdout, timeout, stopping):
+                return None
+            piece = proc.stdout.read(size - len(data))
+            if not piece:
+                break  # its end: ffmpeg exited
+            data += piece
+        return data
+
+    @staticmethod
+    def _readable(pipe, timeout: float, stopping) -> bool:
+        """wait up to `timeout` seconds for the pipe to be readable (data, or its end), in slices so that
+        a stop ends the wait"""
+        deadline = time.monotonic() + timeout
+        while not stopping():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            ready, _, _ = select.select([pipe], [], [], min(0.5, remaining))
+            if ready:
+                return True
+        return False
+
+    def _drain_stderr(self, proc) -> None:
+        """keep ffmpeg's last lines (why it could not open), and never let it block on a full pipe over
+        hours of decode errors"""
+        tail = self._ffmpeg_tail
+
+        def drain():
+            try:
+                for line in iter(proc.stderr.readline, b''):
+                    text = line.decode(errors='replace').strip()
+                    if text:
+                        tail.append(text)
+            except (OSError, ValueError):
+                pass  # the pipe was closed: ffmpeg is gone
+
+        proc.stderr_drain = threading.Thread(target=drain, name='ffmpeg-stderr', daemon=True)
+        proc.stderr_drain.start()
+
+    def _initialize_lsl(self, wait: float | None = None, after_drop: bool = False):
+        """Connect to the LSL stream, waiting for its outlet up to `wait` seconds (connect_wait at start,
+        reconnect_wait after a drop). Returns without an inlet when a stop came meanwhile; raises
+        StreamUnavailable when no outlet of that name showed up."""
         if resolve_byprop is None or StreamInlet is None or local_clock is None:
             raise ImportError(
                 "pylsl package is not installed. Please install it with 'pip install pylsl' to use LSL features."
             )
 
-        streams = resolve_byprop('name', self.lsl_name)
-        if not streams:
-            if max_retries > 0:
-                logger.warning(f"No LSL stream found with name: {self.lsl_name}, retrying...")
-                self._cleanup_lsl()
-                self._initialize_lsl(max_retries=max_retries - 1)
-            else:
-                raise RuntimeError(f"Failed to initialize LSL audio stream with inlet: {self.lsl_name}")
-        else:
+        def open_once() -> bool:
+            self._cleanup_lsl()
+            # the resolve itself waits, a retry interval long
+            streams = resolve_byprop('name', self.lsl_name, timeout=receiver.RETRY_INTERVAL)
+            if not streams:
+                return False
             self.lsl_inlet = StreamInlet(streams[0])
             self.lsl_offset = time.time() - local_clock()
-            logger.info(f"Successfully initialized LSL audio stream with inlet: {self.lsl_inlet}")
+            return True
+
+        wait = self.connect_wait if wait is None else wait
+        if self._wait_for(open_once, self._what(), wait, pause=False):
+            self.log.info(f"Successfully initialized LSL audio stream with inlet: {self.lsl_inlet}")
+            return
+        if self._stopping():
+            self._cleanup_lsl()
+            return
+        came = 'come back' if after_drop else 'come up'
+        raise StreamUnavailable(f"LSL stream '{self.lsl_name}' did not {came} within {wait:g} s: no outlet of "
+                                f"that name was found on the network.")
 
     def _initialize_file(self):
         """Initialize file source."""
@@ -602,12 +802,14 @@ class AudioStream(StreamReceiver):
         return converted_path
 
     def _cleanup_pyaudio(self) -> None:
-        """Clean up PyAudio resources."""
-        if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
-        if self.p:
-            self.p.terminate()
+        """Clean up PyAudio resources; safe to call again."""
+        stream, self.stream = self.stream, None
+        p, self.p = self.p, None
+        if stream:
+            stream.stop_stream()
+            stream.close()
+        if p:
+            p.terminate()
 
     def _cleanup_socket(self) -> None:
         """Clean up socket resources."""
@@ -620,11 +822,30 @@ class AudioStream(StreamReceiver):
         self._reset_socket_framing()
 
     def _cleanup_rtmp(self) -> None:
-        """Clean up RTMP (FFmpeg) process."""
-        if self.ffmpeg_proc:
-            self.ffmpeg_proc.terminate()
-            self.ffmpeg_proc = None
-            logger.info("RTMP stream process terminated.")
+        """End the stream's ffmpeg and wait for it (no zombie per try), then close its pipes; safe to call
+        again and from another thread."""
+        with self._proc_lock:
+            proc, self.ffmpeg_proc = self.ffmpeg_proc, None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        # ffmpeg is gone, so its stderr ends: its last lines (the reason a try failed) are read in full
+        drain = getattr(proc, 'stderr_drain', None)
+        if drain is not None and drain is not threading.current_thread():
+            drain.join(timeout=1)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except Exception:
+                pass
+        self.log.debug("The ffmpeg of the audio stream ended.")
 
     def _cleanup_lsl(self):
         """Clean up lab streaming layer resources."""
@@ -651,38 +872,90 @@ class AudioStream(StreamReceiver):
                 self._converted_file_path = None
 
     def _receive_loop(self) -> None:
-        """Continuously receive data and store in buffer."""
+        """Continuously receive data and store in buffer. A network stream that drops is opened again
+        (_reconnect); this loop never raises: a fault reaches the base through read()."""
         failure_count = 0
-        while not self._stop_event.is_set():
-            try:
-                frame = self._stamped(self._read_chunk())
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    # pushed even when a stop came during the read
+                    frame = self._stamped(self._read_chunk())
+                except RuntimeError:
+                    if self._stop_event.is_set():
+                        break  # stop() ended the source under the read
+                    if self.source != 'stream':
+                        raise
+                    frame, self._stream_ended = None, True
                 if frame:
                     self.buffer.push(frame)
                     failure_count = 0
-                else:
-                    failure_count += 1
-                    if failure_count >= 10:
-                        logger.error("10 consecutive frame read failures. Reinitializing stream.")
-                        if self.source == 'pyaudio':
-                            self._cleanup_pyaudio()
-                            self._initialize_pyaudio()
-                        elif self.source == 'udp':
-                            self._cleanup_socket()
-                            self._initialize_udp()
-                        elif self.source == 'tcp':
-                            self._cleanup_socket()
-                            self._initialize_tcp()
-                        elif self.source == 'stream':
-                            self._cleanup_rtmp()
-                            self._initialize_rtmp()
-                        elif self.source == 'lsl':
-                            self._cleanup_lsl()
-                            self._initialize_lsl()
-                        failure_count = 0
+                    continue
+                if self._stop_event.is_set():
+                    break  # stop() ended the source under the read: no drop
+                if self.source == 'stream' and self._stream_ended:
+                    # ffmpeg's output ended, or stalled: the stream dropped. No ten tries, a pipe at its end
+                    # answers at once
+                    stalled, self._stalled_for = self._stalled_for, None
+                    if not self._reconnect(stalled):
+                        break
+                    continue
+                failure_count += 1
+                if failure_count < 10:
+                    continue
+                failure_count = 0
+                if self.source == 'lsl':
+                    if not self._reconnect():
+                        break
+                    continue
+                self.log.error("10 consecutive frame read failures. Reinitializing stream.")
+                if self.source == 'pyaudio':
+                    self._cleanup_pyaudio()
+                    self._initialize_pyaudio()
+                elif self.source == 'udp':
+                    self._cleanup_socket()
+                    self._initialize_udp()
+                elif self.source == 'tcp':
+                    self._cleanup_socket()
+                    self._initialize_tcp()
+        except Exception as e:
+            # was: logged and stopped, after which read() returned None and the ASR base restarted its run
+            # into a wait for a START that had been sent already
+            self.state, self.failure = 'failed', as_sentence(f"{self._what()} stopped: {e}")
+            self.log.error(self.failure)
+        finally:
+            if self._stop_event.is_set() or self.state == 'failed':
+                # this thread is the only one using the source now (stop() leaves it alone while it runs)
+                self._cleanup_source()
 
-            except Exception as e:
-                logger.error(f"Fatal error in receive loop: {e}")
-                self.stop()
+    def _reconnect(self, stalled: float | None = None) -> bool:
+        """The stream dropped (ffmpeg's output ended: its publisher went, and MediaMTX ended the readers of
+        its path; or no byte came for `stalled` seconds), or an LSL outlet fell silent. It is opened again
+        while the base gets no audio: the audio of the gap is missing and none is made up. False when it did
+        not come back (read() raises from then on) or a stop came."""
+        # a stall began when the last audio came
+        gap = [time.time() - (stalled or 0.0), None]
+        self.gaps.append(gap)
+        self.state = 'reconnecting'
+        why = f"stalled: no audio came for {stalled:g} s" if stalled else "ended"
+        self.log.warning(f"{self._what()} {why}. Opening it again for up to {self.reconnect_wait:g} s; its "
+                         f"audio until then is missing.")
+        try:
+            if self.source == 'stream':
+                self._initialize_rtmp(wait=self.reconnect_wait, after_drop=True)
+            else:
+                self._initialize_lsl(wait=self.reconnect_wait, after_drop=True)
+        except Exception as e:
+            self.state, self.failure = 'failed', as_sentence(e)
+            self.log.error(f"{self.failure} The base ends its run on this.")
+            return False
+        if self._stopping():
+            return False
+        gap[1] = time.time()
+        self.state = 'live'
+        # the stamps may come from elsewhere now: said again
+        self._stamp_source_logged = False
+        self.log.info(f"{self._what()} is back after {gap[1] - gap[0]:.1f} s; the audio of that gap is missing.")
+        return True
 
     def _reset_socket_framing(self) -> None:
         """Forget the sniffed packet format and any partially received chunk."""
@@ -827,13 +1100,26 @@ class AudioStream(StreamReceiver):
             elif self.source in ['udp', 'tcp']:
                 return self._read_socket_chunk()
             elif self.source == 'stream':
-                # for ffmpeg-decoded streams, expected bytes is the raw audio data only
+                # for ffmpeg-decoded streams, expected bytes is the raw audio data only; the chunk the
+                # opening read comes first
                 expected_bytes = self.chunk_size * self.channels * self.sample_width
-                data = self.ffmpeg_proc.stdout.read(expected_bytes)
-                if not data or len(data) < expected_bytes:
+                data, self._first_chunk = self._first_chunk, None
+                if data is None:
+                    data = self._pipe_read(self.ffmpeg_proc, expected_bytes, STALL_SECONDS)
+                if data is None:
+                    if self._stop_event.is_set():
+                        return None  # stop() came while it waited
+                    # no byte for STALL_SECONDS and no end either: ffmpeg would wait for ever. It is ended, and
+                    # the stream opened again as after a drop
+                    self._stalled_for = STALL_SECONDS
+                    self._stream_ended = True
+                    self._cleanup_rtmp()
+                    return None
+                if len(data) < expected_bytes:
+                    self._stream_ended = True  # a pipe read comes back short only at its end: ffmpeg exited
                     return None
                 audio_data = np.frombuffer(data, dtype=self.dtype)
-                timestamp = time.time()
+                return AudioFrame(data=audio_data, timestamp=time.time(), metadata=self._connection_metadata)
             elif self.source == 'lsl':
                 chunk, timestamps = self.lsl_inlet.pull_chunk(timeout=1.0, max_samples=self.chunk_size)
                 if not chunk:
