@@ -4399,7 +4399,9 @@ def _vllm_serve_command(config: dict | None = None, *, mask: bool = False) -> st
 # before it, where its program was already running: the command was read as
 # that program's input and the component never started, while the log said it
 # had launched. A shell still reading its startup files (conda, oh-my-zsh)
-# drops what is typed into it, so each one is given until it is idle. When no
+# keeps no more than 1024 bytes of what is typed into it, so what it is typed
+# is a short line (_mac_command_files), and each shell after the first is
+# also given until it is idle. When no
 # new shell comes -- no new tab, or System Events not allowed to press Cmd-T
 # -- the component gets a window of its own instead of a busy tab, and the
 # commands that got nowhere are named in the log.
@@ -4534,6 +4536,68 @@ end joinText
 # two cards started at once would trade keystrokes and new shells, so their
 # windows are opened one launch at a time
 _MAC_TABS_LOCK = threading.Lock()
+
+# a line typed into a shell that has not yet started its line editor waits in
+# the terminal's input queue, which macOS caps at 1024 bytes (MAX_CANON): the
+# rest of a longer line, its Enter with it, is dropped without a word, and the
+# shell then shows the cut line at its prompt and runs nothing. A remote
+# component's command (sshpass, the ssh options, conda's set-up, the
+# pipeline's flags) runs past that, and the first window of a launch is typed
+# into while its shell is still starting: an IPS base sat unstarted that way
+# while the four started after it ran. So a shell is typed a short line that
+# sources the command from a file of its own, only this user can read; the SSH
+# password in the command stays off the screen and out of the shell's history.
+# The file stays a day, so Up and Enter in its window still start that one
+# component again once it has ended
+_MAC_COMMAND_PREFIX = "openmmla-launch-"
+# seconds after which a launch's files are swept up, by the next launch
+_MAC_COMMAND_MAX_AGE = 24 * 3600.0
+# a component's window is named as soon as its shell runs it ("IPS Base ·
+# base 1 @ mac-01") and opens on a banner in its pipeline's colour: the program
+# names the window itself only once its imports and set-up are done, which on
+# mac-01 took 30 to 80 s, and the tabs of a window group show the running
+# process ("… ▸ ssh"), not the name. Terminal has no colour for a title bar
+_MAC_BANNER_COLOURS = (("asr", "1;97;44"), ("ips", "1;97;42"), ("vfa", "1;97;45"),
+                       ("mllm", "1;97;46"), ("collection", "1;30;43"))
+_MAC_BANNER_DEFAULT = "1;97;100"
+
+
+def _mac_window_title(heading: str, label: str, where: str = "") -> str:
+    title = f"{heading} · {label}" if heading else label
+    return f"{title} @ {where}" if where else title
+
+
+def _mac_title_lines(title: str, heading: str) -> str:
+    """the lines that name a component's window and print its banner."""
+    colour = next((code for key, code in _MAC_BANNER_COLOURS if heading.lower().startswith(key)),
+                  _MAC_BANNER_DEFAULT)
+    quoted = shlex.quote(title)
+    return (f"printf '\\033]0;%s\\007' {quoted}\n"
+            f"printf '\\033[{colour}m %s \\033[0m\\n' {quoted}\n")
+
+
+def _mac_command_files(labels: list[str], cmds: list[str], heading: str = "", where: str = "") -> list[str]:
+    """write each command to a file only this user can read and return their
+    paths, one per command. `heading` (the card, "IPS Base") and `where` (the
+    host it runs on) name the windows."""
+    root = tempfile.gettempdir()
+    for entry in os.listdir(root):
+        stale = os.path.join(root, entry)
+        try:
+            if entry.startswith(_MAC_COMMAND_PREFIX) and time.time() - os.stat(stale).st_mtime > _MAC_COMMAND_MAX_AGE:
+                shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            pass
+    folder = tempfile.mkdtemp(prefix=_MAC_COMMAND_PREFIX)
+    paths = []
+    for index, (label, cmd) in enumerate(zip(labels, cmds), start=1):
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", label).strip("-.") or "component"
+        path = os.path.join(folder, f"{index:02d}-{name}.sh")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{_mac_title_lines(_mac_window_title(heading, label, where), heading)}{cmd}\n")
+        paths.append(path)
+    return paths
 
 
 class ServicePanel(Widget):
@@ -15112,7 +15176,7 @@ class ServicePanel(Widget):
             started.append(_host_label(host))
             recorded.append((host, params, self._collection_local_path(params, host) if host == "local"
                              else self._collection_remote_path(get_profile_by_name(host), params)))
-        opened = bool(tab_cmds) and self._open_collection_terminal(tab_cmds)
+        opened = bool(tab_cmds) and self._open_collection_terminal(tab_cmds, svc.display_name)
         if opened:
             output_root = str(prepared.get("--output-root") or "artifacts")
             self._log(f"[green]Collection recording started on {', '.join(started)}; files are written under "
@@ -15383,7 +15447,7 @@ class ServicePanel(Widget):
             self._log(rich_escape(f"    [{label}] {cmd.split(' && ')[-1]}"))
 
         if sys.platform == "darwin":
-            self._open_tabs_mac(tab_cmds)
+            self._open_tabs_mac(tab_cmds, svc.display_name)
         elif self._is_ubuntu():
             self._open_tabs_gnome(tab_cmds)
         elif self._is_raspberry_pi():
@@ -15394,9 +15458,10 @@ class ServicePanel(Widget):
 
         self._log(f"[green]{svc.display_name} launched in new terminal window.[/green]")
 
-    def _open_collection_terminal(self, tab_cmds: list[tuple[str, str]]) -> bool:
+    def _open_collection_terminal(self, tab_cmds: list[tuple[str, str]], heading: str = "",
+                                  where: str = "") -> bool:
         if sys.platform == "darwin":
-            self._open_tabs_mac(tab_cmds)
+            self._open_tabs_mac(tab_cmds, heading, where)
             return True
         if self._is_ubuntu():
             self._open_tabs_gnome(tab_cmds)
@@ -15407,14 +15472,15 @@ class ServicePanel(Widget):
         self._log("[yellow]Unsupported OS for terminal tab launch.[/yellow]")
         return False
 
-    def _open_tabs_mac(self, tab_cmds: list[tuple[str, str]]) -> None:
+    def _open_tabs_mac(self, tab_cmds: list[tuple[str, str]], heading: str = "", where: str = "") -> None:
         """open a Terminal.app tab or window per component on macOS.
 
-        The commands go to osascript as arguments (_MAC_TABS_SCRIPT), never
-        quoted into the script itself, and the launch runs in a thread of its
-        own: what it opens takes a few seconds, as a new shell is given the
-        time its startup files need before it is typed into, and the launcher
-        stays live meanwhile."""
+        Each command goes into a file of its own (_mac_command_files), and
+        the short line that sources it goes to osascript as an argument
+        (_MAC_TABS_SCRIPT), never quoted into the script itself. The launch
+        runs in a thread of its own: what it opens takes a few seconds, as a
+        new shell is given the time its startup files need before it is typed
+        into, and the launcher stays live meanwhile."""
         if not tab_cmds:
             return
         app = None
@@ -15424,11 +15490,11 @@ class ServicePanel(Widget):
             pass
         threading.Thread(
             target=self._run_mac_tabs,
-            args=([label for label, _ in tab_cmds], [cmd for _, cmd in tab_cmds], app),
+            args=([label for label, _ in tab_cmds], [cmd for _, cmd in tab_cmds], app, heading, where),
             daemon=True,
         ).start()
 
-    def _run_mac_tabs(self, labels: list[str], cmds: list[str], app) -> None:
+    def _run_mac_tabs(self, labels: list[str], cmds: list[str], app, heading: str = "", where: str = "") -> None:
         """run the window opener and say in the log what got nowhere."""
         def report(message: str) -> None:
             try:
@@ -15438,8 +15504,9 @@ class ServicePanel(Widget):
 
         with _MAC_TABS_LOCK:
             try:
+                paths = _mac_command_files(labels, cmds, heading, where)
                 done = subprocess.run(
-                    ["osascript", "-", *cmds],
+                    ["osascript", "-", *(f". {shlex.quote(path)}" for path in paths)],
                     input=_MAC_TABS_SCRIPT, capture_output=True, text=True,
                     timeout=60 + 20 * len(cmds),
                 )
@@ -15454,6 +15521,12 @@ class ServicePanel(Widget):
                    f"{detail[-1] if detail else 'osascript failed'}[/red]")
         lost = [label for i, label in enumerate(labels)
                 if i >= len(places) or places[i] == "failed"]
+        for path, place in zip(paths, places):
+            if place == "failed":
+                try:
+                    os.remove(path)  # no shell was handed it; an unreported one is left to the sweep
+                except OSError:
+                    pass
         if lost:
             report(f"[red]No window ran: {', '.join(lost)} — start them again.[/red]")
         elif places[1:].count("window") == len(places) - 1 and len(places) > 1:
@@ -15826,7 +15899,7 @@ class ServicePanel(Widget):
                         f"    [{label}] ssh {profile.ssh_destination()} "
                         f"{command.split(' bash -lc ', 1)[-1]}"
                     ))
-                if tab_cmds and self._open_collection_terminal(tab_cmds):
+                if tab_cmds and self._open_collection_terminal(tab_cmds, svc.display_name, profile_name):
                     self._log(f"[green]{svc.display_name} launched in SSH terminal(s).[/green]")
                 else:
                     self._log("[yellow]No remote components launched.[/yellow]")
@@ -15887,7 +15960,7 @@ class ServicePanel(Widget):
                 ssh_cmd = self._remote_terminal_command(profile, cmd)
                 masked_cmd = _vllm_serve_command(config, mask=True)
                 self._log(f"  Remote terminal: ssh {profile.ssh_destination()} {masked_cmd}")
-                if self._open_collection_terminal([(svc.name, ssh_cmd)]):
+                if self._open_collection_terminal([(svc.name, ssh_cmd)], svc.display_name, profile_name):
                     self._log(f"  Command: {masked_cmd}")
                     self._log(f"[green]{svc.display_name} tmux session opened remotely on port {config['port']}.[/green]")
                 else:
