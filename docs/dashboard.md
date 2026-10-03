@@ -26,6 +26,8 @@ browser ──HTTP──> the same Flask app on its media ports 5051, 5052   rec
     pip install -e '.[uber-server]'
     ```
 
+    The web process, the worker and `python dashboard.py` check at startup that the environment has every package of the extra they import (Flask, Celery with Redis, gevent, influxdb-client, pymongo, PyYAML, cryptography), and stop with the names of the missing ones otherwise: run the `pip install` above in that environment again.
+
 - InfluxDB, which holds the measurements, and Redis, the queue of the report worker. MongoDB is optional: with it the dashboard knows each session's cameras, microphones, streams, IPS camera placement and software versions, and lists sessions that have no measurements yet. MediaMTX is optional and only needed for live video. All four are described in [System Services](system_services.md).
 
 ## Configuration
@@ -62,7 +64,7 @@ A value that is neither yes nor no (`true`, `false`, `yes`, `no`, `on`, `off`, `
 
 The backend listens on port 5050 by default. Change it under **System Settings → Connections → Dashboard (Flask)**; the TUI passes it to `make flask` as `DASHBOARD_PORT` and the Status tab probes that host and port. `make flask` also binds the next two ports, 5051 and 5052, on the same addresses: the **media ports**, where the same app answers and from which the Live page loads the recorded videos and sound of a replay, so they do not take the browser's connections to the dashboard's port, and two of them carry more videos at once than one (see [Recorded video in a replay](#camera-tiles-and-live-video)). They follow the Dashboard port (a Dashboard section on 6000 opens 6001 and 6002); `make flask DASHBOARD_MEDIA_PORTS="<port> <port>"` picks others, `DASHBOARD_MEDIA_PORT=<port>` a single one, and `DASHBOARD_MEDIA_PORTS=` (empty), `DASHBOARD_MEDIA_PORT=` or `0` opens none, which leaves the page loading the files from the dashboard's port, fewer at once. The frontend needs no configuration: it talks to the backend over same-origin URLs, and the recordings route tells it the media ports.
 
-Environment variables, all optional. Set the first four the same way for the web process and the worker:
+Environment variables, all optional. Set the first four, and `DASHBOARD_ARTIFACTS_DIR`, the same way for the web process and the worker:
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -74,7 +76,7 @@ Environment variables, all optional. Set the first four the same way for the web
 | `DASHBOARD_MEDIA_PORTS` | the two ports after `DASHBOARD_PORT` (`5051 5052`) | the media ports of `make flask` and of `python dashboard.py serve`, spaces or commas between them, from which the Live page loads a replay's recorded videos and sound; `0` opens none, and so does an empty value for `make flask` (`python dashboard.py serve` takes an empty value as unset and opens its defaults, so there use `0` or `--media-ports 0`). `make flask` passes them to gunicorn (as `5051,5052`), which binds them beside `DASHBOARD_PORT` |
 | `DASHBOARD_MEDIA_PORT` | unset | one media port instead of `DASHBOARD_MEDIA_PORTS` (which wins when both are set; for `python dashboard.py serve`, only when it is not empty); `0` opens none, and so does an empty value for `make flask` |
 | `DASHBOARD_RAW_MEDIA` | unset | `0` keeps the [raw recordings](#raw-recordings) off the dashboard and `1` offers them, whatever `Exports.raw_media` says |
-| `DASHBOARD_ARTIFACTS_DIR` | `artifacts/` of the repository | where the dashboard looks for the sessions' raw recordings |
+| `DASHBOARD_ARTIFACTS_DIR` | `artifacts/` of the repository | where the dashboard looks for the sessions' folders: their raw recordings, and the `manifest.json` whose declared pupils the attention and timeline parts use |
 | `OPENMMLA_SYSTEM_SERVICES_CONFIG` | `config/system_services.yml` of the repository | another System Settings file to merge into `config.yml` |
 
 ## Running
@@ -86,6 +88,8 @@ cd pipelines/uber-server
 make flask DASHBOARD_PORT=5050   # gunicorn with the gevent worker on 5050 and the media ports 5051 and 5052, in a tmux session named flask
 make celery                      # the report worker, in a tmux session named celery
 ```
+
+Both run through `pipelines/uber-server/restart_on_failure.sh`, which starts gunicorn or the worker again five seconds after it exits with an error, at most three times in a row (a run that lasted a minute starts the count again), and leaves it stopped after Ctrl+C, which their Stop sends. What their panes show is also written to `pipelines/uber-server/logs/flask.log` and `logs/celery.log`, which keep what a crashed process said after its tmux session is gone; a log past 10 MB becomes `flask.log.1` (or `celery.log.1`) at the next start.
 
 Then open `http://localhost:5050` on the server, or `http://<dashboard-host>:5050` from any device on the network. Keep gunicorn at one worker (`-w 1`): the report job bookkeeping and the [shared live feeds](#live-data-stream) live in that process, and a second worker would keep its own.
 
@@ -120,14 +124,24 @@ server-01 runs the dashboard from its own checkout, on the machine that holds Re
 
     The new worker consumes the `mmla-dashboard` queue. A worker started from older dashboard code consumes the default `celery` queue and never takes these jobs; while only such a worker runs, `auto` mode sees no worker on the queue and runs the jobs in local processes, so nothing waits on it, but restart it all the same. The explorer's **Report worker** chip reads `ok` once the new worker answers (within 30 s) and `local` while jobs run in the web server's processes.
 
-3. Optionally compute every session's report ahead of the first visit. The light jobs take seconds per session; the video jobs take longer, mostly reading the video features out of InfluxDB, and run faster on server-01 itself than over the network. Run it in tmux, and not beside another job that uses every core:
+3. Have the web process and the worker come back after a reboot (once). From `pipelines/uber-server`, in a shell where conda is on the PATH (as in step 1), add a line to the login user's crontab (Linux; `make no-autostart` takes it out again):
+
+    ```bash
+    make autostart DASHBOARD_PORT=5050
+    ```
+
+    After every reboot cron runs `make boot` in `pipelines/uber-server`, in a login shell, and writes what it did to `logs/boot.log`. Boot waits up to five minutes for the addresses the dashboard binds (the tailnet IP comes up some seconds after the network). It then starts the containers of the Docker stack that failed to start because their ports are published on that address and it was not up yet: Docker does not try those again by itself, while a container stopped on purpose stays stopped. Last it starts the web process and the worker in their tmux sessions, as Start does, leaving one that a Start opened in the meantime as it is. Redis, Mosquitto and Nginx are system services and come back by themselves; a MediaMTX run natively (Run mode `native`) does not, so add it: `make autostart DASHBOARD_PORT=5050 AUTOSTART='flask celery mediamtx'`.
+
+    The line keeps this checkout's path, the port, conda's folder and any `DASHBOARD_MEDIA_PORTS`, `DASHBOARD_MEDIA_PORT` or `DASHBOARD_BIND` given to it, so run `make autostart` again after changing one of them. Variables of the table above that should hold after a reboot go into `~/.profile`, which the login shell reads. The tmux server that boot starts serves every tmux session opened on the machine afterwards, so the line also sets `SHELL` to the shell of the user who ran `make autostart`: those sessions get the login environment and shell, not cron's.
+
+4. Optionally compute every session's report ahead of the first visit. The light jobs take seconds per session; the video jobs take longer, mostly reading the video features out of InfluxDB, and run faster on server-01 itself than over the network. Run it in tmux, and not beside another job that uses every core:
 
     ```bash
     cd dashboard/flask-backend      # from pipelines/uber-server
     python dashboard.py precompute --all
     ```
 
-4. Turn on live video in MediaMTX (once). `pipelines/uber-server/mediamtx/mediamtx.yml` already has WebRTC on; the container needs to know the address browsers reach the host at, and has to be recreated to read the new configuration and publish the new ports:
+5. Turn on live video in MediaMTX (once). `pipelines/uber-server/mediamtx/mediamtx.yml` already has WebRTC on; the container needs to know the address browsers reach the host at, and has to be recreated to read the new configuration and publish the new ports:
 
     ```bash
     # docker/.env on server-01
@@ -333,7 +347,9 @@ All JSON, never cached by the browser, except the downloads and the recording fi
 
 - **Port in use**: `make clean-ports 5050 5051 5052`. gunicorn does not start while any of its ports is taken by another program; to keep that program, give the media ports other numbers (`make flask DASHBOARD_MEDIA_PORTS="<port> <port>"`), a single one (`DASHBOARD_MEDIA_PORT=<port>`) or none (`DASHBOARD_MEDIA_PORTS=`).
 - **Stop**: `make stop-flask`, `make stop-celery`, or the Stop buttons on the two cards.
-- **Logs**: the Logs button on the cards, or attach to the tmux sessions (`tmux attach -t flask`, `tmux attach -t celery`; `Ctrl+B` then `D` detaches).
+- **Logs**: the Logs button on the cards, or attach to the tmux sessions (`tmux attach -t flask`, `tmux attach -t celery`; `Ctrl+B` then `D` detaches). The same output, from earlier runs too, is in `pipelines/uber-server/logs/flask.log` and `logs/celery.log` on the dashboard's machine, and a boot's in `logs/boot.log`.
+- **The dashboard stopped and its pane says `giving up`**: gunicorn or the worker kept failing (it was started again three times in a row, and each time failed within a minute), so `restart_on_failure.sh` stopped starting it; the lines above say why (a port in use, a missing package, a broken `config.yml`). The tmux session stays open with the reason, so the Celery card, which goes by its tmux session, still reads running: Stop and Start it once the cause is fixed.
+- **`the dashboard needs ..., which the Python environment at ... lacks`**: the environment that started it misses packages of the `uber-server` extra; run `pip install -e '.[uber-server]'` in it from the repository root and start it again.
 - **No sessions**: the Sessions page shows InfluxDB's error. Check that InfluxDB is reachable from the dashboard's machine and that `flask-backend/config.yml` (or `config/system_services.yml` there) carries the right URL, token, org and bucket. The TUI's Status tab shows what it can reach.
 - **The analysis stays at "Computing"**: the Report worker chip says where jobs run: `ok` (the Celery worker; `tmux attach -t celery` shows the job), `local` (processes of the web server, which write their errors to the flask log), `unreachable` (`DASHBOARD_JOBS=celery` with no worker on the queue: start one, or switch to `auto`). A worker started from older code listens on another queue and takes nothing: restart it.
 - **The page shows old behaviour after an update**: restart gunicorn and the worker (see [Running](#running)).

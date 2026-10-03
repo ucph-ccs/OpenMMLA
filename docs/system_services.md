@@ -138,7 +138,8 @@ cd pipelines/uber-server
 make all                                # free the default ports, then (re)start every service
 make all without=nginx,flask,celery     # everything except some services
 make influxdb mongodb redis mosquitto   # start (and reconfigure) individual services
-make flask celery                       # dashboard backend + worker (uber-server conda env)
+make flask celery                       # dashboard backend + worker (uber-server conda env), started again when they fail
+make autostart DASHBOARD_PORT=5050      # start the dashboard and its worker after every reboot (crontab; make no-autostart; docs/dashboard.md)
 make mediamtx                           # streaming server in a tmux session (needs the mediamtx binary)
 make stop                               # stop everything
 make stop-redis                         # stop one service

@@ -1,4 +1,4 @@
-.PHONY: all install-redis install-mosquitto install-nginx configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx mediamtx flask celery clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-mediamtx stop-flask stop-celery
+.PHONY: all install-redis install-mosquitto install-nginx configure-influxdb-external configure-redis-external configure-mosquitto-external configure-mongodb-external influxdb redis mosquitto mongodb nginx mediamtx flask celery autostart no-autostart boot wait-for-bind infra-after-boot clean-ports stop stop-influxdb stop-redis stop-mosquitto stop-mongodb stop-nginx stop-mediamtx stop-flask stop-celery
 
 # ======= Configurable variables =======
 ENV_NAME ?= uber-server
@@ -30,6 +30,20 @@ DOCKER_ENV_FILE := $(abspath ../../docker/.env)
 INFRA_BIND_ADDRESS ?= $(shell sed -n 's/^INFRA_BIND_ADDRESS=//p' '$(DOCKER_ENV_FILE)' 2>/dev/null | tail -n 1)
 INFRA_LOOPBACK_ADDRESS ?= $(shell sed -n 's/^INFRA_LOOPBACK_ADDRESS=//p' '$(DOCKER_ENV_FILE)' 2>/dev/null | tail -n 1)
 DASHBOARD_BIND ?= $(or $(strip $(INFRA_BIND_ADDRESS) $(INFRA_LOOPBACK_ADDRESS)),$(OPENMMLA_BIND_ADDRESS))
+# the dashboard's web process and worker run through restart_on_failure.sh, which starts one again
+# when it exits with an error (three times in a row at most), and what their tmux panes show is
+# copied into logs/flask.log and logs/celery.log, which keep what a crashed process said after its
+# pane is gone. A log past LOG_ROTATE_BYTES becomes <name>.log.1 at the next start
+LOG_DIR := $(CURDIR)/logs
+LOG_ROTATE_BYTES ?= 10485760
+RESTART_ON_FAILURE := bash "$(CURDIR)/restart_on_failure.sh"
+# makes logs/ and moves logs/<name>.log to <name>.log.1 once it is past LOG_ROTATE_BYTES, unless the
+# tmux session of that name still runs (its pane still writes into the file)
+rotate_log = mkdir -p '$(LOG_DIR)' && f='$(LOG_DIR)/$(1).log' && if ! tmux has-session -t '=$(1)' 2>/dev/null && [ -f "$$f" ] && [ $$(( $$(wc -c < "$$f") )) -gt $(LOG_ROTATE_BYTES) ]; then mv -f "$$f" "$$f.1"; fi
+# after a reboot (make autostart): the targets that start, and how long to wait for their addresses
+AUTOSTART ?= flask celery
+BOOT_WAIT_SECONDS ?= 300
+CRONTAB ?= crontab
 # MediaMTX stream server (native run; the docker run is in docker/docker-compose.infra.yml)
 MEDIAMTX_BIN ?= mediamtx
 MEDIAMTX_CONFIG ?= mediamtx/mediamtx.yml
@@ -328,17 +342,99 @@ endif
 
 flask:
 	@echo "🔁 Starting Flask"
+	@$(call rotate_log,flask)
 	tmux new-session -d -s flask -n flask bash
+	tmux pipe-pane -t flask "cat >> '$(LOG_DIR)/flask.log'"
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t flask 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
-	tmux send-keys -t flask 'DASHBOARD_MEDIA_PORTS="$(DASHBOARD_MEDIA_LISTEN)" gunicorn -k gevent -w 1 $(foreach address,$(DASHBOARD_BIND),$(strip -b $(address):$(DASHBOARD_PORT) $(foreach port,$(DASHBOARD_MEDIA_LISTEN),-b $(address):$(port)))) dashboard:app' C-m
+	tmux send-keys -t flask 'DASHBOARD_MEDIA_PORTS="$(DASHBOARD_MEDIA_LISTEN)" $(RESTART_ON_FAILURE) gunicorn -k gevent -w 1 $(foreach address,$(DASHBOARD_BIND),$(strip -b $(address):$(DASHBOARD_PORT) $(foreach port,$(DASHBOARD_MEDIA_LISTEN),-b $(address):$(port)))) dashboard:app' C-m
 
 celery:
 	@echo "🔁 Starting Celery worker"
+	@$(call rotate_log,celery)
 	tmux new-session -d -s celery -n celery bash
+	tmux pipe-pane -t celery "cat >> '$(LOG_DIR)/celery.log'"
 	tmux send-keys -t celery 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t celery 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
-	tmux send-keys -t celery 'celery -A dashboard.celery worker --loglevel=info' C-m
+	tmux send-keys -t celery '$(RESTART_ON_FAILURE) celery -A dashboard.celery worker --loglevel=info' C-m
+
+# ======= Start the dashboard after a reboot =======
+# `make autostart DASHBOARD_PORT=<port>` adds one line to the login user's crontab that runs
+# `make boot` in this folder after every reboot, and `make no-autostart` takes it out again. The line
+# runs boot in a login shell, with SHELL set to the user's shell, because the tmux server boot starts
+# serves every tmux session opened on the machine afterwards: they get the login environment rather
+# than cron's (PATH /usr/bin:/bin, /bin/sh). Boot waits up to BOOT_WAIT_SECONDS for the addresses the
+# dashboard binds (a tailnet IP comes up some seconds after the network), starts the containers of
+# the docker stack that could not publish their ports on such an address before it was up (docker
+# does not try those again), then starts AUTOSTART, the web process and its worker, in their tmux
+# sessions as the Start of their cards does, leaving one that runs already as it is. The line keeps
+# this checkout, the port, conda's folder and the media ports or addresses given here as they are
+# now, so run it again after changing one. Redis, Mosquitto, Nginx and the databases installed with
+# brew or apt are services of their own that come back by themselves; a MediaMTX run natively is
+# not (add it: make autostart AUTOSTART='flask celery mediamtx')
+AUTOSTART_MARK := openmmla-dashboard-autostart
+# the variables a boot has to repeat: given to `make autostart`, they are written into the line
+AUTOSTART_VARS := DASHBOARD_MEDIA_PORTS DASHBOARD_MEDIA_PORT DASHBOARD_BIND ENV_NAME BOOT_WAIT_SECONDS
+autostart_vars = $(strip $(foreach v,$(AUTOSTART_VARS),$(if $(filter command line environment,$(origin $(v))),$(v)='$($(v))')))
+# the crontab as it is, in $$cur; stops (the crontab untouched) when crontab -l fails for another
+# reason than there being none yet, rather than install a new one over it. Only its output is the
+# crontab: what it says on stderr is read apart, for that test
+read_crontab = err=$$(mktemp) || exit 1; cur=$$($(CRONTAB) -l 2>"$$err") || { msg=$$(cat "$$err"); rm -f "$$err"; case "$$msg" in *"no crontab"*) cur= ;; *) echo "❌ $(CRONTAB) -l failed, the crontab is left as it is: $$msg"; exit 1 ;; esac; }; rm -f "$$err"
+
+# the line is built in the shell (the command boot runs inside the login shell's quotes, where
+# \$PATH reaches that shell unexpanded), and make is named plainly: a recipe line that names the
+# MAKE variable runs even under make -n, which would install the line on a dry run
+autostart:
+	@command -v $(CRONTAB) >/dev/null 2>&1 || { echo "❌ $(CRONTAB) not found: install cron (sudo apt install cron), or start the dashboard by hand after a reboot"; exit 1; }
+	@test -n '$(CONDA_BASE)' && test -f '$(CONDA_BASE)/etc/profile.d/conda.sh' || { echo "❌ conda not found: run this where conda is on the PATH, a boot needs its folder"; exit 1; }
+	@bash_bin=$$(command -v bash) || { echo "❌ bash not found"; exit 1; }; \
+	login_shell=$${SHELL:-$$bash_bin}; \
+	boot="cd '$(CURDIR)' && PATH='$(CONDA_BASE)/condabin':\\\$$PATH exec make boot DASHBOARD_PORT='$(DASHBOARD_PORT)' CONDA_BASE='$(CONDA_BASE)' AUTOSTART='$(AUTOSTART)'$(if $(autostart_vars),$(space)$(autostart_vars))"; \
+	line="@reboot mkdir -p '$(LOG_DIR)' && SHELL='$$login_shell' '$$bash_bin' -lc \"$$boot\" >> '$(LOG_DIR)/boot.log' 2>&1 # $(AUTOSTART_MARK)"; \
+	$(read_crontab); \
+	{ if [ -n "$$cur" ]; then printf '%s\n' "$$cur" | grep -vF '$(AUTOSTART_MARK)'; fi; echo "$$line"; } | $(CRONTAB) - && \
+	echo "✅ After a reboot cron runs: $$line"
+
+no-autostart:
+	@command -v $(CRONTAB) >/dev/null 2>&1 || { echo "No $(CRONTAB) on this machine: nothing to take out"; exit 0; }
+	@$(read_crontab); \
+	if ! printf '%s\n' "$$cur" | grep -qF '$(AUTOSTART_MARK)'; then echo "The crontab has no autostart line: nothing to take out"; exit 0; fi; \
+	printf '%s\n' "$$cur" | grep -vF '$(AUTOSTART_MARK)' | $(CRONTAB) - && echo "✅ The dashboard no longer starts after a reboot"
+
+# each target of AUTOSTART on its own, so one that fails (or whose session a Start opened while boot
+# waited) does not keep the others from starting
+boot: wait-for-bind infra-after-boot
+	@for target in $(AUTOSTART); do \
+		if tmux has-session -t "=$$target" 2>/dev/null; then echo "$$target runs already: left as it is"; \
+		else $(MAKE) --no-print-directory $$target || echo "⚠️ $$target did not start"; fi; \
+	done
+
+# waits until each address the dashboard binds is on this machine, BOOT_WAIT_SECONDS at most, by
+# binding a socket to it (127.0.1.1 is always there on Linux, a tailnet IP once tailscale is up)
+BIND_PYTHON = $(or $(wildcard $(CONDA_BASE)/bin/python3),python3)
+wait-for-bind:
+	@echo "🔁 Boot at $$(date '+%Y-%m-%d %H:%M:%S'): waiting for $(DASHBOARD_BIND)"
+	@for address in $(DASHBOARD_BIND); do \
+		waited=0; \
+		until $(BIND_PYTHON) -c 'import socket, sys; a = sys.argv[1]; socket.socket(socket.AF_INET6 if ":" in a else socket.AF_INET).bind((a, 0))' "$$address" 2>/dev/null; do \
+			if [ $$waited -ge $(BOOT_WAIT_SECONDS) ]; then echo "⚠️ $$address is not on this machine after $(BOOT_WAIT_SECONDS)s: starting anyway"; break; fi; \
+			sleep 5; waited=$$((waited + 5)); \
+		done; \
+	done
+
+# the containers of the docker stack (docker/docker-compose.infra.yml) that failed to start when
+# docker came up because an address they publish on (INFRA_BIND_ADDRESS, a tailnet IP) was not there
+# yet: docker leaves those down, so boot starts them once the address is up. A container stopped on
+# purpose carries no such error and stays stopped
+INFRA_PROJECT ?= openmmla-infra
+infra-after-boot:
+	@command -v docker >/dev/null 2>&1 || exit 0; \
+	for c in $$(docker ps -a --filter 'label=com.docker.compose.project=$(INFRA_PROJECT)' --filter status=created --filter status=exited --format '{{.Names}}' 2>/dev/null); do \
+		case "$$(docker inspect -f '{{.State.Error}}' "$$c" 2>/dev/null)" in \
+			*"assign requested address"*) echo "🔁 Starting $$c, which could not publish its ports before their address was up"; \
+				docker start "$$c" >/dev/null || echo "⚠️ $$c did not start: docker logs $$c" ;; \
+		esac; \
+	done
 
 mediamtx:
 	@echo "🔁 Starting MediaMTX"

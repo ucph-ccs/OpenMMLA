@@ -18,6 +18,38 @@ meeting, `python dashboard.py precompute --all`.
 import os
 import sys
 
+# the modules of the uber-server extra that the web process, the worker and precompute import, with
+# the package each comes from. An environment that misses one does not start: without pymongo the
+# explorer would quietly list fewer sessions, and without cryptography the InfluxDB token would go
+# out still encrypted and every query come back 401, both looking like a database problem
+REQUIRED_MODULES = {
+    "flask": "flask", "celery": "celery[redis]", "redis": "celery[redis]", "gevent": "gevent",
+    "influxdb_client": "influxdb-client", "pymongo": "pymongo", "yaml": "pyyaml", "cryptography": "cryptography",
+}
+
+
+def missing_packages() -> list[str]:
+    """the packages of REQUIRED_MODULES this environment cannot import, found without importing them."""
+    from importlib.util import find_spec
+    missing = set()
+    for module, package in REQUIRED_MODULES.items():
+        try:
+            found = find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            missing.add(package)
+    return sorted(missing)
+
+
+_MISSING = missing_packages()
+if _MISSING:
+    # an ImportError rather than SystemExit: gunicorn then stops with "Worker failed to boot" instead
+    # of starting the worker again and again
+    raise ImportError(f"the dashboard needs {', '.join(_MISSING)}, which the Python environment at {sys.prefix} "
+                      "lacks: run pip install -e '.[uber-server]' there from the repository root, then start "
+                      "the dashboard again")
+
 if __name__ == "__main__" and sys.argv[1:2] == ["serve"]:
     # gevent's server needs the standard library patched before anything opens a socket, as
     # gunicorn's gevent worker does for the deployed app

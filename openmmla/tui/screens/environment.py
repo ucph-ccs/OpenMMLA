@@ -48,7 +48,7 @@ ENV_GROUPS = [
     {"group": "uber-base", "env": "uber-base", "python": "3.10",
      "description": "Analysis framework"},
     {"group": "uber-server", "env": "uber-server", "python": "3.10",
-     "description": "Dashboard & infrastructure services"},
+     "description": "Dashboard, Celery & Gateway (on their host only)"},
     {"group": "tui", "env": "tui", "python": "3.10",
      "description": "TUI management console"},
 ]
