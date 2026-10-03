@@ -329,7 +329,7 @@ flask:
 	tmux new-session -d -s flask -n flask bash
 	tmux send-keys -t flask 'cd dashboard/flask-backend' C-m
 	tmux send-keys -t flask 'source $(CONDA_BASE)/etc/profile.d/conda.sh && conda activate $(ENV_NAME)' C-m
-	tmux send-keys -t flask 'DASHBOARD_MEDIA_PORTS=$(subst $(space),$(comma),$(DASHBOARD_MEDIA_LISTEN)) gunicorn -k gevent -w 1 $(foreach address,$(DASHBOARD_BIND),$(strip -b $(address):$(DASHBOARD_PORT) $(foreach port,$(DASHBOARD_MEDIA_LISTEN),-b $(address):$(port)))) dashboard:app' C-m
+	tmux send-keys -t flask 'DASHBOARD_MEDIA_PORTS="$(DASHBOARD_MEDIA_LISTEN)" gunicorn -k gevent -w 1 $(foreach address,$(DASHBOARD_BIND),$(strip -b $(address):$(DASHBOARD_PORT) $(foreach port,$(DASHBOARD_MEDIA_LISTEN),-b $(address):$(port)))) dashboard:app' C-m
 
 celery:
 	@echo "🔁 Starting Celery worker"
