@@ -557,8 +557,9 @@ def verify_log(path, files: Iterable[tuple[str, Path]] | None = None) -> tuple[b
     JSON passes as a crash cut when the line after it chains to it (the next writer ends a cut line and
     chains over it) or it is the last line and does not end; its place is kept in info['cuts']. With
     `files` ((label_file as logged, path), ...), also both directions of the saved records: every line of
-    those files was saved by a logged request (label_sha256) of the same link, in the order of their seqs,
-    and every logged record is in its file. (ok, what was found, {'lines', 'head', 'seq', 'labels', 'cuts'})."""
+    those files was saved by a logged request (label_sha256) of the same link (a line of an open audit,
+    `open`, by a request of the auditor it names), in the order of their seqs, and every logged record is
+    in its file. (ok, what was found, {'lines', 'head', 'seq', 'labels', 'cuts'})."""
     info = {'lines': 0, 'head': GENESIS, 'seq': -1, 'labels': 0, 'cuts': []}
     try:
         data = Path(path).read_bytes()
@@ -588,7 +589,8 @@ def verify_log(path, files: Iterable[tuple[str, Path]] | None = None) -> tuple[b
         if broken:
             return False, broken, info
         if record.get('label_sha256'):
-            logged.setdefault(str(record.get('label_file')), {})[record['label_sha256']] = (seq, record.get('token_id'))
+            logged.setdefault(str(record.get('label_file')), {})[record['label_sha256']] = \
+                (seq, record.get('token_id'), record.get('coder'))
         info.update(lines=number, head=prev, seq=seq)
         if last and not ended:
             info['cuts'].append(number)
@@ -606,17 +608,20 @@ def verify_log(path, files: Iterable[tuple[str, Path]] | None = None) -> tuple[b
                 digest = sha256_hex(line)
                 if digest not in expected:
                     return False, f'{rel} line {number} was saved by no logged request: edited or added afterwards', info
-                at, token = expected.pop(digest)
+                at, token, coder = expected.pop(digest)
                 if at < last:
                     return False, f'{rel} line {number} is out of the order its requests were logged in', info
                 saved = _parsed(line) or {}
                 if token is not None and str(saved.get('token_id')) != str(token):
                     return False, f'{rel} line {number} names link {saved.get("token_id")}, its request came from link {token}', info
+                # an open audit's line (no link) names the auditor its request typed
+                if saved.get('open') is True and saved.get('auditor') != coder:
+                    return False, f'{rel} line {number} names another auditor than the one its request typed', info
                 last = at
                 info['labels'] += 1
             if expected:
                 return False, (f'{rel}: {len(expected)} saved line(s) the log names are not in the file '
-                               f'(first at seq {min(at for at, _ in expected.values())})'), info
+                               f'(first at seq {min(at for at, *_ in expected.values())})'), info
         for rel, expected in logged.items():
             if expected:
                 return False, f'{rel}: the log names {len(expected)} saved line(s) of a file that is gone', info

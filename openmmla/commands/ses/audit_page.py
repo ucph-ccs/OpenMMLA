@@ -3,14 +3,14 @@ identity, gaze and who-speaks questions of audit.py, on a server of its own (por
 campaign's).
 
 The server is code_locked's guarded server, and an auditor is always someone a one-time link of scope
-audit names: the links are issued in the audit's own folder (--campaign <that folder> --issue-token
-NAME --token-scope audit, --token-subset reliability for a second auditor who answers the reliability
-subset only), whether the server binds 127.0.0.1 (behind an SSH forward) or the tailnet address with
---allow-from. No answer is saved under a name the page gives, so no auditor reads or answers as
-another, and the scorer takes only the answers of claimed audit links. Every request is logged in the
-audit's hash-chained request log, and every answer is appended with its log line (append_record), so
---verify-log checks the answers files both ways. A closed audit is not served, and its pictures and
-clips are refused (410) by a server still running.
+audit names (unless the audit is served open, below): the links are issued in the audit's own folder
+(--campaign <that folder> --issue-token NAME --token-scope audit, --token-subset reliability for a
+second auditor who answers the reliability subset only), whether the server binds 127.0.0.1 (behind
+an SSH forward) or the tailnet address with --allow-from. No answer is saved under a name the page
+gives, so no auditor reads or answers as another, and the scorer takes only the answers of claimed
+audit links. Every request is logged in the audit's hash-chained request log, and every answer is
+appended with its log line (append_record), so --verify-log checks the answers files both ways. A
+closed audit is not served, and its pictures and clips are refused (410) by a server still running.
 
 What the server reads: plan.json, each session's view.json and the answers files. It never opens a
 pipeline*.json, so no pipeline output can reach an answer; in blind mode the only pipeline-derived
@@ -38,11 +38,35 @@ number in the log; the last line of an item's phase counts, but for identity, wh
 
 The page's viewing gate (a who-speaks clip played before an answer) trusts what the browser reports:
 it is a convenience for the auditor, not a control.
+
+The open audit (--audit ID --audit-open) is served as the default coding page is: no link, claim or
+cookie. The page (OPEN_AUDIT_PAGE) asks for the auditor's name (code.name_error checks it, as the
+default page checks a coder's; the browser remembers it) and whether they answer the full audit or the
+reliability subset, and every request but the page itself carries both (?auditor=NAME&scope=full|
+reliability; the server puts them into the picture and clip addresses it sends). A name is taken in
+NFC, without control, formatting or line-break characters. Answers go to answers/<the name's file
+form>.jsonl with `open`, the scope and no link; a default-page coder's name may be typed (the answers
+are a file of their own). A name's file belongs to that name: a name whose file (in any case or Unicode
+form) holds another name's answers or an answer saved through a link is refused, and so is a scope
+other than the one its answers were saved under, all checked again under the log's lock when an answer
+is saved; a refusal never says the other name. Once an answer is saved open, the audit is not served
+with links again. The request log keeps the typed name on every request and save (its `coder`, which
+--verify-log checks against the `auditor` of each open line), so --verify-log still checks the answers
+files both ways; the start line records `open`. --allow-from is optional: a tailnet bind without it
+lets every tailnet address in (0.0.0.0 and LAN addresses stay refused). Every rule of what an auditor
+sees holds per typed name; that the person typing a name is that auditor is not checked, so one person
+may answer a frame's identity under a second name, see which boxes the frozen versions call pupils,
+then answer it under their own (the scorer lists the saves under other names from the primary's
+address and browser).
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import threading
+import unicodedata
+import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -102,11 +126,51 @@ AUDIT_CODEBOOK = {
 }
 MAX_NOTE = 2000
 PHASES = {'roster': 'roster', 'identity': 'vision', 'gaze': 'vision', 'speech': 'speech'}
+# what an open audit's auditor chooses to answer: the scope's subset (audit_page.sequence)
+SCOPES = {'full': None, 'reliability': 'reliability'}
 
 
 def _first(query: dict, name: str) -> str | None:
     values = query.get(name)
     return values[0] if values else None
+
+
+def typed_name(raw) -> tuple[str | None, str | None]:
+    """(an open audit's auditor name, None) or (None, why it is refused): the name as typed, trimmed, in NFC
+    (a name typed in two Unicode forms is one name, as a file system that ignores the form opens one file
+    for both), not empty, without a control, formatting or line-break character (it would forge or hide
+    lines of the scores' report) and short enough to name a file (code.name_error, as the default page
+    checks its coder names)"""
+    name = unicodedata.normalize('NFC', raw).strip() if isinstance(raw, str) else ''
+    if not name:
+        return None, 'type your name first'
+    if any(unicodedata.category(c).startswith('C') or unicodedata.category(c) in ('Zl', 'Zp') for c in name):
+        return None, 'the name holds a control, formatting or line-break character: type it again'
+    error = C.name_error(name)
+    return (None, error.replace('coder name', 'name')) if error else (name, None)
+
+
+def folded(stem: str) -> str:
+    """an answers file's name as a file system blind to case and Unicode form sees it: two names whose files
+    fold alike share one file there"""
+    return unicodedata.normalize('NFC', stem).casefold()
+
+
+def scope_text(subset: str | None) -> str:
+    return 'the reliability subset' if subset == 'reliability' else 'the full audit'
+
+
+def open_bind(bind: str, allow_from: str | None, allow_wide: bool = False) -> tuple:
+    """the networks that may connect to an open audit: as code_locked.check_bind, but a tailnet bind needs no
+    --allow-from (then every tailnet address may connect, as anyone who reaches the default page may)"""
+    if not (allow_from or '').strip():
+        try:
+            address = ipaddress.ip_address('127.0.0.1' if bind == 'localhost' else bind)
+        except ValueError:
+            address = None  # check_bind says why
+        if address is not None and any(address.version == n.version and address in n for n in L.TAILNET):
+            return L.TAILNET
+    return L.check_bind(bind, allow_from, allow_wide)
 
 
 def _number(value) -> float | None:
@@ -129,6 +193,20 @@ def load_audit(artifacts: Path, audit_id: str) -> dict:
                 if any(i.get('practice') for i in sessions[entry['alias']]['view']['items'])]
     return {'audit_id': audit_id, 'mode': plan['mode'], 'order': list(plan['order']), 'sessions': sessions,
             'items': items, 'practice': practice}
+
+
+def saved_open(artifacts: Path, audit: dict) -> int:
+    """how many answer lines of the audit the open page saved (a link's page would show those typed under its
+    auditor's name as theirs, so the audit is not served with links again)"""
+    count = 0
+    for _, path in A.record_files(artifacts, audit['audit_id'], [s['id'] for s in audit['sessions'].values()]):
+        for line in path.read_text(encoding='utf-8').splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            count += isinstance(record, dict) and record.get('open') is True
+    return count
 
 
 def sequence(audit: dict, subset: str | None) -> list[str]:
@@ -158,7 +236,7 @@ def sequence(audit: dict, subset: str | None) -> list[str]:
 
 
 class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
-    """the audit's page and API, for the auditor a link binds"""
+    """the audit's page and API, for the auditor a link binds (or, open, the name a request carries)"""
     KIND = 'audit'
     HOME = '/audit'
     TITLE = 'Sensing audit'
@@ -171,46 +249,145 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     artifacts: Path | None = None
     cache: dict = {}
     cache_lock = threading.Lock()
+    # an open audit (--audit-open): no link, the auditor is the name each request carries
+    open: bool = False
 
     # who ----
 
-    def _auditor(self) -> tuple[str, str | None]:
-        """(the auditor's name, their subset): always the link's (GuardedHandler answers 401 without one)"""
+    def _identity(self) -> L.Identity | None:
+        """the link's auditor (GuardedHandler); open, the name and scope of the request's query, never None: the
+        page itself needs neither, and the routes that do refuse a request without them (_auditor)"""
+        if not self.open:
+            return super()._identity()
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        name, self._typed_error = typed_name(_first(query, 'auditor'))
+        scope = _first(query, 'scope')
+        if scope is not None:
+            self.note(scope=scope[:20])
+        if self._typed_error is None and scope not in SCOPES:
+            self._typed_error = 'choose the full audit or the reliability subset (scope=full or scope=reliability)'
+        return L.Identity(name, None, self.KIND, SCOPES.get(scope), None)
+
+    def note_query(self, query: dict) -> None:
+        if self.open and self._fields.get('device', '') is None:
+            del self._fields['device']  # an open audit binds no device: its log lines name none
+        super().note_query(query)
+
+    def _claim(self, method: str, token: str) -> None:
+        if not self.open:
+            return super()._claim(method, token)
+        self.send_message('/c/', 'This audit takes no links: open /audit and type your name.', 404)
+
+    def _auditor(self) -> tuple[str, str | None] | None:
+        """(the auditor's name, their subset), or None after answering why not: the link's (GuardedHandler
+        answers 401 without one); open, the name and scope the request carries, when _open_refusal allows them"""
+        if not self.open:
+            return self.identity.name, self.identity.subset
+        refused = (400, self._typed_error) if self._typed_error else \
+            self._open_refusal(self.identity.name, self.identity.subset)
+        if refused:
+            self.send_json({'error': refused[1]}, refused[0])
+            return None
         return self.identity.name, self.identity.subset
+
+    def _open_refusal(self, name: str, subset: str | None) -> tuple[int, str] | None:
+        """why a typed name cannot be used now, or None: the answers files of its file form (in any case and
+        Unicode form, as a file system blind to them would open them) hold no other name's answers and no
+        answer saved through a link, the file the name writes is listed under that very name, and its answers
+        so far were saved under the scope it chose. The other name is never said: typing it would show its
+        answers."""
+        form, own = folded(C.safe_name(name)), f'{C.safe_name(name)}.jsonl'
+        taken = (409, 'another name already uses the file of this name (it differs in case, punctuation or accents): '
+                      'type another name')
+        saved: set = set()
+        for alias in self.audit['order']:
+            folder = A.answers_dir(self.artifacts, self.audit['sessions'][alias]['id'], self.audit['audit_id'])
+            # asked before the listing: a file the name's first save creates meanwhile is then listed too
+            exists = (folder / own).exists()
+            try:
+                listed = os.listdir(folder)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            # a file system blind to case or Unicode form opens a file listed under another spelling
+            if exists and own not in listed:
+                return taken
+            for entry in listed:
+                path = folder / entry
+                if path.suffix != '.jsonl' or folded(path.stem) != form or not path.is_file():
+                    continue
+                found = self._parsed(path)
+                if found is None:
+                    continue
+                if found[2]:
+                    return 409, 'the answers under this name were saved through an audit link: type another name'
+                if any(n != name for n in found[1]):
+                    return taken
+                if name in found[1]:
+                    saved |= found[1][name][1]
+        if saved and subset not in saved:
+            return 409, (f'{name} answers {scope_text(sorted(saved, key=str)[0])}: choose it, or type another name')
+        return None
+
+    def _parsed(self, path: Path) -> tuple[dict, dict, bool] | None:
+        """an answers file read (again when it changed), None when there is none: (item -> phase -> the record
+        that counts, an identity's first line and any other phase's last; auditor -> (the same of their own
+        lines, the subsets they were saved under); whether a line was saved through a link, not open)"""
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        with self.cache_lock:
+            cached = self.cache.get(path)
+        if cached is None or cached[0] != stamp:
+            parsed: dict[str, dict[str, dict]] = {}
+            by_name: dict[str, tuple[dict, set]] = {}
+            linked = False
+            for line in path.read_text(encoding='utf-8').splitlines():
+                try:
+                    record = json.loads(line)
+                    phases = parsed.setdefault(record['item'], {})
+                    if record['phase'] != 'identity' or 'identity' not in phases:
+                        phases[record['phase']] = record
+                except (ValueError, KeyError, TypeError):
+                    continue
+                linked = linked or record.get('open') is not True
+                if isinstance(record.get('auditor'), str):
+                    own, subsets = by_name.setdefault(record['auditor'], ({}, set()))
+                    phases = own.setdefault(record['item'], {})
+                    if record['phase'] != 'identity' or 'identity' not in phases:
+                        phases[record['phase']] = record
+                    subset = record.get('subset')
+                    subsets.add(subset if isinstance(subset, str) else None)
+            cached = (stamp, parsed, by_name, linked)
+            with self.cache_lock:
+                self.cache[path] = cached
+        return cached[1], cached[2], cached[3]
 
     def _answers(self, name: str) -> dict[str, dict[str, dict]]:
         """the auditor's answers, item -> phase -> the record that counts (an identity's first line, any
-        other phase's last), from every session's answers file"""
+        other phase's last), from every session's answers file; open, of the lines saved under the name only"""
         out: dict[str, dict[str, dict]] = {}
         for alias in self.audit['order']:
-            path = self._answers_path(alias, name)
-            try:
-                stat = path.stat()
-            except FileNotFoundError:
+            found = self._parsed(self._answers_path(alias, name))
+            if found is None:
                 continue
-            stamp = (stat.st_mtime_ns, stat.st_size)
-            with self.cache_lock:
-                cached = self.cache.get(path)
-            if cached is None or cached[0] != stamp:
-                parsed: dict[str, dict[str, dict]] = {}
-                for line in path.read_text(encoding='utf-8').splitlines():
-                    try:
-                        record = json.loads(line)
-                        phases = parsed.setdefault(record['item'], {})
-                        if record['phase'] != 'identity' or 'identity' not in phases:
-                            phases[record['phase']] = record
-                    except (ValueError, KeyError, TypeError):
-                        continue
-                cached = (stamp, parsed)
-                with self.cache_lock:
-                    self.cache[path] = cached
-            for item, phases in cached[1].items():
+            chosen = (found[1].get(name) or ({}, set()))[0] if self.open else found[0]
+            for item, phases in chosen.items():
                 out.setdefault(item, {}).update(phases)
         return out
 
     def _answers_path(self, alias: str, name: str) -> Path:
         sid = self.audit['sessions'][alias]['id']
         return A.answers_dir(self.artifacts, sid, self.audit['audit_id']) / f'{C.safe_name(name)}.jsonl'
+
+    def _media_query(self) -> str:
+        """what the addresses of pictures and clips carry: nothing for a link's auditor (the cookie names them);
+        open, the auditor and scope, since the browser fetches them by address"""
+        if not self.open:
+            return ''
+        scope = next(k for k, v in SCOPES.items() if v == self.identity.subset)
+        return '?' + urllib.parse.urlencode({'auditor': self.identity.name, 'scope': scope})
 
     def _visible(self, subset) -> list[str]:
         return sequence(self.audit, subset)
@@ -238,10 +415,13 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         self.send_body(303, 'text/plain', b'', (('location', '/audit'),))
 
     def _page(self, request: L.Request) -> None:
-        self.send_html(AUDIT_PAGE)
+        self.send_html(OPEN_AUDIT_PAGE if self.open else AUDIT_PAGE)
 
     def _boot(self, request: L.Request) -> None:
-        name, subset = self._auditor()
+        who = self._auditor()
+        if who is None:
+            return
+        name, subset = who
         mine = self._answers(name)
         rows = []
         for item_id in self._visible(subset):
@@ -249,10 +429,14 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
             rows.append({'item': item_id, 'part': item['part'], 'alias': alias, 'practice': bool(item.get('practice')),
                          'done': self._done(item, mine.get(item_id, {}))})
         self.send_json({'audit_id': self.audit['audit_id'], 'mode': self.audit['mode'], 'codebook': AUDIT_CODEBOOK,
-                        'closed': self.closed(), 'auditor': name, 'subset': subset, 'sequence': rows})
+                        'closed': self.closed(), 'auditor': name, 'subset': subset, 'sequence': rows,
+                        **({'open': True} if self.open else {})})
 
     def _progress(self, request: L.Request) -> None:
-        name, subset = self._auditor()
+        who = self._auditor()
+        if who is None:
+            return
+        name, subset = who
         mine = self._answers(name)
         progress: dict[str, dict[str, dict[str, int]]] = {}
         for item_id in self._visible(subset):
@@ -264,10 +448,13 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         self.send_json({'progress': progress})
 
     def _url(self, item_id: str, name: str | None) -> str | None:
-        return f'/audit/img/{item_id}/{name}' if name else None
+        return f'/audit/img/{item_id}/{name}{self._media_query()}' if name else None
 
     def _item(self, request: L.Request) -> None:
-        name, subset = self._auditor()
+        who = self._auditor()
+        if who is None:
+            return
+        name, subset = who
         visible = self._visible(subset)
         item_id = _first(request.query, 'item')
         if item_id not in self.audit['items'] or item_id not in visible:
@@ -282,7 +469,8 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
             out.update(pupil=item['pupil'], image=self._url(item_id, item.get('image')),
                        answer=(own.get('roster') or {}).get('answer'))
         elif item['part'] == 'speech':
-            out.update(clip=f'/audit/clip/{item_id}', answer=(own.get('speech') or {}).get('answer'))
+            out.update(clip=f'/audit/clip/{item_id}{self._media_query()}',
+                       answer=(own.get('speech') or {}).get('answer'))
         else:
             view = self.audit['sessions'][alias]['view']
             images = item.get('images') or {}
@@ -309,7 +497,10 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         if self.closed():
             self.send_json({'error': 'the audit is closed'}, 410)
             return None
-        name, subset = self._auditor()
+        who = self._auditor()
+        if who is None:
+            return None
+        name, subset = who
         if item_id not in self.audit['items'] or item_id not in self._visible(subset):
             self.send_json({'error': 'not found'}, 404)
             return None
@@ -349,7 +540,10 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
 
     def _answer(self, request: L.Request) -> None:
         body = request.body
-        name, subset = self._auditor()
+        who = self._auditor()
+        if who is None:
+            return
+        name, subset = who
         if self.closed():
             return self.send_json({'error': 'the audit is closed'}, 409)
         item_id, phase = body.get('item'), body.get('phase')
@@ -365,6 +559,11 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         def check(record: dict) -> tuple[int, str] | None:
             # under the request log's lock: the answers as saved by now, so two saves at once are judged one
             # after the other and a lock cannot be passed by both
+            if self.open:
+                # a name's first saves under two scopes at once, or two names of one file form, are judged so too
+                refused = self._open_refusal(name, subset)
+                if refused:
+                    return refused
             mine = self._answers(name)
             answer, error = clean_answer(phase, body.get('answer'), item, view, mine.get(item_id, {}), self._asked)
             if error:
@@ -382,6 +581,9 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
                   'session': sid, 'alias': alias, 'auditor': name, 'token_id': self.identity.token_id, 'subset': subset,
                   'mode': self.audit['mode'], 'codebook': A.CODEBOOK_VERSION, 'practice': bool(item.get('practice')),
                   'reliability': bool(item.get('reliability')), 'answer': None}
+        if self.open:
+            # saved under the typed name: no link, the scope as chosen
+            record.update(open=True, scope='reliability' if subset == 'reliability' else 'full')
         spent = _number(body.get('seconds_spent'))
         if spent is not None:
             record['seconds_spent'] = round(min(max(spent, 0.0), L.MAX_SECONDS), 3)
@@ -478,15 +680,24 @@ def cmd_serve(args, argv) -> int:
     # the links are the audit's own, issued in its folder: --campaign may name it, never another
     if args.campaign and Path(args.campaign).expanduser().resolve() != folder.resolve():
         raise A.AuditError(f"an audit's links are issued in its own folder: --campaign {folder}")
+    opened = bool(getattr(args, 'audit_open', None))
     if not (folder / L.CAMPAIGN_FILE).exists():
-        raise A.AuditError(f'no campaign.yml in {folder}: the links are issued there')
+        why = 'it holds whether the audit is closed (--audit-sample writes it)' if opened else 'the links are issued there'
+        raise A.AuditError(f'no campaign.yml in {folder}: {why}')
     campaign = L.Campaign(folder)
     data = campaign.data()
     if data.get('closed_at'):
         raise A.AuditError(f"the audit was closed at {data['closed_at']}: it is not served again")
-    if not any(t.get('scope') == 'audit' and not t.get('revoked_at') for c in data['coders'] for t in c.get('tokens', [])):
-        raise A.AuditError(f'no audit link is issued: --campaign {folder} --issue-token NAME --token-scope audit')
-    allow = L.check_bind(args.bind, args.allow_from, args.allow_wide)
+    # open, the auditors type their names: no link is needed, and links issued are not served
+    if not opened and not any(t.get('scope') == 'audit' and not t.get('revoked_at') for c in data['coders']
+                              for t in c.get('tokens', [])):
+        raise A.AuditError(f'no audit link is issued: --campaign {folder} --issue-token NAME --token-scope audit '
+                           '(or --audit-open: the auditors type their names)')
+    typed = 0 if opened else saved_open(artifacts, audit)
+    if typed:
+        raise A.AuditError(f'{typed} answers of audit {audit_id} were typed on the open page: serve it with --audit-open '
+                           '(a link would show the answers typed under its name as its own)')
+    allow = (open_bind if opened else L.check_bind)(args.bind, args.allow_from, args.allow_wide)
     port = args.port if L._explicit_port(argv) else DEFAULT_PORT
     others = L.other_instances(artifacts)
     if others and not args.i_know_another_instance_runs:
@@ -498,13 +709,18 @@ def cmd_serve(args, argv) -> int:
         raise A.AuditError(f'nothing of audit {audit_id} is rendered (--audit-render {audit_id})')
     log = L.RequestLog(folder / L.LOG_FILE)
     handler = L.handler_class(AuditHandler, campaign=campaign, log=log, allow=allow, audit=audit, folder=folder,
-                              artifacts=artifacts, cache={}, cache_lock=threading.Lock())
+                              artifacts=artifacts, cache={}, cache_lock=threading.Lock(),
+                              **({'open': True} if opened else {}))
     L.watch_campaign(campaign, log)
     extra = {'audit_id': audit_id, 'plan_sha256': L.file_sha256(folder / A.PLAN_FILE), 'mode': audit['mode'],
              'campaign_sha256': L.file_sha256(campaign.path), 'another_instances': others or None,
              'allow_wide': bool(args.allow_wide)}
-    print(f"audit {audit_id} ({audit['mode']}): {len(audit['sessions'])} recordings, {len(audit['items']) - unrendered} "
-          f"items served; http://{args.bind}:{port}/audit for {', '.join(str(n) for n in allow)} (Ctrl-C stops)")
+    if opened:
+        # the scorer reads the audit as open from this line: names typed, not authenticated
+        extra['open'] = True
+    print(f"audit {audit_id} ({audit['mode']}{', open: the auditors type their names' if opened else ''}): "
+          f"{len(audit['sessions'])} recordings, {len(audit['items']) - unrendered} items served; "
+          f"http://{args.bind}:{port}/audit for {', '.join(str(n) for n in allow)} (Ctrl-C stops)")
     try:
         return L.serve(handler, args.bind, port, argv, AUDIT_MODULES, extra)
     finally:
@@ -766,3 +982,72 @@ document.addEventListener('keydown', e => { onKey(e); });
 start();
 </script></body></html>
 """
+
+
+def _patched(page: str, patches: list[tuple[str, str]]) -> str:
+    for old, new in patches:
+        if page.count(old) != 1:
+            raise RuntimeError(f'the audit page changed: {old[:60]!r} is not in it once; update audit_page.OPEN_AUDIT_PAGE')
+        page = page.replace(old, new)
+    return page
+
+
+# the open audit's page: the link's page with a name form before it, every request naming the auditor and scope
+OPEN_AUDIT_PAGE = _patched(AUDIT_PAGE, [
+    ('</style>',
+     '#named{max-width:560px;margin:32px auto;padding:0 16px}#named p{color:var(--dim)}#named label{display:block;margin:12px 0}\n'
+     '#named input,#named select{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line);'
+     'border-radius:4px;padding:6px 8px;min-width:260px}\n'
+     '#named button{font:inherit;background:#2d6cdf;color:#fff;border:0;border-radius:6px;padding:8px 18px;cursor:pointer}\n'
+     '#namestatus{min-height:20px;margin-top:8px;color:var(--bad)}'
+     '#rename{font:inherit;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;padding:1px 8px;cursor:pointer}\n'
+     '</style>'),
+    ('<header><b>Sensing audit</b><span id="who"></span>',
+     '<header><b>Sensing audit</b><span id="who"></span><button id="rename" type="button" style="display:none">change name</button>'),
+    ('<main><section id="left">',
+     '<form id="named" style="display:none" autocomplete="off"><p>Type your name and choose what you answer: the full '
+     'audit, or the reliability subset of the second auditor. Your answers are kept under this name, so type it the same '
+     'way each time; this browser remembers it.</p>\n'
+     '<label>Name <input id="auditor" maxlength="100" autocomplete="off" spellcheck="false"></label>\n'
+     '<label>You answer <select id="scope"><option value="">choose…</option><option value="full">the full audit</option>'
+     '<option value="reliability">the reliability subset</option></select></label>\n'
+     '<button type="submit">Start</button><div id="namestatus"></div></form>\n'
+     '<main id="work" style="display:none"><section id="left">'),
+    ("// the auditor is the one the personal link named: the page sends no name, and keeps none\n"
+     "async function api(path) {\n  const r = await fetch(path);",
+     "// the auditor is the name typed in (an open audit): every request carries it and the scope chosen, and the\n"
+     "// browser remembers both for the next visit\n"
+     "let scope = null;\n"
+     "function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }\n"
+     "function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }\n"
+     "function named(path) { return `${path}${path.includes('?') ? '&' : '?'}auditor=${encodeURIComponent(auditor)}&scope=${encodeURIComponent(scope)}`; }\n"
+     "async function api(path) {\n  const r = await fetch(named(path));"),
+    ("const r = await fetch('/api/audit/answer', {", "const r = await fetch(named('/api/audit/answer'), {"),
+    ("async function start() {\n"
+     "  try { boot = await api('/api/audit/boot'); }\n"
+     "  catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }\n",
+     "// the name form, filled with what this browser remembers; Enter or Start begins\n"
+     "function askName(text) {\n"
+     "  if (saving) return;\n"
+     "  boot = null; item = null; phase = null; st = null;\n"
+     "  const v = $('video'); if (v.pause) v.pause();\n"
+     "  show('work', false); show('rename', false); show('named', true);\n"
+     "  $('auditor').value = auditor || recall('auditor') || ''; $('scope').value = scope || recall('auditScope') || '';\n"
+     "  $('namestatus').textContent = text || ''; $('auditor').focus();\n"
+     "}\n"
+     "async function start() {\n"
+     "  const name = $('auditor').value.trim(), chosen = $('scope').value;\n"
+     "  if (!name) { $('namestatus').textContent = 'type your name first'; return; }\n"
+     "  if (chosen !== 'full' && chosen !== 'reliability') { $('namestatus').textContent = 'choose the full audit or the reliability subset'; return; }\n"
+     "  auditor = name; scope = chosen; $('namestatus').textContent = 'starting…';\n"
+     "  try { boot = await api('/api/audit/boot'); }\n"
+     "  catch (e) { boot = null; $('namestatus').textContent = `cannot start: ${e.message}`; return; }\n"
+     "  remember('auditor', auditor); remember('auditScope', scope);\n"
+     "  $('namestatus').textContent = ''; $('auditor').blur();\n"
+     "  show('named', false); show('work', true); show('rename', true);\n"),
+    ("document.addEventListener('keydown', e => { onKey(e); });\nstart();\n",
+     "document.addEventListener('keydown', e => { onKey(e); });\n"
+     "$('named').addEventListener('submit', e => { e.preventDefault(); start(); });\n"
+     "$('rename').addEventListener('click', () => askName());\n"
+     "askName();\n"),
+])

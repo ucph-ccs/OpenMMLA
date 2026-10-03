@@ -10,10 +10,21 @@ version's file must be the one its freeze logged (a file changed or frozen twice
 frozen or a render made after scored answers existed is named in the header.
 
 The primary auditor is --audit-auditor, else the one auditor whose audit link has no subset (two such
-need --audit-auditor); the others feed the inter-auditor agreement only. Practice items, items not
-rendered or whose frame failed its tag check, frames and clips the auditor flagged, frames the version
-holds no frame of, pupils without a letter of the display roster, and cannot-tell answers are left out
-of every score and counted. The answers' notes are never read into an output.
+need --audit-auditor); the others feed the inter-auditor agreement only.
+
+An open audit (a start line of its request log served it with --audit-open) is scored by typed name: an
+answer saved by the open page counts under the name it was saved under, and an answer of a claimed audit
+link as above. The primary auditor is --audit-auditor, else the one name whose answers chose the full
+audit (two such need --audit-auditor); the agreement is the primary's with each name that chose the
+reliability subset, on the items both answered; any other name is counted and left out. Every output's
+header says the audit was open: the names were typed, not authenticated. Since one person may type two
+names, the report lists the saves under other names from an address and browser of the primary's own
+saves, and among them the identity answers of a frame saved before the primary's (shared_browser).
+
+Practice items, items not rendered or whose frame failed its tag check, frames and clips the auditor
+flagged, frames the version holds no frame of, pupils without a letter of the display roster, and
+cannot-tell answers are left out of every score and counted. The answers' notes are never read into an
+output.
 
 Identity (a pipeline member box: the version's person at a displayed box carries a tag of the
 version's roster):
@@ -52,6 +63,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,12 +97,73 @@ def audit_links(campaign: dict) -> dict[str, dict]:
             for t in c.get('tokens', []) if t.get('scope') == 'audit' and t.get('claimed_at')}
 
 
-def read_answers(artifacts: Path, plan: dict, campaign: dict) -> tuple[dict[str, dict[str, dict[str, dict]]], Counter]:
+def open_serves(artifacts: Path, audit_id: str) -> list:
+    """the seqs of the start lines in the audit's request log whose server served it open (--audit-open)"""
+    path = A.audit_dir(artifacts, audit_id) / L.LOG_FILE
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return []
+    out = []
+    for line in data.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get('event') == 'start' and record.get('kind') == 'audit' \
+                and record.get('open') is True:
+            out.append(record.get('seq'))
+    return out
+
+
+def shared_browser(artifacts: Path, audit_id: str, primary: str) -> dict:
+    """the saves the request log names under another name than `primary` from an address and browser one of
+    the primary's own saves came from: in an open audit one person may type two names, and an identity
+    answer of a frame under a second name shows which boxes the frozen versions call pupils before the
+    primary's own identity answer of it is locked. {'names': name -> saves, 'identity_before': [{'name',
+    'alias', 'item', 'seq', 'primary_seq'}, ...] (an identity save of a frame before the primary's)}. The
+    same address and browser are no proof of one person (a shared machine, an SSH forward's 127.0.0.1), and
+    different ones no proof of two."""
+    path = A.audit_dir(artifacts, audit_id) / L.LOG_FILE
+    try:
+        data = path.read_bytes()
+    except OSError:
+        data = b''
+    saves = []
+    for line in data.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get('label_sha256') and isinstance(record.get('coder'), str) \
+                and isinstance(record.get('seq'), int) and isinstance(record.get('ip'), str):
+            saves.append(record)
+    mine = {(r.get('ip'), r.get('ua')) for r in saves if r['coder'] == primary}
+    first: dict = {}
+    for r in saves:
+        if r['coder'] == primary and r.get('phase') == 'identity':
+            first.setdefault(r.get('item'), r['seq'])
+    names: Counter = Counter()
+    before = []
+    for r in saves:
+        if r['coder'] == primary or (r.get('ip'), r.get('ua')) not in mine:
+            continue
+        names[r['coder']] += 1
+        if r.get('phase') == 'identity' and r.get('item') in first and r['seq'] < first[r['item']]:
+            before.append({'name': r['coder'], 'alias': r.get('alias'), 'item': r['item'], 'seq': r['seq'],
+                           'primary_seq': first[r['item']]})
+    return {'names': dict(sorted(names.items())), 'identity_before': before}
+
+
+def read_answers(artifacts: Path, plan: dict, campaign: dict,
+                 typed: bool = False) -> tuple[dict[str, dict[str, dict[str, dict]]], Counter, dict[str, set]]:
     """(auditor -> item -> phase -> the record that counts: an identity's first, any other phase's last; what
-    was left out and why): only records a claimed audit link of `campaign` (campaign.yml) saved for its own
-    auditor count"""
+    was left out and why; auditor -> the subsets their counted answers were saved under): only records a
+    claimed audit link of `campaign` (campaign.yml) saved for its own auditor count, and with `typed` (an
+    open audit) also those the open page saved, under the name each was saved under"""
     links = audit_links(campaign)
     out: dict[str, dict[str, dict[str, dict]]] = defaultdict(dict)
+    scopes: dict[str, set] = defaultdict(set)
     left = Counter()
     for _, path in A.record_files(artifacts, plan['audit_id'], [s['id'] for s in plan['sessions']]):
         for line in path.read_text(encoding='utf-8').splitlines():
@@ -101,15 +174,42 @@ def read_answers(artifacts: Path, plan: dict, campaign: dict) -> tuple[dict[str,
                 left['answer lines that do not parse'] += 1
                 continue
             link = links.get(str(record.get('token_id')))
-            if link is None or link['name'] != auditor:
-                left['answers saved without a claimed audit link of their auditor'] += 1
+            if typed and link is None and record.get('open') is True and record.get('token_id') is None \
+                    and isinstance(auditor, str):
+                subset = record.get('subset') if record.get('subset') in L.SUBSETS else None
+            elif link is None or link['name'] != auditor:
+                left['answers saved without a claimed audit link of their auditor' if not typed else
+                     'answers saved neither by the open page nor through a claimed audit link of their auditor'] += 1
                 continue
+            else:
+                subset = link['subset']
             phases = out[auditor].setdefault(item, {})
             if phase == 'identity' and 'identity' in phases:
                 left['identity answers saved after the lock (the first counts)'] += 1
                 continue
             phases[phase] = record
-    return dict(out), left
+            scopes[auditor].add(subset)
+    return dict(out), left, dict(scopes)
+
+
+def _scope_of(subsets: set) -> str:
+    """what a name's answers chose: 'full', 'reliability', or 'mixed' when they were saved under both"""
+    if len(subsets) > 1:
+        return 'mixed'
+    return 'reliability' if subsets == {'reliability'} else 'full'
+
+
+def primary_typed(answers: dict, chosen: str | None, scopes: dict[str, set]) -> str | None:
+    """an open audit's primary auditor: `chosen`, else the one name with answers that chose the full audit"""
+    if chosen:
+        # the open page keeps names in NFC: a name given in another form is the same name
+        chosen = unicodedata.normalize('NFC', chosen)
+        return chosen if chosen in answers else None
+    full = sorted(name for name in answers if None in scopes.get(name, ()))
+    if len(full) > 1:
+        raise A.AuditError(f"{len(full)} names answered the full audit ({', '.join(full)}): name the primary one with "
+                           '--audit-auditor')
+    return full[0] if full else None
 
 
 def primary_auditor(answers: dict, chosen: str | None, campaign: dict) -> str | None:
@@ -534,12 +634,12 @@ def confusions(units: dict) -> dict[str, dict]:
                                         'matrix': attributed}}
 
 
-def interauditor(plan: dict, answers: dict, primary: str) -> list[dict]:
-    """per other auditor and question, on the items both answered (practice and flagged ones left out):
-    the pairs, the share agreeing and Cohen's kappa where it is defined"""
+def interauditor(plan: dict, answers: dict, primary: str, partners=None) -> list[dict]:
+    """per other auditor (of `partners`, default every one) and question, on the items both answered
+    (practice and flagged ones left out): the pairs, the share agreeing and Cohen's kappa where it is defined"""
     rows = []
     mine = answers.get(primary, {})
-    for other in sorted(set(answers) - {primary}):
+    for other in sorted(set(answers if partners is None else partners) - {primary}):
         theirs = answers[other]
         pairs: dict[str, list] = defaultdict(list)
         for item, phases in mine.items():
@@ -591,8 +691,13 @@ def _header(context: dict) -> str:
     log = context.get('log') or {}
     checked = ('DOES NOT VERIFY, scored anyway' if log.get('despite_failure') else
                f"{len(log.get('cuts') or [])} crash cut(s)" if log.get('cuts') else 'verified')
+    opened = '; the audit was open (names typed, not authenticated)' if context.get('open') else ''
+    shared = (context.get('open') or {}).get('shared_browser') or {}
+    if shared.get('names'):
+        opened += (f"; {sum(shared['names'].values())} saves under other names from the primary's address and browser"
+                   f" ({len(shared['identity_before'])} identity answers of a frame before the primary's)")
     return (f"# audit {context['audit_id']}; plan sha256 {context['plan_sha256']}; version {context['version']}; "
-            f"drift check {context['drift']}; primary auditor {context['auditor']}; request log {checked}, head "
+            f"drift check {context['drift']}; primary auditor {context['auditor']}{opened}; request log {checked}, head "
             f"{log.get('head')}{late}")
 
 
@@ -628,6 +733,19 @@ def report_text(context: dict, tables: dict, confusion: dict, agreement: list, l
     for name, data in confusion.items():
         lines += ['', f'CONFUSION {name} (rows {", ".join(data["rows"])}; columns {", ".join(data["columns"])})']
         lines += ['    ' + ' '.join(f'{v:>5}' for v in row) for row in data['matrix']]
+    if context.get('open'):
+        lines += ['', 'OPEN AUDIT: THE NAMES TYPED (not authenticated)']
+        lines += [f"    {name:<24} {row['scope']:<12} {row['items']:>5} items  {row['role']}"
+                  for name, row in context['open']['names'].items()]
+        shared = context['open'].get('shared_browser') or {}
+        lines += ['', "OPEN AUDIT: SAVES UNDER OTHER NAMES FROM THE PRIMARY'S ADDRESS AND BROWSER (one person may type "
+                      'two names; a shared machine looks alike)']
+        lines += [f'    {name:<24} {count:>5} saves' for name, count in (shared.get('names') or {}).items()] or ['    none']
+        if shared.get('identity_before'):
+            lines += ['    identity answers of a frame under another name before the primary\'s own (the boxes the '
+                      'versions call pupils were then shown):']
+            lines += [f"      {r['name']:<22} {r['alias']} {r['item']} at seq {r['seq']}, the primary's at seq "
+                      f"{r['primary_seq']}" for r in shared['identity_before']]
     lines += ['', 'INTER-AUDITOR AGREEMENT']
     lines += [f"    {r['auditor']:<16} {r['question']:<36} n {r['n']:<5} agree {r['agree']} kappa {r['kappa']}"
               for r in agreement] or ['    no second auditor answered the same items']
@@ -661,24 +779,44 @@ def score(artifacts: Path, audit_id: str, version: str, auditor: str | None = No
     index_path = A.audit_dir(artifacts, audit_id) / A.RENDER_INDEX
     render = A.read_json(index_path) if index_path.exists() else {}
     data = campaign.data()
-    answers, refused = read_answers(artifacts, plan, data)
-    primary = primary_auditor(answers, auditor, data)
-    if primary is None:
-        raise A.AuditError(f'no answers by {auditor} through an audit link' if auditor else
-                           'no answers yet through an audit link without a subset (or give --audit-auditor)')
+    # served open at least once: the answers are scored by the names typed
+    opened = open_serves(artifacts, audit_id)
+    answers, refused, scopes = read_answers(artifacts, plan, data, typed=bool(opened))
+    partners = None
+    if opened:
+        primary = primary_typed(answers, auditor, scopes)
+        if primary is None:
+            raise A.AuditError(f'no answers by {auditor}' if auditor else
+                               'no answers yet under a name that chose the full audit (or give --audit-auditor)')
+        partners = sorted(n for n in answers if n != primary and scopes.get(n) == {'reliability'})
+    else:
+        primary = primary_auditor(answers, auditor, data)
+        if primary is None:
+            raise A.AuditError(f'no answers by {auditor} through an audit link' if auditor else
+                               'no answers yet through an audit link without a subset (or give --audit-auditor)')
     built = build_units(plan, designs, versions, render, answers, primary)
     units, left = built['units'], built['left']
     left.update(refused)
+    if opened:
+        others = [n for n in answers if n != primary and n not in partners]
+        if others:
+            left['open audit: names other than the primary and the reliability subset, not scored'] = len(others)
     tables = {check: check_tables(check, units.get(check, []), boot, seed)
               for check in ('identity', 'stored', 'seat', 'recall', 'frames', 'gaze', 'members', 'speech')}
     confusion = confusions(units)
-    agreement = interauditor(plan, answers, primary)
+    agreement = interauditor(plan, answers, primary, partners)
     context = {'audit_id': audit_id, 'plan_sha256': L.file_sha256(A.audit_dir(artifacts, audit_id) / A.PLAN_FILE),
                'version': version, 'drift': ('; '.join(drifted) + ' (allowed)') if drifted else 'none',
                'auditor': primary, 'declared': plan.get('declared') or [], 'boot': boot, 'seed': seed,
                'mode': plan.get('mode'), 'scored_at': C.now_utc(), 'after': after,
                'rendered_after_answers': render.get('after_answers') or 0,
                'log': {k: log[k] for k in ('ok', 'message', 'head', 'seq', 'cuts', 'despite_failure')}}
+    if opened:
+        # names typed, not authenticated: each name with the scope its answers chose and how many items it answered
+        context['open'] = {'served_open_at_seq': opened, 'names': {
+            name: {'scope': _scope_of(scopes.get(name, set())), 'items': len(answers[name]),
+                   'role': 'primary' if name == primary else 'reliability' if name in partners else 'left out'}
+            for name in sorted(answers)}, 'shared_browser': shared_browser(artifacts, audit_id, primary)}
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     folder = Path(out) if out else A.audit_dir(artifacts, audit_id) / A.SCORES_DIR / f'{version}_{stamp}'
     folder.mkdir(parents=True, exist_ok=True)
@@ -712,11 +850,18 @@ def cmd_score(args, argv) -> int:
                             Path(args.audit_out) if args.audit_out else None, bool(args.despite_log_failure))
     A._event(artifacts, audit_id, 'audit-score', version=args.audit_version, auditor=summary['auditor'],
              drift=summary['drift'], log_check=summary['log'], summary_sha256=L.file_sha256(folder / 'summary.json'),
-             argv=list(argv))
+             argv=list(argv), **({'open': True} if summary.get('open') else {}))
     pooled = {(r['check'], r['metric']): r for rows in summary['tables'].values() for r in rows if r['by'] == 'pooled'}
     print(f"audit {audit_id}, {args.audit_version}, primary auditor {summary['auditor']}"
+          + (', the audit was open (names typed, not authenticated)' if summary.get('open') else '')
           + (f", drift: {summary['drift']}" if summary['drift'] != 'none' else '')
           + (f", the request log does not verify ({summary['log']['message']})" if summary['log']['despite_failure'] else ''))
+    shared = (summary.get('open') or {}).get('shared_browser') or {}
+    if shared.get('names'):
+        print("  saves under other names from the primary's address and browser: "
+              + ', '.join(f'{name} {count}' for name, count in shared['names'].items())
+              + (f"; {len(shared['identity_before'])} identity answers of a frame before the primary's"
+                 if shared['identity_before'] else '') + ' (report.txt lists them)')
     for key in (('identity', 'precision'), ('recall', 'recall'), ('gaze', 'accuracy, 8 classes'),
                 ('gaze', 'kappa, 8 classes'), ('gaze', 'version readable'), ('speech', 'sensitivity at speech_ratio > 0'),
                 ('speech', "not the group's, of measured speech")):

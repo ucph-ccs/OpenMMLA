@@ -43,7 +43,9 @@ The steps, each a flag of mmla ses-code (docs/analytics/coding_and_audit.md):
   --audit-freeze ID     another version's outputs frozen for the same items
   --audit-render ID     the frames decoded as the bases decoded them and checked by their AprilTags,
                         the numbered boxes, head close-ups, roster crops and clips (vfa-base, cv2)
-  --audit ID            the page (audit_page), on its own port and request log
+  --audit ID            the page (audit_page), on its own port and request log; with --audit-open no
+                        links: each auditor types their name and chooses the full audit or the
+                        reliability subset
   --audit-estimate ID   the hours the answers take
   --audit-score ID      a version scored against the answers (audit_score)
   --audit-purge ID      the images and clips deleted
@@ -54,7 +56,8 @@ Files:
     plan.json          the sessions with their aliases, lessons and strata, the sizes, the seed, the
                        declared analyses (served: no pipeline output in it)
     campaign.yml       the auditors' one-time links (code_locked; --campaign <this folder> --issue-token
-                       NAME --token-scope audit [--token-subset reliability])
+                       NAME --token-scope audit [--token-subset reliability]) and whether the audit is
+                       closed (an open audit has no links)
     requests.jsonl     the hash-chained request log of the server and of every step here
     media/<alias>/     the images and clips (--audit-purge deletes them)
     render_index.json  what the renderer found: the frame checks, crop brightness, errors
@@ -1176,6 +1179,9 @@ def add_arguments(parser) -> None:
     group.add_argument('--audit-freeze', default=None, metavar='ID', help="freeze another version's outputs for the audit's items")
     group.add_argument('--audit-render', default=None, metavar='ID', help="decode, check and draw the frames, cut the clips (vfa-base)")
     group.add_argument('--audit', default=None, metavar='ID', help="serve the audit's page (port 8766 unless -p)")
+    group.add_argument('--audit-open', action='store_true', default=None,
+                       help="with --audit: no links, each auditor types their name and chooses the full audit or the "
+                            "reliability subset (--allow-from optional; recorded in the start line)")
     group.add_argument('--audit-estimate', default=None, metavar='ID', help="print the hours the answers take")
     group.add_argument('--audit-score', default=None, metavar='ID', help="score a version against the answers")
     group.add_argument('--audit-purge', default=None, metavar='ID', help="delete the audit's images and clips")
@@ -1201,7 +1207,7 @@ def add_arguments(parser) -> None:
     group.add_argument('--audit-allow-drift', action='store_true', default=None, help="keep a session whose table, events or fused view do not agree (recorded)")
     group.add_argument('--audit-after-answers', action='store_true', default=None,
                        help="freeze or render although scored answers exist (logged, named in every score)")
-    group.add_argument('--audit-auditor', default=None, help="the primary auditor of the scores (default the one whose audit link has no subset)")
+    group.add_argument('--audit-auditor', default=None, help="the primary auditor of the scores (default the one whose audit link has no subset; open, the one name that chose the full audit)")
     group.add_argument('--audit-boot', type=int, default=None, help=f"bootstrap resamples (default {DEFAULTS['boot']})")
     group.add_argument('--audit-boot-seed', type=int, default=None, help=f"the bootstrap's seed (default {DEFAULTS['boot_seed']})")
     group.add_argument('--audit-out', default=None, metavar='DIR', help="where the scores go (default <audit>/scores/<version>_<time>)")
@@ -1444,6 +1450,9 @@ def run(args, argv) -> int:
     actions = [a for a in ACTIONS if getattr(args, a, None)]
     if len(actions) != 1:
         print('give one of ' + ', '.join('--' + a.replace('_', '-') for a in ACTIONS))
+        return 2
+    if getattr(args, 'audit_open', None) and actions[0] != 'audit':
+        print('--audit-open goes with --audit ID (the scorer finds an open audit in its request log)')
         return 2
     # the id names folders every step reads, writes or deletes: never a path
     if not AUDIT_ID.fullmatch(str(getattr(args, actions[0]))):

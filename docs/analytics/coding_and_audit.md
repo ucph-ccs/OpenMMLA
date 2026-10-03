@@ -30,8 +30,8 @@ The operator sets this up before the first link and records it in the log:
 
 The servers enforce what they can:
 
-- **Bind.** `--locked` and `--audit` refuse `0.0.0.0` and LAN or public addresses, since plain HTTP would carry clips, frames and cookies across them. They bind the tailnet address or 127.0.0.1, the latter behind an SSH forward.
-- **Allowed clients.** With the tailnet address, `--allow-from` is required and names hosts (single addresses). A network needs `--allow-wide`, which the start line records. Any other client gets 403 and a log line. With 127.0.0.1, only this machine may connect, unless `--allow-from` narrows it further.
+- **Bind.** `--locked` and `--audit` refuse `0.0.0.0` and LAN or public addresses, since plain HTTP would carry clips, frames and cookies across them. They bind the tailnet address or 127.0.0.1, the latter behind an SSH forward. An open audit (`--audit-open`, [below](#the-open-audit)) binds the same addresses.
+- **Allowed clients.** With the tailnet address, `--allow-from` is required and names hosts (single addresses). A network needs `--allow-wide`, which the start line records. Any other client gets 403 and a log line. With 127.0.0.1, only this machine may connect, unless `--allow-from` narrows it further. An open audit is the exception: there `--allow-from` is optional, and without it every tailnet address may connect, as anyone who reaches the default page may. The start line records the addresses allowed.
 - **Another instance.** Both servers refuse to start while another `ses-code` serves the same artifacts, unless `--i-know-another-instance-runs`, which the start line records. This check is a convenience: the control is the one-port rule above. The running default page never needs to stop.
 - **Their own checkout.** Run the campaign and audit servers from a separate checkout on port 8766 (the default for `--locked` and `--audit`). A campaign and an audit served at once need `-p` for one of them.
 
@@ -219,7 +219,7 @@ The audit has no presence question, no speech-activity or overlap question, no w
 - **No pipeline file.** The server reads the plan, the views and the answers files. It never opens a `pipeline*.json` file (a test checks this).
 - **Verify mode.** With `--audit-mode verify` at sampling, the renderer draws the display version's pupil and tag source beside the member boxes, and its gaze ray and class on the gaze pictures. A sample is in one mode for good.
 - **No identifying detail.** Session ids, dates, devices, file paths and absolute times never reach the page: recordings are `R01`, `R02` and so on, and cameras are numbered.
-- **No other auditor.** Every auditor comes in through a one-time link of scope `audit`. No answer is saved, and nothing is shown, under a name the page gives, so no auditor reads or answers as another.
+- **No other auditor.** Every auditor comes in through a one-time link of scope `audit`. No answer is saved, and nothing is shown, under a name the page gives, so no auditor reads or answers as another. In an open audit the auditor is the name typed: the server shows each name only its own answers and progress, but it cannot tell who typed a name ([below](#the-open-audit)).
 
 ### Versions
 
@@ -250,9 +250,9 @@ Two checks make sure a frame set is the video frame the bases read:
 | 2 | `--audit-freeze ID --audit-version rerun --audit-events DIR --audit-tables PATTERN` | Freezes another version's outputs for the same items. Freeze both versions before rendering, so the gaze question asks about the member boxes of both. |
 | 3 | `--audit-render ID` | Decodes, checks and draws the frames, crops the heads and the roster, and cuts the clips (below), in `vfa-base`. |
 | 4 | `--campaign artifacts/runtime/audit/ID --log-note TEXT` | The port probes and approvals of [Network isolation](#network-isolation). |
-| 5 | `--campaign artifacts/runtime/audit/ID --issue-token NAME --token-scope audit` | A one-time link for an auditor, written to `links/NAME.txt` and never printed. `--token-subset reliability` limits a second auditor to the reliability subset. |
+| 5 | `--campaign artifacts/runtime/audit/ID --issue-token NAME --token-scope audit` | A one-time link for an auditor, written to `links/NAME.txt` and never printed. `--token-subset reliability` limits a second auditor to the reliability subset. An open audit skips this step. |
 | 6 | `--audit-estimate ID` | The hours the answers take, from assumed seconds per judgement, or from the practice answers once there are some. |
-| 7 | `--audit ID --bind <tailnet address> --allow-from <auditor machines>` | Serves the page until Ctrl-C. It refuses when no audit link is issued, and once the audit is closed. With `--bind 127.0.0.1` it is reached through an SSH forward. |
+| 7 | `--audit ID --bind <tailnet address> --allow-from <auditor machines>` | Serves the page until Ctrl-C. It refuses when no audit link is issued, and once the audit is closed. With `--bind 127.0.0.1` it is reached through an SSH forward. With `--audit-open`, no link is needed and `--allow-from` is optional ([The open audit](#the-open-audit)). |
 | 8 | `--campaign artifacts/runtime/audit/ID --anchor` | Prints only hashes: the log's head, `campaign.yml`, the plan, the render index, per recording its design, view and each frozen version, and each answers file. Send them outside the project before the first answer, at the end of each day and at the close. |
 | 9 | `--audit-score ID --audit-version reported`, then `rerun` | Scores a version against the answers (below). |
 | 10 | `--campaign artifacts/runtime/audit/ID --close-campaign`, then `--audit-purge ID` | Closes the audit to answers (a server still running answers 410 for pictures and clips), then deletes every image and clip. The plan, views, frozen outputs, answers and scores are kept. |
@@ -313,12 +313,67 @@ A frame or a clip that fails is its item's error, and a recording that fails is 
 
 Everywhere but the roster, `n` focuses the note. `←` and `→` move between items, and the page starts at the first unanswered item. Notes are kept with the answers and never read into the scores. The who-speaks gate (the clip played first) rests on what the browser reports: a convenience, not a control.
 
+### The open audit
+
+`--audit ID --audit-open` serves the audit the way the default coding page (port 8765) is served: no link, claim or cookie. Each auditor types their name and chooses what they answer. Every other rule of the audit stays.
+
+**Operator steps.** Sample, freeze and render as above. Skip `--issue-token`. Then:
+
+1. `--audit ID --audit-open --bind <tailnet address>` serves the page; add `--allow-from <auditor machines>` to narrow it. `--bind 127.0.0.1` behind an SSH forward works as before. `0.0.0.0` and LAN addresses are still refused.
+2. Tell each auditor the name to type, spelled the same way at every sitting, and whether they do the full audit or the reliability subset.
+3. Anchor, score, close and purge as above.
+
+The open server serves no link: `/c/<token>` answers 404, and a link's cookie names no one.
+
+**The page.** It opens on a form:
+
+- **Name.** Trimmed, not empty, and at most 100 bytes in its file-name form, as the default page checks a coder name. It may not hold a control, formatting or line-break character, since such a name could forge or hide lines of the scores' report. A name typed in two Unicode forms (an accent typed as one character or as two) is one name. A coder name of the default page may be typed: audit answers go to a file of their own.
+- **What you answer.** The full audit, or the reliability subset of the second auditor.
+
+The browser remembers both and fills them in at the next visit. On a shared machine, the next person must change the name. "change name" in the header brings the form back.
+
+**Names.** A name is taken as typed (trimmed, in one Unicode form), and no two names share answers. The server refuses a name in three cases:
+
+- **Another name's file.** The name's answers file, in any case or Unicode form, already holds another name's answers. For example, `Ana` when `ana` has answers, or `ana_b` when `ana b` has answers, since both write `ana_b.jsonl`. The refusal does not say the other name, since typing it would show that auditor's answers.
+- **A link's file.** The name's answers file holds answers saved through an audit link.
+- **Another scope.** The name's answers so far were saved under the other scope.
+
+The server checks all three again under the request log's lock when it saves an answer, so two first saves at once cannot pass both.
+
+**Links and typed names.** Serve an audit one way. An audit with answers saved through links may still be served open, but the names of those auditors are refused, so let them finish through their links first. Once the open page has saved an answer, `--audit ID` without `--audit-open` refuses to serve the audit, since a link's page would show the answers typed under its name as its own.
+
+**Answers.** They go to `answers/<the name's file-name form>.jsonl`, one line per save as above. Each line has:
+
+- the auditor's name as typed;
+- `open: true`;
+- the scope (`full` or `reliability`) and its subset;
+- no link (`token_id` is null).
+
+The per-name rules hold as before:
+
+- no pipeline answer is served in blind mode;
+- a frame's identity answers are locked before its gaze question opens;
+- each name sees only its own answers, progress and reference pictures.
+
+**What the log shows.** The request log stays on, and its start line records `open: true` with the addresses allowed. Every request but the page itself carries the typed name, and its log line keeps it as `coder`, with the scope and the client's address and browser. A request without a usable name is refused (400) and logged without one. Every save carries the sha256 of the line it appended, so `--verify-log` checks the answers files both ways as before. It also checks that each open line names the auditor its request typed. The anchors print each file under a hash of its file name, never the name.
+
+**What the log cannot show.**
+
+- Who typed a name. Names are typed, not authenticated, and no device is bound to a name.
+- Whether one person answered under two names, or two people under one.
+- Whether a person typed another auditor's name. That person sees the other's answers and progress and can answer as them, by mistake or not.
+- Whether identity blindness held for a person. Blindness holds per name. A person can answer a frame's identity under a second name, see in its gaze question which boxes the frozen versions call pupils, then answer that frame's identity under their own name, still unlocked. The answers themselves look blind.
+
+The only trace is the address and browser of each request. The scorer lists every save under another name from an address and browser the primary auditor's saves came from, and among them every identity answer of a frame saved before the primary's own ([Scores](#scores)). The same address and browser are no proof of one person: a shared machine, or an SSH forward that shows every auditor as 127.0.0.1. Different ones are no proof of two.
+
+Use links when these matter, for example for a second auditor whose blindness to the first a paper reports. The scores of an open audit say it was open.
+
 ### Answers
 
 `artifacts/<session>/audit/<ID>/answers/<auditor>.jsonl` gets one line per saved answer. Each line holds:
 
 - the item and the phase;
-- the session, the auditor and the link's id;
+- the session, the auditor and the link's id (in an open audit no link, `open: true` and the scope);
 - the mode and the codebook version;
 - whether it is practice or reliability;
 - the answer and the seconds spent;
@@ -341,6 +396,17 @@ What is scored:
 - **The first identity.** An identity line after the first of its frame is counted as a lock broken and left out.
 - **The primary auditor** is the one named, else the one auditor whose audit link has no subset. Two such auditors need `--audit-auditor`. The other auditors give the inter-auditor agreement.
 
+An open audit is scored by typed name. The scorer finds it in the request log: a start line that served the audit with `--audit-open`. No flag is needed at scoring.
+
+- **The answers.** Those the open page saved count under the name each was saved under, beside any answers of claimed audit links.
+- **The primary auditor** is `--audit-auditor NAME`, else the one name whose answers chose the full audit. Two such names need `--audit-auditor`.
+- **The agreement** is the primary auditor's with each name that chose the reliability subset, on the items both answered.
+- **Other names** are counted and left out. `report.txt` lists every name with its scope, its number of items and its role.
+- **Saves under other names from the primary's browser.** From the request log, `report.txt` and `summary.json` list the saves under another name from an address and browser the primary's own saves came from. They also list every identity answer of a frame among them saved before the primary's identity answer of that frame: from then on, that name's gaze question showed which boxes the versions call pupils. The header gives both counts when there are any, and the scorer prints them.
+- **The header** of every output says "the audit was open (names typed, not authenticated)".
+
+An answer marked open counts only when the log shows the audit served open. Otherwise it is left out as an answer without a link.
+
 Left out of every score, and counted:
 
 - practice items;
@@ -353,7 +419,7 @@ Left out of every score, and counted:
 Each file is headed by:
 
 - the plan's sha256 and the version;
-- the drift check and the auditor;
+- the drift check and the auditor, and whether the audit was open;
 - the log's check and head;
 - any version frozen, or render made, after scored answers or after the render.
 
@@ -370,7 +436,7 @@ Every table comes per lesson first, with Wilson intervals (item-level, approxima
 ```
 artifacts/runtime/audit/<ID>/
   plan.json           sessions, aliases, lessons, sizes, seed, mode, frame check bounds, declared analyses
-  campaign.yml        the auditors' links (code_locked)
+  campaign.yml        the auditors' links (code_locked; none in an open audit) and whether the audit is closed
   requests.jsonl      the request log, with every step above and the sha256 of what it wrote
   media/<alias>/      images and clips (--audit-purge deletes them)
   render_index.json   frame checks, tag offsets, head brightness, replay config state, errors
