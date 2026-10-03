@@ -4632,78 +4632,43 @@ def _vllm_serve_command(config: dict | None = None, *, mask: bool = False) -> st
 # new shell comes -- no new tab, or System Events not allowed to press Cmd-T
 # -- the component gets a window of its own instead of a busy tab, and the
 # commands that got nowhere are named in the log.
-# argv: the pipeline's colour ("R G B", 0-65535, or "-" for none), then one
-# shell command per component. Returns one line per command: tab, window, or
-# failed.
+# argv: one shell command per component. Returns one line each: tab, window,
+# or failed. The windows keep their profile's colours: Terminal reports the
+# Basic profile as black text on white even while macOS's dark mode shows it
+# white on black, so a wash of the pipeline's colour over the background it
+# reported put white text on a light background
 _MAC_TABS_SCRIPT = r"""
 on run argv
-	set hue to my parseHue(item 1 of argv)
 	set outcomes to {}
 	try
 		tell application "Terminal"
 			activate
-			set firstTab to do script (item 2 of argv)
+			do script (item 1 of argv)
 		end tell
-		my tint(firstTab, hue)
 		set end of outcomes to "window"
 	on error
 		set end of outcomes to "failed"
 	end try
 	set canKeystroke to false
-	if (count of argv) > 2 then set canKeystroke to my waitUntilFront()
-	repeat with i from 3 to (count of argv)
+	if (count of argv) > 1 then set canKeystroke to my waitUntilFront()
+	repeat with i from 2 to (count of argv)
 		set shellTab to missing value
 		if canKeystroke then set shellTab to my openShell()
 		try
 			if shellTab is missing value then
-				tell application "Terminal" to set shellTab to do script (item i of argv)
+				tell application "Terminal" to do script (item i of argv)
 				set end of outcomes to "window"
 			else
 				my waitUntilReady(shellTab)
 				tell application "Terminal" to do script (item i of argv) in shellTab
 				set end of outcomes to "tab"
 			end if
-			my tint(shellTab, hue)
 		on error
 			set end of outcomes to "failed"
 		end try
 	end repeat
 	return my joinText(outcomes)
 end run
-
-on parseHue(theText)
-	if theText is "-" then return {}
-	set saved to AppleScript's text item delimiters
-	set AppleScript's text item delimiters to space
-	set parts to text items of theText
-	set AppleScript's text item delimiters to saved
-	set hue to {}
-	repeat with part in parts
-		set end of hue to (part as integer)
-	end repeat
-	return hue
-end parseHue
-
--- a wash of the pipeline's colour over the window's own background, light on
--- a light one and dark on a dark one, so its text stays as readable as the
--- profile made it
-on tint(theTab, hue)
-	if (count of hue) is not 3 then return
-	try
-		tell application "Terminal" to set bg to background color of theTab
-		set lum to ((item 1 of bg) * 0.299 + (item 2 of bg) * 0.587 + (item 3 of bg) * 0.114) / 65535
-		if lum > 0.5 then
-			set k to 0.14
-		else
-			set k to 0.25
-		end if
-		set mixed to {}
-		repeat with c from 1 to 3
-			set end of mixed to round ((item c of bg) * (1 - k) + (item c of hue) * k)
-		end repeat
-		tell application "Terminal" to set background color of theTab to mixed
-	end try
-end tint
 
 -- Cmd-T goes wherever the keyboard is: false when Terminal will not take it,
 -- and every component then gets a window of its own
@@ -4825,14 +4790,6 @@ _MAC_COMMAND_MAX_AGE = 24 * 3600.0
 _MAC_BANNER_COLOURS = (("asr", "1;97;44"), ("ips", "1;97;42"), ("vfa", "1;97;45"),
                        ("mllm", "1;97;46"), ("collection", "1;30;43"))
 _MAC_BANNER_DEFAULT = "1;97;100"
-# the same colours as a wash over each window's background (_MAC_TABS_SCRIPT)
-_MAC_TINTS = (("asr", "8000 30000 65535"), ("ips", "0 45000 8000"), ("vfa", "50000 0 50000"),
-              ("mllm", "0 45000 50000"), ("collection", "65535 45000 0"))
-
-
-def _mac_tint(heading: str) -> str:
-    """the colour a card's windows are washed with, "-" for none."""
-    return next((rgb for key, rgb in _MAC_TINTS if heading.lower().startswith(key)), "-")
 
 
 def _mac_window_title(heading: str, label: str, where: str = "") -> str:
@@ -15902,7 +15859,7 @@ class ServicePanel(Widget):
             try:
                 paths = _mac_command_files(labels, cmds, heading, where)
                 done = subprocess.run(
-                    ["osascript", "-", _mac_tint(heading), *(f". {shlex.quote(path)}" for path in paths)],
+                    ["osascript", "-", *(f". {shlex.quote(path)}" for path in paths)],
                     input=_MAC_TABS_SCRIPT, capture_output=True, text=True,
                     timeout=60 + 20 * len(cmds),
                 )
