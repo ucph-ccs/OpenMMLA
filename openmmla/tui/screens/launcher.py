@@ -52,6 +52,7 @@ from openmmla.tui.system_services import (
     hosts_match,
     is_loopback_host,
     is_stream_path,
+    is_this_machine,
     repoint_stream_url,
     stream_server_path,
     stream_server_urls,
@@ -91,6 +92,8 @@ from openmmla.utils.artifact_paths import (
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source, stream_kind
+from openmmla.utils.session_sources import stream_for_base, stream_url_path
+from openmmla.utils.stream_registry import load_stream_registry
 from openmmla.utils.config import (
     asr_segment_durations, base_room, bases_by_room, decrypt_config_values, get_base_by_id, get_bases,
     holds_placeholder, load_yaml_config, main_of_base, placeholder_fields, read_yaml_mapping, room_main,
@@ -434,6 +437,16 @@ _LAUNCHER_REMOTE_DELETE_WORKER_GROUP = "launcher-remote-delete"
 _LAUNCHER_REMOTE_STOP_WORKER_GROUP = "launcher-remote-stop"
 _LAUNCHER_COLLECTION_STOP_WORKER_GROUP = "launcher-collection-stop"
 _LAUNCHER_COLLECTION_START_WORKER_GROUP = "launcher-collection-start"
+_LAUNCHER_STREAM_CHECK_WORKER_GROUP = "launcher-stream-check"
+# how long a base card's Start waits for the Stream Server to say which
+# streams it receives: one API answer over a tailnet relay takes well under a
+# second, and a server that takes longer must not hold a launch up. The
+# deadline also covers the name lookups before the request
+_STREAM_CHECK_TIMEOUT = 2.0
+_STREAM_CHECK_DEADLINE = 3.0
+# what a base whose stream is not up yet does once started: it tries again
+# until the stream comes, for up to stream_kwargs.connect_wait
+_STREAM_WAIT_NOTE = "connect_wait, 30 s by default"
 # every write to a host (a Save there, a sync either way, the push before a
 # Start): never exclusive, since cancelling a copy midway is what breaks a
 # file; the jobs of one host wait for each other in its write queue instead
@@ -1351,6 +1364,214 @@ def _stream_is_there(config: dict, source_index: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+@dataclass(frozen=True)
+class _PulledStream:
+    """a stream a base of a card is about to pull: the base's row on the
+    card and its Bases entry, the Streams entry, the URL it pulls, and the
+    machine that captures it (the entry's ssh_profile; "" for one that
+    someone else publishes)."""
+    row: int
+    entry: str
+    stream: str
+    url: str
+    machine: str = ""
+
+
+@dataclass
+class _StreamAnswer:
+    """what the Stream Server said of the streams a Start would pull: those
+    it receives nothing on, those pulled from another server (not asked),
+    and, by stream name, when this console's Streams tab started one of the
+    former that its registry still holds as running (None when it holds no
+    time)."""
+    idle: list
+    elsewhere: list
+    started: dict
+
+
+def _pulled_streams(svc_name: str, config: dict, params: dict) -> list[_PulledStream]:
+    """the streams the bases of a base card's Start would pull, by the rules
+    the bases apply: each row's -b, else the config's only Bases entry, whose
+    source: stream names a Streams entry (read_target, else target). A base
+    asked in its window, a device of its own, a file, LSL, udp/tcp pushed
+    straight to an ASR base, and an analyze run (it reads what an earlier
+    run stored) pull nothing a stream server could speak for."""
+    if svc_name not in _BASE_CARD_PIPELINES or not isinstance(config, dict):
+        return []
+    if str(params.get("-m") or "live") == "analyze":
+        return []
+    count = _coerce_int(params.get("-nb"), 0)
+    picked = [str(v or "") for v in (params.get("-b") if isinstance(params.get("-b"), list) else [])]
+    picked = (picked + [""] * count)[:count]
+    entries = get_bases(config)
+    only = str(entries[0].get("id")) if len(entries) == 1 else ""
+    found = []
+    for row, value in enumerate(picked, 1):
+        entry_id = value or only
+        base = get_base_by_id(config, entry_id) if entry_id else None
+        if base is None or normalize_source(base.get("source")) != "stream":
+            continue
+        resolved = stream_for_base(config, base)
+        if resolved is None:
+            continue  # names no stream there is: its dropdown reads (not in Streams), and the base says so
+        name, entry, url = resolved
+        found.append(_PulledStream(row, str(base.get("id")), name, url,
+                                   str((entry or {}).get("ssh_profile") or "").strip()))
+    return found
+
+
+def _stream_server_paths(pulled, server: dict, base_host: str = ""):
+    """(each pulled stream's path on the Stream Server `server`, the streams
+    pulled from somewhere it cannot speak for). A URL naming localhost counts
+    when the bases run on the server's own host (`base_host`, "" for this
+    machine), as a session's sources count it. Blocking: names may be resolved."""
+    host = str(server.get("host") or "").strip()
+    on_server = None  # asked only for a localhost URL: it may resolve names
+    paths, elsewhere = {}, []
+    for item in pulled:
+        try:
+            loopback = is_loopback_host(urlsplit(item.url).hostname)
+        except ValueError:
+            loopback = False
+        if loopback:
+            # decided before stream_server_path, which takes any localhost
+            # URL for a server called localhost: a URL's localhost is the
+            # machine its base runs on, and a server called localhost is this
+            # console's machine, which a remote base's localhost is not
+            if on_server is None:
+                on_server = ((not is_loopback_host(host) and hosts_match(base_host, host)) if base_host
+                             else is_this_machine(host))
+            path = stream_url_path(item.url) if on_server else None
+        else:
+            path = stream_server_path(item.url, server)
+        if path:
+            paths[item] = path
+        else:
+            elsewhere.append(item)
+    return paths, elsewhere
+
+
+def _ask_stream_server(pulled, server: dict, root: str, target: str = "local") -> _StreamAnswer:
+    """which of the `pulled` streams the Stream Server receives nothing on,
+    asked through its control API. Blocking (name lookups, the request, the
+    SSH profiles file): call it off the UI thread. A server that cannot be
+    asked raises RecordingsError; an api_port that is no number, ValueError."""
+    base_host = ""
+    if target != "local":
+        profile = get_profile_by_name(target)
+        base_host = str(profile.host if profile is not None else target)
+    paths, elsewhere = _stream_server_paths(pulled, server, base_host)
+    live: set[str] = set()
+    if paths:
+        live = recordings.live_paths(str(server.get("host") or "").strip(),
+                                     int(server.get("api_port") or recordings.API_PORT), _STREAM_CHECK_TIMEOUT)
+    idle = [item for item in pulled if item in paths and paths[item] not in live]
+    started: dict[str, float | None] = {}
+    if idle:
+        try:
+            registry = load_stream_registry(root).get("streams") or {}
+        except yaml.YAMLError:
+            registry = {}  # a registry that cannot be read says nothing of who started what
+        for item in idle:
+            entry = registry.get(item.stream) if isinstance(registry, dict) else None
+            if isinstance(entry, dict) and entry.get("status") == "running":
+                when = entry.get("stream_start_time")
+                started[item.stream] = float(when) if isinstance(when, (int, float)) else None
+    return _StreamAnswer(idle, elsewhere, started)
+
+
+def _stream_names(pulled) -> str:
+    """the names of the streams pulled, each once, in the order of the rows."""
+    return ", ".join(dict.fromkeys(item.stream for item in pulled))
+
+
+def _is_are(pulled) -> str:
+    return "is" if len({item.stream for item in pulled}) == 1 else "are"
+
+
+def _and_list(words: list[str]) -> str:
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
+
+
+def _bases_text(pulled) -> str:
+    """the bases that pull these streams, by their rows on the card."""
+    return _and_list([f"Base {row}" for row in dict.fromkeys(item.row for item in pulled)])
+
+
+def _stream_wait_text(pulled) -> str:
+    """what the bases that pull streams nobody publishes do once started."""
+    rows = {item.row for item in pulled}
+    what = "it" if len({item.stream for item in pulled}) == 1 else "them"
+    return f"{_bases_text(pulled)} {'waits' if len(rows) == 1 else 'wait'} for {what} ({_STREAM_WAIT_NOTE})"
+
+
+def _started_text(when: float | None) -> str:
+    """when the Streams tab started a stream, as this machine's clock reads:
+    the time alone on the day itself."""
+    if when is None:
+        return ""
+    try:
+        started = datetime.fromtimestamp(when)
+    except (OverflowError, OSError, ValueError):
+        return ""
+    same_day = started.date() == datetime.now().date()
+    return f" at {started.strftime('%H:%M' if same_day else '%Y-%m-%d %H:%M')}"
+
+
+def _card_and_host(display_name: str, target: str) -> str:
+    """a card and the host its Start was pressed on, for a line that may be
+    logged once the log's divider shows another."""
+    return f"{display_name} on this machine" if target == "local" else f"{display_name} on '{target}'"
+
+
+def _stream_hold_text(server_host: str, idle, started: dict, card: str = "") -> str:
+    """what a base card's Start (`card`, its name and host) says when it is
+    held back: each stream the Stream Server receives nothing on, the bases
+    that pull it, the machine that captures it, and whether this console
+    started it and never stopped it (its FFmpeg there has then lost the
+    server). The console's Streams tab starts only a stream it captures; one
+    published from outside is started by whoever publishes it."""
+    by_stream: dict[str, list[_PulledStream]] = {}
+    for item in idle:
+        by_stream.setdefault(item.stream, []).append(item)
+    managed = [name for name, items in by_stream.items() if items[0].machine]
+    outside = [name for name, items in by_stream.items() if not items[0].machine]
+    parts = []
+    for name, items in by_stream.items():
+        bases = _and_list([f"Base {item.row} · entry {item.entry}" for item in items])
+        machine = items[0].machine
+        if not machine:
+            where = "published from outside the console"
+        else:
+            where = "captured on " + ("this machine" if machine == "local" else machine)
+        since = ""
+        if name in started:
+            since = f", started from this console{_started_text(started[name])} and not stopped since"
+        parts.append(f"{rich_escape(name)} ({rich_escape(bases)}, {rich_escape(where)}{since})")
+    several = len(by_stream) > 1
+    many = len({item.row for item in idle}) > 1
+
+    def it(names):
+        return "them" if len(names) > 1 else "it"
+
+    if not outside:
+        what = (f"Start {it(managed)} on the Streams tab and press Start again once "
+                f"{'they read' if several else 'it reads'} ● live there")
+    elif not managed:
+        what = (f"Ask whoever publishes {it(outside)} to start {it(outside)} and press Start again once "
+                f"{'they are' if several else 'it is'} live")
+    else:
+        what = (f"Start {_and_list([rich_escape(name) for name in managed])} on the Streams tab, ask whoever "
+                f"publishes {_and_list([rich_escape(name) for name in outside])} to start {it(outside)}, and "
+                f"press Start again once they are live")
+    lead = f"{rich_escape(card)}: the Stream Server" if card else "The Stream Server"
+    return (
+        f"[yellow]{lead} ({rich_escape(server_host)}) receives nothing on {_and_list(parts)}: "
+        f"{'those bases' if many else 'that base'} would have no stream to open. {what}, or press Start "
+        f"again now to start the {'bases' if many else 'base'} all the same.[/yellow]"
+    )
 
 
 def _base_choice_label(pipeline: str, base: dict, config: dict | None = None) -> str:
@@ -4889,6 +5110,12 @@ class ServicePanel(Widget):
         # (host, session id) of a Start that was held back because the session
         # has ended; the second press on the same pair goes ahead
         self._pending_ended_start: tuple[str, str] | None = None
+        # (card, host) -> the streams not live, for each base card's Start held
+        # back because the Stream Server receives nothing on them; the next
+        # press of that card on that host with the same streams missing goes
+        # ahead. One entry per card and host: an IPS and a VFA card often pull
+        # the same cameras, and the hold of one must not undo the other's
+        self._pending_stream_start: dict[tuple[str, str], frozenset[str]] = {}
         # the session the base cards open on: the one the last Start of a base
         # or Collection card went into, or the Session picked by hand on a base
         # card ("" for Create MongoDB Session), so the bases of one take,
@@ -13132,16 +13359,50 @@ class ServicePanel(Widget):
                 self._log(f"[yellow]Create it with: conda create -n {svc.conda_env} python=3.10[/yellow]")
                 return
 
-        if svc.artifact_pipeline:
-            picked = next((value for flag, value in event.params.items() if flag in _BASE_CARD_SESSION_FLAGS), "")
-            if not _is_new_collection_session_choice(picked) and not self._confirm_start_into_ended_session(
-                    event.params, target, session_id=_safe_session_id(picked)):
+        pulled: list[_PulledStream] = []
+        if svc.name in _BASE_CARD_PIPELINES:
+            card_config = self._base_card_config(svc, target)
+            pulled = _pulled_streams(svc.name, card_config, event.params)
+            if (is_remote and not card_config and _coerce_int(event.params.get("-nb"), 0) > 0
+                    and str(event.params.get("-m") or "live") != "analyze"):
+                self._log(f"  The config of '{rich_escape(target)}' has not been read yet, so whether the streams "
+                          f"its bases pull are live is not asked (Refresh on this card reads it).")
+        if pulled:
+            server = self._stream_server_address()
+            if not str(server.get("host") or "").strip():
+                self._log(f"  {unset_address_note('StreamServer')}, so whether "
+                          f"{rich_escape(_stream_names(pulled))} {_is_are(pulled)} live is not known.")
+            else:
+                # the server is asked off the UI thread; the Start goes on when
+                # it answers, which over a relay can take seconds: say so, so
+                # the wait is not taken for a Start that did nothing
+                self._log(f"  Asking the Stream Server ({rich_escape(str(server.get('host')).strip())}) whether "
+                          f"{rich_escape(_stream_names(pulled))} {_is_are(pulled)} live...")
+                self.run_worker(
+                    self._start_after_stream_check(svc, dict(event.params), target, pulled, server),
+                    group=f"{_LAUNCHER_STREAM_CHECK_WORKER_GROUP}:{svc.name}:{target}", exclusive=True)
                 return
-        launch_params = dict(event.params)
+        self._finish_start(svc, event.params, target)
+
+    def _finish_start(self, svc: ServiceDef, params: dict, target: str) -> None:
+        """the rest of a Start once its checks passed: the session it goes
+        into, then the launch on `target`. It may run after the Stream Server
+        was asked, when the Host selector may have moved meanwhile, so nothing
+        in it may read _get_panel_target(): the host is the one pressed on."""
+        is_remote = target != "local"
+        if svc.artifact_pipeline:
+            picked = next((value for flag, value in params.items() if flag in _BASE_CARD_SESSION_FLAGS), "")
+            if not _is_new_collection_session_choice(picked) and not self._confirm_start_into_ended_session(
+                    params, target, session_id=_safe_session_id(picked)):
+                return
+        launch_params = dict(params)
         if not self._ensure_pipeline_session_for_launch(svc, launch_params, target=target):
             self._log("[red]Could not resolve a launch session id.[/red]")
             return
 
+        # a launch goes ahead: a Start of this card and host held for its
+        # streams is answered (another card's or host's hold stays)
+        self._stream_holds().pop((svc.name, target), None)
         target_label = f"on '{target}'" if is_remote else "locally"
         self._log(f"[green]Starting {svc.display_name} {target_label}...[/green]")
         self._note_port_conflict(svc, target)
@@ -13157,6 +13418,87 @@ class ServicePanel(Widget):
             )
         self.set_timer(3.0, self._refresh_visible_statuses)
 
+    def _finish_start_logged(self, svc: ServiceDef, params: dict, target: str) -> None:
+        """_finish_start from a worker: what goes wrong is logged, as on the
+        UI thread, rather than raised (a worker's error closes the console)."""
+        try:
+            self._finish_start(svc, params, target)
+        except Exception as error:
+            self._log(f"[red]Error launching {svc.display_name}: {rich_escape(str(error))}[/red]")
+
+    async def _start_after_stream_check(self, svc: ServiceDef, params: dict, target: str,
+                                        pulled: list[_PulledStream], server: dict) -> None:
+        """a base card's Start once the Stream Server has said which of the
+        streams its bases would pull it receives now. A base whose stream is
+        not there finds nothing to open (404 on DESCRIBE), so the Start is held
+        once and the log names those streams; the next press of this card on
+        this host with the same streams missing goes ahead. A server that does
+        not answer in time holds nothing up. A Stop of this card on this host
+        meanwhile cancels the worker, so nothing launches after it."""
+        host = str(server.get("host") or "").strip()
+        # the answer may come after the Host selector or the card on screen
+        # moved on, and the log's divider with them: every line below names
+        # the card and the host the Start was pressed on
+        card = rich_escape(_card_and_host(svc.display_name, target))
+        try:
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(_ask_stream_server, pulled, server, self._root, target),
+                timeout=_STREAM_CHECK_DEADLINE)
+        except asyncio.TimeoutError:
+            answer, why = None, f"did not answer within {_STREAM_CHECK_DEADLINE:g} s"
+        except Exception as error:
+            # a refusal, an api_port that is no number, anything else: the
+            # Start must not be lost to a question about it
+            answer, why = None, f"could not be asked ({str(error).rsplit(': ', 1)[-1]})"
+        if answer is None:
+            self._log(f"[yellow]  {card}: the Stream Server ({rich_escape(host)}) {rich_escape(why)}, so whether "
+                      f"{rich_escape(_stream_names(pulled))} {_is_are(pulled)} live is not known; starting all the "
+                      f"same.[/yellow]")
+            self._finish_start_logged(svc, params, target)
+            return
+        for item in answer.elsewhere:
+            try:
+                origin = urlsplit(item.url).hostname or "?"
+            except ValueError:
+                origin = "?"
+            # the host alone: a stream URL may carry a user and password
+            self._log(f"  {card}: {rich_escape(item.stream)} is pulled from {rich_escape(origin)}, not from the "
+                      f"Stream Server of System Settings: whether it is live is not asked.")
+        holds = self._stream_holds()
+        if not answer.idle:
+            holds.pop((svc.name, target), None)
+            checked = [item for item in pulled if item not in answer.elsewhere]
+            if checked:
+                self._log(f"  {card}: {rich_escape(_stream_names(checked))} {_is_are(checked)} live on the Stream "
+                          f"Server ({rich_escape(host)}).")
+            self._finish_start_logged(svc, params, target)
+            return
+        missing = frozenset(item.stream for item in answer.idle)
+        if holds.get((svc.name, target)) == missing:
+            self._log(f"[yellow]  {card}: starting without {rich_escape(_stream_names(answer.idle))} live on the "
+                      f"Stream Server: {rich_escape(_stream_wait_text(answer.idle))}.[/yellow]")
+            self._finish_start_logged(svc, params, target)
+            return
+        holds[(svc.name, target)] = missing
+        self._log(_stream_hold_text(host, answer.idle, answer.started, _card_and_host(svc.display_name, target)))
+
+    def _stream_holds(self) -> dict[tuple[str, str], frozenset[str]]:
+        """the base card Starts held back for their streams, by (card, host)."""
+        return self.__dict__.setdefault("_pending_stream_start", {})
+
+    def _call_off_stream_check(self, svc: ServiceDef, target: str) -> None:
+        """a Stop of a base card on a host: a Start of it there that still
+        waits for the Stream Server's answer must not launch the bases after
+        the Stop, and its hold is dropped, so the next Start asks and holds
+        again."""
+        self._stream_holds().pop((svc.name, target), None)
+        try:
+            cancelled = self.workers.cancel_group(self, f"{_LAUNCHER_STREAM_CHECK_WORKER_GROUP}:{svc.name}:{target}")
+        except Exception:
+            cancelled = []  # no app to run workers in: nothing waits
+        if any(not worker.is_finished for worker in cancelled):
+            self._log("  The Start that was waiting for the Stream Server's answer will not go ahead.")
+
     def on_service_card_stop_requested(self, event: ServiceCard.StopRequested) -> None:
         svc = next((s for s in self._services if s.name == event.service_name), None)
         if svc is None:
@@ -13169,6 +13511,8 @@ class ServicePanel(Widget):
         is_remote = target != "local"
         target_label = f"on '{target}'" if is_remote else "locally"
         self._log(f"[red]Stopping {svc.display_name} {target_label}...[/red]")
+        if svc.name in _BASE_CARD_PIPELINES:
+            self._call_off_stream_check(svc, target)
         self._note_port_conflict(svc, target)
 
         if is_remote:
