@@ -31,6 +31,7 @@ from textual.widgets import Button, Input, Label, Select, SelectionList, Static
 from openmmla.bases.asr.speaker_profiles import REGISTRATION_SENTENCES, name_problem
 from openmmla.tui import speakers as spk
 from openmmla.tui.widgets.config_form import FileBrowserModal
+from openmmla.tui.widgets.dismiss_once import DismissOnce
 
 HELP = (
     "A tick is a speaker the base recognizes at the next Start. Until you tick one yourself it follows the "
@@ -40,7 +41,7 @@ HELP = (
 )
 
 
-class SpeakerProfilesScreen(ModalScreen):
+class SpeakerProfilesScreen(DismissOnce, ModalScreen):
 
     DEFAULT_CSS = """
     SpeakerProfilesScreen {

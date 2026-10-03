@@ -25,6 +25,7 @@ from textual.widgets import Button, DataTable, Label, Select, Static
 from openmmla.tui import capture_recordings as cr
 from openmmla.tui.recordings import human_size
 from openmmla.tui.widgets.recordings_panel import AGE_CHOICES
+from openmmla.tui.widgets.dismiss_once import DismissOnce
 
 # the Keep choice while the streams keep theirs for different spans
 MIXED = -1
@@ -41,7 +42,7 @@ HELP = (
 )
 
 
-class StreamRecordingsScreen(ModalScreen):
+class StreamRecordingsScreen(DismissOnce, ModalScreen):
 
     DEFAULT_CSS = """
     StreamRecordingsScreen {

@@ -20,6 +20,7 @@ from rich.text import Text
 
 from openmmla.tui.schema.loader import REMOVED_SECTION, FieldDef, natural_key
 from openmmla.utils.constants import normalize_source
+from openmmla.tui.widgets.dismiss_once import DismissOnce
 
 # media files the file-browser highlights (others are still shown, greyed)
 _MEDIA_EXTS = (
@@ -58,7 +59,7 @@ def _media_files(folder: str) -> list[str]:
             if name.lower().endswith(_MEDIA_EXTS) and os.path.isfile(os.path.join(folder, name))]
 
 
-class FileBrowserModal(ModalScreen):
+class FileBrowserModal(DismissOnce, ModalScreen):
     """A simple local file browser; dismisses with the chosen file path (or None)."""
 
     DEFAULT_CSS = """

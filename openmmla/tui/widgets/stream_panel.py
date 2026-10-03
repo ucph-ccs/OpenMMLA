@@ -36,6 +36,7 @@ from openmmla.utils.artifact_paths import (
 from openmmla.utils.constants import STREAM_URL_SCHEMES, stream_kind
 from openmmla.utils.mac_desktop import window_script
 from openmmla.utils.stream_registry import load_stream_registry, register_stream_start, mark_stream_stopped
+from openmmla.tui.widgets.dismiss_once import DismissOnce
 
 
 STREAM_REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -1042,7 +1043,7 @@ class StreamTable(DataTable):
         return self.cell_region(row, ROTATE_COLUMN)
 
 
-class StreamProfileMenu(ModalScreen):
+class StreamProfileMenu(DismissOnce, ModalScreen):
     """the dropdown of an SSH Profile or a Device cell: opens under the cell,
     like the list of a Select. Enter or a click picks one; Escape or a click
     beside the list leaves the row as it was, and the screen returns None."""
@@ -1102,7 +1103,7 @@ class StreamProfileMenu(ModalScreen):
         self.dismiss(None)
 
 
-class StreamDeviceInput(ModalScreen):
+class StreamDeviceInput(DismissOnce, ModalScreen):
     """a device the machine did not list, typed in a box under its cell. Enter
     gives what was typed (empty: none), Escape or a click beside it None."""
 
