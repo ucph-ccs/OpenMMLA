@@ -268,7 +268,7 @@ def ssh_check_port(profile: SSHProfile, port: int) -> bool:
 
 def ssh_check_tmux(profile: SSHProfile, session_name: str) -> bool:
     """check if a tmux session exists on the remote host."""
-    cmd = f"tmux has-session -t {session_name} 2>/dev/null && echo OK || echo FAIL"
+    cmd = f"{MAC_TOOL_PATH}; tmux has-session -t {session_name} 2>/dev/null && echo OK || echo FAIL"
     try:
         result = ssh_run_sync(profile, cmd, timeout=8.0)
         return "OK" in result.stdout
@@ -384,7 +384,21 @@ CONDA_INIT = (
     'fi'
 )
 
-REMOTE_SHELL_INIT = f'export LANG=en_US.UTF-8 PYTHONUNBUFFERED=1; {CONDA_INIT}'
+# what runs over SSH starts from the account's shell in -c mode with sshd's
+# PATH, /usr/bin:/bin:/usr/sbin:/sbin on a Mac: no profile adds Homebrew
+# (/opt/homebrew on Apple silicon, /usr/local on Intel) or MacPorts, so an ASR
+# base pulling its stream died on "No such file or directory: 'ffmpeg'" on a
+# Mac that had it, and tmux and brew went missing the same way. Each folder
+# that exists is appended, after conda's set-up, so nothing found before
+# (Homebrew's python3 beside /usr/bin's, a conda) is found anywhere else now;
+# on Linux they are on the PATH already, or absent
+MAC_TOOL_PATH = (
+    'for _d in /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /opt/local/bin; do '
+    'case ":$PATH:" in *":$_d:"*) ;; *) [ -d "$_d" ] && PATH="$PATH:$_d" ;; esac; '
+    'done; export PATH'
+)
+
+REMOTE_SHELL_INIT = f'export LANG=en_US.UTF-8 PYTHONUNBUFFERED=1; {CONDA_INIT}; {MAC_TOOL_PATH}'
 
 
 _RESOLVED_SSH_ENDPOINTS: dict[tuple[str, int], tuple[str, int]] = {}
