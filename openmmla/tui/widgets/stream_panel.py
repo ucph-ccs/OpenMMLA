@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import shlex
@@ -117,6 +118,60 @@ def _host_tools(profile, programs: list[str]) -> host_tools.HostTools | None:
 _programs_lock = host_tools.install_lock
 
 
+# the ends of Starts and Stops that run on by themselves (_carry_on), held
+# here until they are done: the event loop keeps only a weak reference to a task
+_CARRIED_ON: set[asyncio.Task] = set()
+# the streams, by (project, name), whose Start or Stop has sent its command to
+# the host and is still to note what came of it in the stream registry: a
+# refresh leaves their entries to it (_note_host_starts)
+_NOTING: dict[tuple[str, str], int] = {}
+# how often a Start or Stop of each stream, by (project, name), or the part of
+# one that runs on by itself, began or ended: a refresh that asked the hosts
+# before the count moved holds answers older than what that Start or Stop set
+# (StreamPanel._acted_since)
+_ACTED: dict[tuple[str, str], int] = {}
+
+
+def _count_act(key: tuple[str, str]) -> None:
+    _ACTED[key] = _ACTED.get(key, 0) + 1
+
+
+def _carried(task: asyncio.Task) -> None:
+    _CARRIED_ON.discard(task)
+    # retrieved here too, so that an error of a task whose worker was
+    # cancelled is not reported as never retrieved; a worker still awaiting
+    # it gets the error all the same
+    if not task.cancelled():
+        task.exception()
+
+
+async def _carry_on(work, key: tuple[str, str]):
+    """await `work`, the part of a Start or a Stop from the command it sends the
+    stream's host on, as a task the panel does not own: it runs to its end when
+    the worker awaiting it is cancelled (leaving the card cancels the panel's
+    workers), as the host does what it was told either way and the stream
+    registry, which the bases on this machine take the stream's start time
+    from, has to say what came of it."""
+    _NOTING[key] = _NOTING.get(key, 0) + 1
+    _count_act(key)
+
+    async def run():
+        try:
+            return await work
+        finally:
+            left = _NOTING.get(key, 0) - 1
+            if left > 0:
+                _NOTING[key] = left
+            else:
+                _NOTING.pop(key, None)
+            _count_act(key)
+
+    task = asyncio.ensure_future(run())
+    _CARRIED_ON.add(task)
+    task.add_done_callback(_carried)
+    return await asyncio.shield(task)
+
+
 def _by_name(streams: list[StreamDef]) -> list[StreamDef]:
     """streams in the order of their names, a number in a name counted as one
     (cam-2 before cam-10)."""
@@ -178,14 +233,67 @@ def _parse_stream_state(output: str) -> str | None:
     return None
 
 
+# the marks before the lines _start_notes_cmd prints
+_START_NOTE = "OPENMMLA_START="
+_RECORD_NOTE = "OPENMMLA_RECORD="
+
+
+def _start_notes_cmd(session: str) -> str:
+    """print what the stream's last Start noted on its host, each on a line
+    behind its mark, empty when there is no note: its capture-side start time
+    (.start) and the file it records to (.record)."""
+    return (
+        f"printf '{_START_NOTE}%s\\n{_RECORD_NOTE}%s\\n' "
+        f'"$(cat "{_stream_file(session, "start")}" 2>/dev/null)" '
+        f'"$(cat "{_stream_file(session, "record")}" 2>/dev/null)"'
+    )
+
+
+class _HostState(str):
+    """what a stream's host said of it (STREAM_*), with what the stream's last
+    Start noted there, read in the same round trip: its capture-side start
+    time (None without a note) and the file it records to ("" for none). A
+    refresh holds the stream registry to them (_note_host_starts)."""
+
+    start_time: float | None = None
+    record_path: str = ""
+
+
+def _parse_host_state(output: str | None) -> _HostState | None:
+    """the state and the Start's notes that _stream_state's command printed;
+    None when no state was said."""
+    lines = [line.strip() for line in (output or "").splitlines()]
+    notes = (_START_NOTE, _RECORD_NOTE)
+    state = _parse_stream_state("\n".join(line for line in lines if not line.startswith(notes)))
+    if state is None:
+        return None
+    answer = _HostState(state)
+    for line in lines:
+        if line.startswith(_START_NOTE):
+            try:
+                answer.start_time = float(line[len(_START_NOTE):])
+            except ValueError:
+                answer.start_time = None
+        elif line.startswith(_RECORD_NOTE):
+            answer.record_path = line[len(_RECORD_NOTE):]
+    return answer
+
+
 def _stream_state(profile, session: str) -> str | None:
     """the state of a managed stream on its host (profile None: this machine),
-    None when the host did not answer."""
+    None when the host did not answer; what its last Start noted there comes
+    with it (_HostState)."""
     try:
-        result = _run_on_host(profile, _with_stream_path(_stream_state_cmd(session)), 8.0)
+        result = _run_on_host(
+            profile, _with_stream_path(f"{_stream_state_cmd(session)}; {_start_notes_cmd(session)}"), 8.0)
     except Exception:
         return None
-    return _parse_stream_state(result.stdout)
+    return _parse_host_state(result.stdout)
+
+
+def _clock(seconds: float) -> str:
+    """a start time as the log says it: this machine's local date and time."""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds))
 
 
 def _stream_path(stream: StreamDef, server: dict) -> str | None:
@@ -1251,6 +1359,13 @@ class StreamPanel(Widget):
         self._live: dict[str, str] = {}
         # what each capture host said of its devices, until Refresh
         self._device_answers: dict[str, capture_devices.Devices] = {}
+        # the panel's ancestors, nearest first, as it was mounted: the lines of
+        # a Start or Stop that runs on after the panel is gone (_carry_on) go
+        # up from the nearest one still there to the log they went to before
+        self._log_route: list = []
+        # the Starts and Stops under way in this panel, by stream name: a
+        # refresh leaves their streams' status to them (_acted_since)
+        self._acts: dict[str, int] = {}
         # captures this console started that the config's Streams no longer
         # name, listed below them so they can be stopped (_left_over_captures)
         self._left_over: list[StreamDef] = []
@@ -1488,18 +1603,29 @@ class StreamPanel(Widget):
         table.add_columns("Name", "SSH Profile", "Device", "Target", "Record", "Rotate", "Status", "Stream Server")
         table.cursor_type = "row"
         self._rebuild_table()
+        self._log_route = list(self.ancestors)
         # even with no Streams entry there may be a capture left over from one
         self._refresh_all()
 
     def _log(self, msg: str) -> None:
-        self.post_message(self.StreamLog(msg))
+        if self.post_message(self.StreamLog(msg)):
+            return
+        # the panel is gone (its card was left) while a Start or Stop of its
+        # streams ran on (_carry_on): the line goes up from the nearest of its
+        # ancestors still there, to the log it went to before
+        for node in self._log_route:
+            if node.is_attached and node.post_message(self.StreamLog(msg)):
+                return
 
     def _refresh_all(self) -> None:
-        self.run_worker(self._async_refresh_all(), exclusive=True)
+        # a group of its own: a refresh replaces an earlier one, never a Start,
+        # Stop, Logs or Probe still under way (they are in the default group)
+        self.run_worker(self._async_refresh_all(), group="stream-refresh", exclusive=True)
 
     def _set_state(self, name: str, state: str | None) -> None:
         """note what a stream's host said of it; None: it did not answer."""
-        self._states[name] = state or STREAM_UNKNOWN
+        # a plain str: what the Start noted (_HostState) is no part of the state
+        self._states[name] = str(state) if state else STREAM_UNKNOWN
         self._statuses[name] = state in (STREAM_RUNNING, STREAM_STARTING)
 
     def _other_cards_streams(self) -> tuple[list[tuple[str, StreamDef]], list[str]] | None:
@@ -1660,6 +1786,12 @@ class StreamPanel(Widget):
     async def _async_refresh_all(self) -> None:
         loop = asyncio.get_event_loop()
         self._left_over = await asyncio.to_thread(self._left_over_captures)
+        # the registry before the machines are asked: an entry that changes
+        # while they are is newer than what they say (_note_host_starts)
+        noted_before = self._registry_entries()
+        # and the Starts and Stops so far: what one under way or done since
+        # sets is newer than what the machines say (_acted_since)
+        acted_before = dict(_ACTED)
         # the other cards' entries are read while the machines are asked
         loading = self._others_loading()
         asked: list[tuple[StreamDef, object, str | None]] = []
@@ -1677,16 +1809,26 @@ class StreamPanel(Widget):
         if loading is not None:
             await asyncio.shield(loading)
         self._rivals = self._rivals_by_name()
-        foreign_now: dict[str, tuple[str, StreamDef]] = {}
+        found: list[tuple[str, str | None, tuple[str, StreamDef] | None]] = []
         for stream, profile, state in asked:
             foreign = None
             if state in (STREAM_RUNNING, STREAM_STARTING, STREAM_EXITED):
                 # a session of the name is there: whose stream it holds
                 foreign = await self._find_foreign(stream, profile, self._rivals.get(stream.name, []))
+            found.append((stream.name, state, foreign))
+        # from here to the registry notes nothing is awaited, so no Start or
+        # Stop sets anything between the look at it and what follows from it
+        foreign_now: dict[str, tuple[str, StreamDef]] = {}
+        for name, state, foreign in found:
+            if self._acted_since(name, acted_before):
+                # what its Start or Stop set stands: the next refresh asks again
+                if name in self._foreign:
+                    foreign_now[name] = self._foreign[name]
+                continue
             if foreign is not None:
-                foreign_now[stream.name] = foreign
+                foreign_now[name] = foreign
                 state = STREAM_FOREIGN
-            self._set_state(stream.name, state)
+            self._set_state(name, state)
         self._foreign = foreign_now
         # a left-over whose host has nothing left of it (no session, no
         # ffmpeg) is over: the registry is told so, and its row goes
@@ -1697,6 +1839,7 @@ class StreamPanel(Widget):
         if done:
             names = {stream.name for stream in done}
             self._left_over = [stream for stream in self._left_over if stream.name not in names]
+        self._note_host_starts(asked, noted_before, acted_before)
         for stream in self._rows():
             if stream.name in self._rivals or stream.name in self._foreign:
                 self._log(self._clash_note(stream, self._rivals.get(stream.name, []),
@@ -1712,6 +1855,85 @@ class StreamPanel(Widget):
         self._live = await self._server_states()
         self._rebuild_table()
 
+    def _registry_entries(self) -> dict[str, dict]:
+        """the stream registry's entries by name, as they are now; none when it cannot be read."""
+        try:
+            entries = load_stream_registry(self._project_dir).get("streams", {})
+        except Exception:
+            return {}
+        return {str(name): entry for name, entry in entries.items() if isinstance(entry, dict)}
+
+    def _note_host_starts(self, asked: list[tuple[StreamDef, object, str | None]],
+                          before: dict[str, dict], acted_before: dict[tuple[str, str], int]) -> None:
+        """hold the stream registry to what the machines just said of this
+        card's streams, where a Start or Stop that was cut short, or one done
+        from another console, left it behind: a stream whose ffmpeg runs since
+        a start the registry does not note as running there is noted with the
+        start time and the recording its Start left on the host (its turn is
+        asked of its ffmpeg, _read_running_turns), and a running entry whose
+        machine has nothing left of it is noted as stopped. An entry that
+        changed while the machines were asked, or whose stream had a Start or
+        Stop under way or done since (_acted_since), is left to that; so is a
+        running entry of another machine, and a name another card gives
+        another stream (_rivals), as the registry has one entry for a name."""
+        now = self._registry_entries()
+        for stream, _profile, answer in asked:
+            name = stream.name
+            if (self._is_left_over(stream) or self._acted_since(name, acted_before)
+                    or now.get(name) != before.get(name)):
+                continue
+            entry = now.get(name) or {}
+            running = entry.get("status") == "running"
+            same_machine = str(entry.get("ssh_profile") or "").strip() == stream.ssh_profile
+            state = self._states.get(name)
+            if state == STREAM_RUNNING:
+                started = getattr(answer, "start_time", None)
+                if started is None:
+                    continue  # no note of its start on the host: nothing to go by
+                if name in self._rivals or (running and not same_machine):
+                    continue
+                try:
+                    noted = float(entry["stream_start_time"]) if running else None
+                except (KeyError, TypeError, ValueError):
+                    noted = None
+                if noted is not None and abs(noted - started) < 0.001:
+                    continue
+                try:
+                    register_stream_start(
+                        name,
+                        stream.target,
+                        started,
+                        project_dir=self._project_dir,
+                        ssh_profile=stream.ssh_profile,
+                        device=stream.device,
+                        read_target=stream.read_target,
+                        record_path=getattr(answer, "record_path", "") or "",
+                    )
+                except Exception:
+                    continue
+                since = _clock(started)
+                if noted is not None:
+                    found = (f"the start its host noted, where the stream registry had {_clock(noted)}; "
+                             f"the host's start is noted there now")
+                else:
+                    found = ("a start the stream registry did not note as running (a Start cut short, or one "
+                             "from another console, leaves it so); noted there now")
+                self._log(f"[yellow]{name}: its ffmpeg on {self._where(stream)} has run since {since}, "
+                          f"{found}.[/yellow]")
+            elif state == STREAM_STOPPED and running and same_machine:
+                try:
+                    mark_stream_stopped(name, project_dir=self._project_dir)
+                except Exception:
+                    pass
+
+    def _acted_since(self, name: str, acted_before: dict[tuple[str, str], int]) -> bool:
+        """whether a Start or Stop of the stream is under way, in this panel or
+        on its own (_carry_on), or began or ended since `acted_before` was
+        taken from _ACTED: what it set is newer than what the stream's host
+        said to a refresh that asked before, and stands."""
+        key = (self._project_dir, name)
+        return name in self._acts or key in _NOTING or _ACTED.get(key, 0) != acted_before.get(key, 0)
+
     def _registered_starts(self) -> dict[str, dict]:
         """the stream registry's running entries, by name. Off the UI thread."""
         try:
@@ -1726,7 +1948,10 @@ class StreamPanel(Widget):
         its Start noted it in the stream registry. One whose Start noted none
         (started before turns were noted) is asked once per start: its
         ffmpeg's command line on its machine says. A stream the registry does
-        not know (started from another console) is not known here either."""
+        not know (started from another console) is not known here either.
+        A stream whose Start or Stop is under way or done meanwhile keeps the
+        turn that one set (_acted_since)."""
+        acted_before = dict(_ACTED)
         registered = await asyncio.to_thread(self._registered_starts)
         loop = asyncio.get_event_loop()
         turns: dict[str, int] = {}
@@ -1749,6 +1974,11 @@ class StreamPanel(Widget):
                     self._turn_asked[key] = turn
             if turn is not None:
                 turns[stream.name] = turn
+        for stream, _profile, _state in asked:
+            if self._acted_since(stream.name, acted_before):
+                turns.pop(stream.name, None)
+                if stream.name in self._runs_turn:
+                    turns[stream.name] = self._runs_turn[stream.name]
         self._runs_turn = turns
 
     def _turn_sharers(self, stream: StreamDef) -> list[tuple[str, StreamDef]]:
@@ -2335,7 +2565,29 @@ class StreamPanel(Widget):
                 )
         self._rebuild_table()
 
+    @contextlib.contextmanager
+    def _acting(self, name: str):
+        """a Start or Stop of the stream `name` under way in this panel, from
+        its first look at the host to its end: a refresh leaves the stream's
+        status and registry entry to it (_acted_since)."""
+        key = (self._project_dir, name)
+        self._acts[name] = self._acts.get(name, 0) + 1
+        _count_act(key)
+        try:
+            yield
+        finally:
+            left = self._acts.get(name, 0) - 1
+            if left > 0:
+                self._acts[name] = left
+            else:
+                self._acts.pop(name, None)
+            _count_act(key)
+
     async def _async_start(self, stream: StreamDef) -> None:
+        with self._acting(stream.name):
+            await self._try_start(stream)
+
+    async def _try_start(self, stream: StreamDef) -> None:
         session = _tmux_session_name(stream.name)
         is_local = stream.ssh_profile == "local"
         profile = None
@@ -2437,6 +2689,18 @@ class StreamPanel(Widget):
         if record_dir:
             self._log(f"  Recording to {record_dir}/ on the streaming host")
 
+        # from the command on, the host starts it whatever becomes of this
+        # worker, so what came of it is seen to the end (_carry_on)
+        await _carry_on(self._launch(stream, profile, session, launch_cmd, desktop, record_dir, where),
+                        (self._project_dir, stream.name))
+
+    async def _launch(self, stream: StreamDef, profile, session: str, launch_cmd: str, desktop: bool,
+                      record_dir: str | None, where: str) -> None:
+        """the part of a Start from its launch command on: run it on the host,
+        wait for ffmpeg, then note the start the host wrote down (its time and
+        recording) in the stream registry, or say why there is none to note."""
+        is_local = stream.ssh_profile == "local"
+        loop = asyncio.get_event_loop()
         try:
             result = await loop.run_in_executor(None, _run_on_host, profile, launch_cmd, 15.0)
             if result.returncode == 0:
@@ -2594,6 +2858,10 @@ class StreamPanel(Widget):
         return True
 
     async def _async_stop(self, stream: StreamDef) -> None:
+        with self._acting(stream.name):
+            await self._try_stop(stream)
+
+    async def _try_stop(self, stream: StreamDef) -> None:
         session = _tmux_session_name(stream.name)
         is_local = stream.ssh_profile == "local"
 
@@ -2652,12 +2920,20 @@ class StreamPanel(Widget):
         stop_cmd = _with_stream_path(_build_stop_stream_cmd(session))
         target_label = "locally" if is_local else f"on {stream.ssh_profile}"
         self._log(f"[red]Stopping {stream.name} {target_label}...[/red]")
+        # from the command on, the host stops it whatever becomes of this
+        # worker, so the stream registry is told of it all the same (_carry_on)
+        await _carry_on(self._stop_on_host(stream, None if is_local else profile, stop_cmd),
+                        (self._project_dir, stream.name))
 
+    async def _stop_on_host(self, stream: StreamDef, profile, stop_cmd: str) -> None:
+        """the part of a Stop from its command on: run it on the stream's host
+        (profile None: this machine), then note in the stream registry that the
+        stream stopped and say where its recording was kept."""
         loop = asyncio.get_event_loop()
         try:
             # the grace for ffmpeg to finish its files, and the ssh round trip
             result = await loop.run_in_executor(
-                None, _run_on_host, None if is_local else profile, stop_cmd, STREAM_STOP_GRACE_SECONDS + 7.0,
+                None, _run_on_host, profile, stop_cmd, STREAM_STOP_GRACE_SECONDS + 7.0,
             )
             if "DONE" in (result.stdout or ""):
                 self._log(f"[red]{stream.name} stopped.[/red]")
