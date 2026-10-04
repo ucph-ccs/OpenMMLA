@@ -92,6 +92,15 @@ choice is in metrics.json. `net_oof='common'` gives the networks' inner out-of-f
 common E* of the refit instead of at each inner split's own best epoch (network.oof_at), so they
 enter the calibrator, gamma and select-all as the tabular models' do.
 
+Three exploratory candidates of the architecture panel (WP9, 2026-10-04) are named only on purpose,
+never by -m all, and sit in the results table's group 'exploratory' (EXPLORATORY_NOTES): pmil-lr, a
+noisy-OR over the pupil pairs with a shared linear scorer and a bias per group size (pmil.py; binary
+target only), lr-soft, lr fitted on two coders' soft labels (the truth coder's and one other's, half
+a window each where both gave a class, none where the truth coder said unclear or absent;
+tabular.fit_soft), and net-attn, self-attention over the person slots with the pairs as its bias
+(network.AttentionNet). Each is fitted, calibrated and smoothed as the model it extends, and each is
+a candidate of select-all.
+
 `features_root` reads the fused tables from another folder (an ablation arm's, re-fused) while the
 labels, manifests and Jev maps still come from artifacts/<session>/. Every run of the session, unit
 and forward splits writes a line when it starts and one when it finishes to
@@ -139,6 +148,25 @@ GROUPS = {
 MODELS = tuple(GROUPS)
 TABULAR = ('r1', 'lr', 'hgb', 'late-lr', 'late-hgb')
 NETWORKS = ('pooled-net', 'net-notcn', 'net', 'net-pair')
+# the exploratory candidates of the architecture panel (WP9, 2026-10-04): named only on purpose, never by -m all
+# (MODELS), and grouped apart in the results table
+EXPLORATORY = ('pmil-lr', 'lr-soft', 'net-attn')
+EXPLORATORY_NOTES = {
+    'pmil-lr': "exploratory (WP9): noisy-OR over the window's pupil pairs of one shared linear scorer, an instance "
+               "being a pair's values and masks with the min and max of its two pupils' (78 columns), one bias per "
+               "group size, lr's balanced weights and C grid; binary target only",
+    'lr-soft': "exploratory (WP9): lr fitted on two coders' soft labels, a window both gave a class two rows of "
+               "weight 0.5, one only one of them did one row of 1 (none where the truth coder said unclear or "
+               "absent), classes balanced over those weights; chosen on the inner folds, calibrated and scored "
+               "against the truth coder alone",
+    'net-attn': "exploratory (WP9): self-attention over the person slots with the pairs as an additive bias, "
+                "attention pooling queried by the group token and group size, then the net family's window "
+                "layer, temporal blocks and training",
+}
+# every model that trains through network.py
+NEURAL = NETWORKS + ('net-attn',)
+# the models that answer p(interaction) only
+BINARY_ONLY = ('pmil-lr',)
 # the models that read no label: they run even where a learned model is refused
 UNLEARNED = ('r0', 'r0-v1', 'jev')
 # the a-priori rule's versions by model name: r0 is the current rule, r0-v1 the first one, kept for the record
@@ -159,10 +187,11 @@ SELECTORS = ('rule22sep', 'select-all')
 # the HMM modes a selector chooses among (the forward filter is the online row, never chosen)
 SELECTED_HMM = ('none', 'fb')
 # the models whose variants keep calibrated inner out-of-fold answers, the candidates of select-all
-INNER_MODELS = TABULAR + NETWORKS + ('jev-cal',)
+INNER_MODELS = TABULAR + NETWORKS + ('jev-cal',) + EXPLORATORY
 # the selectors' variant key: model:nested:nested, since the chosen temporal and HMM mode differ by fold
 NESTED = 'nested'
-GROUP_OF = dict(GROUPS, **{selector: 'selected' for selector in SELECTORS})
+GROUP_OF = dict(GROUPS, **{selector: 'selected' for selector in SELECTORS},
+                **{model: 'exploratory' for model in EXPLORATORY})
 # what metrics.json says of each selector (select_inner has the whole of it)
 SELECTOR_NOTES = {
     'rule22sep': "the 22 Sep rule (select_headline: late-lr or late-hgb, every temporal mode run, HMM none or fb) "
@@ -181,7 +210,7 @@ NET_OOF = ('best', 'common')
 SESSION_RUNS = 'session_runs.jsonl'
 TARGETS = ('3class', 'binary')
 # the network reads its sequence through its own temporal blocks, not through lag columns
-NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair': 'tcn'}
+NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair': 'tcn', 'net-attn': 'tcn'}
 # inputs whose features never read a later window: only these get the forward filter, the online
 # answer, and for it the held-out session is scaled by the running normaliser
 CAUSAL_INPUTS = ('T0', 'T1c', 'j0', 'j1')
@@ -254,7 +283,9 @@ class Config:
     reads and must name the coder too; `models` may add the SELECTORS; `net_oof` 'common' gives the
     networks' inner out-of-fold answers at the common E* ('best', the default, at each inner split's best
     epoch); `features_root` is a folder to read the fused tables from instead of
-    artifacts/<session>/analysis/features/ (see session_tables)."""
+    artifacts/<session>/analysis/features/ (see session_tables). `models` may also name the
+    EXPLORATORY candidates; `soft_coder` is lr-soft's second coder (its labels file name; default the
+    one human coder besides the truth whose labels the training sessions hold, see soft_coder)."""
     artifacts: str = 'artifacts'
     sessions: str | None = None
     coder: str | None = None
@@ -280,6 +311,7 @@ class Config:
     scaling: str = 'mix'
     net_oof: str = 'best'
     features_root: str | None = None
+    soft_coder: str | None = None
 
 
 # ---- sessions ----
@@ -609,6 +641,30 @@ def jev_gaps(folds, data: dict, models, variant: str = 'j0') -> dict:
     return out
 
 
+def soft_coder(data: dict, coder: str | None, named: str | None = None) -> tuple[str | None, str | None]:
+    """lr-soft's second coder over `data`, the sessions the run trains on: (its name, None), or
+    (None, why there is none). `named` must not be the truth coder and must have given a class to a
+    window of those sessions; without a name it is the one human coder besides the truth whose
+    labels they hold (their joined labels, SessionData.others, which hold no model's labels file),
+    and there is none when no such coder or more than one does."""
+    holding = sorted({name for d in data.values() for name, y in d.others.items()
+                      if name != coder and L.scored(y).any()})
+    if named is not None:
+        if named == coder:
+            return None, f"lr-soft's second coder {named} is the truth coder: name another"
+        if named not in holding:
+            return None, (f"lr-soft's second coder {named} gave no window of the training sessions a class"
+                          + (f" (the other coders there: {', '.join(holding)})" if holding else ''))
+        return named, None
+    if not holding:
+        return None, (f"lr-soft needs a second coder's labels beside {coder}'s, and no other human coder gave a "
+                      f"window of the training sessions a class")
+    if len(holding) > 1:
+        return None, (f"lr-soft takes one second coder, and the training sessions hold {', '.join(holding)} "
+                      f"besides {coder}: name one (soft_coder, --soft-coder)")
+    return holding[0], None
+
+
 # ---- folds and the refusal ----
 
 def class_names(k: int) -> tuple:
@@ -910,6 +966,67 @@ def _tabular(fd: _Fold, plan: dict, model: str, temporal: str, details: dict, ex
     return oof, TB.log_proba(fitted, X_test), True, online
 
 
+def _soft_labels(d: SessionData, coder: str, k: int) -> np.ndarray:
+    """a session's labels from another coder over its windows, in the target's form (binary for k
+    2), NaN where they gave none."""
+    y = d.others.get(coder)
+    if y is None:
+        return np.full(len(d), np.nan)
+    return L.to_binary(y) if k == 2 else np.asarray(y, dtype=float)
+
+
+def _vetoed(truth, other) -> tuple[np.ndarray, int]:
+    """the second coder's labels for lr-soft with every window the truth coder called unclear or
+    absent taken out (NaN), and how many of the second coder's classes that took out: the second
+    coder's class counts only where the truth coder gave a class too or gave no code at all, so a
+    window the truth coder judged unclear, or without two members at the table, never trains."""
+    truth, other = np.asarray(truth, dtype=float), np.asarray(other, dtype=float)
+    with np.errstate(invalid='ignore'):
+        vetoed = np.isfinite(truth) & (truth < 0) & L.scored(other)
+    return np.where(vetoed, np.nan, other), int(vetoed.sum())
+
+
+def _soft(fd: _Fold, plan: dict, temporal: str, details: dict):
+    """(inner out-of-fold logits, held-out logits, whether to calibrate, held-out logits from the
+    online tokens or None) of lr-soft: lr on the same view, grid, inner splits and selection score
+    (the class-weighted NLL against the truth), every fit on the soft labels of the truth and of
+    plan['soft_coder'] over the training windows (tabular.fit_soft, the classes balanced over the
+    soft weights), less the windows the truth coder called unclear or absent (_vetoed). The second
+    coder's labels of a held-out session are never read."""
+    second = plan['soft_coder']
+    X_train, X_test = fd.X('train', temporal), fd.X('test', temporal)
+    X_online = fd.X_online(temporal) if _online_wanted(plan, temporal) else None
+    other, vetoed = _vetoed(fd.y, np.concatenate([_soft_labels(d, second, fd.k) for d in fd.train]))
+    make = functools.partial(TB.make_lr, class_weight=None)
+    params, oof = TB.select_soft(make, plan['lr_grid'], X_train, fd.y, [other], fd.groups, fd.pairs)
+    fitted = TB.fit_soft(make, params, X_train, fd.y, [other])
+    truth, given = L.scored(fd.y), L.scored(other)
+    details.update(params=params, soft={'coder': second, 'both': int((truth & given).sum()),
+                                        'truth_only': int((truth & ~given).sum()),
+                                        'second_only': int((~truth & given).sum()), 'vetoed': vetoed})
+    online = TB.log_proba(fitted, X_online) if X_online is not None else None
+    return oof, TB.log_proba(fitted, X_test), True, online
+
+
+def _pmil(fd: _Fold, plan: dict, details: dict):
+    """(inner out-of-fold logits, held-out logits, whether to calibrate, held-out logits from the
+    online tokens or None) of pmil-lr: the window rows of the fold's scaled tokens
+    (pmil.window_rows), with C from lr's grid chosen on the inner splits as lr's is; its bias per
+    group size goes into the fold's details."""
+    from openmmla.analytics.interaction import pmil as PM
+    X_train = np.vstack([PM.window_rows(fd.scaled[d.session]) for d in fd.train])
+    X_test = np.vstack([PM.window_rows(fd.scaled[d.session]) for d in fd.test])
+    params, oof = TB.select(PM.make_pmil, plan['lr_grid'], X_train, fd.y, fd.groups, fd.pairs)
+    fitted = TB.fit_model(PM.make_pmil, params, X_train, fd.y)
+    details['params'] = params
+    if isinstance(fitted, PM.PairMIL):
+        details['group_bias'] = fitted.group_bias
+    online = None
+    if _online_wanted(plan, 'T0'):
+        online = TB.log_proba(fitted, np.vstack([PM.window_rows(fd.online()[d.session]) for d in fd.test]))
+    return oof, TB.log_proba(fitted, X_test), True, online
+
+
 def _network(fd: _Fold, plan: dict, model: str, details: dict):
     """(inner out-of-fold logits, held-out logits, held-out logits from the online tokens or None)
     of a network rung: E* from the inner folds (seed 0, patience), then the seed ensemble on every
@@ -1005,9 +1122,10 @@ def select_inner(selector: str, inner: dict, fd: _Fold, models) -> dict:
     the fold's decisions use the outer-training prior.
 
     select-all: over every variant of the named models that has such answers (r1, lr, hgb, late-lr,
-    late-hgb, the networks and jev-cal; HMM none and fb), the lowest class-weighted binary log-loss
-    of p_interaction on the coded training windows every candidate answered, the first in run order
-    on a tie. The floors, the rule and zero-shot Jev keep no out-of-fold answer and are no candidate."""
+    late-hgb, the networks, jev-cal and the EXPLORATORY candidates; HMM none and fb), the lowest
+    class-weighted binary log-loss of p_interaction on the coded training windows every candidate
+    answered, the first in run order on a tie. The floors, the rule and zero-shot Jev keep no
+    out-of-fold answer and are no candidate."""
     names = class_names(fd.k)
     if selector == 'rule22sep':
         candidates = {key: record for key, record in inner.items() if key.split(':')[0] in HEADLINE_MODELS}
@@ -1072,7 +1190,17 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
                 where = details.setdefault(f'{model}:{temporal}', {})
                 oof, logits, calibrate, online = _tabular(fd, plan, model, temporal, where, extras)
                 _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online, inner)
-        elif model in NETWORKS:
+        elif model == 'lr-soft':
+            for temporal in plan['temporal']:
+                where = details.setdefault(f'{model}:{temporal}', {})
+                oof, logits, calibrate, online = _soft(fd, plan, temporal, where)
+                _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online, inner)
+        elif model == 'pmil-lr':
+            # the pairs come from the tokens, with no lag columns: T0 only
+            where = details.setdefault(f'{model}:T0', {})
+            oof, logits, calibrate, online = _pmil(fd, plan, where)
+            _finish(fd, plan['hmm'], model, 'T0', oof, logits, calibrate, where, results, online, inner)
+        elif model in NEURAL:
             temporal = NET_TEMPORAL[model]
             where = details.setdefault(f'{model}:{temporal}', {})
             oof, logits, online = _network(fd, plan, model, where)
@@ -1752,20 +1880,24 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(_jsonable(value), indent=2, ensure_ascii=False), encoding='utf-8')
 
 
-def _session_split_record(coder: str, folds: list, excluded: dict) -> dict:
+def _session_split_record(coder: str, folds: list, excluded: dict, soft_coder: str | None = None) -> dict:
     """what config.json and metrics.json say of a session split, so no one takes it for the frozen
     TEST scoring: every session the coder labelled is a fold, DEV and TEST alike, the sessions left
-    out with why, whose labels and how the per-session figures are read."""
+    out with why, whose labels and how the per-session figures are read (with lr-soft's second
+    coder, `soft_coder`, among the labels trained on)."""
     sessions = [session for fold in folds for session in fold.test]
+    truth = (f"labels/{coder}.jsonl alone: adjudicated.jsonl is not read for the truth, and the other coders' "
+             f"files only for the inter-coder ceiling")
+    if soft_coder:
+        truth = (f"labels/{coder}.jsonl alone: adjudicated.jsonl is not read for the truth; lr-soft also trains on "
+                 f"labels/{soft_coder}.jsonl of each fold's training sessions (soft labels, never a held-out "
+                 f"session's), and the other coders' files serve only the inter-coder ceiling")
     return {
         'split': 'session', 'all_sessions': True, 'held_out_test': False,
         'note': "leave one session out over every session the coder labelled, DEV and TEST alike (decided "
                 "2026-10-03: the TEST sessions' data quality is too poor to stand for the model): cross-validated "
                 "estimates with no untouched hold-out, not the frozen TEST evaluation (split test)",
-        'coder': coder,
-        'truth': f"labels/{coder}.jsonl alone: adjudicated.jsonl is not read for the truth, and the other coders' "
-                 f"files only for the inter-coder ceiling",
-        'sessions': sessions, 'tasks': {s: S.task_of(s) for s in sessions},
+        'coder': coder, 'truth': truth, 'sessions': sessions, 'tasks': {s: S.task_of(s) for s in sessions},
         'excluded': {s: record.get('reason') for s, record in excluded.items()},
         'inner_folds': 'leave one session out within the training sessions',
         'across_sessions': {
@@ -1790,11 +1922,12 @@ def split_units(data: dict) -> dict:
     return {unit: sorted(units[unit]) for unit in sorted(units)}
 
 
-def _unit_split_record(split: str, coder: str, folds: list, excluded: dict, data: dict) -> dict:
+def _unit_split_record(split: str, coder: str, folds: list, excluded: dict, data: dict,
+                       soft_coder: str | None = None) -> dict:
     """what config.json and metrics.json say of a unit or forward split, as _session_split_record
     does of the session split, with the units (a date with the dates its same_class_as links reach)
     and the mean over the held-out units beside the mean over the sessions."""
-    record = _session_split_record(coder, folds, excluded)
+    record = _session_split_record(coder, folds, excluded, soft_coder)
     held = {data[s].lesson for fold in folds for s in fold.test}
     units = split_units(data)
     if split == 'unit':
@@ -1868,6 +2001,9 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
                   for s, d in data.items()},
         'software': software_info(artifacts.parent), 'git_commit': git_commit(artifacts.parent),
     }
+    exploratory = [m for m in plan['models'] if m in EXPLORATORY]
+    if exploratory:
+        record['exploratory'] = _exploratory_record(exploratory, plan)
     if session_record:
         extra = {key: value for key, value in session_record.items() if key not in ('across_sessions', 'across_units')}
         # the split's own record first, after the run's name; its coder and inner folds replace the defaults
@@ -1876,6 +2012,21 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
     if cfg.features_root is not None:
         record['features_root'] = {'folder': str(Path(cfg.features_root).resolve()), 'not_read': dict(not_read or {})}
     return redact_secrets(_jsonable(record))
+
+
+def _exploratory_record(models, plan: dict) -> dict:
+    """what config.json says of the exploratory candidates a run fits: each one's note, pmil-lr's
+    instance columns, lr-soft's second coder and net-attn's configurations."""
+    out = {'models': {model: EXPLORATORY_NOTES[model] for model in models}}
+    if 'pmil-lr' in models:
+        from openmmla.analytics.interaction import pmil as PM
+        out['pmil-lr'] = {'instance_columns': list(PM.INSTANCE_COLUMNS), 'grid': plan['lr_grid']}
+    if 'lr-soft' in models:
+        out['lr-soft'] = {'second_coder': plan.get('soft_coder'), 'grid': plan['lr_grid']}
+    if 'net-attn' in models:
+        from openmmla.analytics.interaction import network as N
+        out['net-attn'] = {'default': dict(N.ATTENTION), 'small': dict(N.ATTENTION_SMALL)}
+    return out
 
 
 def _record_test_run(artifacts: Path, run_dir: Path, cfg: Config, status: str) -> list:
@@ -2007,7 +2158,8 @@ def planned_variants(models, temporal=TEMPORAL, hmm=HMM_MODES, jev_variant: str 
     """model -> the variant keys (model:temporal:hmm) a run with these flags gives it, before
     anything is loaded: r0, the floors and zero-shot Jev give one whatever the flags say, r1 reads
     the T0 view only, a network its own temporal mode, and the forward filter goes only to causal
-    inputs. A model with an empty list would be trained on every fold for nothing. A selector gives
+    inputs. A model with an empty list would be trained on every fold for nothing. pmil-lr reads the
+    tokens' pairs, T0 only, and lr-soft the temporal modes as lr does. A selector gives
     model:nested:nested when the run fits a candidate for it (rule22sep: late-lr or late-hgb;
     select-all: a model of INNER_MODELS) with HMM none or fb."""
     out = {}
@@ -2024,8 +2176,8 @@ def planned_variants(models, temporal=TEMPORAL, hmm=HMM_MODES, jev_variant: str 
         if model == 'jev':
             out[model] = [_key(model, jev_variant, 'none')]
             continue
-        modes = [jev_variant] if model == 'jev-cal' else [NET_TEMPORAL[model]] if model in NETWORKS \
-            else ['T0'] if model == 'r1' else list(dict.fromkeys(temporal))
+        modes = [jev_variant] if model == 'jev-cal' else [NET_TEMPORAL[model]] if model in NEURAL \
+            else ['T0'] if model in ('r1', 'pmil-lr') else list(dict.fromkeys(temporal))
         out[model] = [_key(model, t, h) for t in modes for h in dict.fromkeys(hmm)
                       if h != 'filter' or t in CAUSAL_INPUTS]
     return out
@@ -2050,9 +2202,10 @@ def _selector_gap(cfg: Config) -> str | None:
 
 
 def _check(cfg: Config):
-    unknown = [m for m in cfg.models if m not in MODELS + SELECTORS]
+    named = MODELS + SELECTORS + EXPLORATORY
+    unknown = [m for m in cfg.models if m not in named]
     if unknown:
-        raise ValueError(f"unknown model(s) {', '.join(unknown)}: one of {', '.join(MODELS + SELECTORS)}")
+        raise ValueError(f"unknown model(s) {', '.join(unknown)}: one of {', '.join(named)}")
     gap = _selector_gap(cfg)
     if gap:
         raise ValueError(gap)
@@ -2064,6 +2217,12 @@ def _check(cfg: Config):
         raise ValueError(f"split {cfg.split!r} is not built: one of {', '.join(SPLITS)}{hint}")
     if cfg.target not in TARGETS:
         raise ValueError(f"target must be one of {', '.join(TARGETS)}")
+    binary_only = [m for m in dict.fromkeys(cfg.models) if m in BINARY_ONLY]
+    if binary_only and cfg.target != 'binary':
+        raise ValueError(f"{', '.join(binary_only)} answer(s) p(interaction) only (a noisy-OR over the pairs has no "
+                         f"social against collaborative): run it with the binary target")
+    if cfg.soft_coder is not None and 'lr-soft' not in cfg.models:
+        raise ValueError("soft_coder is lr-soft's second coder: it goes with the model lr-soft")
     bad = [t for t in cfg.temporal if t not in TEMPORAL] + [h for h in cfg.hmm if h not in HMM_MODES]
     if bad or not cfg.temporal or not cfg.hmm:
         raise ValueError(f"temporal modes are {', '.join(TEMPORAL)} and HMM modes {', '.join(HMM_MODES)}")
@@ -2086,7 +2245,7 @@ def _check(cfg: Config):
         raise ValueError(f"{', '.join(barren)} give(s) no variant with temporal {','.join(cfg.temporal)} and HMM "
                          f"{','.join(cfg.hmm)}: the forward filter runs only for inputs that never read a later "
                          f"window ({', '.join(CAUSAL_INPUTS[:2])}, net-notcn, Jev)")
-    if any(m in NETWORKS for m in cfg.models) and importlib.util.find_spec('torch') is None:
+    if any(m in NEURAL for m in cfg.models) and importlib.util.find_spec('torch') is None:
         raise ModuleNotFoundError("the network variants need torch: pip install torch")
     if cfg.device not in ('cpu', 'cuda', 'auto'):
         raise ValueError(f"device must be cpu, cuda or auto, not {cfg.device!r}")
@@ -2104,7 +2263,7 @@ def _device(cfg: Config) -> tuple:
     """(the device the networks train on, as the plan carries it, and torch's version with its CUDA
     build, or None): cpu whenever no network runs, so a tabular run never imports torch; 'cuda' is
     refused here, before anything is read, when torch sees no GPU."""
-    if not any(m in NETWORKS for m in cfg.models):
+    if not any(m in NEURAL for m in cfg.models):
         return 'cpu', None
     import torch
     from openmmla.analytics.interaction import network as N
@@ -2264,6 +2423,11 @@ def run(config, log=None) -> Path:
     except S.SplitError as error:
         folds, split_error = [], str(error)
     notes = {s: d.jev_note for s, d in data.items() if d.jev_note}
+    soft_gap = None
+    if 'lr-soft' in plan['models']:
+        # the second coder of lr-soft, from the sessions some fold trains on
+        trained = {s for fold in folds for s in fold.train}
+        plan['soft_coder'], soft_gap = soft_coder({s: data[s] for s in trained}, coder, cfg.soft_coder)
     dropped = jev_gaps(folds, data, plan['models'], cfg.jev_variant)
     if dropped:
         plan['models'] = [m for m in plan['models'] if m not in dropped]
@@ -2278,6 +2442,8 @@ def run(config, log=None) -> Path:
     why = None
     if split_error:
         why = split_error
+    elif soft_gap and folds:
+        why = soft_gap
     elif not plan['models']:
         why = f"every model named was left out ({', '.join(dropped)}: no usable Jev maps, see left_out and notes)"
     elif not folds:
@@ -2321,7 +2487,7 @@ def run(config, log=None) -> Path:
         for fold in folds:
             say(f"fold {fold.name}: trains on {len({S.date_of(s) for s in fold.train})} earlier date(s), "
                 f"{len(fold.train)} session(s)")
-    if 'select-all' in plan['models'] and cfg.net_oof == 'best' and any(m in NETWORKS for m in plan['models']):
+    if 'select-all' in plan['models'] and cfg.net_oof == 'best' and any(m in NEURAL for m in plan['models']):
         say("select-all compares the networks on their inner answers at each split's own best epoch: "
             "net_oof 'common' (--net-oof common) reads every split at the refit's epoch count instead")
     say(f"{len(folds)} fold(s) over {len(data)} session(s): {', '.join(plan['models'])}")
@@ -2469,13 +2635,17 @@ def run(config, log=None) -> Path:
             'winners': {out['name']: out['models'][selector]['winner'] for out in outputs['full']
                         if selector in out['models']},
             'note': SELECTOR_NOTES[selector]} for selector in selected}
+    exploratory = [m for m in plan['models'] if m in EXPLORATORY]
+    if exploratory:
+        metrics['exploratory'] = {'models': {model: EXPLORATORY_NOTES[model] for model in exploratory},
+                                  'soft_coder': plan.get('soft_coder')}
     session_record = None
     if by_session:
-        session_record = _session_split_record(coder, folds, excluded)
+        session_record = _session_split_record(coder, folds, excluded, plan.get('soft_coder'))
         metrics['all_sessions'] = True
         metrics['across_sessions'] = session_record['across_sessions']
     elif pooled:
-        session_record = _unit_split_record(cfg.split, coder, folds, excluded, data)
+        session_record = _unit_split_record(cfg.split, coder, folds, excluded, data, plan.get('soft_coder'))
         metrics['all_sessions'] = True
         metrics['across_sessions'] = session_record['across_sessions']
         metrics['across_units'] = session_record['across_units']

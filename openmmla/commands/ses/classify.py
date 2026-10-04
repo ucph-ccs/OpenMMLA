@@ -42,6 +42,16 @@ another folder (e.g. an ablation arm's re-fused tables), never artifacts/<sessio
 a session the run would read from artifacts/ but whose table that folder lacks refuses the run (one
 without the --coder's labels in a session, unit or forward run excepted, which those leave out anyway).
 
+-m pmil-lr, -m lr-soft and -m net-attn are exploratory candidates of the architecture panel (WP9,
+2026-10-04), named only on purpose (never by -m all) and grouped 'exploratory' in the results:
+pmil-lr, a noisy-OR over the pupil pairs of one shared linear scorer with a bias per group size,
+answers p(interaction) only and needs --target binary; lr-soft is lr fitted on two coders' soft
+labels (a window both gave a class counts half for each label, a window the --coder called unclear or
+absent not at all), the second coder being --soft-coder or else the one human coder besides --coder
+whose labels the training sessions hold; net-attn is self-attention over the persons with the pairs as
+its bias, trained as the networks are. All three are calibrated, smoothed and scored as the model they
+extend and are candidates of select-all.
+
 --agreement A,B trains nothing: Cohen's kappa and the percent agreement of two coders on the windows
 both labelled, per session and pooled, over the same sessions after the same label join, written to
 agreement.csv and agreement.json (default folder artifacts/_analysis/interaction/agreement-<time>).
@@ -95,9 +105,11 @@ def get_parser():
                         help="comma list of r0 (a-priori rule), r0-v1 (its first version, kept for the record), jev "
                              "(zero-shot, from mmla ses-jev's answers), "
                              "majority, stratified, r1 (fitted tree), jev-cal, lr, hgb, late-lr, late-hgb, pooled-net, "
-                             f"net-notcn, net, net-pair (default {DEFAULT_MODELS}); and the selectors rule22sep (the "
+                             f"net-notcn, net, net-pair (default {DEFAULT_MODELS}); the selectors rule22sep (the "
                              "22 Sep rule over late-lr and late-hgb) and select-all (the lowest inner log-loss over the "
-                             "named models), chosen in each fold on the inner out-of-fold answers")
+                             "named models), chosen in each fold on the inner out-of-fold answers; and the exploratory "
+                             "candidates pmil-lr (pairs, noisy-OR; --target binary only), lr-soft (two coders' soft "
+                             "labels) and net-attn (attention over persons), never in all")
     parser.add_argument('--split', choices=('date', 'task', 'test', 'session', 'unit', 'forward'), default='date',
                         help="date: leave one DEV date out, all its sessions together (default); test: train on "
                              "DEV, score TEST once (needs --confirm-frozen and --coder); session: leave one session "
@@ -152,6 +164,9 @@ def get_parser():
                              "artifacts/_analysis/interaction/session_runs.jsonl as looked at (a folder already there "
                              "is not added again)")
     parser.add_argument('--ledger-note', default=None, help="with --ledger-add: a note kept on each line")
+    parser.add_argument('--soft-coder', default=None, metavar='CODER',
+                        help="with -m lr-soft: the second coder of its soft labels, by labels file name (default: "
+                             "the one human coder besides --coder whose labels the training sessions hold)")
     parser.add_argument('--jev-variant', choices=('j0', 'j1'), default='j0',
                         help="which cached Jev answers jev and jev-cal read (default j0)")
     parser.add_argument('--with-actions', action='store_true',
@@ -342,7 +357,7 @@ def main(argv=None):
     if args.agreement:
         return _agreement(args)
     from openmmla.analytics.interaction import evaluate as E
-    models = _choices(parser, args.models, E.MODELS, '-m/--models', E.SELECTORS)
+    models = _choices(parser, args.models, E.MODELS, '-m/--models', E.SELECTORS + E.EXPLORATORY)
     temporal = _choices(parser, args.temporal, E.TEMPORAL, '--temporal')
     hmm = _choices(parser, args.hmm, E.HMM_MODES, '--hmm')
     if args.ablate not in ('none', 'modality'):
@@ -364,6 +379,12 @@ def main(argv=None):
                      f"e.g. Arthur or zaibei)")
     if args.test_coder and args.split != 'test':
         parser.error("--test-coder names the truth of the TEST sessions: it goes with --split test")
+    binary_only = [model for model in models if model in E.BINARY_ONLY]
+    if binary_only and args.target != 'binary':
+        parser.error(f"{', '.join(binary_only)} answer(s) p(interaction) only (a noisy-OR over the pairs has no social "
+                     f"against collaborative): add --target binary")
+    if args.soft_coder and 'lr-soft' not in models:
+        parser.error("--soft-coder names lr-soft's second coder: it goes with -m lr-soft")
     if args.seeds < 1 or args.jobs < 1 or (args.epochs is not None and args.epochs < 1):
         parser.error("--seeds, --jobs and --epochs must be at least 1")
     gap = E._selector_gap(E.Config(models=models, hmm=hmm))
@@ -378,10 +399,10 @@ def main(argv=None):
                      f"--hmm {','.join(hmm)}: filter runs only for inputs that never read a later window "
                      f"(T0, T1c, net-notcn, Jev)")
 
-    if any(model in E.NETWORKS for model in models) and _missing(('torch',)):
+    if any(model in E.NEURAL for model in models) and _missing(('torch',)):
         print("the network variants need torch: pip install torch")
         return 1
-    if args.device == 'cuda' and any(model in E.NETWORKS for model in models):
+    if args.device == 'cuda' and any(model in E.NEURAL for model in models):
         import torch
         if not torch.cuda.is_available():
             print(f"--device cuda, but this torch ({torch.__version__}) sees no CUDA GPU: install a CUDA build of "
@@ -395,7 +416,8 @@ def main(argv=None):
                       target=args.target, join=args.join, seeds=args.seeds, small=args.small, epochs=args.epochs,
                       jobs=args.jobs, out=args.out, quick=args.quick, confirm_frozen=args.confirm_frozen,
                       jev_variant=args.jev_variant, device=args.device, ablate=args.ablate,
-                      scaling=args.scaling, net_oof=args.net_oof, features_root=args.features_root)
+                      scaling=args.scaling, net_oof=args.net_oof, features_root=args.features_root,
+                      soft_coder=args.soft_coder)
     started = time.time()
     try:
         run_dir = E.run(config, log=print)

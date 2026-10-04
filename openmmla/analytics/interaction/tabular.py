@@ -13,6 +13,11 @@ Selection, calibration and stacking all run on the same inner splits, which hold
 lessons: windows ten seconds apart are near copies, so a split that scatters them (a random
 K-fold, CalibratedClassifierCV, early stopping's validation share) would score a model on windows
 it has as good as seen.
+
+lr-soft (exploratory, WP9) fits lr on several coders' labels of the same windows at once:
+soft_rows gives a window one row per coder who gave it a class, each weighing a share of one,
+balanced_weights balances the classes over those weights, and fit_soft and select_soft are fit_model
+and select on those rows, the inner choice still scored against the truth alone.
 """
 from __future__ import annotations
 
@@ -249,10 +254,11 @@ def make_rule_tree():
     return DecisionTreeClassifier(max_depth=2, min_samples_leaf=100, class_weight='balanced', random_state=0)
 
 
-def make_lr(C: float = 1.0):
+def make_lr(C: float = 1.0, class_weight='balanced'):
     """logistic regression on the pooled view: the median of the training fold fills a missing
     value (the mask columns say it was missing), then standardising, then a multinomial L2 model
-    with balanced class weights; the calibrator gives the prior back."""
+    with balanced class weights; the calibrator gives the prior back. `class_weight` None leaves
+    the classes to the sample weights (lr-soft balances them over its soft rows, fit_soft)."""
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
@@ -260,7 +266,7 @@ def make_lr(C: float = 1.0):
     # lbfgs is multinomial for three classes by default; multi_class is deprecated in sklearn 1.5
     # an empty column of the training fold is kept (as 0), so the weights keep their columns
     return make_pipeline(SimpleImputer(strategy='median', keep_empty_features=True), StandardScaler(),
-                         LogisticRegression(C=C, class_weight='balanced', max_iter=2000))
+                         LogisticRegression(C=C, class_weight=class_weight, max_iter=2000))
 
 
 def make_hgb(**params):
@@ -384,6 +390,78 @@ def select(make, grid, X, y, groups, inner=4, sample_weight=None) -> tuple[dict,
                 continue
             weight = None if sample_weight is None else np.asarray(sample_weight, dtype=float)[train]
             model = fit_model(make, params, _rows(X, train), y[train], weight)
+            oof[test] = log_proba(model, _rows(X, test))
+        score = class_weighted_nll(oof, y)
+        score = score if np.isfinite(score) else np.inf
+        if best is None or score < best[0]:
+            best = (score, dict(params), oof)
+    return best[1], best[2]
+
+
+# ---- two coders' soft labels (lr-soft, exploratory, WP9 2026-10-04) ----
+
+def soft_rows(*labels, n_classes: int = N_CLASSES) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """the rows a fit on several coders' labels of the same windows reads, from one label array per
+    coder (anything that is not a class is none): (window positions, labels, weights), a window once
+    per coder who gave it a class, each of those rows weighing 1 / their number, in window order. With
+    two coders a window both gave a class is two rows of 0.5 (one class twice when they agree, which
+    is one row of 1), a window one of them did is one row of 1 with that coder's class, and a window
+    neither did is no row."""
+    arrays = [_labels(y, n_classes) for y in labels]
+    if not arrays:
+        raise ValueError("give at least one coder's labels")
+    if len({len(y) for y in arrays}) > 1:
+        raise ValueError(f"the coders' labels cover {sorted({len(y) for y in arrays})} windows, not the same ones")
+    given = np.sum([y >= 0 for y in arrays], axis=0)
+    rows = np.concatenate([np.flatnonzero(y >= 0) for y in arrays])
+    values = np.concatenate([y[y >= 0] for y in arrays])
+    # the windows in order, each window's rows in the coders' order
+    order = np.argsort(rows, kind='stable')
+    rows, values = rows[order], values[order]
+    return rows, values, 1.0 / given[rows]
+
+
+def balanced_weights(values, weights, n_classes: int = N_CLASSES) -> np.ndarray:
+    """per row, its class's balanced weight over weighted rows, W / (K W_c) with W_c the weight of
+    the class's rows and K the classes present: what class_weight='balanced' gives over unweighted
+    rows (sklearn counts rows, not their weights)."""
+    values = np.asarray(values, dtype=int)
+    totals = np.bincount(values, weights=np.asarray(weights, dtype=float), minlength=n_classes)
+    present = totals > 0
+    per_class = np.zeros(len(totals))
+    per_class[present] = totals.sum() / (present.sum() * totals[present])
+    return per_class[values]
+
+
+def fit_soft(make, params: dict | None, X, y, others, n_classes: int = N_CLASSES, balanced: bool = True):
+    """make(**params) fitted on the soft labels of the truth `y` and the other coders' labels
+    `others` (a list of label arrays over the same rows), each row weighing its share (soft_rows)
+    and, with `balanced`, its class's balanced weight over those shares (balanced_weights), so a
+    window two coders gave a class counts once, half for each label: `make` must then weigh no class
+    itself (make_lr(class_weight=None)). The training prior instead when the rows hold fewer than
+    two classes."""
+    rows, values, weights = soft_rows(y, *others, n_classes=n_classes)
+    if balanced and len(values):
+        weights = weights * balanced_weights(values, weights, n_classes)
+    return fit_model(make, params, _rows(X, rows), values, weights, n_classes)
+
+
+def select_soft(make, grid, X, y, others, groups, inner=4, balanced: bool = True) -> tuple[dict, np.ndarray]:
+    """select with every fit on soft labels (fit_soft of the truth `y` and `others`, `balanced` as
+    there) rather than on `y` alone. The out-of-fold answers are scored as select scores them, by
+    their class-weighted NLL against `y`, the run's truth, on the same inner splits: only what the
+    model learns from changes, not what it is chosen and judged by."""
+    y = _labels(y)
+    others = [np.asarray(other, dtype=float) for other in others]
+    splits = inner_splits(y, groups, inner)
+    best = None
+    for params in grid:
+        oof = np.full((len(y), N_CLASSES), np.nan)
+        for train, test in splits:
+            if len(test) == 0:
+                continue
+            model = fit_soft(make, params, _rows(X, train), y[train], [other[train] for other in others],
+                             balanced=balanced)
             oof[test] = log_proba(model, _rows(X, test))
         score = class_weighted_nll(oof, y)
         score = score if np.isfinite(score) else np.inf

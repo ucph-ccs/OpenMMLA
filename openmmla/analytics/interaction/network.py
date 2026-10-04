@@ -15,7 +15,9 @@ layout.py (a value whose mask is 0 is already 0 there):
 
 with a label per window: 0 individual, 1 social, 2 collaborative, anything else (uncoded, unclear,
 None, NaN) none. `session_tensors` turns a session into the dict every other function reads; the
-pooled control (PooledNet) reads the 118-column pooled view instead of the tokens.
+pooled control (PooledNet) reads the 118-column pooled view instead of the tokens. net-attn
+(AttentionNet, an exploratory candidate of the architecture panel, WP9) reads the same tokens
+through self-attention over the persons and trains through the same functions.
 
 The training part follows the recipe fixed before any result: tempered class weights,
 cross-entropy with label smoothing on coded windows only (uncoded and unclear windows are context),
@@ -116,6 +118,95 @@ class InteractionNet(nn.Module):
         return (logits, h) if return_persons else logits
 
 
+class PersonAttention(nn.Module):
+    """one pre-norm self-attention block over a window's person slots (attention, then a small
+    feed-forward layer, each with its residual), the pairs an additive bias on the scores: each head
+    reads a pair slot's 22 values and masks into one number, added where its two persons meet, both
+    ways (nothing on the diagonal), and a slot that holds no pair adds nothing. A slot that holds
+    nobody is no key (key padding from P_exists) and its output is zeroed; in a window with nobody
+    every slot is a key, since a softmax over none is NaN, and every output is zeroed all the same.
+    Attention and the bias follow the persons, so the output does not depend on slot order."""
+
+    def __init__(self, d, heads=2, d_pair=D_Q):
+        super().__init__()
+        if d % heads:
+            raise ValueError(f"{d} dimensions do not split into {heads} heads")
+        self.heads = heads
+        self.norm = nn.LayerNorm(d)
+        self.qkv = nn.Linear(d, 3 * d)
+        self.pair_bias = nn.Linear(d_pair, heads)
+        self.out = nn.Linear(d, d)
+        self.norm_ff = nn.LayerNorm(d)
+        self.ff = nn.Sequential(nn.Linear(d, 2 * d), nn.GELU(), nn.Linear(2 * d, d))
+
+    def bias(self, pairs, pair_exists, pair_index, n):  # pairs (B,T,P,d_pair) -> (B,T,heads,n,n)
+        per_pair = self.pair_bias(pairs) * pair_exists.unsqueeze(-1)
+        # which two persons each pair slot joins, both ways
+        incidence = torch.zeros(pair_index.shape[0], n, n, dtype=per_pair.dtype, device=per_pair.device)
+        slot = torch.arange(pair_index.shape[0], device=per_pair.device)
+        incidence[slot, pair_index[:, 0], pair_index[:, 1]] = 1.0
+        incidence[slot, pair_index[:, 1], pair_index[:, 0]] = 1.0
+        return torch.einsum('btph,pnm->bthnm', per_pair, incidence)
+
+    def forward(self, h, exists, pairs, pair_exists, pair_index):  # h (B,T,N,d), exists (B,T,N) in {0,1}
+        batch, length, n, d = h.shape
+        q, k, v = self.qkv(self.norm(h)).reshape(batch, length, n, 3, self.heads, d // self.heads) \
+            .permute(3, 0, 1, 4, 2, 5)
+        scores = q @ k.transpose(-1, -2) / math.sqrt(d // self.heads) + self.bias(pairs, pair_exists, pair_index, n)
+        here = exists > 0
+        keys = here | ~here.any(-1, keepdim=True)
+        scores = scores.masked_fill(~keys[:, :, None, None, :], float('-inf'))
+        attended = (torch.softmax(scores, -1) @ v).permute(0, 1, 3, 2, 4).reshape(batch, length, n, d)
+        h = h + self.out(attended)
+        h = h + self.ff(self.norm_ff(h))
+        return h * here.unsqueeze(-1).to(h.dtype)
+
+
+class GroupQueryPool(nn.Module):
+    """attention pooling over the person slots, queried by the group token (the speech values and
+    masks and the group size / 3): one softmax over the persons there; a window with nobody pools to
+    zeros."""
+
+    def __init__(self, d, d_g=D_G):
+        super().__init__()
+        self.query = nn.Linear(d_g, d)
+        self.key = nn.Linear(d, d)
+
+    def forward(self, h, exists, g):  # h (B,T,N,d), exists (B,T,N), g (B,T,d_g)
+        here = exists > 0
+        anyone = here.any(-1, keepdim=True)
+        scores = (self.key(h) * self.query(g).unsqueeze(2)).sum(-1) / math.sqrt(h.shape[-1])
+        scores = scores.masked_fill(~(here | ~anyone), float('-inf'))
+        return (torch.softmax(scores, -1).unsqueeze(-1) * h).sum(2) * anyone.to(h.dtype)
+
+
+class AttentionNet(nn.Module):
+    """net-attn, an exploratory candidate of the architecture panel (WP9, 2026-10-04; never a rung
+    of the ladder and never in -m all): self-attention over the person slots with the pairs as its
+    bias (PersonAttention), attention pooling queried by the group token and group size
+    (GroupQueryPool), then the net family's window layer (the speech token, the pooled persons and
+    the availability bits), temporal blocks (none with `dilations` ()) and head. The pairs reach the
+    window only through the attention bias. It trains through the same loop as the rungs, with the
+    same seeds, E* and ensemble: 14,511 parameters, 7,151 small (layout version 4)."""
+
+    def __init__(self, d_person=24, heads=2, d_speech=16, d_window=48, kernel=5, dilations=(1, 2), causal=False,
+                 d_g=D_G):
+        super().__init__()
+        self.embed = nn.Linear(D_P, d_person)
+        self.attention = PersonAttention(d_person, heads)
+        self.pool = GroupQueryPool(d_person, d_g)
+        self.speech = nn.Sequential(nn.Linear(d_g, d_speech), nn.GELU())
+        d_cat = d_speech + d_person + N_AVAIL
+        self.window = nn.Sequential(nn.LayerNorm(d_cat), nn.Linear(d_cat, d_window), nn.GELU(), nn.Dropout(0.3))
+        self.temporal = nn.Sequential(*[TemporalBlock(d_window, kernel, d, causal) for d in dilations])
+        self.head = nn.Linear(d_window, N_CLASSES)
+
+    def forward(self, g, avail, persons, person_exists, pairs, pair_exists, pair_index):
+        h = self.attention(self.embed(persons), person_exists, pairs, pair_exists, pair_index)
+        e = self.window(torch.cat([self.speech(g), self.pool(h, person_exists, g), avail], -1))
+        return self.head(self.temporal(e))  # (B,T,3)
+
+
 class PooledNet(nn.Module):
     """the control: the 118-column pooled view through the same window, temporal and head layers."""
 
@@ -147,6 +238,11 @@ KEEP_EVERY = 5
 SMALL = {'d_set': 16, 'd_speech': 12, 'd_window': 32}
 SMALL_BELOW = 3000
 VARIANTS = ('pooled-net', 'net-notcn', 'net', 'net-pair')  # ladder rungs a-d; rung e (pretraining) is deferred
+# the exploratory candidates of the architecture panel (WP9, 2026-10-04): no rung of the ladder
+EXPLORATORY = ('net-attn',)
+# net-attn's two configurations, taken by the rungs' rule (use_small)
+ATTENTION = {'d_person': 24, 'heads': 2, 'd_speech': 16, 'd_window': 48}
+ATTENTION_SMALL = {'d_person': 16, 'heads': 2, 'd_speech': 12, 'd_window': 32}
 
 # the token columns, taken from the layout that builds the tokens (values in the order of the
 # layout tables, then the masks), so the two cannot drift apart: the noise and modality dropout
@@ -186,9 +282,12 @@ LAYOUT = {'g': token_layout(G_COLUMNS), 'persons': token_layout(P_COLUMNS), 'pai
 
 def make_model(variant='net', small=False, causal=False, d_in=len(_layout.POOLED_COLUMNS)):
     """a fresh model of a ladder rung: (a) pooled-net, (b) net-notcn (DeepSets only), (c) net,
-    (d) net-pair (the pair-conditioned encoder); `small` takes the pre-declared small configuration."""
-    if variant not in VARIANTS:
-        raise ValueError(f"unknown network variant {variant!r}: one of {', '.join(VARIANTS)}")
+    (d) net-pair (the pair-conditioned encoder); `small` takes the pre-declared small configuration.
+    net-attn, exploratory (AttentionNet), takes ATTENTION or ATTENTION_SMALL."""
+    if variant not in VARIANTS + EXPLORATORY:
+        raise ValueError(f"unknown network variant {variant!r}: one of {', '.join(VARIANTS + EXPLORATORY)}")
+    if variant == 'net-attn':
+        return AttentionNet(causal=causal, **(ATTENTION_SMALL if small else ATTENTION))
     if variant == 'pooled-net':
         return PooledNet(d_in=d_in, causal=causal, **({'d_window': SMALL['d_window']} if small else {}))
     return InteractionNet(dilations=() if variant == 'net-notcn' else (1, 2), causal=causal,
