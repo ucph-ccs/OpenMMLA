@@ -455,14 +455,16 @@ async def cut_stream(
     callbacks: ExportCallbacks | None = None,
     *,
     run: HostRunner | None = None,
+    windows: list[tuple[float, float]] | None = None,
 ) -> StreamCut:
     """cut one stream's recordings to the window (unix times) on its capture
-    host: straight into artifacts/<session>/streams/capture/<host label>/<kind>/
-    for 'local', into its staging there otherwise. A cut already here in full
-    is not made again; a shorter copy (taken while the session went on) is
-    replaced. A stream noted Record off whose host could not be asked, or
-    holds nothing of the window, is not logged here: whoever runs the export
-    says where its copy is."""
+    host, or to each of `windows` when given (a session's START to STOP
+    stretches; one cut per stretch and recording): straight into
+    artifacts/<session>/streams/capture/<host label>/<kind>/ for 'local', into
+    its staging there otherwise. A cut already here in full is not made again;
+    a shorter copy (taken while the session went on) is replaced. A stream
+    noted Record off whose host could not be asked, or holds nothing of the
+    window, is not logged here: whoever runs the export says where its copy is."""
     callbacks = callbacks or ExportCallbacks()
     run = run or run_on_host
     log = callbacks.log
@@ -476,7 +478,8 @@ async def cut_stream(
         if not stream.noted_off:
             log(f"  [red]✗ {name_markup}: could not list its recordings on {where}.[/red]")
         return StreamCut(stream, listed=False)
-    cuts = stream_cuts.cuts_for_window(files, start, end)
+    cuts = [cut for begin, finish in (windows if windows is not None else [(start, end)])
+            for cut in stream_cuts.cuts_for_window(files, begin, finish)]
     if not cuts:
         if not stream.noted_off:
             log(f"  [dim]- {name_markup}: nothing recorded on {where} in that time[/dim]")
@@ -630,9 +633,11 @@ async def export_session(
     *,
     run: HostRunner | None = None,
     fetch: Callable[..., Awaitable[bool]] | None = None,
+    windows: dict[str, list[tuple[float, float]]] | None = None,
 ) -> SessionExport:
-    """a session's part (start to end, unix times) of the recordings of these
-    streams, into artifacts/<session>/streams/capture/<host label>/<video|audio>/:
+    """a session's part (start to end, unix times; or, for a stream `windows`
+    names, its stretches there) of the recordings of these streams, into
+    artifacts/<session>/streams/capture/<host label>/<video|audio>/:
     every stream is cut on its capture host, then each remote host's cuts are
     fetched at once. `run` (default run_on_host) runs a script where a stream
     records; `fetch` (default fetch_tree) is the transfer. Hosts that cannot be
@@ -653,7 +658,8 @@ async def export_session(
     here_labels: list[str] = []
     for stream in streams:
         _check(callbacks)
-        cut = await cut_stream(project_root, session_id, stream, start, end, callbacks, run=run)
+        cut = await cut_stream(project_root, session_id, stream, start, end, callbacks, run=run,
+                               windows=(windows or {}).get(stream.name))
         result.cuts.append(cut)
         result.present += cut.present
         if stream.ssh_profile == "local":

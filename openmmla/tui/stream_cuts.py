@@ -4,7 +4,8 @@ A managed stream with `record: true` writes one file per run on its capture
 host, <record_root>/streams/capture/<YYYY-MM-DD>/<host label>/<video|audio>/
 <name>_<start>.<mkv|wav>, filed by day because the stream is shared by the
 sessions that pull it. The footage of one session is the part of those files
-between the session's start and end. It is cut on the capture host, with the
+within its windows: each START to its STOP, as the Stream Server recorded it,
+else the session's start to its end. It is cut on the capture host, with the
 ffmpeg that made the recording and without re-encoding, so only the part that
 is wanted travels; the cuts wait under <record_root>/streams/.session-cuts/
 <session>/<host label>/<video|audio>/ until they are fetched.

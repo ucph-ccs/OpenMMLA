@@ -92,6 +92,9 @@ _WINDOW_REASONS = {
     "running": "still running: up to now",
 }
 
+# what the stretches of a session with recording windows are, as the log says it
+_RECORDED_WINDOWS = "from START to STOP, when the Stream Server recorded it"
+
 # the Stream Server's retention when the caller does not know it: asked of the
 # server itself, once it is needed to tell footage deleted from never recorded
 ASK = object()
@@ -1081,6 +1084,25 @@ class _ServerCopy:
     failed_clips: list[str] = field(default_factory=list)
 
 
+def _window_text(start: datetime, end: datetime) -> str:
+    """'2026-10-04 13:57:12 to 13:59:49': one stretch of a session, its end's
+    date only when it is another day."""
+    until = f"{end:%H:%M:%S}" if end.date() == start.date() else f"{end:%Y-%m-%d %H:%M:%S}"
+    return f"{start:%Y-%m-%d %H:%M:%S} to {until}"
+
+
+def _windows_of(windows: list, path: str | None, every: bool = False) -> list[tuple[datetime, datetime]]:
+    """the stretches of a session (archive.session_windows) that hold one of
+    its streams: those whose START switched its Stream Server path on, every
+    one for a stream that went through no Stream Server (`path` None) or a
+    window that names no paths. `every`: a path no START switched on still
+    gets them all, as its capture host recorded it whatever the server did."""
+    held = [(start, end) for start, end, paths in windows if paths is None or path is None or path in paths]
+    if not held and every:
+        held = [(start, end) for start, end, _paths in windows]
+    return held
+
+
 async def export_streams(root, session_id: str, record: dict | None, callbacks, archive: _Archive | None = None, *,
                          dry_run: bool = False, retention=ASK) -> PartResult:
     """both copies of the session's part of every stream it used, from its
@@ -1091,8 +1113,10 @@ async def export_streams(root, session_id: str, record: dict | None, callbacks, 
     openmmla.utils.stream_recording), and with Record on the machine that
     captures it records it whether or not one runs. Nothing of either belongs
     to a session; each base notes in the session's document the stream it
-    takes (openmmla.utils.session_sources), and the session's start and end
-    (recordings.session_end) pick the part of it:
+    takes (openmmla.utils.session_sources), and the session's windows pick the
+    part of it, the same for both copies: each START to its STOP, as its
+    `recording_windows` note when the Stream Server recorded it, else its start
+    to its end (archive.session_windows, recordings.session_end):
       - the server copy, over HTTP: each noted path on the Stream Server of
         System Settings, one file per unbroken stretch, into
         artifacts/<session>/streams/server/<app>/<name>_<start>.mp4;
@@ -1104,6 +1128,7 @@ async def export_streams(root, session_id: str, record: dict | None, callbacks, 
     between steps (a clip being downloaded at once); what arrived stays.
     `retention`: the Stream Server's, in seconds (None: not known), ASK to ask
     the server when it is needed."""
+    from openmmla.commands.ses.archive import session_windows
     from openmmla.tui import recordings
     from openmmla.tui.system_services import stream_server_address
     from openmmla.utils import session_sources
@@ -1127,13 +1152,25 @@ async def export_streams(root, session_id: str, record: dict | None, callbacks, 
             f"no base joined it).[/yellow]")
         return part
     end, why = recordings.session_end(record)
-    until = f"{end:%H:%M:%S}" if end.date() == start.date() else f"{end:%Y-%m-%d %H:%M:%S}"
-    log(f"  {start:%Y-%m-%d %H:%M:%S} to {until} UTC ({_WINDOW_REASONS[why]})")
+    # both copies are cut to the same stretches: what was recorded before the
+    # first START (the bases starting up) is no part of either
+    windows, what = session_windows(record)
+    windows = windows or [(start, end, None)]
+    if what == "recording_windows":
+        still = "" if why == "ended" else f"; {_WINDOW_REASONS[why]}"
+        log(f"  {', '.join(_window_text(begin, finish) for begin, finish, _paths in windows)} UTC "
+            f"({_RECORDED_WINDOWS}{still})")
+        before = (min(begin for begin, _finish, _paths in windows) - start).total_seconds()
+        if before >= 1:
+            log(f"  [dim]The {before:.0f} s from the session's start ({start:%H:%M:%S}) to its first START are not "
+                f"taken.[/dim]")
+    else:
+        log(f"  {_window_text(start, end)} UTC ({_WINDOW_REASONS[why]})")
 
     server = await asyncio.to_thread(stream_server_address, _settings_root())
     # without an address no URL is known to be the Stream Server's
     sources = await asyncio.to_thread(server_sources, record, server) if server.get("host") else ServerSources()
-    copy = await _server_copy(root, session_id, server, sources, (start, end), why == "ended", callbacks,
+    copy = await _server_copy(root, session_id, server, sources, windows, why == "ended", callbacks,
                               retention, part, dry_run)
     if callbacks.cancelled():
         raise asyncio.CancelledError()
@@ -1144,7 +1181,7 @@ async def export_streams(root, session_id: str, record: dict | None, callbacks, 
             part.missing.append(Missing("streams/server/ (the Stream Server's copy)",
                                         why + (f"; {archive.none_note('streams/server')}" if archive is not None
                                                else "")))
-    from_capture = await _capture_copy(root, session_id, record, sources, (start, end), callbacks, part, archive,
+    from_capture = await _capture_copy(root, session_id, record, sources, windows, callbacks, part, archive,
                                        dry_run)
 
     folder = _shown_path(root, session_server_streams_dir(root, session_id).parent)
@@ -1162,28 +1199,32 @@ async def export_streams(root, session_id: str, record: dict | None, callbacks, 
     return part
 
 
-def _server_clips_here(out_dir: Path, path: str, start: datetime, end: datetime) -> list[Path]:
+def _server_clips_here(out_dir: Path, path: str, spans: list[tuple[datetime, datetime]]) -> list[Path]:
     """the clips of a Stream Server path an earlier export brought here for
-    this window: <app>/<name>_<start>.mp4 under streams/server/
+    these stretches: <app>/<name>_<start>.mp4 under streams/server/
     (recordings.clip_relpath)."""
     parts = [part for part in path.split("/") if part and part not in (".", "..")]
     folder = Path(out_dir).joinpath(*parts[:-1]) if len(parts) > 1 else Path(out_dir)
-    return _exported_here(folder, parts[-1] if parts else "stream", ".mp4", start.timestamp(), end.timestamp())
+    found = (clip for start, end in spans
+             for clip in _exported_here(folder, parts[-1] if parts else "stream", ".mp4", start.timestamp(),
+                                        end.timestamp()))
+    return list(dict.fromkeys(found))
 
 
 async def _server_copy(root, session_id: str, server: dict, sources: ServerSources,
-                       window: tuple[datetime, datetime], ended: bool, callbacks, retention,
+                       windows: list, ended: bool, callbacks, retention,
                        part: PartResult, dry_run: bool = False) -> _ServerCopy:
     """the server copy: each unbroken stretch of the session's paths on the
-    Stream Server within its window, asked of the playback server over HTTP
-    (no SSH). A clip already here in full is not fetched again."""
+    Stream Server within its windows (archive.session_windows: a path only in
+    those whose START switched it on, as the archive host cuts them), asked
+    of the playback server over HTTP (no SSH). A clip already here in full is
+    not fetched again."""
     from openmmla.tui import recordings
     from openmmla.tui.artifacts import copy_covers, ensure_session_layout
     from openmmla.utils.artifact_paths import session_server_streams_dir
 
     result = _ServerCopy()
     log = callbacks.log
-    start, end = window
     shown = _escape(session_id)
     host = str(server.get("host") or "")
     if not host:
@@ -1221,11 +1262,17 @@ async def _server_copy(root, session_id: str, server: dict, sources: ServerSourc
         return result
     finally:
         callbacks.progress_end()
-    clips = recordings.clips_for_window(spans, start, end)
+    clips, seen = [], set()
+    for path in sorted(paths):
+        for start, end in _windows_of(windows, path):
+            for clip in recordings.clips_for_window({path: spans.get(path) or []}, start, end):
+                if (clip.path, clip.start) not in seen:
+                    seen.add((clip.path, clip.start))
+                    clips.append(clip)
     if not clips:
         # the clips an earlier export brought of each path are here still, whatever the server holds now
         kept = await asyncio.to_thread(
-            lambda: {path: len(_server_clips_here(out_dir, path, start, end)) for path in paths})
+            lambda: {path: len(_server_clips_here(out_dir, path, _windows_of(windows, path))) for path in paths})
         result.here += sum(kept.values())
         part.present += sum(kept.values())
         gone = [path for path in paths if not kept[path]]
@@ -1237,7 +1284,7 @@ async def _server_copy(root, session_id: str, server: dict, sources: ServerSourc
             with contextlib.suppress(recordings.RecordingsError, ValueError, TypeError):
                 retention = await asyncio.to_thread(
                     recordings.retention, host, int(server.get("api_port") or recordings.API_PORT), 2.0)
-        expired = recordings.expiry(start, retention)
+        expired = recordings.expiry(min(start for start, _end, _paths in windows), retention)
         if expired is not None and expired <= datetime.now(timezone.utc):
             color = "yellow" if gone else "dim"
             log(f"  [{color}]Nothing left on the server: it keeps a recording for "
@@ -1334,12 +1381,13 @@ def _clip_progress(loop, clip, callbacks):
 
 
 async def _capture_copy(root, session_id: str, record: dict, sources: ServerSources,
-                        window: tuple[datetime, datetime], callbacks, part: PartResult,
+                        windows: list, callbacks, part: PartResult,
                         archive: _Archive | None = None, dry_run: bool = False) -> int:
     """the capture copy: each noted stream's recording on the machine that
-    captured it, cut there to the window without re-encoding and fetched
-    (stream_export.export_session, which says what it does line by line). How
-    many cuts are here afterwards.
+    captured it, cut there without re-encoding to the session's windows that
+    the server copy of its path is cut to (_windows_of; all of them for a
+    stream no START switched on), and fetched (stream_export.export_session,
+    which says what it does line by line). How many cuts are here afterwards.
 
     Every stream the console captures is asked for, whatever Record its bases
     noted: a base notes it from the config of the machine it runs on, which
@@ -1350,10 +1398,14 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
     from openmmla.utils.artifact_paths import session_capture_streams_dir
 
     log = callbacks.log
-    start, end = window
     folder = session_capture_streams_dir(root, session_id)
     log(f"[cyan]From the capture hosts into {_shown_path(root, folder)}[/cyan]")
     found = stream_export.session_streams(record, root)
+
+    def spans_of(stream) -> list[tuple[float, float]]:
+        """the stretches cut out of a stream's recordings, in unix times."""
+        return [(start.timestamp(), end.timestamp())
+                for start, end in _windows_of(windows, sources.by_stream.get(stream.name), every=True)]
 
     def only_copy(name: str) -> str:
         """where the copy of a stream no capture host gave is (markup)."""
@@ -1381,12 +1433,14 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
     arrived: set[Path] = set()
 
     async def kept_here(stream) -> tuple[list[Path], list[Path]]:
-        """the cuts of a stream's window here: those an earlier export brought,
+        """the cuts of a stream's windows here: those an earlier export brought,
         and those a transfer of this one brought that this run did not make
         (an earlier export staged them, and its fetch did not finish)."""
-        found = await asyncio.to_thread(
-            _exported_here, folder / stream.host_label / stream.kind, stream.name,
-            f".{stream_cuts.EXTENSIONS.get(stream.kind, 'mkv')}", start.timestamp(), end.timestamp())
+        spans = spans_of(stream)
+        suffix = f".{stream_cuts.EXTENSIONS.get(stream.kind, 'mkv')}"
+        found = await asyncio.to_thread(lambda: list(dict.fromkeys(
+            path for start, end in spans
+            for path in _exported_here(folder / stream.host_label / stream.kind, stream.name, suffix, start, end))))
         return [path for path in found if path not in arrived], [path for path in found if path in arrived]
 
     def said_here(before: list[Path], now: list[Path]) -> str:
@@ -1397,7 +1451,7 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
         return "; ".join(said)
 
     async def none_there(stream, where: str) -> int:
-        """a capture host that answered with no recording of the window: the
+        """a capture host that answered with no recording of the windows: the
         cuts an earlier export brought are here (how many; one fetched now
         counts as fetched), else what the archive host holds of it is
         fetched; for a stream noted Record off, where its only copy is."""
@@ -1449,7 +1503,7 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
                     f"there (streams/capture/{_escape(stream.host_label)}/).[/yellow]")
                 lost.setdefault(stream.host_label, (where, f"{where} did not answer"))
                 continue
-            cuts = stream_cuts.cuts_for_window(files, start.timestamp(), end.timestamp())
+            cuts = [cut for start, end in spans_of(stream) for cut in stream_cuts.cuts_for_window(files, start, end)]
             if not cuts:
                 here += await none_there(stream, where)
                 continue
@@ -1462,10 +1516,13 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
         await _capture_from_archive(lost, folder, part, archive)
         return here
 
+    first = min(start for start, _end, _paths in windows)
+    last = max(end for _start, end, _paths in windows)
     callbacks.progress_start("Capture hosts · cutting", None)
     try:
-        result = await stream_export.export_session(root, session_id, streams, start.timestamp(), end.timestamp(),
-                                                    callbacks)
+        result = await stream_export.export_session(root, session_id, streams, first.timestamp(), last.timestamp(),
+                                                    callbacks, windows={stream.name: spans_of(stream)
+                                                                        for stream in streams})
     finally:
         callbacks.progress_end()
     part.fetched += result.fetched
