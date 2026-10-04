@@ -92,6 +92,7 @@ from openmmla.utils.artifact_paths import (
 )
 from openmmla.utils.yaml_dump import dump_yaml_pretty
 from openmmla.utils.constants import get_stream_sources, normalize_source, resolve_stream_source, stream_kind
+from openmmla.utils import session_sources
 from openmmla.utils.session_sources import stream_for_base, stream_url_path
 from openmmla.utils.stream_registry import load_stream_registry
 from openmmla.utils.config import (
@@ -1368,10 +1369,11 @@ def _stream_is_there(config: dict, source_index: str) -> bool:
 
 @dataclass(frozen=True)
 class _PulledStream:
-    """a stream a base of a card is about to pull: the base's row on the
-    card and its Bases entry, the Streams entry, the URL it pulls, and the
-    machine that captures it (the entry's ssh_profile; "" for one that
-    someone else publishes)."""
+    """a stream a base of a card is about to pull (or, over udp/tcp, to
+    receive): the base's row on the card and its Bases entry, the Streams
+    entry, the URL it pulls (or the target pushed to), and the machine that
+    captures it (the entry's ssh_profile; "" for one that someone else
+    publishes)."""
     row: int
     entry: str
     stream: str
@@ -1391,13 +1393,12 @@ class _StreamAnswer:
     started: dict
 
 
-def _pulled_streams(svc_name: str, config: dict, params: dict) -> list[_PulledStream]:
-    """the streams the bases of a base card's Start would pull, by the rules
-    the bases apply: each row's -b, else the config's only Bases entry, whose
-    source: stream names a Streams entry (read_target, else target). A base
-    asked in its window, a device of its own, a file, LSL, udp/tcp pushed
-    straight to an ASR base, and an analyze run (it reads what an earlier
-    run stored) pull nothing a stream server could speak for."""
+def _card_bases(svc_name: str, config: dict, params: dict) -> list[tuple[int, dict]]:
+    """each base of a base card's Start, by its row on the card, with the
+    Bases entry it runs as, by the rules the bases apply: each row's -b, else
+    the config's only Bases entry. A base asked in its window has none yet,
+    and an analyze run takes no stream (it reads what an earlier run stored),
+    so it has none here."""
     if svc_name not in _BASE_CARD_PIPELINES or not isinstance(config, dict):
         return []
     if str(params.get("-m") or "live") == "analyze":
@@ -1411,11 +1412,47 @@ def _pulled_streams(svc_name: str, config: dict, params: dict) -> list[_PulledSt
     for row, value in enumerate(picked, 1):
         entry_id = value or only
         base = get_base_by_id(config, entry_id) if entry_id else None
-        if base is None or normalize_source(base.get("source")) != "stream":
+        if base is not None:
+            found.append((row, base))
+    return found
+
+
+def _pulled_streams(svc_name: str, config: dict, params: dict) -> list[_PulledStream]:
+    """the streams the bases of a base card's Start would pull, by the rules
+    the bases apply (_card_bases): a base whose source: stream names a
+    Streams entry (read_target, else target). A base asked in its window, a
+    device of its own, a file, LSL, udp/tcp pushed straight to an ASR base
+    (_pushed_streams), and an analyze run pull nothing a stream server could
+    speak for."""
+    found = []
+    for row, base in _card_bases(svc_name, config, params):
+        if normalize_source(base.get("source")) != "stream":
             continue
         resolved = stream_for_base(config, base)
         if resolved is None:
             continue  # names no stream there is: its dropdown reads (not in Streams), and the base says so
+        name, entry, url = resolved
+        found.append(_PulledStream(row, str(base.get("id")), name, url,
+                                   str((entry or {}).get("ssh_profile") or "").strip()))
+    return found
+
+
+def _pushed_streams(svc_name: str, config: dict, params: dict, host: str) -> list[_PulledStream]:
+    """the streams pushed straight to the bases of an ASR Base card's Start
+    over udp/tcp: for each such base, the Streams entry whose target is its
+    port, the one pushed to `host` (the machine the bases run on) when
+    several are, as the base finds it when it notes its stream in the
+    session (session_sources.stream_for_base). No stream server is between
+    them, so the Start asks none about these."""
+    if _BASE_CARD_PIPELINES.get(svc_name) != "asr":
+        return []
+    found = []
+    for row, base in _card_bases(svc_name, config, params):
+        if normalize_source(base.get("source")) not in ("udp", "tcp"):
+            continue
+        resolved = stream_for_base(config, base, host)
+        if resolved is None:
+            continue  # no entry pushes to its port, or which one cannot be told: the base notes none either
         name, entry, url = resolved
         found.append(_PulledStream(row, str(base.get("id")), name, url,
                                    str((entry or {}).get("ssh_profile") or "").strip()))
@@ -1524,6 +1561,121 @@ def _card_and_host(display_name: str, target: str) -> str:
     """a card and the host its Start was pressed on, for a line that may be
     logged once the log's divider shows another."""
     return f"{display_name} on this machine" if target == "local" else f"{display_name} on '{target}'"
+
+
+@dataclass(frozen=True)
+class _StreamDisagreement:
+    """a stream a base card's bases would pull, started from this console's
+    Streams tab and not stopped, that runs otherwise than the Streams entry
+    of the config those bases read says. A base notes its stream's machine,
+    record and rotate in the session from that entry
+    (session_sources.source_entry), so the session would say what the entry
+    says. `runs_on` is the machine the stream runs on ("" when its Start
+    noted none); each pair is (what it runs with, what the entry says), None
+    where they agree or what it runs with is not known."""
+    stream: str
+    started: float | None
+    runs_on: str
+    machine: tuple[str, str] | None = None
+    record: tuple[bool, bool] | None = None
+    rotate: tuple[int, int] | None = None
+
+
+def _stream_disagreements(pulled, config: dict, registry: dict, pipeline: str) -> list[_StreamDisagreement]:
+    """the streams of `pulled`, each once in the order of the rows, whose
+    running entry in this console's stream registry (`registry`, its
+    `streams` by name) disagrees with the Streams entry of `config`, the
+    config the bases read: the machine it runs on (ssh_profile), whether it
+    records (its Start noted a recording), and for a camera the turn its
+    ffmpeg gives the picture. The entry is read as the bases read it
+    (session_sources). A stream with no machine in the config (someone else
+    publishes it) and one the registry holds no running entry of say nothing."""
+    streams = config.get("Streams") if isinstance(config, dict) else None
+    streams = streams if isinstance(streams, dict) else {}
+    registry = registry if isinstance(registry, dict) else {}
+    first: dict[str, _PulledStream] = {}
+    for item in pulled:
+        first.setdefault(item.stream, item)
+    found = []
+    for name, item in first.items():
+        entry = streams.get(name)
+        entry = entry if isinstance(entry, dict) else {}
+        says_on = session_sources._clean(entry.get("ssh_profile"))
+        runs = registry.get(name)
+        if not item.machine or not says_on or not isinstance(runs, dict) or runs.get("status") != "running":
+            continue
+        runs_on = str(runs.get("ssh_profile") or "").strip()
+        machine = (runs_on, says_on) if runs_on and runs_on != says_on else None
+        records = bool(str(runs.get("record_path") or "").strip())
+        says_record = session_sources._yes(entry.get("record"))
+        record = (records, says_record) if records != says_record else None
+        rotate = None
+        if runs.get("rotate") is not None and session_sources._kind(entry, pipeline, item.url) == "video":
+            turns, says_turn = video_turn(runs.get("rotate")), session_sources._turn(entry.get("rotate"))
+            rotate = (turns, says_turn) if turns != says_turn else None
+        if machine or record or rotate:
+            when = runs.get("stream_start_time")
+            started = float(when) if isinstance(when, (int, float)) and not isinstance(when, bool) else None
+            found.append(_StreamDisagreement(name, started, runs_on, machine, record, rotate))
+    return found
+
+
+def _stream_disagreement_notes(card: str, found: list[_StreamDisagreement], pipeline: str = "") -> list[str]:
+    """what a base card's Start (`card`, its name and host; `pipeline`, its
+    pipeline) logs of the streams _stream_disagreements found: a line per
+    stream with what it runs with, what the config its bases read says and
+    what the session will therefore note, then one on how to make them
+    agree. The Start goes on."""
+    if not found:
+        return []
+
+    def where(machine: str) -> str:
+        return "this machine" if machine == "local" else machine
+
+    def turned(degrees: int) -> str:
+        return f"turned by {degrees}°" if degrees else "not turned"
+
+    lines = []
+    for item in found:
+        runs, says, notes, noted = [], [], [], []
+        if item.machine:
+            runs.append(f"runs on {where(item.machine[0])}")
+            says.append(f"ssh_profile: {item.machine[1]}")
+            notes.append(f"names {where(item.machine[1])} as its capture host")
+        if item.record:
+            on = f" on {where(item.runs_on)}" if item.runs_on and not item.machine else ""
+            runs.append(f"records{on}" if item.record[0] else "does not record")
+            says.append(f"record: {'true' if item.record[1] else 'false'}")
+            noted.append("recorded" if item.record[1] else "not recorded")
+        bases = ""
+        if item.rotate:
+            turns, says_turn = item.rotate
+            runs.append(f"turns the picture by {turns}°" if turns else "does not turn the picture")
+            says.append(f"rotate: {says_turn}")
+            noted.append(turned(says_turn))
+            if pipeline == "ips":
+                # the IPS bases read the config's turn as well (utils.video.turn.base_capture_turn), as the
+                # Streams tab's own note of a running camera says (stream_panel._turn_note)
+                how = (f"turn its intrinsics and poses by {says_turn}°" if says_turn
+                       else "do not turn its intrinsics and poses")
+                mirrored = " (its tags come out mirrored through the camera's axis)" if (
+                    (turns - says_turn) % 360 == 180) else ""
+                bases = f", and these bases {how} for a picture that is {turned(turns)}{mirrored}"
+        if noted:
+            notes.append(f"notes it as {_and_list(noted)}")
+        lines.append(
+            f"[yellow]  {rich_escape(card)}: {rich_escape(item.stream)}, started from this console's Streams "
+            f"tab{_started_text(item.started)}, {rich_escape(_and_list(runs))}, but the config these bases read "
+            f"says {rich_escape(_and_list(says))}, so the session {rich_escape(_and_list(notes))}"
+            f"{rich_escape(bases)}.[/yellow]")
+    names = [item.stream for item in found]
+    it = "them" if len(names) > 1 else "it"
+    lines.append(
+        f"[yellow]  {rich_escape(card)}: for these bases and the session to go by how {rich_escape(_and_list(names))} "
+        f"{'run' if len(names) > 1 else 'runs'}, make the two agree: Sync from Host or Sync to Host on the Config "
+        f"tab copies one host's config over another's, or change the entry, Stop {it} and Start {it} again on the "
+        f"Streams tab. Then Stop these bases if they run and press Start again.[/yellow]")
+    return lines
 
 
 def _stream_hold_text(server_host: str, idle, started: dict, card: str = "") -> str:
@@ -13330,6 +13482,8 @@ class ServicePanel(Widget):
                     and str(event.params.get("-m") or "live") != "analyze"):
                 self._log(f"  The config of '{rich_escape(target)}' has not been read yet, so whether the streams "
                           f"its bases pull are live is not asked (Refresh on this card reads it).")
+            for note in self._stream_config_notes(svc, card_config, pulled, target, event.params):
+                self._log(note)
         if pulled:
             server = self._stream_server_address()
             if not str(server.get("host") or "").strip():
@@ -13444,6 +13598,40 @@ class ServicePanel(Widget):
             return
         holds[(svc.name, target)] = missing
         self._log(_stream_hold_text(host, answer.idle, answer.started, _card_and_host(svc.display_name, target)))
+
+    def _stream_config_notes(self, svc: ServiceDef, config: dict, pulled: list[_PulledStream],
+                             target: str, params: dict | None = None) -> list[str]:
+        """what a base card's Start says of the streams its bases take (those
+        pulled, and those pushed to an ASR base over udp/tcp) that this
+        console's Streams tab runs otherwise than their entries in `config`
+        say: the config of the host the bases run on, which they read
+        (_stream_disagreements). Only said: the Start goes on. The registry
+        is a small local file, read here; one that cannot be read says nothing."""
+        pipeline = _BASE_CARD_PIPELINES.get(svc.name, "")
+        taken = list(pulled)
+        if pipeline == "asr" and params:
+            taken += _pushed_streams(svc.name, config, params, self._bases_host(target))
+        if not taken:
+            return []
+        try:
+            registry = load_stream_registry(self._root).get("streams") or {}
+        except (yaml.YAMLError, OSError):
+            return []
+        found = _stream_disagreements(taken, config, registry, pipeline)
+        return _stream_disagreement_notes(_card_and_host(svc.display_name, target), found, pipeline)
+
+    @staticmethod
+    def _bases_host(target: str) -> str:
+        """the machine a base card's bases run on, as a base names itself
+        when it notes its stream in a session (session_sources.source_entry):
+        this machine's short name, else the SSH profile's host."""
+        if target == "local":
+            return socket.gethostname().split(".", 1)[0]
+        try:
+            profile = get_profile_by_name(target)
+        except Exception:
+            profile = None  # a profiles file that cannot be read: the profile's name is the best guess
+        return str(profile.host if profile is not None else target)
 
     def _stream_holds(self) -> dict[tuple[str, str], frozenset[str]]:
         """the base card Starts held back for their streams, by (card, host)."""
