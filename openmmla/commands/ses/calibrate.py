@@ -23,8 +23,9 @@ def get_parser():
     add_arg('main', str, None, 'the main camera (a device of the manifest, e.g. c920-01); if not set, c920-01, else c920-05, '
             'else the first', shortname='-mc')
     add_arg('cameras', str, None, 'comma-separated devices to take; if not set, every video of the manifest', shortname='-cams')
-    add_arg('camera', str, None, "the Cameras entry (intrinsics) the videos were recorded with; if not set, the config's first",
-            shortname='-cam')
+    add_arg('camera', str, None, 'the Cameras entry (intrinsics) the videos were recorded with; if not set, the one the Bases '
+            "entries of the devices name (by id, or the stream or file they read), else the config's only camera; it stops when "
+            'that leaves a choice or names a camera Cameras lacks', shortname='-cam')
     add_arg('capture_rotate', str, None, 'the turn the capture applied to the videos, for a session that does not note it '
             '(sources[].capture.rotate): one turn for every video (180), or device=turn pairs (c920-01=180,c920-02=0); '
             'if not set, what the session notes, else 0', shortname='-cr')
@@ -81,6 +82,53 @@ def _capture_turns(text: str | None, devices) -> dict:
     return {device.strip(): normalize_turn(turn) for device, turn in pairs}
 
 
+def _camera_entry(config: dict, devices: list, videos: dict, requested: str | None) -> tuple[str, str]:
+    """(the Cameras entry every video is read with, where it came from): -cam when given, else the one
+    camera the Bases entries of these devices name (an entry is a device's when its id is the device's
+    name, or its source_index, for a stream or file entry, is the device's name or recording path), else
+    the config's only camera. ValueError when -cam names no entry, when the devices name different cameras
+    or one Cameras lacks, or when a device has no Bases entry naming a camera and Cameras holds more than
+    one: a sorted or first entry could be another device's intrinsics (the iphone that configs written
+    from the old template hold sorted before logitechC920 and put every pose centimetres off)."""
+    cameras = config.get('Cameras') or {}
+    if requested:
+        if requested not in cameras:
+            raise ValueError(f"Cameras has no entry {requested!r}: {sorted(cameras)}")
+        return requested, '-cam'
+    bases = [entry for entry in config.get('Bases') or [] if isinstance(entry, dict)]
+
+    def is_devices(entry, device, path):
+        # a numeric name (a Mac camera recorded without a Device Label is '0', '1', ...) is no id: the
+        # ids 1, 2, ... of a config are its bases' positions, and a device index is another machine's
+        if not device.isdigit() and str(entry.get('id')) == device:
+            return True
+        index = entry.get('source_index')
+        return (index is not None and str(entry.get('source') or '') in ('stream', 'rtmp', 'file')
+                and str(index).strip() in (device, path))
+
+    named = {}  # device -> the cameras its Bases entries name
+    for device in devices:
+        path = str(videos[device].get('path') or '')
+        found = {str(entry.get('camera') or '').strip() for entry in bases if is_devices(entry, device, path)} - {''}
+        if found:
+            named[device] = found
+    names = set().union(*named.values()) if named else set()
+    if len(names) > 1:
+        listed = ', '.join(f"{device} {'/'.join(sorted(found))}" for device, found in sorted(named.items()))
+        raise ValueError(f"the Bases entries of these devices name different cameras ({listed}), and every video is read "
+                         "with one Cameras entry: pass -cam, or calibrate the devices of one camera at a time with -cams")
+    if names - set(cameras):
+        raise ValueError(f"the Bases entries of {sorted(named)} name camera {sorted(names)[0]!r}, which Cameras does not hold "
+                         f"({sorted(cameras)}): pass -cam")
+    if names and all(device in named for device in devices):
+        return next(iter(names)), 'the Bases entries of the devices'
+    if len(cameras) == 1:
+        return next(iter(cameras)), "the config's only camera"
+    unnamed = [device for device in devices if device not in named]
+    raise ValueError(f"no Bases entry whose id, or stream or file source_index, is the name or recording of {unnamed} names "
+                     f"a camera, and Cameras holds {sorted(cameras)}: pass -cam with the one the videos were recorded with")
+
+
 def main():
     parser = get_parser()
     args = parser.parse_args()
@@ -99,18 +147,13 @@ def main():
     cameras = config.get('Cameras') or {}
     if not cameras:
         parser.error(f"{args.config_path} has no Cameras section")
-    camera = args.camera or sorted(cameras)[0]
-    if camera not in cameras:
-        parser.error(f"Cameras has no entry {camera!r}: {sorted(cameras)}")
-    if cameras[camera].get('fisheye'):
-        parser.error(f"camera {camera} is fisheye: ses-calibrate reads the frames as they are")
     base = config.get('Base') or {}
     tag_size = args.tag_size or float(manifest.get('tag_size') or base.get('tag_size') or 0.08)
     families = str(base.get('families') or 'tag36h11')
     rotate = int(base.get('rotate') or 0)
 
     videos = {r['device']: r for r in manifest.get('recordings', []) if '/video/' in str(r.get('path'))}
-    wanted = [c.strip() for c in args.cameras.split(',')] if args.cameras else sorted(videos)
+    wanted = list(dict.fromkeys(c.strip() for c in args.cameras.split(','))) if args.cameras else sorted(videos)
     missing = [c for c in wanted if c not in videos]
     if missing:
         parser.error(f"the manifest has no video of {missing}; it has {sorted(videos)}")
@@ -119,12 +162,18 @@ def main():
         parser.error(f"main camera {main_camera} is not among {wanted}")
     if len(wanted) < 2:
         parser.error("at least two cameras are needed")
+    try:
+        camera, camera_from = _camera_entry(config, wanted, videos, args.camera)
+    except ValueError as e:
+        parser.error(str(e))
+    if cameras[camera].get('fisheye'):
+        parser.error(f"camera {camera} is fisheye: ses-calibrate reads the frames as they are")
 
     sync = float(manifest['initial_sync_time'])
     end = min(float(videos[c]['start_time']) + float(videos[c].get('duration') or 0) for c in wanted)
     stamps = [sync + k * args.step for k in range(int((end - sync) / args.step) + 1)]
     print(f"{len(stamps)} frames per camera every {args.step} s from {sync:.3f} ({(end - sync) / 60:.1f} min); "
-          f"tag size {tag_size} m, family {families}, camera {camera}, main {main_camera}")
+          f"tag size {tag_size} m, family {families}, camera {camera} ({camera_from}), main {main_camera}")
     # the turn each recording got where it was captured: the poses are taken back to the sensor's
     # frame, as the IPS base reports them, so that the matrices hold whatever turned the picture
     # (-cr wins, then the turn a Collection recording notes in its own manifest row, then the sources')
@@ -189,7 +238,7 @@ def main():
     with open(matrices_path, 'w') as f:
         json.dump(matrices, f, indent=2)
     report.update({'session_id': args.session_id, 'step': args.step, 'frames': len(stamps), 'tag_size': tag_size,
-                   'camera': camera, 'verified': args.verify, 'rotate': rotate,
+                   'camera': camera, 'camera_from': camera_from, 'verified': args.verify, 'rotate': rotate,
                    'capture_rotate': {device: turns.get(device, 0) for device in wanted}})
     with open(os.path.join(out_dir, 'calibration_report.json'), 'w') as f:
         json.dump(report, f, indent=2)
