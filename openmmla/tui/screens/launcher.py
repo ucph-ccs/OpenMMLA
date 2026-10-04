@@ -820,6 +820,39 @@ def _expand_remote_home_path(path: str, remote_home: str | None) -> str:
     return text
 
 
+# what a recorder leaves in a session's folder besides its recordings: never a
+# reason to keep the folder once the recordings are gone (ses tidy's CLUTTER)
+_SESSION_FOLDER_LEFTOVERS = ("manifest.json", "manifest.yml", "manifest.json.tmp", "manifest.yml.tmp",
+                             ".manifest.lock", ".DS_Store", "Thumbs.db")
+
+
+def _collection_session_dir(host_dir: str, session_id: str) -> str | None:
+    """the session's folder around one host's recordings,
+    <root>/<session>/collection/<host label> -> <root>/<session>; None for any
+    other path (an Output Root of its own, whose session folder is the one
+    Delete Remote removes)."""
+    parts = str(host_dir).rstrip("/").split("/")
+    if not session_id or len(parts) < 4 or parts[-2] != "collection" or parts[-3] != session_id:
+        return None
+    return "/".join(parts[:-2])
+
+
+def _session_folder_tidy_cmd(session_dir: str) -> str:
+    """remove a session's folder on a host once nothing of the session is left
+    in it but what a recorder writes beside its recordings (its manifests):
+    SESSION_REMOVED. Anything else, or a folder that cannot be searched
+    through, keeps it: SESSION_KEPT and the first files left, each on a
+    `LEFT <path>` line."""
+    quoted = _quote_remote_path(session_dir)
+    leftovers = " ".join(f"! -name {shlex.quote(name)}" for name in _SESSION_FOLDER_LEFTOVERS)
+    return (
+        f"if [ -d {quoted} ]; then "
+        f"if left=$(find {quoted} ! -type d {leftovers}) && [ -z \"$left\" ]; then "
+        f"rm -rf -- {quoted} && echo SESSION_REMOVED; "
+        f"else echo SESSION_KEPT; printf '%s\\n' \"$left\" | head -n 3 | sed 's/^/LEFT /'; fi; fi"
+    )
+
+
 def _safe_session_id(value: str | None, default: str = "") -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -14027,11 +14060,17 @@ class ServicePanel(Widget):
         remote_path = self._collection_remote_path(profile, params)
         remote_delete_path = _expand_remote_home_path(remote_path, _remote_home(profile))
         quoted_path = _quote_remote_path(remote_delete_path)
+        # with the default Output Root this host's recordings are one folder of
+        # the session's there: the session's folder goes too once only its
+        # manifests are left in it (also on a second press, after the recordings went)
+        session_dir = _collection_session_dir(remote_delete_path, session_id)
         cmd = (
             f"if [ -d {quoted_path} ]; then "
             f"rm -rf -- {quoted_path} && echo DELETED; "
             "else echo MISSING; fi"
         )
+        if session_dir:
+            cmd += f"; {_session_folder_tidy_cmd(session_dir)}"
         self._log(f"[red]Deleting remote collection: {profile_name}:{remote_delete_path}[/red]")
         proc = await ssh_run_async(profile, wrap_remote(cmd))
         assert proc.stdout is not None
@@ -14040,9 +14079,22 @@ class ServicePanel(Widget):
             output += line.decode(errors="replace")
         rc = await proc.wait()
         words = output.split()
-        if rc == 0 and "DELETED" in words:
-            self._log(f"[green]Deleted {profile_name}:{remote_delete_path}.[/green]")
-        elif rc == 0 and "MISSING" in words:
+        left = [line[len("LEFT "):].strip() for line in output.splitlines() if line.startswith("LEFT ")]
+        left = [path[len(session_dir) + 1:] if session_dir and path.startswith(session_dir + "/") else path
+                for path in left]
+        if "DELETED" in words or ("MISSING" in words and "SESSION_REMOVED" in words):
+            if "DELETED" in words:
+                self._log(f"[green]Deleted {profile_name}:{remote_delete_path}.[/green]")
+            else:
+                self._log(f"[dim]{profile_name}:{remote_delete_path} was deleted before.[/dim]")
+            if "SESSION_REMOVED" in words:
+                self._log(f"[green]Deleted {profile_name}:{session_dir} too: nothing of the session was left "
+                          f"there but its manifest.[/green]")
+            elif "SESSION_KEPT" in words:
+                shown = ", ".join(left) if left else "files it could not search through"
+                self._log(f"[dim]{profile_name}:{session_dir} stays: it holds more of the session "
+                          f"({rich_escape(shown)}).[/dim]")
+        elif "MISSING" in words:
             self._log(
                 f"[yellow]Nothing to delete: {profile_name}:{remote_delete_path} is not there "
                 f"(deleted before, or never recorded on this host).[/yellow]"
@@ -14050,7 +14102,7 @@ class ServicePanel(Widget):
         else:
             for line in output.strip().splitlines():
                 self._log(rich_escape(line))
-            self._log(f"[red]Remote collection delete failed (exit {rc}).[/red]")
+            self._log(f"[red]Remote collection delete failed{f' (exit {rc})' if rc else ''}.[/red]")
 
     async def _mark_session_ended(self, session_id: str, target: str = "local") -> None:
         """record the stop in MongoDB without blocking the event loop."""
