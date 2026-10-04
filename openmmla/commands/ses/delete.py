@@ -197,10 +197,13 @@ def hook_notes() -> list[str]:
 def _record_roots(host: str, session_id: str, record: dict | None, project_root) -> list[FilesRoot]:
     """the roots the session's document names on `host` (an SSH profile):
     the folder each of its Collection recorders wrote into there, and the
-    staging folder of the cuts of each stream captured there with Record on."""
+    staging folder of the cuts of each stream captured there, whatever Record
+    its bases noted (Export asks the capture host for every one, since a base
+    notes Record from its own machine's config), under the root Export stages
+    them in (stream_export.session_streams)."""
     from openmmla.commands.ses.export import COLLECTION_RECORDERS_FIELD
-    from openmmla.utils import session_sources
-    from openmmla.utils.artifact_paths import SESSION_CUTS_DIR, STREAMS_DIR, capture_record_root
+    from openmmla.tui.stream_export import session_streams
+    from openmmla.utils.artifact_paths import SESSION_CUTS_DIR, STREAMS_DIR
 
     roots = []
     recorders = (record or {}).get(COLLECTION_RECORDERS_FIELD)
@@ -215,10 +218,9 @@ def _record_roots(host: str, session_id: str, record: dict | None, project_root)
             root = "/".join(parts[:index])
             if root and root != "/":
                 roots.append(FilesRoot(root, WHAT_RECORDERS))
-    for entry in session_sources.captured_streams(record):
-        if entry["ssh_profile"] == host and entry["record"]:
-            record_root = capture_record_root(host, entry["record_root"], project_root)
-            roots.append(FilesRoot(_join(_spelled(record_root), STREAMS_DIR, SESSION_CUTS_DIR), WHAT_CUTS))
+    for stream in session_streams(record, project_root).streams:
+        if stream.ssh_profile == host:
+            roots.append(FilesRoot(_join(_spelled(stream.record_root), STREAMS_DIR, SESSION_CUTS_DIR), WHAT_CUTS))
     return roots
 
 
@@ -1198,7 +1200,7 @@ def plan_session(session_id: str, *, influx=None, influx_configured: bool = True
 
     from openmmla.commands.ses import archive
     from openmmla.commands.ses.export import COLLECTION_HOSTS_FIELD
-    from openmmla.utils import session_sources
+    from openmmla.tui.stream_export import session_streams
 
     plan = SessionPlan(session_id)
     problem = session_id_problem(session_id)
@@ -1302,8 +1304,9 @@ def plan_session(session_id: str, *, influx=None, influx_configured: bool = True
             continue
         plan.kept.append(f"this console's {folder}/{_escape(session_id)}/ ({_human(size)})")
     hosts = [str(name) for name in (record or {}).get(COLLECTION_HOSTS_FIELD) or [] if str(name or "").strip()]
-    hosts += [entry["ssh_profile"] for entry in session_sources.captured_streams(record)
-              if entry["record"] and entry["ssh_profile"] and entry["ssh_profile"] != "local"]
+    # whatever Record a base noted: it noted its own machine's config, not the stream's
+    hosts += [stream.ssh_profile for stream in session_streams(record, project_root).streams
+              if stream.ssh_profile != "local"]
     named = ", ".join(dict.fromkeys(hosts))
     plan.kept.append("the files on the capture hosts" + (f" ({_escape(named)})" if named else "")
                      + " and on other machines (Delete Files, host by host)")

@@ -1339,7 +1339,13 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
     """the capture copy: each noted stream's recording on the machine that
     captured it, cut there to the window without re-encoding and fetched
     (stream_export.export_session, which says what it does line by line). How
-    many cuts are here afterwards."""
+    many cuts are here afterwards.
+
+    Every stream the console captures is asked for, whatever Record its bases
+    noted: a base notes it from the config of the machine it runs on, which
+    need not be the config the stream was started with. One noted off that its
+    host holds nothing of, or whose host does not answer, is said in a dim
+    line and is not missing; one whose recording ffmpeg could not cut is."""
     from openmmla.tui import stream_cuts, stream_export
     from openmmla.utils.artifact_paths import session_capture_streams_dir
 
@@ -1348,18 +1354,20 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
     folder = session_capture_streams_dir(root, session_id)
     log(f"[cyan]From the capture hosts into {_shown_path(root, folder)}[/cyan]")
     found = stream_export.session_streams(record, root)
-    for name, why in found.skipped:
-        reason = ("someone else publishes it (it has no SSH Profile), so no capture host of this console records it"
-                  if why == "external" else "Record was off for it, so its capture host holds no recording of it")
+
+    def only_copy(name: str) -> str:
+        """where the copy of a stream no capture host gave is (markup)."""
         path = sources.by_stream.get(name)
         other = next((url for stream, url in sources.elsewhere if stream == name), None)
         if path:
-            where = f"on the Stream Server ({_escape(path)}, above)"
-        elif other:
-            where = f"on the server it was published to ({_escape(other)})"
-        else:
-            where = "on the Stream Server, if it went through one"
-        log(f"  [dim]- {_escape(name)}: {reason}; its only copy is {where}[/dim]")
+            return f"on the Stream Server ({_escape(path)}, above)"
+        if other:
+            return f"on the server it was published to ({_escape(other)})"
+        return "on the Stream Server, if it went through one"
+
+    for name, _why in found.skipped:
+        log(f"  [dim]- {_escape(name)}: someone else publishes it (it has no SSH Profile), so no capture host of "
+            f"this console records it; its only copy is {only_copy(name)}[/dim]")
     streams = found.streams
     if not streams:
         if not found.skipped:
@@ -1369,23 +1377,60 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
     # a host that could not be asked, no longer holds a stream's recording, or
     # whose cuts did not arrive: what the archive holds of it
     lost: dict[str, tuple[str, str]] = {}
+    # the cuts this export's transfers brought: counted as fetched, never as here already
+    arrived: set[Path] = set()
+
+    async def kept_here(stream) -> tuple[list[Path], list[Path]]:
+        """the cuts of a stream's window here: those an earlier export brought,
+        and those a transfer of this one brought that this run did not make
+        (an earlier export staged them, and its fetch did not finish)."""
+        found = await asyncio.to_thread(
+            _exported_here, folder / stream.host_label / stream.kind, stream.name,
+            f".{stream_cuts.EXTENSIONS.get(stream.kind, 'mkv')}", start.timestamp(), end.timestamp())
+        return [path for path in found if path not in arrived], [path for path in found if path in arrived]
+
+    def said_here(before: list[Path], now: list[Path]) -> str:
+        """which of a stream's cuts are here, as kept_here() splits them."""
+        said = [f"the {len(before)} cut(s) exported before are here"] if before else []
+        if now:
+            said.append(f"the {len(now)} cut(s) an earlier export left staged there were fetched now")
+        return "; ".join(said)
 
     async def none_there(stream, where: str) -> int:
         """a capture host that answered with no recording of the window: the
-        cuts an earlier export brought are here (how many), else what the
-        archive host holds of it is fetched."""
-        kept = await asyncio.to_thread(
-            _exported_here, folder / stream.host_label / stream.kind, stream.name,
-            f".{stream_cuts.EXTENSIONS.get(stream.kind, 'mkv')}", start.timestamp(), end.timestamp())
-        if kept:
-            part.present += len(kept)
-            log(f"  [dim]- {_escape(stream.name)}: {_escape(where)} holds no recording of that time any more; the "
-                f"{len(kept)} cut(s) exported before are here[/dim]")
-            return len(kept)
+        cuts an earlier export brought are here (how many; one fetched now
+        counts as fetched), else what the archive host holds of it is
+        fetched; for a stream noted Record off, where its only copy is."""
+        before, now = await kept_here(stream)
+        if before or now:
+            part.present += len(before)
+            log(f"  [dim]- {_escape(stream.name)}: {_escape(where)} holds no recording of that time any more; "
+                f"{said_here(before, now)}[/dim]")
+            return len(before)
+        if stream.noted_off:
+            log(f"  [dim]- {_escape(stream.name)}: Record was off for it, and {_escape(where)} holds no recording of "
+                f"it from that time; its only copy is {only_copy(stream.name)}[/dim]")
+            return 0
         log(f"  [yellow]{_escape(where)} holds no recording of {_escape(stream.name)} from the session's time "
             f"(deleted since, or never recorded): the cut of it (streams/capture/{_escape(stream.host_label)}/) "
             f"is not made there.[/yellow]")
         lost.setdefault(stream.host_label, (where, f"{where} holds no recording of {stream.name} from that time"))
+        return 0
+
+    async def not_asked(stream, where: str) -> int:
+        """a capture host that did not answer for a stream noted Record off:
+        not missing, since nothing says it was recorded there; the cuts an
+        earlier export brought are here (how many; one fetched now counts as
+        fetched)."""
+        before, now = await kept_here(stream)
+        if before or now:
+            part.present += len(before)
+            log(f"  [dim]- {_escape(stream.name)}: {_escape(where)} could not be asked; "
+                f"{said_here(before, now)}[/dim]")
+            return len(before)
+        log(f"  [dim]- {_escape(stream.name)}: Record was off for it by its base's config, and {_escape(where)} "
+            f"could not be asked whether it recorded it anyway; its only copy known is "
+            f"{only_copy(stream.name)}[/dim]")
         return 0
 
     if dry_run:
@@ -1397,6 +1442,9 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
             files = stream_cuts.parse_listing(listing or "", stream.name)
             where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
             if files is None:
+                if stream.noted_off:
+                    here += await not_asked(stream, where)
+                    continue
                 log(f"  [yellow]{_escape(where)} did not answer (offline?): {_escape(stream.name)} would not be cut "
                     f"there (streams/capture/{_escape(stream.host_label)}/).[/yellow]")
                 lost.setdefault(stream.host_label, (where, f"{where} did not answer"))
@@ -1405,7 +1453,10 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
             if not cuts:
                 here += await none_there(stream, where)
                 continue
+            if stream.noted_off:
+                log(stream_export.recorded_anyway(stream))
             here += len(cuts)
+            # no bytes: a cut has no size before it is made, and the listing gives none of the recordings
             part.fetched += len(cuts)
             log(f"  {_escape(stream.name)}: {len(cuts)} cut(s) to make on {_escape(where)}")
         await _capture_from_archive(lost, folder, part, archive)
@@ -1418,7 +1469,10 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
     finally:
         callbacks.progress_end()
     part.fetched += result.fetched
+    # a cut made here counts with its size, as a file Measurements writes here does
+    part.fetched_bytes += result.fetched_bytes
     part.present += result.present
+    arrived.update(result.arrived)
     if result.here:
         log(f"  [green]{result.here} cut(s) are under {_shown_path(root, result.folder)}"
             + (f" ({result.present} of them were already here)" if result.present else "") + "[/green]")
@@ -1426,17 +1480,21 @@ async def _capture_copy(root, session_id: str, record: dict, sources: ServerSour
     for cut in result.cuts:
         stream = cut.stream
         where = "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
-        if not cut.listed:
+        if not cut.listed and stream.noted_off:
+            kept += await not_asked(stream, where)
+        elif not cut.listed:
             log(f"  [yellow]{_escape(where)} did not answer (offline?): the cut of {_escape(stream.name)} "
                 f"(streams/capture/{_escape(stream.host_label)}/) is not made there.[/yellow]")
             lost.setdefault(stream.host_label, (where, f"{where} did not answer"))
         elif cut.failed:
+            # a recording that is there and could not be cut, whatever Record was noted
             lost.setdefault(stream.host_label, (where, f"ffmpeg could not cut {stream.name} on {where}"))
         elif not (cut.made or cut.present):
             kept += await none_there(stream, where)
     for profile in result.unfetched:
         for cut in result.cuts:
-            if cut.stream.ssh_profile == profile:
+            # a stream noted Record off is missing only for a cut made of it
+            if cut.stream.ssh_profile == profile and (cut.made or not cut.stream.noted_off):
                 lost.setdefault(cut.stream.host_label, (profile, f"the cuts made on {profile} did not arrive"))
     if result.unfetched:
         hosts = ", ".join(dict.fromkeys(result.unfetched))

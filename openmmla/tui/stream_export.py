@@ -52,34 +52,68 @@ class RecordedStream:
     record_root: str   # on the capture host; $HOME/... for a remote one
     host_label: str    # the folder under streams/capture/<day>/
     kind: str          # video | audio
+    # every base that took it noted Record off. A base notes what the config of
+    # the machine it runs on says, which need not be the config the stream was
+    # started with, so its capture host is asked all the same; `noted_by` is
+    # that machine, when the base's entry names it
+    noted_off: bool = False
+    noted_by: str = ""
 
 
 @dataclass
 class SessionStreams:
     """the streams a session's bases noted they took, as the capture side sees them."""
-    streams: list[RecordedStream] = field(default_factory=list)   # to cut: the console runs them, Record on
-    # (name, why) of the others, in the order the bases noted them: "external"
-    # (someone else runs its ffmpeg) or "not recorded" (Record was off for it);
-    # only the Stream Server may have those
+    # to cut: the console runs them (they have an SSH profile), whatever Record their bases noted
+    streams: list[RecordedStream] = field(default_factory=list)
+    # (name, "external") of the others, in the order the bases noted them:
+    # someone else runs their ffmpeg, so only the Stream Server may have them
     skipped: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _record_notes(record: dict | None) -> tuple[dict[str, dict], dict[str, str]]:
+    """for each stream a base of the session noted Record on for, the capture
+    entry of the first such base (Record means something only for a stream the
+    console runs, so an entry without an SSH profile does not count); and the
+    machine the first base that noted each stream ran on (its entry's host)."""
+    noted_on: dict[str, dict] = {}
+    noted_by: dict[str, str] = {}
+    for entry in session_sources.session_sources(record):
+        name = str(entry.get("stream") or "").strip()
+        capture = entry.get("capture")
+        if not name or not isinstance(capture, dict):
+            continue
+        if capture.get("record") and str(capture.get("ssh_profile") or "").strip():
+            noted_on.setdefault(name, capture)
+        noted_by.setdefault(name, str(entry.get("host") or "").strip())
+    return noted_on, noted_by
 
 
 def session_streams(record: dict | None, project_root) -> SessionStreams:
     """the capture-side streams of a session record (session_sources.captured_streams):
     record_root with ~ spelled $HOME, empty meaning artifacts/ of the project for
     'local' and $HOME/artifacts on any other host; the host label of 'local' is
-    this machine's short name, else the SSH profile."""
+    this machine's short name, else the SSH profile. A stream is noted_off when
+    no base that took it noted Record on; when one did, its machine, root and
+    kind come from that base's entry, since its config is the one the stream
+    was started with, not the first base's."""
     found = SessionStreams()
+    noted_on, noted_by = _record_notes(record)
     for entry in session_sources.captured_streams(record):
-        name, profile = entry["name"], entry["ssh_profile"]
+        name = entry["name"]
+        trusted = noted_on.get(name)
+        if trusted is not None:
+            profile = str(trusted.get("ssh_profile") or "").strip()
+            root = str(trusted.get("record_root") or "").strip()
+            kind = str(trusted.get("kind") or "video")
+        else:
+            profile, root, kind = entry["ssh_profile"], entry["record_root"], entry["kind"]
         if not profile:
             found.skipped.append((name, "external"))
-        elif not entry["record"]:
-            found.skipped.append((name, "not recorded"))
-        else:
-            found.streams.append(RecordedStream(
-                name, profile, capture_record_root(profile, entry["record_root"], project_root),
-                capture_host_label(profile), entry["kind"] if entry["kind"] in CAPTURE_KINDS else "video"))
+            continue
+        off = trusted is None
+        found.streams.append(RecordedStream(
+            name, profile, capture_record_root(profile, root, project_root), capture_host_label(profile),
+            kind if kind in CAPTURE_KINDS else "video", noted_off=off, noted_by=noted_by.get(name, "") if off else ""))
     return found
 
 
@@ -336,6 +370,9 @@ class StreamCut:
     present: int = 0    # already here in full, not cut again
     failed: int = 0     # ffmpeg could not cut them
     listed: bool = True  # False: its capture host could not be asked
+    # the size of the cuts made straight into place ('local'); a remote host's
+    # are counted by the transfer that brings them
+    made_bytes: int = 0
 
 
 @dataclass
@@ -347,6 +384,12 @@ class SessionExport:
     fetched: int = 0                                # cuts that arrived here this time
     present: int = 0                                # already here in full
     unfetched: list[str] = field(default_factory=list)  # hosts whose staged cuts did not arrive
+    # the size of what arrived here this time: the cuts made here, and what the
+    # transfers fetched (never a cut that was here already)
+    fetched_bytes: int = 0
+    # the cuts the transfers brought here this time, an earlier export's staged
+    # ones among them (a cut made straight into place here is not listed)
+    arrived: list[Path] = field(default_factory=list)
 
     @property
     def here(self) -> int:
@@ -355,6 +398,52 @@ class SessionExport:
 
 def _where(stream) -> str:
     return "this machine" if stream.ssh_profile == "local" else stream.ssh_profile
+
+
+def _size_of(path: Path) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+class _Sized:
+    """a transfer of fetch_tree's shape that notes what it fetched: the planned
+    files that were not here already (as the `present` it is handed,
+    files_already_here by default, says), once all of them have arrived; a
+    manifest is no cut and is left out. `rels` names them (relative to the
+    folder they land in), `bytes` adds up their size. As the export's other
+    parts count a transfer (ses export's _Counted)."""
+
+    def __init__(self, fetch: Callable[..., Awaitable[bool]]) -> None:
+        self.fetch = fetch
+        self.rels: list[str] = []
+        self.bytes = 0
+
+    async def __call__(self, profile, remote_dir, local_dir, **kwargs) -> bool:
+        present = kwargs.pop("present", None) or files_already_here
+        wanted: list = []
+
+        def here(here_dir, plan):
+            found = present(here_dir, plan)
+            kept = set(found)
+            wanted[:] = [item for item in plan.files
+                         if item.rel not in kept and os.path.basename(item.rel) not in METADATA_FILENAMES]
+            return found
+
+        ok = await self.fetch(profile, remote_dir, local_dir, present=here, **kwargs)
+        if ok:
+            self.rels += [item.rel for item in wanted]
+            self.bytes += sum(item.size for item in wanted)
+        return ok
+
+
+def recorded_anyway(stream: RecordedStream) -> str:
+    """the log line of a stream noted Record off whose capture host holds a
+    recording of the session's time all the same (Rich markup)."""
+    config = f"its base's config on {escape(stream.noted_by)}" if stream.noted_by else "its base's config"
+    return (f"  [dim]- {escape(stream.name)}: {config} said Record was off, but {escape(_where(stream))} "
+            f"recorded it anyway[/dim]")
 
 
 async def cut_stream(
@@ -371,7 +460,9 @@ async def cut_stream(
     host: straight into artifacts/<session>/streams/capture/<host label>/<kind>/
     for 'local', into its staging there otherwise. A cut already here in full
     is not made again; a shorter copy (taken while the session went on) is
-    replaced."""
+    replaced. A stream noted Record off whose host could not be asked, or
+    holds nothing of the window, is not logged here: whoever runs the export
+    says where its copy is."""
     callbacks = callbacks or ExportCallbacks()
     run = run or run_on_host
     log = callbacks.log
@@ -382,12 +473,16 @@ async def cut_stream(
         30.0)
     files = stream_cuts.parse_listing(listing or "", stream.name)
     if files is None:
-        log(f"  [red]✗ {name_markup}: could not list its recordings on {where}.[/red]")
+        if not stream.noted_off:
+            log(f"  [red]✗ {name_markup}: could not list its recordings on {where}.[/red]")
         return StreamCut(stream, listed=False)
     cuts = stream_cuts.cuts_for_window(files, start, end)
     if not cuts:
-        log(f"  [dim]- {name_markup}: nothing recorded on {where} in that time[/dim]")
+        if not stream.noted_off:
+            log(f"  [dim]- {name_markup}: nothing recorded on {where} in that time[/dim]")
         return StreamCut(stream)
+    if stream.noted_off:
+        log(recorded_anyway(stream))
 
     here_dir = session_capture_streams_dir(project_root, session_id, stream.host_label) / stream.kind
     if stream.ssh_profile == "local":
@@ -420,6 +515,9 @@ async def cut_stream(
         words = (output or "").split()
         if "CUT" in words:
             result.made += 1
+            if stream.ssh_profile == "local" and "KEPT" not in words:
+                # written here by this export (a KEPT one was here already)
+                result.made_bytes += await asyncio.to_thread(_size_of, here)
             if covered is False and here.exists() and stream.ssh_profile != "local":
                 # kept until the full cut has arrived: the fetch's merge puts it in place
                 # (a local cut already went over it, whole)
@@ -538,7 +636,12 @@ async def export_session(
     every stream is cut on its capture host, then each remote host's cuts are
     fetched at once. `run` (default run_on_host) runs a script where a stream
     records; `fetch` (default fetch_tree) is the transfer. Hosts that cannot be
-    asked are logged and left out, never raised."""
+    asked are logged and left out, never raised. `fetched_bytes` is the size of
+    the cuts made here and of what the transfers fetched, as their plans give
+    it; a cut that was here already adds nothing. A transfer can bring cuts
+    this run did not make (an earlier export staged them and its fetch did not
+    finish): they count as fetched too, and `arrived` names them with the rest
+    the transfers brought."""
     callbacks = callbacks or ExportCallbacks()
     run = run or run_on_host
     fetch = fetch or fetch_tree
@@ -555,6 +658,7 @@ async def export_session(
         result.present += cut.present
         if stream.ssh_profile == "local":
             result.fetched += cut.made
+            result.fetched_bytes += cut.made_bytes
             if cut.made and stream.host_label not in here_labels:
                 here_labels.append(stream.host_label)
         elif cut.listed:
@@ -566,9 +670,16 @@ async def export_session(
             callbacks.log(note)
     for (ssh_profile, record_root, host_label), count in staged.items():
         _check(callbacks)
+        sized = _Sized(fetch)
         if await fetch_session_cuts(project_root, session_id, ssh_profile, record_root, host_label, callbacks,
-                                    run=run, fetch=fetch, expected=count > 0):
-            result.fetched += count
+                                    run=run, fetch=sized, expected=count > 0):
+            # the files fetched are the cuts that arrived, an earlier export's
+            # among them, so the count goes with the bytes; the cuts made stand
+            # when the transfer names none (a plan too long to list them)
+            result.fetched += max(count, len(sized.rels))
+            result.fetched_bytes += sized.bytes
+            local_dir = session_capture_streams_dir(project_root, session_id, host_label)
+            result.arrived += [local_dir / rel for rel in sized.rels]
         else:
             result.unfetched.append(ssh_profile)
     return result
