@@ -134,10 +134,14 @@ def _prelude(folder: CaptureFolder) -> str:
     )
 
 
-def inventory_script(folder: CaptureFolder) -> str:
+def inventory_script(folder: CaptureFolder, console_day: str | None = None) -> str:
     """print `NOW <host time>`, `FILE <bytes> <mtime> <1 if an ffmpeg names it> <path>`
-    for every recording in the folder, `FREE <kB>` of the disk it is on, LISTED when done."""
-    return _prelude(folder) + (
+    for every recording in the folder, `FREE <kB>` of the disk it is on, LISTED when done.
+    The folders of past days left empty go first (_tidy), as after a delete: with
+    nothing ever pruned (a keep time of 0), one would otherwise stay until the
+    next delete of another day."""
+    console_day = console_day or capture_day()
+    return _prelude(folder) + _tidy(console_day) + (
         'echo "NOW $now"; '
         f'for f in "$cap"/{CAPTURE_DAY_GLOB}/"$label"/video/* "$cap"/{CAPTURE_DAY_GLOB}/"$label"/audio/*; do '
         '[ -f "$f" ] || continue; s=$(st "$f"); [ -n "$s" ] || continue; w=0; '
@@ -150,10 +154,11 @@ def inventory_script(folder: CaptureFolder) -> str:
     )
 
 
-# folders left empty go, day by day, bottom up: never today's, which a stream
-# starting now may just have made (by the host's date and by the console's,
-# which names the folder), and never one a running ffmpeg writes into.
-# streams/capture/ itself stays: a Start's mkdir -p may be making a day in it
+# folders left empty go, day by day, bottom up, at every listing and after every
+# delete: never today's, which a stream starting now may just have made (by the
+# host's date and by the console's, which names the folder), and never one a
+# running ffmpeg writes into. streams/capture/ itself stays: a Start's mkdir -p
+# may be making a day in it
 def _tidy(console_day: str) -> str:
     return (
         f"procs=$(running); today=$(date +%Y-%m-%d); here={shlex.quote(console_day)}; "
