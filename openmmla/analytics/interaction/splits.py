@@ -28,6 +28,17 @@ model: one session at a time is held out, DEV and TEST alike, and the inner fold
 training session out. Neither the date, nor same_class_as, nor TEST plays a part in it, so a
 group's other lesson of the same morning trains the model a session is scored with; its numbers
 are cross-validated estimates with no untouched hold-out, never the frozen TEST scoring.
+
+The unit split (unit_folds_all, unit_inner_folds, 2026-10-04) covers the same sessions as the
+session split, DEV and TEST alike, but holds out a unit at a time: a date with every date its
+sessions' same_class_as links reach (class_units), so the same pupils are never on both sides.
+TEST plays no part in it (no SplitError): a TEST session is an ordinary session of its date. The
+inner folds leave one training unit out.
+
+The forward split (forward_folds, 2026-10-04) chains forward over the same sessions: each date with
+at least MIN_EARLIER_DATES earlier dates with coded windows is held out in turn and the fold trains
+on the earlier dates only, never a later one; a training date whose unit reaches the held-out date
+stays out of that fold. Its inner folds leave one training unit (date) out, as in the unit split.
 """
 from __future__ import annotations
 
@@ -45,6 +56,8 @@ TEST_SESSIONS = (
 LESSON_RE = re.compile(r'^(exp_\d{8}_(?:microbit|wegrow)_group_\d+)_')
 TASK_RE = re.compile(r'^exp_\d{8}_(microbit|wegrow)_')
 DATE_RE = re.compile(r'^exp_(\d{8})_')
+# the forward split holds out a date only when this many earlier dates have coded windows
+MIN_EARLIER_DATES = 4
 
 Fold = namedtuple('Fold', 'name train test')
 
@@ -204,6 +217,60 @@ def session_inner_folds(sessions, sizes=None) -> list:
     if len(held) < 2:
         raise ValueError(f"inner folds need at least 2 sessions with coded windows, got {len(held)}")
     return [Fold(f'inner-{n}', [s for s in sessions if s != session], [session]) for n, session in enumerate(held)]
+
+
+def unit_folds_all(sessions, coded=None, same_class=None) -> list:
+    """leave one unit out over every given session, DEV and TEST alike, the outer folds of the unit
+    split: one fold per unit (class_units: a date, with the dates its same_class_as links reach)
+    with coded windows (`coded` as in date_folds), named by the unit, in name order, holding out all
+    its sessions and training on every other given session. TEST is an ordinary session here: no
+    SplitError, and a link to a TEST session merges its unit like any other. The caller passes only
+    the sessions the evaluation covers."""
+    sessions = list(dict.fromkeys(sessions))
+    held = _coded(sessions, coded)
+    unit = class_units(sessions, same_class)
+    return [Fold(value, [s for s in sessions if unit[s] != value], [s for s in sessions if unit[s] == value])
+            for value in sorted({unit[s] for s in sessions if s in held})]
+
+
+def unit_inner_folds(sessions, sizes=None, same_class=None) -> list:
+    """leave one unit out within an outer-training set, the inner folds of the unit and forward
+    splits: one fold per unit of these sessions (class_units) with coded windows (`sizes`: session
+    -> coded windows; every session counts when None), in the order the units first appear; a unit
+    with nothing coded always trains. TEST sessions are ordinary. Fewer than two units to hold out
+    raise."""
+    sessions = list(dict.fromkeys(sessions))
+    unit = class_units(sessions, same_class)
+    coded = {s for s in sessions if sizes is None or (sizes.get(s) or 0) > 0}
+    held = [value for value in dict.fromkeys(unit[s] for s in sessions)
+            if any(unit[s] == value for s in coded)]
+    if len(held) < 2:
+        raise ValueError(f"inner folds need at least 2 units with coded windows, got {len(held)}")
+    return [Fold(f'inner-{n}', [s for s in sessions if unit[s] != value], [s for s in sessions if unit[s] == value])
+            for n, value in enumerate(held)]
+
+
+def forward_folds(sessions, coded=None, same_class=None, min_earlier: int = MIN_EARLIER_DATES) -> list:
+    """forward chaining over every given session, DEV and TEST alike, the outer folds of the forward
+    split: each date with coded windows (`coded` as in date_folds) and at least `min_earlier`
+    earlier dates with coded windows is held out in turn, all its sessions together, and its fold
+    trains on every session of an earlier date, never a later one. A training date whose unit
+    (class_units over the given sessions) reaches the held-out date stays out of that fold, so no
+    unit is on both sides. A fold is named by its held-out lessons joined with '+', in date order;
+    a session without a date in its id takes no part."""
+    sessions = [s for s in dict.fromkeys(sessions) if date_of(s)]
+    held = _coded(sessions, coded)
+    unit = class_units(sessions, same_class)
+    dates = sorted({date_of(s) for s in sessions if s in held})
+    folds = []
+    for date in dates:
+        if sum(1 for earlier in dates if earlier < date) < min_earlier:
+            continue
+        test = [s for s in sessions if date_of(s) == date]
+        units = {unit[s] for s in test}
+        train = [s for s in sessions if date_of(s) < date and unit[s] not in units]
+        folds.append(Fold('+'.join(sorted({lesson_key(s) for s in test})), train, test))
+    return folds
 
 
 def task_transfer(sessions, source: str = 'microbit', target: str = 'wegrow', same_class=None) -> list:

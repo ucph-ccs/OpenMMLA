@@ -21,7 +21,10 @@ The training part follows the recipe fixed before any result: tempered class wei
 cross-entropy with label smoothing on coded windows only (uncoded and unclear windows are context),
 48-window crops around coded windows, run-wise modality dropout, person dropout and noise, AdamW.
 Only the epoch count is tuned (the median of the inner splits' best epochs), and the refit is a
-5-seed ensemble whose mean softmax is the prediction; no seed is ever picked.
+5-seed ensemble whose mean softmax is the prediction; no seed is ever picked. The inner splits'
+held-out logits can also be kept every KEEP_EVERY epochs (select_epochs' `keep`), and oof_at reads
+every split at the common E* (rounded to a kept epoch) instead of at its own best epoch, replaying
+with the same seed a split that patience stopped earlier (--net-oof common).
 
 Training runs on the CPU, on one thread, unless a `device` says 'cuda' (or 'auto' finds a GPU).
 Crops, dropout draws and noise are still made on the CPU from the same numpy generator, and a
@@ -138,6 +141,8 @@ NOISE = 0.1  # sigma of the Gaussian noise on observed scaled values
 SMOOTHING = 0.05
 MAX_EPOCHS, PATIENCE = 300, 25
 SEEDS = (0, 1, 2, 3, 4)
+# the common-E* out-of-fold answers (oof_at): the inner splits' held-out logits are kept every this many epochs
+KEEP_EVERY = 5
 # the small configuration, for an outer-training fold with fewer coded non-unclear windows than SMALL_BELOW
 SMALL = {'d_set': 16, 'd_speech': 12, 'd_window': 32}
 SMALL_BELOW = 3000
@@ -468,17 +473,21 @@ def masked_loss(logits, y, weights=None, smoothing=SMOOTHING):
     return F.cross_entropy(flat, target, weight=weights, ignore_index=-1, label_smoothing=smoothing)
 
 
-def _held_out_nll(model, sessions, weights):
+def _held_out_nll(model, sessions, weights, keep=False):
     """the class-weighted NLL (no smoothing) of full-session predictions, pooled over the sessions'
-    coded windows; NaN when none is coded."""
+    coded windows; NaN when none is coded. With `keep`, (that NLL, each session's (T, 3) logits as
+    float64 numpy, in the sessions' order), from the same forward pass."""
     model.eval()
     device = _model_device(model)
     with torch.no_grad():
-        logits = torch.cat([_forward(model, _to(_single(s), device))[0] for s in sessions])
+        parts = [_forward(model, _to(_single(s), device))[0] for s in sessions]
+        logits = torch.cat(parts)
         y = torch.cat([s['y'] for s in sessions]).to(device)
+    kept = [part.cpu().numpy().astype(np.float64) for part in parts] if keep else None
     if not bool(((y >= 0) & (y < N_CLASSES)).any()):
-        return float('nan')
-    return float(masked_loss(logits, y, weights, smoothing=0.0))
+        return (float('nan'), kept) if keep else float('nan')
+    nll = float(masked_loss(logits, y, weights, smoothing=0.0))
+    return (nll, kept) if keep else nll
 
 
 # ---- training ----
@@ -514,14 +523,18 @@ class AdamW:
 
 
 def train_epochs(model, train_sessions, epochs, seed, val_sessions=None, weights=None, patience=None,
-                 augment=True, device=None):
+                 augment=True, device=None, keep_every=None):
     """train for `epochs` epochs of crops, in batches of 16, with AdamW and a clipped gradient;
     seeded, and on one thread, so a reported run repeats. The model is moved to `device` (see
     resolve_device; default the CPU) and stays there. With `val_sessions` the held-out
     class-weighted NLL is tracked after every epoch, training stops `patience` epochs after its
     best (when a patience is given), and the model is left at its best epoch. `weights` default to
     the training sessions' tempered class weights. The history holds the mean training loss and
-    the held-out NLL per epoch, and the best epoch (counted from 1) with its NLL."""
+    the held-out NLL per epoch, and the best epoch (counted from 1) with its NLL. With
+    `keep_every` it also holds, under 'kept', the held-out sessions' logits at every epoch that is
+    a multiple of it (epoch -> list of (T, 3) arrays in val_sessions' order), read from the forward
+    pass the NLL is computed from: the held-out pass draws no random number, so keeping them
+    changes no weight and no choice."""
     device = resolve_device(device)
     torch.set_num_threads(1)
     torch.manual_seed(seed)
@@ -537,6 +550,8 @@ def train_epochs(model, train_sessions, epochs, seed, val_sessions=None, weights
     weights = weights.to(device)
     optimizer = AdamW(model.parameters())
     history = {'loss': [], 'val_nll': [], 'best_epoch': None, 'best_val_nll': None}
+    if keep_every:
+        history['kept'] = {}
     best_state, since_best = None, 0
     for epoch in range(1, epochs + 1):
         model.train()
@@ -556,7 +571,10 @@ def train_epochs(model, train_sessions, epochs, seed, val_sessions=None, weights
         history['loss'].append(float(np.mean(losses)))
         if not val_sessions:
             continue
-        nll = _held_out_nll(model, val_sessions, weights)
+        if keep_every and epoch % keep_every == 0:
+            nll, history['kept'][epoch] = _held_out_nll(model, val_sessions, weights, keep=True)
+        else:
+            nll = _held_out_nll(model, val_sessions, weights)
         history['val_nll'].append(nll)
         if math.isnan(nll):
             continue
@@ -583,7 +601,7 @@ def _positions(sessions, part):
 
 
 def select_epochs(outer_train, inner_folds, make=None, max_epochs=MAX_EPOCHS, patience=PATIENCE, seed=0,
-                  weights=None, device=None):
+                  weights=None, device=None, keep=None):
     """the one tuned hyperparameter, the epoch count. Seed 0 trains on each inner split for up to
     `max_epochs` epochs, tracking the held-out lessons' class-weighted NLL (patience 25), and E* is
     the median of the splits' best epochs. The inner models, each back at its best epoch, give the
@@ -591,21 +609,28 @@ def select_epochs(outer_train, inner_folds, make=None, max_epochs=MAX_EPOCHS, pa
     held) pairs of positions in `outer_train` or of session names; `make` builds a fresh model
     (default InteractionNet); the class weights come from the whole outer-training fold. The
     logits come back in `outer_train`'s order, (T, 3) arrays, None for a session no split held out;
-    the inner models train on `device`."""
+    the inner models train on `device`. `keep`, a dict, receives per split (its number) the held-out
+    positions, the held-out logits every KEEP_EVERY epochs and the last epoch trained, for oof_at;
+    the training and every number returned are the same with it or without it."""
     make = make or InteractionNet
     if weights is None:
         weights = class_weights([s['y'] for s in outer_train])
     best, oof = [], [None] * len(outer_train)
-    for train_part, held_part in inner_folds:
+    for split, (train_part, held_part) in enumerate(inner_folds):
         train_at, held_at = _positions(outer_train, train_part), _positions(outer_train, held_part)
         if not any(bool((outer_train[i]['y'] >= 0).any()) for i in held_at):
             # a split with nothing to score would stop at its last epoch and drag the median up
             raise ValueError("an inner split holds out no coded window; only lessons with coded windows form folds")
         torch.manual_seed(seed)
         model = make()
+        # without `keep` the call is the one it always was
+        kept = {'keep_every': KEEP_EVERY} if keep is not None else {}
         history = train_epochs(model, [outer_train[i] for i in train_at], max_epochs, seed,
                                val_sessions=[outer_train[i] for i in held_at], weights=weights, patience=patience,
-                               device=device)
+                               device=device, **kept)
+        if keep is not None:
+            keep[split] = {'train': train_at, 'held': held_at, 'kept': history['kept'],
+                           'trained': len(history['loss'])}
         best.append(history['best_epoch'])
         at = _model_device(model)
         with torch.no_grad():
@@ -615,6 +640,42 @@ def select_epochs(outer_train, inner_folds, make=None, max_epochs=MAX_EPOCHS, pa
         raise ValueError("no inner split to select the epoch count on")
     # the median of an even count rounds half up
     return int(np.floor(np.median(best) + 0.5)), oof
+
+
+def common_epoch(epochs, every=KEEP_EVERY) -> int:
+    """the kept epoch the common out-of-fold answers are read at: `epochs` rounded to the nearest
+    multiple of `every` (half up), at least `every`."""
+    return max(int(every), int(np.floor(epochs / every + 0.5)) * int(every))
+
+
+def oof_at(outer_train, kept, epochs, make=None, seed=0, weights=None, device=None, every=KEEP_EVERY):
+    """the inner out-of-fold logits of every split at one common epoch (the equal treatment of the
+    networks, 2026-10-04), rather than at each split's own best epoch as select_epochs gives them:
+    common_epoch(epochs), read from the held-out logits select_epochs kept (`kept`, its `keep`)
+    where a split trained that long, and for a split that patience stopped before it from a replay
+    of that split with the same seed and weights to that epoch, which repeats its first epochs
+    exactly (the held-out pass draws no random number). Returns (the logits in outer_train's order
+    as select_epochs gives them, the epoch read, the numbers of the splits replayed)."""
+    make = make or InteractionNet
+    if weights is None:
+        weights = class_weights([s['y'] for s in outer_train])
+    at = common_epoch(epochs, every)
+    oof, replayed = [None] * len(outer_train), []
+    for split, record in sorted(kept.items()):
+        if at in record['kept']:
+            logits = record['kept'][at]
+        else:
+            torch.manual_seed(seed)
+            model = make()
+            train_epochs(model, [outer_train[i] for i in record['train']], at, seed, weights=weights, device=device)
+            on = _model_device(model)
+            with torch.no_grad():
+                logits = [_forward(model, _to(_single(outer_train[i]), on))[0].cpu().numpy().astype(np.float64)
+                          for i in record['held']]
+            replayed.append(split)
+        for i, values in zip(record['held'], logits):
+            oof[i] = values
+    return oof, at, replayed
 
 
 def fit_ensemble(outer_train, epochs, seeds=SEEDS, make=None, weights=None, device=None):

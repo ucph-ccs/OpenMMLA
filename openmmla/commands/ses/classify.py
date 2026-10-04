@@ -21,6 +21,27 @@ windows) and every variant gets the mean and SD over the sessions beside the poo
 metrics.json across_sessions); config.json says all_sessions true. There is no headline and no
 contrast, and nothing is recorded in test_runs.jsonl: it is not the frozen TEST scoring.
 
+--split unit and --split forward (decided 2026-10-04) read the sessions --split session reads (DEV and
+TEST alike, the --coder's own labels file, the same sessions left out) but hold out a unit at a time: a
+recording date with every date its sessions' same_class_as links reach (mmla ses-tidy --same-class-as).
+unit leaves one unit out; forward holds out each date with at least 4 earlier dates with coded windows
+and trains on the earlier dates only. The inner folds leave one training unit out. The units are printed
+and kept in config.json; per_unit.csv scores each held-out unit and results.csv gives the mean and SD over
+the units beside the pooled value. Every session, unit and forward run writes a line when it starts and
+one when it finishes to artifacts/_analysis/interaction/session_runs.jsonl; --ledger-add adds run folders
+made before that, as looked at, with --ledger-note kept on each line.
+
+-m rule22sep and -m select-all are pseudo-variants that choose inside each outer fold, from the
+calibrated inner out-of-fold answers, among the variants the run fits, and copy the chosen one's
+held-out answers: rule22sep by the rule declared on 22 Sep (late-lr or late-hgb, every temporal mode,
+HMM none or fb, by binary macro-F1 under --target binary and macro-F1 under 3class), select-all by the
+class-weighted binary log-loss over every variant of the named models. Each fold's choice is in
+metrics.json. --net-oof common gives the networks' inner out-of-fold answers at the common E* of the
+refit rather than at each inner split's own best epoch. --features-root reads the fused tables from
+another folder (e.g. an ablation arm's re-fused tables), never artifacts/<session>/analysis/features/;
+a session the run would read from artifacts/ but whose table that folder lacks refuses the run (one
+without the --coder's labels in a session, unit or forward run excepted, which those leave out anyway).
+
 --agreement A,B trains nothing: Cohen's kappa and the percent agreement of two coders on the windows
 both labelled, per session and pooled, over the same sessions after the same label join, written to
 agreement.csv and agreement.json (default folder artifacts/_analysis/interaction/agreement-<time>).
@@ -65,7 +86,7 @@ def get_parser():
     parser.add_argument('--coder', default=None,
                         help="whose labels are the truth, by the labels file's exact name (Arthur reads "
                              "labels/Arthur.jsonl; default: the coder with the most windows over the DEV sessions; "
-                             "required with --split test and --split session)")
+                             "required with --split test, session, unit and forward)")
     parser.add_argument('--test-coder', default=None,
                         help="with --split test: whose labels score the TEST sessions, when not --coder's (e.g. "
                              "train on a model's DEV labels, score on a human coder's TEST labels; "
@@ -74,12 +95,17 @@ def get_parser():
                         help="comma list of r0 (a-priori rule), r0-v1 (its first version, kept for the record), jev "
                              "(zero-shot, from mmla ses-jev's answers), "
                              "majority, stratified, r1 (fitted tree), jev-cal, lr, hgb, late-lr, late-hgb, pooled-net, "
-                             f"net-notcn, net, net-pair (default {DEFAULT_MODELS})")
-    parser.add_argument('--split', choices=('date', 'task', 'test', 'session'), default='date',
+                             f"net-notcn, net, net-pair (default {DEFAULT_MODELS}); and the selectors rule22sep (the "
+                             "22 Sep rule over late-lr and late-hgb) and select-all (the lowest inner log-loss over the "
+                             "named models), chosen in each fold on the inner out-of-fold answers")
+    parser.add_argument('--split', choices=('date', 'task', 'test', 'session', 'unit', 'forward'), default='date',
                         help="date: leave one DEV date out, all its sessions together (default); test: train on "
                              "DEV, score TEST once (needs --confirm-frozen and --coder); session: leave one session "
                              "out over every session the --coder labelled, DEV and TEST alike, with the mean and SD "
-                             "over the sessions and the pooled value (needs --coder); task is not built yet")
+                             "over the sessions and the pooled value (needs --coder); unit: the same sessions, one "
+                             "unit (a date with its same_class_as dates) out at a time (needs --coder); forward: the "
+                             "same sessions, each date with 4 earlier dates held out and trained on the earlier "
+                             "dates only (needs --coder); task is not built yet")
     parser.add_argument('--agreement', default=None, metavar='CODER_A,CODER_B',
                         help="train nothing: Cohen's kappa and percent agreement of two coders (labels file names) on "
                              "the windows both labelled, per session and pooled, over every session S1 keeps (DEV "
@@ -111,6 +137,21 @@ def get_parser():
     parser.add_argument('--epochs', type=int, default=None,
                         help="the network's epoch count for the refit, e.g. the median of the date folds' for the "
                              "test model (default: chosen on the inner folds)")
+    parser.add_argument('--net-oof', choices=('best', 'common'), default='best',
+                        help="the networks' inner out-of-fold answers, which fit their calibrator and HMM gamma and "
+                             "enter select-all: best (default) at each inner split's own best epoch; common at the "
+                             "refit's epoch count for every split (kept every 5 epochs; a split stopped early is "
+                             "replayed to it)")
+    parser.add_argument('--features-root', default=None, metavar='FOLDER',
+                        help="read each session's fused table from FOLDER (<session>_window_features.csv, or under "
+                             "<session>/ or <session>/analysis/features/) instead of artifacts/<session>/analysis/"
+                             "features/; labels, manifests and Jev maps still come from artifacts/<session>/. A "
+                             "session whose table FOLDER lacks refuses the run (see the module help)")
+    parser.add_argument('--ledger-add', nargs='+', default=None, metavar='RUN_DIR',
+                        help="train nothing: add these run folders, made before the run ledger, to "
+                             "artifacts/_analysis/interaction/session_runs.jsonl as looked at (a folder already there "
+                             "is not added again)")
+    parser.add_argument('--ledger-note', default=None, help="with --ledger-add: a note kept on each line")
     parser.add_argument('--jev-variant', choices=('j0', 'j1'), default='j0',
                         help="which cached Jev answers jev and jev-cal read (default j0)")
     parser.add_argument('--with-actions', action='store_true',
@@ -130,14 +171,14 @@ def get_parser():
     return parser
 
 
-def _choices(parser, text: str, allowed: tuple, name: str) -> tuple:
-    """a comma list checked against `allowed`, with 'all' for every one of them."""
+def _choices(parser, text: str, allowed: tuple, name: str, extra: tuple = ()) -> tuple:
+    """a comma list checked against `allowed` and `extra`, with 'all' for every one of `allowed`."""
     items = [item.strip() for item in text.split(',') if item.strip()]
     if items == ['all']:
         return allowed
-    unknown = [item for item in items if item not in allowed]
+    unknown = [item for item in items if item not in tuple(allowed) + tuple(extra)]
     if unknown or not items:
-        parser.error(f"{name} takes a comma list of {', '.join(allowed)} or all, not {text!r}")
+        parser.error(f"{name} takes a comma list of {', '.join(tuple(allowed) + tuple(extra))} or all, not {text!r}")
     return tuple(dict.fromkeys(items))
 
 
@@ -166,19 +207,24 @@ def _summary(run_dir) -> str:
     return table[columns].round(3).to_string(index=False, na_rep='n/a')
 
 
-def _session_summary(run_dir) -> str:
+def _session_summary(run_dir, unit: str = 'session', split: str = 'session') -> str:
     """the session split's results table: per variant the sessions, the mean and SD over them and
-    the pooled value of macro-F1 and accuracy, and the means of kappa, AUROC, Brier and NLL."""
+    the pooled value of macro-F1 and accuracy, and the means of kappa, AUROC, Brier and NLL; with
+    `unit` 'unit' the same over the held-out units of the unit or forward `split`."""
     import pandas as pd
     table = pd.read_csv(run_dir / 'results.csv')
     table = table[table['group'] != 'ceiling']
     arms = 'ablation' in table.columns and table['ablation'].dropna().ne('full').any()
     names = ('group', 'variant') + (('ablation',) if arms else ()) + (
-        'sessions', 'sessions_flagged', 'macro_f1_mean', 'macro_f1_sd', 'macro_f1', 'accuracy_mean', 'accuracy_sd',
+        f'{unit}s', f'{unit}s_flagged', 'macro_f1_mean', 'macro_f1_sd', 'macro_f1', 'accuracy_mean', 'accuracy_sd',
         'accuracy', 'kappa_mean', 'auroc_mean', 'auroc', 'brier_mean', 'nll_mean')
     columns = [c for c in names if c in table.columns]
-    return ("leave one session out over DEV and TEST alike: the mean and SD over the held-out sessions, and the "
-            "pooled value over their windows (macro_f1, accuracy, auroc):\n"
+    head = {'session': "leave one session out over DEV and TEST alike: the mean and SD over the held-out sessions",
+            'unit': "leave one unit (a date with its same_class_as dates) out over DEV and TEST alike: the mean and "
+                    "SD over the held-out units",
+            'forward': "forward chaining over DEV and TEST alike, each date trained on the earlier ones: the mean and "
+                       "SD over the held-out units"}[split]
+    return (f"{head}, and the pooled value over their windows (macro_f1, accuracy, auroc):\n"
             + table[columns].round(3).to_string(index=False, na_rep='n/a'))
 
 
@@ -215,6 +261,20 @@ def _agreement(args) -> int:
         print(f"{coder} coded {sum(sessions.values())} window(s) in {len(sessions)} session(s) the rule S1 keeps")
     print(f"-> {run_dir}")
     return 0
+
+
+def _ledger_add(args) -> int:
+    """--ledger-add: run folders made before the run ledger added to it as looked at, nothing trained."""
+    from openmmla.analytics.interaction import evaluate as E
+    artifacts = args.artifacts or os.path.join(os.getcwd(), 'artifacts')
+    if not os.path.isdir(artifacts):
+        print(f"no artifacts folder at {artifacts}: give it with -a")
+        return 1
+    done = E.log_run_folders(artifacts, args.ledger_add, note=args.ledger_note)
+    for folder, what in done:
+        print(f"{folder}: {what}")
+    print(f"-> {E.ledger_path(artifacts)}")
+    return 0 if all(not what.startswith('skipped') for _, what in done) else 1
 
 
 def _ablation_summary(run_dir) -> str | None:
@@ -275,10 +335,14 @@ def main(argv=None):
     if missing:
         print(f"missing {', '.join(missing)}: pip install \"openmmla[analysis]\"")
         return 1
+    if args.ledger_note and not args.ledger_add:
+        parser.error("--ledger-note goes with --ledger-add")
+    if args.ledger_add:
+        return _ledger_add(args)
     if args.agreement:
         return _agreement(args)
     from openmmla.analytics.interaction import evaluate as E
-    models = _choices(parser, args.models, E.MODELS, '-m/--models')
+    models = _choices(parser, args.models, E.MODELS, '-m/--models', E.SELECTORS)
     temporal = _choices(parser, args.temporal, E.TEMPORAL, '--temporal')
     hmm = _choices(parser, args.hmm, E.HMM_MODES, '--hmm')
     if args.ablate not in ('none', 'modality'):
@@ -295,13 +359,18 @@ def main(argv=None):
     if args.split == 'test' and not args.coder:
         parser.error("--split test names its truth: add --coder, the coder of the date runs "
                      "(their config.json 'coder')")
-    if args.split == 'session' and not args.coder:
-        parser.error("--split session reads one coder's labels at a time: add --coder (the labels file's name, "
-                     "e.g. Arthur or zaibei)")
+    if args.split in ('session', 'unit', 'forward') and not args.coder:
+        parser.error(f"--split {args.split} reads one coder's labels at a time: add --coder (the labels file's name, "
+                     f"e.g. Arthur or zaibei)")
     if args.test_coder and args.split != 'test':
         parser.error("--test-coder names the truth of the TEST sessions: it goes with --split test")
     if args.seeds < 1 or args.jobs < 1 or (args.epochs is not None and args.epochs < 1):
         parser.error("--seeds, --jobs and --epochs must be at least 1")
+    gap = E._selector_gap(E.Config(models=models, hmm=hmm))
+    if gap:
+        parser.error(gap)
+    if args.features_root and not os.path.isdir(args.features_root):
+        parser.error(f"--features-root {args.features_root} is no folder")
     planned = E.planned_variants(models, temporal, hmm, args.jev_variant)
     barren = [model for model, keys in planned.items() if not keys]
     if barren:
@@ -326,13 +395,14 @@ def main(argv=None):
                       target=args.target, join=args.join, seeds=args.seeds, small=args.small, epochs=args.epochs,
                       jobs=args.jobs, out=args.out, quick=args.quick, confirm_frozen=args.confirm_frozen,
                       jev_variant=args.jev_variant, device=args.device, ablate=args.ablate,
-                      scaling=args.scaling)
+                      scaling=args.scaling, net_oof=args.net_oof, features_root=args.features_root)
     started = time.time()
     try:
         run_dir = E.run(config, log=print)
     except E.Refused as refusal:
         print(str(refusal))
-        unit = 'session(s)' if args.split == 'session' else 'date(s)'
+        unit = 'session(s)' if args.split == 'session' else 'unit(s)' if args.split in ('unit', 'forward') \
+            else 'date(s)'
         for problem in refusal.problems:
             print(f"  fold {problem['fold']}: {problem['counts']} coded windows in training, "
                   f"{problem['coded_units']} coded {unit}")
@@ -358,6 +428,15 @@ def main(argv=None):
                   f"{', '.join(flagged)}; they enter the means, *_unflagged in metrics.json leave them out")
         for session, why in ((metrics.get('across_sessions') or {}).get('excluded') or {}).items():
             print(f"left out, {session}: {why}")
+    elif args.split in ('unit', 'forward'):
+        print(_session_summary(run_dir, 'unit', args.split))
+        flagged = sorted({unit for report in (metrics.get('variants') or {}).values()
+                          for unit in (report.get('across_units') or {}).get('flagged', [])})
+        if flagged:
+            print(f"flagged held-out units (fewer than {E.MIN_SESSION_WINDOWS} scored windows, or one class): "
+                  f"{', '.join(flagged)}; they enter the means, *_unflagged in metrics.json leave them out")
+        for session, why in ((metrics.get('across_sessions') or {}).get('excluded') or {}).items():
+            print(f"left out, {session}: {why}")
     else:
         print(_summary(run_dir))
     ablation = _ablation_summary(run_dir)
@@ -365,6 +444,9 @@ def main(argv=None):
         print(ablation)
     if metrics.get('headline'):
         print(f"headline ({metrics['headline']['selected_on']}): {metrics['headline']['variant']}")
+    for selector, record in (metrics.get('selectors') or {}).items():
+        chosen = ', '.join(f"{fold} {winner or 'none'}" for fold, winner in record['winners'].items())
+        print(f"{selector} chose, per fold: {chosen}")
     for name, contrast in (metrics.get('contrasts') or {}).items():
         if 'left_out' in contrast:
             print(f"{name} {contrast['a']} - {contrast['b']}: left out, {contrast['left_out']}")
@@ -378,9 +460,9 @@ def main(argv=None):
     for line in _caveats(metrics):
         print(line)
     policy = metrics['absent_class_policy']
-    if args.split == 'session':
+    if args.split in ('session', 'unit', 'forward'):
         print(f"social windows over every session: {policy['social_windows']}, social in "
-              f"{policy['lessons_with_social']} lesson(s); no headline or contrast in the session split")
+              f"{policy['lessons_with_social']} lesson(s); no headline or contrast in the {args.split} split")
     elif policy['confirmatory_target'] == 'binary':
         print(f"absent-class policy: {policy['social_windows']} social windows, social in "
               f"{policy['lessons_with_social']} lesson(s): the confirmatory target is binary")

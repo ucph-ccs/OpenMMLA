@@ -73,6 +73,32 @@ value (session_summary). There is no headline and no contrast, since nothing her
 advance. coder_agreement scores two coders against each other on the same sessions after the
 same join, training nothing.
 
+The unit and forward splits (`split='unit'`, `'forward'`, 2026-10-04) read the sessions the
+session split reads, the same way (DEV and TEST alike, the coder's own labels file, the same
+sessions left out), but group them as the date split does: the unit is a date with the dates its
+sessions' same_class_as links reach (splits.class_units), held out whole, resampled whole and named
+in the lesson column. The unit split leaves one unit out (splits.unit_folds_all), the forward split
+holds out each date with at least splits.MIN_EARLIER_DATES earlier dates and trains on the earlier
+dates only (splits.forward_folds); in both the inner folds leave one training unit out
+(splits.unit_inner_folds). Each held-out session and each held-out unit is scored on its own
+(per_session.csv, per_unit.csv), results.csv gives the mean and SD over the units, and there is no
+headline and no contrast in the run (contrasts.py compares variants on predictions.csv).
+
+Two pseudo-variants choose a model inside each outer fold from the calibrated inner out-of-fold
+answers of the variants the run fits, and copy the chosen variant's held-out answers (SELECTORS):
+`rule22sep` applies select_headline, the rule declared on 22 Sep, to them, and `select-all` takes
+the lowest class-weighted binary log-loss over every variant of the named models. Each fold's
+choice is in metrics.json. `net_oof='common'` gives the networks' inner out-of-fold answers at the
+common E* of the refit instead of at each inner split's own best epoch (network.oof_at), so they
+enter the calibrator, gamma and select-all as the tabular models' do.
+
+`features_root` reads the fused tables from another folder (an ablation arm's, re-fused) while the
+labels, manifests and Jev maps still come from artifacts/<session>/. Every run of the session, unit
+and forward splits writes a line when it starts and one when it finishes to
+artifacts/_analysis/interaction/session_runs.jsonl (the commit, the settings, every table and
+labels file read and every file written, by sha256); log_run_folders adds run folders made before
+the ledger to it, as looked at.
+
 Deferred by decision, with their places kept: the other ablation grids of 4.6 (temporal, fusion,
 ladder, weights), the causal network row, the lexicon feature, masked-modality pretraining, and
 the task-transfer run (splits.task_transfer exists; the driver does not run it yet).
@@ -123,8 +149,36 @@ HEADLINE_MODELS = ('late-lr', 'late-hgb')
 TEMPORAL = ('T0', 'T1c', 'T2')
 HMM_MODES = ('none', 'fb', 'filter')
 # 'date' leaves one date out of DEV (the unit of every split); 'test' scores TEST once; 'session' leaves
-# one session out over every session the coder labelled, DEV and TEST alike
-SPLITS = ('date', 'test', 'session')
+# one session out over every session the coder labelled, DEV and TEST alike; 'unit' leaves one unit (a date
+# with its same_class_as dates) out over those sessions, and 'forward' trains on earlier dates only
+SPLITS = ('date', 'test', 'session', 'unit', 'forward')
+# the splits over every session the coder labelled, DEV and TEST alike, with the coder's own file as the truth
+POOLED_SPLITS = ('session', 'unit', 'forward')
+# the pseudo-variants that choose, inside each outer fold, among the variants the run fits; never in -m all
+SELECTORS = ('rule22sep', 'select-all')
+# the HMM modes a selector chooses among (the forward filter is the online row, never chosen)
+SELECTED_HMM = ('none', 'fb')
+# the models whose variants keep calibrated inner out-of-fold answers, the candidates of select-all
+INNER_MODELS = TABULAR + NETWORKS + ('jev-cal',)
+# the selectors' variant key: model:nested:nested, since the chosen temporal and HMM mode differ by fold
+NESTED = 'nested'
+GROUP_OF = dict(GROUPS, **{selector: 'selected' for selector in SELECTORS})
+# what metrics.json says of each selector (select_inner has the whole of it)
+SELECTOR_NOTES = {
+    'rule22sep': "the 22 Sep rule (select_headline: late-lr or late-hgb, every temporal mode run, HMM none or fb) "
+                 "applied in each outer fold to the candidates' calibrated inner out-of-fold answers pooled over the "
+                 "inner folds, by binary macro-F1 under the binary target and by three-class macro-F1 under the "
+                 "three-class one, even where the absent-class policy makes binary macro-F1 the date split's "
+                 "headline score; known optimism: grid points, calibrators, stackers and gamma were chosen on the same "
+                 "inner out-of-fold answers (12 grid points for HGB, 5 for LR), with no inner level below, for cost",
+    'select-all': "in each outer fold, the variant of the named models (HMM none or fb) with the lowest class-weighted "
+                  "binary log-loss of its calibrated inner out-of-fold answers, on the coded training windows every "
+                  "candidate answered; the same optimism as rule22sep",
+}
+# the networks' inner out-of-fold answers: at each inner split's best epoch (best, as before) or at the
+# common E* of the refit (common, network.oof_at)
+NET_OOF = ('best', 'common')
+SESSION_RUNS = 'session_runs.jsonl'
 TARGETS = ('3class', 'binary')
 # the network reads its sequence through its own temporal blocks, not through lag columns
 NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair': 'tcn'}
@@ -196,7 +250,11 @@ class Config:
     adds the arms of MODALITY_ARMS to the run ('none', the default, runs the full arm only); `scaling`
     is layout.scale's scheme for every session, training and held-out alike: 'mix' (the default, by
     each value's tag), 's' (every value within its own session), 'c' (centred within the session on the
-    global spread) or 'g' (every value globally)."""
+    global spread) or 'g' (every value globally). `split` 'unit' and 'forward' read the sessions 'session'
+    reads and must name the coder too; `models` may add the SELECTORS; `net_oof` 'common' gives the
+    networks' inner out-of-fold answers at the common E* ('best', the default, at each inner split's best
+    epoch); `features_root` is a folder to read the fused tables from instead of
+    artifacts/<session>/analysis/features/ (see session_tables)."""
     artifacts: str = 'artifacts'
     sessions: str | None = None
     coder: str | None = None
@@ -220,6 +278,8 @@ class Config:
     min_class_windows: int = MIN_CLASS_WINDOWS
     ablate: str = 'none'
     scaling: str = 'mix'
+    net_oof: str = 'best'
+    features_root: str | None = None
 
 
 # ---- sessions ----
@@ -280,17 +340,62 @@ class SessionData:
         return np.where(labelled, np.char.add(f'{self.session}#', number.astype(str)), '')
 
 
-def session_tables(artifacts, pattern: str | None = None) -> list[tuple[str, Path]]:
+def session_tables(artifacts, pattern: str | None = None, features_root=None) -> list[tuple[str, Path]]:
     """(session, fused table) for every artifacts/exp_*/analysis/features/<session>_window_features.csv
-    whose session id contains `pattern`."""
+    whose session id contains `pattern`. With `features_root` the tables come from that folder
+    instead (features_table), one for each artifacts/exp_* session folder, which still holds the
+    session's labels, manifest and Jev maps; a session with no table there is not found (run()
+    refuses a run that would miss one, features_root_gaps)."""
     found = []
     for session_dir in sorted(Path(artifacts).glob('exp_*')):
         if pattern and pattern not in session_dir.name:
+            continue
+        if features_root is not None:
+            path = features_table(features_root, session_dir.name)
+            if path is not None:
+                found.append((session_dir.name, path))
             continue
         path = session_dir / 'analysis' / 'features' / f'{session_dir.name}_window_features.csv'
         if path.exists():
             found.append((session_dir.name, path))
     return found
+
+
+def features_table(features_root, session: str) -> Path | None:
+    """a session's fused table under another root than artifacts/ (an ablation arm's tables,
+    re-fused with mmla ses-fuse -o), the first of <root>/<session>_window_features.csv,
+    <root>/<session>/<session>_window_features.csv and
+    <root>/<session>/analysis/features/<session>_window_features.csv that exists; None when none
+    does."""
+    root, name = Path(features_root), f'{session}_window_features.csv'
+    for path in (root / name, root / session / name, root / session / 'analysis' / 'features' / name):
+        if path.is_file():
+            return path
+    return None
+
+
+def features_root_gaps(artifacts, cfg: Config, found) -> dict:
+    """the sessions a run with cfg.features_root reads no table for although artifacts/ holds one
+    the same run would read (`found`: what it reads), each with why that changes nothing: in the
+    session, unit and forward splits, a session without labels/<coder>.jsonl, which every run of
+    the split leaves out. Any other such session raises FileNotFoundError naming them all, since
+    without it the folds, the training sessions and the scored windows are no longer those of the
+    run the arm is compared with."""
+    have = {s for s, _ in found}
+    gaps = [s for s, _ in session_tables(artifacts, cfg.sessions)
+            if s not in have and not (cfg.split == 'date' and s in S.TEST_SESSIONS)]
+    left_out, missing = {}, []
+    for session in gaps:
+        if cfg.split in POOLED_SPLITS and cfg.coder not in label_names([Path(artifacts) / session]):
+            left_out[session] = f"no labels/{cfg.coder}.jsonl: every {cfg.split} run leaves it out"
+        else:
+            missing.append(session)
+    if missing:
+        raise FileNotFoundError(
+            f"the features root {cfg.features_root} has no table for {len(missing)} session(s) the run reads from "
+            f"{artifacts}: {', '.join(missing)}; re-fuse them there, copy their own tables there to read them "
+            f"unchanged, or narrow the run with --sessions")
+    return left_out
 
 
 def primary_coder(directories) -> str | None:
@@ -382,7 +487,7 @@ def ablated(d: SessionData, modalities) -> SessionData:
 
 def load_session(session: str, table_path, coder: str | None = None, join: str = 'exact',
                  target: str = '3class', models: set | None = None,
-                 adjudicated: bool = True) -> tuple[SessionData, pd.DataFrame]:
+                 adjudicated: bool = True, directory=None) -> tuple[SessionData, pd.DataFrame]:
     """a session and its fused table: roster (the manifest's pupils when it declares them),
     unscaled tokens and pooled view, and the coder's labels joined to the table's grid (a join
     that leaves more than 1 % of labels without a window raises labels.LabelJoinError, which
@@ -391,11 +496,13 @@ def load_session(session: str, table_path, coder: str | None = None, join: str =
     model's labels file (`models`, run() passes labels.model_names of every session; default: this
     session's). The join report counts the truth's rows from the coder's own file and from
     adjudicated.jsonl; with `adjudicated` False (the session split) adjudicated.jsonl is not read
-    for the truth, which is the coder's own file alone."""
+    for the truth, which is the coder's own file alone. `directory` is the session's folder (labels,
+    manifest, Jev maps), by default the one the table sits in (artifacts/<session>/analysis/features/);
+    a table read from another root (features_table) names it."""
     from openmmla.utils.session_provenance import file_digest
     table_path = Path(table_path)
     table = LY.read_table(table_path)
-    directory = table_path.parents[2]
+    directory = table_path.parents[2] if directory is None else Path(directory)
     # the pupils the session's manifest declares, else the roster rules
     ros = LY.session_roster(table, directory)
     tokens = LY.window_tokens(table, ros)
@@ -511,12 +618,17 @@ def class_names(k: int) -> tuple:
 def make_folds(split: str, data: dict) -> list:
     """the outer folds: one per DEV date with coded windows (date), dates joined by same_class_as
     together, the one scoring of the TEST sessions (test), or one per session with coded windows,
-    DEV and TEST alike (session). Raises splits.SplitError when, in the date or test split, a DEV
-    session shares a date or a same_class_as link with a TEST one."""
+    DEV and TEST alike (session), one per unit with coded windows, DEV and TEST alike (unit), or one
+    per date with enough earlier dates, trained on those (forward). Raises splits.SplitError when, in
+    the date or test split, a DEV session shares a date or a same_class_as link with a TEST one."""
     sessions = list(data)
     if split == 'session':
         return S.session_folds(sessions, coded={s: d.n_coded for s, d in data.items()})
     links = {s: d.same_class_as for s, d in data.items()}
+    if split == 'unit':
+        return S.unit_folds_all(sessions, coded={s: d.n_coded for s, d in data.items()}, same_class=links)
+    if split == 'forward':
+        return S.forward_folds(sessions, coded={s: d.n_coded for s, d in data.items()}, same_class=links)
     if split == 'date':
         return S.date_folds(sessions, coded={s: d.n_coded for s, d in data.items()}, same_class=links)
     fold = S.final_fold(sessions, same_class=links)
@@ -608,6 +720,12 @@ class _Fold:
             # the session split: every training session is its own group, held out alone in the inner folds
             self.units = {s: s for s in fold.train}
             self.inner = S.session_inner_folds(fold.train, sizes=sizes) if learned else []
+        elif split in ('unit', 'forward'):
+            # a unit (a date with its same_class_as dates) is one group, held out alone in the inner folds;
+            # a TEST session is an ordinary one
+            links = {d.session: d.same_class_as for d in self.train}
+            self.units = S.class_units(fold.train, links)
+            self.inner = S.unit_inner_folds(fold.train, sizes=sizes, same_class=links) if learned else []
         else:
             # a date (with its same_class_as dates) is one group, as in the outer folds
             links = {d.session: d.same_class_as for d in self.train}
@@ -655,11 +773,12 @@ class _Fold:
     def labels(self, binary: bool = False) -> dict:
         return {d.session: (L.to_binary(d.target) if binary else d.target) for d in self.train}
 
-    def smooth(self, p, prior, A, gamma, mode) -> np.ndarray:
-        """the held-out sessions' posteriors through the HMM, each session on its own."""
-        flats = self.flat('test')
+    def smooth(self, p, prior, A, gamma, mode, side: str = 'test') -> np.ndarray:
+        """the held-out sessions' posteriors through the HMM, each session on its own (`side`
+        'train': the training sessions' inner out-of-fold ones, for the selectors)."""
+        flats = self.flat(side)
         return np.vstack([H.smooth(part, prior, A, gamma, flats[session], mode)
-                          for session, part in self.by_session(p, 'test').items()])
+                          for session, part in self.by_session(p, side).items()])
 
 
 def _key(model: str, temporal: str, mode: str) -> str:
@@ -698,11 +817,14 @@ def _decide(p, prior, k: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _finish(fd: _Fold, hmm_modes, model: str, temporal: str, oof, logits, calibrate: bool, details: dict,
-            results: dict, online=None):
+            results: dict, online=None, inner: dict | None = None):
     """one model's answers through calibration (fit on the inner out-of-fold logits), each HMM mode
     (gamma chosen on the same out-of-fold answers) and the decisions; one result per mode.
     `online` is the held-out logits from the online tokens (_Fold.online), which the forward
-    filter reads; without them (Jev, whose answers do not depend on scaling) it reads `logits`."""
+    filter reads; without them (Jev, whose answers do not depend on scaling) it reads `logits`.
+    `inner` (when a selector runs) receives, per variant of SELECTED_HMM, the training side's
+    calibrated out-of-fold posteriors through the same HMM (the same gamma) and their decisions
+    under the outer-training prior; nothing else changes with it."""
     k = fd.k
     oof, logits = _collapse(oof, k), _collapse(logits, k)
     online = logits if online is None else _collapse(online, k)
@@ -716,6 +838,7 @@ def _finish(fd: _Fold, hmm_modes, model: str, temporal: str, oof, logits, calibr
         if mode == 'filter' and temporal not in CAUSAL_INPUTS:
             continue
         record = {'p': p_test, 'viterbi': None, 'binary_hmm': None}
+        p_inner = p_oof
         if mode != 'none':
             gamma, scores = H.select_gamma(fd.by_session(p_oof, 'train'), fd.labels(), fd.prior, fd.A,
                                            fd.flat('train'), mode=mode)
@@ -725,8 +848,15 @@ def _finish(fd: _Fold, hmm_modes, model: str, temporal: str, oof, logits, calibr
                 record['viterbi'] = fd.smooth(p_test, fd.prior, fd.A, gamma, 'viterbi').argmax(axis=1)
                 if k == 3:
                     record['binary_hmm'] = _binary_hmm(fd, p_oof, p_test)
+            if inner is not None and mode in SELECTED_HMM:
+                # a window no inner fold held out keeps no answer, though the smoother would carry one to it
+                answered = np.isfinite(p_oof).all(axis=1)
+                p_inner = np.where(answered[:, None], fd.smooth(p_oof, fd.prior, fd.A, gamma, mode, 'train'), np.nan)
         record['y_pred'], record['y_pred_binary'] = _decide(record['p'], fd.prior, k)
         results[_key(model, temporal, mode)] = record
+        if inner is not None and mode in SELECTED_HMM:
+            y_pred, y_binary = _decide(p_inner, fd.prior, k)
+            inner[_key(model, temporal, mode)] = {'p': p_inner, 'y_pred': y_pred, 'y_pred_binary': y_binary}
 
 
 def _binary_hmm(fd: _Fold, p_oof, p_test) -> np.ndarray:
@@ -783,7 +913,8 @@ def _tabular(fd: _Fold, plan: dict, model: str, temporal: str, details: dict, ex
 def _network(fd: _Fold, plan: dict, model: str, details: dict):
     """(inner out-of-fold logits, held-out logits, held-out logits from the online tokens or None)
     of a network rung: E* from the inner folds (seed 0, patience), then the seed ensemble on every
-    outer-training session."""
+    outer-training session. The out-of-fold logits are each inner split's at its own best epoch,
+    or with plan['net_oof'] 'common' every split's at the refit's epoch count (network.oof_at)."""
     from openmmla.analytics.interaction import network as N
     pooled_input = model == 'pooled-net'
     first = fd.views[fd.train[0].session]
@@ -800,9 +931,15 @@ def _network(fd: _Fold, plan: dict, model: str, details: dict):
     small = N.use_small(sum(d.n_coded for d in fd.train), plan['small'])
     make = functools.partial(N.make_model, model, small=small, d_in=first.shape[1])
     device = plan.get('device') or 'cpu'
+    keep = {} if plan.get('net_oof') == 'common' else None
     epochs, oof = N.select_epochs(train, [(inner.train, inner.test) for inner in fd.inner], make=make,
-                                  max_epochs=plan['max_epochs'], patience=plan['patience'], seed=0, device=device)
+                                  max_epochs=plan['max_epochs'], patience=plan['patience'], seed=0, device=device,
+                                  keep=keep)
     used = plan['epochs'] or epochs
+    if keep is not None:
+        # every inner split's answers at the refit's epoch count, rather than at its own best epoch
+        oof, at, replayed = N.oof_at(train, keep, used, make=make, seed=0, device=device)
+        details.update(oof_epoch=at, oof_replayed=replayed)
     models = N.fit_ensemble(train, used, seeds=tuple(range(plan['seeds'])), make=make, device=device)
     details.update(epochs=epochs, epochs_used=used, small=small, parameters=N.count_parameters(models[0]))
     oof = np.vstack([o if o is not None else np.full((len(d), 3), np.nan) for o, d in zip(oof, fd.train)])
@@ -827,6 +964,77 @@ def _unanswered(record: dict, rows: np.ndarray):
             record[name] = np.where(rows, -1, record[name])
 
 
+def _inner_scores(record: dict, y_train) -> dict:
+    """the pooled scores select_headline reads, here of one variant's inner out-of-fold decisions on
+    the coded training windows it answered, counted as score_variant counts them on held-out ones:
+    macro-F1 (the three classes, or the two of a binary target) and binary macro-F1, None where
+    undefined."""
+    y_pred, y_binary = np.asarray(record['y_pred']), np.asarray(record['y_pred_binary'])
+    y = np.where(y_pred >= 0, _labels_int(y_train), -1)
+    coded = y >= 0
+    return {'n': int(coded.sum()), 'macro_f1': M._float(M.macro_f1(y[coded], y_pred[coded])),
+            'binary_macro_f1': M._float(M.macro_f1(_binary_truth(y)[coded], y_binary[coded], n_classes=2))}
+
+
+def _binary_log_loss(p, truth, rows) -> float | None:
+    """the class-weighted binary log-loss of p_interaction (p_social + p_collaborative, or the
+    interaction column of a binary target) on `rows`: each class weighs as much as the other
+    (tabular.class_weighted_nll); None when no row counts."""
+    p = np.asarray(p, dtype=float)
+    interaction = np.clip(p[:, 1:].sum(axis=1), M.FLOOR, 1.0 - M.FLOOR)
+    loss = TB.class_weighted_nll(np.log(np.column_stack([1.0 - interaction, interaction])),
+                                 np.where(rows, truth, -1))
+    return M._float(loss)
+
+
+def select_inner(selector: str, inner: dict, fd: _Fold, models) -> dict:
+    """the variant a selector chooses in one outer fold from the calibrated inner out-of-fold
+    answers of the training side (`inner`, from _finish: per variant of the HMM modes none and fb,
+    the posteriors and the decisions under the outer-training prior), with each candidate's score.
+    The caller copies the winner's held-out answers.
+
+    rule22sep, the rule declared on 22 Sep: select_headline itself, over the late-lr and late-hgb
+    variants (every temporal mode run, HMM none and fb), on their pooled inner out-of-fold binary
+    macro-F1 under the binary target and three-class macro-F1 under the three-class one, the first
+    in run order on a tie. Under the three-class target it may choose otherwise than the date
+    split's headline: there the absent-class policy (too few social windows, or lessons with them)
+    makes select_headline rank by binary macro-F1, while rule22sep keeps the target's own score, as
+    declared for it on 2026-10-04. Known optimism, to be disclosed: the grid points, the calibrator,
+    the stacker and gamma were chosen on the same inner out-of-fold answers the rule then scores
+    (twelve grid points for HGB against five for LR), with no inner level below them, for cost; and
+    the fold's decisions use the outer-training prior.
+
+    select-all: over every variant of the named models that has such answers (r1, lr, hgb, late-lr,
+    late-hgb, the networks and jev-cal; HMM none and fb), the lowest class-weighted binary log-loss
+    of p_interaction on the coded training windows every candidate answered, the first in run order
+    on a tie. The floors, the rule and zero-shot Jev keep no out-of-fold answer and are no candidate."""
+    names = class_names(fd.k)
+    if selector == 'rule22sep':
+        candidates = {key: record for key, record in inner.items() if key.split(':')[0] in HEADLINE_MODELS}
+        scores = {key: _inner_scores(record, fd.y) for key, record in candidates.items()}
+        variants = {key: {'model': key.split(':')[0], 'hmm': key.split(':')[2]} for key in candidates}
+        reports = {key: {'macro_f1_ci': {'estimate': score['macro_f1']},
+                         'binary_macro_f1_ci': {'estimate': score['binary_macro_f1']}} for key, score in scores.items()}
+        winner = select_headline(variants, reports, binary=fd.k == 2)
+        return {'winner': winner, 'candidates': list(candidates), 'scores': scores,
+                'selected_on': 'select_headline on the calibrated inner out-of-fold answers pooled over the inner '
+                               'folds, ' + ('binary macro-F1' if fd.k == 2 else f"macro-F1 over {', '.join(names)}")}
+    panel = [model for model in models if model in INNER_MODELS]
+    candidates = {key: record for key, record in inner.items() if key.split(':')[0] in panel}
+    truth = _binary_truth(_labels_int(fd.y))
+    rows = truth >= 0
+    for record in candidates.values():
+        rows &= np.isfinite(np.asarray(record['p'], dtype=float)).all(axis=1)
+    losses = {key: _binary_log_loss(record['p'], truth, rows) for key, record in candidates.items()}
+    winner = None
+    for key, loss in losses.items():
+        if loss is not None and (winner is None or loss < losses[winner]):
+            winner = key
+    return {'winner': winner, 'candidates': list(candidates), 'windows': int(rows.sum()), 'log_loss': losses,
+            'selected_on': 'the lowest class-weighted binary log-loss of the calibrated inner out-of-fold answers, on '
+                           'the coded training windows every candidate answered'}
+
+
 def run_fold(fold, data: dict, plan: dict) -> dict:
     """everything one outer fold gives: per variant (model:temporal:hmm) the held-out rows'
     posteriors and decisions, and what was chosen on the way (parameters, calibrators, gammas,
@@ -836,8 +1044,12 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
     fd = _Fold(fold, data, k, learned=any(model not in UNLEARNED for model in plan['models']),
                scheme=plan.get('scaling', 'mix'), split=plan.get('split', 'date'))
     results, details, extras = {}, {}, {}
+    # the selectors read the training side's out-of-fold answers, kept only when one runs
+    inner = {} if any(model in SELECTORS for model in plan['models']) else None
     n_test = sum(len(d) for d in fd.test)
     for model in plan['models']:
+        if model in SELECTORS:
+            continue
         if model in RULE_MODELS:
             # the rule reads the unscaled view: its thresholds are in the table's units
             labels = np.concatenate([TB.rule_a_priori(d.raw, version=RULE_MODELS[model]) for d in fd.test])
@@ -859,12 +1071,12 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
             for temporal in (('T0',) if model == 'r1' else plan['temporal']):
                 where = details.setdefault(f'{model}:{temporal}', {})
                 oof, logits, calibrate, online = _tabular(fd, plan, model, temporal, where, extras)
-                _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online)
+                _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online, inner)
         elif model in NETWORKS:
             temporal = NET_TEMPORAL[model]
             where = details.setdefault(f'{model}:{temporal}', {})
             oof, logits, online = _network(fd, plan, model, where)
-            _finish(fd, plan['hmm'], model, temporal, oof, logits, True, where, results, online)
+            _finish(fd, plan['hmm'], model, temporal, oof, logits, True, where, results, online, inner)
         elif model == 'jev':
             p = _normalised(_collapse(_jev_rows(fd.test), k))
             answered = np.isfinite(p).all(axis=1)
@@ -875,9 +1087,15 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
             # Jev never saw a label, so its answers on the training windows are out-of-sample as they are
             where = details.setdefault(f"jev-cal:{plan['jev_variant']}", {})
             held = _jev_rows(fd.test)
-            _finish(fd, plan['hmm'], 'jev-cal', plan['jev_variant'], _jev_rows(fd.train), held, True, where, results)
+            _finish(fd, plan['hmm'], 'jev-cal', plan['jev_variant'], _jev_rows(fd.train), held, True, where, results,
+                    inner=inner)
             for key in [key for key in results if key.startswith('jev-cal:')]:
                 _unanswered(results[key], ~np.isfinite(held).all(axis=1))
+    for model in [model for model in plan['models'] if model in SELECTORS]:
+        choice = select_inner(model, inner, fd, plan['models'])
+        details[model] = choice
+        if choice.get('winner') is not None:
+            results[_key(model, NESTED, NESTED)] = dict(results[choice['winner']])
     return {'name': fold.name, 'train': list(fold.train), 'test': list(fold.test),
             'inner': [sorted({fd.units[s] for s in inner.test}) for inner in fd.inner],
             'prior': fd.prior.tolist(), 'transitions': fd.A.tolist(), 'models': details, 'results': results,
@@ -1078,17 +1296,19 @@ def session_metric_names(k: int) -> list:
     return list(dict.fromkeys(list(SESSION_METRICS) + [f'f1_{name}' for name in class_names(k)]))
 
 
-def session_scores(variant: dict, base: pd.DataFrame, k: int) -> pd.DataFrame:
+def session_scores(variant: dict, base: pd.DataFrame, k: int, by: str = 'session') -> pd.DataFrame:
     """the session split's per_session.csv rows of one variant: per held-out session with coded
     windows, its scores on the coded windows the variant answered (_session_metrics, macro-F1 over
     the classes with at least metrics.MIN_SUPPORT true windows there), the coder's class-coded
     windows and the coverage, and the flags: few_windows (fewer than MIN_SESSION_WINDOWS scored
     windows), single_class (fewer than two classes with metrics.MIN_SUPPORT true windows, so its
-    macro-F1 is one class's F1) and flagged (either)."""
+    macro-F1 is one class's F1) and flagged (either). `by` 'lesson' gives the same per held-out unit
+    (the unit and forward splits' per_unit.csv), in a 'unit' column, its tasks joined with '+'."""
     truth_all = _labels_int(base['y_true'])
     y_pred, y_binary = np.asarray(variant['y_pred']), np.asarray(variant['y_pred_binary'])
     y = np.where(y_pred >= 0, truth_all, -1)
-    sessions, tasks = base['session'].to_numpy(), base['task'].to_numpy(dtype=object)
+    sessions, tasks = base[by].to_numpy(), base['task'].to_numpy(dtype=object)
+    name = 'session' if by == 'session' else 'unit'
     p = variant['p']
     rows = []
     for session in pd.unique(sessions):
@@ -1098,7 +1318,8 @@ def session_scores(variant: dict, base: pd.DataFrame, k: int) -> pd.DataFrame:
             continue
         scores = _session_metrics(y[at], None if p is None else p[at], y_pred[at], y_binary[at], k, M.MIN_SUPPORT)
         few, single = scores['n'] < MIN_SESSION_WINDOWS, scores['classes'] < 2
-        rows.append({'session': session, 'task': tasks[at][0], 'n': scores['n'], 'n_coded': n_coded,
+        task = tasks[at][0] if by == 'session' else '+'.join(sorted({str(t) for t in tasks[at] if t}))
+        rows.append({name: session, 'task': task, 'n': scores['n'], 'n_coded': n_coded,
                      'coverage': scores['n'] / n_coded, 'classes': scores['classes'], 'few_windows': few,
                      'single_class': single, 'flagged': few or single, **scores})
     return pd.DataFrame(rows)
@@ -1111,21 +1332,22 @@ def _spread(values) -> tuple:
             int(len(finite)))
 
 
-def session_summary(rows: pd.DataFrame, variant: dict, base: pd.DataFrame, k: int) -> dict:
+def session_summary(rows: pd.DataFrame, variant: dict, base: pd.DataFrame, k: int, level: str = 'session') -> dict:
     """the session split's figures of one variant (metrics.json `across_sessions`): per score, the
     mean and sample SD over the held-out sessions where it is defined and how many they are, the
     same without the flagged sessions, and the pooled value over every held-out window the variant
     answered (macro-F1 there over every class present, as the pooled report counts it). Every
     held-out session enters the mean of each score it defines, flagged or not: a single-class
     session's macro-F1 is that class's F1, and a session without both sides of the binary target
-    has no AUROC and stays out of its mean."""
+    has no AUROC and stays out of its mean. `level` 'unit' reads session_scores' rows by unit
+    (`across_units`, n_units and units)."""
     truth_all = _labels_int(base['y_true'])
     y_pred = np.asarray(variant['y_pred'])
     pooled = _session_metrics(np.where(y_pred >= 0, truth_all, -1), variant['p'], y_pred,
                               np.asarray(variant['y_pred_binary']), k, 1)
     flagged = rows['flagged'].to_numpy(dtype=bool) if len(rows) else np.zeros(0, dtype=bool)
-    out = {'n_sessions': int(len(rows)), 'sessions': list(rows['session']) if len(rows) else [],
-           'flagged': sorted(rows.loc[flagged, 'session']) if len(rows) else [],
+    out = {f'n_{level}s': int(len(rows)), f'{level}s': list(rows[level]) if len(rows) else [],
+           'flagged': sorted(rows.loc[flagged, level]) if len(rows) else [],
            'pooled_windows': pooled['n'], 'metrics': {}}
     for name in session_metric_names(k):
         values = list(rows[name]) if name in rows else []
@@ -1141,12 +1363,12 @@ def session_summary(rows: pd.DataFrame, variant: dict, base: pd.DataFrame, k: in
 SESSION_RESULT_METRICS = ('macro_f1', 'accuracy', 'kappa', 'f1_interaction', 'auroc', 'brier', 'nll')
 
 
-def _session_columns(summary: dict, k: int) -> dict:
+def _session_columns(summary: dict, k: int, level: str = 'session') -> dict:
     """results.csv's extra columns in the session split: the number of sessions, each score's mean
     and SD over them, and the pooled accuracy and Brier (the other pooled scores are already in
-    the row)."""
+    the row); `level` 'unit' the same over the units (the unit and forward splits)."""
     scores = summary['metrics']
-    out = {'sessions': summary['n_sessions'], 'sessions_flagged': len(summary['flagged'])}
+    out = {f'{level}s': summary[f'n_{level}s'], f'{level}s_flagged': len(summary['flagged'])}
     for name in list(SESSION_RESULT_METRICS) + [f'f1_{name}' for name in class_names(k)]:
         if name in scores and f'{name}_mean' not in out:
             out[f'{name}_mean'], out[f'{name}_sd'] = scores[name]['mean'], scores[name]['sd']
@@ -1159,7 +1381,7 @@ def _result_row(key: str, variant: dict, report: dict) -> dict:
     pooled = report['pooled']
     temporal = pooled.get('temporal') or {}
     ci = report['macro_f1_ci']
-    group = 'online' if variant['hmm'] == 'filter' else GROUPS[variant['model']]
+    group = 'online' if variant['hmm'] == 'filter' else GROUP_OF[variant['model']]
     row = {'group': group, 'variant': key, 'model': variant['model'], 'temporal': variant['temporal'],
            'hmm': variant['hmm'], 'ablation': variant.get('ablation', 'full'), 'n': pooled['n'],
            'coverage': (report.get('coverage') or {}).get('share'),
@@ -1304,7 +1526,7 @@ def ablation_frame(variants: dict, arm_of: dict, reports: dict, base: pd.DataFra
                                  lessons_all[rows], n_boot, unit)
             row = {'ablation': arm, 'removed': '+'.join(arms.get(arm, ())), 'variant': base_key,
                    'model': variant['model'], 'temporal': variant['temporal'], 'hmm': variant['hmm'],
-                   'group': 'online' if variant['hmm'] == 'filter' else GROUPS[variant['model']],
+                   'group': 'online' if variant['hmm'] == 'filter' else GROUP_OF[variant['model']],
                    'n': pooled['n'], 'coverage': (report.get('coverage') or {}).get('share'),
                    'macro_f1': pooled['macro_f1'], 'macro_f1_lo': ci['lo'], 'macro_f1_hi': ci['hi'],
                    'kappa': pooled['kappa'], 'binary_macro_f1': binary_ci['estimate'],
@@ -1559,12 +1781,54 @@ def _session_split_record(coder: str, folds: list, excluded: dict) -> dict:
             'pooled': "every held-out window the variant answered, macro-F1 over every class present"}}
 
 
+def split_units(data: dict) -> dict:
+    """unit -> its sessions, sorted, in unit order: what the unit and forward splits hold out and
+    resample whole (SessionData.lesson after link_lessons)."""
+    units = {}
+    for session, d in data.items():
+        units.setdefault(d.lesson, []).append(session)
+    return {unit: sorted(units[unit]) for unit in sorted(units)}
+
+
+def _unit_split_record(split: str, coder: str, folds: list, excluded: dict, data: dict) -> dict:
+    """what config.json and metrics.json say of a unit or forward split, as _session_split_record
+    does of the session split, with the units (a date with the dates its same_class_as links reach)
+    and the mean over the held-out units beside the mean over the sessions."""
+    record = _session_split_record(coder, folds, excluded)
+    held = {data[s].lesson for fold in folds for s in fold.test}
+    units = split_units(data)
+    if split == 'unit':
+        note = ("leave one unit out over every session the coder labelled, DEV and TEST alike (decided 2026-10-04): "
+                "a unit is a recording date with every date its sessions' same_class_as links reach, so the same "
+                "pupils are never on both sides; cross-validated estimates with no untouched hold-out, not the frozen "
+                "TEST evaluation (split test)")
+    else:
+        note = (f"forward chaining over every session the coder labelled, DEV and TEST alike (decided 2026-10-04): "
+                f"each date with at least {S.MIN_EARLIER_DATES} earlier dates with coded windows is held out and the "
+                f"models train on the earlier dates only (a training date of the held-out date's unit stays out); "
+                f"descriptive, not the frozen TEST evaluation (split test)")
+    record.update(split=split, note=note, units=units,
+                  inner_folds='leave one unit (a date with its same_class_as dates) out within the training sessions')
+    if split == 'forward':
+        record['min_earlier_dates'] = S.MIN_EARLIER_DATES
+    record['across_units'] = dict(
+        record['across_sessions'], n_units=len(held), units=sorted(held),
+        macro_f1_per_unit=f"the classes with at least {M.MIN_SUPPORT} true windows in the unit",
+        mean="every held-out unit enters the mean and SD (ddof 1) of each score it defines, flagged or not; "
+             "*_unflagged repeat them without the flagged units")
+    for key in ('n_sessions', 'sessions', 'macro_f1_per_session'):
+        record['across_units'].pop(key, None)
+    return record
+
+
 def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: Path, run_dir: Path,
-                   coder: str | None = None, session_record: dict | None = None) -> dict:
+                   coder: str | None = None, session_record: dict | None = None, not_read: dict | None = None) -> dict:
     """config.json: what the run read (every fused table and label file by sha256), whose labels
     were the truth and how that coder was chosen, with what (feature lists, grids, seeds, the
     layout version) and which software, secrets masked. A session split adds `session_record`
-    (_session_split_record) at the top."""
+    (_session_split_record) at the top. A run with a features root adds `features_root`: the folder,
+    and the sessions with a table under artifacts/ but none there, each with why (`not_read`,
+    features_root_gaps)."""
     from openmmla.utils.session_provenance import git_commit, redact_secrets, software_info
     values = LY.GROUP_VALUES + LY.PERSON_VALUES + LY.PAIR_VALUES
     record = {
@@ -1605,10 +1869,12 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
         'software': software_info(artifacts.parent), 'git_commit': git_commit(artifacts.parent),
     }
     if session_record:
-        extra = {key: value for key, value in session_record.items() if key != 'across_sessions'}
+        extra = {key: value for key, value in session_record.items() if key not in ('across_sessions', 'across_units')}
         # the split's own record first, after the run's name; its coder and inner folds replace the defaults
         record = {**{key: record[key] for key in ('run', 'created_at')}, **extra,
                   **{key: value for key, value in record.items() if key not in extra}}
+    if cfg.features_root is not None:
+        record['features_root'] = {'folder': str(Path(cfg.features_root).resolve()), 'not_read': dict(not_read or {})}
     return redact_secrets(_jsonable(record))
 
 
@@ -1629,15 +1895,129 @@ def _record_test_run(artifacts: Path, run_dir: Path, cfg: Config, status: str) -
     return earlier
 
 
+def ledger_path(artifacts) -> Path:
+    """the run ledger: artifacts/_analysis/interaction/session_runs.jsonl."""
+    return Path(artifacts) / '_analysis' / 'interaction' / SESSION_RUNS
+
+
+def _git_state() -> dict:
+    """the commit of the checkout this code runs from, in full, and the files under openmmla/ it
+    has changed since (None for either when it is no checkout or git is missing)."""
+    import subprocess
+    folder = Path(__file__).resolve().parents[3]
+
+    def git(*args):
+        try:
+            done = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, text=True, timeout=5,
+                                  check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout if done.returncode == 0 else None
+
+    commit = git('rev-parse', 'HEAD')
+    changed = git('status', '--porcelain', '--', 'openmmla')
+    return {'commit': commit.strip() if commit else None,
+            'changed': [line[3:] for line in changed.splitlines() if line.strip()] if changed is not None else None}
+
+
+def _output_digests(run_dir: Path) -> dict:
+    """every file of a run folder (not its subfolders) by sha256."""
+    from openmmla.utils.session_provenance import file_digest
+    return {path.name: file_digest(path) for path in sorted(Path(run_dir).iterdir()) if path.is_file()}
+
+
+def _append_ledger(artifacts, line: dict) -> None:
+    path = ledger_path(artifacts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'a', encoding='utf-8') as handle:
+        handle.write(json.dumps(_jsonable(line), ensure_ascii=False) + '\n')
+
+
+def _record_session_run(artifacts: Path, run_dir: Path, cfg: Config, status: str, data: dict, coder: str) -> None:
+    """the run ledger of the session, unit and forward splits (2026-10-04), in _record_test_run's
+    way: artifacts/_analysis/interaction/session_runs.jsonl gets a line when a run starts and one
+    when it finishes, with the code's commit (and the files under openmmla/ changed since), the
+    run's settings, every fused table and labels file it read by sha256 and, when it finishes, every
+    file of the run folder by sha256."""
+    from openmmla.utils.session_provenance import redact_secrets
+    line = {'run': run_dir.name, 'run_dir': str(Path(run_dir).resolve()), 'status': status,
+            'at': datetime.now(timezone.utc).isoformat(), 'split': cfg.split, 'coder': coder, 'target': cfg.target,
+            'models': list(cfg.models), 'ablate': cfg.ablate, 'scaling': cfg.scaling, 'net_oof': cfg.net_oof,
+            'features_root': cfg.features_root, 'quick': bool(cfg.quick), 'git': _git_state(),
+            'config': redact_secrets(_jsonable(asdict(cfg))),
+            'tables': {s: d.table_sha256 for s, d in data.items()},
+            'labels': {s: d.label_files for s, d in data.items()}}
+    if status == 'finished':
+        line['outputs'] = _output_digests(run_dir)
+    _append_ledger(artifacts, line)
+
+
+def log_run_folders(artifacts, run_dirs, note: str | None = None, status: str = 'looked_at') -> list:
+    """add run folders made before the ledger (or by hand) to session_runs.jsonl, each as one line
+    with `status` (looked at: their results have been seen) and retro true: the commit, settings
+    and tables their config.json records, and every file in the folder by sha256. A folder already
+    in the ledger with that status is not added again. Returns (folder, what was done) per folder;
+    a folder with no config.json and no metrics.json is skipped as no run folder."""
+    path = ledger_path(artifacts)
+    logged = set()
+    if path.exists():
+        for text in path.read_text(encoding='utf-8').splitlines():
+            try:
+                record = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if record.get('status') == status:
+                logged.add(str(Path(record.get('run_dir') or '').resolve()))
+    done = []
+    for folder in run_dirs:
+        folder = Path(folder).resolve()
+        config_file, metrics_file = folder / 'config.json', folder / 'metrics.json'
+        if not folder.is_dir() or not (config_file.exists() or metrics_file.exists()):
+            done.append((str(folder), 'skipped: no config.json or metrics.json there'))
+            continue
+        if str(folder) in logged:
+            done.append((str(folder), f'already in the ledger as {status}'))
+            continue
+        config, metrics = {}, {}
+        for name, holder in ((config_file, config), (metrics_file, metrics)):
+            try:
+                holder.update(json.loads(name.read_text(encoding='utf-8')) if name.exists() else {})
+            except (OSError, ValueError):
+                pass
+        settings = config.get('config') or {}
+        line = {'run': folder.name, 'run_dir': str(folder), 'status': status, 'retro': True,
+                'at': datetime.now(timezone.utc).isoformat(), 'created_at': config.get('created_at'),
+                'split': settings.get('split') or metrics.get('split'), 'coder': config.get('coder'),
+                'target': settings.get('target') or metrics.get('target'), 'models': settings.get('models'),
+                'ablate': settings.get('ablate'), 'scaling': settings.get('scaling'), 'quick': settings.get('quick'),
+                'git': {'commit': config.get('git_commit'), 'changed': None, 'from': 'config.json (short)'},
+                'config': settings,
+                'tables': {s: entry.get('table_sha256') for s, entry in (config.get('files') or {}).items()},
+                'labels': {s: entry.get('labels') for s, entry in (config.get('files') or {}).items()},
+                'outputs': _output_digests(folder), 'note': note}
+        _append_ledger(artifacts, line)
+        logged.add(str(folder))
+        done.append((str(folder), f'added as {status}'))
+    return done
+
+
 # ---- the run ----
 
 def planned_variants(models, temporal=TEMPORAL, hmm=HMM_MODES, jev_variant: str = 'j0') -> dict:
     """model -> the variant keys (model:temporal:hmm) a run with these flags gives it, before
     anything is loaded: r0, the floors and zero-shot Jev give one whatever the flags say, r1 reads
     the T0 view only, a network its own temporal mode, and the forward filter goes only to causal
-    inputs. A model with an empty list would be trained on every fold for nothing."""
+    inputs. A model with an empty list would be trained on every fold for nothing. A selector gives
+    model:nested:nested when the run fits a candidate for it (rule22sep: late-lr or late-hgb;
+    select-all: a model of INNER_MODELS) with HMM none or fb."""
     out = {}
-    for model in dict.fromkeys(models):
+    named = list(dict.fromkeys(models))
+    chosen = [h for h in dict.fromkeys(hmm) if h in SELECTED_HMM]
+    for model in named:
+        if model in SELECTORS:
+            pool = HEADLINE_MODELS if model == 'rule22sep' else INNER_MODELS
+            out[model] = [_key(model, NESTED, NESTED)] if chosen and any(m in pool for m in named) else []
+            continue
         if model in ('r0', 'r0-v1', 'majority', 'stratified'):
             out[model] = [_key(model, 'T0', 'none')]
             continue
@@ -1657,10 +2037,25 @@ def _barren(cfg: Config) -> list:
     return [model for model, keys in planned.items() if not keys]
 
 
+def _selector_gap(cfg: Config) -> str | None:
+    """why a named selector has nothing to choose from, or None."""
+    chosen = [h for h in cfg.hmm if h in SELECTED_HMM]
+    for selector in [m for m in dict.fromkeys(cfg.models) if m in SELECTORS]:
+        pool = HEADLINE_MODELS if selector == 'rule22sep' else INNER_MODELS
+        if not any(m in pool for m in cfg.models):
+            return f"{selector} chooses among {', '.join(pool)}: name at least one of them too"
+        if not chosen:
+            return f"{selector} chooses among the HMM modes {' and '.join(SELECTED_HMM)}: add one to the HMM modes"
+    return None
+
+
 def _check(cfg: Config):
-    unknown = [m for m in cfg.models if m not in MODELS]
+    unknown = [m for m in cfg.models if m not in MODELS + SELECTORS]
     if unknown:
-        raise ValueError(f"unknown model(s) {', '.join(unknown)}: one of {', '.join(MODELS)}")
+        raise ValueError(f"unknown model(s) {', '.join(unknown)}: one of {', '.join(MODELS + SELECTORS)}")
+    gap = _selector_gap(cfg)
+    if gap:
+        raise ValueError(gap)
     if not cfg.models:
         raise ValueError("name at least one model")
     if cfg.split not in SPLITS:
@@ -1677,9 +2072,13 @@ def _check(cfg: Config):
     if cfg.split == 'test' and not cfg.coder:
         raise ValueError("the TEST scoring names its truth coder: pass the coder the date runs were chosen on "
                          "(their config.json 'coder')")
-    if cfg.split == 'session' and not cfg.coder:
-        raise ValueError("the session split reads one coder's labels at a time: name the coder (its labels file "
-                         "name, e.g. 'Arthur' for labels/Arthur.jsonl)")
+    if cfg.split in POOLED_SPLITS and not cfg.coder:
+        raise ValueError(f"the {cfg.split} split reads one coder's labels at a time: name the coder (its labels file "
+                         f"name, e.g. 'Arthur' for labels/Arthur.jsonl)")
+    if cfg.net_oof not in NET_OOF:
+        raise ValueError(f"net_oof must be one of {', '.join(NET_OOF)}, not {cfg.net_oof!r}")
+    if cfg.features_root is not None and not Path(cfg.features_root).is_dir():
+        raise FileNotFoundError(f"the features root {cfg.features_root} is no folder")
     if cfg.test_coder and cfg.split != 'test':
         raise ValueError("test_coder is the truth of the TEST sessions: it goes with split 'test' only")
     barren = _barren(cfg)
@@ -1725,7 +2124,7 @@ def _plan(cfg: Config) -> dict:
             'max_epochs': quick.get('max_epochs', 300), 'patience': quick.get('patience', 25),
             'seeds': int(cfg.seeds), 'small': cfg.small, 'epochs': cfg.epochs, 'jev_variant': cfg.jev_variant,
             'bootstrap': cfg.bootstrap or quick.get('bootstrap', BOOTSTRAP), 'jobs': jobs, 'scaling': cfg.scaling,
-            'split': cfg.split,
+            'split': cfg.split, 'net_oof': cfg.net_oof,
             'threads': max(1, (os.cpu_count() or 1) // jobs) if jobs > 1 else None,
             'device': device, 'torch': build}
 
@@ -1785,35 +2184,47 @@ def run(config, log=None) -> Path:
     plan = _plan(cfg)
     k = plan['k']
     artifacts = Path(cfg.artifacts).resolve()
-    found = session_tables(artifacts, cfg.sessions)
+    found = session_tables(artifacts, cfg.sessions, cfg.features_root)
     if cfg.split == 'date':
         # a dev run never opens a TEST session, not even its labels
         found = [(s, p) for s, p in found if s not in S.TEST_SESSIONS]
     if not found:
-        raise FileNotFoundError(f"no fused table under {artifacts} for {cfg.sessions or 'any session'}: "
-                                f"run mmla ses-fuse")
+        raise FileNotFoundError(f"no fused table under {cfg.features_root or artifacts} for "
+                                f"{cfg.sessions or 'any session'}: run mmla ses-fuse")
+    # the session's folder (labels, manifest, Jev maps): where its table sits, or under artifacts/ when the
+    # tables come from another root
+    folder = {s: (artifacts / s if cfg.features_root is not None else path.parents[2]) for s, path in found}
+    not_read = None
+    if cfg.features_root is not None:
+        not_read = features_root_gaps(artifacts, cfg, found)
+        say(f"fused tables from {cfg.features_root}: {len(found)} session(s)")
+        for session, why in not_read.items():
+            say(f"{session}: no table under the features root ({why})")
     by_session = cfg.split == 'session'
-    if by_session:
+    # the session, unit and forward splits: every session the coder labelled, DEV and TEST alike
+    pooled = cfg.split in POOLED_SPLITS
+    if pooled:
         # one coder's own file is the truth, matched by its exact name
-        require_coder(cfg.coder, [path.parents[2] for _, path in found])
+        require_coder(cfg.coder, [folder[s] for s, _ in found])
     # the truth coder is chosen on the DEV sessions in every split, so TEST labels never decide it
-    coder = cfg.coder or primary_coder([path.parents[2] for s, path in found if s not in S.TEST_SESSIONS])
+    coder = cfg.coder or primary_coder([folder[s] for s, path in found if s not in S.TEST_SESSIONS])
     # a test run may score TEST against another coder than the one that trains; DEV always reads `coder`
     test_coder = (cfg.test_coder or coder) if cfg.split == 'test' else coder
-    models = L.model_names([path.parents[2] for _, path in found])
+    models = L.model_names([folder[s] for s, _ in found])
     data, tables, excluded = {}, {}, {}
     for session, path in found:
         loaded, table = load_session(session, path, test_coder if session in S.TEST_SESSIONS else coder,
-                                     cfg.join, cfg.target, models, adjudicated=not by_session)
+                                     cfg.join, cfg.target, models, adjudicated=not pooled,
+                                     directory=folder[session] if cfg.features_root is not None else None)
         # S1, the inclusion rule: a session that never shows two persons together is left out whole
         included, reason = LY.session_inclusion(table, loaded.roster)
         if not included:
             excluded[session] = {**loaded.roster.record(), 'included': False, 'reason': reason}
-            if by_session:
+            if pooled:
                 excluded[session]['coded_windows'] = loaded.n_coded
             say(f"{session} left out: {reason}")
             continue
-        if by_session and not loaded.n_coded:
+        if pooled and not loaded.n_coded:
             # the session split folds over the sessions the coder labelled; the others train nothing either
             hint = case_hint(loaded.directory, coder)
             reason = (f"no labels of coder {coder} ({hint or f'labels/{coder}.jsonl missing or empty'})"
@@ -1824,12 +2235,15 @@ def run(config, log=None) -> Path:
             continue
         data[session], tables[session] = loaded, table
     if not data:
-        if by_session:
+        if pooled:
             raise Refused(f"every session is left out (the inclusion rule S1, or no class coded by {coder}): "
                           + '; '.join(f"{s} ({r['reason']})" for s, r in excluded.items()), [], None)
         raise Refused("every session is left out by the inclusion rule S1: "
                       + '; '.join(f"{s} ({r['reason']})" for s, r in excluded.items()))
     link_lessons(data, by_session=by_session)
+    if cfg.split in ('unit', 'forward'):
+        for unit, sessions in split_units(data).items():
+            say(f"unit {unit}: {', '.join(sessions)}")
     if any(m in JEV_MODELS for m in plan['models']):
         for d in data.values():
             d.jev, d.jev_note = jev_log_proba(d, cfg.jev_variant)
@@ -1869,6 +2283,9 @@ def run(config, log=None) -> Path:
     elif not folds:
         why = 'no TEST session has a fused table' if cfg.split == 'test' else \
             f'no session has windows coded by {coder} to hold out' if by_session else \
+            f'no unit has windows coded by {coder} to hold out' if cfg.split == 'unit' else \
+            (f'no date with windows coded by {coder} has {S.MIN_EARLIER_DATES} earlier dates with coded windows '
+             f'to train on') if cfg.split == 'forward' else \
             'no date has coded windows to hold out'
     elif unmet:
         why = (f"the TEST truth coder {test_coder!r} has no labels of their own in {', '.join(unmet)} "
@@ -1877,7 +2294,7 @@ def run(config, log=None) -> Path:
         why = 'the held-out sessions have no coded window to score'
     elif problems:
         why = f"{len(problems)} outer-training fold(s) lack {cfg.min_class_windows} coded windows of a class " \
-              f"(or two coded {'sessions' if by_session else 'dates'} for the inner folds)"
+              f"(or two coded {'sessions' if by_session else 'units' if pooled else 'dates'} for the inner folds)"
     if why:
         write_json(run_dir / 'metrics.json', {'run': run_dir.name, 'refused': why, 'problems': problems,
                                               'models': plan['models'], 'target': cfg.target,
@@ -1889,9 +2306,24 @@ def run(config, log=None) -> Path:
         if earlier:
             say(f"the TEST sessions were scored before ({len(earlier)} line(s) in test_runs.jsonl): "
                 f"this run is recorded as another look")
+    if pooled:
+        _record_session_run(artifacts, run_dir, cfg, 'started', data, coder)
     if by_session:
         say(f"leave one session out over every session coder {coder} labelled, DEV and TEST alike "
             f"(inner folds: one training session out); {len(excluded)} session(s) left out")
+    elif cfg.split == 'unit':
+        say(f"leave one unit out over every session coder {coder} labelled, DEV and TEST alike "
+            f"(inner folds: one training unit out); {len(excluded)} session(s) left out")
+    elif cfg.split == 'forward':
+        say(f"forward chaining over every session coder {coder} labelled, DEV and TEST alike: each date with "
+            f"{S.MIN_EARLIER_DATES} earlier dates trains on those (inner folds: one training unit out); "
+            f"{len(excluded)} session(s) left out")
+        for fold in folds:
+            say(f"fold {fold.name}: trains on {len({S.date_of(s) for s in fold.train})} earlier date(s), "
+                f"{len(fold.train)} session(s)")
+    if 'select-all' in plan['models'] and cfg.net_oof == 'best' and any(m in NETWORKS for m in plan['models']):
+        say("select-all compares the networks on their inner answers at each split's own best epoch: "
+            "net_oof 'common' (--net-oof common) reads every split at the refit's epoch count instead")
     say(f"{len(folds)} fold(s) over {len(data)} session(s): {', '.join(plan['models'])}")
     arms = ABLATIONS[cfg.ablate]
     if len(arms) == 1:
@@ -1924,20 +2356,27 @@ def run(config, log=None) -> Path:
     # the headline, the contrasts and the state shares read the full arm only, as pre-registered
     full = {key: variant for key, variant in variants.items() if variant['ablation'] == 'full'}
     # what the bootstrap resamples, as the reason an interval is left out names it
-    unit = 'session' if by_session else 'date'
-    reports, per_session = {}, []
+    unit = 'session' if by_session else 'unit' if cfg.split == 'unit' else 'date'
+    reports, per_session, per_unit = {}, [], []
     for key, variant in variants.items():
         reports[key], rows = score_variant(variant, base, k, plan['bootstrap'], unit)
-        if by_session:
-            # each held-out session is a fold: its own scores, flags, and the mean and SD over them
+        if pooled:
+            # each held-out session is scored on its own, with its flags and the mean and SD over them
             frame = session_scores(variant, base, k)
             reports[key]['across_sessions'] = session_summary(frame, variant, base, k)
             per_session += [{'variant': key, 'model': variant['model'], 'temporal': variant['temporal'],
                              'hmm': variant['hmm'], 'ablation': variant['ablation'], **row}
                             for row in frame.to_dict('records')]
+            if not by_session:
+                # and so is each held-out unit, the unit and forward splits' inferential unit
+                frame = session_scores(variant, base, k, by='lesson')
+                reports[key]['across_units'] = session_summary(frame, variant, base, k, level='unit')
+                per_unit += [{'variant': key, 'model': variant['model'], 'temporal': variant['temporal'],
+                              'hmm': variant['hmm'], 'ablation': variant['ablation'], **row}
+                             for row in frame.to_dict('records')]
         else:
             per_session += [dict(row, variant=key, ablation=variant['ablation']) for row in rows]
-    policy = absent_class_policy(data, all_sessions=by_session)
+    policy = absent_class_policy(data, all_sessions=pooled)
     binary_confirmatory = policy['confirmatory_target'] == 'binary' or k == 2
     headline = select_headline(full, reports, binary_confirmatory) if cfg.split == 'date' else None
     tests = contrasts(headline, full, base, plan['bootstrap'], binary_confirmatory) if headline else {}
@@ -1956,6 +2395,8 @@ def run(config, log=None) -> Path:
 
     predictions_frame(base, variants, k).to_csv(run_dir / 'predictions.csv', index=False)
     pd.DataFrame(per_session).to_csv(run_dir / 'per_session.csv', index=False)
+    if pooled and not by_session:
+        pd.DataFrame(per_unit).to_csv(run_dir / 'per_unit.csv', index=False)
     confusion_frame(reports, k, {key: variant['ablation'] for key, variant in variants.items()}).to_csv(
         run_dir / 'confusion.csv', index=False)
     if cfg.ablate != 'none':
@@ -1964,11 +2405,17 @@ def run(config, log=None) -> Path:
     if by_session:
         results = pd.DataFrame([dict(_result_row(key, variants[key], reports[key]),
                                      **_session_columns(reports[key]['across_sessions'], k)) for key in variants])
+    elif pooled:
+        # the unit and forward splits: the mean and SD over the held-out units
+        results = pd.DataFrame([dict(_result_row(key, variants[key], reports[key]),
+                                     **_session_columns(reports[key]['across_units'], k, level='unit'))
+                                for key in variants])
     else:
         results = pd.DataFrame([_result_row(key, variants[key], reports[key]) for key in variants])
-    # the ceiling is read on the sessions this run scores (in the session split, all of them), against their
-    # truth coder
-    ceiling = inter_coder(data if by_session else
+    # the ceiling is read on the sessions this run scores, against their truth coder: in the session and unit
+    # splits all of them, in the forward split the held-out dates only (the first dates only ever train)
+    scored = {s for fold in folds for s in fold.test}
+    ceiling = inter_coder({s: d for s, d in data.items() if s in scored} if pooled else
                           {s: d for s, d in data.items() if (s in S.TEST_SESSIONS) == (cfg.split == 'test')},
                           test_coder if cfg.split == 'test' else coder)
     for name, agreement in ceiling.items():
@@ -2013,15 +2460,32 @@ def run(config, log=None) -> Path:
             # the full arm's folds are 'folds' above
             'folds': {arm: [{key: out[key] for key in ('name', 'models', 'seconds')} for out in outputs[arm]]
                       for arm in arms if arm != 'full'}}
+    selected = [m for m in plan['models'] if m in SELECTORS]
+    if selected:
+        metrics['selectors'] = {selector: {
+            'variant': _key(selector, NESTED, NESTED),
+            'selected_on': next((out['models'][selector]['selected_on'] for out in outputs['full']
+                                 if selector in out['models']), None),
+            'winners': {out['name']: out['models'][selector]['winner'] for out in outputs['full']
+                        if selector in out['models']},
+            'note': SELECTOR_NOTES[selector]} for selector in selected}
     session_record = None
     if by_session:
         session_record = _session_split_record(coder, folds, excluded)
         metrics['all_sessions'] = True
         metrics['across_sessions'] = session_record['across_sessions']
+    elif pooled:
+        session_record = _unit_split_record(cfg.split, coder, folds, excluded, data)
+        metrics['all_sessions'] = True
+        metrics['across_sessions'] = session_record['across_sessions']
+        metrics['across_units'] = session_record['across_units']
+        metrics['units'] = session_record['units']
     write_json(run_dir / 'metrics.json', metrics)
     write_json(run_dir / 'config.json', _config_record(cfg, plan, data, folds, artifacts, run_dir, coder,
-                                                       session_record))
+                                                       session_record, not_read))
     if cfg.split == 'test':
         _record_test_run(artifacts, run_dir, cfg, 'finished')
+    if pooled:
+        _record_session_run(artifacts, run_dir, cfg, 'finished', data, coder)
     say(f"{len(variants)} variant(s) scored in {metrics['seconds']} s -> {run_dir}")
     return run_dir

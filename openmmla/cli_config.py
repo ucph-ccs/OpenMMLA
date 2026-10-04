@@ -52,6 +52,7 @@ OPTIONAL_DEP_MAP = {
     "ses-code": "uber-base",
     "ses-jev": "uber-base",
     "ses-classify": "uber-base",
+    "ses-contrast": "uber-base",
     "ses-calibrate": "ips-base",
     "ses-archive": "tui",
     "ses-export": "tui",
@@ -181,6 +182,10 @@ COMMANDS = {
     "ses-classify": (
         "openmmla.commands.ses.classify:main",
         "Train and evaluate the 10 s interaction classifier across sessions."
+    ),
+    "ses-contrast": (
+        "openmmla.commands.ses.contrast:main",
+        "Compare two interaction-classifier variants on the same windows, unit by unit, with paired tests."
     ),
     "ses-archive": (
         "openmmla.commands.ses.archive:main",
