@@ -136,8 +136,7 @@ def load_sessions(artifacts: Path, pattern: str | None = None, show_all: bool = 
             continue
         held = next((h for h in hold if h and h in session_dir.name), None)
         if held:
-            hidden.append({'id': session_dir.name, 'reason': f'held back with --hold {held}', 'by': 'hold',
-                           'split': split_of(session_dir.name)})
+            hidden.append({'id': session_dir.name, 'reason': f'held back with --hold {held}', 'by': 'hold'})
             continue
         manifest = _read(session_dir / 'manifest.json')
         recordings = [r for r in manifest.get('recordings', []) if os.path.exists(r.get('path', ''))]
@@ -152,7 +151,7 @@ def load_sessions(artifacts: Path, pattern: str | None = None, show_all: bool = 
                 rule = False  # inclusion() says why, per session
         included, reason = inclusion(session_dir, rule or None)
         if included is False and not show_all:
-            hidden.append({'id': session_dir.name, 'reason': reason, 'by': 'S1', 'split': split_of(session_dir.name)})
+            hidden.append({'id': session_dir.name, 'reason': reason, 'by': 'S1'})
             continue
         videos.sort(key=lambda r: (CAMERA_PREFERENCE.index(r['device']) if r['device'] in CAMERA_PREFERENCE else 99, r['device']))
         audios.sort(key=lambda r: (AUDIO_PREFERENCE.index(r['device']) if r['device'] in AUDIO_PREFERENCE else 99, r['device']))
@@ -164,18 +163,8 @@ def load_sessions(artifacts: Path, pattern: str | None = None, show_all: bool = 
         sessions.append({'id': session_dir.name, 'dir': str(session_dir), 'start': start, 'end': end,
                          'videos': videos[:2], 'audio': audio,
                          'experiment': manifest.get('experiment_id'), 'group': manifest.get('group_id'),
-                         'included': included, 'inclusion': reason, 'split': split_of(session_dir.name)})
+                         'included': included, 'inclusion': reason})
     return sessions, hidden
-
-
-def split_of(session_id: str) -> str | None:
-    """'TEST' for one of the classifier's four TEST sessions, 'DEV' for any other, None when the
-    analytics package cannot be imported (the page then shows neither)."""
-    try:
-        from openmmla.analytics.interaction.splits import TEST_SESSIONS
-    except Exception:
-        return None
-    return 'TEST' if session_id in TEST_SESSIONS else 'DEV'
 
 
 def _test_sessions() -> set[str]:
@@ -578,7 +567,7 @@ function clipSound() { const a = session.audio; return !a ? 'the clip has no sou
 function s1(s) { return s.included === false ? ', left out by S1' : s.included === null ? ', S1 not checked' : ''; }
 function optionText(s) {
   const p = progress[s.id];
-  return `${s.split ? `[${s.split}] ` : ''}${s.id} (${Math.round((s.end - s.start) / 60)} min, ${s.videos.length} cam${s.audio ? ', audio' : ', no audio'}${s1(s)})${p ? ` · ${p.coded}/${p.windows} coded` : ''}`;
+  return `${s.id} (${Math.round((s.end - s.start) / 60)} min, ${s.videos.length} cam${s.audio ? ', audio' : ', no audio'}${s1(s)})${p ? ` · ${p.coded}/${p.windows} coded` : ''}`;
 }
 function showProgress() { for (const o of $('session').options) { const s = sessions.find(x => x.id === o.value); if (s) o.textContent = optionText(s); } }
 async function loadProgress() {
@@ -861,7 +850,7 @@ document.addEventListener('keydown', e => {
     const held = boot.hidden.filter(h => h.by === 'hold').length, byRule = boot.hidden.length - held;
     $('hidden').textContent = [byRule ? `${byRule} session${byRule === 1 ? '' : 's'} hidden: left out of the analysis by the inclusion rule S1` : '',
                                held ? `${held} session${held === 1 ? '' : 's'} held back for now` : ''].filter(Boolean).join(' · ');
-    $('hidden').title = boot.hidden.map(h => `${h.split ? `[${h.split}] ` : ''}${h.id}: ${h.reason}`).join('\n');
+    $('hidden').title = boot.hidden.map(h => `${h.id}: ${h.reason}`).join('\n');
     $('hidden').style.display = '';
   }
   $('session').onchange = e => { e.target.blur(); loadSession(e.target.value); };
