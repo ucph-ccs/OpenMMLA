@@ -1,6 +1,7 @@
 import argparse
 import functools
 import os
+from pathlib import Path
 
 
 def get_parser():
@@ -52,10 +53,32 @@ def get_parser():
             "second between its positions (at a run's first and last step its raw step too), in the window of its "
             "later position; false sums every raw step between the window's own positions in 3D, as every table "
             "fused before 2026-10-03", shortname='-pr')
+    add_arg('cameras', str, None,
+            "comma-separated camera ids (the camera each VFA frame carries, else its window_features.camera_keys "
+            "key): keep only those cameras' frames of every VFA frame set before the fusion and drop a set left "
+            "with no frame; refused when a named camera has no frame in the session. The windows stay those of "
+            "the table fused without it. Needs -o outside artifacts/<session>/analysis/features/", shortname='-cams')
+    add_arg('frame_sets', str, None,
+            "PERIOD:KEEP: after -cams, number the VFA frame sets in time order k = 0, 1, ... and keep set k when "
+            "k mod PERIOD < KEEP (1 <= KEEP < PERIOD): 4:2 keeps two consecutive sets in every four, 2:1 every "
+            "other one. The windows stay those of the table fused without it. Needs -o outside "
+            "artifacts/<session>/analysis/features/", shortname='-fs')
     add_arg('out', str, None,
             'where to write the table (.csv, else JSON lines); if not set, '
             'artifacts/<session>/analysis/features/<session>_window_features.csv', shortname='-o')
     return parser
+
+
+def _in_features_folder(path) -> bool:
+    """whether a table path lies in a session's own features folder (.../analysis/features/ or below)."""
+    parts = Path(os.path.realpath(os.path.dirname(os.path.abspath(path)))).parts
+    return any(parts[i:i + 2] == ('analysis', 'features') for i in range(len(parts) - 1))
+
+
+def _kept(report: dict) -> str:
+    sets, frames = report['frame_sets'], report['frames']
+    return (f"{sets['kept']} of {sets['kept'] + sets['dropped']} frame sets, "
+            f"{frames['kept']} of {frames['kept'] + frames['dropped']} frames")
 
 
 def main():
@@ -76,6 +99,21 @@ def main():
     if args.face_refusal < 0:
         parser.error("-fr/--face_refusal must be 0 (off) or more")
     face_refusal = args.face_refusal or None
+    cameras = None
+    if args.cameras is not None:
+        cameras = [camera.strip() for camera in args.cameras.split(',') if camera.strip()]
+        if not cameras:
+            parser.error("-cams/--cameras names no camera")
+    frame_sets = None
+    if args.frame_sets is not None:
+        try:
+            period, keep = (int(part) for part in args.frame_sets.split(':'))
+        except ValueError:
+            parser.error(f"-fs/--frame_sets takes PERIOD:KEEP (e.g. 4:2), not {args.frame_sets!r}")
+        if not 1 <= keep < period:
+            parser.error(f"-fs/--frame_sets {args.frame_sets}: KEEP must be at least 1 and below PERIOD")
+        frame_sets = (period, keep)
+    filtered = cameras is not None or frame_sets is not None
     project_dir = args.project_dir or os.getcwd()
     session_id = args.session_id
     inputs: list[str] = []
@@ -108,9 +146,34 @@ def main():
         except ValueError as e:
             parser.error(str(e))
         pupils_source = 'manifest' if pupils is not None else 'trust bound'
+
+    # a filtered arm's table never lands in a session's own features folder, beside or over its table
+    if filtered and _in_features_folder(args.out or os.path.join(os.fspath(session_dir), 'analysis', 'features', 'x')):
+        parser.error("-cams and -fs make a filtered arm's table: give -o outside artifacts/<session>/analysis/features/")
+    span, filters = None, {}
+    if filtered:
+        from openmmla.utils.constants import EVENT_TYPE_VFA_FEATURES
+        # the windows are those of the events before the filter, so the arm's table has the grid of the
+        # unfiltered one; only the VFA frame sets are filtered
+        span = fusion.session_span(events)
+        records = events.get(EVENT_TYPE_VFA_FEATURES, [])
+        if cameras is not None:
+            records, report = fusion.keep_cameras(records, cameras)
+            if report['missing']:
+                parser.error(f"-cams/--cameras: no VFA frame of {session_id} carries {', '.join(report['missing'])} "
+                             f"(its frames' cameras: {', '.join(report['seen']) or 'none'})")
+            print(f"Cameras {', '.join(cameras)}: kept {_kept(report)}; frames per camera {report['seen']}")
+            filters['cameras'] = report
+        if frame_sets is not None:
+            records, report = fusion.keep_frame_sets(records, *frame_sets)
+            print(f"Frame sets {frame_sets[0]}:{frame_sets[1]}: kept {_kept(report)}")
+            filters['frame_sets'] = report
+        filters['window_span'] = {'from': 'the events before the filters',
+                                  'start': span[0] if span else None, 'end': span[1] if span else None}
+        events = dict(events, **{EVENT_TYPE_VFA_FEATURES: records})
     rows = fusion.window_features(events, window=args.window, step=args.step, participants=participants, pupils=pupils,
                                   hand_relabel=args.hand_relabel, joint_split=args.joint_split, tag_memory=tag_memory,
-                                  face_refusal=face_refusal, path_rule=args.path_rule)
+                                  face_refusal=face_refusal, path_rule=args.path_rule, span=span)
     if not rows:
         print(f"No events found for session {session_id}: nothing to build a table from.")
         return
@@ -218,11 +281,16 @@ def main():
                                              # None: the face checks of remembered tags left unread
                                              'face_refusal_frames': face_refusal,
                                              'path_rule': path_rule,
-                                             'events': counts, 'source': args.measurements or 'influxdb'},
+                                             'events': counts, 'source': args.measurements or 'influxdb',
+                                             # the frame-set filters of a re-fused arm (-cams, -fs), only when set
+                                             **filters},
                                  root=project_dir, project_dir=project_dir)
         write_analysis_record(record, os.path.join(os.path.dirname(path), 'fusion'))
     except Exception as e:  # the table stands without its record
         print(f"Could not write the analysis record next to the table: {e}")
+        if filtered:
+            # a filtered arm's table is read with the record of what its filters kept, or not at all
+            raise SystemExit(f"-cams/-fs: the table {path} has no record of its filters")
 
 
 if __name__ == "__main__":

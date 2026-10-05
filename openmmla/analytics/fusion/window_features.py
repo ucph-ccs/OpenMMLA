@@ -162,6 +162,13 @@ duplicate-skeleton gate reads one), but the camera's distance and field of view 
 cancel out: a 540p and a 1080p camera from the same place give the same values). These are
 2D positions at one frame set a second: hands close together are not hands touching, and a handover
 of a second or less is seen once or not at all.
+
+Filtered frame sets (2026-10-05, for the sensor-value ladder's re-fused arms). keep_cameras keeps
+only the named cameras' frames of every VFA frame set (dropping a set left with none), and
+keep_frame_sets keeps the k-th set in time order when k mod PERIOD < KEEP; mmla ses-fuse applies them
+(-cams, -fs) to the VFA events alone, before the fusion, and passes the span of the events before
+the filter, so the windows stay the grid of the unfiltered table. Every parameter counted in frames
+or seconds is unchanged. Without them the table is the one fused before, byte for byte.
 """
 from __future__ import annotations
 
@@ -1602,6 +1609,64 @@ def camera_keys(frames: list[dict], shared_angles: Iterable[str] = ()) -> list[s
     return keys
 
 
+# ---- frame-set filters for re-fused arms (the sensor-value ladder, 2026-10-05) ----
+
+def keep_cameras(records: Iterable[dict], cameras: Iterable[str],
+                 layout: tuple[int | None, frozenset[str]] | None = None) -> tuple[list[dict], dict]:
+    """the vfa_features records with only the frames of the named cameras, and what was kept. A
+    frame's camera is its camera_keys key under the layout of the records as given (frame_set_layout
+    of them when `layout` is None), so a filter keys the frames as the unfiltered fusion does. A
+    record left with no frame is dropped; a kept record keeps its other fields, its frames in their
+    order. The input is not changed. The report: the cameras named, the frame sets and frames kept
+    and dropped, the frames each camera key held (`seen`) and the named cameras no frame carried
+    (`missing`)."""
+    records, wanted = list(records), list(dict.fromkeys(str(camera) for camera in cameras))
+    if layout is None:
+        layout = frame_set_layout(records)
+    kept, seen = [], Counter()
+    sets_dropped = frames_kept = frames_dropped = 0
+    for record in records:
+        frames = _frames_of(record)
+        keys = camera_keys(frames, layout[1])
+        seen.update(keys)
+        mine = [frame for frame, key in zip(frames, keys) if key in wanted]
+        frames_kept += len(mine)
+        frames_dropped += len(frames) - len(mine)
+        if mine:
+            kept.append(dict(record, features=mine))
+        else:
+            sets_dropped += 1
+    report = {'cameras': wanted, 'frame_sets': {'kept': len(kept), 'dropped': sets_dropped},
+              'frames': {'kept': frames_kept, 'dropped': frames_dropped},
+              'seen': {key: seen[key] for key in sorted(seen)},
+              'missing': [camera for camera in wanted if not seen[camera]]}
+    return kept, report
+
+
+def keep_frame_sets(records: Iterable[dict], period: int, keep: int) -> tuple[list[dict], dict]:
+    """the vfa_features records thinned in time: sorted by start (stable) and numbered k = 0, 1, ...,
+    record k is kept when k mod `period` < `keep` (1 <= keep < period), in time order. 4 and 2 keep
+    two consecutive frame sets in every four, 2 and 1 every other one. The input is not changed; the
+    report gives the rule and the frame sets and frames kept and dropped."""
+    if isinstance(period, bool) or isinstance(keep, bool) or int(period) != period or int(keep) != keep:
+        raise ValueError(f"period and keep must be whole numbers, not {period!r} and {keep!r}")
+    period, keep = int(period), int(keep)
+    if not 1 <= keep < period:
+        raise ValueError(f"keep must be at least 1 and below the period: {period}:{keep}")
+    kept, frames_kept, frames_dropped, sets_dropped = [], 0, 0, 0
+    for k, record in enumerate(sorted(records, key=_time)):
+        n = len(_frames_of(record))
+        if k % period < keep:
+            kept.append(record)
+            frames_kept += n
+        else:
+            sets_dropped += 1
+            frames_dropped += n
+    report = {'period': period, 'keep': keep, 'frame_sets': {'kept': len(kept), 'dropped': sets_dropped},
+              'frames': {'kept': frames_kept, 'dropped': frames_dropped}}
+    return kept, report
+
+
 # ---- identity along the tracks ----
 
 def _decoded(person: dict) -> bool:
@@ -2798,7 +2863,8 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
                     track_tags: bool = True, pupils: list[str] | None = None,
                     work_area: bool = True, seat_partners: bool = True, hand_relabel: bool = True,
                     joint_split: bool = False, tag_memory: float | None = TAG_MEMORY_SECONDS,
-                    face_refusal: int | None = FACE_REFUSAL_FRAMES, path_rule: bool = True) -> list[dict]:
+                    face_refusal: int | None = FACE_REFUSAL_FRAMES, path_rule: bool = True,
+                    span: tuple[float, float] | None = None) -> list[dict]:
     """the fusion table: one row per window over the session's span. `pupils` are the session's
     pupils, the in-group set whose faces and hands are a partner's (default_pupils of the
     participants when not given). With `hand_relabel` (the default) every stored frame's gaze
@@ -2826,10 +2892,14 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     byte. With `path_rule` (the default) a person's path is counted over the whole session on the
     floor, smoothed, without the jitter and the jumps, each step in the window of its later position
     (path_steps); without it every raw step between the window's own positions is summed in 3D, as in
-    every table fused before 2026-10-03."""
+    every table fused before 2026-10-03. `span` is the first and last moment the windows cover
+    (session_span of `events` when not given): a re-fusion whose VFA frame sets were filtered
+    (keep_cameras, keep_frame_sets) passes the span of the events before the filter, so its windows
+    are the grid of the table fused without it."""
     if window <= 0 or step <= 0:
         raise ValueError("window and step must be greater than 0")
-    span = session_span(events)
+    if span is None:
+        span = session_span(events)
     if span is None:
         return []
     participants = list(participants) if participants else participants_of(events)

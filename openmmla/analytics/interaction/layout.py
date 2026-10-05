@@ -241,6 +241,29 @@ def _modality_index() -> dict:
 
 MODALITY_INDEX = _modality_index()
 
+# the gaze model's outputs (2026-10-05, the sensor-value ladder's pose-only arm): a pseudo-modality that
+# ablate() removes inside body_gaze. Its values are the ones the gaze estimator made (the person's gaze
+# switches, gaze shares and readable share; the pair's gaze distance, joint attention and following) and
+# its masks the ones that cover nothing else. The pose values (seen_share, head yaw, the hands,
+# co_seen_share, the hand distances and steps), their masks (m_vfa among them, which seen_share shares
+# with switch_rate and known_share) and vfa_ran stay, and so does the body_gaze block of late fusion
+GAZE_MODEL_VALUES = ('switch_rate',) + GAZE_SHARES + ('known_share', 'gaze_dist_mean', 'joint_attention_ratio',
+                                                      'joint_attention_excess', 'follow_ratio')
+GAZE_MODEL_MASKS = ('m_gaze', 'm_other', 'm_wa', 'm_gazepair', 'm_jexcess', 'm_follow')
+
+
+def _pseudo_index(values: tuple, masks: tuple) -> dict:
+    """where a pseudo-modality's values and masks sit in G, P and Q; it has no availability bit."""
+    entry = {'avail': None}
+    for part, spec, mask_names in (('G', GROUP_VALUES, GROUP_MASKS), ('P', PERSON_VALUES, PERSON_MASKS),
+                                   ('Q', PAIR_VALUES, PAIR_MASKS)):
+        entry[part] = [i for i, v in enumerate(spec) if v.name in values] + \
+            [len(spec) + i for i, m in enumerate(mask_names) if m in masks]
+    return entry
+
+
+PSEUDO_MODALITY_INDEX = {'gaze_model': _pseudo_index(GAZE_MODEL_VALUES, GAZE_MODEL_MASKS)}
+
 _STATS = ('min', 'mean', 'max')
 
 
@@ -726,12 +749,15 @@ def ablate(tokens: Tokens, modalities) -> Tokens:
     are fitted on the same windows (a real outage would recompute `empty`). Without the cameras
     (body_gaze removed, space kept) a present_ratio 0 that the cameras had made unobserved (the
     badge lost while a camera saw the person, `ips_missed`) is an observation again, as a VFA
-    outage would leave it: the space block then carries nothing the cameras saw. The input is not
-    changed; no modality gives the same tokens back."""
+    outage would leave it: the space block then carries nothing the cameras saw. The pseudo-modality
+    `gaze_model` (PSEUDO_MODALITY_INDEX) removes the gaze model's values and masks the same way and
+    nothing else: no availability bit, nobody unpositioned, the pose values of body_gaze kept. The
+    input is not changed; no modality gives the same tokens back."""
     modalities = tuple(dict.fromkeys(modalities))
-    unknown = [m for m in modalities if m not in MODALITIES]
+    known = MODALITIES + tuple(PSEUDO_MODALITY_INDEX)
+    unknown = [m for m in modalities if m not in known]
     if unknown:
-        raise ValueError(f"unknown modality {', '.join(map(str, unknown))}: one of {', '.join(MODALITIES)}")
+        raise ValueError(f"unknown modality {', '.join(map(str, unknown))}: one of {', '.join(known)}")
     if not modalities:
         return tokens
     if tokens.scaled:
@@ -740,8 +766,9 @@ def ablate(tokens: Tokens, modalities) -> Tokens:
     avail = tokens.avail.copy()
     sizes = {'G': len(GROUP_VALUES), 'P': len(PERSON_VALUES), 'Q': len(PAIR_VALUES)}
     for modality in modalities:
-        index = MODALITY_INDEX[modality]
-        avail[:, index['avail']] = 0.0
+        index = MODALITY_INDEX[modality] if modality in MODALITY_INDEX else PSEUDO_MODALITY_INDEX[modality]
+        if index['avail'] is not None:
+            avail[:, index['avail']] = 0.0
         for part, array in arrays.items():
             n = sizes[part]
             values = [c for c in index[part] if c < n]

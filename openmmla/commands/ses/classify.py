@@ -69,7 +69,11 @@ scored only on the windows it answered, and the coverage is printed when that is
 no_space, no_body_gaze, only_body_gaze, only_speech), each with its modalities not run in any
 session, train and test alike; the floors and Jev run in the full arm only, the headline and the
 contrasts are the full arm's, and ablation.csv sets the arms side by side. It is one run, so with
---split test one look at TEST.
+--split test one look at TEST. --ablate gaze_model (the sensor-value ladder, 2026-10-05) does the
+same with the arms only_body_gaze, only_pose and no_gaze_model: only_pose keeps the cameras' pose
+values (seen share, head yaw, hands, hand distances) and removes speech, space and the gaze model's
+values (gaze shares, known share, switch rate, gaze distance, joint attention, following) with
+their masks; no_gaze_model removes the gaze model's values alone.
 
 --quick swaps in two-point grids, 30 training epochs and 200 bootstrap resamples: for checking
 the plumbing end to end, never for a reported number.
@@ -81,7 +85,7 @@ import sys
 import time
 
 DEFAULT_MODELS = 'r0,r1,lr,hgb,late-lr,late-hgb'
-ABLATIONS = ('none', 'modality', 'temporal', 'fusion', 'ladder', 'weights', 'all')
+ABLATIONS = ('none', 'modality', 'gaze_model', 'temporal', 'fusion', 'ladder', 'weights', 'all')
 
 
 def get_parser():
@@ -129,9 +133,11 @@ def get_parser():
                         help="comma list of none, fb (forward-backward), filter (causal, for T0 and T1c inputs), "
                              "or all (default all)")
     parser.add_argument('--ablate', choices=ABLATIONS, default='none',
-                        help="ablation grid: none (default), or modality (every learned model and the rule once more "
+                        help="ablation grid: none (default), modality (every learned model and the rule once more "
                              "without speech, space, body_gaze, speech+space and space+body_gaze, in every session; "
-                             "writes ablation.csv); temporal, fusion, ladder, weights and all are not built yet")
+                             "writes ablation.csv), or gaze_model (the same with the arms only_body_gaze, only_pose "
+                             "and no_gaze_model: the gaze model's values removed, the pose values kept); temporal, "
+                             "fusion, ladder, weights and all are not built yet")
     parser.add_argument('--scaling', choices=('mix', 's', 'c', 'g'), default='mix',
                         help="how the feature values are scaled, in every session alike: mix (default, as each "
                              "value is tagged: most by the training sessions' statistics, a few within the session), "
@@ -292,9 +298,9 @@ def _ledger_add(args) -> int:
     return 0 if all(not what.startswith('skipped') for _, what in done) else 1
 
 
-def _ablation_summary(run_dir) -> str | None:
+def _ablation_summary(run_dir, grid: str = 'modality') -> str | None:
     """ablation.csv condensed, one line per variant, one column per arm: the binary macro-F1 with
-    its interval and the three-class macro-F1; None when the run has no ablation."""
+    its interval and the three-class macro-F1; None when the run has no ablation. `grid` names it."""
     import pandas as pd
     path = run_dir / 'ablation.csv'
     if not path.exists():
@@ -314,7 +320,7 @@ def _ablation_summary(run_dir) -> str | None:
     arms = list(dict.fromkeys(table['ablation']))
     wide = table.pivot(index='variant', columns='ablation', values='cell')
     wide = wide.reindex(index=list(dict.fromkeys(table['variant'])), columns=arms)
-    return ("modality ablation, binary macro-F1 [interval] / macro-F1 (exploratory):\n"
+    return (f"{grid} ablation, binary macro-F1 [interval] / macro-F1 (exploratory):\n"
             + wide.to_string(na_rep='-'))
 
 
@@ -360,11 +366,12 @@ def main(argv=None):
     models = _choices(parser, args.models, E.MODELS, '-m/--models', E.SELECTORS + E.EXPLORATORY)
     temporal = _choices(parser, args.temporal, E.TEMPORAL, '--temporal')
     hmm = _choices(parser, args.hmm, E.HMM_MODES, '--hmm')
-    if args.ablate not in ('none', 'modality'):
-        parser.error(f"--ablate {args.ablate} is not built yet: of the ablations of section 4.6 only modality is built")
-    if args.ablate == 'modality' and all(model in E.FEATURELESS for model in models):
-        parser.error(f"--ablate modality needs a model that reads features: {', '.join(models)} run in the full arm "
-                     f"only (the floors and Jev read none)")
+    if args.ablate not in E.ABLATIONS:
+        parser.error(f"--ablate {args.ablate} is not built yet: of the ablations of section 4.6 only modality is built "
+                     f"(and gaze_model, for the sensor-value ladder)")
+    if args.ablate != 'none' and all(model in E.FEATURELESS for model in models):
+        parser.error(f"--ablate {args.ablate} needs a model that reads features: {', '.join(models)} run in the full "
+                     f"arm only (the floors and Jev read none)")
     if args.with_actions:
         parser.error("--with-actions is not built yet: the semantic block waits for the VLM to run")
     if args.split == 'task':
@@ -461,7 +468,7 @@ def main(argv=None):
             print(f"left out, {session}: {why}")
     else:
         print(_summary(run_dir))
-    ablation = _ablation_summary(run_dir)
+    ablation = _ablation_summary(run_dir, args.ablate)
     if ablation:
         print(ablation)
     if metrics.get('headline'):

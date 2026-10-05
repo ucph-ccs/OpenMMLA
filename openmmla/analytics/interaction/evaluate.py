@@ -57,6 +57,11 @@ unobserved, masks and availability bit 0, as an outage writes them, the empty fl
 floors and Jev read no feature and run in the full arm only. The headline, the contrasts and the
 state shares are the full arm's, which is the run without the ablation; ablation.csv sets the arms
 side by side (exploratory, no Holm correction). An ablated arm's variant key ends in ':<arm>'.
+The gaze-model ablation (`ablate='gaze_model'`, 2026-10-05, for the sensor-value ladder) runs the
+arms of GAZE_MODEL_ARMS the same way: only_body_gaze, only_pose (the cameras' pose values alone:
+layout's pseudo-modality gaze_model removed too) and no_gaze_model. The gaze model's values and
+masks are unobserved as an outage writes them; vfa_ran, the pose values and the body_gaze expert of
+late fusion stay.
 
 The session split (`split='session'`, decided 2026-10-03, when the TEST sessions' data quality
 turned out too poor to stand for the model) pools DEV and TEST: every session the named coder
@@ -219,7 +224,11 @@ JEV_MODELS = ('jev', 'jev-cal')
 # test alike; the full arm first, and it is the run without the ablation
 MODALITY_ARMS = {'full': (), 'no_speech': ('speech',), 'no_space': ('space',), 'no_body_gaze': ('body_gaze',),
                  'only_body_gaze': ('speech', 'space'), 'only_speech': ('space', 'body_gaze')}
-ABLATIONS = {'none': {'full': ()}, 'modality': MODALITY_ARMS}
+# the gaze-model ablation (2026-10-05, the sensor-value ladder, PREREG_ladder_v1 C3): the cameras with the gaze
+# model's outputs and without them (layout's pseudo-modality gaze_model), the body_gaze block of late fusion kept
+GAZE_MODEL_ARMS = {'full': (), 'only_body_gaze': ('speech', 'space'), 'only_pose': ('speech', 'space', 'gaze_model'),
+                   'no_gaze_model': ('gaze_model',)}
+ABLATIONS = {'none': {'full': ()}, 'modality': MODALITY_ARMS, 'gaze_model': GAZE_MODEL_ARMS}
 # the models that read no feature: the floors and Jev run in the full arm only (an ablated arm would repeat them)
 FEATURELESS = ('majority', 'stratified') + JEV_MODELS
 
@@ -276,7 +285,8 @@ class Config:
     `epochs` fixes the network's E* (the median of the date folds' for the test model) instead of
     the inner choice; `bootstrap` overrides the number of unit resamples; `device` is where the
     networks train: cpu (the default), cuda, or auto (cuda when torch sees a GPU); `ablate` 'modality'
-    adds the arms of MODALITY_ARMS to the run ('none', the default, runs the full arm only); `scaling`
+    adds the arms of MODALITY_ARMS to the run, 'gaze_model' those of GAZE_MODEL_ARMS ('none', the
+    default, runs the full arm only); `scaling`
     is layout.scale's scheme for every session, training and held-out alike: 'mix' (the default, by
     each value's tag), 's' (every value within its own session), 'c' (centred within the session on the
     global spread) or 'g' (every value globally). `split` 'unit' and 'forward' read the sessions 'session'
@@ -2505,7 +2515,7 @@ def run(config, log=None) -> Path:
                                                      models=[m for m in plan['models'] if m not in FEATURELESS])
                  for arm, removed in arms.items()}
         alone = [m for m in plan['models'] if m in FEATURELESS]
-        say(f"modality ablation: {', '.join(arms)}; {', '.join(alone) or 'no model'} in the full arm only")
+        say(f"{cfg.ablate} ablation: {', '.join(arms)}; {', '.join(alone) or 'no model'} in the full arm only")
         outputs = _run_arms(folds, arm_data, plans, say)
 
     # the rows are the same in every arm: an ablation keeps the grid, the empty flag, the labels and the strata
