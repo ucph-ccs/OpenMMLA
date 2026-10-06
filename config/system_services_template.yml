@@ -21,7 +21,7 @@ MQTT:
 Redis:
   host: <uber-server>
   port: 6379
-  db: 1                               # a db other than 0 keeps the Celery queue apart from the control bus
+  db: 1                               # keeps the dashboard's Celery queue out of the default db 0 (START/STOP pub/sub ignores the db)
 Dashboard:
   host: <uber-server>                 # where make flask runs; the Status tab probes host:port
   port: 5050                          # make flask also binds the next two ports, the media ports the Live page loads a replay's recordings from

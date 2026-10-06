@@ -48,7 +48,7 @@ MongoDB:
 Redis:
   host: <redis-host>
   port: 6379
-  db: 1          # a database number other than 0, so the Celery queue stays apart from the session control bus
+  db: 1          # a database number other than 0, so the Celery queue stays out of the default database
 ```
 
 MediaMTX is found through **System Settings → Stream Server** (`config/system_services.yml` on the dashboard's machine: `host`, `api_port`, `playback_port`, `webrtc_port`), re-read every minute; without it the dashboard tries a `StreamServer` section of `config.yml`, then the InfluxDB host with the MediaMTX default ports. See [Camera tiles and live video](#camera-tiles-and-live-video).
@@ -319,8 +319,8 @@ The dashboard is where a session is watched, so the processes that produce it ne
 
 The **Downloads** card of **Data and exports** on the Analysis page lists, between the transcript and the raw events, the recordings of the session that the dashboard's machine holds. It starts with a line on the session's archive (`mmla ses-archive`): `Archive: complete, 32 files, 99 MB, verified 2 Oct 2026 16:29, on this machine`, or `on server-01:~/OpenMMLA/artifacts/<session>` when the archive is on another machine; an archive that is not complete (`partial`) carries a warning mark; `Not archived` without one. It reads the archive from the session's MongoDB document, else from the manifest of the session folder on the dashboard's machine. Then come the session's files in two lists, one row each with its format, length and size, a **Download** link, and a **Play** link that opens the file in a new tab, where the browser plays it and can seek in it:
 
-- **Collection recordings**: the camera and microphone files of the Collection card's recorders (`Camera c920-05 on raspi5-01`, `Group mic jabra-0`, `Worn mic vimo-0, Tag 0`).
-- **Stream cuts (archived)**: the cuts `mmla ses-archive` (or the TUI's Sessions → Export Streams) took of each stream from the stream server, fMP4 (`Stream vfa/c920-05`, `Stream asr/c920-05-mic`). A live session whose capture hosts recorded nothing has only these; the card then says that there were no Collection recordings, and the cuts are its video and sound.
+- **Collection recordings**: the camera and microphone files of the Collection card's recorders (`Camera c920-05 on pi-01`, `Group mic jabra-0`, `Worn mic vimo-0, Tag 0`).
+- **Stream cuts (archived)**: the cuts `mmla ses-archive` (or the TUI's **Sessions → Export**) took of each stream from the stream server, fMP4 (`Stream vfa/c920-05`, `Stream asr/c920-05-mic`). A live session whose capture hosts recorded nothing has only these; the card then says that there were no Collection recordings, and the cuts are its video and sound.
 
 The page asks for the list once, when the section is first shown.
 
