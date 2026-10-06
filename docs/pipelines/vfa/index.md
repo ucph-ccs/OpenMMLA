@@ -75,7 +75,7 @@ The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnal
 
 Local:
 
-- **vLLM**: the **MLLM Server** card runs `vllm serve` with the model, port and limits from `config/mllm_server.yml` (Qwen3-VL-8B-Instruct by default) in the `vfa-vllm` environment (`pip install -e '.[vfa-vllm-runtime]'`, Python 3.12). Point `vllm.vlm_base_url` at it. Alternatively the `mllm` profile of the VFA compose file runs the official vLLM image; see the [Docker guide](../../docker.md#local-vllm-vlm-backend).
+- **vLLM**: the **MLLM Server** card runs `vllm serve` with the model, port and limits from `config/mllm_server.yml` (Qwen3-VL-8B-Instruct by default) in the `vfa-vllm` environment (`pip install -e '.[vfa-vllm-runtime]'`, Python 3.12). Point `vllm.vlm_base_url` at it. A dockerized frame analyzer reaches it on the same machine at `http://host.docker.internal:<port>/v1`; see the [Docker guide](../../docker.md#a-vlm-server-on-the-same-host).
 - **Ollama**: install from https://ollama.com/download and pull a multimodal model (`ollama pull llava`); backend `ollama`.
 - **llama.cpp**: backend `llamacpp` against a llama-server endpoint.
 

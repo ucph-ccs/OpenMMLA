@@ -1,9 +1,6 @@
-# VFA server stack — frame analyzer (5007) plus optional local vLLM backends.
+# VFA server stack — frame analyzer (5007).
 # Run from the repository root:
 #   docker compose -f docker/docker-compose.vfa.yml up -d --build
-# With a local vLLM VLM server (OpenAI-compatible, port 8000):
-#   VLLM_VLM_MODEL=openbmb/MiniCPM-V-2_6 \
-#   docker compose -f docker/docker-compose.vfa.yml --profile mllm up -d
 #
 # Requirements on the host: NVIDIA driver + nvidia-container-toolkit.
 
@@ -43,26 +40,9 @@ services:
     ports:
       - "5007:5007"
     extra_hosts:
-      # lets config URLs like http://localhost:8000/v1 keep working when the
-      # vLLM backend runs on the host or in the mllm profile below
+      # lets the config reach a VLM server running natively on the host (the
+      # console's MLLM Server card, Ollama) at http://host.docker.internal:<port>/v1
       - "host.docker.internal:host-gateway"
-
-  # optional local VLM backend (config backend: vllm → vlm_base_url http://<host>:8000/v1)
-  vllm-vlm:
-    <<: *gpu
-    profiles: ["mllm"]
-    image: vllm/vllm-openai:latest
-    # bounded on purpose: a bad config is not fixed by trying again, and an
-    # endless loop only makes the console's status blink as the port comes and goes
-    restart: on-failure:3
-    command: ["--model", "${VLLM_VLM_MODEL:-openbmb/MiniCPM-V-2_6}", "--trust-remote-code"]
-    environment:
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-    ports:
-      - "8000:8000"
-    ipc: host
 
 volumes:
   hf-cache:

@@ -15,7 +15,6 @@ Two kinds of stacks live in this directory:
 | SpeechTranscriber | `openmmla/asr-speech-transcriber` | 5005 | ✅ | **whisperx 3.8.6 + torch 2.8 + ct2 ≥4.5 (cuDNN 9)** |
 | VoiceActivityDetector | `openmmla/asr-voice-activity-detector` | 5006 | — | silero-vad (CPU torch) |
 | VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | ✅ | torch 2.7 + tf-keras/retina-face + ultralytics 8.4 (YOLO26 pose, **AGPL-3.0**: serving this image over a network carries the AGPL source-offer obligation for the combined work; leave it out and set `features.enabled: false` for an AGPL-free deployment) + onnxruntime-gpu 1.22 (the tracker's optional face check) |
-| vLLM VLM backend (optional) | `vllm/vllm-openai` | 8000 | ✅ | official image, profile `mllm` |
 
 ## Host requirements
 
@@ -60,16 +59,9 @@ docker compose -f docker/docker-compose.asr.yml --profile nemo up -d audio-infer
 
 Set `AudioInferer.backend` to `nemo` in `pipelines/asr-server/config.yml` at the same time. The TUI picks the container from that setting automatically.
 
-### Local vLLM VLM backend
+### A VLM server on the same host
 
-```bash
-VLLM_VLM_MODEL=openbmb/MiniCPM-V-2_6 \
-docker compose -f docker/docker-compose.vfa.yml --profile mllm up -d
-```
-
-The frame analyzer container maps `host.docker.internal` to the host, so a `vlm_base_url` of `http://localhost:8000/v1` in the config has to become `http://host.docker.internal:8000/v1` (or the compose service name, `http://vllm-vlm:8000/v1`).
-
-This is separate from the TUI's **MLLM Server** card, which runs vLLM natively in the `vfa-vllm` conda environment from `config/mllm_server.yml`.
+The VLM servers are not containers: the TUI's **MLLM Server** card runs vLLM natively in the `vfa-vllm` conda environment from `config/mllm_server.yml`, and Ollama is a host install. The frame analyzer container maps `host.docker.internal` to the host, so a `vlm_base_url` of `http://localhost:<port>/v1` in the config has to become `http://host.docker.internal:<port>/v1` when that server runs on the same machine.
 
 ## Database stack: InfluxDB and MongoDB
 
