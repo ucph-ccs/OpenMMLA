@@ -97,8 +97,8 @@ from openmmla.utils.session_sources import stream_for_base, stream_url_path
 from openmmla.utils.stream_registry import load_stream_registry
 from openmmla.utils.config import (
     asr_segment_durations, base_room, bases_by_room, decrypt_config_values, get_base_by_id, get_bases,
-    holds_placeholder, load_yaml_config, main_of_base, main_without_matrices, placeholder_fields,
-    read_yaml_mapping, room_main,
+    holds_placeholder, load_yaml_config, main_of_base, main_without_matrices, matrix_file_bases,
+    placeholder_fields, read_yaml_mapping, room_main,
     shared_segment_duration,
 )
 from openmmla.collection.recording import (
@@ -1265,6 +1265,50 @@ def _remote_transform_matrix_listing(profile, remote_dir: str) -> list[str] | No
     )
 
 
+# the line that names each file in _remote_matrix_bases' output
+_MATRIX_TEXT_MARK = "@@OPENMMLA_MATRIX_FILE@@"
+
+
+def _local_matrix_bases(local_dir: str) -> dict[str, set[str] | None]:
+    """each transformation_matrices_<id>.json of a folder by its main id, and
+    the base ids it holds a matrix for (None for one that cannot be read)."""
+    held: dict[str, set[str] | None] = {}
+    for base_id in _matrix_file_ids(_local_transform_matrix_files(local_dir)):
+        try:
+            with open(os.path.join(local_dir, f"{_MATRIX_FILE_PREFIX}{base_id}.json"), encoding="utf-8") as file:
+                held[base_id] = matrix_file_bases(file.read())
+        except OSError:
+            held[base_id] = None
+    return held
+
+
+def _remote_matrix_bases(profile, remote_dir: str) -> dict[str, set[str] | None] | None:
+    """what _local_matrix_bases says of a remote folder, read with one
+    command; None when the host could not be asked."""
+    quoted = _quote_remote_path(remote_dir)
+    cmd = (
+        f"if [ -d {quoted} ]; then for f in {quoted}/{_MATRIX_FILE_PREFIX}*.json; do "
+        f"[ -f \"$f\" ] || continue; printf '\\n{_MATRIX_TEXT_MARK} %s\\n' \"$(basename \"$f\")\"; "
+        f"cat \"$f\"; done; fi"
+    )
+    try:
+        result = ssh_run_sync(profile, cmd, timeout=8.0)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    texts: dict[str, list[str]] = {}
+    current = None
+    for line in (result.stdout or "").splitlines():
+        if line.startswith(_MATRIX_TEXT_MARK + " "):
+            current = line[len(_MATRIX_TEXT_MARK) + 1:].strip()
+            texts[current] = []
+        elif current is not None:
+            texts[current].append(line)
+    return {base_id: matrix_file_bases("\n".join(texts[f"{_MATRIX_FILE_PREFIX}{base_id}.json"]))
+            for base_id in _matrix_file_ids(list(texts))}
+
+
 # the base cards, and the pipeline their bases note in a session's sources
 _BASE_CARD_PIPELINES = {"ASR Base": "asr", "VFA Base": "vfa", "IPS Base": "ips"}
 
@@ -1813,18 +1857,33 @@ def _matrix_base_note(base: dict | None) -> str:
     return "room " + room if room else ""
 
 
-def _main_camera_choices(ids: list[str] | None, config: dict) -> tuple[list[tuple[str, str]], str]:
+def _alone_main_cameras(ids: list[str] | None, config: dict, held: dict | None = None) -> list[str]:
+    """the Bases entries that can be the main camera alone on the card's host:
+    no matrix file there holds them, nor is their own (main_without_matrices).
+    `held` is each file's main id and the bases it holds a matrix for, None
+    when the files could not be read (then only the mains, and the only
+    Bases entry, are taken as such); a host whose files could not be listed
+    (`ids` None) has none, as which bases they hold is not known."""
+    if ids is None:
+        return []
+    known = held if held is not None else {base_id: None for base_id in ids}
+    return [str(base.get("id")) for base in get_bases(config)
+            if main_without_matrices(config, base.get("id"), known)]
+
+
+def _main_camera_choices(ids: list[str] | None, config: dict,
+                         held: dict | None = None) -> tuple[list[tuple[str, str]], str]:
     """the Main Camera dropdown of the IPS synchronizer: one option per matrix
-    file on the card's host, then each base with no file there that can be the
-    main camera alone (the main of its room, or the only Bases entry), whose
-    coordinates a session of that camera alone keeps as they are; and the
-    default, the Bases entry with main: true when it is offered, else the
-    first option ("" with none). A host whose files could not be listed
-    (None) offers nothing: which mains have no file is not known."""
+    file on the card's host, then each base that can be the main camera alone
+    there (_alone_main_cameras: no file holds it), whose coordinates a
+    session of that camera alone keeps as they are; and the default, the
+    Bases entry with main: true when it is offered, else the first option
+    ("" with none). A host whose files could not be listed (None) offers
+    nothing."""
     if ids is None:
         return [], ""
     bases = {str(base.get("id")): base for base in get_bases(config)}
-    alone = [base_id for base_id in bases if base_id not in ids and main_without_matrices(config, base_id)]
+    alone = _alone_main_cameras(ids, config, held)
     options = []
     for base_id in [*ids, *alone]:
         base = bases.get(base_id)
@@ -7947,11 +8006,14 @@ class ServicePanel(Widget):
             if param.flag == "-b" and param.per_instance:
                 params.append(replace(param, choices=base_options, default=[value for _, value in base_options if value]))
             elif param.flag == "-mc" and pipeline == "ips":
-                options, default = _main_camera_choices(self._transform_matrix_ids(target), config)
-                # Base 1 takes the main of its room along, or itself as the only Bases entry
+                ids = self._transform_matrix_ids(target)
+                held = self._transform_matrix_bases(target) if ids is not None else None
+                options, default = _main_camera_choices(ids, config, held)
+                # Base 1 takes the main of its room along, or itself when no matrix file holds it
+                alone = _alone_main_cameras(ids, config, held)
                 follow = {
-                    str(base.get("id")): main_of_base(config, base.get("id"))
-                    or (str(base.get("id")) if main_without_matrices(config, base.get("id")) else None)
+                    str(base.get("id")): str(base.get("id")) if str(base.get("id")) in alone
+                    else main_of_base(config, base.get("id"))
                     for base in get_bases(config)
                 }
                 params.append(replace(param, choices=options, default=default,
@@ -7993,12 +8055,28 @@ class ServicePanel(Widget):
             if listing is not None:
                 cache[target] = _matrix_file_ids(listing)
                 stale.discard(target)
+                # which bases the files hold (the Main Camera's bases alone), asked only when there are files
+                held_cache = getattr(self, "_matrix_bases_cache", None)
+                if held_cache is None:
+                    held_cache = self._matrix_bases_cache = {}
+                held_cache[target] = (
+                    _remote_matrix_bases(profile, self._ips_transform_remote_dir(profile)) if cache[target] else {}
+                )
             elif cache.get(target) is not None:
                 # not answering now: the Main Camera keeps the list and the pick it had
                 stale.add(target)
             else:
                 cache[target] = None
         return cache.get(target)
+
+    def _transform_matrix_bases(self, target: str) -> dict[str, set[str] | None] | None:
+        """each matrix file on the card's host by its main id, and the bases it
+        holds a matrix for; None when they have not been read. This machine's
+        are read each time, a remote host's with its listing
+        (_transform_matrix_ids with `refresh`)."""
+        if target == "local":
+            return _local_matrix_bases(_ips_transform_local_dir(self._root))
+        return (getattr(self, "_matrix_bases_cache", None) or {}).get(target)
 
     def _matrix_folder(self, target: str) -> str:
         """camera_sync/ of the card's host, as the log names it."""
@@ -8523,6 +8601,11 @@ class ServicePanel(Widget):
         if by_room and main and _coerce_int(params.get("-ns"), 0) > 0:
             room = next(iter(by_room))
             wanted = room_main(config, room)
+            if wanted and main != wanted and main in picked:
+                ids = self._transform_matrix_ids(target)
+                if main in _alone_main_cameras(ids, config, self._transform_matrix_bases(target) if ids else None):
+                    # a camera no matrix file holds: its own coordinates (_ips_alone_problem keeps it alone)
+                    wanted = main
             if wanted and main != wanted:
                 return (
                     f"[yellow]The Main Camera is {main}, but the bases are room {room or '(none)'}'s, whose main "

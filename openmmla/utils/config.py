@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -127,16 +128,35 @@ def main_of_base(config: dict, base_id) -> str | None:
     return None if base is None else room_main(config, base_room(base))
 
 
-def main_without_matrices(config: dict, base_id) -> bool:
-    """whether base `base_id` can be a session's main camera with no
-    transformation_matrices_<id>.json: it is the main of its room, or the
-    config's only Bases entry. Its poses are then the session's coordinates
-    as they are, and no other camera is placed (camera sync's file is what
-    puts another camera in its coordinates)."""
-    bases = get_bases(config)
-    if len(bases) == 1:
-        return str(bases[0].get("id")) == str(base_id)
-    return main_of_base(config, base_id) == str(base_id)
+def main_without_matrices(config: dict, base_id, matrices: dict | None = None) -> bool:
+    """whether base `base_id` can be a session's main camera alone, with no
+    transformation_matrices_<id>.json of its own: no exported file holds a
+    matrix for it, so no other camera's coordinates take it in, and its own
+    are the session's as they are (no other camera is placed). `matrices`
+    gives each exported file's main id and the base ids it holds a matrix
+    for (None for a file that could not be read); without it, or with a file
+    unread, only the main of its room or the config's only Bases entry is
+    taken as one."""
+    base_id = str(base_id)
+    if get_base_by_id(config, base_id) is None:
+        return False
+    if matrices is not None and base_id in matrices:
+        return False  # it has its own file: a main camera with matrices
+    if matrices is not None and all(held is not None for held in matrices.values()):
+        return not any(base_id in held for held in matrices.values())
+    if len(get_bases(config)) == 1:
+        return True
+    return main_of_base(config, base_id) == base_id
+
+
+def matrix_file_bases(text: str) -> set[str] | None:
+    """the base ids a transformation_matrices_<id>.json (its text) holds a
+    matrix for; None when it is not such a file's JSON."""
+    try:
+        matrices = json.loads(text)
+    except ValueError:
+        return None
+    return {str(key) for key in matrices} if isinstance(matrices, dict) else None
 
 
 def camera_sync_problem(config: dict) -> str:

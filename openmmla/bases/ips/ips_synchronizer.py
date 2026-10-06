@@ -11,7 +11,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.config import base_room, is_main_base, main_without_matrices
+from openmmla.utils.config import base_room, is_main_base, main_without_matrices, matrix_file_bases
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .fusion import DEFAULT_GATE, fuse_bucket, place
@@ -399,12 +399,29 @@ class IPSSynchronizer(Synchronizer):
                       if name.startswith(MATRICES_PREFIX) and name.endswith('.json')
                       and os.path.isfile(os.path.join(self.camera_sync_dir, name)))
 
+    def _exported_bases(self) -> dict[str, set[str] | None]:
+        """Each exported file's main camera id and the base ids it holds a matrix for (None for a
+        file that cannot be read)."""
+        held = {}
+        for name in self._exported_matrices():
+            try:
+                with open(os.path.join(self.camera_sync_dir, name), 'r') as file:
+                    held[main_id_of(name)] = matrix_file_bases(file.read())
+            except OSError:
+                held[main_id_of(name)] = None
+        return held
+
+    def _alone(self, main_id) -> bool:
+        """Whether base `main_id` can be the main camera alone: no exported file holds a matrix for
+        it, nor is its own (openmmla.utils.config.main_without_matrices)."""
+        return main_without_matrices(self.config, main_id, self._exported_bases())
+
     def _resolve_main_camera(self) -> tuple[str | None, str]:
         """The main camera a run takes without asking: (id, "") or (None, why there is none).
 
-        -mc names it: a base with its transformation file there, or one that can be the main camera
-        alone without one (the main of its room, or the only Bases entry), which then keeps its own
-        coordinates and places no other camera. Without -mc: the Bases entry marked main: true when
+        -mc names it: a base with its transformation file there, or a Bases entry that no file
+        there holds a matrix for, which is then the main camera alone: it keeps its own coordinates
+        and places no other camera. Without -mc: the Bases entry marked main: true when
         its transformation file is there, else the only transformation file in camera_sync/, else,
         with no file there, the config's only Bases entry.
         """
@@ -412,12 +429,15 @@ class IPSSynchronizer(Synchronizer):
         listed = ', '.join(exported)
         if self.launch_main_camera:
             main_id = self.launch_main_camera
-            if matrices_file_name(main_id) in exported or main_without_matrices(self.config, main_id):
+            if matrices_file_name(main_id) in exported or self._alone(main_id):
                 return main_id, ''
             there = f"camera_sync holds {listed}" if exported else "camera_sync holds no transformation files"
+            placed = [held_by for held_by, held in self._exported_bases().items() if held and main_id in held]
+            pick = (f"pick {placed[0]} as the main camera on the IPS Base card, whose matrices place base {main_id}"
+                    if placed else "pick another main camera on the IPS Base card")
             return None, (f"There is no camera_sync/{matrices_file_name(main_id)} for main camera {main_id} in "
                           f"{self.project_dir} ({there}): run IPS Transforms and export the transformations, "
-                          f"or pick another main camera on the IPS Base card.")
+                          f"or {pick}.")
 
         main_bases = [base for base in get_bases(self.config) if is_main_base(base)]
         mains = [str(base.get('id')) for base in main_bases]
@@ -663,9 +683,9 @@ class IPSSynchronizer(Synchronizer):
 
         Args:
             main_id: the main camera id whose camera_sync/transformation_matrices_<id>.json to load
-                (none, {}, for a base that can be the main camera alone without that file; the
-                result is None for another); if None, list the files there and the bases that
-                can be the main camera alone, and ask for one
+                (none, {}, for a base no file there holds a matrix for, the main camera alone;
+                the result is None for another); if None, list the files there and the bases
+                that can be the main camera alone, and ask for one
         """
         if main_id is not None:
             path = os.path.join(self.camera_sync_dir, matrices_file_name(main_id))
@@ -673,7 +693,7 @@ class IPSSynchronizer(Synchronizer):
                 with open(path, 'r') as file:
                     matrices = json.load(file)
                 self.transform_matrices_file = matrices_file_name(main_id)
-            elif main_without_matrices(self.config, main_id):
+            elif self._alone(main_id):
                 # no other camera is placed, and the main camera's own poses need no matrix
                 matrices = {}
                 self.transform_matrices_file = None
@@ -683,9 +703,9 @@ class IPSSynchronizer(Synchronizer):
             return matrices
 
         exported = self._exported_matrices()
+        held = self._exported_bases()
         alone = [str(base.get('id')) for base in get_bases(self.config)
-                 if matrices_file_name(base.get('id')) not in exported
-                 and main_without_matrices(self.config, base.get('id'))]
+                 if main_without_matrices(self.config, base.get('id'), held)]
         choices = ([(name, main_id_of(name)) for name in exported]
                    + [(f"base {base_id} alone, no matrices (its own coordinates)", base_id) for base_id in alone])
         for idx, (label, _) in enumerate(choices):
