@@ -8,7 +8,7 @@ Cameras at several angles watch a group at work. Each VFA base captures a frame 
 | [Pose](#pose) | per person, a box, 17 keypoints, the AprilTag they wear, a track id and the head yaw; per pair, how close their hands come (circles placed past the wrists) | an Ultralytics YOLO pose model and the AprilTag detector (`POST /vllm/features`) | `vfa_features` |
 | [Gaze](#gaze) | per person, the face box, the point the gaze lands on, the probability it lands in the frame, and what it lands on (a partner's face or hands, their own hands, a zone, elsewhere); per pair, how far apart the gazes land | RetinaFace and PaGE or Gaze-LLE, with the pose (`POST /vllm/features`) | `vfa_features` |
 
-Each is switched on its own (Gaze also turns Pose on, and the two come back in one request): **Action Labels**, **Pose** and **Gaze** on the card, `-a`, `-pose` and `-gaze` on the command line (see [Choosing the outputs](#choosing-the-outputs)). The action labels are semantic, one label per person each time the VLM is asked, every 30 s by default. The pose and the gaze are geometry, one answer per frame set, about every second in a pose run, and no VLM is involved.
+Each is switched on its own (Gaze also turns Pose on, and the two come back in one request): **Action Labels**, **Pose** and **Gaze** on the card, `-a`, `-pose` and `-gaze` on the command line (see [Choosing the outputs](#choosing-the-outputs)). The action labels are semantic, one label per person each time the VLM is asked, every 30 s (the bases' `keyframe_interval`) when they are on, and they are off by default: the VLM is the costliest request, and a cloud backend gets the frames. The pose and the gaze are geometry, one answer per frame set, about every second in a pose run, and no VLM is involved.
 
 ## Pipeline overview
 
@@ -71,7 +71,7 @@ Templates substitute `{{variable}}` placeholders, each using only its own subset
 
 ### Model backend
 
-The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnalyzer.backend` in `pipelines/vfa-server/config.yml` and fill in the matching block; the template lists every supported one. In the paper, GLM-4.5V, InternVL-3.5, Gemini-2.5-Pro and GPT-5 were evaluated with the `cot` profile.
+The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnalyzer.backend` in `pipelines/vfa-server/config.yml` (a dropdown on the Config tab) and fill in the matching block; the template lists every supported one. `vllm` is the default, and what a config without `backend` gets: the template's block points at what the MLLM Server card serves (`Qwen/Qwen3-VL-8B-Instruct` on port 8010, one model for both steps, at `http://host.docker.internal:8010/v1`), and the card's `limit_mm_per_prompt` must cover the cameras of a frame set, which go in one request. A `vllm`, `ollama` or `llamacpp` block may leave `api_key` out: `EMPTY` is sent, the key the MLLM Server card starts `vllm serve` with. A cloud backend needs its key and uploads the frames. In the paper, GLM-4.5V, InternVL-3.5, Gemini-2.5-Pro and GPT-5 were evaluated with the `cot` profile.
 
 Local:
 
@@ -193,7 +193,7 @@ The checks run at two moments:
 
 The gaze is where each person looks and at what, from a face detector and a gaze model, again with no VLM. It comes with the pose from the same [features endpoint](#features-endpoint-skeletons-and-gazes) when **Gaze** is on (a gaze lands on someone's face or hands, so Gaze on turns Pose on), in the same `vfa_features` event. The same gaze model draws the gaze lines the VLM sees for the [action labels](#action-labels), but those return no gaze as data.
 
-**Models.** The gaze comes from a face detector and a gaze model (RetinaFace for the faces; PaGE by default, `gaze_backend: gazelle` for Gaze-LLE. `gaze_model` picks the checkpoint: PaGE's `Octopus1/page-vitb` by default, the distilled ViT-B that reaches human agreement on GazeFollow, VideoAttentionTarget and ChildPlay, `Octopus1/page-vits` at a third of the compute, `Octopus1/page-vithplus` the 840M teacher; Gaze-LLE's `gazelle_dinov2_vitl14_inout` by default or a `_childplay` variant fine-tuned on children. PaGE's code is MIT and its checkpoints carry Meta's DINOv3 licence, which binds redistribution of the weights, not serving them): the face box, the point the gaze lands on, the probability it lands in the frame at all, and what it lands on.
+**Models.** The gaze comes from a face detector and a gaze model (RetinaFace for the faces; PaGE by default, `gaze_backend: gazelle` for Gaze-LLE. `gaze_model` picks the checkpoint: PaGE's `Octopus1/page-vitb` by default, the distilled ViT-B that reaches human agreement on GazeFollow, VideoAttentionTarget and ChildPlay, `Octopus1/page-vits` at a third of the compute, `Octopus1/page-vitsplus` between the two, `Octopus1/page-vithplus` the 840M teacher; Gaze-LLE's `gazelle_dinov2_vitl14_inout` by default or `gazelle_dinov2_vitb14_inout`, the torch.hub entry points with the in/out-of-frame head. A checkpoint loads with its own backend only: a `gazelle_*` one needs `gaze_backend: gazelle`. PaGE's code is MIT and its checkpoints carry Meta's DINOv3 licence, which binds redistribution of the weights, not serving them): the face box, the point the gaze lands on, the probability it lands in the frame at all, and what it lands on.
 
 **Targets.** Every target within reach is scored and the best taken: a partner's face (`partner_face`, with their id) beats any hands, the nearest hands (`own_hands` or `partner_hands`) beat a zone, and a named zone beats `elsewhere`; `out_of_frame` below `inout_threshold` (the request's `inout_threshold`, else the config's), and `unknown` for a person with no face (neither RetinaFace nor the pose's head box, below). Every target is widened by what the model cannot resolve, one cell of its 64 by 64 heatmap (30 px at 1920 wide). Zones are polygons the request names in `zones`, `{"table": [[x, y], ...]}` for every frame or `{"front": {"table": [...]}}` per angle, in pixels or in `[0, 1]`.
 
@@ -248,9 +248,11 @@ The endpoint keeps no state but the tracks and their appearance memories: one re
 | Output | Keys |
 |---|---|
 | all | `port` (the card finds the service by it; the container listens on 5007 whatever it says), `workers` (the container runs one gunicorn worker whatever it says, and one it must be: the pose's tracks live in the process), `april_tag` (on when left out) and the AprilTag `families`, which the action labels' overlays draw and the pose's identity reads, and `gaze_detect` (on when left out), which loads the face detector and the gaze model: off, the action labels' frames get no gaze lines and the features no gaze |
-| Action labels | `backend` and its block (see [Model backend](#model-backend)), `end_to_end`, `prompt_profile`, `image_detail`, optionally `action_schema`; the server does not start without `backend` and its block, even when it is only asked for the pose and the gaze |
+| Action labels | `backend` and its block (see [Model backend](#model-backend)), `end_to_end`, `prompt_profile`, `image_detail`, optionally `action_schema`; `backend` is `vllm` when left out, and the server does not start without its block (and, for a cloud backend, its `api_key`), even when it is only asked for the pose and the gaze |
 | Pose | the `features` block: `enabled`, `pose_model`, `weights_dir`, `pose_confidence`, `keypoint_confidence`, `tracking` (`enabled`, `buffer_frames`, `idle_seconds`, `split_gap_seconds`, `frame_seconds`, `cascade`, `freeze_lost` and the `appearance` checks, see [Tracking](#tracking)) |
 | Gaze | `gaze_backend` (`page` for PaGE, the default, or `gazelle` for Gaze-LLE), `gaze_model` (its checkpoint, the backend's default when left out), `gaze_head_scale` (how far PaGE widens a face box into the head crop it looks at), `gaze_head_box_fallback` (true by default: a person the face detector missed gets a head box made from the pose's nose, eyes and ears), `gaze_face_detector_bgr` (true by default: RetinaFace is handed BGR, the order it expects; see [Face detector input](#gaze)), and in the `features` block `gaze` (true by default: whether the features carry gazes when a request does not say; a synchronizer with **Gaze** on does not say, so `false` here leaves its features without gazes) and `inout_threshold`. The action labels' gaze lines use the same model |
+
+On the Config tab `backend`, `prompt_profile`, `image_detail`, `gaze_backend`, `gaze_model` and `features.pose_model` are dropdowns: a value not in the list (a local checkpoint) is shown, marked and kept, and the blank keeps the template's default.
 
 ### Input sources
 
@@ -302,11 +304,11 @@ A process that cannot start says why in its window. A synchronizer with no numbe
 
 | Card | Flag | Config (default) | Server endpoint | Event | Runs on the server |
 |---|---|---|---|---|---|
-| **Action Labels** | `-a` | `Synchronizer.actions` (true) | `/vllm` | `vfa_action` | AprilTag and gaze overlays, then the VLM (with `end_to_end: false`, the template's default, a VLM describes and an LLM classifies) |
-| **Pose** | `-pose` | `Synchronizer.pose` (false) | `/vllm/features` | `vfa_features` | the pose model and the AprilTags |
-| **Gaze** | `-gaze` | `Synchronizer.gaze` (false) | `/vllm/features` | `vfa_features` (the same event) | the pose and the gaze model; a gaze lands on someone's face or hands, so Gaze on turns Pose on |
+| **Action Labels** | `-a` | `Synchronizer.actions` (false) | `/vllm` | `vfa_action` | AprilTag and gaze overlays, then the VLM (with `end_to_end: false`, the template's default, a VLM describes and an LLM classifies) |
+| **Pose** | `-pose` | `Synchronizer.pose` (true) | `/vllm/features` | `vfa_features` | the pose model and the AprilTags |
+| **Gaze** | `-gaze` | `Synchronizer.gaze` (true) | `/vllm/features` | `vfa_features` (the same event) | the pose and the gaze model; a gaze lands on someone's face or hands, so Gaze on turns Pose on |
 
-Each is a three-way choice: `as the config says` passes nothing and the config's `Synchronizer.actions` (true by default), `Synchronizer.pose` and `Synchronizer.gaze` (false by default) decide, `on` and `off` override them for this start.
+Each is a three-way choice: `as the config says` passes nothing and the config's `Synchronizer.actions` (false by default), `Synchronizer.pose` and `Synchronizer.gaze` (true by default) decide, `on` and `off` override them for this start.
 
 The action labels and the features (the pose, with or without the gaze) are two separate requests to the same server: the action labels run the VLM on frames the server first annotates with AprilTags and gaze lines (its own `april_tag` and `gaze_detect` settings), so they use the gaze model as a hint for the VLM but return no gaze and run no pose model; Pose and Gaze return data and run no VLM. With Action Labels and Gaze both on, the gaze model runs twice per frame set.
 

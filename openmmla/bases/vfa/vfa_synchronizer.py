@@ -106,9 +106,12 @@ class VFASynchronizer(Synchronizer):
         # what each frame set is sent for: the config's say, unless the launch flags (-a, -pose,
         # -gaze) said otherwise. The gazes need the pose (a gaze lands on someone's face or
         # hands), so gaze on means pose on
-        config_actions = _config_flag(sync_config.get('actions'), True)
-        config_pose = _config_flag(sync_config.get('pose'), False)
-        config_gaze = _config_flag(sync_config.get('gaze'), False)
+        # action labels are off unless asked for: the VLM is the costliest request, and a cloud
+        # backend gets the frames
+        config_actions = _config_flag(sync_config.get('actions'), False)
+        # pose and gaze are on unless switched off: they are what a session's features are made of
+        config_pose = _config_flag(sync_config.get('pose'), True)
+        config_gaze = _config_flag(sync_config.get('gaze'), True)
         self.actions = config_actions if self.launch_actions is None else bool(self.launch_actions)
         self.gaze = config_gaze if self.launch_gaze is None else bool(self.launch_gaze)
         self.pose = (config_pose if self.launch_pose is None else bool(self.launch_pose)) or self.gaze

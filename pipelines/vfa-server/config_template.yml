@@ -8,11 +8,11 @@ VLLMFrameAnalyzer:
   families: tag36h11  # AprilTag used in experiment, e.g., tag36h11, tag25h9, tagStandard41h12
   gaze_backend: page  # the gaze model behind the gaze lines and the features' gazes: page (PaGE, human-level on the gaze benchmarks) or gazelle (Gaze-LLE from torch.hub)
   gaze_head_scale: 1.3  # page only: the face box widened about its centre into the head crop the model looks at (it learned from head boxes, the face detector answers face boxes); 1 crops the face box as is
-  gaze_model: <gaze-checkpoint>  # its checkpoint; left out, the backend's default. page: Octopus1/page-vitb (default), Octopus1/page-vits (a third of the compute), Octopus1/page-vithplus (the 840M teacher). gazelle: gazelle_dinov2_vitl14_inout (default), gazelle_dinov2_vitb14_inout, the _childplay variants fine-tuned on children
+  gaze_model: <gaze-checkpoint>  # its checkpoint; left out, the backend's default. page: Octopus1/page-vitb (default), Octopus1/page-vits (a third of the compute), Octopus1/page-vitsplus, Octopus1/page-vithplus (the 840M teacher). gazelle: gazelle_dinov2_vitl14_inout (default), gazelle_dinov2_vitb14_inout. A checkpoint loads with its own backend only: a gazelle_* one needs gaze_backend: gazelle
   gaze_head_box_fallback: true  # features endpoint: a person the face detector missed gets a head box from the pose's head keypoints (nose, eyes, ears) for the gaze model; false leaves such persons' gaze unknown
   gaze_face_detector_bgr: true  # hands RetinaFace the frame in BGR, the channel order it expects; false hands it RGB, as every session analysed before 2026-10-02 was: in an A/B on 500 stored frames BGR found a face on 66.5 % of the pupils' heads instead of 47.4 %, losing none, at the same speed, so the gazes and the tracker's face check change with it
 
-  backend: <backend_name>  # e.g., gemini, ollama, openai, vllm, qwen, deepseek, llamacpp, grok
+  backend: vllm  # the VLM behind the action labels, with its block below: vllm (the console's MLLM Server card, the default; left out, vllm too), ollama, llamacpp (self-hosted), or openai, gemini, qwen, deepseek, grok, zhipuai, intern (cloud APIs: the frames are uploaded)
   end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
   image_detail: "auto"  # Image detail for vision models: "low" (faster, less detail), "high" (slower, more detail), "auto" (model decides)
   prompt_profile: cot  # end-to-end prompt variant: cot (zero-shot CoT, paper default), baseline, baseline_no_pre
@@ -60,8 +60,8 @@ VLLMFrameAnalyzer:
   # Supported backends
   ollama:
     api_key: <OLLAMA_API_KEY>
-    vlm_base_url: "http://localhost:11434/v1" # base url for vlm
-    llm_base_url: "http://localhost:11434/v1" # base url for llm
+    vlm_base_url: "http://host.docker.internal:11434/v1"  # Ollama on the frame analyzer's own host (http://localhost:11434/v1 when it runs without Docker)
+    llm_base_url: "http://host.docker.internal:11434/v1"
     vlm_model: "llava:13b" # vlm model name
     llm_model: "llama3.1" # llm model name
     top_p: 0 # top_p for LLM (from 0 to 1) - OPTIONAL: omit if model doesn't support it
@@ -69,20 +69,19 @@ VLLMFrameAnalyzer:
     VLMExtraBody: {} # extra body for vlm
     LLMExtraBody: {} # extra body for llm
 
-  vllm:
-    api_key: <VLLM_API_KEY>
-    vlm_base_url: "http://localhost:8000/v1"
-    llm_base_url: "http://localhost:8001/v1"
-    vlm_model: "openbmb/MiniCPM-V-2_6"
-    llm_model: "microsoft/Phi-3-small-128k-instruct"
-    VLMExtraBody: 
-      stop_token_ids: [151645, 151643] # stop token ids for MiniCPM-V-2_6
+  vllm:  # the console's MLLM Server card (vllm serve, config/mllm_server.yml): one model on port 8010 serves both steps; its limit_mm_per_prompt must cover the cameras of a frame set, which go in one request
+    api_key: EMPTY  # its --api-key; a vllm, ollama or llamacpp block may leave the key out (EMPTY is sent)
+    vlm_base_url: "http://host.docker.internal:8010/v1"  # host.docker.internal: the frame analyzer's container reaching its own host; http://localhost:8010/v1 when it runs without Docker, http://<host>:8010/v1 for another machine
+    llm_base_url: "http://host.docker.internal:8010/v1"
+    vlm_model: "Qwen/Qwen3-VL-8B-Instruct"
+    llm_model: "Qwen/Qwen3-VL-8B-Instruct"
+    VLMExtraBody: {}
     LLMExtraBody: {}
   
   llamacpp:
     api_key: "sk-no-key-required"
-    vlm_base_url: "http://localhost:8001/v1"
-    llm_base_url: "http://localhost:8001/v1"
+    vlm_base_url: "http://host.docker.internal:8001/v1"  # a llama.cpp server on the frame analyzer's own host (http://localhost:8001/v1 when it runs without Docker)
+    llm_base_url: "http://host.docker.internal:8001/v1"
     vlm_model: "ggml-org/SmolVLM-500M-Instruct-GGUF"
     llm_model: "ggml-org/SmolVLM-500M-Instruct-GGUF"
     VLMExtraBody: {}

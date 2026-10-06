@@ -27,11 +27,10 @@ from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze, gaze_backend_name, load_gaze_backend
 from openmmla.utils.video.image import encode_image_base64, load_image
+from openmmla.utils.config_choices import DEFAULT_VFA_BACKEND, LOCAL_API_KEY, LOCAL_VFA_BACKENDS, VFA_BACKENDS
 
-SUPPORTED_BACKENDS = (
-    'ollama', 'vllm', 'openai', 'qwen', 'gemini',
-    'deepseek', 'llamacpp', 'grok', 'zhipuai', 'intern',
-)
+# the VLM backends, each with a block of its own in the config (the Config tab offers the same list)
+SUPPORTED_BACKENDS = VFA_BACKENDS
 
 # frames in a row whose face models fail (a GPU out of memory, say) before the face check is
 # switched off, the colour check staying on
@@ -209,8 +208,10 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             self.families = None
             
         backend = analyzer_config.get('backend')
-        if backend is None or _is_unfilled(backend):
-            raise ValueError(f"{self._config_where('backend')} is not set. {_FILL_IN_HINT}")
+        if backend is None or str(backend).strip() == "" or _is_unfilled(backend):
+            # left out: the VLM the console's MLLM Server card serves on this host
+            backend = DEFAULT_VFA_BACKEND
+            self.logger.info(f"{self._config_where('backend')} is not set: backend {backend}.")
         self.backend = str(backend).strip()
         self.end_to_end = analyzer_config.get('end_to_end', False)
         
@@ -246,7 +247,11 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 f"{_FILL_IN_HINT}"
             )
 
-        self.api_key = self._required_backend_value(backend_config, 'api_key')
+        if self.backend in LOCAL_VFA_BACKENDS and not _text(backend_config.get('api_key'), ''):
+            # self-hosted: the key the console's MLLM Server card starts vllm serve with
+            self.api_key = LOCAL_API_KEY
+        else:
+            self.api_key = self._required_backend_value(backend_config, 'api_key')
         self.vlm_model = self._required_backend_value(backend_config, 'vlm_model')
         self.llm_model = self._required_backend_value(backend_config, 'llm_model')
         self.vlm_base_url = backend_config.get('vlm_base_url', None)
