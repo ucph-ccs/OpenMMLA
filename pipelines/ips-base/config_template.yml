@@ -158,8 +158,8 @@ Gateway:
   scheme: http              # http or https
 
 # Camera intrinsics, one entry per camera, named as a base's `camera` names it.
-# IPS Camera Calibration (Capture, then Calibrate) writes an entry; Launcher →
-# Calibration Cameras → Sync to Remote gives it to another machine; the Config
+# IPS Intrinsics (Capture, then Calibrate) writes an entry; Sync to Host on the
+# Calibration Cameras panel below its card gives it to another machine; the Config
 # tab adds one by hand (+ Add Camera). An entry looks like this:
 #   your-camera:
 #     fisheye: false                # true for a fisheye lens

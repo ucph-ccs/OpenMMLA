@@ -181,10 +181,11 @@ Server:
   vfa:
     vllm_frame_analyzer: http://<vfa-example-server>:<port>/vllm
 
-# Camera intrinsics, one entry per camera, named as a base's `camera` names it.
-# IPS Camera Calibration (Capture, then Calibrate) writes an entry; Launcher →
-# Calibration Cameras → Sync to Remote gives it to another machine; the Config
-# tab adds one by hand (+ Add Camera). An entry looks like this:
+# camera intrinsics, one entry per camera, named as a base's `camera` names it.
+# the Config tab adds one by hand (+ Add Camera), or copy the entry from the
+# Cameras of the IPS base config: IPS Intrinsics (Capture, then Calibrate)
+# writes those, and Sync to Host on the Calibration Cameras panel below its card
+# gives them to another machine's IPS base config only. An entry looks like this:
 #   your-camera:
 #     fisheye: false                # true for a fisheye lens
 #     params: [fx, fy, cx, cy]      # what the tag detector uses

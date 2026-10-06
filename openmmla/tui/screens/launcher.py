@@ -8720,8 +8720,8 @@ class ServicePanel(Widget):
             )
             return (
                 f"[red]No transformation_matrices_<id>.json in {folder} on {where}: the IPS synchronizer takes its "
-                f"Main Camera from one, and every base needs its own file there too. Make them with IPS Camera "
-                f"Sync{fetch}, and press Refresh on this card. A session of one camera needs none: mark its Bases "
+                f"Main Camera from one, and every base needs its own file there too. Make them with IPS Transforms"
+                f"{fetch}, and press Refresh on this card. A session of one camera needs none: mark its Bases "
                 f"entry main: true on the Config tab and Save, and it is offered as the Main Camera. To start the "
                 f"bases alone, set Num Synchronizers to 0.[/red]"
             )
@@ -9570,9 +9570,9 @@ class ServicePanel(Widget):
             form_fields, values, self._stream_server_address())
         if has_cameras:
             section_notes["Cameras"] = (
-                "The cameras of this config: written by IPS Intrinsics (Calibrate), synced from "
-                "another machine (Calibration Cameras, Sync to Host or Sync from Host), or added here with "
-                "+ Add Camera.")
+                "The cameras of this config: added here with + Add Camera. Those of the IPS Base config are "
+                "also written by IPS Intrinsics (Calibrate) and synced from another machine (Calibration "
+                "Cameras, Sync to Host or Sync from Host); another pipeline's are copied from there.")
         form = ConfigForm(pipeline.name, form_fields, values, dynamic_sections,
                           group_add_buttons=group_add_buttons,
                           base_section=pipeline.base_section or None,
