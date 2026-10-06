@@ -28,7 +28,7 @@ Base:
   # (<prefix>_<timestamp>.<extension>), unless initial_sync_time is set.
 
   # Frame processing settings (applies to all video sources)
-  keyframe_interval: 30.0                          # Interval between processed frames in seconds (30.0 = 1 frame per 30s, 1.0 = 1 FPS)
+  keyframe_interval: 1.0                           # Interval between processed frames in seconds (1.0 = 1 FPS, the pace the pose and the gaze are read at; 30.0 = 1 frame per 30s)
   processing_rate: 1.0                             # Real-time rate multiplier for file sources (1.0 = real-time, 0.5 = 2x time allowance, 2.0 = half time allowance)
   enable_timing_sync: true                         # Enforce accumulative timing synchronization for file sources (prevents drift and race conditions)
   
@@ -94,7 +94,7 @@ Synchronizer:
   actions: false                                    # send a frame set every action_interval for its action labels (the VLM, the vfa_action event; the server draws tags and gaze lines on the frames for the VLM by its own april_tag / gaze_detect settings, and returns neither as data); off by default, as the VLM is the costliest request and a cloud backend gets the frames; the card's Action Labels overrides
   pose: true                                        # send every frame set for its skeletons, AprilTags and head yaws as data (the vfa_features event, one per frame set); on by default; the card's Pose overrides
   gaze: true                                        # and for where each person looks, as data (the gaze model's point and target); a gaze needs the pose, so this turns the pose on too; on by default; the card's Gaze overrides
-  action_interval: 0                                # seconds between two action-label (VLM) requests, whatever the bases' keyframe_interval; 0 asks for every frame set. For a pose run at 1 frame set per second, 30 keeps the VLM at its usual pace
+  action_interval: 30                               # seconds between two action-label (VLM) requests, whatever the bases' keyframe_interval (30 when left out); 0 asks for every frame set
   pose_keypoints: true                              # keep the skeletons in every vfa_features event; false keeps the derived fields alone (smaller events)
   feature_zones_file: <zones-json-file>             # optional: a JSON file of named polygons a gaze may land in, {name: [[x, y], ...]} for every angle or {angle: {name: polygon}}, in pixels or in [0, 1]; relative to this folder
 

@@ -119,11 +119,14 @@ class VFASynchronizer(Synchronizer):
         self.feature_zones = self._load_feature_zones(sync_config.get('feature_zones_file'))
         # the VLM at its own pace: with the bases sending a frame set every second for the
         # features, the action labels are asked for at most once per action_interval seconds
-        # (0: every frame set)
+        # (0: every frame set; left out, 30)
+        raw_interval = sync_config.get('action_interval')
+        if raw_interval is None or str(raw_interval).strip() == "" or str(raw_interval).strip().startswith("<"):
+            raw_interval = 30.0
         try:
-            self.action_interval = max(0.0, float(sync_config.get('action_interval') or 0))
+            self.action_interval = max(0.0, float(raw_interval))
         except (TypeError, ValueError):
-            self.action_interval = 0.0
+            self.action_interval = 30.0
         self._last_action_time = None
         
         self.logger.info(f"Loaded angle configurations: {list(self.angle_config.keys()) if self.angle_config else 'None'}")
