@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -130,6 +131,10 @@ _NOTING: dict[tuple[str, str], int] = {}
 # before the count moved holds answers older than what that Start or Stop set
 # (StreamPanel._acted_since)
 _ACTED: dict[tuple[str, str], int] = {}
+# the threads a refresh asks the streams' machines on, all at once: one that is
+# switched off holds a thread for its whole timeout, and asyncio's default
+# executor, which every to_thread of the console shares, must not wait for them
+_HOST_ASKS = ThreadPoolExecutor(max_workers=16, thread_name_prefix="stream-ask")
 
 
 def _count_act(key: tuple[str, str]) -> None:
@@ -1794,7 +1799,7 @@ class StreamPanel(Widget):
         acted_before = dict(_ACTED)
         # the other cards' entries are read while the machines are asked
         loading = self._others_loading()
-        asked: list[tuple[StreamDef, object, str | None]] = []
+        to_ask: list[tuple[StreamDef, object]] = []
         for stream in self._rows():
             if not stream.ssh_profile:
                 continue
@@ -1804,8 +1809,16 @@ class StreamPanel(Widget):
                 if profile is None:
                     self._set_state(stream.name, None)
                     continue
-            state = await loop.run_in_executor(None, _stream_state, profile, _tmux_session_name(stream.name))
-            asked.append((stream, profile, state))
+            to_ask.append((stream, profile))
+        # every machine at once: one that does not answer (a Pi switched off
+        # waits out its timeout) holds up none of the others
+        states = await asyncio.gather(*(
+            loop.run_in_executor(_HOST_ASKS, _stream_state, profile, _tmux_session_name(stream.name))
+            for stream, profile in to_ask
+        ))
+        asked: list[tuple[StreamDef, object, str | None]] = [
+            (stream, profile, state) for (stream, profile), state in zip(to_ask, states)
+        ]
         if loading is not None:
             await asyncio.shield(loading)
         self._rivals = self._rivals_by_name()
@@ -2109,6 +2122,9 @@ class StreamPanel(Widget):
             elif stream.name in self._rivals:
                 # another card gives its name to another stream: Start refuses it
                 status = Text("Name clash", "red")
+            elif state is None:
+                # its machine has not answered a refresh yet
+                status = Text("Asking", "dim")
             else:
                 status = "Stopped"
             live = self._live.get(stream.name)
