@@ -97,7 +97,8 @@ from openmmla.utils.session_sources import stream_for_base, stream_url_path
 from openmmla.utils.stream_registry import load_stream_registry
 from openmmla.utils.config import (
     asr_segment_durations, base_room, bases_by_room, decrypt_config_values, get_base_by_id, get_bases,
-    holds_placeholder, load_yaml_config, main_of_base, placeholder_fields, read_yaml_mapping, room_main,
+    holds_placeholder, load_yaml_config, main_of_base, main_without_matrices, placeholder_fields,
+    read_yaml_mapping, room_main,
     shared_segment_duration,
 )
 from openmmla.collection.recording import (
@@ -1812,19 +1813,28 @@ def _matrix_base_note(base: dict | None) -> str:
     return "room " + room if room else ""
 
 
-def _main_camera_choices(ids: list[str], config: dict) -> tuple[list[tuple[str, str]], str]:
+def _main_camera_choices(ids: list[str] | None, config: dict) -> tuple[list[tuple[str, str]], str]:
     """the Main Camera dropdown of the IPS synchronizer: one option per matrix
-    file on the card's host, and the default, the Bases entry with main: true
-    when it has a file, else the first there is ("" with none)."""
+    file on the card's host, then each base with no file there that can be the
+    main camera alone (the main of its room, or the only Bases entry), whose
+    coordinates a session of that camera alone keeps as they are; and the
+    default, the Bases entry with main: true when it is offered, else the
+    first option ("" with none). A host whose files could not be listed
+    (None) offers nothing: which mains have no file is not known."""
+    if ids is None:
+        return [], ""
     bases = {str(base.get("id")): base for base in get_bases(config)}
+    alone = [base_id for base_id in bases if base_id not in ids and main_without_matrices(config, base_id)]
     options = []
-    for base_id in ids:
+    for base_id in [*ids, *alone]:
         base = bases.get(base_id)
         camera = _shown_base_value(base.get("camera")) if base is not None else ""
-        label = " · ".join(part for part in (base_id, camera, _matrix_base_note(base)) if part)
+        note = "alone, no matrices" if base_id in alone else ""
+        label = " · ".join(part for part in (base_id, camera, _matrix_base_note(base), note) if part)
         options.append((label, base_id))
+    offered = [*ids, *alone]
     main = next((base_id for base_id, base in bases.items() if _is_main_base(base)), None)
-    default = main if main in ids else (ids[0] if ids else "")
+    default = main if main in offered else (offered[0] if offered else "")
     return options, default
 
 
@@ -7937,8 +7947,13 @@ class ServicePanel(Widget):
             if param.flag == "-b" and param.per_instance:
                 params.append(replace(param, choices=base_options, default=[value for _, value in base_options if value]))
             elif param.flag == "-mc" and pipeline == "ips":
-                options, default = _main_camera_choices(self._transform_matrix_ids(target) or [], config)
-                follow = {str(base.get("id")): main_of_base(config, base.get("id")) for base in get_bases(config)}
+                options, default = _main_camera_choices(self._transform_matrix_ids(target), config)
+                # Base 1 takes the main of its room along, or itself as the only Bases entry
+                follow = {
+                    str(base.get("id")): main_of_base(config, base.get("id"))
+                    or (str(base.get("id")) if main_without_matrices(config, base.get("id")) else None)
+                    for base in get_bases(config)
+                }
                 params.append(replace(param, choices=options, default=default,
                                       follow_values={base_id: main for base_id, main in follow.items() if main}))
             elif param.flag == _ROOM_FLAG and pipeline == "ips":
@@ -8515,6 +8530,33 @@ class ServicePanel(Widget):
                 )
         return ""
 
+    def _ips_alone_problem(self, params: dict, picked: list[str], only: str, target: str) -> str:
+        """why the card's bases cannot be one session with a Main Camera that
+        has no matrix file on the card's host: the synchronizer keeps that
+        camera's coordinates as they are and places no other camera, so a
+        session of it is of that camera alone."""
+        main = str(params.get("-mc") or "").strip()
+        if not main or _coerce_int(params.get("-ns"), 0) <= 0:
+            return ""
+        ids = self._transform_matrix_ids(target)
+        if ids is None or main in ids:
+            return ""
+        entries = [value or only for value in picked]
+        # a base left to ask in its window is another camera when the card starts more than one
+        others = [index for index, entry in enumerate(entries) if entry != main and (entry or len(entries) > 1)]
+        if not others:
+            return ""
+        named = ", ".join(f"Base {index + 1}" + (f" ({entries[index]})" if entries[index] else "")
+                          for index in others)
+        where = "this machine" if target == "local" else f"'{target}'"
+        fetch = "" if target == "local" else f" (Sync to Host on the Transform Matrix tab brings them to {where})"
+        return (
+            f"[yellow]Main Camera {main} has no {_MATRIX_FILE_PREFIX}{main}.json in {self._matrix_folder(target)} "
+            f"on {where}: the synchronizer keeps its coordinates as they are and places no other camera, so "
+            f"{named} would be left out. Start base {main} alone, or make the matrices with IPS Transforms"
+            f"{fetch} and press Refresh.[/yellow]"
+        )
+
     def _base_card_start_problem(self, svc: ServiceDef, params: dict, target: str) -> str:
         """why a base card cannot start as it stands, said plainly; "" when it
         can. Every process the card opens takes its choices from the card and
@@ -8548,7 +8590,8 @@ class ServicePanel(Widget):
                 )
             seen[entry] = index
         if svc.name == "IPS Base":
-            problem = self._ips_room_problem(params, picked, target, svc)
+            problem = self._ips_room_problem(params, picked, target, svc) or self._ips_alone_problem(
+                params, picked, only, target)
             if problem:
                 return problem
         if svc.name in _SYNC_WAIT_CARDS and _coerce_int(params.get("-ns"), 0) > 0:
@@ -8590,8 +8633,9 @@ class ServicePanel(Widget):
             return (
                 f"[red]No transformation_matrices_<id>.json in {folder} on {where}: the IPS synchronizer takes its "
                 f"Main Camera from one, and every base needs its own file there too. Make them with IPS Camera "
-                f"Sync{fetch}, and press Refresh on this card. To start the bases alone, set Num Synchronizers "
-                f"to 0.[/red]"
+                f"Sync{fetch}, and press Refresh on this card. A session of one camera needs none: mark its Bases "
+                f"entry main: true on the Config tab and Save, and it is offered as the Main Camera. To start the "
+                f"bases alone, set Num Synchronizers to 0.[/red]"
             )
         return (
             "[yellow]Pick the synchronizer's Main Camera first (press Refresh on this card when its list "

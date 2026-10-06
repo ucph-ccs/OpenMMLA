@@ -127,6 +127,18 @@ def main_of_base(config: dict, base_id) -> str | None:
     return None if base is None else room_main(config, base_room(base))
 
 
+def main_without_matrices(config: dict, base_id) -> bool:
+    """whether base `base_id` can be a session's main camera with no
+    transformation_matrices_<id>.json: it is the main of its room, or the
+    config's only Bases entry. Its poses are then the session's coordinates
+    as they are, and no other camera is placed (camera sync's file is what
+    puts another camera in its coordinates)."""
+    bases = get_bases(config)
+    if len(bases) == 1:
+        return str(bases[0].get("id")) == str(base_id)
+    return main_of_base(config, base_id) == str(base_id)
+
+
 def camera_sync_problem(config: dict) -> str:
     """why IPS camera sync cannot run on this config's 'Bases', or "".
 

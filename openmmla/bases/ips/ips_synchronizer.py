@@ -11,7 +11,7 @@ from openmmla.bases.synchronizer import Synchronizer
 from openmmla.utils.artifact_paths import copy_config_snapshot, pipeline_section_dir, runtime_pipeline_artifact_dir
 from openmmla.utils import session_provenance
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
-from openmmla.utils.config import base_room, is_main_base
+from openmmla.utils.config import base_room, is_main_base, main_without_matrices
 from openmmla.utils.input import select_or_create_session, show_error_and_pause
 from openmmla.utils.logger import get_logger
 from .fusion import DEFAULT_GATE, fuse_bucket, place
@@ -71,6 +71,7 @@ class IPSSynchronizer(Synchronizer):
         # Runtime attributes
         self.main_id = None
         self.transform_matrices_dict = None
+        self.transform_matrices_file = None  # the camera_sync file the matrices came from (None: a main alone)
         self.session_id = None
         self.allowed_tag_ids = None
         self.unregistered_tag_ids = set()  # detected tags this session has no individual for, logged once each
@@ -286,10 +287,11 @@ class IPSSynchronizer(Synchronizer):
         try:
             matrices = None
             if self.main_id is not None:
-                file_name = matrices_file_name(self.main_id)
-                matrices = {'file': file_name, 'main_id': self.main_id, 'matrices': self.transform_matrices_dict}
-                copy_config_snapshot(os.path.join(self.camera_sync_dir, file_name),
-                                     self.project_dir, self.session_id, 'ips-base')
+                matrices = {'file': self.transform_matrices_file, 'main_id': self.main_id,
+                            'matrices': self.transform_matrices_dict}
+                if self.transform_matrices_file:
+                    copy_config_snapshot(os.path.join(self.camera_sync_dir, self.transform_matrices_file),
+                                         self.project_dir, self.session_id, 'ips-base')
             entry = session_provenance.component_entry(
                 'ips', 'synchronizer',
                 arguments={'verbose': self.verbose, 'session_id': self.launch_session_id,
@@ -400,14 +402,17 @@ class IPSSynchronizer(Synchronizer):
     def _resolve_main_camera(self) -> tuple[str | None, str]:
         """The main camera a run takes without asking: (id, "") or (None, why there is none).
 
-        -mc names it. Without -mc: the Bases entry marked main: true when its transformation file is
-        there, else the only transformation file in camera_sync/.
+        -mc names it: a base with its transformation file there, or one that can be the main camera
+        alone without one (the main of its room, or the only Bases entry), which then keeps its own
+        coordinates and places no other camera. Without -mc: the Bases entry marked main: true when
+        its transformation file is there, else the only transformation file in camera_sync/, else,
+        with no file there, the config's only Bases entry.
         """
         exported = self._exported_matrices()
         listed = ', '.join(exported)
         if self.launch_main_camera:
             main_id = self.launch_main_camera
-            if matrices_file_name(main_id) in exported:
+            if matrices_file_name(main_id) in exported or main_without_matrices(self.config, main_id):
                 return main_id, ''
             there = f"camera_sync holds {listed}" if exported else "camera_sync holds no transformation files"
             return None, (f"There is no camera_sync/{matrices_file_name(main_id)} for main camera {main_id} in "
@@ -428,6 +433,10 @@ class IPSSynchronizer(Synchronizer):
         if len(exported) == 1 and not any(base_room(base) for base in get_bases(self.config)):
             # without rooms the only file is the one camera sync made; with rooms it may be another room's
             return main_id_of(exported[0]), ''
+        bases = get_bases(self.config)
+        if len(bases) == 1 and not exported:
+            # one camera: its coordinates are the session's, and there is no other to place
+            return str(bases[0].get('id')), ''
         wanted = (f"the main base {mains[0]} has no camera_sync/{matrices_file_name(mains[0])}" if mains
                   else "no Bases entry is marked main: true")
         if exported:
@@ -455,7 +464,12 @@ class IPSSynchronizer(Synchronizer):
         if self.transform_matrices_dict is None:
             return (f"camera_sync/{file_name} is gone: run IPS Transforms and export the transformations "
                     f"again, or pick another main camera on the IPS Base card.")
-        self.logger.info(f"Main camera {main_id}: loaded camera_sync/{file_name}.")
+        if self.transform_matrices_file is None:
+            self.logger.info(f"Main camera {main_id}: there is no camera_sync/{file_name}, so its coordinates are "
+                             f"the session's as they are and no other camera is placed (camera sync puts them "
+                             f"in its coordinates).")
+        else:
+            self.logger.info(f"Main camera {main_id}: loaded camera_sync/{file_name}.")
         return ''
 
     def _set_main_camera(self, main_id: str | None = None):
@@ -649,23 +663,35 @@ class IPSSynchronizer(Synchronizer):
 
         Args:
             main_id: the main camera id whose camera_sync/transformation_matrices_<id>.json to load
-                (the result is None when that file is not there); if None, list the files there and
-                ask for one
+                (none, {}, for a base that can be the main camera alone without that file; the
+                result is None for another); if None, list the files there and the bases that
+                can be the main camera alone, and ask for one
         """
         if main_id is not None:
             path = os.path.join(self.camera_sync_dir, matrices_file_name(main_id))
-            if not os.path.isfile(path):
+            if os.path.isfile(path):
+                with open(path, 'r') as file:
+                    matrices = json.load(file)
+                self.transform_matrices_file = matrices_file_name(main_id)
+            elif main_without_matrices(self.config, main_id):
+                # no other camera is placed, and the main camera's own poses need no matrix
+                matrices = {}
+                self.transform_matrices_file = None
+            else:
                 return None
-            with open(path, 'r') as file:
-                matrices = json.load(file)
             self.main_id = str(main_id)
             return matrices
 
-        transformation_choices = self._exported_matrices()
-        for idx, choice in enumerate(transformation_choices):
-            print(f"{idx}: {choice}")
+        exported = self._exported_matrices()
+        alone = [str(base.get('id')) for base in get_bases(self.config)
+                 if matrices_file_name(base.get('id')) not in exported
+                 and main_without_matrices(self.config, base.get('id'))]
+        choices = ([(name, main_id_of(name)) for name in exported]
+                   + [(f"base {base_id} alone, no matrices (its own coordinates)", base_id) for base_id in alone])
+        for idx, (label, _) in enumerate(choices):
+            print(f"{idx}: {label}")
 
-        if not transformation_choices:
+        if not choices:
             return None
 
         default_selection = 0  # default to the first transformation matrix
@@ -676,17 +702,14 @@ class IPSSynchronizer(Synchronizer):
                     selection = default_selection
                 else:
                     selection = int(selection_input)
-                if not 0 <= selection < len(transformation_choices):
+                if not 0 <= selection < len(choices):
                     self.logger.warning("Invalid selection. Please choose a valid number.")
                 else:
-                    chosen_transformation = transformation_choices[selection]
-                    self.main_id = main_id_of(chosen_transformation)
                     break
             except ValueError:
                 self.logger.warning("Please enter a valid number or press Enter for default.")
 
-        with open(os.path.join(self.camera_sync_dir, chosen_transformation), 'r') as file:
-            return json.load(file)
+        return self._load_transform_matrices(choices[selection][1])
 
     @property
     def session_control(self) -> str | None:
