@@ -1502,6 +1502,8 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
     if (same) return;
     Object.assign(t, { label: item.label, vfa: item.vfa, ips: item.ips, paths: item.paths.slice(), rotate: item.rotate });
     t.name.textContent = item.label;
+    // a narrow tile cuts the name short: the whole of it in the tooltip
+    t.name.title = item.label;
     t.canvas.setAttribute('aria-label', item.vfa == null
       ? `Camera ${item.label}: video only`
       : `Camera ${item.label}: skeletons of the newest frame set`);
@@ -1512,7 +1514,7 @@ export function cameraWall({ tagColor, tagLabel = (t) => `Tag ${t}` } = {}) {
 
   function makeTile(item) {
     const id = item.key;
-    const name = h('span', { class: 'cam-name', text: item.label });
+    const name = h('span', { class: 'cam-name truncate', text: item.label });
     const age = h('span', { class: 'badge cam-age num', text: fmt.na, title: 'Age of the frame set drawn' });
     const stateEl = h('span', { class: 'cam-state muted' });
     const playBtn = h('button', { class: 'btn sm', attrs: { type: 'button' }, hidden: true }, icon('play', 12), h('span', { text: 'Play' }));

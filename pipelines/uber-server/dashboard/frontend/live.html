@@ -81,12 +81,16 @@
     /* cameras */
     .cam-wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; }
     .cam-tile { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    /* one line in a tile of any width: the age and the buttons keep their size, the state takes only the
+       room left between them and gives way first, then the name shrinks (.truncate; its full text in the title) */
     .cam-head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
-    .cam-name { flex: none; font-family: var(--mono); font-size: 12px; color: var(--ink); }
+    .cam-name { flex: 0 1 auto; font-family: var(--mono); font-size: 12px; color: var(--ink); }
     .cam-age { flex: none; }
     .cam-head .btn { flex: none; }
     .cam-age[data-stale="true"] { box-shadow: inset 0 0 0 1px var(--warning); }
-    .cam-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .cam-state { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    /* the state fills the room before the buttons, so the head's spacer stays out of the line */
+    .cam-head > .spacer { display: none; }
     .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 6px; overflow: hidden; background: var(--surface-2); }
     .cam-stage video, .cam-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
     .cam-stage video { object-fit: contain; background: #000; }
