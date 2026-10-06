@@ -744,12 +744,25 @@ def api_report_refresh(sid):
 
 
 def _span(sid: str) -> dict:
-    """t0, t1 and the group of a session, from the cached index when it holds the session."""
+    """t0, t1 and the group of a session, from the cached index when it holds the session. The
+    index is only computed again when a page lists the sessions, so the entry of a session that ran
+    when it was computed ends where the session stood then: its end is moved to the session's newest
+    event (last_event, a few seconds old at most) when that is later."""
     entry = index_entry(sid)
     if entry is None:
         meta = _meta(sid)
-        entry = {"t0": meta.get("t0"), "t1": meta.get("t1"), "group": meta.get("group"),
-                 "last_event": (meta.get("state") or {}).get("last_event")}
+        return {"t0": meta.get("t0"), "t1": meta.get("t1"), "group": meta.get("group"),
+                "last_event": (meta.get("state") or {}).get("last_event")}
+    try:
+        last = last_event(sid)
+    except InfluxUnavailable:
+        last = None
+    if last is None:
+        return entry
+    entry = dict(entry)
+    for key in ("t1", "last_event"):
+        if entry.get(key) is None or float(entry[key]) < last:
+            entry[key] = last
     return entry
 
 
