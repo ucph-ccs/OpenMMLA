@@ -781,7 +781,10 @@ class Session:
         from openmmla.analytics.interaction import layout as Y
         from openmmla.analytics.interaction import splits
         self.id, self.dir = sid, Path(artifacts) / sid
-        self.lesson, self.task, self.split = splits.lesson_key(sid), splits.task_of(sid), C.split_of(sid)
+        # the audit's designs and scores keep the classifier's DEV/TEST split as a stratum, which the
+        # coding page no longer shows
+        self.lesson, self.task = splits.lesson_key(sid), splits.task_of(sid)
+        self.split = 'TEST' if sid in splits.TEST_SESSIONS else 'DEV'
         self.videos, audios = manifest_recordings(self.dir)
         if not self.videos:
             raise AuditError('no video recording')
