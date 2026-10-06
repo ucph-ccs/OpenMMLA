@@ -20,6 +20,15 @@ def _safe_id(raw: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_-]', '_', raw)
 
 
+def being_removed(widget: Widget) -> bool:
+    """whether `widget` is on its way out of the DOM (its card redrawn while a
+    worker still answers for it). Textual takes the children out first, so a
+    Select there has lost its overlay and raises NoMatches when it is given a
+    value or options."""
+    return (not widget.is_attached or getattr(widget, "_pruning", False)
+            or getattr(widget, "_closing", False) or getattr(widget, "_closed", False))
+
+
 @dataclass
 class ComponentDef:
     role: str
@@ -809,6 +818,15 @@ class ServiceCard(Widget):
     def _instance_select_id(self, flag: str, index: int) -> str:
         return self._param_id(f"select{index}", flag)
 
+    def _settable_select(self, select_id: str) -> Select | None:
+        """the Select `select_id` when it can be given options and a value:
+        None when it is not built, or is being removed with its card."""
+        try:
+            sel = self.query_one(f"#{select_id}", Select)
+        except Exception:
+            return None
+        return None if being_removed(sel) else sel
+
     def _instance_input_id(self, flag: str, index: int) -> str:
         return self._param_id(f"typed{index}", flag)
 
@@ -1476,10 +1494,7 @@ class ServiceCard(Widget):
                 selects: list[Select | None] = []
                 shown: list[str | None] = []
                 for index in range(len(values)):
-                    try:
-                        sel = self.query_one(f"#{self._instance_select_id(param.flag, index)}", Select)
-                    except Exception:
-                        sel = None
+                    sel = self._settable_select(self._instance_select_id(param.flag, index))
                     selects.append(sel)
                     # what the row shows now (not what the last collect noted)
                     value = values[index] if sel is None else (None if sel.value is Select.NULL else str(sel.value))
@@ -1517,10 +1532,7 @@ class ServiceCard(Widget):
                             sel.value = keep if keep in legal else Select.NULL
                 self._param_values[param.flag] = values
                 continue
-            try:
-                sel = self.query_one(f"#{self._param_id('select', param.flag)}", Select)
-            except Exception:
-                sel = None
+            sel = self._settable_select(self._param_id('select', param.flag))
             if sel is None:
                 current = str(self._param_values.get(param.flag) or "")
             else:
@@ -1609,9 +1621,8 @@ class ServiceCard(Widget):
             noted[index] = value
             picked.discard(index)
             card_shown[index] = value
-            try:
-                sel = self.query_one(f"#{self._instance_select_id(param.flag, index)}", Select)
-            except Exception:
+            sel = self._settable_select(self._instance_select_id(param.flag, index))
+            if sel is None:
                 continue
             with sel.prevent(Select.Changed):
                 sel.value = value if value else Select.NULL
@@ -1654,10 +1665,7 @@ class ServiceCard(Widget):
         picked = self._picked_instances.setdefault(flag, set())
         card_shown = self._card_shown.setdefault(flag, {})
         for index in range(len(values)):
-            try:
-                sel = self.query_one(f"#{self._instance_select_id(flag, index)}", Select)
-            except Exception:
-                sel = None
+            sel = self._settable_select(self._instance_select_id(flag, index))
             current = values[index] if sel is None else ("" if sel.value is Select.NULL else str(sel.value))
             if index in picked and current in legal:
                 keep = current
@@ -1734,9 +1742,8 @@ class ServiceCard(Widget):
             else:
                 widget_ids = [self._param_id("select", param.flag)]
             for widget_id in widget_ids:
-                try:
-                    sel = self.query_one(f"#{widget_id}", Select)
-                except Exception:
+                sel = self._settable_select(widget_id)
+                if sel is None:
                     continue
                 current = sel.value
                 sel.set_options((c, c) for c in choice_strs)
@@ -1761,9 +1768,8 @@ class ServiceCard(Widget):
                 choices.insert(1 if choices else 0, choice)
             params.append(replace(param, choices=choices, default=choice))
             self._param_values[param.flag] = choice
-            try:
-                sel = self.query_one(f"#{self._param_id('select', param.flag)}", Select)
-            except Exception:
+            sel = self._settable_select(self._param_id('select', param.flag))
+            if sel is None:
                 continue
             sel.set_options((c, c) for c in choices)
             sel.value = choice
@@ -1789,11 +1795,8 @@ class ServiceCard(Widget):
         self.service_def = replace(self.service_def, params=params)
         self._param_values["--session-id"] = session_id
         for role in ("audio", "video"):
-            try:
-                sel = self.query_one(
-                    f"#{self._collection_param_id(role, 'select', '--session-id')}", Select
-                )
-            except Exception:
+            sel = self._settable_select(self._collection_param_id(role, 'select', '--session-id'))
+            if sel is None:
                 continue
             sel.set_options((choice, choice) for choice in choices)
             sel.value = session_id

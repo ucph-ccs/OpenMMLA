@@ -142,7 +142,9 @@ from openmmla.tui.widgets.config_form import ConfigForm, DictListField, FieldRow
 from openmmla.tui.widgets.recordings_panel import StreamServerRecordingsPanel
 from openmmla.tui.widgets.streams_overview import StreamServerStreamsPanel
 from openmmla.tui.widgets.experiment_form import ExperimentForm
-from openmmla.tui.widgets.service_card import ServiceCard, ServiceDef, ParamDef, ComponentDef, host_params
+from openmmla.tui.widgets.service_card import (
+    ServiceCard, ServiceDef, ParamDef, ComponentDef, being_removed, host_params,
+)
 from openmmla.tui.widgets.collection_table import CollectionTable, channel_picks, file_channels, joined_picks
 from openmmla.tui.widgets.ssh_form import SSHForm
 from openmmla.tui.widgets.stream_panel import (
@@ -8190,6 +8192,12 @@ class ServicePanel(Widget):
         _scope_key, group, _roster = self._collection_roster(params.get("-sid"), params.get("--experiment-group"))
         return target, group, entry_id
 
+    def _asr_base_card(self) -> ServiceCard | None:
+        """the ASR Base card on screen, not one being removed: a speakers
+        answer can come back while the node's content is rebuilt."""
+        return next((card for card in self.query(ServiceCard)
+                     if card.service_def.name == _ASR_BASE_CARD and not being_removed(card)), None)
+
     def _refresh_asr_participants(self) -> None:
         """the Participant rows of the ASR Base card: the participants of the
         session's group, Group and Speakers. A row opens on the pick kept for
@@ -8198,7 +8206,7 @@ class ServicePanel(Widget):
         what its base type's asr_scope says: the group's participants in row
         order for wearer, Speakers for a base that verifies speakers, Group
         for the rest."""
-        card = next((card for card in self.query(ServiceCard) if card.service_def.name == _ASR_BASE_CARD), None)
+        card = self._asr_base_card()
         if card is None or not any(param.flag == _ASR_PARTICIPANT_FLAG for param in card.service_def.params):
             return
         target = self._get_panel_target()
@@ -8291,7 +8299,7 @@ class ServicePanel(Widget):
     def _show_speakers_summary(self) -> None:
         """write the Participant options and the Speakers line of every base
         of the ASR Base card."""
-        card = next((card for card in self.query(ServiceCard) if card.service_def.name == _ASR_BASE_CARD), None)
+        card = self._asr_base_card()
         if card is None:
             return
         self._refresh_asr_participants()
