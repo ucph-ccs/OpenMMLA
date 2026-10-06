@@ -44,6 +44,8 @@ A pipeline built with the toolkit follows a three-stage data flow:
 
 ## Quick start
 
+The [Quickstart](docs/quickstart.md) walks through the whole setup and a first session step by step; the list below is the short version.
+
 1. **System prerequisites** on every machine that runs a component: [Conda](docs/prerequisites.md#conda), [Git](docs/prerequisites.md#git-tmux-portaudio-and-ffmpeg), [tmux](docs/prerequisites.md#git-tmux-portaudio-and-ffmpeg), [PortAudio](docs/prerequisites.md#git-tmux-portaudio-and-ffmpeg) and [FFmpeg](docs/prerequisites.md#git-tmux-portaudio-and-ffmpeg). Install commands and official links: [System Prerequisites](docs/prerequisites.md).
 
 2. **System services** on the uber server: [InfluxDB](docs/system_services.md#influxdb), [MongoDB](docs/system_services.md#mongodb), [Redis](docs/system_services.md#redis) and [Mosquitto](docs/system_services.md#mosquitto) are required; [Nginx](docs/system_services.md#nginx-optional) and the [Dashboard](docs/system_services.md#dashboard-optional) are optional. Installation, listener configuration and start/stop: [System Services](docs/system_services.md). InfluxDB and MongoDB can run as containers instead: [Docker](docs/docker.md).
@@ -67,6 +69,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 
 | Page | Content |
 |---|---|
+| [Quickstart](docs/quickstart.md) | from nothing to an exported and archived session: the one-time setup, then Collection mode or Pipeline mode |
 | [System Prerequisites](docs/prerequisites.md) | Conda, Git, tmux, PortAudio, FFmpeg per OS |
 | [System Services](docs/system_services.md) | InfluxDB, MongoDB, Redis, Mosquitto, Nginx, dashboard: install, start/stop, System Settings |
 | [Management Console](docs/tui.md) | the TUI: environments, launcher tree, cards, sessions, status, remote hosts |

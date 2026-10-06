@@ -4,7 +4,7 @@
 
 ## Install and start
 
-Install the [prerequisites](prerequisites.md) first. The console runs from a clone of the repository, because it edits the configs under `pipelines/` and `config/` and runs the compose files under `docker/`.
+The [Quickstart](quickstart.md) gives the order of a first setup and of a session; this page describes each panel. Install the [prerequisites](prerequisites.md) first. The console runs from a clone of the repository, because it edits the configs under `pipelines/` and `config/` and runs the compose files under `docker/`.
 
 ```bash
 git clone https://github.com/ucph-ccs/OpenMMLA.git
@@ -17,6 +17,7 @@ mmla tui
 
 - With an editable install the console finds the repository root from the installed package, so `mmla tui` works from any directory. The package is also on PyPI (`pip install "openmmla[tui]"`), but a non-editable install has to be started from the repository root, because the console reads `pipelines/`, `config/` and `docker/` from the current directory in that case.
 - Press `q` to quit. Four tabs sit at the top: **Environment**, **Launcher**, **Sessions**, **Status**.
+- **Ctrl+C** copies the selection (in a field, or text dragged over with the mouse) and **Ctrl+V** pastes. With the console running on a Mac, both go through the Mac's clipboard, so text moves to and from other apps; **Cmd+C** does not copy, since macOS Terminal keeps that key for itself.
 - Every value whose key is named `token`, `password`, `api_key`, `secret`, `secret_key` or `subscription_key` is stored as `ENC(...)`: encrypted with the master key of the machine the file is on, and decrypted by the services there at startup. Every machine has its own key, a Fernet key in `~/.openmmla/master.key` (`0600`) made the first time something encrypted is written to it; a colleague's computer running its own console is no exception. The console re-encrypts secrets for the machine it writes to, and never copies or replaces a key (see [One master key per machine](system_services.md#one-master-key-per-machine)). Back the key up with its machine; without it the encrypted values stored there cannot be read.
 
 ## Hosts
@@ -283,7 +284,7 @@ Bases and synchronizers block after start-up until they receive a START signal f
 
 There is no host to pick here: the signal is published from this machine to that Redis, and every base subscribed to the same Redis hears it, whichever machine it runs on. What matters is therefore that all machines of a session use **one** Redis. With `Redis.host` left at `localhost`, only bases on this machine hear the signal, because a base on another machine reads `localhost` as itself; the panel warns about it. Put the host name of the machine that runs Redis into **System Settings → Redis** for a session that spans machines. While Redis has no host yet on this machine (no `config/system_services.yml`, no Redis section in it, or `<uber-server>` still there), the panel says so and sends neither START nor STOP; while MongoDB has none, STOP still goes out but cannot mark the session ended, and says so.
 
-A typical run is therefore: start the AI servers and the system services, start the bases and synchronizers on every base station (each with the `Bases` entry its card gave it, all into one session: the cards after the first open on it), then send START from here once every window reports it is waiting, and STOP when the session is over. Every base and synchronizer the Launcher started for that session then exits by itself; the bases note in the session when they left, which is when a session that was never ended is taken to end.
+A typical run is therefore: start the AI servers and the system services, start the bases and synchronizers on every base station (each with the `Bases` entry its card gave it, all into one session: the cards after the first open on it), then send START from here once every window reports it is waiting, and STOP when the session is over. Every base and synchronizer the Launcher started for that session then exits by itself; the bases note in the session when they left, which is when a session that was never ended is taken to end. The [Quickstart](quickstart.md#run-a-session) walks through it step by step.
 
 ## Sessions tab
 

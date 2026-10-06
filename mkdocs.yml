@@ -65,6 +65,7 @@ plugins:
 nav:
   - Overview: index.md
   - Getting started:
+      - Quickstart: quickstart.md
       - System prerequisites: prerequisites.md
       - System services: system_services.md
       - Management console (TUI): tui.md
