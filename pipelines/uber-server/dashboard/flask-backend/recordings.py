@@ -568,13 +568,16 @@ def _found_cuts(root: str, sid: str) -> list[dict]:
 
 
 def _cut_record(cut: dict) -> dict:
-    """the listing entry of one archived stream cut: its modality from its manifest row, else from
-    the stream's app (an asr/ stream is sound); its device the stream's name (the last part of its
-    path, which the dashboard replaces with the session's own name of the stream when it knows it)."""
+    """the listing entry of one archived stream cut: sound when the stream's app is asr/, else its
+    modality from its manifest row, else video (an archive could note an ASR cut as video when the
+    session's source named no kind); its device the stream's name (the last part of its path, which
+    the dashboard replaces with the session's own name of the stream when it knows it)."""
     row = cut.get("row") or {}
     stream_path = _text(row.get("stream_path")) or cut["stream_path"]
-    modality = row.get("modality") if row.get("modality") in MODALITIES else (
-        "audio" if stream_path.split("/", 1)[0] == "asr" else "video")
+    if stream_path.split("/", 1)[0] == "asr":
+        modality = "audio"
+    else:
+        modality = row.get("modality") if row.get("modality") in MODALITIES else "video"
     start = _number(row.get("start_time"))
     duration = _number(row.get("duration"))
     if not duration or duration < 0:

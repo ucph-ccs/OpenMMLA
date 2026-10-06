@@ -210,7 +210,9 @@ def session_server_paths(record: dict | None, server: dict | None
                          ) -> tuple[list[str], list[tuple[str, str]], dict[str, str]]:
     """the session's paths on the Stream Server `server` ({host, ...} of System
     Settings), the (stream, URL) its bases took from another server, and each
-    path's kind (audio | video, as its bases noted). A source counts when its
+    path's kind (audio | video: the first kind its sources noted; else audio for
+    a path only ASR sources took, video for any other, as the dashboard's
+    mongo_devices decides it). A source counts when its
     URL names that server (by name, alias or address), or names localhost from
     a base that ran on the server's host; one with a server path and no URL is
     taken at its word. Blocking: a host name may be resolved."""
@@ -220,6 +222,8 @@ def session_server_paths(record: dict | None, server: dict | None
     paths: list[str] = []
     elsewhere: list[tuple[str, str]] = []
     kinds: dict[str, str] = {}
+    # a kind guessed for a source that noted none gives way to one another source noted
+    guessed: dict[str, str] = {}
     for entry in session_sources(record):
         url = str(entry.get("url") or "").strip()
         served = str(entry.get("server_path") or "").strip("/") or (stream_url_path(url) if url else None)
@@ -237,9 +241,19 @@ def session_server_paths(record: dict | None, server: dict | None
                 elsewhere.append((name, url))
             continue
         capture = entry.get("capture") if isinstance(entry.get("capture"), dict) else {}
-        kinds.setdefault(path, "audio" if capture.get("kind") == "audio" else "video")
+        kind = capture.get("kind")
+        if kind in ("audio", "video"):
+            kinds.setdefault(path, kind)
+        else:
+            # a source noted without its capture's kind: an ASR base pulls sound, any other video,
+            # and a path a camera's base pulls too is video (a camera's stream may carry its microphone)
+            guess = "audio" if entry.get("pipeline") == "asr" or path.split("/", 1)[0] == "asr" else "video"
+            if guessed.get(path) != "video":
+                guessed[path] = guess
         if path not in paths:
             paths.append(path)
+    for path, kind in guessed.items():
+        kinds.setdefault(path, kind)
     return paths, elsewhere, kinds
 
 

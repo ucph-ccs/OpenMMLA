@@ -396,6 +396,28 @@ def archive_summary(value) -> dict | None:
             'location': _text(value.get('location')), 'verified_at': to_epoch(value.get('verified_at'))}
 
 
+def _noted_kind(entry: dict) -> str | None:
+    """the kind (audio | video) a source's capture noted, None when it noted neither."""
+    capture = entry.get('capture') if isinstance(entry.get('capture'), dict) else {}
+    kind = capture.get('kind')
+    return kind if kind in ('audio', 'video') else None
+
+
+def _entry_kind(entry: dict) -> str:
+    """what a source takes: its noted kind, else sound for an ASR base and video for any other."""
+    return _noted_kind(entry) or ('audio' if entry.get('pipeline') == 'asr' else 'video')
+
+
+def _stream_kind(entries: list[dict]) -> str:
+    """the kind of a path its sources took: the first kind one of them noted, else video when any
+    base other than ASR took it (a camera's stream may carry its microphone too), else audio; as
+    openmmla.utils.stream_recording.session_server_paths decides it for the archive."""
+    noted = next((kind for kind in map(_noted_kind, entries) if kind), None)
+    if noted:
+        return noted
+    return 'video' if any(_entry_kind(entry) == 'video' for entry in entries) else 'audio'
+
+
 def mongo_devices(doc: dict | None) -> dict:
     """the cameras (IPS and VFA bases) and microphones (ASR bases) a session used, the Stream Server
     paths its bases pulled (each with the stream's name and how its capture turned the picture),
@@ -413,16 +435,20 @@ def mongo_devices(doc: dict | None) -> dict:
             target.append(str(base_id))
 
     sources = [entry for entry in _list((doc or {}).get('sources')) if isinstance(entry, dict)]
+    by_path: dict[str, list[dict]] = {}
     for entry in sources:
-        pipeline = entry.get('pipeline')
-        note(pipeline, entry.get('base_id'))
+        note(entry.get('pipeline'), entry.get('base_id'))
         path = str(entry.get('server_path') or '').strip('/')
-        if path and all(stream['path'] != path for stream in streams):
-            capture = entry.get('capture') if isinstance(entry.get('capture'), dict) else {}
-            kind = capture.get('kind') or ('audio' if pipeline == 'asr' else 'video')
-            streams.append({'path': path, 'pipeline': pipeline, 'base_id': str(entry.get('base_id') or ''),
-                            'kind': str(kind), 'stream': _text(entry.get('stream')),
-                            'rotate': _turn(capture.get('rotate'))})
+        if path:
+            by_path.setdefault(path, []).append(entry)
+    for path, entries in by_path.items():
+        kind = _stream_kind(entries)
+        # the stream is named after a base that takes it as what it is (a camera's tile key is its base)
+        entry = next((e for e in entries if _entry_kind(e) == kind), entries[0])
+        capture = entry.get('capture') if isinstance(entry.get('capture'), dict) else {}
+        streams.append({'path': path, 'pipeline': entry.get('pipeline'), 'base_id': str(entry.get('base_id') or ''),
+                        'kind': kind, 'stream': _text(entry.get('stream')),
+                        'rotate': _turn(capture.get('rotate'))})
     if not sources:
         for entry in _components(doc):
             if entry.get('role') == 'base':
