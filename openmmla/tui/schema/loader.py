@@ -8,6 +8,9 @@ from typing import Any
 import yaml
 
 from openmmla.utils.asr_scope import ASR_SCOPES
+from openmmla.utils.config_choices import (
+    DIARIZE_MODELS, GAZE_BACKENDS, GAZE_MODELS, IMAGE_DETAILS, POSE_MODELS, PROMPT_PROFILES, VFA_BACKENDS,
+)
 
 
 PLACEHOLDER_RE = re.compile(r'^<.*>$')
@@ -20,10 +23,20 @@ INLINE_COMMENT_RE = re.compile(r'^[^#]*#\s*(.*?)\s*$')
 MAPPING_FIELDS = frozenset({"Base.angle_config"})
 
 # config keys that take one of a few words: the form offers them as a dropdown
-# (a blank keeps the default the pipeline reads for nothing)
+# (a blank keeps the default the pipeline reads for nothing). A key is a bare
+# name, for every key of that name, or a full dotted path, which wins: the VFA
+# server's backend is not the ASR server's. A stored value the list does not
+# offer (a local checkpoint) is shown and kept
 KEY_CHOICES = {
     "asr_scope": ASR_SCOPES,
     "speech_gate": ("absolute", "relative"),
+    "VLLMFrameAnalyzer.backend": VFA_BACKENDS,
+    "VLLMFrameAnalyzer.gaze_backend": GAZE_BACKENDS,
+    "VLLMFrameAnalyzer.gaze_model": GAZE_MODELS,
+    "VLLMFrameAnalyzer.features.pose_model": POSE_MODELS,
+    "VLLMFrameAnalyzer.prompt_profile": PROMPT_PROFILES,
+    "VLLMFrameAnalyzer.image_detail": IMAGE_DETAILS,
+    "SpeechTranscriber.local.diarize_model": DIARIZE_MODELS,
 }
 
 
@@ -283,7 +296,7 @@ def _walk_yaml(data, path_parts, section, comments, fields, indent_level=0):
                 description=desc,
                 required=req,
                 section=section,
-                choices=list(KEY_CHOICES.get(str(key), ())),
+                choices=list(KEY_CHOICES.get(dot_path) or KEY_CHOICES.get(str(key), ())),
             ))
 
 

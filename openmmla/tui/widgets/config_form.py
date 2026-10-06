@@ -18,7 +18,7 @@ from textual.widget import Widget
 
 from rich.text import Text
 
-from openmmla.tui.schema.loader import REMOVED_SECTION, FieldDef, natural_key
+from openmmla.tui.schema.loader import PLACEHOLDER_RE, REMOVED_SECTION, FieldDef, natural_key
 from openmmla.utils.constants import normalize_source
 from openmmla.tui.widgets.dismiss_once import DismissOnce
 
@@ -215,8 +215,10 @@ class FieldRow(Widget):
         used to open blank, and the next Save wrote the blank over it."""
         options = [(str(c[0]), str(c[1])) if isinstance(c, (tuple, list)) else (str(c), str(c)) for c in choices]
         initial = str(initial) if initial not in (None, "") else ""
-        if initial in ("Select.NULL", "Select.BLANK", "None", "null"):
-            initial = ""  # what an empty Select once left behind in a config
+        if initial in ("Select.NULL", "Select.BLANK", "None", "null") or PLACEHOLDER_RE.match(initial):
+            # what an empty Select once left behind in a config, or the template's
+            # <placeholder> standing in for a key the config leaves out
+            initial = ""
         if initial and not any(value == initial for _, value in options):
             options.append((f"{initial}  (not in the list now)", initial))
         kwargs = {"value": initial} if initial else {}
