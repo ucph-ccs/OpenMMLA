@@ -10,7 +10,8 @@
  * 10 seconds; a page back from the back/forward cache reconnects at once. The Cameras card plays live
  * video in follow mode and, in the replay of an ended session, each camera's recorded file at the
  * replay clock (cameras.js), from the list the recordings route gives; the Sound control plays one of
- * the session's microphone files at the same clock (sound.js).
+ * the session's microphone files at the same clock, and in follow mode one of its microphones live
+ * (sound.js).
  */
 
 import {
@@ -24,7 +25,7 @@ import {
   GROUP_LABEL_RE, JA_PAIR_MIN_SHARE, TAG_MEMORY_SECONDS,
 } from './live-model.js';
 import { cameraWall, cameraItems, mediaOriginFor, probeMediaOrigin, awaitMediaAnswers } from './cameras.js';
-import { ReplaySound, soundSources, defaultSource, MAX_SOUND_SPEED } from './sound.js';
+import { ReplaySound, LiveSound, soundSources, defaultSource, MAX_SOUND_SPEED } from './sound.js';
 
 const SPEEDS = [1, 2, 4, 8, 16];
 const WINDOWS = [
@@ -39,8 +40,12 @@ const HEAVY_MS = 1000;
 const STALE_AGE = 10;
 const LOOKS_SECONDS = 60;
 const MEDIA_REFRESH_MS = 60000;
+// a /media refresh that failed is asked again after this long
+const MEDIA_RETRY_MS = 10000;
 // a recordings list that could not be read is asked for again after this long
 const RECORDINGS_RETRY_MS = 60000;
+// how often a hidden tab that hears a microphone live checks it should go on
+const HIDDEN_SOUND_MS = 5000;
 const GAZE_FILL = {
   partner_face: 'var(--ord-4)',
   partner_hands: 'var(--ord-3)',
@@ -116,7 +121,9 @@ const S = {
   trails: true,
   distances: true,
   media: null,
-  mediaAt: 0,
+  // when /media was last asked (none yet: the first ask goes out at once), and whether it is out now
+  mediaAt: -Infinity,
+  mediaBusy: false,
   // the recordings route's answer (the replay of an ended session plays the camera files it lists)
   recordings: null,
   recordingsAt: 0,
@@ -128,10 +135,11 @@ const S = {
   // which mediaOrigins call the list belongs to, so a port that answers late joins only its own
   mediaOriginsGen: 0,
   // the Sound control: the microphone the viewer picked (its source key, 'off', or null for the
-  // default), and the mute toggle
+  // default: a replay's group mic, nothing live), the mute toggle, the replay's sound and the live one
   soundPick: null,
   soundMuted: false,
   sound: null,
+  liveSound: null,
   camsOpen: false,
   raf: 0,
   lastFrame: 0,
@@ -272,6 +280,9 @@ function onFloor(basis) {
 
 function onStatus(d) {
   S.live = !!d.live;
+  // a session whose data stopped stops its microphone heard live, and one whose data comes again
+  // hears it again, in a hidden tab too (which draws nothing)
+  if (S.mode === 'follow') syncLiveSound();
   // status comes once the backfill is out (follow mode also sends it when no record is new)
   if (S.mode === 'follow') S.backfilling = false;
   S.lag = finite(d.lag) ? d.lag : null;
@@ -312,6 +323,7 @@ function onTick(d) {
 
 function onEnd(d) {
   stopStream();
+  syncLiveSound();
   if (d && d.reason === 'replay_end') {
     S.connState = 'idle';
     S.playing = false;
@@ -567,7 +579,7 @@ function build(root) {
   UI.playBtn = h('button', { class: 'btn icon-btn', attrs: { type: 'button', 'aria-label': 'Play' } }, icon('play', 14));
   UI.playBtn.addEventListener('click', () => {
     // the click lets the replay's sound play (autoplay rules want a gesture), Pause's too
-    S.sound.arm();
+    armSound();
     if (S.playing) pause();
     else play();
   });
@@ -607,7 +619,7 @@ function build(root) {
   UI.backLive.addEventListener('click', () => startFollow());
   UI.fromStart = h('button', { class: 'btn', attrs: { type: 'button' } }, icon('reconnect', 14), h('span', { text: 'Replay from start' }));
   UI.fromStart.addEventListener('click', () => {
-    S.sound.arm();
+    armSound();
     replayFromStart();
   });
   root.appendChild(h('div', { class: 'live-controls', attrs: { role: 'group', 'aria-label': 'Playback' } },
@@ -759,11 +771,18 @@ function build(root) {
 }
 
 async function loadMedia(force = false) {
-  if (!force && performance.now() - S.mediaAt < MEDIA_REFRESH_MS) return;
+  if (S.mediaBusy) return;
+  if (!force && S.media && performance.now() - S.mediaAt < MEDIA_REFRESH_MS) return;
   S.mediaAt = performance.now();
+  S.mediaBusy = true;
   const res = await api(`/api/sessions/${encodeURIComponent(S.sid)}/media`);
+  S.mediaBusy = false;
   if (res.ok && res.data) S.media = res.data;
-  else S.media = { webrtc: null, streams: [], reason: res.error ? `The stream server could not be asked: ${res.error}` : null };
+  else if (S.media && Array.isArray(S.media.streams) && S.media.streams.length) {
+    // a refresh that failed keeps the streams the last answer named (a live video or sound plays on),
+    // and is asked again sooner
+    S.mediaAt = performance.now() - MEDIA_REFRESH_MS + MEDIA_RETRY_MS;
+  } else S.media = { webrtc: null, streams: [], reason: res.error ? `The stream server could not be asked: ${res.error}` : null };
   S.force = true;
   requestFrame();
 }
@@ -776,13 +795,15 @@ function endedReplay() {
 /**
  * ask for the session's recordings (once, when the replay of an ended session opens, and again when
  * the Cameras card is opened; a failed answer again after a minute). The tiles play the video files,
- * the Sound control the audio files.
+ * the Sound control the audio files. A list asked while following the session to its end is marked
+ * `follow`, and the replay asks again (renderSound): the files may have been archived since.
  */
 async function loadRecordings(force = false) {
   if (S.recordingsBusy) return;
   if (!force && S.recordings && !(S.recordings.failed && performance.now() - S.recordingsAt >= RECORDINGS_RETRY_MS)) return;
   S.recordingsBusy = true;
   S.recordingsAt = performance.now();
+  const follow = S.mode === 'follow';
   const res = await api(`/api/sessions/${encodeURIComponent(S.sid)}/recordings`);
   const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
   // the files wait for the media ports' answers, so none loads from the page's origin first (a
@@ -798,10 +819,11 @@ async function loadRecordings(force = false) {
       files: (Array.isArray(d.files) ? d.files : []).filter((f) => f && (f.modality === 'video' || f.modality === 'audio')),
       reason: typeof d.reason === 'string' ? d.reason : null,
       failed: false,
+      follow,
     };
   } else {
     const why = res.error ? ` (${String(res.error).replace(/\.$/, '')})` : '';
-    S.recordings = { enabled: false, files: [], reason: `The recordings could not be listed${why}.`, failed: true };
+    S.recordings = { enabled: false, files: [], reason: `The recordings could not be listed${why}.`, failed: true, follow };
   }
   S.force = true;
   requestFrame();
@@ -861,24 +883,32 @@ function clockRunning(now) {
 
 // sound
 
-const SOUND_FOLLOW = 'No sound in follow mode: the microphones stream AAC, which WebRTC does not carry. The replay of an ended session plays its recorded microphones.';
-
 /** the Sound control of the session bar: Off or one of the session's microphones, and a mute toggle */
 function buildSound() {
   const audio = h('audio', { class: 'live-audio', attrs: { preload: 'none' }, hidden: true });
   S.sound = new ReplaySound({ audio });
+  // the live sound has an element of its own, so the replay's file and the live connection never
+  // take turns on one
+  const liveAudio = h('audio', { class: 'live-audio', hidden: true });
+  S.liveSound = new LiveSound({
+    audio: liveAudio,
+    onChange: () => {
+      S.force = true;
+      requestFrame();
+    },
+  });
   const select = h('select', { class: 'select', attrs: { id: 'live-sound-select' } }, h('option', { attrs: { value: 'off' }, text: 'Off' }));
   select.addEventListener('change', () => {
     S.soundPick = select.value;
     // picking a microphone is a gesture too: it may play from now on
-    if (select.value !== 'off') S.sound.arm();
+    if (select.value !== 'off') armSound();
     S.force = true;
     requestFrame();
   });
   const mute = h('button', { class: 'btn icon-btn', attrs: { type: 'button', 'aria-pressed': 'false', 'aria-label': 'Mute the sound', title: 'Mute the sound' } }, icon('volume', 14));
   mute.addEventListener('click', () => {
     S.soundMuted = !S.soundMuted;
-    if (!S.soundMuted) S.sound.arm();
+    if (!S.soundMuted) armSound();
     S.force = true;
     requestFrame();
   });
@@ -886,33 +916,95 @@ function buildSound() {
   // a sound the browser held back plays from a click on this note, in one click
   const unblock = h('button', { class: 'btn sm live-sound-unblock', attrs: { type: 'button', title: 'The browser held the sound back until a click on the page; this click lets it play.' }, hidden: true }, icon('volume', 12), h('span', { text: 'Play the sound' }));
   unblock.addEventListener('click', () => {
-    S.sound.arm();
+    armSound();
     S.force = true;
     requestFrame();
   });
   const label = h('label', { class: 'live-sound-label', attrs: { for: 'live-sound-select' }, text: 'Sound' });
-  const el = h('div', { class: 'live-sound', attrs: { role: 'group', 'aria-label': 'Sound' } }, label, select, mute, note, unblock, audio);
-  UI.sound = { el, select, mute, note, unblock, audio, sig: '', optionsSig: '' };
+  const el = h('div', { class: 'live-sound', attrs: { role: 'group', 'aria-label': 'Sound' } }, label, select, mute, note, unblock, audio, liveAudio);
+  UI.sound = { el, select, mute, note, unblock, audio, liveAudio, sig: '', optionsSig: '' };
+}
+
+/** a gesture on the sound's controls: both sounds may play from now on (autoplay rules want one) */
+function armSound() {
+  S.sound.arm();
+  S.liveSound.arm();
 }
 
 let soundCache = { rec: null, sources: [] };
 
-/** whether this view has sound: {ok, sources} or {ok: false, reason} */
+/** the replay's microphones: the audio files the recordings route lists ([] before it answers) */
+function recordedSources(rec) {
+  if (!rec || !rec.enabled) return [];
+  if (soundCache.rec !== rec) soundCache = { rec, sources: soundSources(rec.files) };
+  return soundCache.sources;
+}
+
+/**
+ * whether this view has sound: {ok, live, sources} or {ok: false, reason}. Follow mode of a running
+ * session hears its microphones live (live: true; each source {key, label, path: its listen/ path,
+ * ready}); the replay of an ended session plays its recorded microphones.
+ */
 function soundState() {
-  if (S.mode === 'follow') return { ok: false, reason: SOUND_FOLLOW };
-  if (S.live) return { ok: false, reason: 'Sound plays in the replay of an ended session, from its microphone recordings.' };
+  if (S.mode === 'follow') return S.live ? liveSoundState() : endedFollowSoundState();
+  if (S.live) {
+    const live = liveSoundState();
+    return {
+      ok: false,
+      reason: live.ok ? 'A running session plays its microphones live: Back to live hears them.' : `The replay of a running session has no sound. ${live.reason}`,
+    };
+  }
   const rec = S.recordings;
   if (!rec) return { ok: false, reason: 'Looking for the session\'s microphone recordings.' };
   if (!rec.enabled) return { ok: false, reason: rec.reason || 'The recordings are not available on this dashboard.' };
-  if (soundCache.rec !== rec) soundCache = { rec, sources: soundSources(rec.files) };
-  if (!soundCache.sources.length) return { ok: false, reason: 'The dashboard\'s machine holds no microphone recording of this session that has a start time.' };
-  return { ok: true, sources: soundCache.sources };
+  const sources = recordedSources(rec);
+  if (!sources.length) return { ok: false, reason: 'The dashboard\'s machine holds no microphone recording of this session that has a start time.' };
+  return { ok: true, live: false, sources };
+}
+
+/** the microphones of the running session the page follows, as the stream server can play them */
+function liveSoundState() {
+  const m = S.media;
+  if (!m) return { ok: false, reason: 'Asking the stream server for the session\'s microphones.' };
+  const mics = (Array.isArray(m.streams) ? m.streams : []).filter((s) => s && s.kind === 'audio' && s.path);
+  if (!mics.length) {
+    const reason = m.reason && !(m.streams || []).length ? m.reason : null;
+    return { ok: false, reason: reason || 'This session takes no microphone through the stream server, so there is nothing to hear live.' };
+  }
+  const heard = mics.filter((s) => s.listen);
+  if (!heard.length || !m.webrtc) return { ok: false, reason: m.listen_reason || 'The stream server cannot play the microphones in the browser.' };
+  const sources = heard.map((s) => ({ key: `live|${s.path}`, label: s.stream || s.path.split('/').pop(), path: s.listen, ready: !!s.ready }));
+  // a name two microphones share names their paths
+  const count = new Map();
+  for (const src of sources) count.set(src.label, (count.get(src.label) || 0) + 1);
+  for (const src of sources) if (count.get(src.label) > 1) src.label = src.path.replace(/^listen\//, '');
+  return { ok: true, live: true, sources };
+}
+
+/**
+ * a page that followed its session to the end: the microphones are no longer this session's (a
+ * stream outlives the sessions that take it), so nothing plays; the replay plays the recorded ones,
+ * when the dashboard's machine holds them
+ */
+function endedFollowSoundState() {
+  const rec = S.recordings;
+  if (!rec) return { ok: false, reason: 'This session has ended. Looking for its microphone recordings, which its replay plays.' };
+  if (!rec.enabled) return { ok: false, reason: `This session has ended. ${rec.reason || 'The recordings are not available on this dashboard.'}` };
+  if (recordedSources(rec).length) return { ok: false, reason: 'This session has ended: Replay this session plays its recorded microphones.' };
+  return {
+    ok: false,
+    reason: 'This session has ended, and the dashboard\'s machine holds no recording of its microphones yet: Sessions -> Export, then Archive, in the console put them there for its replay.',
+  };
 }
 
 /** the microphone that plays: the viewer's pick while it is listed, else the default; null for Off */
 function soundSource(st) {
   if (!st.ok || S.soundPick === 'off') return null;
-  return (S.soundPick && st.sources.find((s) => s.key === S.soundPick)) || defaultSource(st.sources);
+  const picked = S.soundPick && st.sources.find((s) => s.key === S.soundPick);
+  if (picked) return picked;
+  // a replay plays its group mic unless told otherwise; nothing is heard live before the viewer
+  // picks a microphone
+  return st.live ? null : defaultSource(st.sources);
 }
 
 /** the small note beside the control: what the sound does now */
@@ -922,18 +1014,55 @@ function soundNote(res) {
     case 'gap': return { text: 'No recording at this moment', title: 'The microphone\'s file does not cover this moment of the session.' };
     case 'loading': return { text: 'Loading', title: '' };
     case 'error': return { text: 'Could not play', title: res.message || 'The recording could not be played.' };
+    case 'connecting': return { text: 'Connecting', title: 'The stream server is turning the microphone into sound the browser plays (a second or two).' };
+    case 'retrying': return { text: 'Reconnecting', title: res.message || 'The sound stopped; trying again.' };
+    case 'down': return { text: 'Not publishing now', title: 'The stream server has nothing from this microphone at the moment.' };
+    case 'live': return { text: 'Live', title: 'The microphone as it is now, a moment ahead of the transcript.' };
     // the note becomes a button (UI.sound.unblock)
     case 'blocked': return { text: '', title: '' };
     default: return { text: '', title: '' };
   }
 }
 
-/** keep the replay's sound on the clock and the control up to date (every redraw) */
+/**
+ * hear the picked microphone live, or stop hearing it; what the live sound does now ({state,
+ * message}), null when this view has no live sound. renderSound calls it on every redraw, and so do
+ * the stream's status and a timer while the tab is hidden (live, below): a hidden tab draws nothing,
+ * and a microphone heard live goes on there, so the end of the session must reach it without a redraw
+ */
+function syncLiveSound(st = soundState()) {
+  if (!st.ok || !st.live) {
+    S.liveSound.release();
+    return null;
+  }
+  const source = soundSource(st);
+  // a microphone the stream server has nothing from is not asked for (every ask starts a conversion
+  // there); one already heard is not let go for that (a publisher that reconnects reads as not ready
+  // for a moment), its player reconnects by itself
+  const heard = !!source && (source.ready || S.liveSound.holds(source.path));
+  const res = S.liveSound.update({ webrtc: S.media && S.media.webrtc, path: heard ? source.path : null, muted: S.soundMuted });
+  if (source && !heard) return { state: 'down', message: null };
+  if (res.state === 'playing') return { state: 'live', message: null };
+  return res;
+}
+
+/** keep the sounds up to date with the view and the control with them (every redraw) */
 function renderSound(now) {
-  if (endedReplay()) loadRecordings(false);
+  if (endedReplay()) {
+    // a list asked while following the session to its end is asked again: it may have been archived since
+    loadRecordings(!!(S.recordings && S.recordings.follow));
+  } else if (S.mode === 'follow' && !S.live) {
+    // the note sends the viewer to Export and Archive: a list without a microphone is asked again a minute later
+    const recheck = !!(S.recordings && !S.recordings.failed && !recordedSources(S.recordings).length
+      && performance.now() - S.recordingsAt >= RECORDINGS_RETRY_MS);
+    loadRecordings(recheck);
+  }
+  if (S.live) loadMedia(false);
   const st = soundState();
   const source = soundSource(st);
-  const res = S.sound.update({ source, now, speed: S.speed, running: clockRunning(now), muted: S.soundMuted, origin: S.mediaOrigins[0] || null });
+  let res = syncLiveSound(st);
+  if (res) S.sound.release();
+  else res = S.sound.update({ source, now, speed: S.speed, running: clockRunning(now), muted: S.soundMuted, origin: S.mediaOrigins[0] || null });
   const U = UI.sound;
   const optionsSig = st.ok ? st.sources.map((s) => `${s.key}=${s.label}`).join('\n') : '';
   if (optionsSig !== U.optionsSig) {
@@ -944,14 +1073,15 @@ function renderSound(now) {
   const value = source ? source.key : 'off';
   if (U.select.value !== value) U.select.value = value;
   const note = soundNote(res);
-  const sig = [st.ok, st.reason, value, S.soundMuted, res.state, note.text, note.title].join('|');
+  const sig = [st.ok, st.live, st.reason, value, S.soundMuted, res.state, note.text, note.title].join('|');
   if (sig === U.sig) return;
   U.sig = sig;
   U.el.dataset.state = res.state;
   U.select.disabled = !st.ok;
   // a disabled control shows no tooltip of its own: the group says why
   U.el.title = st.ok ? '' : st.reason;
-  U.select.title = st.ok ? 'The microphone the replay plays, at the replay clock' : st.reason;
+  U.select.title = !st.ok ? st.reason
+    : st.live ? 'Pick a microphone to hear it live (Off: none)' : 'The microphone the replay plays, at the replay clock';
   U.mute.disabled = !source;
   U.mute.setAttribute('aria-pressed', S.soundMuted ? 'true' : 'false');
   const label = S.soundMuted ? 'Unmute the sound' : 'Mute the sound';
@@ -1787,7 +1917,8 @@ function renderCameras(now) {
   const newestVfa = S.model.vfa.last;
   // the sound's file takes one of the connections the tiles' recorded files share (on the page's
   // origin; from the media ports it has one of its own, on the first)
-  const reserved = S.sound.takesMedia(soundSource(soundState()), S.speed) ? 1 : 0;
+  const sound = soundState();
+  const reserved = !sound.live && S.sound.takesMedia(soundSource(sound), S.speed) ? 1 : 0;
   wall.update({
     cameras: ids,
     sid: S.sid,
@@ -1915,6 +2046,15 @@ function start(root) {
   setInterval(() => {
     if (document.visibilityState !== 'hidden') requestFrame();
   }, FRAME_MS);
+  // a hidden tab draws nothing: a microphone picked to be heard there still learns of the stream
+  // server's answers (a stream that stopped or came back, raw media turned off) once a minute; the
+  // stream's status tells it of the session's data stopping and coming again (onStatus)
+  setInterval(() => {
+    if (document.visibilityState !== 'hidden' || S.mode !== 'follow' || !S.liveSound.armed) return;
+    if (!String(S.soundPick || '').startsWith('live|')) return;
+    if (S.live) loadMedia(false);
+    syncLiveSound();
+  }, HIDDEN_SOUND_MS);
   // a live session's speech part grows: ask again for voices that have no colour yet (never repainting one)
   setInterval(() => {
     if (document.visibilityState === 'hidden') return;
@@ -1926,7 +2066,9 @@ function start(root) {
       requestFrame();
     } else {
       tooltip.hide();
-      // a hidden page lets go of the sound's file, as the tiles do of theirs; the next redraw loads it again
+      // a hidden page lets go of the sound's file, as the tiles do of theirs; the next redraw loads it
+      // again. A microphone heard live goes on: listening with the page in the background is its use
+      // (the timer below keeps it in step meanwhile)
       S.sound.release();
     }
   });
@@ -1936,6 +2078,7 @@ function start(root) {
     stopStream();
     S.connState = 'idle';
     S.sound.release();
+    S.liveSound.release();
     // a page kept in the back/forward cache keeps its tiles, with every video closed
     if (e.persisted) UI.cams.wall.suspend();
     else UI.cams.wall.destroy();
@@ -1952,7 +2095,10 @@ function start(root) {
     reconnectNow();
   });
   // a hook for checks from the browser console
-  window.__live = { S, UI, seek, play, pause, setSpeed, startFollow, startPreview, replayFromStart, sound: () => S.sound.inspect() };
+  window.__live = {
+    S, UI, seek, play, pause, setSpeed, startFollow, startPreview, replayFromStart,
+    sound: () => S.sound.inspect(), liveSound: () => S.liveSound.inspect(),
+  };
 }
 
 main();

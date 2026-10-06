@@ -115,7 +115,9 @@ services:
 
   mediamtx:
     <<: *logging
-    image: bluenviron/mediamtx:1.21.0
+    # the -ffmpeg variant carries the FFmpeg that turns a microphone into Opus for the
+    # dashboard's Live sound (the listen/ paths of mediamtx.yml)
+    image: bluenviron/mediamtx:1.21.0-ffmpeg
     restart: unless-stopped
     volumes:
       - ../pipelines/uber-server/mediamtx/mediamtx.yml:/mediamtx.yml:ro
@@ -123,9 +125,9 @@ services:
       # container's working directory is /, so ./streams/server of mediamtx.yml is here
       - "${MEDIAMTX_STREAMS_DIR:-../artifacts/streams/server}:/streams/server"
     environment:
-      # where browsers take WebRTC video from: the container only knows its own docker
-      # addresses, so name the host as browsers reach it (comma-separated IPs or
-      # names, e.g. its tailnet IP). empty leaves webrtcAdditionalHosts of mediamtx.yml empty
+      # where browsers take WebRTC video and sound from: the container only knows its
+      # own docker addresses, so name the host as browsers reach it (comma-separated IPs
+      # or names, e.g. its tailnet IP). empty leaves webrtcAdditionalHosts of mediamtx.yml empty
       MTX_WEBRTCADDITIONALHOSTS: "${MEDIAMTX_WEBRTC_HOSTS:-}"
     ports:
       - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_RTMP_PORT:-1935}:1935"
@@ -141,8 +143,8 @@ services:
       # and in .env.example; unset, these lines repeat the two above and collapse)
       - "${INFRA_LOOPBACK_ADDRESS:-${INFRA_BIND_ADDRESS:-0.0.0.0}}:${MEDIAMTX_API_PORT:-9997}:9997"
       - "${INFRA_LOOPBACK_ADDRESS:-${INFRA_BIND_ADDRESS:-0.0.0.0}}:${MEDIAMTX_PLAYBACK_PORT:-9996}:9996"
-      # WebRTC for the dashboard's camera tiles: the WHEP handshake, then ICE (udp,
-      # tcp when udp is blocked). 8189 is announced to browsers as is, so it keeps its number
+      # WebRTC for the dashboard's camera tiles and Live sound: the WHEP handshake, then ICE
+      # (udp, tcp when udp is blocked). 8189 is announced to browsers as is, so it keeps its number
       - "${INFRA_BIND_ADDRESS:-0.0.0.0}:${MEDIAMTX_WEBRTC_PORT:-8889}:8889"
       - "${INFRA_BIND_ADDRESS:-0.0.0.0}:8189:8189/udp"
       - "${INFRA_BIND_ADDRESS:-0.0.0.0}:8189:8189/tcp"

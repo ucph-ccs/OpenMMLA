@@ -1,8 +1,8 @@
 # Dashboard backend settings. The TUI fills InfluxDB, MongoDB and Redis from System Settings ->
-# Connections when it saves this file; the live camera tiles find MediaMTX through System Settings ->
-# Stream Server (config/system_services.yml). A StreamServer section here (host, api_port,
-# playback_port, webrtc_port) is used only when System Settings has none, and without either the
-# dashboard tries the InfluxDB host with the MediaMTX default ports.
+# Connections when it saves this file; the live camera tiles and live sound find MediaMTX through
+# System Settings -> Stream Server (config/system_services.yml). A StreamServer section here (host,
+# api_port, playback_port, webrtc_port) is used only when System Settings has none, and without
+# either the dashboard tries the InfluxDB host with the MediaMTX default ports.
 #
 # The ports are not set here: `make flask` binds the Dashboard port of System Settings (DASHBOARD_PORT,
 # 5050) and, on the same addresses, the media ports (DASHBOARD_MEDIA_PORTS, the two above it: 5051
@@ -55,11 +55,14 @@ Redis:
 Exports:
   # Raw recordings in the Analysis page's downloads (Data and exports): the camera and microphone files
   # of a session that this machine holds under artifacts/<session>/collection/, and the recordings
-  # MediaMTX keeps of its streams. They are classroom footage and voices of children, and the dashboard
-  # serves them over plain HTTP without a login, on its port and its media ports, wherever make flask
-  # binds them (the INFRA addresses of docker/.env, else every interface): set false to keep them off
-  # the dashboard. An empty or unknown value, or a config.yml or system_services.yml that cannot be
-  # parsed, keeps them off too. Speaker profiles, coding clips and everything else of a session folder
+  # MediaMTX keeps of its streams. The same switch covers what the Live page plays: a replay's recorded
+  # video and sound, and a running session's microphones heard live (their listen/ paths). They are
+  # classroom footage and voices of children, and the dashboard serves them over plain HTTP without a
+  # login, on its port and its media ports, wherever make flask binds them (the INFRA addresses of
+  # docker/.env, else every interface): set false to keep them off the dashboard (MediaMTX itself has
+  # no login, so this does not keep them off its own ports). An empty or unknown value, or a
+  # config.yml or system_services.yml that cannot be parsed, keeps them off too. Speaker profiles,
+  # coding clips and everything else of a session folder
   # are never served. The environment variable DASHBOARD_RAW_MEDIA (0 or 1) overrides this; restart
   # the dashboard after changing either.
   raw_media: true

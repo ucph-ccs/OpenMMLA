@@ -112,13 +112,15 @@ export function waitIceGathering(pc, timeoutMs = ICE_TIMEOUT_MS, { setTimer = se
 }
 
 /**
- * One WHEP exchange on `pc`: receive-only video and audio transceivers, an offer with its ICE
- * candidates (gathering waited for up to `iceTimeout` ms), POST it as application/sdp, expect 201
- * with the answer, set it. Returns {location} (the session URL for DELETE, or null).
+ * One WHEP exchange on `pc`: a receive-only transceiver of each of `kinds` (video and audio; a
+ * microphone's sound takes audio alone), an offer with its ICE candidates (gathering waited for up
+ * to `iceTimeout` ms), POST it as application/sdp, expect 201 with the answer, set it. `what` names
+ * the media in the errors. Returns {location} (the session URL for DELETE, or null).
  */
-export async function whepNegotiate(pc, url, { fetchImpl = globalThis.fetch, iceTimeout = ICE_TIMEOUT_MS, signal, timers } = {}) {
-  pc.addTransceiver('video', { direction: 'recvonly' });
-  pc.addTransceiver('audio', { direction: 'recvonly' });
+export async function whepNegotiate(pc, url, {
+  fetchImpl = globalThis.fetch, iceTimeout = ICE_TIMEOUT_MS, signal, timers, kinds = ['video', 'audio'], what = 'video',
+} = {}) {
+  for (const kind of kinds) pc.addTransceiver(kind, { direction: 'recvonly' });
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   await waitIceGathering(pc, iceTimeout, timers);
@@ -137,8 +139,8 @@ export async function whepNegotiate(pc, url, { fetchImpl = globalThis.fetch, ice
     } catch {
       detail = '';
     }
-    const what = res.status === 404 ? 'The stream is not published' : `The stream server refused the video (HTTP ${res.status})`;
-    throw new WhepError(`${what}${detail ? `: ${detail}` : '.'}`, res.status);
+    const why = res.status === 404 ? 'The stream is not published' : `The stream server refused the ${what} (HTTP ${res.status})`;
+    throw new WhepError(`${why}${detail ? `: ${detail}` : '.'}`, res.status);
   }
   const answer = await res.text();
   if (!answer || !/^v=0/m.test(answer)) throw new WhepError('The stream server sent no SDP answer.', res.status);
@@ -160,17 +162,21 @@ export function supportsVideoDelay() {
 
 /**
  * A live video over WHEP that reconnects with backoff (1, 2, 5, 10 s) until stopped.
- * onState({state: 'connecting'|'playing'|'retrying'|'stopped', message, retryIn}).
+ * onState({state: 'connecting'|'playing'|'retrying'|'stopped', message, retryIn}). With
+ * `kinds: ['audio']` and an <audio> element as `video` it plays a microphone's sound (`what` names
+ * the media in its messages).
  */
 export class WhepPlayer {
   constructor({
     url, video = null, onState = () => {}, RTC = globalThis.RTCPeerConnection,
     fetchImpl = globalThis.fetch ? globalThis.fetch.bind(globalThis) : null, iceTimeout = ICE_TIMEOUT_MS,
     steps = RECONNECT_STEPS, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id),
-    disconnectGrace = 4000,
+    disconnectGrace = 4000, kinds = ['video', 'audio'], what = 'video',
   } = {}) {
     this.url = url;
     this.video = video;
+    this.kinds = kinds;
+    this.what = what;
     this.onState = onState;
     this.RTC = RTC;
     this.fetchImpl = fetchImpl;
@@ -241,7 +247,7 @@ export class WhepPlayer {
     try {
       const { location } = await whepNegotiate(pc, this.url, {
         fetchImpl: this.fetchImpl, iceTimeout: this.iceTimeout, signal: controller ? controller.signal : undefined,
-        timers: { setTimer: this.setTimer, clearTimer: this.clearTimer },
+        timers: { setTimer: this.setTimer, clearTimer: this.clearTimer }, kinds: this.kinds, what: this.what,
       });
       if (pc !== this.pc) return;
       this.location = location;
@@ -262,11 +268,11 @@ export class WhepPlayer {
       this.attempt = 0;
       this.emit('playing');
     } else if (st === 'failed') {
-      this.fail(new WhepError('The video connection failed.'));
+      this.fail(new WhepError(`The ${this.what} connection failed.`));
     } else if (st === 'disconnected') {
       this.clearTimer(this.graceTimer);
       this.graceTimer = this.setTimer(() => {
-        if (pc === this.pc && pc.connectionState === 'disconnected') this.fail(new WhepError('The video connection dropped.'));
+        if (pc === this.pc && pc.connectionState === 'disconnected') this.fail(new WhepError(`The ${this.what} connection dropped.`));
       }, this.disconnectGrace);
     }
   }
@@ -276,7 +282,7 @@ export class WhepPlayer {
     if (!this.wanted) return;
     const wait = this.steps[Math.min(this.attempt, this.steps.length - 1)];
     this.attempt += 1;
-    this.emit('retrying', { message: (err && err.message) || 'The video stopped.', retryIn: wait });
+    this.emit('retrying', { message: (err && err.message) || `The ${this.what} stopped.`, retryIn: wait });
     this.clearTimer(this.retryTimer);
     this.retryTimer = this.setTimer(() => {
       this.retryTimer = 0;

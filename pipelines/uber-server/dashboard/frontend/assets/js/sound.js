@@ -11,11 +11,18 @@
  *
  * Nothing loads before the viewer's first gesture on the page's controls (arm(), called from Play,
  * Pause, Replay from start, unmuting, a pick in the control, or the note a blocked sound shows), so
- * autoplay rules never block it. A hidden page lets go of the file (release()). Follow mode has no
- * sound: the microphones stream AAC, which WebRTC does not carry.
+ * autoplay rules never block it. A hidden page lets go of the file (release()).
+ *
+ * The sound of a running session in follow mode is LiveSound: one microphone heard live over WebRTC.
+ * The microphones publish AAC, which WebRTC does not carry, so it reads the microphone's listen/ path
+ * (the /media answer's `listen`), which the stream server makes on demand by turning the microphone
+ * into Opus (the listen/ entry of mediamtx.yml). It plays only once the viewer picked a microphone,
+ * and goes on in a hidden page.
  */
 
-import { FilePlayer, driftTolerance, recordingAt, nextRecording, inlineUrl, RECORDING_LOOKAHEAD } from './cameras.js';
+import {
+  FilePlayer, WhepPlayer, whepUrl, driftTolerance, recordingAt, nextRecording, inlineUrl, RECORDING_LOOKAHEAD,
+} from './cameras.js';
 
 // the fastest replay speed with sound
 export const MAX_SOUND_SPEED = 4;
@@ -170,6 +177,155 @@ export class ReplaySound {
       src: a ? a.getAttribute('src') : null, target: p ? p.target : null, time: a ? a.currentTime : null,
       paused: a ? a.paused : null, muted: a ? a.muted : null, rate: a ? a.playbackRate : null, stepping: p ? p.stepping : false,
       seeks: p ? p.seeks : 0,
+    };
+  }
+}
+
+/**
+ * One microphone of a running session, heard live: its listen/ path over WHEP into an <audio>
+ * element. update({webrtc, path, muted}) runs on every redraw (`webrtc`: the stream server's WebRTC
+ * base, `path`: the microphone's listen/ path, null for none) and returns {state, message} with state
+ * 'off' (no path), 'idle' (not armed yet), 'connecting', 'retrying' (the message says why),
+ * 'blocked' (the browser's autoplay rules refused it), 'error' (the player gave up: a browser
+ * without WebRTC) or 'playing'; 'released' after release() until the next update. `onChange` is
+ * called when the state moves between redraws.
+ */
+export class LiveSound {
+  constructor({ audio, Player = WhepPlayer, onChange = () => {} } = {}) {
+    this.audio = audio;
+    this.Player = Player;
+    this.onChange = onChange;
+    this.player = null;
+    // the listen/ path the player reads
+    this.path = null;
+    this.armed = false;
+    this.blocked = false;
+    this.message = null;
+    this.status = { state: 'off', message: null };
+    if (audio) {
+      audio.autoplay = true;
+      if (typeof audio.addEventListener === 'function') {
+        audio.addEventListener('playing', () => {
+          this.blocked = false;
+          this.changed();
+        });
+      }
+    }
+  }
+
+  changed() {
+    try {
+      this.onChange();
+    } catch {
+      // a broken listener must not stop the sound
+    }
+  }
+
+  /**
+   * call from a click: the element may play from now on, and plays now when it holds the sound;
+   * one that holds nothing yet is unlocked by a play() inside the gesture (a browser that asks for
+   * a gesture per element), as ReplaySound.arm does
+   */
+  arm() {
+    if (!this.audio) return;
+    this.armed = true;
+    if (this.player && this.audio.srcObject) {
+      this.tryPlay();
+      return;
+    }
+    try {
+      const r = this.audio.play();
+      if (r && typeof r.catch === 'function') r.catch(() => {});
+      this.audio.pause();
+    } catch {
+      // nothing to unlock
+    }
+  }
+
+  /** play the received sound; a refusal of the autoplay rules waits for the next arm() */
+  tryPlay() {
+    if (!this.audio || !this.armed) return;
+    try {
+      const r = this.audio.play();
+      if (r && typeof r.then === 'function') {
+        r.then(() => {
+          this.blocked = false;
+          this.changed();
+        }, (err) => {
+          if (err && err.name === 'NotAllowedError') {
+            this.blocked = true;
+            this.changed();
+          }
+        });
+      }
+    } catch {
+      // nothing to play yet
+    }
+  }
+
+  /** whether a player reads this listen/ path now (playing, connecting or retrying) */
+  holds(path) {
+    return !!this.player && !!path && this.path === path;
+  }
+
+  /** close the connection (Off, another microphone, the session ended, replay mode) */
+  release() {
+    if (this.player) {
+      this.player.stop();
+      this.player = null;
+    }
+    this.path = null;
+    this.blocked = false;
+    this.message = null;
+    this.set('released');
+  }
+
+  update({ webrtc = null, path = null, muted = false } = {}) {
+    if (!this.audio || !webrtc || !path) {
+      this.release();
+      return this.set('off');
+    }
+    if (!this.armed) {
+      this.release();
+      return this.set('idle');
+    }
+    const url = whepUrl(webrtc, path);
+    if (!this.player || this.player.url !== url) {
+      this.release();
+      this.path = path;
+      this.player = new this.Player({
+        url, video: this.audio, kinds: ['audio'], what: 'sound',
+        onState: (st) => {
+          this.message = st && st.message ? st.message : null;
+          if (st && st.state === 'playing') this.tryPlay();
+          this.changed();
+        },
+      });
+      this.player.start();
+    }
+    this.audio.muted = !!muted;
+    const p = this.player;
+    if (p.state === 'retrying') return this.set('retrying', this.message);
+    if (p.state === 'stopped') return this.set('error', this.message || 'This browser cannot play the live sound.');
+    if (p.state !== 'playing') return this.set('connecting');
+    if (this.blocked) return this.set('blocked');
+    if (this.audio.paused) return this.set('connecting');
+    return this.set('playing');
+  }
+
+  set(state, message = null) {
+    this.status = { state, message };
+    return this.status;
+  }
+
+  /** the element as it stands, for checks from the browser console */
+  inspect() {
+    const a = this.audio;
+    const p = this.player;
+    return {
+      armed: this.armed, state: this.status.state, message: this.status.message, url: p ? p.url : null,
+      player: p ? p.state : null, blocked: this.blocked, paused: a ? a.paused : null, muted: a ? a.muted : null,
+      tracks: a && a.srcObject && typeof a.srcObject.getAudioTracks === 'function' ? a.srcObject.getAudioTracks().length : 0,
     };
   }
 }

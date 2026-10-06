@@ -166,9 +166,15 @@ class Published:
     received: int = 0  # bytes
 
 
+# the paths the stream server makes itself from a microphone while the dashboard's Live page
+# listens to it (its sound as Opus, the listen/ entry of mediamtx.yml): no capture publishes them
+LISTEN_PREFIX = "listen/"
+
+
 def published(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> list[Published]:
     """the paths being published to the stream server right now (control API:
-    a path is ready while its source sends), by name. The time is None when
+    a path is ready while its source sends), by name; not the listen/ paths the
+    server makes for the dashboard while someone listens. The time is None when
     the server does not report one."""
     found: list[Published] = []
     page = 0
@@ -176,6 +182,8 @@ def published(host: str, api_port: int = API_PORT, timeout: float = 3.0) -> list
         data = _get_json(f"{_origin(host, api_port)}/v3/paths/list?itemsPerPage=100&page={page}", timeout)
         for item in data.get("items") or []:
             if not (item.get("ready") and item.get("name")):
+                continue
+            if str(item["name"]).startswith(LISTEN_PREFIX):
                 continue
             source = item.get("source") if isinstance(item.get("source"), dict) else {}
             try:

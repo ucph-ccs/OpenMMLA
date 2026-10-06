@@ -48,17 +48,21 @@ srtAddress: :8890
 hls: no
 
 # WebRTC, for browsers only: the dashboard's camera tiles read a live path with
-# WHEP (POST http://<stream-server>:8889/<app>/<name>/whep). The handshake goes
-# over 8889/tcp and the video over ICE on 8189 (udp, else tcp), so both have to
-# be reachable from the browser. H.264 video plays; AAC audio paths do not
+# WHEP (POST http://<stream-server>:8889/<app>/<name>/whep), and its Live sound
+# a microphone's listen/<app>/<name>. The handshake goes over 8889/tcp and the
+# video and sound over ICE on 8189 (udp, else tcp), so both have to be reachable
+# from the browser. H.264 video plays; the microphones publish AAC, which the
+# WebRTC of MediaMTX does not carry (its audio is Opus, G.722, G.711 or LPCM),
+# so the dashboard listens to a microphone through its listen/ path (see paths:
+# below)
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ['*']
 webrtcLocalUDPAddress: :8189
 webrtcLocalTCPAddress: :8189
-# the addresses the server offers browsers to take the video from are those of
-# its own interfaces. inside docker those are the container's, which no browser
-# reaches, so docker/docker-compose.infra.yml sets this list from
+# the addresses the server offers browsers to take the video and sound from are
+# those of its own interfaces. inside docker those are the container's, which no
+# browser reaches, so docker/docker-compose.infra.yml sets this list from
 # MEDIAMTX_WEBRTC_HOSTS (env MTX_WEBRTCADDITIONALHOSTS, comma-separated): the
 # address or name browsers reach this host at, such as its tailnet IP
 webrtcAdditionalHosts: []
@@ -115,5 +119,22 @@ pathDefaults:
   recordDeleteAfter: 72h
 
 paths:
-  # any path name works: the <app>/<name> of the publish URL is created on the fly
+  # the sound of a microphone for the dashboard's Live page: reading
+  # listen/<app>/<name> (WebRTC) starts an FFmpeg here that reads <app>/<name>
+  # and publishes its audio again as Opus, which WebRTC carries; the path does
+  # not exist until someone reads it, and its FFmpeg stops 10 s after the last
+  # reader left. Nothing of it is recorded: it is never a session's source. The
+  # docker service runs the -ffmpeg image for this; a native run (make mediamtx)
+  # needs an ffmpeg with libopus on the PATH
+  "~^listen/(.+)$":
+    record: no
+    runOnDemand: >-
+      ffmpeg -hide_banner -loglevel error -fflags nobuffer -rtsp_transport tcp
+      -i rtsp://localhost:$RTSP_PORT/$G1 -map 0:a:0 -ac 1 -c:a libopus -b:a 32k -ar 48000
+      -application voip -f rtsp -rtsp_transport tcp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnDemandRestart: yes
+    runOnDemandStartTimeout: 10s
+    runOnDemandCloseAfter: 10s
+  # any path name works, except under listen/, which the dashboard's Live sound
+  # takes: the <app>/<name> of the publish URL is created on the fly
   all_others:

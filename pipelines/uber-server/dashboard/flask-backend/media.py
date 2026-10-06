@@ -25,6 +25,8 @@ PATHS_TTL = 5.0
 GLOBAL_TTL = 60.0
 ADDRESS_TTL = 60.0
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "127.0.1.1"}
+# a microphone's path read under this prefix is its sound as Opus (the listen/ entry of mediamtx.yml)
+LISTEN_PREFIX = "listen/"
 
 _FRACTION_RE = re.compile(r"^(.*T\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$")
 
@@ -138,6 +140,8 @@ class MediaServer:
         self._paths_at = 0.0
         self._global = None
         self._global_at = 0.0
+        self._listen = None
+        self._listen_at = 0.0
 
     def address(self) -> dict | None:
         """re-read every minute, so a Stream Server saved in the TUI reaches a running dashboard."""
@@ -193,6 +197,31 @@ class MediaServer:
         except (URLError, HTTPError, OSError, ValueError):
             value = None
         self._global, self._global_at = value, now
+        return value
+
+    def listen_entry(self) -> bool | None:
+        """whether the running server holds the listen/ entry of mediamtx.yml (a regular expression
+        on LISTEN_PREFIX with a runOnDemand), so a microphone can be heard in a browser; None when
+        the API did not answer. Cached a minute."""
+        now = time.time()
+        if self._listen_at and now - self._listen_at < GLOBAL_TTL:
+            return self._listen
+        value = None
+        try:
+            found, page, pages = False, 0, 1
+            while page < pages and page < 20 and not found:
+                body = self._api(f"/v3/config/paths/list?itemsPerPage=200&page={page}") or {}
+                for item in body.get("items") or []:
+                    name = str((item or {}).get("name") or "") if isinstance(item, dict) else ""
+                    if name.startswith(f"~^{LISTEN_PREFIX}") and str(item.get("runOnDemand") or "").strip():
+                        found = True
+                        break
+                pages = _int(body.get("pageCount"), 1)
+                page += 1
+            value = found
+        except (URLError, HTTPError, OSError, ValueError):
+            value = None
+        self._listen, self._listen_at = value, now
         return value
 
     def health(self) -> dict:
@@ -256,9 +285,12 @@ class MediaServer:
 
     def session_media(self, doc: dict | None, devices: dict | None, mongo_ok: bool, t0, t1,
                       want_recordings: bool, request_host: str | None) -> dict:
-        """the /media answer of section 5.5."""
+        """the /media answer of section 5.5. Each microphone (kind audio) also names `listen`, the
+        path its sound plays from in a browser (LISTEN_PREFIX + its path), while the server has WebRTC
+        and the listen/ entry; `listen_reason` says why none has one otherwise."""
         address = self.address()
-        out = {"webrtc": None, "playback": None, "streams": [], "recordings": [], "reason": None}
+        out = {"webrtc": None, "playback": None, "streams": [], "recordings": [], "reason": None,
+               "listen_reason": None}
         if address is None:
             out["reason"] = "No stream server is configured, so the dashboard cannot show video."
             return out
@@ -284,15 +316,27 @@ class MediaServer:
                 out["reason"] = "This session lists no sources."
             return out
         ready, api_reason = self.ready_paths()
-        for stream in streams:
+        kinds = [stream.get("kind") or ("audio" if stream.get("pipeline") == "asr" else "video") for stream in streams]
+        listen = None
+        if "audio" in kinds:
+            listen = self.listen_entry() if webrtc_on else False
+            if not webrtc_on:
+                out["listen_reason"] = "MediaMTX has WebRTC turned off, so the microphones cannot play in the browser."
+            elif listen is None:
+                out["listen_reason"] = "MediaMTX did not say whether it can turn the microphones into sound for the browser."
+            elif not listen:
+                out["listen_reason"] = ("The stream server has no listen/ entry in its mediamtx.yml, so the microphones "
+                                        "cannot play in the browser (see the dashboard docs).")
+        for stream, kind in zip(streams, kinds):
             path = str(stream.get("path"))
-            kind = stream.get("kind") or ("audio" if stream.get("pipeline") == "asr" else "video")
             out["streams"].append({
                 "path": path, "pipeline": stream.get("pipeline"), "base_id": stream.get("base_id"),
                 "camera": stream.get("base_id") if kind == "video" else None, "kind": kind,
                 # the stream's name (the camera's tile key) and how its capture turned the picture
                 "stream": stream.get("stream") or None, "rotate": stream.get("rotate") or 0,
                 "ready": bool(ready is not None and path in ready),
+                # where a browser hears a microphone: its sound as Opus, made when first read
+                "listen": f"{LISTEN_PREFIX}{path.strip('/')}" if kind == "audio" and listen else None,
             })
         if ready is None:
             out["reason"] = api_reason

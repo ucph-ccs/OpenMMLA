@@ -38,7 +38,7 @@ A pipeline built with the toolkit follows a three-stage data flow:
 - **Servers**: PCs that provide centralized services.
     + *Base server*: the AI services (speaker inference, transcription, VAD, frame analysis, ...) as Docker containers on a GPU machine.
     + *Uber server*: the system services: InfluxDB and MongoDB (databases), Redis and Mosquitto (messaging), Nginx (load balancing), MediaMTX (streaming) and the dashboard.
-- **Dashboard**: web pages with a session explorer, a live view of a running session (with its camera video when the session streams through MediaMTX) or a replay of an ended one, an analysis report per session, and measurement downloads.
+- **Dashboard**: web pages with a session explorer, a live view of a running session (with its camera video and microphone sound when the session streams through MediaMTX) or a replay of an ended one, an analysis report per session, and measurement downloads.
 
 </details>
 

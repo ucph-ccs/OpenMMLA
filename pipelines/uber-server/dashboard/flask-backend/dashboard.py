@@ -855,7 +855,7 @@ def api_media(sid):
     check_sid(sid)
     # while Exports.raw_media is off, neither the recorded stretches nor the playback server that
     # serves them go out (the live view only needs webrtc)
-    raw_media_on, _ = raw_media_state()
+    raw_media_on, raw_reason = raw_media_state()
     want_recordings = raw_media_on and request.args.get("recordings") in ("1", "true", "yes")
     mongo_ok, doc, devices, t0, t1, failed = _media_inputs(sid)
     if failed is not None and (failed.status not in (404, 503) or (failed.status == 404 and doc is None)):
@@ -863,6 +863,12 @@ def api_media(sid):
     body = MEDIA.session_media(doc, devices, mongo_ok, t0, t1, want_recordings, _request_hostname())
     if not raw_media_on:
         body["playback"] = None
+        # the microphones are the children's voices, as the recordings are: the same switch keeps
+        # them from the browser live
+        for stream in body.get("streams") or []:
+            if stream.get("listen"):
+                stream["listen"] = None
+                body["listen_reason"] = raw_reason
     return json_response(body)
 
 
