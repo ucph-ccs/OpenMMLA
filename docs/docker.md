@@ -77,7 +77,7 @@ The image tags are pinned on purpose; do not switch them to `latest`. From 2026-
 
 ### Setup
 
-Run the commands on the **machine that will hold the databases** (called `server-01` below), from the repository root. That machine only needs a clone of the repository, or just these two files from `docker/`: the stack has no build context.
+Run the commands on the **machine that will hold the databases** (called `uber-server` below), from the repository root. That machine only needs a clone of the repository, or just these two files from `docker/`: the stack has no build context.
 
 First stop any bare-metal service that may hold 8086 / 27017, otherwise `up -d` fails with `Bind for 0.0.0.0:8086 failed: port is already allocated`. If the port is held by **another project's container**, do not stop it; change our host port instead, see [Sharing a host with another project](#sharing-a-host-with-another-project).
 
@@ -117,7 +117,7 @@ mongodump --uri "mongodb://localhost:27017" --db openmmla --archive=openmmla.arc
 influx backup ./influx-backup -t "<old admin token>"
 ```
 
-Copy both to `server-01` and import into the containers:
+Copy both to `uber-server` and import into the containers:
 
 ```bash
 docker compose -f docker/docker-compose.infra.yml exec -T mongodb \
@@ -157,7 +157,7 @@ INFLUXDB_PORT=8087
 MONGODB_PORT=27018
 ```
 
-Then put the new ports in the System Settings URLs (`http://server-01:8087`, `mongodb://server-01:27018`). The TUI's status probe reads the port from the URL, so nothing else changes. Inside the containers the ports stay 8086 / 27017, so the healthchecks and the data are unaffected.
+Then put the new ports in the System Settings URLs (`http://uber-server:8087`, `mongodb://uber-server:27018`). The TUI's status probe reads the port from the URL, so nothing else changes. Inside the containers the ports stay 8086 / 27017, so the healthchecks and the data are unaffected.
 
 Do not go the other way and reuse the other project's instance: it is usually bound to loopback only (unreachable from other machines), has authentication enabled (the password would have to go into `MongoDB.url` in plaintext), and if it runs `influxdb:latest`, one `pull` after 2026-09-15 turns it into InfluxDB 3 and takes your data with it.
 
@@ -178,7 +178,7 @@ getent hosts "$(hostname)"           # on the database host: 127.0.1.1 on Debian
 
 ```bash
 # docker/.env, on the database host only
-INFRA_BIND_ADDRESS=100.x.x.x         # tailnet interface, as before
+INFRA_BIND_ADDRESS=<tailnet-ip>      # tailnet interface, as before
 INFRA_LOOPBACK_ADDRESS=127.0.1.1     # what the host's own name resolves to there
 ```
 
@@ -186,8 +186,8 @@ INFRA_LOOPBACK_ADDRESS=127.0.1.1     # what the host's own name resolves to ther
 docker compose -f docker/docker-compose.infra.yml up -d influxdb mongodb
 ```
 
-Every config keeps the host name — `http://server-01:8087` resolves to the tailnet address on
-the other machines and to `127.0.1.1` on server-01, and both are published — so System Settings
+Every config keeps the host name — `http://uber-server:8087` resolves to the tailnet address on
+the other machines and to `127.0.1.1` on `uber-server` itself, and both are published — so System Settings
 syncs the same value everywhere, and the dashboard can move to another machine without a config
 change. Prefer this over `localhost`: a `localhost` URL is only right on the database host, so it
 has to be pinned there with `SystemServicesOverride`, which also stops token rotations from
@@ -206,11 +206,11 @@ itself, and its own processes could already dial the bind address.
 
 | Field | Value |
 |---|---|
-| `InfluxDB.url` | `http://server-01.local:8086` (`org: admin` and `bucket: mmla-data` stay as they are) |
+| `InfluxDB.url` | `http://uber-server.local:8086` (`org: admin` and `bucket: mmla-data` stay as they are) |
 | `InfluxDB.token` | the `INFLUXDB_INIT_ADMIN_TOKEN` from above, replacing the whole `ENC(...)` string (the stored token, encrypted with this machine's master key) with the plain value; or press **Fetch Token** on the InfluxDB card (see below) |
-| `MongoDB.url` | `mongodb://server-01.local:27017` (`db: openmmla` stays) |
+| `MongoDB.url` | `mongodb://uber-server.local:27017` (`db: openmmla` stays) |
 
-**How you spell the host name depends on your network.** `.local` is mDNS and only works on the **same LAN**. If your Mac and `server-01` are on different subnets with Tailscale in between (`ssh admin@server-01` works but `ping server-01.local` does not), use the Tailscale MagicDNS name or the tailnet IP: `http://server-01:8086`, `http://100.x.x.x:8086`. That also means **every base station has to be in the tailnet**, or it cannot reach the databases. If you changed the ports, include them: `http://server-01:8087`.
+**How you spell the host name depends on your network.** `.local` is mDNS and only works on the **same LAN**. If your Mac and `uber-server` are on different subnets with Tailscale in between (`ssh admin@uber-server` works but `ping uber-server.local` does not), use the Tailscale MagicDNS name or the tailnet IP: `http://uber-server:8086`, `http://<tailnet-ip>:8086`. That also means **every base station has to be in the tailnet**, or it cannot reach the databases. If you changed the ports, include them: `http://uber-server:8087`.
 
 On save the token is re-encrypted to `ENC(...)` and written into every local `pipelines/*/config.yml`. **Do not edit those files by hand**: they get overwritten, and at runtime `config/system_services.yml` wins anyway. The first launch on a remote host syncs the config first and then asks you to launch again; that is by design, not an error.
 
@@ -219,14 +219,14 @@ The new container is a fresh InfluxDB, so the old token is guaranteed to fail au
 Verify, from the machine that runs the TUI:
 
 ```bash
-ping -c1 server-01.local
-curl -sf http://server-01.local:8086/health
-mongosh mongodb://server-01.local:27017 --eval 'db.adminCommand({ping:1})'
+ping -c1 uber-server.local
+curl -sf http://uber-server.local:8086/health
+mongosh mongodb://uber-server.local:27017 --eval 'db.adminCommand({ping:1})'
 ```
 
-`server-01.local` relies on mDNS. Ubuntu Server ships neither `avahi-daemon` nor `libnss-mdns` by default (`sudo apt install -y avahi-daemon libnss-mdns` and `sudo hostnamectl set-hostname server-01`), and mDNS does not cross subnets or VLANs. If the name does not resolve, fall back to a fixed IP or `/etc/hosts`.
+`uber-server.local` relies on mDNS. Ubuntu Server ships neither `avahi-daemon` nor `libnss-mdns` by default (`sudo apt install -y avahi-daemon libnss-mdns` and `sudo hostnamectl set-hostname uber-server`), and mDNS does not cross subnets or VLANs. If the name does not resolve, fall back to a fixed IP or `/etc/hosts`.
 
-**These three checks run on the host, but the ASR / VFA containers read the same URLs**, and containers on a bridge network do no mDNS resolution by default: `ping server-01.local` working on the host does not mean it works inside the container. When the containerized AI services are in use as well, put a fixed IP in `config/system_services.yml`, or add `extra_hosts` to the two AI compose files.
+**These three checks run on the host, but the ASR / VFA containers read the same URLs**, and containers on a bridge network do no mDNS resolution by default: `ping uber-server.local` working on the host does not mean it works inside the container. When the containerized AI services are in use as well, put a fixed IP in `config/system_services.yml`, or add `extra_hosts` to the two AI compose files.
 
 ### MongoDB authentication (optional, strongly recommended)
 
@@ -241,7 +241,7 @@ docker compose -f docker/docker-compose.infra.yml up -d
 - This only takes effect while the `mongodb-data` volume is empty. Adding the variables once the volume holds data gives you `--auth` with no users at all, and nobody can connect. **Do not delete the volume** in that case: clear both variables and `up -d` again to return to no-auth with the data untouched, or create the user through the container's localhost exception:
   `docker compose -f docker/docker-compose.infra.yml exec mongodb mongosh admin --eval 'db.createUser({user:"openmmla",pwd:"<password>",roles:["root"]})'`
 - Setting only one of the two variables makes the container **restart-loop** while `up -d` still reports success. If 27017 never opens, check `docker compose -f docker/docker-compose.infra.yml ps` and `... logs mongodb`.
-- With auth on, the URL must be `mongodb://<user>:<pass>@server-01.local:27017/?authSource=admin`; without `authSource=admin` authentication fails.
+- With auth on, the URL must be `mongodb://<user>:<pass>@uber-server.local:27017/?authSource=admin`; without `authSource=admin` authentication fails.
 - `url` is not on the list of encrypted fields (only keys such as token/password/secret are encrypted), so a URL with a password sits in plaintext in `config/system_services.yml` and in every synced `pipelines/*/config.yml`. Those files are gitignored, but keep that in mind before enabling auth, at least until `MongoDB` gets separate username/password fields.
 
 ## Mounts
@@ -270,9 +270,9 @@ A remote host runs the same commands over SSH in its repository directory, so it
 - **Start / Stop / Logs**: each card has a **Run mode** dropdown (`docker` / `native`), **`docker` by default**. Switch a machine that still uses brew / systemctl databases to `native`, otherwise Start brings up a container on that machine and fights the bare-metal instance for the port. In `docker` mode the three buttons run `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <service>`. Stop uses `stop`, not `down`: the cards share one compose file and `down` would take the other containers with it. The **Stream Server (MediaMTX)** card probes the `rtmp_port` and `rtsp_port` of the Stream Server section.
 - Run mode is remembered per host + service, so switching Host or clicking another node and coming back keeps it, but only for this TUI session; a restart returns to `docker`.
 - **Fetch Token** (InfluxDB card only, docker mode): reads the docker stack's admin token on the selected Host, first from the running container's `/etc/influxdb2/influx-configs` (which also covers a token influx generated itself), then from `docker/.env`, and stores it encrypted in System Settings as `InfluxDB.token`. The token never appears in the logs; only its first and last 4 characters are shown. The TUI warns when the URL's host and the host the token was read from differ.
-- **Status tab, Host column**: for InfluxDB / MongoDB / Redis / Mosquitto / Nginx it shows **the machine the service is configured on** (`server-01`, `ericli.local`), not where the TUI runs; the Port column is the port. View Logs finds the SSH profile for that host (matched by profile name or host), reads locally when the host is this machine, reads the container logs when a container exists, and otherwise falls back to journalctl / brew logs.
-- Reachability is judged **from the TUI machine**, which is the path the pipelines actually take. With `InfluxDB.url` set to `http://server-01:8087`, the card and the Status tab connect to `server-01:8087`; which interface `INFRA_BIND_ADDRESS` binds does not matter. The card description states the address being probed. Two consequences: a `localhost` / `127.0.0.1` URL names no particular machine, so the old logic applies (local probes this machine, a remote Host is probed over SSH on its own loopback); and if the TUI machine is outside the tailnet or behind a firewall, the card is grey even when the pipeline machines can connect.
-- After the databases move to `server-01`, the two cards on a Mac with `localhost` URLs stay grey, because the local probe hits 127.0.0.1. That is expected, not a connectivity problem. **Do not press Start on the Mac in that state**: in `native` mode it runs `make influxdb` / `make mongodb`, which starts a bare-metal database on local 8086 / 27017, and the card turns green `Running` for an empty local database while the pipelines still use `server-01`. Stop those two local services once the move is done.
+- **Status tab, Host column**: for InfluxDB / MongoDB / Redis / Mosquitto / Nginx it shows **the machine the service is configured on** (`uber-server`, `uber-server.local`), not where the TUI runs; the Port column is the port. View Logs finds the SSH profile for that host (matched by profile name or host), reads locally when the host is this machine, reads the container logs when a container exists, and otherwise falls back to journalctl / brew logs.
+- Reachability is judged **from the TUI machine**, which is the path the pipelines actually take. With `InfluxDB.url` set to `http://uber-server:8087`, the card and the Status tab connect to `uber-server:8087`; which interface `INFRA_BIND_ADDRESS` binds does not matter. The card description states the address being probed. Two consequences: a `localhost` / `127.0.0.1` URL names no particular machine, so the old logic applies (local probes this machine, a remote Host is probed over SSH on its own loopback); and if the TUI machine is outside the tailnet or behind a firewall, the card is grey even when the pipeline machines can connect.
+- After the databases move to `uber-server`, the two cards on a Mac with `localhost` URLs stay grey, because the local probe hits 127.0.0.1. That is expected, not a connectivity problem. **Do not press Start on the Mac in that state**: in `native` mode it runs `make influxdb` / `make mongodb`, which starts a bare-metal database on local 8086 / 27017, and the card turns green `Running` for an empty local database while the pipelines still use `uber-server`. Stop those two local services once the move is done.
 
 ## Known caveats
 
@@ -286,6 +286,6 @@ A remote host runs the same commands over SSH in its repository directory, so it
 - The InfluxDB web UI is published on the same port 8086; anyone who can reach it can log in with `admin` + `INFLUXDB_INIT_PASSWORD`. Do not pad that password to 8 characters; generate it with `openssl rand -base64 24`.
 - **Do not run `make -C pipelines/uber-server all` on a machine that runs the containerized databases**: `all` starts with `clean-ports`, which `kill -9`s whatever holds 8086 / 27017, i.e. docker-proxy, and the `influxdb` / `mongodb` targets then start bare-metal services on top. Use `make all without=influxdb,mongodb` there.
 - MongoDB runs without authentication by default, and on Linux Docker's NAT rules run before ufw, so `ufw deny 27017` does not block a published port. Use it only on a trusted lab network, restrict publishing to one interface with `INFRA_BIND_ADDRESS=<LAN IP>`, or add iptables rules to the `DOCKER-USER` chain.
-- With `INFRA_BIND_ADDRESS` set to an address that comes up after Docker does (a tailnet IP), a container started at boot before the address is there cannot publish its ports and stays down: Docker's restart policy only restarts a container that ran and exited, not one whose start failed. `docker compose -f docker/docker-compose.infra.yml up -d` brings them up once the address is there, and on a machine that runs the dashboard `make autostart` in `pipelines/uber-server` makes every boot start them (see the [Dashboard Setup Guide](dashboard.md#deploying-on-server-01)).
+- With `INFRA_BIND_ADDRESS` set to an address that comes up after Docker does (a tailnet IP), a container started at boot before the address is there cannot publish its ports and stays down: Docker's restart policy only restarts a container that ran and exited, not one whose start failed. `docker compose -f docker/docker-compose.infra.yml up -d` brings them up once the address is there, and on a machine that runs the dashboard `make autostart` in `pipelines/uber-server` makes every boot start them (see the [Dashboard Setup Guide](dashboard.md#deploying-on-a-server)).
 - **MediaMTX reads `mediamtx.yml` when its container starts.** The file is bind-mounted on its own, and a change made on the host, by a `git pull` or by a Save or Sync on the Stream Server card, never reaches the running server: recreate it (`docker compose -f docker/docker-compose.infra.yml up -d --force-recreate mediamtx`, or Stop and then Start on the card), which closes every stream for a moment. `curl -s http://<stream-server>:9997/v3/config/global/get` shows what it runs with. The same goes for its record folder: one renamed or removed under a running container records nowhere (see [Streaming](rtmp_streaming.md#on-the-server)).
 - MongoDB 5.0+ requires AVX on x86_64 (ARMv8.2-A or newer on arm64). On an older CPU the container restart-loops with exit code 132 while `up -d` reports success. Check with `grep -m1 -o avx /proc/cpuinfo` on the server before going live.

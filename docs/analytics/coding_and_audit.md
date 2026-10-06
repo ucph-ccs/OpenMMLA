@@ -23,8 +23,8 @@ The tool limits who may connect to its own port. It cannot stop a coder's machin
 
 The operator sets this up before the first link and records it in the log:
 
-1. **One port only.** A coder's or auditor's machine must reach exactly one port of the server: 8766, the campaign's or the audit's. Use a Tailscale ACL that lets the coding machines' tag reach only `server-01:8766`, or an SSH account limited by `permitopen` to `127.0.0.1:8766` (then bind 127.0.0.1).
-2. **A probe from each machine.** Run a port probe from each coding machine (for example `nc -zv server-01 1-65535`) and record what it reached with `--log-note "port probe from <machine>: only 8766 open"`.
+1. **One port only.** A coder's or auditor's machine must reach exactly one port of the server: 8766, the campaign's or the audit's. Use a Tailscale ACL that lets the coding machines' tag reach only `uber-server:8766`, or an SSH account limited by `permitopen` to `127.0.0.1:8766` (then bind 127.0.0.1).
+2. **A probe from each machine.** Run a port probe from each coding machine (for example `nc -zv uber-server 1-65535`) and record what it reached with `--log-note "port probe from <machine>: only 8766 open"`.
 3. **Kiosk machines.** Coders use the machines whose addresses `--allow-from` names, never their own devices.
 4. **Approvals.** Record the data protection approval of the processing, each coder's and auditor's signed data agreement, and the non-developer who confirmed the list of coders, each with `--log-note`.
 

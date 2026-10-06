@@ -152,7 +152,7 @@ sudo netstat -tulnp | grep 50004  # for linux
 it will list out the process using the port 50004
 ```
 COMMAND    PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-python3.9 3440 ericli    9u  IPv4 0x2bf903e3e96b6203      0t0  UDP *:50004
+python3.9 3440   mmla    9u  IPv4 0x2bf903e3e96b6203      0t0  UDP *:50004
 ```
 Then, kill the process with PID
 ```cmd

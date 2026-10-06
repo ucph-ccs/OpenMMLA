@@ -30,7 +30,7 @@ Edit `config.yml`:
 # load balancer: one entry per AI service endpoint, one server line per host that runs it
 upstreams:
   transcribe:
-    - host: server-01.local
+    - host: gpu-server.local
       port: 5005
       weight: 3
     - host: 192.168.1.12
