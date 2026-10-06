@@ -61,7 +61,7 @@ class _GoesOn:
 def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store: bool = False,
                    vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                    hsr: bool = True, session_id: str | None = None, base: str | None = None,
-                   speakers: str | None = None, language: str | None = None, diarize: bool = False,
+                   speakers: str | None = None, language: str | None = None, diarize: bool | None = None,
                    participant: str | None = None):
     """Start ASR Base with restart capability.
     
@@ -81,7 +81,8 @@ def start_asr_base(project_dir: str, config_path: str, mode: str = 'live', store
         language: Language to transcribe in, whatever the speech transcriber is configured for
         participant: Whom the base's speech is attributed to: a participant's tag, 'group' or
             'speakers'; if omitted, the config decides
-        diarize: Whether to ask the speech transcriber for anonymous speaker turns with every chunk
+        diarize: Whether to ask the speech transcriber for anonymous speaker turns with every chunk;
+            if omitted, a group microphone asks and the other bases do not (ASRBase.diarizes)
     """
     # restart loop - allows restarting the entire process
     while True:
@@ -130,7 +131,7 @@ class ASRBase(Base):
                  vad: bool = True, nr: bool = True, tr: bool = True, sp: bool = False,
                  hsr: bool = True, session_id: str | None = None, base: str | None = None,
                  speakers: str | list[str] | None = None, registration: str | None = None,
-                 language: str | None = None, diarize: bool = False, participant: str | None = None):
+                 language: str | None = None, diarize: bool | None = None, participant: str | None = None):
         """Initialize the ASRBase class.
 
         Args:
@@ -158,8 +159,9 @@ class ASRBase(Base):
             diarize: whether every chunk is sent for its anonymous speaker turns (SPEAKER_00,
                 SPEAKER_01 ... within the chunk, no names), which the transcript record then
                 carries as `diarization`; a group-level base (asr_scope: group) gets who-of-how-many
-                spoke when without any speaker profile. Only a local WhisperX transcriber can
-                (default: False)
+                spoke when without any speaker profile. Only a local WhisperX transcriber can.
+                If omitted, a group microphone's chunks are sent for them and the others' are not
+                (diarizes) (default: None)
             participant: whom this base's speech is attributed to, as the Launch tab picked it: a
                 participant's tag (a microphone they wear: wearer mode with that tag), 'group' (the
                 session's group) or 'speakers' (speaker verification); it wins over asr_scope, the
@@ -181,7 +183,8 @@ class ASRBase(Base):
         self.launch_participant = launch_attribution(participant)
         self.registration = registration
         self.language = str(language).strip() if language and str(language).strip() else None
-        self.diarize = bool(diarize)
+        # as -dia said; None leaves it to whether this base is a group microphone (diarizes)
+        self.diarize = None if diarize is None else bool(diarize)
 
         # runtime attributes
         self.session_id = None
@@ -1234,8 +1237,9 @@ class ASRBase(Base):
                     # how the speakers of a diarized chunk are linked into the voices of the session (a
                     # base that asks for turns; one whose transcriber diarizes every file links too, and
                     # its transcripts say so by their voices)
-                    'voice_link_threshold': VOICE_LINK_THRESHOLD if self.diarize else None,
-                    'voice_min_seconds': VOICE_MIN_SECONDS if self.diarize else None,
+                    'diarize': self.diarizes,
+                    'voice_link_threshold': VOICE_LINK_THRESHOLD if self.diarizes else None,
+                    'voice_min_seconds': VOICE_MIN_SECONDS if self.diarizes else None,
                     'selected_speakers': list(self.selected_speakers or []),
                     'group_speaker_id': self.group_speaker_id, 'language': self.language,
                     'participant': self.participant,
@@ -2087,12 +2091,22 @@ class ASRBase(Base):
         """
         response = request_speech_transcription(frames, frame_rate, f'{self.base_type.lower()}_{self.id}',
                                             self.speech_transcriber_url, language=self.language,
-                                            diarize=self.diarize)
+                                            diarize=self.diarizes)
         if response is None:
             return {}
         self._check_language(response)
         self._check_diarize(response)
         return response
+
+    @property
+    def diarizes(self) -> bool:
+        """whether this base's chunks are sent for their anonymous speaker turns: as -dia said, else
+        when its speech goes to the group (no wearer, no speaker verification), a group microphone,
+        whose speakers nothing else tells apart. Asked at each chunk, as a session's noted wearer
+        can make a worn microphone of one for a run."""
+        if self.diarize is not None:
+            return self.diarize
+        return getattr(self, 'participant', None) is None and not getattr(self, 'speaker_verification', True)
 
     def _check_diarize(self, response: dict) -> None:
         """say once, when this base asked for speaker turns, that the speech transcriber gave none:
@@ -2108,7 +2122,7 @@ class ASRBase(Base):
                 "linked into the voices of the session: its service runs code from before it returned them (or a "
                 "WhisperX whose pipeline cannot). Transcripts keep each chunk's own SPEAKER_NN until the speech "
                 "transcriber image is built anew and started again.")
-        if not self.diarize or self._diarize_told:
+        if not self.diarizes or self._diarize_told:
             return
         if response.get("diarized"):
             self._diarize_told = True

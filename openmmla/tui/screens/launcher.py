@@ -1392,6 +1392,9 @@ _GRAPHICS_BY_SOURCE = [("off for streams", ""), ("on", "true"), ("off", "false")
 # the speech transcriber's own configured language for the first option. The
 # common ones; -lang itself takes any code (yue) or locale (en-GB) the
 # service's backend knows
+# the ASR Base card's Diarize: whose chunks are sent for their anonymous speaker turns
+_ASR_DIARIZE = [("on for group microphones", ""), ("on", "true"), ("off", "false")]
+
 _ASR_LANGUAGES = [
     ("the server's own language", ""),
     ("English (en)", "en"),
@@ -3936,8 +3939,10 @@ def _build_service_registry(root: str) -> list[ServiceDef]:
             ParamDef("-tr", "Transcribe", "bool", True),
             ParamDef("-lang", "Language", "str", "", _ASR_LANGUAGES),
             # anonymous speaker turns with every transcript (pyannote on the speech
-            # transcriber, local WhisperX only): who-of-how-many spoke when, no names
-            ParamDef("-dia", "Diarize", "bool", False),
+            # transcriber, local WhisperX only): who-of-how-many spoke when, no names.
+            # The first option passes no -dia: each base diarizes when it is a group
+            # microphone (ASRBase.diarizes)
+            ParamDef("-dia", "Diarize", "str", "", _ASR_DIARIZE),
             ParamDef("-sp", "Speech Separate", "bool", False),
             ParamDef("-d", "Dominant Speaker", "bool", False),
             ParamDef("-hsr", "Half-Scaled Recognition", "bool", True),
