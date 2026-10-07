@@ -61,26 +61,26 @@ The [Quickstart](docs/quickstart.md) walks through the whole setup and a first s
     mmla tui
     ```
 
-    Guide to every tab and card: [Management Console (TUI)](docs/tui.md).
+    Guide to every tab and card: [Management console (TUI)](docs/tui/index.md).
 
-4. **Pipelines**: set up and run [Automatic speech recognition](docs/pipelines/asr.md), the [Indoor positioning system](docs/pipelines/ips.md) or the [Video frame analyzer](docs/pipelines/vfa/index.md).
+4. **Pipelines**: set up and run [Automatic speech recognition](docs/pipelines/asr/index.md), the [Indoor positioning system](docs/pipelines/ips/index.md) or the [Video frame analyzer](docs/pipelines/vfa/index.md).
 
 ## Documentation
 
 | Page | Content |
 |---|---|
 | [Quickstart](docs/quickstart.md) | from nothing to an exported and archived session: the one-time setup, then Collection mode or Pipeline mode |
-| [System Prerequisites](docs/prerequisites.md) | Conda, Git, tmux, PortAudio, FFmpeg per OS |
-| [System Services](docs/system_services.md) | InfluxDB, MongoDB, Redis, Mosquitto, Nginx, dashboard: install, start/stop, System Settings |
-| [Management Console](docs/tui.md) | the TUI: environments, launcher tree, cards, sessions, status, remote hosts |
-| [ASR](docs/pipelines/asr.md), [IPS](docs/pipelines/ips.md), [VFA](docs/pipelines/vfa/index.md) | the three pipelines end to end |
+| [System prerequisites](docs/prerequisites.md) | Conda, Git, tmux, PortAudio, FFmpeg per OS |
+| [System services](docs/system_services.md) | InfluxDB, MongoDB, Redis, Mosquitto, Nginx, dashboard: install, start/stop, System Settings |
+| [Management console (TUI)](docs/tui/index.md) | the TUI: environments, launcher tree, cards, sessions, status, remote hosts |
+| [ASR](docs/pipelines/asr/index.md), [IPS](docs/pipelines/ips/index.md), [VFA](docs/pipelines/vfa/index.md) | the three pipelines end to end |
 | [Human coding interface](docs/pipelines/vfa/coding_interface.md) | coding VFA ground truth frame by frame, in the pipeline's own output format |
 | [Window features](docs/analytics/window_features.md) | `mmla ses-fuse`: a session's ASR, IPS and VFA events joined into one table, window by window |
 | [Docker](docs/docker.md) | the ASR/VFA AI service stacks and the InfluxDB/MongoDB/MediaMTX stack |
-| [Dashboard](docs/dashboard.md) | Flask backend, Celery worker and the static frontend |
-| [Nginx](docs/nginx.md), [Streaming](docs/rtmp_streaming.md) | load balancing; camera/microphone streaming and recording through MediaMTX |
+| [Dashboard](docs/dashboard/index.md) | the live view, the replay and the analysis report; live video and sound; deployment and API |
+| [Nginx](docs/nginx.md), [Streaming](docs/streaming/index.md) | load balancing; camera/microphone streaming and recording through MediaMTX |
 | [Raspberry Pi](docs/raspi_config.md) | a Pi as streaming device or base station |
-| [Databases](docs/database.md) | what is stored in InfluxDB and MongoDB, CLI tips, backups, migration |
+| [Databases](docs/database.md) | what is stored in InfluxDB and MongoDB, CLI tips, resets, deleting a session, backups |
 | [FAQ](docs/faq.md) | known problems and fixes |
 
 ## Citation

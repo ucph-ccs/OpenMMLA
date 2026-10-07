@@ -14,6 +14,7 @@ exclude_docs: |
   analytics/interaction_classifier.md
   analytics/coding_and_audit.md
   img/interaction_*.svg
+  STYLE.md
 
 theme:
   name: material
@@ -68,20 +69,50 @@ nav:
       - Quickstart: quickstart.md
       - System prerequisites: prerequisites.md
       - System services: system_services.md
-      - Management console (TUI): tui.md
+      - Management console (TUI):
+          - Overview: tui/index.md
+          - Environment tab: tui/environment.md
+          - Launcher tab: tui/launcher.md
+          - System Settings: tui/system-settings.md
+          - System Services: tui/system-services.md
+          - Collection: tui/collection.md
+          - Bringing recordings in: tui/session-tools.md
+          - Pipelines: tui/pipelines.md
+          - Streams tab: tui/streams.md
+          - Sessions tab: tui/sessions.md
+          - Status tab: tui/status.md
   - Pipelines:
-      - Automatic speech recognition (ASR): pipelines/asr.md
-      - Indoor positioning (IPS): pipelines/ips.md
+      - Automatic speech recognition (ASR):
+          - Overview: pipelines/asr/index.md
+          - Run: pipelines/asr/run.md
+          - Speakers and diarization: pipelines/asr/speakers-and-diarization.md
+          - Configuration: pipelines/asr/configuration.md
+      - Indoor positioning (IPS):
+          - Overview: pipelines/ips/index.md
+          - Run: pipelines/ips/run.md
+          - Calibrate the cameras: pipelines/ips/calibration.md
+          - Configuration: pipelines/ips/configuration.md
       - Video frame analyzer (VFA):
-          - pipelines/vfa/index.md
+          - Overview: pipelines/vfa/index.md
+          - Run: pipelines/vfa/run.md
+          - Action labels: pipelines/vfa/action-labels.md
+          - Pose and gaze: pipelines/vfa/pose-and-gaze.md
+          - Configuration: pipelines/vfa/configuration.md
           - Human coding interface: pipelines/vfa/coding_interface.md
   - Analysis:
       - Window features: analytics/window_features.md
   - Deployment:
       - Docker: docker.md
-      - Dashboard: dashboard.md
+      - Dashboard:
+          - Overview: dashboard/index.md
+          - Live video and sound: dashboard/live-video-and-sound.md
+          - Deploy: dashboard/deploy.md
+          - Reference: dashboard/reference.md
       - Nginx: nginx.md
-      - Streaming (MediaMTX): rtmp_streaming.md
+      - Streaming (MediaMTX):
+          - Overview: streaming/index.md
+          - Recording: streaming/recording.md
+          - Troubleshooting: streaming/troubleshooting.md
       - Raspberry Pi: raspi_config.md
   - Reference:
       - Databases: database.md

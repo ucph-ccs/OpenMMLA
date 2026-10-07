@@ -1,4 +1,4 @@
-# Human Coding Interface
+# Human coding interface
 
 `pipelines/vfa-base/coding-interface/human_coding_interface.html` is a single self-contained web page for coding what each participant is doing in a series of video frames. It produces the human ground truth for the [VFA pipeline](index.md): coders see the same frames the pipeline analyzes and pick from the same action categories, and the export has the same shape as the pipeline's own output, so human and machine codings can be compared frame by frame.
 
@@ -7,7 +7,7 @@
 ## What you need
 
 - **The page**: open the HTML file in any modern browser (double-click it). No server, no installation, no network access; everything stays on your machine.
-- **Frames**: image files whose names contain a 10-digit unix timestamp, for example `1738029031.jpg` as written by a VFA base in `capture` mode (under `artifacts/runtime/pipelines/vfa-base/<host>/real-time/runtime/<camera>_<base-id>/`) or `frame_1738029031.jpg`. The timestamp becomes the window time of the coding. A single video file works too: the page steps through it at one frame per second and derives the timestamps from the timestamp in the file name plus the offset.
+- **Frames**: image files whose names contain a 10-digit unix timestamp, for example `1738029031.jpg` as written by a VFA base in `capture` mode (under `artifacts/<session-id>/pipelines/vfa-base/<host>/real-time/runtime/<camera>_<base-id>/`, see [Human coding](action-labels.md#human-coding)) or `frame_1738029031.jpg`. The timestamp becomes the window time of the coding. A single video file works too: the page steps through it at one frame per second and derives the timestamps from the timestamp in the file name plus the offset.
 - **A template**: a JSON file with the action categories, their definitions and the participants. `human_coding_template.json` next to the page carries the five-action collaborative scheme used by VFA; fill in the participants:
 
 ```json
@@ -75,4 +75,4 @@ Only participants that received a classification appear in a window. To compare 
 
 ## Reliability
 
-With several coders, each exports their own file. Agreement is measured per participant with Cohen's κ, and a majority vote across coders forms the gold standard; frames without a majority are excluded. This is the procedure used for the ICALT 2026 evaluation of the pipeline (κ between 0.73 and 0.84 across two sessions). The analysis scripts of that study are not part of the package.
+With several coders, each exports their own file. Measure their agreement per participant with Cohen's κ, and take a majority vote across coders as the gold standard, leaving out frames without a majority. The package has no script for this comparison.

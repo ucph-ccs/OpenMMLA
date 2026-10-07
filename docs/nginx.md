@@ -1,30 +1,27 @@
-# Nginx Setup Guide
+# Nginx
 
-Nginx is optional. It is the **load balancer** in front of the ASR and VFA AI services: one HTTP entry point (port 8080 by default) so base stations only need the gateway address and requests can be spread over several servers.
+Nginx is the optional Gateway in front of the ASR and VFA services: one HTTP entry point, on port 8080, that spreads the requests over the servers that run each service. Use it when several GPU servers share the work, or to give the bases one address for all the services.
 
-Streams no longer go through Nginx: cameras and microphones publish to [MediaMTX](rtmp_streaming.md), which has an address of its own and may run on another machine. The Nginx address is set once under **System Settings → Connections → Gateway (Nginx)** in the TUI (`host`, `http_port`, `scheme`) and synced into every pipeline config.
+## What you need
 
-## Installation
+- **Nginx** on the Gateway's host, with no extra module; **Start** on the Gateway card installs it when the host has none ([System services → Nginx](system_services.md#nginx-optional)).
+- **The `uber-server` conda environment** on that host, which renders the config: create it on the console's **Environment** tab, or with `pip install -e '.[uber-server]'`.
+- **Its address**, under `System Settings → Connections → Gateway (Nginx)` (`host`, `http_port`, `scheme`), which the console syncs into every pipeline config.
+- **On macOS**, Nginx allowed to accept incoming connections under **System Settings → Privacy & Security → Firewall**.
 
-```bash
-# macOS (config: /opt/homebrew/etc/nginx/nginx.conf)
-brew install nginx
+Streams do not go through Nginx: cameras and microphones publish to the Stream Server ([Streaming](streaming/index.md)).
 
-# Ubuntu / Debian (config: /etc/nginx/nginx.conf)
-sudo apt update && sudo apt install -y nginx
-```
+## Configure the upstreams
 
-No extra module is needed; the RTMP module that earlier versions of this guide asked for can be dropped.
+The config is rendered from a Jinja2 template. Three files under `pipelines/uber-server/nginx/` take part:
 
-## Configuration
+| File | What it is |
+|---|---|
+| `config.yml` | your upstreams; copy it from `config_template.yml`, or **Save** it on the Gateway card's **Config** tab |
+| `nginx.conf.j2` | the template |
+| `nginx.generated.conf` | the rendered file, gitignored, copied over the system's `nginx.conf` (`/opt/homebrew/etc/nginx/nginx.conf` on macOS, `/etc/nginx/nginx.conf` on Linux) |
 
-The Nginx config is rendered from a Jinja2 template. Three files under `pipelines/uber-server/nginx/` are involved:
-
-1. `config.yml`: your upstreams (copy `config_template.yml` to start).
-2. `nginx.conf.j2`: the template.
-3. `nginx.generated.conf`: the rendered file (gitignored) that is copied over the system `nginx.conf`.
-
-Edit `config.yml`:
+List one entry per service endpoint in `config.yml`, with one line per machine that runs it:
 
 ```yaml
 # load balancer: one entry per AI service endpoint, one server line per host that runs it
@@ -33,16 +30,41 @@ upstreams:
     - host: gpu-server.local
       port: 5005
       weight: 3
-    - host: 192.168.1.12
+    - host: gpu-server-2.local
       port: 5005
       weight: 1
 ```
 
-The endpoint names (`infer`, `resample`, `enhance`, `separate`, `transcribe`, `vad`, `vllm`) must match the service endpoint names; the default service ports are 5001 to 5006 for ASR and 5007 for VFA. The template generates an upstream block and a matching `location` for every service that is defined, with a server line for every machine of it whose name resolves — running or not, on or off. What is up when you render decides nothing, so the Gateway does not have to be started again after the ASR or VFA server: Nginx takes up a server that starts later by itself. A server that fails is skipped for `fail_timeout` (30 s) and then tried again with a real request, one that stops is skipped, and its workers share what they learn of the servers (`zone`). The cost of a machine that is off is one request every 30 s held for up to `proxy_connect_timeout` (2 s), which `proxy_next_upstream` then sends to the next server; take a machine you do not run out of the list to save even that. An upstream of one server is never skipped at all (Nginx ignores `max_fails` for it), so a list that names only the machines you actually run is also the fastest to pick a service up. While none of a service's servers answers, Nginx answers `502`, which the bases retry; a name that does not resolve is left out, as Nginx would not start with it, and a service not one of whose names resolves gets a `location` that answers `503` rather than no route at all. With the port check (the default) the render also tries each server's port, and prints for every one whether something answers there, nothing does yet, or the machine is silent. An `rtmp_apps` key left over from the RTMP days is ignored.
+| Endpoint | Service | Default port |
+|---|---|---|
+| `infer` | AudioInferer | 5001 |
+| `resample` | AudioResampler | 5002 |
+| `enhance` | SpeechEnhancer | 5003 |
+| `separate` | SpeechSeparator | 5004 |
+| `transcribe` | SpeechTranscriber | 5005 |
+| `vad` | VoiceActivityDetector | 5006 |
+| `vllm` | VLLMFrameAnalyzer | 5007 |
 
-## Running
+| Key | Default | What it does |
+|---|---|---|
+| `host` | required | the server's name or address |
+| `port` | required | the port the service listens on |
+| `weight` | required | its share of the requests: a server of weight 3 gets three times the requests of one of weight 1 |
+| `rtmp_apps` | | ignored: streams go through MediaMTX |
 
-The Makefile in `pipelines/uber-server` renders the config, installs it and reloads Nginx, starting it when it is not running. A reload, not a restart: the old workers answer the requests they hold, so a session in progress keeps its answers, and it clears what Nginx learned of the servers, so one that has just started is tried at once instead of after `fail_timeout`. The rendered config is tested with `nginx -t` before the reload, and the one that was running comes back if the new one does not pass. The render step runs in the `uber-server` conda environment, so create that environment first (TUI Environment tab, or `pip install -e '.[uber-server]'`).
+A service of your own, made with `create_app()`, is listed under the endpoint name it gives there. The template writes an upstream and a matching `location` for every service listed, with a server line for every machine whose name resolves, running or not. So the Gateway need not be started again after an ASR or VFA server: Nginx takes up a server that starts later by itself. List only the machines you run: it is also the fastest way to pick a service up.
+
+??? info "Details: how Nginx picks a server"
+    - A server that fails is skipped for `fail_timeout` (30 s) and then tried again with a real request; one that stops is skipped. The workers share what they learn of the servers (`zone`).
+    - A machine that is off costs one request every 30 s, held for up to `proxy_connect_timeout` (2 s), which `proxy_next_upstream` then sends to the next server. Take a machine you do not run out of the list to save even that.
+    - An upstream of one server is never skipped: Nginx ignores `max_fails` for it.
+    - While none of a service's servers answers, Nginx answers `502`, which the bases retry.
+    - A name that does not resolve is left out, as Nginx would not start with it. A service none of whose names resolves gets a `location` that answers `503`, rather than no route at all.
+    - With the port check, the default, the render also tries each server's port and prints for every one whether something answers there, nothing does yet, or the machine is silent.
+
+## Run it { #running }
+
+Press **Start** on `Launcher → System Services → Gateway (Nginx)`. It runs the Makefile target in `pipelines/uber-server`, which renders the config, installs it, tests it with `nginx -t`, and reloads Nginx, starting it when it is not running. By hand:
 
 ```bash
 cd pipelines/uber-server
@@ -51,31 +73,30 @@ make nginx false    # skip the check: list every server whose name resolves
 make stop-nginx
 ```
 
-From the TUI, the same targets run behind **Launcher → System Services → Gateway (Nginx)**. Starting the **ASR Server** or **VFA Server** card renders and reloads the Gateway too, on the machine `Gateway.host` names, so a machine whose name did not resolve at the last render is routed without pressing Start on the Gateway card; it is skipped, with a line in the log, while the Gateway itself is not running. The **MLLM Server** does not do this: the frame analyzer calls it straight, not through the Gateway.
+**Start** on the **ASR Server** or **VFA Server** card renders and reloads the Gateway too, on the machine `Gateway.host` names, so a server whose name did not resolve at the last render is routed without pressing **Start** on the Gateway card. While the Gateway is not running, this is skipped with a line in the log. The **MLLM Server** does not do this: the frame analyzer calls it directly, not through the Gateway.
 
-### macOS firewall
-
-Go to **System Settings → Privacy & Security → Firewall** and make sure Nginx is allowed to accept incoming connections.
+??? info "Details: a reload, not a restart"
+    The old workers answer the requests they hold, so a session in progress keeps its answers. The reload clears what Nginx learned of the servers, so one that has just started is tried at once instead of after `fail_timeout`. When the new config does not pass `nginx -t`, the one that was running comes back.
 
 ## Troubleshooting
 
-1. **Port conflicts**
+**`404 Not Found (the Gateway has no route to it)`** in a base's log, or a speaker registration that says the Gateway has no route. The running config has no `location` for that service: its endpoint is missing from `upstreams` in `nginx/config.yml`. Add it, press **Start** on the Gateway card, and read the summary the render prints.
 
-   ```bash
-   make clean-ports 8080
-   ```
+**`502 Bad Gateway (the Gateway has no server for it that answers)`.** The route is there and its servers are down. Start the ASR or VFA Server card, or read its **Logs**.
 
-2. **Error logs**
+**`503`.** No machine of that service has a name that resolves right now.
 
-   ```bash
-   tail -f /opt/homebrew/var/log/nginx/error.log   # macOS
-   tail -f /var/log/nginx/error.log                # Linux
-   ```
+**Port 8080 is taken.** Free it, in `pipelines/uber-server`:
 
-3. **Check the installed config** before blaming Nginx: `sudo nginx -t`.
+```bash
+make clean-ports 8080
+```
 
-4. **`404 Not Found (the Gateway has no route to it)`** in a base's log, or a speaker registration that says the Gateway has no route: the running config has no `location` for that service, so its endpoint is missing from `upstreams` in `nginx/config.yml`, or the config was rendered before this behaviour existed. Press **Start** on the Gateway card and read the summary the render prints. `502 Bad Gateway (the Gateway has no server for it that answers)` means the route is there and its servers are down: start the ASR or VFA Server card, or read its Logs. `503` means no machine of that service has a name that resolves right now.
+**Nginx misbehaves.** Test the installed config with `sudo nginx -t`, and read the error log:
 
-## Official links
+```bash
+tail -f /opt/homebrew/var/log/nginx/error.log   # macOS
+tail -f /var/log/nginx/error.log                # Linux
+```
 
-- Nginx: https://nginx.org/en/docs/install.html
+See also the [Nginx installation guide](https://nginx.org/en/docs/install.html).

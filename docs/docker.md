@@ -1,35 +1,47 @@
-# Dockerized OpenMMLA services
+# Docker
 
-Two kinds of stacks live in this directory:
+OpenMMLA runs two kinds of Docker stacks: the AI services of ASR and VFA, one image per service, on the GPU server; and InfluxDB, MongoDB and the MediaMTX Stream Server on the uber server. The console runs the AI services in Docker only; by hand they also run as gunicorn processes ([ASR](pipelines/asr/run.md#run-the-server-without-docker), [VFA](pipelines/vfa/run.md#run-the-server-without-docker)). The databases and the Stream Server may run natively instead ([System services](system_services.md)).
 
-- **AI service stacks** (`docker-compose.asr.yml`, `docker-compose.vfa.yml`): one image per ASR/VFA service, so every service keeps its own Python environment and can be upgraded without touching the others. The ports match the Nginx gateway upstreams, so the gateway config needs no change.
-- **Database and streaming stack** (`docker-compose.infra.yml`): InfluxDB, MongoDB and the MediaMTX streaming server for the uber server, as an alternative to installing them with brew/apt. See [Database stack: InfluxDB and MongoDB](#database-stack-influxdb-and-mongodb).
+## What runs in Docker
+
+| Stack | Compose file | Runs on | What it holds |
+|---|---|---|---|
+| ASR services | `docker/docker-compose.asr.yml` | GPU server | the six ASR services, each with its own Python environment, upgradable without the others |
+| VFA service | `docker/docker-compose.vfa.yml` | GPU server | the frame analyzer |
+| Databases and streaming | `docker/docker-compose.infra.yml` | uber server | InfluxDB, MongoDB and MediaMTX |
+
+The ports of the AI services match the upstreams of the Gateway (Nginx), so its config needs no change ([Nginx](nginx.md)).
 
 | Service | Image | Port | GPU | Stack |
 |---|---|---|---|---|
-| AudioInferer (wespeaker) | `openmmla/asr-audio-inferer-wespeaker` | 5001 | ✅ | torch 2.4.1 + wespeaker |
-| AudioInferer (nemo, optional) | `openmmla/asr-audio-inferer-nemo` | 5001 | ✅ | nemo-toolkit ≤1.23 |
-| AudioResampler | `openmmla/asr-audio-resampler` | 5002 | — | librosa (CPU) |
-| SpeechEnhancer | `openmmla/asr-speech-enhancer` | 5003 | ✅ | torch 2.4.1 + denoiser |
-| SpeechSeparator | `openmmla/asr-speech-separator` | 5004 | ✅ | torch 2.4.1 + modelscope |
-| SpeechTranscriber | `openmmla/asr-speech-transcriber` | 5005 | ✅ | **whisperx 3.8.6 + torch 2.8 + ct2 ≥4.5 (cuDNN 9)** |
-| VoiceActivityDetector | `openmmla/asr-voice-activity-detector` | 5006 | — | silero-vad (CPU torch) |
-| VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | ✅ | torch 2.7 + tf-keras/retina-face + ultralytics 8.4 (YOLO26 pose, **AGPL-3.0**: serving this image over a network carries the AGPL source-offer obligation for the combined work; leave it out and set `features.enabled: false` for an AGPL-free deployment) + onnxruntime-gpu 1.22 (the tracker's optional face check) |
+| AudioInferer (wespeaker) | `openmmla/asr-audio-inferer-wespeaker` | 5001 | yes | torch 2.4.1 + wespeaker |
+| AudioInferer (nemo, optional) | `openmmla/asr-audio-inferer-nemo` | 5001 | yes | nemo-toolkit ≤1.23 |
+| AudioResampler | `openmmla/asr-audio-resampler` | 5002 | no | librosa (CPU) |
+| SpeechEnhancer | `openmmla/asr-speech-enhancer` | 5003 | yes | torch 2.4.1 + denoiser |
+| SpeechSeparator | `openmmla/asr-speech-separator` | 5004 | yes | torch 2.4.1 + modelscope |
+| SpeechTranscriber | `openmmla/asr-speech-transcriber` | 5005 | yes | whisperx 3.8.6 + torch 2.8 + ct2 ≥4.5 (cuDNN 9) |
+| VoiceActivityDetector | `openmmla/asr-voice-activity-detector` | 5006 | no | silero-vad (CPU torch) |
+| VLLMFrameAnalyzer | `openmmla/vfa-frame-analyzer` | 5007 | yes | torch 2.7 + tf-keras and retina-face + ultralytics 8.4 (YOLO26 pose) + onnxruntime-gpu 1.22 (the tracker's optional face check) |
+| InfluxDB | `influxdb:2.7.12` | 8086 | no | official image, v2 API (org, bucket, token and Flux) |
+| MongoDB | `mongo:7.0.40-jammy` | 27017 | no | official image, no authentication by default |
+| MediaMTX | `bluenviron/mediamtx:1.21.0-ffmpeg` | 1935, 8554, 8890/udp, 9997, 9996, 8889, 8189/udp and tcp | no | official image with FFmpeg, for the dashboard's live sound ([Streaming → Ports](streaming/index.md#ports)) |
 
-## Host requirements
+!!! note "Licence of the frame analyzer image"
+    `ultralytics` is AGPL-3.0. Serving the frame analyzer image over a network carries the AGPL source-offer obligation for the combined work. For an AGPL-free deployment, leave it out and set `features.enabled: false` ([Skeletons](pipelines/vfa/pose-and-gaze.md#skeletons)).
 
-For the AI service stacks (a GPU base server):
+The database images are pinned on purpose; do not switch them to `latest`. `influxdb:latest` is InfluxDB 3 Core, which has no org, bucket or token and breaks `influxdb-client==1.44.0`, and `mongo:latest` drifts across major versions. Both pinned tags are published for linux/amd64 and linux/arm64.
 
-- NVIDIA driver
-- Docker Engine + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-- the host's own `~/.openmmla/master.key`, mounted read-only into the containers to decrypt the `ENC(...)` values in the config (see [Mounts](#mounts))
-- the current user in the `docker` group, so `docker` runs without `sudo` (the TUI runs plain `docker compose`)
+## What you need { #host-requirements }
 
-The database stack only needs Docker Engine: no GPU, no nvidia-container-toolkit, no master key.
+| Host | Needs |
+|---|---|
+| GPU server (AI services) | the NVIDIA driver; Docker Engine and the [NVIDIA container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html); the host's own `~/.openmmla/master.key` ([Mounts](#mounts)); the user in the `docker` group, since the console runs plain `docker compose` |
+| uber server (databases and streaming) | Docker Engine only: no GPU, no container toolkit, no master key |
+| either, run from the console | a clone of the repository, `docker/` included, at the SSH profile's `remote_project_path` |
 
-## AI service stacks: ASR and VFA
+## Run the AI services
 
-Run from the repository root:
+The **ASR Server** and **VFA Server** cards run these commands on their host ([How the console runs the stacks](#how-the-tui-uses-these-stacks)). By hand, from the repository root:
 
 ```bash
 # all ASR services (build + start)
@@ -38,7 +50,7 @@ docker compose -f docker/docker-compose.asr.yml up -d --build
 # VFA frame analyzer
 docker compose -f docker/docker-compose.vfa.yml up -d --build
 
-# status / logs
+# status, logs
 docker compose -f docker/docker-compose.asr.yml ps
 docker compose -f docker/docker-compose.asr.yml logs -f speech-transcriber
 
@@ -46,95 +58,126 @@ docker compose -f docker/docker-compose.asr.yml logs -f speech-transcriber
 docker compose -f docker/docker-compose.asr.yml down
 ```
 
-The service configs stay on the host: `pipelines/asr-server/config.yml` and `pipelines/vfa-server/config.yml` are bind-mounted into the containers as `/project/config.yml`, so edit them exactly as before (the TUI's Config tab on the ASR Server / VFA Server cards writes the same files).
+The service configs stay on the host: `pipelines/asr-server/config.yml` and `pipelines/vfa-server/config.yml` are mounted into the containers as `/project/config.yml`. Edit them on the **Config** tab of the ASR Server and VFA Server cards, which write the same files.
 
-### Switching the inferer backend: wespeaker or nemo
+### Switch the inferer backend { #switching-the-inferer-backend-wespeaker-or-nemo }
 
-Both listen on 5001, so only one can run at a time:
+The wespeaker and nemo inferers both listen on 5001, so only one runs at a time. Set `AudioInferer.backend` to `nemo` in `pipelines/asr-server/config.yml`; the card then starts the nemo container. By hand:
 
 ```bash
 docker compose -f docker/docker-compose.asr.yml stop audio-inferer
 docker compose -f docker/docker-compose.asr.yml --profile nemo up -d audio-inferer-nemo
 ```
 
-Set `AudioInferer.backend` to `nemo` in `pipelines/asr-server/config.yml` at the same time. The TUI picks the container from that setting automatically.
+The nemo image is experimental: nemo-toolkit ≤1.23 has old dependencies and a long build.
 
 ### A VLM server on the same host
 
-The VLM servers are not containers: the TUI's **MLLM Server** card runs vLLM natively in the `vfa-vllm` conda environment from `config/mllm_server.yml`, and Ollama is a host install. The frame analyzer container maps `host.docker.internal` to the host, so a `vlm_base_url` of `http://localhost:<port>/v1` in the config has to become `http://host.docker.internal:<port>/v1` when that server runs on the same machine.
+The VLM servers are not containers: the console's **MLLM Server** card runs vLLM natively in the `vfa-vllm` conda environment from `config/mllm_server.yml`, and Ollama is a host install. The frame analyzer container maps `host.docker.internal` to its host, so a `vlm_base_url` of `http://localhost:<port>/v1` becomes `http://host.docker.internal:<port>/v1` when that server runs on the same machine.
 
-## Database stack: InfluxDB and MongoDB
+## Run the databases and the Stream Server { #database-stack-influxdb-and-mongodb }
 
-`docker-compose.infra.yml` runs the two uber-server databases, and the MediaMTX streaming server, as containers instead of bare-metal brew/apt installs. The default ports match `config/system_services.yml`, so the pipelines only need the host name changed; the host ports can be overridden with `INFLUXDB_PORT` / `MONGODB_PORT` / `MEDIAMTX_*_PORT` (see [Sharing a host with another project](#sharing-a-host-with-another-project)).
-
-| Service | Image | Port | GPU | Stack |
-|---|---|---|---|---|
-| InfluxDB | `influxdb:2.7.12` | 8086 | — | official image, v2 API (org/bucket/token + Flux) |
-| MongoDB | `mongo:7.0.40-jammy` | 27017 | — | official image, no authentication by default |
-| MediaMTX | `bluenviron/mediamtx:1.21.0-ffmpeg` (with FFmpeg, for the dashboard's live sound) | 1935 RTMP, 8554 RTSP, 8890/udp SRT, 9997 API, 9996 playback, 8889 WebRTC + 8189/udp,tcp ICE (`MEDIAMTX_WEBRTC_HOSTS` names the host for browsers) | — | official image; config from `pipelines/uber-server/mediamtx/mediamtx.yml`, recordings bind-mounted to `artifacts/streams/server/` (`MEDIAMTX_STREAMS_DIR`), see the [Streaming guide](rtmp_streaming.md) |
-
-The image tags are pinned on purpose; do not switch them to `latest`. From 2026-09-15 `influxdb:latest` points at InfluxDB 3 Core, which has no org/bucket/token semantics and breaks `influxdb-client==1.44.0` outright, and `mongo:latest` drifts across major versions. Both pinned tags are published for linux/amd64 and linux/arm64.
+`docker/docker-compose.infra.yml` runs InfluxDB, MongoDB and MediaMTX as containers instead of brew or apt installs. Its default ports match `config/system_services.yml`, so the pipelines only need the host name changed.
 
 ### Setup
 
-Run the commands on the **machine that will hold the databases** (called `uber-server` below), from the repository root. That machine only needs a clone of the repository, or just these two files from `docker/`: the stack has no build context.
+Run these steps on the machine that will hold the databases, `uber-server` below, from the repository root. It needs a clone of the repository: MediaMTX reads `pipelines/uber-server/mediamtx/mediamtx.yml` from it and records into its `artifacts/`. The databases alone need just `docker/docker-compose.infra.yml` and `docker/.env.example`, since the stack has no build context.
 
-First stop any bare-metal service that may hold 8086 / 27017, otherwise `up -d` fails with `Bind for 0.0.0.0:8086 failed: port is already allocated`. If the port is held by **another project's container**, do not stop it; change our host port instead, see [Sharing a host with another project](#sharing-a-host-with-another-project).
+1. **Free the ports.** Stop any bare-metal service that holds 8086 or 27017. When another project's container holds them, leave it running and change this stack's ports instead ([Share a host with another project](#sharing-a-host-with-another-project)).
+
+    ```bash
+    # macOS
+    brew services stop influxdb mongodb-community
+    # Ubuntu / Debian
+    sudo systemctl disable --now influxdb mongod
+    ```
+
+2. **Fill in the secrets** in `docker/.env` ([Environment variables](#environment-variables)). Generate the password rather than padding one to eight characters: the InfluxDB web UI is published on port 8086, and anyone who reaches it can log in as `admin` with it.
+
+    ```bash
+    cp docker/.env.example docker/.env && chmod 600 docker/.env
+    # edit docker/.env: at least INFLUXDB_INIT_ADMIN_TOKEN and INFLUXDB_INIT_PASSWORD
+    #   openssl rand -hex 32      -> INFLUXDB_INIT_ADMIN_TOKEN
+    #   openssl rand -base64 24   -> INFLUXDB_INIT_PASSWORD
+    ```
+
+3. **Start the stack.**
+
+    ```bash
+    docker compose -f docker/docker-compose.infra.yml up -d
+
+    # status, logs, stop (down keeps the volumes, down -v deletes all data)
+    docker compose -f docker/docker-compose.infra.yml ps
+    docker compose -f docker/docker-compose.infra.yml logs -f influxdb
+    docker compose -f docker/docker-compose.infra.yml down
+    ```
+
+4. **Point OpenMMLA at the stack** ([below](#pointing-openmmla-at-the-stack)).
+
+!!! warning "The first start sets InfluxDB and MongoDB up"
+    The `INFLUXDB_INIT_*` and `MONGO_ROOT_*` values take effect only on the first start against an empty volume. Changing them afterwards neither errors nor takes effect ([Troubleshooting](#known-caveats)).
+
+!!! warning "Do not run `make all` on this machine"
+    `make -C pipelines/uber-server all` starts with `clean-ports`, which sends `kill -9` to whatever holds 8086 and 27017, including Docker's proxy, and then starts bare-metal databases on top. Use `make all without=influxdb,mongodb` there.
+
+??? info "Details: why the secrets go in `docker/.env`"
+    `docker/.env` is gitignored. Compose reads it for every subcommand, so `ps`, `logs` and `down` behave the same from any shell and after a reboot, while an exported value lives in one shell only and ends up in `~/.bash_history`. Only a value in `.env` makes every later `up -d` use the same `INFRA_BIND_ADDRESS` instead of falling back to `0.0.0.0`. The same file serves the ASR stack on the GPU server, for `HF_TOKEN`.
+
+### Point OpenMMLA at the stack { #pointing-openmmla-at-the-stack }
+
+In `mmla tui`, open `Launcher → System Settings → Connections` and change three fields:
+
+| Field | Value |
+|---|---|
+| `InfluxDB.url` | `http://uber-server.local:8086`; `org: admin` and `bucket: mmla-data` stay |
+| `InfluxDB.token` | the `INFLUXDB_INIT_ADMIN_TOKEN` from `docker/.env`, replacing the whole `ENC(...)` string; or press **Fetch Token** on the InfluxDB card |
+| `MongoDB.url` | `mongodb://uber-server.local:27017`; `db: openmmla` stays |
+
+The new container is a fresh InfluxDB, so the old token fails: replace it. **Save** encrypts the token again and writes it into every local `pipelines/*/config.yml` ([Pointing the pipelines at the services](system_services.md#pointing-the-pipelines-at-the-services)).
+
+Spell the host as your network resolves it. `.local` is mDNS and works on the same LAN only. Across subnets with Tailscale in between (`ssh uber-server` works, `ping uber-server.local` does not), use the MagicDNS name or the tailnet IP, `http://uber-server:8086`, and put every base station in the tailnet. Include a changed port: `http://uber-server:8087`.
+
+Verify from the machine that runs the console:
 
 ```bash
-# macOS
-brew services stop influxdb mongodb-community
-# Ubuntu / Debian
-sudo systemctl disable --now influxdb mongod
+ping -c1 uber-server.local
+curl -sf http://uber-server.local:8086/health
+mongosh mongodb://uber-server.local:27017 --eval 'db.adminCommand({ping:1})'
 ```
 
-Then fill in the secrets and start:
+??? info "Details: mDNS on Ubuntu Server and inside containers"
+    - Ubuntu Server ships neither `avahi-daemon` nor `libnss-mdns`: `sudo apt install -y avahi-daemon libnss-mdns` and `sudo hostnamectl set-hostname uber-server`. mDNS does not cross subnets or VLANs. When the name does not resolve, use a fixed IP or `/etc/hosts`.
+    - The ASR and VFA containers read the same URLs, and a container on a bridge network does no mDNS resolution: `ping uber-server.local` working on the host does not mean it works inside a container. With the AI services in Docker, put a fixed IP in `config/system_services.yml`, or add `extra_hosts` to the two AI compose files.
 
-```bash
-cp docker/.env.example docker/.env && chmod 600 docker/.env
-# edit docker/.env: at least INFLUXDB_INIT_ADMIN_TOKEN and INFLUXDB_INIT_PASSWORD
-#   openssl rand -hex 32      -> INFLUXDB_INIT_ADMIN_TOKEN
-#   openssl rand -base64 24   -> INFLUXDB_INIT_PASSWORD
+### Move data from bare-metal databases { #migrating-from-the-bare-metal-databases-do-this-first }
 
-docker compose -f docker/docker-compose.infra.yml up -d
+The containers start as new, empty databases. Repointing the URLs alone makes the console's session list, the dashboard's history and every `sensor_events` point seem to vanish: the data stays on the old machine. To keep it, migrate before you change the URLs.
 
-# status / logs / stop (down keeps the volumes, down -v deletes all data)
-docker compose -f docker/docker-compose.infra.yml ps
-docker compose -f docker/docker-compose.infra.yml logs -f influxdb
-docker compose -f docker/docker-compose.infra.yml down
-```
+1. **Export** on the old uber server:
 
-Keep the secrets in `docker/.env` (gitignored) rather than `export`ing them: compose reads `.env` for **every** subcommand, so `ps`, `logs` and `down` behave the same from any shell and after a reboot, while an exported value only lives in that one shell and ends up in `~/.bash_history`. The same file serves the ASR stack on the ASR Server's host: `HF_TOKEN` there is the Hugging Face token the speech transcriber fetches the gated pyannote diarization pipeline with (`SpeechTranscriber.local.diarize`, see the [ASR guide](pipelines/asr.md#diarize)); it is read at every `up`, not only the first. The same goes for `INFRA_BIND_ADDRESS`: only a value in `.env` guarantees that every later `up -d` uses the same bind address instead of silently falling back to `0.0.0.0`.
+    ```bash
+    mongodump --uri "mongodb://localhost:27017" --db openmmla --archive=openmmla.archive
+    influx backup ./influx-backup -t "<old admin token>"
+    ```
 
-### Migrating from the bare-metal databases (do this first)
+2. **Import** on `uber-server`, after copying both there:
 
-Both containers start as **brand-new, empty databases**. If you just repoint the URLs, the TUI's session list, the dashboard's session history and every historical `sensor_events` point will appear to vanish. The data is still on the old machine; nothing connects to it any more.
+    ```bash
+    docker compose -f docker/docker-compose.infra.yml exec -T mongodb \
+      mongorestore --archive --db openmmla < openmmla.archive
 
-To keep the history, migrate before changing the URLs. On the **old** uber server export:
+    docker cp ./influx-backup "$(docker compose -f docker/docker-compose.infra.yml ps -q influxdb)":/tmp/influx-backup
+    docker compose -f docker/docker-compose.infra.yml exec influxdb \
+      influx restore /tmp/influx-backup --full
+    ```
 
-```bash
-mongodump --uri "mongodb://localhost:27017" --db openmmla --archive=openmmla.archive
-influx backup ./influx-backup -t "<old admin token>"
-```
+3. **Enter the old token** in the console: `influx restore --full` also restores the old instance's tokens. To keep the new token, restore the data alone with `--bucket mmla-data`.
 
-Copy both to `uber-server` and import into the containers:
-
-```bash
-docker compose -f docker/docker-compose.infra.yml exec -T mongodb \
-  mongorestore --archive --db openmmla < openmmla.archive
-
-docker cp ./influx-backup "$(docker compose -f docker/docker-compose.infra.yml ps -q influxdb)":/tmp/influx-backup
-docker compose -f docker/docker-compose.infra.yml exec influxdb \
-  influx restore /tmp/influx-backup --full
-```
-
-`influx restore --full` also overwrites the tokens with the old instance's, so afterwards enter the **old** token in the TUI. To keep the new token, restore only the data with `--bucket mmla-data`.
-
-Not migrating is fine too: leave the old machine running, the old and new data just stay apart from then on.
+Not migrating is fine too: the old machine keeps the old data, apart from the new.
 
 ### Backups
 
-The data lives only in named volumes. `docker compose down -v`, `docker volume rm` and a few "just reset it" tutorial commands **delete them permanently**; there is no recycle bin. Run the two exports below regularly and keep the output outside Docker:
+The data lives only in named volumes. `docker compose down -v`, `docker volume rm` and "reset it" commands delete them for good. Run these exports regularly and keep the output outside Docker:
 
 ```bash
 docker compose -f docker/docker-compose.infra.yml exec -T mongodb \
@@ -145,11 +188,11 @@ docker compose -f docker/docker-compose.infra.yml exec influxdb \
 docker cp "$(docker compose -f docker/docker-compose.infra.yml ps -q influxdb)":/tmp/backup /backup/influx-$(date +%F)
 ```
 
-Do not `down` the stack while a collection is running. Both services have `stop_grace_period: 60s`, but the normal order is: end the session, then stop the stack.
+Do not `down` the stack while a collection runs. Both databases get 60 s to stop (`stop_grace_period`), but end the session first, then stop the stack.
 
-### Sharing a host with another project
+### Share a host with another project { #sharing-a-host-with-another-project }
 
-If the machine already runs another project's InfluxDB / MongoDB containers, even ones bound only to `127.0.0.1:8086`, our `0.0.0.0:8086` will not come up: the kernel does not allow a wildcard bind and a specific bind on the same port. **Do not stop their containers**; change our host ports:
+When the machine already runs another project's InfluxDB or MongoDB container, even one bound to `127.0.0.1:8086` only, this stack's `0.0.0.0:8086` does not come up: the kernel refuses a wildcard bind and a specific bind on one port. Leave their containers running and change this stack's host ports:
 
 ```bash
 # docker/.env
@@ -157,80 +200,44 @@ INFLUXDB_PORT=8087
 MONGODB_PORT=27018
 ```
 
-Then put the new ports in the System Settings URLs (`http://uber-server:8087`, `mongodb://uber-server:27018`). The TUI's status probe reads the port from the URL, so nothing else changes. Inside the containers the ports stay 8086 / 27017, so the healthchecks and the data are unaffected.
+Then put the ports in the System Settings URLs (`http://uber-server:8087`, `mongodb://uber-server:27018`); the console's status probe reads the port from the URL. Inside the containers the ports stay 8086 and 27017, so the healthchecks and the data are unaffected.
 
-Do not go the other way and reuse the other project's instance: it is usually bound to loopback only (unreachable from other machines), has authentication enabled (the password would have to go into `MongoDB.url` in plaintext), and if it runs `influxdb:latest`, one `pull` after 2026-09-15 turns it into InfluxDB 3 and takes your data with it.
+!!! warning "Do not reuse the other project's instance"
+    It is usually bound to loopback only, out of reach of other machines, and has authentication on, so the password would go into `MongoDB.url` in plain text. If it runs `influxdb:latest`, one `pull` turns it into InfluxDB 3 and takes your data with it.
 
-### When the database host has to reach its own databases
+### Reach the databases from their own host { #when-the-database-host-has-to-reach-its-own-databases }
 
-`INFRA_BIND_ADDRESS` pinned to one interface — a tailnet or VPN address, say — leaves that
-machine unable to dial its own databases by name. On Debian and Ubuntu the host's own name
-resolves to `127.0.1.1` on the host itself (it is in `/etc/hosts`), nothing is published there,
-and anything running locally gets `Connection refused` from a URL that works perfectly from
-every other machine. The dashboard backend is the one that runs on the database host, so this
-shows up as a Session Explorer that could not reach the database.
+With `INFRA_BIND_ADDRESS` pinned to one interface, such as a tailnet address, the database host cannot reach its own databases by name. On Debian and Ubuntu the host's own name resolves to `127.0.1.1` on the host itself, nothing is published there, and a local process, such as the dashboard backend, gets `Connection refused` from a URL that works from every other machine. Publish the same ports on that address as well:
 
-Publish the same ports on that address as well:
+1. **Find the address** on the database host:
 
-```bash
-getent hosts "$(hostname)"           # on the database host: 127.0.1.1 on Debian/Ubuntu
-```
+    ```bash
+    getent hosts "$(hostname)"           # 127.0.1.1 on Debian/Ubuntu
+    ```
 
-```bash
-# docker/.env, on the database host only
-INFRA_BIND_ADDRESS=<tailnet-ip>      # tailnet interface, as before
-INFRA_LOOPBACK_ADDRESS=127.0.1.1     # what the host's own name resolves to there
-```
+2. **Set it** in `docker/.env` on that host only:
 
-```bash
-docker compose -f docker/docker-compose.infra.yml up -d influxdb mongodb
-```
+    ```bash
+    INFRA_BIND_ADDRESS=<tailnet-ip>      # the tailnet interface
+    INFRA_LOOPBACK_ADDRESS=127.0.1.1     # what the host's own name resolves to there
+    ```
 
-Every config keeps the host name — `http://uber-server:8087` resolves to the tailnet address on
-the other machines and to `127.0.1.1` on `uber-server` itself, and both are published — so System Settings
-syncs the same value everywhere, and the dashboard can move to another machine without a config
-change. Prefer this over `localhost`: a `localhost` URL is only right on the database host, so it
-has to be pinned there with `SystemServicesOverride`, which also stops token rotations from
-reaching that file.
+3. **Recreate** the two databases. `up -d` recreates, `restart` does not; naming the services leaves MediaMTX and any recording it writes alone, and the volumes are not affected:
 
-A ports change needs a **recreate**, which `up -d` does and `restart` does not; naming the two
-services keeps MediaMTX and any recording it is writing untouched. The named volumes are not
-affected. Leave `INFRA_LOOPBACK_ADDRESS` empty while `INFRA_BIND_ADDRESS` is `0.0.0.0` — a
-wildcard bind and a specific bind on one port is refused by the kernel and the container will
-not start at all. Exposure is unchanged: a `127.x` address is reachable only from the machine
-itself, and its own processes could already dial the bind address.
+    ```bash
+    docker compose -f docker/docker-compose.infra.yml up -d influxdb mongodb
+    ```
 
-### Pointing OpenMMLA at the stack
+4. **Recreate MediaMTX between sessions**, with `up -d mediamtx`. It publishes its API and playback ports on that address too, for the dashboard on this machine, and a recreate closes every stream for a moment.
 
-`mmla tui` → Launcher → **System Settings → Connections**; only three fields change:
+Every config keeps the host name: `http://uber-server:8087` resolves to the tailnet address on the other machines and to `127.0.1.1` on `uber-server`, and both are published. System Settings syncs one value everywhere, and the dashboard can move to another machine without a config change. A `localhost` URL is right on the database host only, so it would have to be pinned there with `SystemServicesOverride`, which also keeps token rotations from reaching that file.
 
-| Field | Value |
-|---|---|
-| `InfluxDB.url` | `http://uber-server.local:8086` (`org: admin` and `bucket: mmla-data` stay as they are) |
-| `InfluxDB.token` | the `INFLUXDB_INIT_ADMIN_TOKEN` from above, replacing the whole `ENC(...)` string (the stored token, encrypted with this machine's master key) with the plain value; or press **Fetch Token** on the InfluxDB card (see below) |
-| `MongoDB.url` | `mongodb://uber-server.local:27017` (`db: openmmla` stays) |
+!!! warning
+    Leave `INFRA_LOOPBACK_ADDRESS` empty while `INFRA_BIND_ADDRESS` is `0.0.0.0`: the kernel refuses a wildcard bind and a specific bind on one port, and the containers do not start. Exposure is unchanged by it: a `127.x` address is reachable from the machine itself only.
 
-**How you spell the host name depends on your network.** `.local` is mDNS and only works on the **same LAN**. If your Mac and `uber-server` are on different subnets with Tailscale in between (`ssh admin@uber-server` works but `ping uber-server.local` does not), use the Tailscale MagicDNS name or the tailnet IP: `http://uber-server:8086`, `http://<tailnet-ip>:8086`. That also means **every base station has to be in the tailnet**, or it cannot reach the databases. If you changed the ports, include them: `http://uber-server:8087`.
+### MongoDB authentication { #mongodb-authentication-optional-strongly-recommended }
 
-On save the token is re-encrypted to `ENC(...)` and written into every local `pipelines/*/config.yml`. **Do not edit those files by hand**: they get overwritten, and at runtime `config/system_services.yml` wins anyway. The first launch on a remote host syncs the config first and then asks you to launch again; that is by design, not an error.
-
-The new container is a fresh InfluxDB, so the old token is guaranteed to fail authentication; it must be replaced with the new one.
-
-Verify, from the machine that runs the TUI:
-
-```bash
-ping -c1 uber-server.local
-curl -sf http://uber-server.local:8086/health
-mongosh mongodb://uber-server.local:27017 --eval 'db.adminCommand({ping:1})'
-```
-
-`uber-server.local` relies on mDNS. Ubuntu Server ships neither `avahi-daemon` nor `libnss-mdns` by default (`sudo apt install -y avahi-daemon libnss-mdns` and `sudo hostnamectl set-hostname uber-server`), and mDNS does not cross subnets or VLANs. If the name does not resolve, fall back to a fixed IP or `/etc/hosts`.
-
-**These three checks run on the host, but the ASR / VFA containers read the same URLs**, and containers on a bridge network do no mDNS resolution by default: `ping uber-server.local` working on the host does not mean it works inside the container. When the containerized AI services are in use as well, put a fixed IP in `config/system_services.yml`, or add `extra_hosts` to the two AI compose files.
-
-### MongoDB authentication (optional, strongly recommended)
-
-Authentication is off by default, matching the bare-metal setup. To enable it, set both variables **before the first start**:
+MongoDB runs without authentication by default, as the bare-metal setup does, and on Linux Docker's NAT rules run before ufw, so `ufw deny 27017` does not block a published port. Use it only on a trusted lab network, publish on one interface (`INFRA_BIND_ADDRESS=<LAN IP>`), add iptables rules to the `DOCKER-USER` chain, or switch authentication on. To switch it on, set both variables before the first start:
 
 ```bash
 export MONGO_ROOT_USER=openmmla
@@ -238,54 +245,92 @@ export MONGO_ROOT_PASSWORD="<password>"
 docker compose -f docker/docker-compose.infra.yml up -d
 ```
 
-- This only takes effect while the `mongodb-data` volume is empty. Adding the variables once the volume holds data gives you `--auth` with no users at all, and nobody can connect. **Do not delete the volume** in that case: clear both variables and `up -d` again to return to no-auth with the data untouched, or create the user through the container's localhost exception:
-  `docker compose -f docker/docker-compose.infra.yml exec mongodb mongosh admin --eval 'db.createUser({user:"openmmla",pwd:"<password>",roles:["root"]})'`
-- Setting only one of the two variables makes the container **restart-loop** while `up -d` still reports success. If 27017 never opens, check `docker compose -f docker/docker-compose.infra.yml ps` and `... logs mongodb`.
-- With auth on, the URL must be `mongodb://<user>:<pass>@uber-server.local:27017/?authSource=admin`; without `authSource=admin` authentication fails.
-- `url` is not on the list of encrypted fields (only keys such as token/password/secret are encrypted), so a URL with a password sits in plaintext in `config/system_services.yml` and in every synced `pipelines/*/config.yml`. Those files are gitignored, but keep that in mind before enabling auth, at least until `MongoDB` gets separate username/password fields.
+With authentication on, the URL is `mongodb://<user>:<pass>@uber-server.local:27017/?authSource=admin`; without `authSource=admin` it fails.
+
+!!! warning
+    - The variables take effect only while the `mongodb-data` volume is empty. Set once the volume holds data, they give `--auth` with no users, and nobody can connect. **Do not delete the volume** then: clear both variables and `up -d` again to return to no authentication with the data untouched, or create the user through the container's localhost exception:
+      `docker compose -f docker/docker-compose.infra.yml exec mongodb mongosh admin --eval 'db.createUser({user:"openmmla",pwd:"<password>",roles:["root"]})'`
+    - `MongoDB.url` is not an encrypted field (only keys such as token, password or secret are), so a URL with a password sits in plain text in `config/system_services.yml` and in every synced `pipelines/*/config.yml`. Those files are gitignored.
+
+## How the console runs the stacks { #how-the-tui-uses-these-stacks }
+
+| Card | Start | Stop | Logs |
+|---|---|---|---|
+| **ASR Server**, **VFA Server** (`Launcher → Pipelines`) | `docker compose -f docker/docker-compose.asr.yml up -d --build <services>`, or `docker-compose.vfa.yml`; AudioInferer picks its container from `backend` | `docker compose ... down` | `docker compose ... logs --tail 40` |
+| **InfluxDB**, **MongoDB**, **Stream Server (MediaMTX)** (`Launcher → System Services`), **Run mode** `docker` | `docker compose -f docker/docker-compose.infra.yml up -d <service>` | `... stop <service>`, not `down`, which would stop the other containers of the shared file | `... logs <service>` |
+
+A remote host runs the same commands over SSH, in its repository directory. The AI server cards show `Running` and `(R)` in the tree while their ports answer. The system service cards probe the address in System Settings from the console's machine, whatever interface `INFRA_BIND_ADDRESS` binds, so a console outside the tailnet or behind a firewall shows them grey even when the pipeline machines connect ([TUI → System Services](tui/system-services.md#status)).
+
+**Fetch Token**, on the InfluxDB card, reads the stack's admin token from the running container's `/etc/influxdb2/influx-configs`, which also holds a token InfluxDB generated itself, else from `docker/.env`, and warns when the URL's host and the host it read the token from differ ([Card controls](tui/system-services.md#card-controls)).
+
+## Environment variables
+
+The stacks read these from `docker/.env` ([Setup](#setup)), or from the shell that runs `docker compose`.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `HF_TOKEN` | empty | ASR stack: the Hugging Face token of an account that accepted the pyannote pipeline's terms, for `SpeechTranscriber.local.diarize` ([Diarization](pipelines/asr/speakers-and-diarization.md#diarize)); an `hf_token` in `pipelines/asr-server/config.yml` wins; read at every `up` |
+| `OPENMMLA_KEY_DIR` | `~/.openmmla` | AI stacks: the folder whose `master.key` is mounted; leave it unset ([Mounts](#mounts)) |
+| `INFLUXDB_INIT_ADMIN_TOKEN` | empty: InfluxDB generates one | the admin token, which goes into `InfluxDB.token`; first start only |
+| `INFLUXDB_INIT_PASSWORD` | empty: the first start fails | the web UI's `admin` password, at least eight characters; first start only |
+| `INFLUXDB_INIT_USERNAME`, `INFLUXDB_INIT_ORG`, `INFLUXDB_INIT_BUCKET` | `admin`, `admin`, `mmla-data` | must match `config/system_services.yml`; first start only |
+| `MONGO_ROOT_USER`, `MONGO_ROOT_PASSWORD` | empty | both set switch on authentication on an empty volume ([MongoDB authentication](#mongodb-authentication-optional-strongly-recommended)) |
+| `INFRA_BIND_ADDRESS` | `0.0.0.0` | the address the infra stack publishes its ports on; a LAN address keeps them off other interfaces |
+| `INFRA_LOOPBACK_ADDRESS` | empty | a second address for processes on this machine: the database ports, and MediaMTX's API and playback ports, are published on it too ([Reach the databases from their own host](#when-the-database-host-has-to-reach-its-own-databases)) |
+| `INFLUXDB_PORT`, `MONGODB_PORT` | `8086`, `27017` | host ports; keep the System Settings URLs in step |
+| `MEDIAMTX_RTMP_PORT`, `MEDIAMTX_RTSP_PORT`, `MEDIAMTX_SRT_PORT`, `MEDIAMTX_API_PORT`, `MEDIAMTX_PLAYBACK_PORT`, `MEDIAMTX_WEBRTC_PORT` | `1935`, `8554`, `8890`, `9997`, `9996`, `8889` | MediaMTX's host ports; keep the Stream Server's ports in System Settings in step |
+| `MEDIAMTX_STREAMS_DIR` | `../artifacts/streams/server` | where the server's recordings land, relative to `docker/` or absolute |
+| `MEDIAMTX_WEBRTC_HOSTS` | empty | the addresses or names browsers reach this host at, comma-separated, for the dashboard's live video and sound ([Live video and sound in MediaMTX](dashboard/deploy.md#live-video-and-sound-in-mediamtx)) |
+
+A changed port or address needs a recreate, which `up -d` does and `restart` does not.
 
 ## Mounts
 
-- `pipelines/asr-server` / `pipelines/vfa-server` → `/project` in the container: `config.yml`, `temp/`, runtime logs and, for the frame analyzer, `weights/` (the pose weights of the [features endpoint](pipelines/vfa/index.md#features-endpoint-skeletons-and-gazes), fetched once at the first start into this bind mount rather than a named volume, and with the tracker's [face check](pipelines/vfa/index.md#tracking) switched on its ArcFace model under `weights/face/`) stay on the host, the same as with conda.
-- Model caches (HuggingFace / torch hub / ModelScope / wespeaker) are shared named volumes, so re-created containers do not download again (the frame analyzer's PaGE checkpoint and its model code land in `hf-cache`, a Gaze-LLE checkpoint in `torch-cache`, RetinaFace's weights in `deepface-cache`).
-- `~/.openmmla` of the user who runs `docker compose` (or the folder `OPENMMLA_KEY_DIR` names) is mounted read-only at `/root/.openmmla`, and the services decrypt the `ENC(...)` values of `config.yml` with its `master.key` at startup. The key in `~/.openmmla` is the host's own, the one the console encrypts that host's configs with, so no key is copied from anywhere: run the stack as the user the console's SSH profile logs in as, as the TUI does. The console always uses `~/.openmmla/master.key` of that login, so leave `OPENMMLA_KEY_DIR` unset or point it at that same folder: a key from anywhere else does not open what the console wrote, and the services get the `ENC(...)` strings themselves. A plain-text secret in `config.yml` is encrypted with that key and written back by the service at startup; with no key there it is used as it is. A host whose configs hold no encrypted value yet may have no key; the console makes it one with the first encrypted value it writes there (or run `openmmla crypto init` there). If a stack was started before `~/.openmmla` existed, Docker made that folder itself, owned by root, and nothing can put a key in it: `sudo chown -R "$USER": ~/.openmmla` first.
-- The database stack's data lives entirely in named volumes: `influxdb-data` (`/var/lib/influxdb2`, with `influxd.bolt` and the engine), `influxdb-config` (`/etc/influxdb2`, with `influx-configs`, from which the admin token can be recovered), `mongodb-data` (`/data/db`) and `mongodb-config` (`/data/configdb`). Do not bind-mount `/data/db`: WiredTiger needs real file-lock semantics.
-- The database containers do **not** mount `~/.openmmla`: the official influxdb / mongo images contain no OpenMMLA code, never read `config.yml`, and have nothing to decrypt.
-- MediaMTX mounts its config read-only and writes its recordings (the streams of a running session, see [Streaming](rtmp_streaming.md#on-the-server)) to a bind mount, `artifacts/streams/server/` of the repository by default, so the files are plain fMP4 segments on the host.
+| In the container | From the host | What it holds |
+|---|---|---|
+| `/project` | `pipelines/asr-server`, `pipelines/vfa-server` | `config.yml`, `temp/` and runtime logs; for the frame analyzer `weights/`, the pose weights of the [features endpoint](pipelines/vfa/pose-and-gaze.md#features-endpoint), fetched once at the first start, and with the tracker's [face check](pipelines/vfa/pose-and-gaze.md#appearance-checks) on, its ArcFace model under `weights/face/` |
+| `/project/config/vfa`, read-only | `config/vfa` | the frame analyzer's action schema (`action_schemas.yml`), which its config refers to |
+| model caches | named volumes `hf-cache`, `torch-cache`, `modelscope-cache`, `wespeaker-cache`, `deepface-cache` | shared, so a recreated container downloads nothing again: the transcriber's Whisper model at its first request and the frame analyzer's PaGE checkpoint in `hf-cache`, a Gaze-LLE checkpoint in `torch-cache`, the separator's MossFormer2 model in `modelscope-cache` (`/root/.cache/modelscope`), RetinaFace's weights in `deepface-cache` |
+| `/root/.openmmla`, read-only | `~/.openmmla` of the user who runs `docker compose` (`OPENMMLA_KEY_DIR`) | the host's `master.key`, which decrypts the `ENC(...)` values of `config.yml` at startup |
+| `/var/lib/influxdb2`, `/etc/influxdb2` | named volumes `influxdb-data`, `influxdb-config` | InfluxDB's data (`influxd.bolt` and the engine) and its config (`influx-configs`, from which the admin token can be recovered) |
+| `/data/db`, `/data/configdb` | named volumes `mongodb-data`, `mongodb-config` | MongoDB's data; do not bind-mount `/data/db`, as WiredTiger needs real file locks |
+| `/mediamtx.yml`, read-only | `pipelines/uber-server/mediamtx/mediamtx.yml` | MediaMTX's config, read when the container starts |
+| `/streams/server` | `MEDIAMTX_STREAMS_DIR` | the server's recordings, plain fMP4 segments on the host ([Record on the server](streaming/recording.md#on-the-server)) |
 
-## How the TUI uses these stacks
+The database containers do not mount `~/.openmmla`: the official images hold no OpenMMLA code and have nothing to decrypt.
 
-**ASR Server / VFA Server** cards (Launcher → Pipelines → ASR → ASR Server, Launcher → Pipelines → VFA → VFA Server): Start / Stop / Logs all go through docker compose; the tmux + gunicorn way has been removed.
+??? info "Details: the master key of the AI services"
+    - The key in `~/.openmmla` is the host's own, the one the console encrypts that host's configs with, so no key is copied from anywhere. Run the stack as the user the console's SSH profile logs in as, as the console does.
+    - The console always uses `~/.openmmla/master.key` of that login. Leave `OPENMMLA_KEY_DIR` unset or point it at that folder: a key from anywhere else does not open what the console wrote, and the services get the `ENC(...)` strings themselves.
+    - A service encrypts a plain-text secret in `config.yml` with that key and writes it back at startup; with no key there, it uses the secret as it is.
+    - A host whose configs hold no encrypted value yet may have no key. The console makes it one with the first encrypted value it writes there, or run `openmmla crypto init` there.
 
-- **Start**: `docker compose -f docker/docker-compose.*.yml up -d --build <selected services>` (AudioInferer picks the wespeaker or nemo container from `backend` in the config)
-- **Stop**: `docker compose ... down`
-- **Logs**: `docker compose ... logs --tail 40`
-- **Status**: still probed by port; a running container shows `Running` on the card and the `(R)` marker in the tree
+## Troubleshooting { #known-caveats }
 
-A remote host runs the same commands over SSH in its repository directory, so it needs: the repository cloned (including `docker/`), Docker Engine + nvidia-container-toolkit, and the current user in the `docker` group.
+**A changed token, org, bucket or password in `docker/.env` does nothing.** The `DOCKER_INFLUXDB_INIT_*` values apply only on the first start against an empty `influxdb-data` volume; once `influxd.bolt` exists, setup is skipped without an error. Make a new token, or read the first one back:
 
-**InfluxDB / MongoDB / MediaMTX** cards (Launcher → System Services):
+```bash
+docker compose -f docker/docker-compose.infra.yml exec influxdb influx auth create --org admin --all-access
+docker compose -f docker/docker-compose.infra.yml exec influxdb cat /etc/influxdb2/influx-configs
+```
 
-- **Status**: the cards probe the URL configured in System Settings, with a direct TCP connect from the TUI machine to host:port, independent of the Host selector. Only when the URL says `localhost` do they fall back to probing the selected host's own loopback; a URL that still says `<uber-server>` is never looked up: the card names the form to fill and, as for `localhost`, probes the selected host's own port. The Status tab does the same and its port column shows the host:port that was actually probed.
-- **Start / Stop / Logs**: each card has a **Run mode** dropdown (`docker` / `native`), **`docker` by default**. Switch a machine that still uses brew / systemctl databases to `native`, otherwise Start brings up a container on that machine and fights the bare-metal instance for the port. In `docker` mode the three buttons run `docker compose -f docker/docker-compose.infra.yml up -d / stop / logs <service>`. Stop uses `stop`, not `down`: the cards share one compose file and `down` would take the other containers with it. The **Stream Server (MediaMTX)** card probes the `rtmp_port` and `rtsp_port` of the Stream Server section.
-- Run mode is remembered per host + service, so switching Host or clicking another node and coming back keeps it, but only for this TUI session; a restart returns to `docker`.
-- **Fetch Token** (InfluxDB card only, docker mode): reads the docker stack's admin token on the selected Host, first from the running container's `/etc/influxdb2/influx-configs` (which also covers a token influx generated itself), then from `docker/.env`, and stores it encrypted in System Settings as `InfluxDB.token`. The token never appears in the logs; only its first and last 4 characters are shown. The TUI warns when the URL's host and the host the token was read from differ.
-- **Status tab, Host column**: for InfluxDB / MongoDB / Redis / Mosquitto / Nginx it shows **the machine the service is configured on** (`uber-server`, `uber-server.local`), not where the TUI runs; the Port column is the port. View Logs finds the SSH profile for that host (matched by profile name or host), reads locally when the host is this machine, reads the container logs when a container exists, and otherwise falls back to journalctl / brew logs.
-- Reachability is judged **from the TUI machine**, which is the path the pipelines actually take. With `InfluxDB.url` set to `http://uber-server:8087`, the card and the Status tab connect to `uber-server:8087`; which interface `INFRA_BIND_ADDRESS` binds does not matter. The card description states the address being probed. Two consequences: a `localhost` / `127.0.0.1` URL names no particular machine, so the old logic applies (local probes this machine, a remote Host is probed over SSH on its own loopback); and if the TUI machine is outside the tailnet or behind a firewall, the card is grey even when the pipeline machines can connect.
-- After the databases move to `uber-server`, the two cards on a Mac with `localhost` URLs stay grey, because the local probe hits 127.0.0.1. That is expected, not a connectivity problem. **Do not press Start on the Mac in that state**: in `native` mode it runs `make influxdb` / `make mongodb`, which starts a bare-metal database on local 8086 / 27017, and the card turns green `Running` for an empty local database while the pipelines still use `uber-server`. Stop those two local services once the move is done.
+!!! danger "Do not delete `influxd.bolt` to run the setup again"
+    Setup then runs against the kept `/etc/influxdb2`, which already holds a config, most likely fails, and its failure path deletes the engine directory with `rm -rf`. All data is gone.
 
-## Known caveats
+**`Bind for 0.0.0.0:8086 failed: port is already allocated`.** A bare-metal database or another project's container holds the port. Stop the first ([Setup](#setup)), or change this stack's ports for the second ([Share a host with another project](#sharing-a-host-with-another-project)).
 
-- The nemo image is experimental: nemo-toolkit ≤1.23 has old dependencies and a long build.
-- The transcriber image uses whisperx 3.8.6 with the config unchanged (`whisperx/small`, `da`, ...); the first request downloads the model into the hf-cache volume.
-- The separator's MossFormer2 model cache is written to `/root/.cache/modelscope` (named volume).
-- **`DOCKER_INFLUXDB_INIT_*` only apply on the first start against an empty `influxdb-data` volume.** Once the entrypoint sees `influxd.bolt` it skips setup entirely; changing the token / org / bucket / password afterwards and running `up -d` neither errors nor takes effect. To change the token later use
-  `docker compose -f docker/docker-compose.infra.yml exec influxdb influx auth create --org admin --all-access`;
-  to recover the initial token use `... exec influxdb cat /etc/influxdb2/influx-configs`.
-- **Do not delete `influxd.bolt` to re-run the bootstrap.** The entrypoint only checks whether the file exists; with it gone, setup runs again against a persisted `/etc/influxdb2` that already holds a config, most likely fails, and its failure path runs `rm -rf` on the engine directory. All data gone. Use `influx auth create` from the previous point to change tokens.
-- The InfluxDB web UI is published on the same port 8086; anyone who can reach it can log in with `admin` + `INFLUXDB_INIT_PASSWORD`. Do not pad that password to 8 characters; generate it with `openssl rand -base64 24`.
-- **Do not run `make -C pipelines/uber-server all` on a machine that runs the containerized databases**: `all` starts with `clean-ports`, which `kill -9`s whatever holds 8086 / 27017, i.e. docker-proxy, and the `influxdb` / `mongodb` targets then start bare-metal services on top. Use `make all without=influxdb,mongodb` there.
-- MongoDB runs without authentication by default, and on Linux Docker's NAT rules run before ufw, so `ufw deny 27017` does not block a published port. Use it only on a trusted lab network, restrict publishing to one interface with `INFRA_BIND_ADDRESS=<LAN IP>`, or add iptables rules to the `DOCKER-USER` chain.
-- With `INFRA_BIND_ADDRESS` set to an address that comes up after Docker does (a tailnet IP), a container started at boot before the address is there cannot publish its ports and stays down: Docker's restart policy only restarts a container that ran and exited, not one whose start failed. `docker compose -f docker/docker-compose.infra.yml up -d` brings them up once the address is there, and on a machine that runs the dashboard `make autostart` in `pipelines/uber-server` makes every boot start them (see the [Dashboard Setup Guide](dashboard.md#deploying-on-a-server)).
-- **MediaMTX reads `mediamtx.yml` when its container starts.** The file is bind-mounted on its own, and a change made on the host, by a `git pull` or by a Save or Sync on the Stream Server card, never reaches the running server: recreate it (`docker compose -f docker/docker-compose.infra.yml up -d --force-recreate mediamtx`, or Stop and then Start on the card), which closes every stream for a moment. `curl -s http://<stream-server>:9997/v3/config/global/get` shows what it runs with. The same goes for its record folder: one renamed or removed under a running container records nowhere (see [Streaming](rtmp_streaming.md#on-the-server)).
-- MongoDB 5.0+ requires AVX on x86_64 (ARMv8.2-A or newer on arm64). On an older CPU the container restart-loops with exit code 132 while `up -d` reports success. Check with `grep -m1 -o avx /proc/cpuinfo` on the server before going live.
+**8086 or 27017 never opens, while `up -d` reported success.** The container restart-loops; `docker compose -f docker/docker-compose.infra.yml ps` and `... logs influxdb` (or `mongodb`) say why:
+
+- an empty `INFLUXDB_INIT_PASSWORD` on the first start;
+- only one of `MONGO_ROOT_USER` and `MONGO_ROOT_PASSWORD` set;
+- exit code 132 from MongoDB: MongoDB 5.0 and later needs AVX on x86_64 (ARMv8.2-A or newer on arm64). Check with `grep -m1 -o avx /proc/cpuinfo` before going live.
+
+**The containers are down after a reboot.** `INFRA_BIND_ADDRESS` names an address that comes up after Docker does, such as a tailnet IP, so a container started at boot cannot publish its ports. Docker's restart policy restarts only a container that ran and exited. Run `docker compose -f docker/docker-compose.infra.yml up -d` once the address is there; on a machine that runs the dashboard, `make autostart` in `pipelines/uber-server` makes every boot start them ([Start after a reboot](dashboard/deploy.md#start-after-a-reboot)).
+
+**The dashboard on the database host cannot reach the databases** (`Connection refused`). See [Reach the databases from their own host](#when-the-database-host-has-to-reach-its-own-databases).
+
+**The InfluxDB and MongoDB cards on a Mac stay grey after the move to `uber-server`.** The Mac's URLs still say `localhost`, so the cards probe the Mac's own ports. Do not press **Start** there: in `native` mode it runs `make influxdb` and `make mongodb`, which start empty local databases, and the cards turn green while the pipelines use `uber-server`. Stop those local services once the move is done.
+
+**A service gets `ENC(...)` strings instead of secrets.** Its key folder holds no key the console wrote with ([Details: the master key](#mounts)). A stack started before `~/.openmmla` existed made that folder itself, owned by root, and nothing can put a key in it: run `sudo chown -R "$USER": ~/.openmmla`, then start the stack again.
+
+**MediaMTX runs with an old `mediamtx.yml`, or records nowhere.** The container reads its config, and opens its record folder, when it starts. Recreate it after a change, or after its record folder was renamed or removed ([Streaming troubleshooting](streaming/troubleshooting.md#the-stream-server)).

@@ -1,391 +1,62 @@
-# Video Frame Analyzer (VFA)
+# Video frame analyzer (VFA)
 
-Cameras at several angles watch a group at work. Each VFA base captures a frame from its camera at a fixed interval, the synchronizer bundles the angles of one moment into a frame set, and the VFA server, the frame analyzer, gives three outputs for it, side by side:
+The video frame analyzer watches a group at work through cameras at several angles and turns each moment into data: where each person is, where they look, and what they are doing. Use it when a study needs body, gaze or activity measures from video next to speech ([ASR](../asr/index.md)) and positions ([IPS](../ips/index.md)).
 
-| Output | What it gives | How the server gets it | Event |
+## What VFA produces
+
+| Output | What it gives | What it is for | Event |
 |---|---|---|---|
-| [Action labels](#action-labels) | per person, one of five collaborative actions, with the observations and a step-by-step justification | a vision-language model (VLM) reads the frames with the AprilTag ids and gaze lines drawn on them (`POST /vllm`) | `vfa_action` |
-| [Pose](#pose) | per person, a box, 17 keypoints, the AprilTag they wear, a track id and the head yaw; per pair, how close their hands come (circles placed past the wrists) | an Ultralytics YOLO pose model and the AprilTag detector (`POST /vllm/features`) | `vfa_features` |
-| [Gaze](#gaze) | per person, the face box, the point the gaze lands on, the probability it lands in the frame, and what it lands on (a partner's face or hands, their own hands, a zone, elsewhere); per pair, how far apart the gazes land | RetinaFace and PaGE or Gaze-LLE, with the pose (`POST /vllm/features`) | `vfa_features` |
+| [Action labels](action-labels.md) | per person, one of five collaborative actions, with the observations and a step-by-step justification | a coder-like account of what each person is doing | `vfa_action` |
+| [Pose](pose-and-gaze.md#pose) | per person, a box, 17 keypoints, the AprilTag they wear, a track id and the head yaw; per pair, how close their hands come | who is where, head turns, hand activity | `vfa_features` |
+| [Gaze](pose-and-gaze.md#gaze) | per person, the face box, the point the gaze lands on, the probability it lands in the frame, and what it lands on; per pair, how far apart the gazes land | who looks at whom or at what, joint attention | `vfa_features` |
 
-Each is switched on its own (Gaze also turns Pose on, and the two come back in one request): **Action Labels**, **Pose** and **Gaze** on the card, `-a`, `-pose` and `-gaze` on the command line (see [Choosing the outputs](#choosing-the-outputs)). The action labels are semantic, one label per person each time the VLM is asked, every 30 s (the bases' `keyframe_interval`) when they are on, and they are off by default: the VLM is the costliest request, and a cloud backend gets the frames. The pose and the gaze are geometry, one answer per frame set, about every second in a pose run, and no VLM is involved.
+The action labels come from a vision-language model (VLM), one label per person each time the VLM is asked. The pose and the gaze are geometry from a pose model and a gaze model, one answer per frame set and no VLM. Each output is switched on and off on its own: see [Choosing the outputs](run.md#choosing-the-outputs).
 
-## Pipeline overview
+![A classroom frame with the pose and gaze VFA computes drawn on it: each badge wearer's skeleton and box in their tag colour, labelled Tag 0 and Tag 1, a dashed gaze line from each face to what it lands on (partner_face, partner_hands), and an adult without a badge in grey; every head is pixelated](../../img/vfa/overlay.png)
 
-1. **Frame Capture (FC)**: each VFA base captures a frame from its video stream every `keyframe_interval` seconds (30 s by default; set it to about 1 s for the pose and the gaze) and broadcasts the frame metadata (base id, angle name, frame path, capture time) over MQTT.
-2. **Frame Synchronization (FS)**: the VFA synchronizer listens on the MQTT channel, aligns the messages of all bases in time into one frame set, looks up each angle's description in its own `angle_config`, and sends the frame set to the frame analyzer in up to two requests: to `/vllm`, with the participant and angle descriptions, for the action labels (at most one frame set every `Synchronizer.action_interval` seconds of frame time; the frame sets in between get no labels), and to `/vllm/features`, one request for the pose and the gaze together.
-3. **Frame Analysis (FA)**: the VFA server answers each request: the [action labels](#action-labels) through overlays, a structured prompt and a VLM; the [pose](#pose) and the [gaze](#gaze) as geometry from the pose and gaze models.
-4. **Storage**: the synchronizer writes the answers to InfluxDB as `vfa_action` and `vfa_features` events (see the [Database Reference](../../database.md)), and publishes the features to the bases (`<session>/vfa/features` on MQTT), which, with **Graphics** on, draw them on their live windows.
+## How it works
 
-Joining these events with the speech and the positions, window by window, is analysis rather than capture: see [Window features](../../analytics/window_features.md).
+![The VFA path for action labels: VFA bases capture frames at an interval and broadcast them over MQTT (FC); the VFA synchronizer aligns the frames of all bases (FS) and sends them by HTTP to the VFA analyzer, which detects AprilTags and gazes and renders them on the frames (FA); a VLM server grounds, captions and classifies each person (VLP); the synchronizer uploads the results to InfluxDB](../../img/video_frame_analyzer.png)
 
-| Component | Runs on | Command | Environment |
+1. **Frame capture**: each VFA base takes a frame from its camera every `keyframe_interval` seconds and announces it over MQTT, with its base id, angle name, frame path and capture time.
+2. **Frame synchronization**: the VFA synchronizer aligns the frames of all bases in time into one frame set. It sends the set to the VFA server for the action labels (`/vllm`, with the participant and angle descriptions), for the pose and the gaze (`/vllm/features`, one request for both), or both.
+3. **Frame analysis**: the VFA server answers each request. For the action labels it draws the AprilTags and gaze lines on the frames and asks a VLM; for the pose and the gaze it runs the pose and gaze models.
+4. **Storage**: the synchronizer writes the answers to InfluxDB as `vfa_action` and `vfa_features` events ([Databases](../../database.md#influxdb)). It also sends the features to the bases, which draw them on their live windows.
+
+Joining these events with speech and positions, window by window, is analysis rather than capture: see [Window features](../../analytics/window_features.md).
+
+## Components
+
+| Component | Runs on | Started with | Environment |
 |---|---|---|---|
 | VFA Base, one per camera angle | base station | `mmla vfa-base` | conda env `vfa-base` |
 | VFA Synchronizer, one per session | base station | `mmla vfa-sync` | conda env `vfa-base` |
-| VFA Server: the multi-angle frame analyzer | GPU base server | docker compose | image in `docker/` |
-| MLLM Server, optional local vision-language model for the action labels | GPU server | `vllm serve` | conda env `vfa-vllm` |
-
-Create the `vfa-base` environment from the TUI's Environment tab or by hand (`conda create -n vfa-base python=3.10 -y && pip install -e '.[vfa-base]'`). For an `lsl` source add `pip install pylsl==1.17.6` and `conda install -c conda-forge liblsl=1.16.2`.
-
-## Action labels
-
-Gaze-augmented collaborative action recognition with vision-language models. For every frame set it is asked about, the server grounds each participant by their AprilTag, overlays gaze cues, and asks a VLM to describe what each person is doing and to classify it into one of five collaborative actions with a transparent, step-by-step justification. The pipeline, its prompt design and its evaluation against human coders are described in the ICALT 2026 paper *Designing for Transparency: Gaze-Augmented Collaborative Action Recognition with Vision-Language Models*.
-
-![Video frame analysis pipeline: frame capture, frame synchronization, frame analysis, vision-language processing](../../img/video_frame_analyzer.png)
-
-On this path the frame analysis (FA) runs AprilTag detection and gaze detection (RetinaFace for faces, [PaGE](https://github.com/OctopusWen/PaGE) or [Gaze-LLE](https://github.com/fkryan/gazelle) for gaze targets), renders the frames with the overlays below, builds the structured prompt, and sends it to the VLM. In the vision-language processing (VLP) the VLM, local or in the cloud behind an OpenAI-compatible API, performs grounding, captioning and classification and returns JSON.
-
-A rendered frame carries the cues the prompt refers to: each detected AprilTag is repainted as a black square with its id in white, each detected face gets a coloured box, a gaze line points at the estimated gaze target, and `in: 0.98` is the probability that the gaze target lies inside the frame.
-
-### Action coding scheme
-
-Every participant in every frame is assigned one of five mutually exclusive actions. Human coders work from the descriptive definitions below; the VLM receives a rule-based formalization of the same definitions, written as explicit conditions on gaze and hands plus a hierarchical decision process (`config/vfa/action_schemas.yml`, schema `collaboration_v1`, editable from the **Action Schema** tab of the VFA Server card).
-
-| Action | Definition |
-|---|---|
-| Communicating | Actively communicating with others: looking at work items (screen, documents, hardware) while clearly pointing at them, or looking at another person while gesturing or pointing. |
-| Observing | Watching or monitoring without communicating or manipulating: looking at work items or people while the hands are resting, hovering without touching, or touching something other than what is being looked at. |
-| Manipulating | Directly working with something: looking at a work item while at least one hand clearly touches the same item. |
-| Idle-OffTask | Not engaged in the task: looking at personal items (phone, snacks) or outside the camera frame, whatever the hands do. |
-| Unclear | The gaze or the hands cannot be seen well enough to tell, because of occlusion, blur or poor visibility. |
-
-The same scheme ships as the default template of the [human coding interface](coding_interface.md), so machine and human codings use identical labels.
-
-### Prompt engineering
-
-![Structure of the chain-of-thought prompt: persona, context, grounding, captioning, classifying, formulating](../../img/vfa_prompt_structure.png)
-
-The prompt mirrors the human annotation process as a stepwise reasoning chain:
-
-1. **Persona assignment** (system prompt): the VLM acts as an expert multi-perspective lab activity analyst.
-2. **Context**: a legend of the visual overlays, the camera setup (`{{num_perspectives}}`, `{{angle_descriptions}}`) and the participant descriptions (`{{participant_descriptions}}`).
-3. **Grounding**: identify each person by the AprilTag id, else by matching the appearance to the participant descriptions, else assign an id from 100 upwards.
-4. **Captioning**: describe gaze focus, hand status (contact, hovering, inactive), position and clothing per person, citing the camera view that supports each observation.
-5. **Classifying**: apply `{{action_definitions}}` and `{{decision_process}}` top down, stopping at the first match, with contact evidence when a rule requires contact.
-6. **Formulating**: answer in a fixed JSON layout with `observations`, `classifications` and `justifications` per id.
-
-The templates are plain text files under `pipelines/vfa-server/prompts/` (`prompt_templates_dir`), edited from the **Prompts** tab of the VFA Server card, which marks the templates in use. `prompt_profile` selects the end-to-end variant: `cot` (the chain-of-thought prompt above, the paper's main condition), `baseline` (direct classification without the reasoning steps) and `baseline_no_pre` (baseline without the pre-context block). `end_to_end: false` switches to the older two-step mode with the fixed `multi_angle_vlm_*` (vision) and `multi_angle_llm_*` (classification) templates.
-
-Templates substitute `{{variable}}` placeholders, each using only its own subset: `{{num_perspectives}}`, `{{angle_descriptions}}`, `{{participant_descriptions}}`, `{{action_definitions}}`, `{{decision_process}}` (not in the baseline variants) and `{{image_description}}` (two-step LLM prompts only). The participant descriptions come from the experiment selected for the session (`config/experiments.yaml`, edited under **System Settings → Study → Experiments**). A missing templates directory is an error at startup; a missing single template is skipped silently and leaves that prompt empty, so check the path if the model starts receiving bare input.
-
-### Model backend
-
-The server talks to an OpenAI-compatible endpoint. Choose it with `VLLMFrameAnalyzer.backend` in `pipelines/vfa-server/config.yml` (a dropdown on the Config tab) and fill in the matching block; the template lists every supported one. `vllm` is the default, and what a config without `backend` gets: the template's block points at what the MLLM Server card serves (`Qwen/Qwen3-VL-8B-Instruct` on port 8010, one model for both steps, at `http://host.docker.internal:8010/v1`), and the card's `limit_mm_per_prompt` must cover the cameras of a frame set, which go in one request. A `vllm`, `ollama` or `llamacpp` block may leave `api_key` out: `EMPTY` is sent, the key the MLLM Server card starts `vllm serve` with. A cloud backend needs its key and uploads the frames. In the paper, GLM-4.5V, InternVL-3.5, Gemini-2.5-Pro and GPT-5 were evaluated with the `cot` profile.
-
-Local:
-
-- **vLLM**: the **MLLM Server** card runs `vllm serve` with the model, port and limits from `config/mllm_server.yml` (Qwen3-VL-8B-Instruct by default) in the `vfa-vllm` environment (`pip install -e '.[vfa-vllm-runtime]'`, Python 3.12). Point `vllm.vlm_base_url` at it. A dockerized frame analyzer reaches it on the same machine at `http://host.docker.internal:<port>/v1`; see the [Docker guide](../../docker.md#a-vlm-server-on-the-same-host).
-- **Ollama**: install from https://ollama.com/download and pull a multimodal model (`ollama pull llava`); backend `ollama`.
-- **llama.cpp**: backend `llamacpp` against a llama-server endpoint.
-
-Cloud, each needing an API key in its block (stored encrypted on save):
-
-- **OpenAI** (`openai`), **Google Gemini** (`gemini`), **xAI Grok** (`grok`), **Zhipu** (`zhipuai`), **InternLM** (`intern`): vision-capable models for both steps.
-- **DeepSeek** (`deepseek`): text models only, so usable for the classification step of the two-step mode; the shipped block points `vlm_model` at `deepseek-reasoner`, which does not accept images.
-- **Qwen** (`qwen`) through DashScope's OpenAI-compatible endpoint: the template default `qwen2.5-72b-instruct` is text-only, so set `vlm_model` to a `-vl` model.
-
-Because the frame analyzer runs in a container, a backend on the same machine is reached as `http://host.docker.internal:<port>/v1`, not `localhost`.
-
-### Human coding and evaluation
-
-Ground truth for the action labels is produced with the [human coding interface](coding_interface.md), a single HTML page in `pipelines/vfa-base/coding-interface/`. Run a base in `capture` mode, which always stores its frames, or in `live` mode with `Store Frames` on (it is off by default) to collect frames; they land under `artifacts/runtime/pipelines/vfa-base/<host>/real-time/runtime/<camera>_<base-id>/` named `<unix-timestamp>.jpg`. Coders load the same frames and the action template, code every participant in every frame, and export a JSON file whose windows mirror the pipeline's `action_recognition` output, so human and machine codings can be joined on the frame timestamp and the participant id.
-
-In the paper, three researchers coded two pilot sessions this way (Cohen's κ 0.73 to 0.84), a majority vote formed the gold standard, and each VLM was run five times over 214 person-frame codings. Manipulating and Observing were recognised most reliably; Communicating was the hardest class.
-
-## Pose
-
-The pose is the persons of each frame as geometry: where each one is, who they are, which way the head turns and where the hands are, from a pose model and the AprilTags, with no VLM. It comes from the [features endpoint](#features-endpoint-skeletons-and-gazes), one `vfa_features` event per frame set when **Pose** is on.
-
-- **Skeletons** come from an Ultralytics YOLO pose model (`features.pose_model`, `yolo26n-pose.pt` by default, the end-to-end YOLO26 nano; `yolo26s-pose.pt` and the YOLO11 ones are a name away): a box, a score and the 17 COCO keypoints per person, in pixels from the top-left corner. The weights are fetched once, at the first start, into `pipelines/vfa-server/weights/` (the container's `/project/weights`); put the file there yourself on a host without internet. A model that cannot be loaded, or one that does not answer 17 keypoints, makes the endpoint answer 503 with the reason. **Licence**: `ultralytics` is AGPL-3.0 while openmmla is MIT; serving the frame analyzer image over a network with it inside carries the AGPL source-offer obligation for the combined work (see the [Docker guide](../../docker.md)). A deployment that must stay AGPL-free leaves `ultralytics` out and sets `features.enabled: false`.
-- **Identity** is the AprilTag on the chest: a tag inside a person's torso (the shoulders and hips, or, seated with the hips hidden, a box hanging from the shoulder line) beats one merely inside their box, the nearest such tag wins, and tags and persons are matched one to one; `tag_match` says which (`torso`, `box`). A person whose tag is out of sight keeps it through their track (`tag_match: track`, next); the others are `track_<id>` while tracked, else `unknown_1`, `unknown_2` ... from left to right, and are bystanders a client should drop.
-- **Tracking**: with `cameras` in the request the server tracks the persons of each camera, so every person carries a `track_id`, and a tag read on a track names that person while it is hidden (see [Tracking](#tracking) below).
-- **Head yaw** is read from where the nose sits between the ears (between the eyes when an ear is hidden, scaled for their narrower arc): 0 facing the camera, positive turned towards the right of the image, past ±90 seen from behind, about ±70 when only one ear is seen, `null` when the nose is hidden.
-- **Hands** are circles: for each wrist the pose model sees, a circle of 0.4 shoulder widths around a point past the wrist along the forearm (on the wrist when the elbow is hidden). The gaze targets score these circles, and the pairs measure hands between their centres. Version 2 of the circle (`features.HAND_NUDGE`, from 2026-09-24) centres it 0.33 shoulder widths past the wrist; version 1 centred it 0.14 past. The distance is where a whole-body hand model (DWPose-l, run on the pose boxes) puts the hand's centroid past the YOLO wrist, and the version 2 circle holds more of that model's fingertips than version 1. The server answers with version 2 only once its image is rebuilt; every event stored before that carries version 1, and the fusion makes its targets and hand distances again (see [the hand circle, remade](../../analytics/window_features.md#the-hand-circle-remade)). Each frame of the answer says what its targets and pairs were made with, in `scoring`: `hand_circle` (the circle's version), `keypoint_confidence` and `inout_threshold`; `/info` reports the circle under `features` (`hand_circle`, `hand_nudge`). A frame without `scoring` was made with version 1.
-
-### Tracking
-
-With `cameras` in the request (the base id of each frame; the synchronizer sends them) the server keeps a tracker per camera of a session over the pose boxes, so every person carries a `track_id` that holds while they stay in view and for `features.tracking.buffer_frames` frames out of it (30: at the bases' `keyframe_interval` of 1 s, 30 s; a newcomer's first frame has none, the track is confirmed on the second). A tag read on a track names that person while the track lasts, hidden or not (`tag_match: track`); a tag read on another track moves to it. Each frame of the answer names its `camera`. The tracks live in the server process: run it with one worker (the default), and send a camera's frames in order, as the synchronizer does. `features.tracking.enabled: false` turns tracking off.
-
-**What ByteTrack compares, and what it misses.** The tracker is Ultralytics' ByteTrack: a Kalman filter predicts where each track's box will be, and a track takes the person whose box overlaps that prediction best (the cost is one minus the IoU times the detection score, and must stay below 0.8). It compares boxes and nothing else, and three of its habits can put a tag on the wrong person: it makes one assignment over the tracks in view and the lost ones together, so a lost track can take a person whose own track is in view; a lost track's box keeps moving at its last velocity for up to 30 frames; and the tag memory follows a track found again with no check. In one classroom session the three together moved a tag from a pupil who left the table onto another pupil for 326 frames: the leaver's last box went to a lost track in the corner (IoU 0.651, against 0.509 with their own track), which drifted 124 px in 22 frames and then took the other pupil from their own track as they stood up. Over five sessions the first tag read on a track after it was found again differed from the last read before the gap in 20 % of 10,189 such re-activations (against 2 % on tracks seen without a gap), and in half of those where the box had moved half a box width to a whole one.
-
-**What the server's tracker changes** (`openmmla/services/vfa/tracking.py`, a small subclass of ByteTrack written for Ultralytics 8.3 and 8.4):
-
-- **Splits** (`split_gap_seconds`, 3, and `appearance.split_on`, `different`): a lost track found again at least 3 s after it last saw its person (two missed frame sets at one a second) continues under a new track id, which inherits no tag, when the appearance calls the person someone else. Such a match is refused before it is made, and the refusal holds for the 3 frames after it (below), so in practice that person starts a track of their own, without the tag, and the lost track waits for its own person. A re-find the face confirms, or one it cannot judge, keeps the track's id and its tag, as ByteTrack had it, and a track found again sooner than 3 s always does. `split_on: unconfirmed` splits every re-find after the gap that the appearance does not confirm, as the server's tracker first did (why it no longer does is below). The tracker counts frames, and `frame_seconds` (1, the bases' `keyframe_interval`) turns the seconds into frames, so a file replay run faster than real time splits where a live run would. `0` never splits.
-- **Cascade** (`cascade`, off): the tracks in view take the frame's persons first, and a lost track is offered only a person none of them took.
-- **Frozen lost tracks** (`freeze_lost`, off): a lost track stays where its person was last seen, without velocity, and a track found again starts its motion afresh from where it is found.
-- **Duplicates**: in ByteTrack's check for duplicate tracks (two boxes overlapping by an IoU above 0.85) a lost track gives way to the track in view when it is frozen, with the cascade, and whenever the appearance checks are on: a lost track the appearance refused a person at stands where that person stands, and would otherwise delete the track they start, frame after frame. The split rule plays no part in it. A lost track drifting over a pupil whose track is younger than its own would otherwise delete that pupil's track and take them over, tag and all, in the next frame: in the pilot re-run (below) this rule, not a verdict, kept the tag of the case session off the other pupil.
-- **Track ids** are counted per camera from 1. ByteTrack shares one counter among every tracker of the process and resets it whenever a tracker is made, so a camera whose tracker was made later, or a second session, could hand a newcomer the id of a live track.
-
-**How the defaults were chosen.** A replay rebuilt the deployed tracker offline over the stored boxes and scores of 20 sessions (652,299 person frames, 36.9 camera-hours, 48 pupils) and ran each variant through the fusion's tag rules (expire, then propagate with a 60 s memory). It reproduced the stored track ids, tags and `tag_match` of the case session above exactly, and the tags of 99.98 % of all person frames. The AprilTag reads stand in for the truth: an error is a read that contradicts another on the same track. With no re-activation ever confirmed by the appearance, the worst case for the splits:
-
-| Variant | Fused frames a read on their track contradicts | Torso reads switching tag along a track | Pupil-set coverage, fused |
-|---|---|---|---|
-| ByteTrack as deployed before | 2.84 % | 155 | 76.7 % |
-| split at 3 s (`split_on: unconfirmed`) | 1.02 % | 41 | 74.5 % |
-| split at 5 s | 1.34 % | 62 | 75.0 % |
-| cascade, split at 3 s | 1.52 % | 56 | 75.2 % |
-| cascade, frozen lost tracks, split at 3 s | 1.60 % | 53 | 75.2 % |
-| cascade, frozen lost tracks, no split | 3.11 % | 141 | 77.2 % |
-
-- A track found again after 3 to 4 s already holds someone else as often as after a longer gap: 14 to 17 % of the pairs of reads across such a gap disagree, against 4 to 5 % across a 2 s gap and 0.1 % along a track in view. So the split starts at 3 s; at 5 s it would miss those.
-- The cascade keeps a person a lost track would take on their own track (in the case above both pupils keep theirs), but it swaps more persons between tracks in view (torso reads switching tag without a gap: 32 with ByteTrack's own association, 45 to 49 with the cascade), which no split catches. With the split of `split_on: unconfirmed`, ByteTrack's own association also left the robbed pupil without the wrong tag (the lost track was renamed as it took them), so the cascade was left off. Under the default `split_on: different` that no longer holds: a lost track that takes a pupil from their own track with no face to compare keeps its id and tag (the fusion's 60 s tag memory then caps it), as the pupil standing up in the case above does when their face is not seen, while the cascade keeps them on their own track without it. The cascade was not weighed again for that rule, so whether it should stay off is open.
-- Freezing lost tracks added errors in every pairing (fused contradictions 3.79 % against 2.84 % alone, 3.11 % against 2.73 % with the cascade) and gained only fewer, longer tracks, so it is off.
-- The coverage the split gives up (2.2 points against ByteTrack as deployed) is a worst case: a re-activation the appearance confirms keeps its id and tag. Every variant costs about 0.33 ms per camera frame on one CPU thread.
-
-**Why a split needs a `different` verdict.** A pilot re-run of three sessions (2026-10-02) through the server with the first rules (`split_on: unconfirmed`, tag checks that act, the face check on and the colour off) judged each decision by the AprilTag reads on both sides of it:
-
-- The face seldom had anything to compare: 3,978 of the 4,013 splits had no usable face. Where reads on both sides could judge them, 75 % of the splits after 3 to 5 s were false (the same person on both sides), and a track found again after a 3 s gap held the same person 84 % of the time. The splits cost one pupil 12.7 points of fused presence and all pupils 2.8 points pooled, for 33 fewer wrong tags by the strict check.
-- The face's verdicts are worth different things. `same` was right 99.6 % of the time on tags and confirmed 38 of 39 re-founds; `different` refusing a lost track a person was right in 4 of 4 checkable cases; but `different` against a remembered tag's gallery (the tag withheld, the track split after `different_frames`) was wrong in 70 of 82 checkable cases, at every score.
-- The case session's tag stayed off the other pupil through the duplicate rule above (a lost track gives way to the track in view while the appearance checks are on), not through any verdict.
-
-So by default a re-found track is split only on `different`, a re-find the face cannot judge keeps the track and its tag as ByteTrack did (the fusion's [60 s tag memory](../../analytics/window_features.md#tags-along-the-tracks) still caps a carried tag), and a tag check only records its verdict (`appearance.tag_check_acts: false`). `split_on: unconfirmed` and `tag_check_acts: true` bring the first rules back, but for the hold of a refusal (below), which the first rules did not have.
-
-**The appearance checks.** They were calibrated on the stored frames of four sessions (14 cameras, 270,787 person boxes, 156,550 face embeddings), decoded and compared in memory only, with the AprilTags read on the torso as labels. A check compares a distance (0 for the same) with two thresholds: at or below `same` the person is the same, above `different` someone else, in between `unknown`.
-
-- **Colour** (`appearance.colour`, off since the pilot re-run of 2026-10-02, where its 'different' verdicts on remembered tags were right only 4 to 9 % of the time, as lighting, posture and occlusion move the histogram as much as a change of person; the face alone checks identities): an HSV histogram of the upper-body clothing, per channel: the hue in 16 bins, each pixel weighted by its saturation (a pixel darker than V 40 counts in a grey bin instead), the saturation in 8 bins and the brightness in 8, each part normalised and given a third. Two compare by their Hellinger distance. The region is the polygon of the shoulders and hips; seated with the hips hidden, a box from the shoulder line down 1.2 shoulder widths; with the shoulders hidden too, the band of the person's box from 20 % to 50 % of its height, 20 % in from each side. Each is shrunk by 15 % towards its middle, and the crop to 48 px on its long side (30 pixels at least). It costs 0.1 ms. Of the descriptors tried (hue by saturation bins with brightness bins for the grey pixels, and CIELAB) it separated best in every set of pairs: an AUC of 0.91 between two pupils read at the same moment and one pupil read 1 to 60 s apart on one camera, but 0.83 across cameras, so a colour is compared only with looks from the same camera.
-- **Face** (`appearance.face`, off unless switched on): InsightFace's ArcFace model (`w600k_r50.onnx`) embeds the face aligned from the five landmarks RetinaFace gives with every face it finds, and two embeddings compare by their cosine distance. A face is used when its box is at least `min_face_px` (56) wide and it is turned at most `max_face_yaw` (50) degrees by its landmarks (the nose at most 0.6 eye distances off the eyes' midpoint). The pose's head yaw is not used: faces it puts past 60 degrees still separated with an AUC of 0.98. Faces separate pupils far better than clothes: an AUC of 0.984 over every face RetinaFace found (91 % of same-pupil pairs accepted at 1 % false accepts), 0.994 for those that also passed the calibration's SCRFD score of 0.5 (96 %), a third check the server, taking RetinaFace's landmarks, does not make. But only 30 to 39 % of the torso reads show a usable face. A face costs about 3 ms on the GPU, 48 ms on the CPU. Which channel order RetinaFace is handed decides how many faces there are (see [Gaze](#gaze)).
-- The face decides wherever both sides have one; the colour decides otherwise.
-
-The two sides of a check:
-
-- A track's own **looks**: the last `descriptor_frames` (10) of its frames, one every `sample_spacing_seconds` (2) of the camera, the colours only of frames where the person's box overlaps no other person's by an IoU of `max_overlap` (0.3) or more.
-- A session's **tag galleries** hold, per tag, the frames in which the tag was read on the torso (not on the box): its last `gallery_size` (10) usable faces, of any camera, and its last 10 colours of each camera, one every 2 s of a camera. The cameras of a session share one set of galleries.
-- A distance is the nearest of the memory's looks. Against a single look the thresholds for 1 % false accepts are about 0.65 for the face and 0.11 to 0.13 for the colour, but the nearest of 10 looks lets more impostors through, so `same` is set for galleries of 10: 0.55 for the face, 0.12 for the colour, with the nearest-tag rule below. With them, 90 % of same-pupil probes were confirmed at 0.8 % false accepts (0.75 to 0.95 % per session); without the rule the same thresholds accepted 4.8 %. Larger galleries let more impostors in: in the case above, a gallery of every read of the tag brought the other pupil's clothes within 0.132 of it, against 0.216 with the last 10.
-
-The checks run at two moments:
-
-- **A lost track found again**: a track that remembers a tag checks the person against the session's tag galleries. The tag is confirmed (`same`) only when it is within `same` and also the nearest of the session's tags; it is `different` beyond `different` (0.65 for the face, 0.35 for the colour), or when another tag is within `same` instead. Another tag counts in this rule once its gallery holds `rival_looks` (3) looks, so a badge misread once does not stand against a pupil's own tag (the calibration counted the tags read on the torso at least 50 times). When the remembered tag's gallery holds nothing to compare (a tag read on the box only, or never on this camera), the track's own looks take its place under the same rule, so a person another tag's gallery holds nearer is not confirmed. Without a remembered tag the person is checked against the track's own looks. A match called someone else is refused, and the person is taken by another track or starts a new one. The refusal holds for the 3 frames after it (`REFUSAL_HOLD_FRAMES` in `tracking.py`): the lost track then takes only a person the appearance confirms, since a refused newcomer's own track is confirmed only on their second frame, where their face is often not seen, so without the hold a lost track refused a newcomer would take them, with its tag, in their next faceless frame. A person it holds off, its own included, starts a track of their own, without the tag. Any other match keeps the track's id and tag whatever the gap, unless `split_on: unconfirmed` splits a re-find not called the same after 3 s. On the re-activations of the four sessions after a gap of 5 s or more, the first frame confirmed 59 % of the same pupils and 1 of 28 different ones, whose tag label both the face and the colour call wrong. In the case above the check refuses the tag at 29:17: a face distance of 0.741 and a colour distance of 0.216 to its gallery. Looking at the first 3 frames would confirm 75 % with no more false accepts (a usable face shows in 48 % of them, against 27 % of first frames), but the server decides on the first: under `split_on: unconfirmed` a tag confirmed after the split would be lost anyway, as the fusion drops a kept tag from a track that never read it, and keeping the old id in the meantime would let the fusion carry the old tag onto those frames.
-- **A remembered tag**: a person whose tag is not read and whose track remembers one carries it, and is checked against that tag by the same rule; the verdict goes into `reid` and changes nothing (`appearance.tag_check_acts: false`, see why above). With `tag_check_acts: true` a `different` verdict withholds the tag in that frame and answers the person under a provisional track id of their own; the `different_frames`-th (2) in a row gives the person no tag and continues their track under that id, and a verdict that is not `different`, or a read, puts them back on their track. So the fusion's [tags along the tracks](../../analytics/window_features.md#tags-along-the-tracks), which carry reads along a track id, carry the track's earlier reads neither onto a withheld frame nor past the split; a check that says `unknown`, or finds nothing to compare (no torso or face, an empty gallery), carries the tag as before. The `different` thresholds sit where a pupil is rarely called someone else: the nearest of 10 gallery faces of the same pupil lay within 0.565 in 99 % of probes, and the clothing of two different persons lay 0.39 apart at the median (the same pupil's 0.14). They were not calibrated on frames in view, which is why a single verdict does not split a track.
-- In both, the colour of a person whose box overlaps another's by `max_overlap` or more is not compared, since the memories never take such a colour either (a neighbour leaning in front shows their own clothes in the torso); the face still is.
-
-**In the answer.** A person a check ran on, or whom a lost track took after `split_gap_seconds`, carries `reid`, by check: `track` (a lost track found again, or refused) and `tag` (a remembered tag), each with `kind` (`colour` or `face`), `score` (the distance) and `verdict`, and as they apply `gap` (the seconds since the track last saw its person), `split: true` (the track continued under a new id), `blocked: true` (the match was refused, on a person no track took or on one the refusal kept from the lost track that would have taken them; with a verdict other than `different`, by the hold of an earlier refusal), `withheld: true` (with `tag_check_acts` only: the tag was not given in this frame, and `track_id` is the provisional one) and `tag_id` (the tag checked against). Such a re-find is recorded whether the track was split or kept; with nothing to compare its `kind` and `score` are `null` and its `verdict` `unknown`. By default a `tag` record carries no flag: the tag was given whatever its verdict.
-
-```json
-"reid": {"track": {"kind": "colour", "score": 0.084, "verdict": "same", "tag_id": 2, "gap": 9.0},
-         "tag": {"kind": "face", "score": 0.412, "verdict": "same", "tag_id": 2}}
-```
-
-**Safeguards.** The looks and galleries live in the server process's memory only, per session and never compared across sessions. They are dropped with the session's trackers, at the first request after every camera of the session has been silent for `idle_seconds` (600), or when the server stops, and are never written to a file, a log, Redis, InfluxDB or MongoDB, nor answered: an answer, and the event the synchronizer stores from it, carries a kind, a distance and a verdict. The face check is a switch, off in the template; a deployment switches it on in its own config, for data whose consent covers local face recognition. The face model is fetched once, at start, into `pipelines/vfa-server/weights/face/` (the container's `/project/weights/face`, a bind mount, so a rebuild does not fetch it again) from InsightFace's `buffalo_l` pack (`models_url`), whose models are released for non-commercial research only; on a host without internet put `w600k_r50.onnx` there yourself (and `det_10g.onnx` when `detection_model` names it), and an empty `models_url` never fetches. It runs on ONNX Runtime, on the GPU when it has CUDA. A model that cannot be fetched (a fetch waits at most 30 s for its next bytes and 30 min in all) or loaded leaves the face check off (and the colour check as configured), and the log says so at start. A face model that fails on a frame (a GPU out of memory, say) leaves that frame's faces out and keeps its colours, and 10 such frames in a row switch the face check off until the server restarts; `/info` reports the settings under `features.tracking`.
-
-**Settings** (`features.tracking` in the server config):
-
-| Key | Default | What it does |
-|---|---|---|
-| `enabled` | `true` | track the persons of each camera |
-| `buffer_frames` | 30 | frames a lost track (and its tag) is kept |
-| `idle_seconds` | 600 | a camera silent this long forgets its tracks; a session whose cameras all did forgets its galleries |
-| `split_gap_seconds` | 3 | a lost track found again sooner keeps its id and tag; one found later is split as `appearance.split_on` says; 0 never splits |
-| `frame_seconds` | 1.0 | the time between two frames of a camera |
-| `cascade` | `false` | tracks in view first, lost tracks only for the persons left |
-| `freeze_lost` | `false` | a lost track stays where its person was last seen |
-| `appearance.descriptor_frames`, `gallery_size`, `sample_spacing_seconds`, `max_overlap` | 10, 10, 2, 0.3 | the memories, above |
-| `appearance.split_on` | `different` | the verdict that splits a lost track found again after `split_gap_seconds`: `different`, or `unconfirmed` (any but `same`, none included) |
-| `appearance.tag_check_acts` | `false` | `true`: a `different` verdict on a remembered tag withholds the tag and, `different_frames` in a row, splits the track; `false` only records it |
-| `appearance.different_frames` | 2 | with `tag_check_acts`: `different` tag verdicts in a row that split a track in view (the frames before carry a provisional id) |
-| `appearance.rival_looks` | 3 | looks another tag's gallery needs before it counts in the nearest-tag rule (not in the template) |
-| `appearance.colour` | `enabled: false`, `same: 0.12`, `different: 0.35` | the colour check; `hue_bins`, `saturation_bins`, `value_bins`, `min_value`, `torso_inset`, `torso_drop`, `box_top`, `box_bottom`, `box_inset`, `min_shoulder_px`, `max_side` and `min_pixels` shape the histogram and its region |
-| `appearance.face` | `enabled: false`, `same: 0.55`, `different: 0.65`, `min_face_px: 56`, `max_face_yaw: 50` | the face check; `recognition_model` and `models_url` name the model; `detection_model` (empty) can name SCRFD for persons RetinaFace missed, looked for in the pose's head box, whose faces separated poorly (an AUC of 0.898), with `detection_size` (192) and `detection_threshold` (0.5) |
-
-`colour` and `face` also take a bare `true` or `false`.
-
-## Gaze
-
-The gaze is where each person looks and at what, from a face detector and a gaze model, again with no VLM. It comes with the pose from the same [features endpoint](#features-endpoint-skeletons-and-gazes) when **Gaze** is on (a gaze lands on someone's face or hands, so Gaze on turns Pose on), in the same `vfa_features` event. The same gaze model draws the gaze lines the VLM sees for the [action labels](#action-labels), but those return no gaze as data.
-
-**Models.** The gaze comes from a face detector and a gaze model (RetinaFace for the faces; PaGE by default, `gaze_backend: gazelle` for Gaze-LLE. `gaze_model` picks the checkpoint: PaGE's `Octopus1/page-vitb` by default, the distilled ViT-B that reaches human agreement on GazeFollow, VideoAttentionTarget and ChildPlay, `Octopus1/page-vits` at a third of the compute, `Octopus1/page-vitsplus` between the two, `Octopus1/page-vithplus` the 840M teacher; Gaze-LLE's `gazelle_dinov2_vitl14_inout` by default or `gazelle_dinov2_vitb14_inout`, the torch.hub entry points with the in/out-of-frame head. A checkpoint loads with its own backend only: a `gazelle_*` one needs `gaze_backend: gazelle`. PaGE's code is MIT and its checkpoints carry Meta's DINOv3 licence, which binds redistribution of the weights, not serving them): the face box, the point the gaze lands on, the probability it lands in the frame at all, and what it lands on.
-
-**Targets.** Every target within reach is scored and the best taken: a partner's face (`partner_face`, with their id) beats any hands, the nearest hands (`own_hands` or `partner_hands`) beat a zone, and a named zone beats `elsewhere`; `out_of_frame` below `inout_threshold` (the request's `inout_threshold`, else the config's), and `unknown` for a person with no face (neither RetinaFace nor the pose's head box, below). Every target is widened by what the model cannot resolve, one cell of its 64 by 64 heatmap (30 px at 1920 wide). Zones are polygons the request names in `zones`, `{"table": [[x, y], ...]}` for every frame or `{"front": {"table": [...]}}` per angle, in pixels or in `[0, 1]`.
-
-**Work area.** The fusion, not the endpoint, calls an `elsewhere` gaze inside the camera's work area `work_area` and adds `work_area` (the box) to each frame ([window features](../../analytics/window_features.md#the-work-area)). The same `WorkArea` could run in the server (kept per session and camera, applied right after the frame's features, with the [pupils](../../analytics/window_features.md#pupils) sent by the synchronizer); that online hook is not built, and a frame that carries `work_area` from a server that labels online is kept by the fusion as it is.
-
-**Head boxes from the pose.** RetinaFace misses many faces (side views, small heads), and PaGE and Gaze-LLE find no face themselves, so a person it missed whose nose, or both eyes, the pose model sees (at `keypoint_confidence`) gets a square head box instead: centred on the nose, eyes and ears seen, as wide as the head (the ear span, 2.3 eye distances or a third of the shoulders, whichever is widest) plus a fifth on each side. A head seen side on shows one ear and overlapping shoulders, so there the head is also at least 1.5 times the nose to that ear and three times the nose to an eye, and the box always holds every head keypoint seen. The gaze model runs once more on those boxes alone, so the RetinaFace gazes stay what they were, and a face RetinaFace found always wins. That second run happens only on a frame where someone was missed, which in a classroom is most frames: it adds about a third to a frame's time on PaGE (the frame is decoded once for both runs), so a file replay paced to the server's rate without it (`processing_rate`) needs that much more headroom, or the synchronizer's features queue grows and the frame sets still queued at STOP get no `vfa_features`. Such a person carries `"face_source": "pose"`, and their `face_bbox` is the head box; a person without the key has a RetinaFace face, or none when `face_bbox` is `null`. A head box is looser than a RetinaFace box and PaGE widens it again by `gaze_head_scale`, so it is a slightly larger partner face. `gaze_head_box_fallback: false` turns this off. When RetinaFace cannot load, the server keeps the gaze model and gazes from head boxes alone (its log says so at start, and the `/vllm` overlays then draw no gaze); with the fallback off, the gaze is off as before.
-
-**Face detector input.** RetinaFace takes a numpy frame as BGR and swaps the channels itself, but the gaze code has always handed it the RGB frame, so the network sees them swapped. `gaze_face_detector_bgr: true` hands it BGR. In an A/B on 500 stored frames (three sessions, 10 cameras, 654 pupils' heads) that found a face on 66.5 % of the pupils' heads instead of 47.4 %, losing none found before, at the same 42 ms per frame; faces off every head rose from 0.5 % to 0.8 % of the faces. It is on by default since 2026-10-02, when the sessions were analysed again with the new tracker. It changes which persons get a gaze from a detector face rather than a head box, and gives the tracker's face check more faces, so `gaze_face_detector_bgr: false` is only for comparing with an analysis made before. `/info` reports it (`gaze_face_detector_bgr`). SCRFD (`det_10g`) was tried as well: at 640 px it found no more faces than RetinaFace given BGR (64.5 %), and fewer side views, in a tenth of the time (3.8 ms), and ArcFace separated the pupils as well with either detector's landmarks. So RetinaFace stays, for the gaze and for the face check alike.
-
-**Failures.** When the face detector or the gaze model fails on a frame, the frame carries `gaze_error` with the reason, the synchronizer says so once on its console and the base's window writes it under the features note; the skeletons and tags still come.
-
-## The features endpoint { #features-endpoint-skeletons-and-gazes }
-
-The pose and the gaze both come from `POST /vllm/features` (through the gateway too), which answers with the persons of each frame as **geometry**: the continuous, low-level signal source for interaction analysis.
-
-For every image sent (`images`, with `angles` naming each) the answer holds one frame:
-
-```json
-{"frames": [{"angle": "front", "width": 1920, "height": 1080,
-             "tags": {"0": [1010.5, 560.0]},
-             "persons": [{"person_id": "0", "tag_id": 0, "tag_match": "torso", "bbox": [775, 70, 1359, 938], "score": 0.93,
-                          "keypoints": [[x, y, confidence], "... 17 in COCO order"],
-                          "head_yaw": -3.6,
-                          "face_bbox": [1000, 230, 1210, 400],
-                          "gaze": {"point": [1080, 760], "inout": 0.91,
-                                   "target": {"category": "zone", "person_id": null, "zone": "table"}}}],
-             "pairs": {"0|1": {"gaze_distance": 412.0, "hand_distance": 254.4}}}],
- "pose_model": "yolo26n-pose.pt", "gaze": true}
-```
-
-- **Pairs** give, for every two persons, how far apart their gazes land (a joint-attention proxy; `null` when either gaze is out of the frame or missing) and how close their hands come, in pixels. The frame also echoes the `zones` as resolved, in pixels, so a zone sent in the wrong units shows up at once; a zone that is not a polygon, or a frame that is not an image, is answered with 400 naming it.
-- **Privacy**: the answer holds boxes, keypoints and scalars, never pixels nor an appearance descriptor (the tracker's checks answer a kind, a score and a verdict, see [Tracking](#tracking)), and `/features` writes no frame to the server's `temp/` (where `/vllm` keeps its overlays); `keypoints=false` in the request leaves even the skeletons out.
-
-The endpoint keeps no state but the tracks and their appearance memories: one request, one set of synchronized frames. The synchronizer sends every frame set to it when its **Pose** (or **Gaze**) is on and writes the answer as one `vfa_features` event (see the [Database Reference](../../database.md#influxdb)); with **Gaze** off the request carries `gaze=false` and the server answers the pose alone (its own `features.gaze` sets its default); `Synchronizer.pose_keypoints: false` keeps the skeletons out of the events, and `Synchronizer.feature_zones_file` names a JSON file of zones. It also publishes each answer to the bases (`<session>/vfa/features` on MQTT): a base with **Graphics** on draws its own angle's boxes, tags, head yaws, skeletons and gaze lines on its live window, with a note of how old they are (the window runs at the camera's rate, the pose at the bases' `keyframe_interval`). The `features` block of the server config turns it off (`enabled: false`), picks the model and the confidence thresholds; the client helper is `request_frame_features` in `openmmla/services/vfa/requests.py`, and `pipelines/vfa-base/examples/frame_features.py` sends still frames to it.
-
-## Configuration
-
-`pipelines/vfa-base/config.yml` for the bases (created from the Config tab with **Save**, or copied from `config_template.yml`):
-
-| Section | What it holds |
-|---|---|
-| `Base` | shared settings: `tag_size` and `families`, `resolution`, `rotate`, `fps`, `keyframe_interval` (seconds between analyzed frames), `angle_config` (the viewing angles: a name and what a camera at that angle sees, added and removed on the Config tab), the file-replay pacing (`processing_rate`), `stream_kwargs` |
-| `Bases` | one entry per camera angle: `id`, `camera` (a calibrated profile from `Cameras`, shared with IPS), `source`, `source_index`, `camera_angle` (picked from the names of `angle_config`) |
-| `Synchronizer` | `result_expiry_time`, `match_tolerance`; the outputs it asks for (`actions`, `pose`, `gaze`, see [Choosing the outputs](#choosing-the-outputs)), `action_interval`, `pose_keypoints`, `feature_zones_file` |
-| `Streams` | managed and external streams |
-| `Server.vfa` | the frame analyzer endpoint, through the gateway (`http://<gateway>:8080/vllm`) or direct (`http://<server>:5007/vllm`); the action labels go to this URL, the pose and the gaze to it with `/features` appended |
-| `Cameras` | calibrated camera profiles; calibrate with the IPS camera calibration tool |
-| `InfluxDB`, `MongoDB`, `MQTT`, `Redis`, `Gateway` | mirrored from System Settings |
-
-`pipelines/vfa-server/config.yml` for the server, by output:
-
-| Output | Keys |
-|---|---|
-| all | `port` (the card finds the service by it; the container listens on 5007 whatever it says), `workers` (the container runs one gunicorn worker whatever it says, and one it must be: the pose's tracks live in the process), `april_tag` (on when left out) and the AprilTag `families`, which the action labels' overlays draw and the pose's identity reads, and `gaze_detect` (on when left out), which loads the face detector and the gaze model: off, the action labels' frames get no gaze lines and the features no gaze |
-| Action labels | `backend` and its block (see [Model backend](#model-backend)), `end_to_end`, `prompt_profile`, `image_detail`, optionally `action_schema`; `backend` is `vllm` when left out, and the server does not start without its block (and, for a cloud backend, its `api_key`), even when it is only asked for the pose and the gaze |
-| Pose | the `features` block: `enabled`, `pose_model`, `weights_dir`, `pose_confidence`, `keypoint_confidence`, `tracking` (`enabled`, `buffer_frames`, `idle_seconds`, `split_gap_seconds`, `frame_seconds`, `cascade`, `freeze_lost` and the `appearance` checks, see [Tracking](#tracking)) |
-| Gaze | `gaze_backend` (`page` for PaGE, the default, or `gazelle` for Gaze-LLE), `gaze_model` (its checkpoint, the backend's default when left out), `gaze_head_scale` (how far PaGE widens a face box into the head crop it looks at), `gaze_head_box_fallback` (true by default: a person the face detector missed gets a head box made from the pose's nose, eyes and ears), `gaze_face_detector_bgr` (true by default: RetinaFace is handed BGR, the order it expects; see [Face detector input](#gaze)), and in the `features` block `gaze` (true by default: whether the features carry gazes when a request does not say; a synchronizer with **Gaze** on does not say, so `false` here leaves its features without gazes) and `inout_threshold`. The action labels' gaze lines use the same model |
-
-On the Config tab `backend`, `prompt_profile`, `image_detail`, `gaze_backend`, `gaze_model` and `features.pose_model` are dropdowns: a value not in the list (a local checkpoint) is shown, marked and kept, and the blank keeps the template's default.
-
-### Input sources
-
-| Source | Description | Setup |
-|---|---|---|
-| `opencv` | USB camera on the base station or a Raspberry Pi | `source_index` is the device index: the Config tab lists the cameras found on the card's host (`/dev/video<N>` is index N on Linux, a Mac's in AVFoundation's order) to pick from, and the base lists the devices it finds when it starts |
-| `stream` | video pulled from the MediaMTX server (`rtmp` is the old name) | a `Streams` entry whose `read_target` (else `target`) is an `rtmp://`, `rtsp://` or `srt://` URL; `source_index` names that entry (a number is read as its position among them, as older configs have it). Left empty, the base takes the only one there is, and stops with the list of names when there are several |
-| `lsl` | Lab Streaming Layer | `source_index` is the stream name; needs `pylsl` |
-| `file` | replay of a recorded video | `source_index` is the file to replay, by its full path: **Browse…** on the Config tab writes it, and the dropdown lists the other files of its folder (when the card's host is this machine; on another one the path is typed). Files replayed together sit in one folder: the replay starts at the latest start among them, read from the names. A config from before keeps a `file_dir` in `Base`, where a bare file name was looked up: the bases still read it, and the Config tab turns those names into full paths, which the next **Save** writes (the log says what moved). |
-
-### Streams
-
-```yaml
-Streams:
-  # external stream (already running; the base pulls read_target, else target)
-  cam-external:
-    target: rtmp://uber-server.local:1935/vfa/side
-    read_target: rtsp://uber-server.local:8554/vfa/side
-
-  # managed stream: the TUI starts/stops ffmpeg on a remote Raspberry Pi over SSH
-  cam-front:
-    ssh_profile: rpi-front          # must match a TUI SSH profile name
-    device: /dev/video0             # camera device on the remote machine
-    target: rtmp://uber-server.local:1935/vfa/front       # published to MediaMTX
-    read_target: rtsp://uber-server.local:8554/vfa/front  # pulled by the base
-    codec: libx264
-    resolution: 1920x1080
-    fps: 30
-    bitrate: 1M
-    record: true                    # also keep an mkv on the Pi for later replay
-```
-
-Managed streams are started and stopped from the **Streams** tab; see the [Streaming guide](../../rtmp_streaming.md) for the FFmpeg commands and the recording layout.
-
-**Turning the picture.** A camera mounted upside down (or on its side) is turned upright once, where it is captured: its Streams entry's `rotate` (0, 90, 180 or 270, clockwise; the **Rotate** cell of the Streams tab) makes the capture host's FFmpeg turn the picture, so the frames reach the base, the VFA Server and the dashboard upright, and the session notes the turn as the stream's `sources[].capture.rotate`. `Base.rotate` stays 0; it turns the frames in the base, for a source the console does not capture. A file turned before it reached the base, such as a recording `mmla ses-tidy` flipped, says so with its `Bases` entry's `capture_rotate`; a fisheye camera's frames are then remapped as they arrive, with its `K` turned with them (its distortion `D` is radial and holds as it is), and a base whose `capture_rotate` and `Base.rotate` are both set warns at start that the picture is turned twice. The base's session parameters note `capture_turn` beside `rotate`.
-
-## Run from the TUI
-
-This section assumes that the [one-time setup](../../quickstart.md#one-time-setup) of the Quickstart is done: the machines added and prepared, the system services running and every machine pointed at them, and the study described. It covers the VFA part: what is set up once per deployment, then what is done for every session.
-
-### Once per deployment
-
-These steps are done once, and again only when something they set changes: a model, a prompt, a camera, a stream or a machine.
-
-1. **VFA Server config**: `Launcher → Pipelines → VFA → VFA Server`, **Host** set to the GPU server. On the Config tab set what the outputs you will ask for need (see [Configuration](#configuration)), then **Save**, which writes `pipelines/vfa-server/config.yml` on that host:
-    - Action labels: `backend` and its block, with its models and addresses (see [Model backend](#model-backend); the API key of a cloud block is stored encrypted), `end_to_end` and `prompt_profile` (see [Prompt engineering](#prompt-engineering)). `backend` is `vllm` when left out; the server does not start without the chosen backend's block (and, for a cloud backend, its `api_key`), even when it is only asked for the pose and the gaze.
-    - Pose: the `features` block, with the pose model, its thresholds and the tracking (see [Pose](#pose)).
-    - Gaze: `gaze_backend` and `gaze_model` (see [Gaze](#gaze)). The gaze lines of the action labels use the same model.
-2. **Prompts** and **Action Schema** tabs of the same card, for the action labels: the templates under `pipelines/vfa-server/prompts/`, with the templates in use marked, and the action schema in `config/vfa/action_schemas.yml` (see [Action coding scheme](#action-coding-scheme)). Both tabs edit the files of the card's host; **Sync to Host** copies them to another host and **Sync from Host** brings another host's in.
-3. **MLLM Server**, only when `backend` is `vllm`: `Launcher → Pipelines → VFA → MLLM Server`, **Host** set to the machine that serves the model, usually the GPU server. That machine needs the `vfa-vllm` environment (Environment tab, Python 3.12) and tmux.
-    - Its Config tab edits this console's `config/mllm_server.yml`, whatever the Host selector says: the model (`Qwen/Qwen3-VL-8B-Instruct` as shipped), the port (8010), the limits (`limit_mm_per_prompt` has to allow as many images as a frame set has cameras) and the `api_key`. **Start** runs `vllm serve` with these values on the card's host, in the `vfa-vllm` environment, inside a tmux session named `mllm-server`.
-    - The template's `vllm` block already points at an MLLM Server as shipped on the same machine: `vlm_base_url` and `llm_base_url` `http://host.docker.internal:8010/v1`, `vlm_model` and `llm_model` `Qwen/Qwen3-VL-8B-Instruct`, `api_key` `EMPTY`. The frame analyzer runs in a container, so a server on the same machine is `host.docker.internal`, not `localhost` (see the [Docker guide](../../docker.md#a-vlm-server-on-the-same-host)). Change them on the VFA Server card's Config tab, and **Save**, when the MLLM Server runs on another machine (`http://<host>:<port>/v1`), on another port, or serves another model; with `end_to_end: false` the classification goes to `llm_base_url` and `llm_model`, so keep them on the same server unless another one serves the LLM.
-    - Start the MLLM Server before the VFA Server.
-4. **VFA Server**: **Start** on the Launch tab, where the frame analyzer (`VLLMFrameAnalyzer`) has a `true`/`false` toggle. The card runs `docker compose -f docker/docker-compose.vfa.yml up -d --build frame-analyzer` on its host. The first Start builds the image, which downloads several GB, and the server fetches the pose weights at its first start (see [Pose](#pose)). The server reads its config, the prompts and the action schema when its container starts: after a change to any of them, **Stop** the card and **Start** it again.
-5. **VFA Base config**: `Launcher → Pipelines → VFA → VFA Base`, **Host** set to the base station, which needs the `vfa-base` environment (see [Pipeline overview](#pipeline-overview)). On the Config tab (see [Configuration](#configuration)):
-    - `Base.angle_config`: the viewing angles, each a name and what a camera at that angle sees (**+ Add Entry**, **Remove**). What an angle sees travels with its frames to the VLM.
-    - `Cameras`: the calibrated camera profiles the `Bases` entries name, in the form IPS uses. **IPS Intrinsics** writes them into the IPS Base config only; **+ Add Camera** adds one here (`fisheye`, `params`, `K`, `D`).
-    - `Streams`: one entry per camera the console captures (**+ Add Stream**; `target` takes the path alone, `vfa/front`, and Save completes it with the Stream Server of System Settings), or an external stream (see [Streams](#streams)).
-    - `Bases`: one entry per camera angle (**+ Add Entry**): `id`, `camera` from `Cameras`, `source` and `source_index` (for a `stream` source, the `Streams` entry by name; see [Input sources](#input-sources)), and `camera_angle`, picked from the names of `angle_config`. A new angle or stream is offered in these dropdowns once the config is saved.
-    - `Server.vfa`: the frame analyzer, through the Gateway (the bare name `vllm`, shown as `through the Gateway: http://<gateway>:8080/vllm`) or straight to the server (`http://<gpu-server>:5007/vllm`).
-    - `Base.keyframe_interval` and `Synchronizer.action_interval`: the pace of the frame sets and of the VLM (see [Choosing the outputs](#choosing-the-outputs)).
-
-    **Save** writes the config on the card's host.
-
-6. **Streams tab** of the same card, for each stream the console captures: its **SSH Profile** (the machine that runs its FFmpeg, such as `pi-01`), its **Device**, **Record** and **Rotate** (`180°` for a camera mounted upside down; see [Turning the picture](#streams)). These picks are written into the config of the card's host. **Start** a stream and **Probe** it: FFmpeg on this machine decodes two seconds of the URL the bases pull.
-7. **Other base stations**: when the bases of one session run on more than one base station, **Sync to Host** on the Config tab copies this config, its `Bases` and `Streams` included, to the others. Each card's bases read the config of their own host.
-
-### Every session
-
-1. **Streams**: on the VFA Base card's Streams tab, **Start** the stream of each camera the session uses, or **Start All**, and wait until the **Stream Server** column reads `● live`. A stream that runs already, for another session, is left as it runs. A base with an `opencv`, `lsl` or `file` source, and every base of an `analyze` run, pulls no stream.
-2. **VFA Base**, Launch tab. The card opens on the host it was last pointed at.
-
-    ![VFA Base card on the Launch tab: the base and synchronizer counts, the Session and Experiment Group, a Base row per base, Mode, Graphics, Store Frames and Verbose](../../img/tui/vfa-base.png)
-
-    - **Num Bases**: one base per camera angle on this host. **Num Synchronizers** is 1: a session has one synchronizer.
-    - **Sync Waits For** (`--num_bases`): how many bases the synchronizer merges each frame set from, counted over every host of the session. It goes along with Num Bases and is set by hand when bases of the session run on other hosts; the cards there start bases only, with **Num Synchronizers** at 0. Too high, a frame set waits for bases that never report until it expires (`Synchronizer.result_expiry_time`, 30 s), and is then sent with the frames it has, or dropped with only one; too low, it is merged before the others report. Start refuses a card that starts more bases than the synchronizer waits for.
-    - **Session** and **Experiment Group**: `Create MongoDB Session`, with the experiment group of the take, starts a new take. The first Start mints the session id, and every base card (ASR, IPS and VFA, on any host) then opens on it, so the other cards of the take join it with their own Start. The descriptions of that group's participants go into the action-label prompts.
-    - **Base 1**, **Base 2**, ...: which `Bases` entry each base is, one dropdown per base, as many as Num Bases. Base *n* starts on the *n*-th entry, and `ask in its window` lets that base ask. Start refuses two bases on one entry.
-    - **Mode**: `live` analyzes frames as they are captured (the TUI default); `capture` only stores frames, which is how frames for [human coding](#human-coding-and-evaluation) are collected; `analyze` re-runs the analysis on the frames this session stored earlier.
-    - **Graphics** (`-g`): `off for streams`, the default, opens a window on the base's frames unless its source is a stream, which a base pulls where nobody watches it, often over SSH with no display; `on` and `off` decide for every source. A window draws the features the synchronizer publishes (with **Pose** or **Gaze** on); the dashboard's camera tiles show them either way.
-    - **Store Frames** (`-s`), off by default: a `live` base then writes each frame to `real-time/temp/`, which the synchronizer deletes once it is done with it, so turn it on to keep frames. A `capture` base stores its frames whatever the toggle says, since storing them is what it is for. **Verbose** (`-v`, on) prints debug output.
-    - **Action Labels**, **Pose** and **Gaze**: what the synchronizer asks the frame analyzer for, each `as the config says`, `on` or `off` (see [Choosing the outputs](#choosing-the-outputs)).
-
-3. **Start** opens one terminal window per instance, and nothing in them asks anything (unless a Base is left on `ask in its window`): each base runs as its `Bases` entry, and the synchronizer starts on the session at once and waits for START.
-    - Before that, on a remote host whose config lacks the current System Settings, the first Start only brings them there and says `Relaunch VFA Base once the sync above completes.`; press Start again.
-    - Start then asks the Stream Server whether the streams the bases pull are live, and holds back once, naming those that are not (see [TUI → Pipelines](../../tui.md#pipelines)): start them on the Streams tab, or press Start again to start the bases all the same. It also warns, and starts all the same, when a stream the Streams tab runs is captured on another machine, recorded or turned otherwise than the config of the card's host says: the bases read that config, and the session notes what it says.
-    - A base whose stream is not up yet says so and waits for it, up to 30 s (see [Streaming](../../rtmp_streaming.md#bases-pulling-a-stream)), before it says that it waits for START; a START or STOP sent meanwhile is heard once the stream is up. A base whose stream did not come up within its wait names the stream's URL and exits.
-    - A process that cannot start says why in its window. A synchronizer with no number of bases to use (`-nb 0`, or no `-nb` and an empty `Bases` list), one that cannot reach Redis, or one whose run ends on an error rather than STOP, prints the reason and falls back to its menu (`1: start`, `2: reinitialize` to reload the config, `0: exit`), which keeps the session it was started for. MQTT and MongoDB are connected to as the synchronizer starts, before there is a menu: when either cannot be reached it says so in plain words, names what to check, and exits; start them from **System Services** and press **Start** on the card again.
-    - A base launched without an id takes the only `Bases` entry there is; given an id that the `Bases` list does not have, or no id while there are several entries, it lists the ids there are and asks which one it is.
-4. **Session Control** (`Launcher → Pipelines → Session Control`): pick the session (the list opens on the one the base cards were last started into), leave **VFA** ticked with the other pipelines of the take, and press **Send START** once every window reports that it waits. A base whose stream drops during the session opens it again on its own, and that angle's frames are missing for the gap. The dashboard's [Live](../../dashboard.md#live) page follows the session as it is written.
-5. **Send STOP** at the end. STOP ends the run of every base and synchronizer of the session, and each of them exits, also when STOP comes before START; the card has no Stop of its own. A request the frame analyzer has not answered by then is given up (the VLM can take minutes), so the synchronizer exits at once and the action labels or features of that frame set, and of any frame sets still queued behind it, are dropped. STOP also marks the session as ended, and the cards go back to `Create MongoDB Session`: the bases and the synchronizer of the next session are started from the card again.
-6. **Stop the streams** once no other session pulls them: **Stop** or **Stop All** on the VFA Base card's Streams tab, or **Stop All** on the Streams tab of `Launcher → System Services → Stream Server (MediaMTX)`, which lists the streams of every pipeline, whichever card started them. Stop waits for FFmpeg to finish a recording and names the file.
-7. **Export and Archive** on the Sessions tab: **Export** gathers the session's measurements, recordings and base files onto the console, and **Archive** sends its raw files on to the System Settings host (see [Export and archive](../../quickstart.md#export-and-archive)).
-
-### Choosing the outputs
-
-| Card | Flag | Config (default) | Server endpoint | Event | Runs on the server |
-|---|---|---|---|---|---|
-| **Action Labels** | `-a` | `Synchronizer.actions` (false) | `/vllm` | `vfa_action` | AprilTag and gaze overlays, then the VLM (with `end_to_end: false`, the template's default, a VLM describes and an LLM classifies) |
-| **Pose** | `-pose` | `Synchronizer.pose` (true) | `/vllm/features` | `vfa_features` | the pose model and the AprilTags |
-| **Gaze** | `-gaze` | `Synchronizer.gaze` (true) | `/vllm/features` | `vfa_features` (the same event) | the pose and the gaze model; a gaze lands on someone's face or hands, so Gaze on turns Pose on |
-
-Each is a three-way choice: `as the config says` passes nothing and the config's `Synchronizer.actions` (false by default), `Synchronizer.pose` and `Synchronizer.gaze` (true by default) decide, `on` and `off` override them for this start.
-
-The action labels and the features (the pose, with or without the gaze) are two separate requests to the same server: the action labels run the VLM on frames the server first annotates with AprilTags and gaze lines (its own `april_tag` and `gaze_detect` settings), so they use the gaze model as a hint for the VLM but return no gaze and run no pose model; Pose and Gaze return data and run no VLM. With Action Labels and Gaze both on, the gaze model runs twice per frame set.
-
-The labels and the pose run at different paces: for a pose run set `Base.keyframe_interval` to about 1 second and `Synchronizer.action_interval` to 30, so the frame sets come every second and the VLM is asked at most every 30 s; for a labels-only run keep `keyframe_interval` at 30 and `action_interval` at 0.
-
-### What a session records
-
-Each base notes in the session's MongoDB document which `Bases` entry it is and the stream it pulls: the `Streams` entry, its URL and path on the Stream Server, and the machine that captures and records it (the session's `sources`, see the [Database Reference](../../database.md#mongodb)). It writes this when it joins the session and notes when it leaves, first thing on its way out, before it stops its threads and stream. **Sessions → Export** reads it, so it takes that session's own streams, from the Stream Server and from the capture hosts, without being told which. A session recorded before bases did this, or one no base joined, has nothing to export, and the log says so. A base that cannot write the note (MongoDB down, or a session the console did not create) warns in its log and runs on.
-
-## Manual CLI
-
-```bash
-conda activate vfa-base
-mmla vfa-base -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -m live -sid <session-id> -b <base-id>
-mmla vfa-sync -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -sid <session-id> -nb <number-of-bases>
-# the outputs by flag: pose and gaze, no action labels; the bases' keyframe_interval sets the rate
-mmla vfa-sync -p pipelines/vfa-base -c pipelines/vfa-base/config.yml -sid <session-id> -nb 2 -a False -pose True -gaze True
-```
-
-With `-sid`, as the card runs them, both start at once and exit when the session is stopped; `-nb` (`--num_bases`) defaults to the number of entries in `Bases`, and `vfa-base` without `-b` takes the only `Bases` entry there is (with several it asks). Without `-sid` the synchronizer opens its menu, where `1: start` asks for the session and, unless `-nb` is given, the number of bases; the base asks for the session, and without `-b` for its `Bases` entry.
-
-To run the server without Docker (`pip install -e '.[vfa-server]'`):
-
-```bash
-export PROJECT_DIR=pipelines/vfa-server CONFIG_PATH=pipelines/vfa-server/config.yml
-gunicorn -k gevent -w 1 -b 0.0.0.0:5007 openmmla.services.vfa.apps.serve_multi_angle_vllm_frame_analyzer:app
-```
-
-The server also answers `GET /vllm/info` (through the gateway too) with what it runs — the backend, its VLM and LLM models and their addresses, the prompt profile, the action schema, the temperature, the gaze backend and model, and under `features` the pose model, its thresholds, the hand circle and the tracking — and the VFA synchronizer asks and notes the answer in the session's document, so that a session's action labels and features can be traced to the models, prompts and settings that produced them (see [Databases](../../database.md#mongodb)). A server running an older openmmla has no `/info`, and the session says so instead.
-
-## Post-time processing
-
-Record with **Collection → Collection Session**, then set each base's `source` to `file` and its `source_index` to its file in the `video/` directory from the collection manifest, by its full path (**Browse…** picks it), and run in `live` mode; `keyframe_interval` and `processing_rate` control the replay pace.
+| VFA Server, the frame analyzer | GPU server | `docker compose` | image built from `docker/` |
+| MLLM Server, a local VLM for the action labels (optional) | GPU server | `vllm serve` | conda env `vfa-vllm` |
+
+The management console starts all four from cards under `Launcher → Pipelines → VFA`; see [Run VFA](run.md).
+
+## What you need
+
+- **Cameras**: one per viewing angle, as a USB camera, a stream through the Stream Server, a Lab Streaming Layer stream or a recorded file ([Input sources](configuration.md#input-sources)).
+- **AprilTag badges**: each participant wears one on the chest. The tag is how the pose and the action labels know who is who.
+- **A GPU server** for the VFA Server, with the NVIDIA driver and the NVIDIA container toolkit ([Docker](../../docker.md)).
+- **A VLM**, only for the action labels: a local one served by the **MLLM Server** card (the default), or a cloud API ([Model backends](action-labels.md#model-backends)).
+- **The system services**: MQTT, Redis, MongoDB and InfluxDB, and the Stream Server for streamed cameras ([Quickstart](../../quickstart.md#one-time-setup)).
+- **The `vfa-base` environment** on every base station. Create it from the console's **Environment** tab, or by hand:
+
+    ```bash
+    conda create -n vfa-base python=3.10 -y
+    conda activate vfa-base
+    pip install -e '.[vfa-base]'
+    ```
+
+    For an `lsl` source, add `pip install pylsl==1.17.6` and `conda install -c conda-forge liblsl=1.16.2`.
+
+## Pages in this guide
+
+- [Run VFA](run.md): set up once, run every session, run from the command line, replay recordings.
+- [Action labels](action-labels.md): the action coding scheme, the prompts and the model backends.
+- [Pose and gaze](pose-and-gaze.md): the features endpoint, skeletons and identity, tracking, gaze targets.
+- [Configuration](configuration.md): every key of the base and server configs.
+- [Human coding interface](coding_interface.md): code frames by hand with the same labels.

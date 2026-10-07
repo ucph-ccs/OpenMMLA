@@ -1,198 +1,120 @@
-# Frequently Asked Questions
-- [Frequently Asked Questions](#frequently-asked-questions)
-  - [PyAudio Installation Errors](#pyaudio-installation-errors)
-  - [Pydub Installation Errors](#pydub-installation-errors)
-  - [Librosa Installation Errors](#librosa-installation-errors)
-  - [Server name not known](#server-name-not-known)
-    - [Mac server](#mac-server)
-    - [Linux server](#linux-server)
-  - [Speech separation doesn't perform well](#speech-separation-doesnt-perform-well)
-  - [Speech separation couldn't load](#speech-separation-couldnt-load)
-  - [Server couldn't download the model](#server-couldnt-download-the-model)
-  - [Redis address already in use](#redis-address-already-in-use)
-  - [Update Arduino's Wi-Fi firmware](#update-arduinos-wi-fi-firmware)
-  - [Badge reconnection mechanism not work as expected in Mac audio base](#badge-reconnection-mechanism-not-work-as-expected-in-mac-audio-base)
-  - [Socket address already in use when running audio bases on Mac](#socket-address-already-in-use-when-running-audio-bases-on-mac)
-  - [Connect smraza fisheye camera to Raspberry Pi](#connect-smraza-fisheye-camera-to-raspberry-pi)
-  - [Video module visualizer fails to initialize](#video-module-visualizer-fails-to-initialize)
-  - [Nvidia driver installation](#nvidia-driver-installation)
-  - [Nvidia CUDA unknown error](#nvidia-cuda-unknown-error)
-  - [Nvidia NVML Driver/library version mismatch](#nvidia-nvml-driverlibrary-version-mismatch)
+# FAQ
 
-## PyAudio Installation Errors
+Known problems outside a single pipeline, with their fixes. Problems of one pipeline or service are in the **Troubleshooting** section of its page, such as [System services](system_services.md#troubleshooting) and [Deploy the dashboard](dashboard/deploy.md#troubleshooting).
 
-To resolve the installation failures of PyAudio, you need to use the C++ library for compiling during installation. If your system is Windows, and Python is 3.7, you can download the whl installation package here: [https://github.com/intxcc/pyaudio_portaudio/releases](https://github.com/intxcc/pyaudio_portaudio/releases)
+## Installation
 
-## Pydub Installation Errors
+### PyAudio does not build { #pyaudio-installation-errors }
 
-Installation of pydub requires the installation of ffmpeg and adding it to the system path.
+PyAudio compiles against PortAudio. Install `build-essential` and `portaudio19-dev` (apt) or `portaudio` (Homebrew) first ([Prerequisites](prerequisites.md#git-tmux-portaudio-and-ffmpeg)), or press **Install Tools** on the Environment tab, then **Install Deps** again.
 
-## Librosa Installation Errors
+### pydub cannot find FFmpeg { #pydub-installation-errors }
 
-For resolving the installation failures of librosa, you can install it from source. Download the source code from [https://github.com/librosa/librosa/releases/](https://github.com/librosa/librosa/releases/). For Windows users, you can download the zip package which is easy to decompress.
+pydub runs FFmpeg. Install FFmpeg and make sure it is on the `PATH` of the env's shell ([Prerequisites](prerequisites.md#git-tmux-portaudio-and-ffmpeg)).
 
-```cmd
-pip install pytest-runner
-tar xzf librosa-<version number>.tar.gz or unzip librosa-<version number>.tar.gz
-cd librosa-<version number>/
-python setup.py install 
-```
+### librosa fails to load audio { #librosa-installation-errors }
 
-If you encounter an error like `'libsndfile64bit.dll': error 0x7e`, please install version 0.6.3, such as `pip install librosa==0.6.3`.
+librosa reads audio through soundfile, which needs `libsndfile1` on Debian, Ubuntu and Raspberry Pi OS, and through FFmpeg for other formats. Install both ([Prerequisites](prerequisites.md#ubuntu-debian-and-raspberry-pi-os)).
 
-Download and install ffmpeg.
+### Speech separation gives poor results { #speech-separation-doesnt-perform-well }
 
-+ For Windows, check the blog: [http://blog.gregzaal.com/how-to-install-ffmpeg-on-windows/](http://blog.gregzaal.com/how-to-install-ffmpeg-on-windows/). The author downloaded the 64-bit, static version. Then go to the C drive, decompress it, rename the file as `ffmpeg`, store it in the `C:\Program Files\` directory, and add the environment variable `C:\Program Files\ffmpeg\bin`.
+The cause is usually a PyTorch and modelscope pair that do not match. Run the speech separator in Docker, whose image pins a working pair (`torch==2.4.1`, `modelscope[framework]==1.16.1`); see the [Docker guide](docker.md).
 
-    Finally, modify the source code. The path is `C:\Python3.7\Lib\site-packages\audioread\ffdec.py`, and modify the 32nd line of code as follows:
+### Speech separation does not load { #speech-separation-couldnt-load }
 
-    ```bash
-    COMMANDS = ('C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe', 'avconv')
-    ```
+With `ImportError: cannot import name '_datasets_server' from 'datasets.utils'`, install an older `datasets` in the separator's env:
 
-+ For Mac,
-  + Install the homebrew first
-      ```cmd
-      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-      ```
-  + Install ffmpeg
-     ```cmd
-     brew install ffmpeg
-     ```
-  + Verify ffmpeg
-     ```cmd
-     ffmpeg -version
-     ```
-     
-## Server name not known
-
-### Mac server
-Check the following options:
-1. Firewall should be inactive
-2. For mac server, go to setting -> Sharing, enable the remote management
-3. Allow influxdb, redis-server, and mosquitto server process to accept connections
-
-After checking the options above, if the problem still exists, you can try the following steps:
-+ check the mDNSResponder process with `ps aux | grep mDNSResponder`
-+ restart the mDNSResponder
-  ```sh
-  sudo killall -HUP mDNSResponder
-  # or 
-  sudo killall -STOP mDNSResponder
-  sudo killall -CONT mDNSResponder
-  ```
-+ flush the DNS cache
-  ```sh
-  sudo dscacheutil -flushcache
-  ```
-+ check the mDNSResponder process with `ps aux | grep mDNSResponder`
-+ compare the mDNSResponder process with the previous one, if the process is different, 
-then the mDNSResponder is restarted successfully
-
-**Restart the network, and reboot the router and devices if the above actions doesn't work**
-
-### Linux server
-+ Restart the mDNS service
-  ```sh
-  sudo systemctl restart avahi-daemon
-  ```
-+ Enable avahi-daemon service on boot
-  ```sh
-  sudo systemctl enable avahi-daemon
-  ```
-+ Check the avahi-daemon service
-  ```sh
-  sudo systemctl status avahi-daemon
-  ```
-+ Flush the nscd DNS Cache
-  ```sh
-  sudo /etc/init.d/nscd restart
-  sudo nscd -i hosts
-  ```
-+ Go to `/etc/avahi/avahi-daemon.conf`, ensure that
-  ```sh
-  publish-workstation=yes
-  publish-domain=yes
-  ```
-
-**Restart the network, and reboot the router and devices if the above actions doesn't work** 
-
-## Speech separation doesn't perform well
-The reason may be a PyTorch version mismatch. PyTorch 2.1.1 with speech separation (modelscope) 1.9.5 is known to perform well, with 945 components indexed. The dockerized speech separator pins a working combination; see the [Docker guide](docker.md).
-
-## Speech separation couldn't load 
-If you find `ImportError: cannot import name '_datasets_server' from 'datasets.utils'`, you can
-either downgrade the modelscope to 1.12.0 with `pip install modelscope==1.12.0` or dataset dependencies with
-`pip install datasets==2.18.0`.
-
-## Server couldn't download the model
-The first start of the AI services downloads the models, which can time out when every service starts at once. Start the failing service alone (select only that service on the ASR Server / VFA Server card in the TUI, or `docker compose -f docker/docker-compose.asr.yml up -d <service>`) and retry.
-
-## Redis address already in use
-Shut the running Redis down and let the Makefile restart it with the OpenMMLA listener config:
 ```bash
-redis-cli shutdown
-make -C pipelines/uber-server redis
+pip install datasets==2.18.0
 ```
 
-## Update Arduino's Wi-Fi firmware
-https://support.arduino.cc/hc/en-us/articles/4403365234322-Update-Wi-Fi-firmware-on-Portenta-H7-boards
+## Network
 
-## Badge reconnection mechanism not work as expected in Mac audio base
-Because the TIME_WAIT doesn't allow reuse the same port as in the last connection (the last socket still in TIME_WAIT state).
-Also, when the badges are not connected, it won't receive the stop signal from synchronizer.
+### Server name not known
 
-## Socket address already in use when running audio bases on Mac
-You can manually shut down the process to free up the port, e.g. port 50004 is in use
-type in terminal. 
-```cmd
-sudo lsof -i :50004  # for mac
-sudo netstat -tulnp | grep 50004  # for linux
-```
-it will list out the process using the port 50004
-```
-COMMAND    PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-python3.9 3440   mmla    9u  IPv4 0x2bf903e3e96b6203      0t0  UDP *:50004
-```
-Then, kill the process with PID
-```cmd
-sudo kill -9 3440
-```
-Or directly kill the process by 
-`kill -9 $(lsof -ti:50004)`
+A `<name>.local` name needs mDNS and works on one LAN only. Across networks, use a name every machine resolves, such as a Tailscale MagicDNS name, or an address. When a `.local` name stops resolving on the LAN, restart mDNS on the server:
 
-Or free the port with the Makefile: `make -C pipelines/uber-server clean-ports 50004`.
+=== "macOS"
 
-## Connect smraza fisheye camera to Raspberry Pi
-Check [Youtube Tutorial](https://www.youtube.com/watch?v=iyITuOcHCjg)
-```
-sudo raspi-config
+    1. Check that the firewall lets InfluxDB, `redis-server` and Mosquitto accept connections, and that **System Settings → General → Sharing → Remote Management** is on.
+    2. Restart mDNSResponder and flush the DNS cache:
+
+        ```bash
+        sudo killall -HUP mDNSResponder
+        # or: sudo killall -STOP mDNSResponder && sudo killall -CONT mDNSResponder
+        sudo dscacheutil -flushcache
+        ```
+
+    3. Check with `ps aux | grep mDNSResponder` that the process has a new PID.
+
+=== "Linux"
+
+    1. In `/etc/avahi/avahi-daemon.conf`, set `publish-workstation=yes` and `publish-domain=yes`.
+    2. Restart Avahi, enable it at boot, and check it:
+
+        ```bash
+        sudo systemctl restart avahi-daemon
+        sudo systemctl enable avahi-daemon
+        sudo systemctl status avahi-daemon
+        ```
+
+    3. Flush the nscd cache, where nscd runs:
+
+        ```bash
+        sudo /etc/init.d/nscd restart
+        sudo nscd -i hosts
+        ```
+
+When that does not help, restart the network, and reboot the router and the machines.
+
+### A port is already in use { #socket-address-already-in-use-when-running-audio-bases-on-mac }
+
+A process from an earlier run still holds the port, often the UDP or TCP port of an audio base. Find it and stop it:
+
+```bash
+sudo lsof -i :50004                  # macOS
+sudo netstat -tulnp | grep 50004     # Linux
+kill -9 $(lsof -ti:50004)
 ```
 
-## Video module visualizer fails to initialize
-Error message:
-```sh
-objc[19587]: +[__NSCFConstantString initialize] may have been in progress in another thread when fork() was called. We cannot safely call it or ignore it in the fork() child process. Crashing instead. Set a breakpoint on objc_initializeAfterForkError to debug.
-```
-If you see the above warning, change your safety setting
-```sh
-sudo nano ~/.zshrc
-# Add this line at the end for multiprocess fork
+`make -C pipelines/uber-server clean-ports 50004` does the same. For Redis, see [System services → Troubleshooting](system_services.md#troubleshooting).
+
+### The AI services cannot download their models { #server-couldnt-download-the-model }
+
+The first start of the AI services downloads the models, which can time out when every service starts at once. Start the failing service alone, with only that service selected on the ASR Server or VFA Server card, or with `docker compose -f docker/docker-compose.asr.yml up -d <service>`, and try again.
+
+## Devices
+
+### A badge does not reconnect to its base { #badge-reconnection-mechanism-not-work-as-expected-in-mac-audio-base }
+
+A `tcp` base waits for its badge to connect before anything else, and hears no STOP while it waits. Free the base's port ([A port is already in use](#socket-address-already-in-use-when-running-audio-bases-on-mac)) and start the base again.
+
+### Update the Wi-Fi firmware of an Arduino badge { #update-arduinos-wi-fi-firmware }
+
+Follow Arduino's guide, [Update Wi-Fi firmware on Portenta H7 boards](https://support.arduino.cc/hc/en-us/articles/4403365234322-Update-Wi-Fi-firmware-on-Portenta-H7-boards).
+
+### Connect a Smraza fisheye camera to a Raspberry Pi { #connect-smraza-fisheye-camera-to-raspberry-pi }
+
+Enable the camera interface in `sudo raspi-config`; this [video tutorial](https://www.youtube.com/watch?v=iyITuOcHCjg) shows the steps.
+
+### A window crashes on macOS with an `objc` fork error { #video-module-visualizer-fails-to-initialize }
+
+The error reads `+[__NSCFConstantString initialize] may have been in progress in another thread when fork() was called`. Turn off the fork safety check of the Objective-C runtime in `~/.zshrc`, and open a new shell:
+
+```bash
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 ```
 
-## Nvidia driver installation
-Check the blog: [Install nvidia driver](https://www.murhabazi.com/install-nvidia-driver)
+## GPU servers
 
-## Nvidia CUDA unknown error
-Error message: 
-```sh
-Error(s):	CUDA unknown error - this may be due to an incorrectly set up environment, e.g. changing env variable
-CUDA_VISIBLE_DEVICES after program start. Setting the available devices to be zero.
-```
-If you see the above error message when starting the server, make sure you are connecting the device to power, and try
-reboot.
+### Install the NVIDIA driver { #nvidia-driver-installation }
 
-## Nvidia NVML Driver/library version mismatch
-This error happens when we have upgraded the nvidia driver by `sudo apt upgrade`,
-you might try to reboot your server first, it should work. If not, try the solution listed in [stackoverflow](https://stackoverflow.com/questions/43022843/nvidia-nvml-driver-library-version-mismatch#comment73133147_43022843).
+On Ubuntu, `sudo ubuntu-drivers install` installs the recommended driver (`sudo ubuntu-drivers autoinstall` where `ubuntu-drivers` has no `install` command); [this guide](https://www.murhabazi.com/install-nvidia-driver) walks through it. Docker also needs the NVIDIA container toolkit ([Host requirements](docker.md#host-requirements)).
+
+### CUDA unknown error { #nvidia-cuda-unknown-error }
+
+With `CUDA unknown error - this may be due to an incorrectly set up environment` when a server starts, check that the GPU has power, and reboot.
+
+### NVML driver and library version mismatch { #nvidia-nvml-driverlibrary-version-mismatch }
+
+An `apt upgrade` replaced the NVIDIA driver while the old one is still loaded. Reboot. When the error stays, see [this answer](https://stackoverflow.com/questions/43022843/nvidia-nvml-driver-library-version-mismatch#comment73133147_43022843).

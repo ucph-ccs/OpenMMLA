@@ -1,51 +1,60 @@
-# Raspberry Pi Setup
+# Raspberry Pi
 
-A Raspberry Pi can play two roles in OpenMMLA:
+A Raspberry Pi serves OpenMMLA as a capture host, which streams or records a camera or a microphone, or as a base station, which runs a base itself. This page sets one up headless, for either role.
 
-- **Streaming device**: it pushes a camera or microphone stream to the MediaMTX stream server (or straight to an ASR base over UDP) with FFmpeg, and can record the same stream to its SD card at the same time. The TUI starts and stops that FFmpeg process over SSH, so the Pi only needs FFmpeg and an SSH login. A push the server drops is opened again by that FFmpeg itself, every five seconds until the server takes it, so a network outage needs nobody at the console, and a recording on the SD card goes on in one file meanwhile. See [Streaming](rtmp_streaming.md) and the `Streams` section of the pipeline configs.
-- **Base station**: it runs an IPS/VFA/ASR base itself, which needs the full [prerequisites](prerequisites.md), a clone of the repository and a conda environment (the TUI's Environment tab can create it remotely).
+| Role | What runs on the Pi | What it needs |
+|---|---|---|
+| Capture host | FFmpeg, started and stopped over SSH by a card's **Streams** tab or the Collection card | SSH, `ffmpeg` and `tmux` |
+| Base station | an IPS, VFA or ASR base | the [prerequisites](prerequisites.md), a clone of the repository and a conda environment |
 
-## Headless setup
+As a capture host, the Pi pushes its stream to the Stream Server, or straight to an ASR base over UDP, and can record it to its SD card at the same time ([Streaming](streaming/index.md)).
 
-1. Flash Raspberry Pi OS onto the microSD card with Raspberry Pi Imager and enable SSH (and set the hostname, user and Wi-Fi) in the imager's settings.
+## Set up the Pi
 
-2. If a previous Pi used the same hostname, drop its old host key:
+1. **Flash the card.** Write Raspberry Pi OS to the microSD card with Raspberry Pi Imager, and in its settings enable SSH and set the hostname, the user and the Wi-Fi.
+2. **Forget an old host key.** When a previous Pi used the same hostname, drop its key:
 
-    ```sh
-    ssh-keygen -R raspi-01.local
+    ```bash
+    ssh-keygen -R pi-01.local
     ```
 
-3. Connect (example hostname `raspi-01`, user `admin`):
+3. **Connect**, here to the hostname `pi-01`:
 
-    ```sh
-    ssh admin@raspi-01.local
+    ```bash
+    ssh <user>@pi-01.local
     ```
 
-4. Optional: enable the VNC server for a remote desktop:
+4. **Install the base tools.** `v4l2-ctl --list-devices` and `arecord -l` then name the camera and the microphone:
 
-    ```sh
-    sudo raspi-config
-    # 3 Interface Options -> I2 VNC
-    ```
-
-5. Install the base tools:
-
-    ```sh
+    ```bash
     sudo apt update && sudo apt upgrade -y
     sudo apt install -y git tmux ffmpeg v4l-utils alsa-utils
     ```
 
-    `v4l2-ctl --list-devices` and `arecord -l` then show the camera and microphone device names to put in the `Streams` config.
+5. **Add an SSH profile** for the Pi in the console: `Launcher → System Settings → Hosts → SSH Profiles`, with the **Host** selector on `Local`.
 
-## Streaming device only
+    ![SSH Profiles form of the console: one row per machine (base-01, base-02, gpu-server, pi-01) with Test, Edit and Delete, and below it the Add / Edit Profile form with Profile Name, Host and User](img/tui/ssh-profiles.png)
 
-Nothing else is needed. Add an SSH profile for the Pi in the TUI (**Launcher → System Settings → Hosts → SSH Profiles**, with the Host selector on `Local`), add a `Streams` entry with `device` and `target` on the pipeline's Config tab, and pick the Pi in that stream's **SSH Profile** column on the Streams tab (it is written as the entry's `ssh_profile`); the Streams tab then starts and stops FFmpeg on the Pi.
+??? info "Details: a remote desktop over VNC"
+    Enable the VNC server with `sudo raspi-config`, under `3 Interface Options → I2 VNC`.
 
-## Base station
+## Use it as a capture host
 
-6. Give the Pi access to the repository, either with an SSH key added to your GitHub account or with a personal access token:
+Nothing else is needed on the Pi. In the console:
 
-    ```sh
+1. **Declare the stream.** On the pipeline card's **Config** tab, add a `Streams` entry with its `device` and `target` ([Declare a stream](streaming/index.md#devices-pushing-a-stream)).
+2. **Pick the Pi.** On the **Streams** tab, choose the Pi in the stream's **SSH Profile** cell, which is written as the entry's `ssh_profile`.
+3. **Start** the stream there. The Streams tab starts and stops FFmpeg on the Pi, and installs `ffmpeg` and `tmux` when they are missing.
+
+The Pi's user needs to be in the `video` and `audio` groups to use the camera and the microphone. `groups` lists them, and `sudo usermod -aG video,audio "$USER"` adds them, from the next login.
+
+## Use it as a base station
+
+After [Set up the Pi](#set-up-the-pi):
+
+1. **Give the Pi access to the repository**, with an SSH key added to your GitHub account or with a personal access token:
+
+    ```bash
     # ssh key
     ssh-keygen -t ed25519 -C "your_email@example.com"
     eval "$(ssh-agent -s)"
@@ -59,32 +68,31 @@ Nothing else is needed. Add an SSH profile for the Pi in the TUI (**Launcher →
     source ~/.bashrc
     ```
 
-7. Clone the repository:
+2. **Clone the repository:**
 
-    ```sh
+    ```bash
     git clone git@github.com:ucph-ccs/OpenMMLA.git
     # or
     git clone https://$GITHUB_PAT@github.com/ucph-ccs/OpenMMLA.git
     ```
 
-8. Install Miniforge (the conda-forge distribution with aarch64 builds):
+3. **Install Miniforge**, the conda-forge distribution with aarch64 builds:
 
-    ```sh
+    ```bash
     wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
     bash Miniforge3-$(uname)-$(uname -m).sh
     ```
 
-9. Install the remaining [prerequisites](prerequisites.md#ubuntu-debian-and-raspberry-pi-os), then either create the pipeline environment from the TUI (Environment tab, with the Pi selected as target) or by hand:
+4. **Install the rest of the [prerequisites](prerequisites.md#ubuntu-debian-and-raspberry-pi-os)**, then create the pipeline's environment on the console's **Environment** tab, with the Pi as the target, or by hand:
 
-    ```sh
+    ```bash
     conda create -n ips-base python=3.10 -y
     conda activate ips-base
     pip install -e '.[ips-base]'
     ```
 
-The TUI's SSH profile for the Pi should point `remote_project_path` at the clone (default `~/OpenMMLA`); the first remote launch syncs the pipeline config to it.
+5. **Point the SSH profile at the clone.** Its `remote_project_path` defaults to `~/OpenMMLA`. The first launch on the Pi syncs the pipeline config there.
 
 ## Related
 
 - [FAQ: Connect the smraza fisheye camera to a Raspberry Pi](faq.md#connect-smraza-fisheye-camera-to-raspberry-pi)
-- [Streaming](rtmp_streaming.md)
