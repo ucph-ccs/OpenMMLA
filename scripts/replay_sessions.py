@@ -30,7 +30,9 @@ read to its end (and the ASR queue drained), sends STOP, ends the session in Mon
 `mmla ses-fuse`. A pipeline whose events the session already has is skipped unless `--force`.
 
 A session with several microphones replays each personal one (vimo, badge) through its own Vimo
-base, bound to its participant, beside the group microphone.
+base, bound to its participant, beside the group microphone. A session with worn microphones only
+gets a stand-in group microphone: their channels summed (`mix-0`, written under
+`artifacts/<session>/analysis/group_mix/`), diarized as a group microphone is.
 """
 from __future__ import annotations
 
@@ -51,6 +53,7 @@ import yaml
 from openmmla.collection.recording import default_audio_scope, natural_device_key
 
 AUDIO_PREFERENCE = ('jabra-0', 'vimo-0-ch0', 'vimo-0', 'badge-0')
+GROUP_MIX_ID = 'mix-0'  # the stand-in group microphone of a session with worn microphones only: their channels summed
 PERSONAL_BASE_TYPE = 'Vimo'
 VIMO_BLOCK = {  # the Vimo block of the local pipelines/asr-base/config.yml, added when the template has none
     'asr_scope': 'participant', 'speaker_verification': 'auto', 'register_duration': 10, 'recognize_duration': 3,
@@ -145,6 +148,9 @@ def plan_session(manifest: dict, sources: list | None = None) -> dict:
                              'participant': str(tag) if tag not in (None, '') else pid})
         groups = sorted({r['device'] for r in audio_records if audio_scope(r) == 'group'}, key=natural_device_key)
         microphone = next((d for d in AUDIO_PREFERENCE if d in groups), None) or next(iter(groups), None)
+    # worn microphones only: no room microphone hears the group, so their channels summed stand in for
+    # one and are diarized as it would be (the runner writes the sum, mix_worn_channels)
+    group_mix = [p['path'] for p in personal] if microphone is None and len(personal) >= 2 else []
     calibration, main, ips_cameras = calibration_for(manifest['session_id'], list(videos)) if videos else (None, None, [])
     turns = {}
     if sources:
@@ -163,6 +169,7 @@ def plan_session(manifest: dict, sources: list | None = None) -> dict:
         'microphone': microphone,
         'audio_path': audio.get(microphone),
         'personal': personal,
+        'group_mix': group_mix,
         'videos': videos,
         'calibration': calibration,
         'ips_main': main,
@@ -171,6 +178,41 @@ def plan_session(manifest: dict, sources: list | None = None) -> dict:
         'capture_turns': turns,
         'minutes': max((float(r.get('duration') or 0) for r in recordings), default=0.0) / 60.0,
     }
+
+
+def mix_worn_channels(paths: list[str], out_path: str) -> dict:
+    """the worn channels of a session summed into one 16-bit mono wav at `out_path`, the stand-in
+    group microphone of a session without one. The channels are taken as aligned at their first
+    sample (one recorder wrote them, from one start stamp), the shorter ones end in silence, and the
+    sum keeps their level: a sample beyond 16 bits is clipped rather than the whole file scaled down,
+    since a level gate reads the level. Answers what was done, which is also written beside the wav
+    as JSON."""
+    import wave
+    channels, rate = [], None
+    for source in paths:
+        with wave.open(source, 'rb') as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2:
+                raise ValueError(f"{source}: {w.getnchannels()} channels of {8 * w.getsampwidth()} bits, not 16-bit mono")
+            if rate is not None and w.getframerate() != rate:
+                raise ValueError(f"{source}: {w.getframerate()} Hz beside {rate} Hz")
+            rate = w.getframerate()
+            channels.append(np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16))
+    total = np.zeros(max(len(c) for c in channels), dtype=np.int32)
+    for samples in channels:
+        total[:len(samples)] += samples
+    clipped = int(np.count_nonzero((total > 32767) | (total < -32768)))
+    mixed = np.clip(total, -32768, 32767).astype(np.int16)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with wave.open(out_path, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(mixed.tobytes())
+    info = {'sources': list(paths), 'method': 'sum, aligned at the first sample', 'clipped_samples': clipped,
+            'rate': rate, 'seconds': round(len(mixed) / rate, 3)}
+    with open(os.path.splitext(out_path)[0] + '.json', 'w') as f:
+        json.dump(info, f, indent=2)
+    return info
 
 
 def asr_config(template: dict, plan: dict) -> dict:
@@ -482,6 +524,15 @@ class Runner:
         manifest = json.load(open(os.path.join(self.project, 'artifacts', sid, 'manifest.json')))
         plan = plan_session(manifest, self.session_sources(sid))
         wanted = [p for p in self.pipelines if self.force or self.events(sid, EVENT_OF[p]) == 0] if not self.dry_run else list(self.pipelines)
+        if plan.get('group_mix') and 'asr' in wanted:
+            # the worn channels summed are the session's group microphone (mixed again for each run)
+            mix_path = os.path.join(self.project, 'artifacts', sid, 'analysis', 'group_mix',
+                                    f"audio_{GROUP_MIX_ID}_{plan['sync_time']:.3f}.wav")
+            if not self.dry_run:
+                info = mix_worn_channels(plan['group_mix'], mix_path)
+                log(f"{sid}: {len(plan['group_mix'])} worn channels summed into {GROUP_MIX_ID} "
+                    f"({info['seconds'] / 60:.0f} min, {info['clipped_samples']} samples clipped)")
+            plan['microphone'], plan['audio_path'] = GROUP_MIX_ID, mix_path
         personal = [p['id'] for p in plan.get('personal', [])]
         summary = {'session': sid, 'minutes': round(plan['minutes'], 1), 'videos': len(plan['videos']), 'microphone': plan['microphone'],
                    'personal': personal,
