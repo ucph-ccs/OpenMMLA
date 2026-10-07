@@ -61,7 +61,9 @@ The gaze-model ablation (`ablate='gaze_model'`, for the sensor-value ladder) run
 arms of GAZE_MODEL_ARMS the same way: only_body_gaze, only_pose (the cameras' pose values alone:
 layout's pseudo-modality gaze_model removed too) and no_gaze_model. The gaze model's values and
 masks are unobserved as an outage writes them; vfa_ran, the pose values and the body_gaze expert of
-late fusion stay.
+late fusion stay. The diarization ablation (`ablate='dia'`) runs the arm no_dia of DIA_ARMS the same
+way: the group microphone's dia_* values and their mask are unobserved (layout's pseudo-modality
+dia), while the level, silence and word values, asr_ran and the speech expert of late fusion stay.
 
 The session split (`split='session'`, for when the TEST sessions alone cannot stand for the
 model) pools DEV and TEST: every session the named coder
@@ -229,7 +231,10 @@ MODALITY_ARMS = {'full': (), 'no_speech': ('speech',), 'no_space': ('space',), '
 # model's outputs and without them (layout's pseudo-modality gaze_model), the body_gaze block of late fusion kept
 GAZE_MODEL_ARMS = {'full': (), 'only_body_gaze': ('speech', 'space'), 'only_pose': ('speech', 'space', 'gaze_model'),
                    'no_gaze_model': ('gaze_model',)}
-ABLATIONS = {'none': {'full': ()}, 'modality': MODALITY_ARMS, 'gaze_model': GAZE_MODEL_ARMS}
+# the diarization ablation: the group microphone's dia_* values (layout's pseudo-modality dia) with and
+# without, the rest of speech kept
+DIA_ARMS = {'full': (), 'no_dia': ('dia',)}
+ABLATIONS = {'none': {'full': ()}, 'modality': MODALITY_ARMS, 'gaze_model': GAZE_MODEL_ARMS, 'dia': DIA_ARMS}
 # the models that read no feature: the floors and Jev run in the full arm only (an ablated arm would repeat them)
 FEATURELESS = ('majority', 'stratified') + JEV_MODELS
 
@@ -286,8 +291,8 @@ class Config:
     `epochs` fixes the network's E* (the median of the date folds' for the test model) instead of
     the inner choice; `bootstrap` overrides the number of unit resamples; `device` is where the
     networks train: cpu (the default), cuda, or auto (cuda when torch sees a GPU); `ablate` 'modality'
-    adds the arms of MODALITY_ARMS to the run, 'gaze_model' those of GAZE_MODEL_ARMS ('none', the
-    default, runs the full arm only); `scaling`
+    adds the arms of MODALITY_ARMS to the run, 'gaze_model' those of GAZE_MODEL_ARMS, 'dia' that of
+    DIA_ARMS ('none', the default, runs the full arm only); `scaling`
     is layout.scale's scheme for every session, training and held-out alike: 'mix' (the default, by
     each value's tag), 's' (every value within its own session), 'c' (centred within the session on the
     global spread) or 'g' (every value globally). `split` 'unit' and 'forward' read the sessions 'session'

@@ -85,7 +85,7 @@ import sys
 import time
 
 DEFAULT_MODELS = 'r0,r1,lr,hgb,late-lr,late-hgb'
-ABLATIONS = ('none', 'modality', 'gaze_model', 'temporal', 'fusion', 'ladder', 'weights', 'all')
+ABLATIONS = ('none', 'modality', 'gaze_model', 'dia', 'temporal', 'fusion', 'ladder', 'weights', 'all')
 
 
 def get_parser():
@@ -136,8 +136,9 @@ def get_parser():
                         help="ablation grid: none (default), modality (every learned model and the rule once more "
                              "without speech, space, body_gaze, speech+space and space+body_gaze, in every session; "
                              "writes ablation.csv), or gaze_model (the same with the arms only_body_gaze, only_pose "
-                             "and no_gaze_model: the gaze model's values removed, the pose values kept); temporal, "
-                             "fusion, ladder, weights and all are not built yet")
+                             "and no_gaze_model: the gaze model's values removed, the pose values kept), or dia (the "
+                             "arm no_dia: the group microphone's dia_* values removed, the rest of speech kept); "
+                             "temporal, fusion, ladder, weights and all are not built yet")
     parser.add_argument('--scaling', choices=('mix', 's', 'c', 'g'), default='mix',
                         help="how the feature values are scaled, in every session alike: mix (default, as each "
                              "value is tagged: most by the training sessions' statistics, a few within the session), "

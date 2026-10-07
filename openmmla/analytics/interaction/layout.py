@@ -262,7 +262,14 @@ def _pseudo_index(values: tuple, masks: tuple) -> dict:
     return entry
 
 
-PSEUDO_MODALITY_INDEX = {'gaze_model': _pseudo_index(GAZE_MODEL_VALUES, GAZE_MODEL_MASKS)}
+# the group microphone's diarization (the dia ablation): a pseudo-modality that ablate() removes inside
+# speech, its four values and their mask m_dia. The level, silence and word values (m_asr, m_transcription)
+# and asr_ran stay, and so does the speech block of late fusion
+DIA_VALUES = ('dia_speakers', 'log_dia_switches', 'dia_overlap_ratio', 'dia_share_entropy')
+DIA_MASKS = ('m_dia',)
+
+PSEUDO_MODALITY_INDEX = {'gaze_model': _pseudo_index(GAZE_MODEL_VALUES, GAZE_MODEL_MASKS),
+                         'dia': _pseudo_index(DIA_VALUES, DIA_MASKS)}
 
 _STATS = ('min', 'mean', 'max')
 
@@ -751,7 +758,8 @@ def ablate(tokens: Tokens, modalities) -> Tokens:
     badge lost while a camera saw the person, `ips_missed`) is an observation again, as a VFA
     outage would leave it: the space block then carries nothing the cameras saw. The pseudo-modality
     `gaze_model` (PSEUDO_MODALITY_INDEX) removes the gaze model's values and masks the same way and
-    nothing else: no availability bit, nobody unpositioned, the pose values of body_gaze kept. The
+    nothing else: no availability bit, nobody unpositioned, the pose values of body_gaze kept; `dia`
+    removes the diarization values and m_dia so, the other speech values kept. The
     input is not changed; no modality gives the same tokens back."""
     modalities = tuple(dict.fromkeys(modalities))
     known = MODALITIES + tuple(PSEUDO_MODALITY_INDEX)
