@@ -816,7 +816,7 @@ function weighted(values, weights) {
 export const PART_JOB = { speech: 'light', space: 'light', attention: 'video', timeline: 'video' };
 const PART_LIST = ['speech', 'space', 'attention', 'timeline'];
 
-/** "Reading video features: 12 min of 61 min", "Counting looks: 1,200 of 3,651 frame sets" */
+/** "Reading video features: 12 min of 60 min", "Counting looks: 1,200 of 3,600 frame sets" */
 export function progressText(st) {
   if (!st || st.state === 'loading') return 'Loading';
   // a failed job keeps its last progress step; never show it as if the job still ran
@@ -2538,7 +2538,7 @@ function serverRow(entry) {
 
 /**
  * the line that says where `mmla ses-archive` put the session: "Archive: complete, 32 files, 99 MB,
- * verified 2 Oct 2026 16:29, on this machine" (an archive that is not complete in the warning
+ * verified 14 May 2026 16:29, on this machine" (an archive that is not complete in the warning
  * colour), "Not archived" without one.
  */
 export function archiveLine(archive) {

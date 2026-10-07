@@ -18,7 +18,7 @@ Version 1 read it as 0. The seat trace of window_features (p<t>_untagged_at_seat
 n_untagged_at_seats) is auxiliary: parse_columns sets it apart, no token reads it, and the presence
 gate reads it where the table has it.
 
-Layout version 3 (2026-09-23, before any label was read): partner gaze is in-group (another pupil
+Layout version 3 (fixed before any label was read): partner gaze is in-group (another pupil
 of the session); the faces and hands of anyone else are other_face and other_hands (mask m_other),
 an `elsewhere` gaze inside the camera's work area is work_area (mask m_wa, on where most of the
 person's gaze frames had a ready area), and joint attention above the pair's own rate 20-40 s
@@ -28,7 +28,7 @@ its m_other and m_wa are off, its excess is NaN, and its partner gaze still coun
 person. data_checks' fusion_check lists it as split: false; it is not refused, as a table fused
 before the camera fix is not.
 
-Layout version 4 (2026-09-24, before any label was read): the hands in body units. The fusion's
+Layout version 4 (fixed before any label was read): the hands in body units. The fusion's
 hand columns follow each pupil's wrists in the image, in their own shoulder widths
 (window_features.wrist_moves): the share of 1 s steps with the hands active or still, the wrist
 speed in shoulder widths, and the hands of a body outside the group near theirs (masks m_hands
@@ -77,9 +77,8 @@ MIN_KNOWN_SHARE = 0.05
 # two skeletons whose hands are this close (frame widths) on average are one person seen twice
 DUPLICATE_HAND_WIDTH = 0.01
 # the wrist speed is logged above this floor, in shoulder widths a second: under half a still arm's
-# median wrist jitter (0.024-0.027 a step) and under every setup's 10th percentile of a window's mean
-# speed (0.036-0.061 on the 20 replayed sessions), so the log spreads the still windows without running
-# off to minus infinity
+# wrist jitter and under the slowest windows' mean speed on recorded classroom data, so the log spreads
+# the still windows without running off to minus infinity
 WRIST_SW_FLOOR = 1e-2
 CLIP = 5.0
 # a session's own statistics need this many observed values; before that the global ones serve
@@ -120,10 +119,11 @@ DROPPED = {
     r'^vote_words$': "the worn microphones' words by the bucket vote, beside `words` in a session without a group "
                      'microphone whose words are decided one by one: a comparison, never a feature',
     r'^pair\d+_\d+_face_(ab|ba)_ratio$': 'replaced by face_any = max(ab, ba), since ab and ba follow the arbitrary tag order',
-    # face_both = min(ab, ba) is never built: > 0 in 0-0.6 % of windows
-    r'^pair\d+_\d+_face_mutual_ratio$': 'near-dead (> 0 in 0.06 % of IPS pair-windows); its support is in data_checks.json',
-    r'^pair\d+_\d+_mutual_gaze_ratio$': 'near-dead (> 0 in 3.8 % of co-visible pair-windows, mean 0.006); its support is in '
+    # face_both = min(ab, ba) is never built: it is almost never above 0
+    r'^pair\d+_\d+_face_mutual_ratio$': 'near-dead (almost never > 0 in IPS pair-windows); its support is in '
                                          'data_checks.json',
+    r'^pair\d+_\d+_mutual_gaze_ratio$': 'near-dead (rarely > 0 in co-visible pair-windows, and small then); its '
+                                         'support is in data_checks.json',
     r'^(n_asr_recognition|n_asr_transcription|n_ips|n_ips_relation|n_vfa_features|n_vfa_angles|n_vfa_cameras'
     r'|n_vfa_incomplete|n_vfa_propagated|n_vfa_seat_partners)$': _COUNTER,
     r'^p\d+_(cameras|frames|frame_sets|hand_steps)$': _COUNTER,
@@ -132,7 +132,7 @@ DROPPED = {
     r'^(n_vfa_action|p\d+_action|pair\d+_\d+_co_manipulating)$': 'empty in this batch; the reserved semantic block',
     AUXILIARY_RE.pattern: _AUXILIARY,
     r'^(window_index|window_start|window_end)$': 'an index, not a feature',
-    # the joint split of 2026-09-29 (exploratory): its baseline, like joint_attention_baseline, lives in its excess
+    # the joint split (exploratory): its baseline, like joint_attention_baseline, lives in its excess
     r'^pair\d+_\d+_joint_member_baseline$': 'the proximity baseline of joint attention: the raw share and the excess carry it',
     r'^(pair\d+_\d+_joint_(reach|both_wa)_ratio|n_vfa_non_members)$': 'a diagnostic of the v5 joint split and non-member pass',
 }
@@ -144,7 +144,7 @@ USED = (
     r'|gaze_(partner_face|partner_hands|other_face|other_hands|own_hands|work_area|elsewhere|out_of_frame|unknown)_ratio)$',
     r'^pair\d+_\d+_(dist_mean_m|dist_min_m|hand_dist_sw_min|hand_dist_sw_mean|hands_close_ratio|gaze_dist_mean'
     r'|joint_attention_ratio|joint_attention_excess|one_active_ratio|both_active_ratio|both_still_ratio|follow_ratio'
-    # the v5 columns of 2026-09-29 (exploratory, after DEV labels were read): known here, but no token of
+    # the v5 columns (exploratory, added after DEV labels were read): known here, but no token of
     # layout version 4 reads them; extra_v5 gives them for the DEV checks
     r'|joint_member_ratio|joint_outsider_ratio|joint_member_excess)$',
     r'^(nm_at_table_ratio|nm_hands_in_table_ratio)$',
@@ -241,7 +241,7 @@ def _modality_index() -> dict:
 
 MODALITY_INDEX = _modality_index()
 
-# the gaze model's outputs (2026-10-05, the sensor-value ladder's pose-only arm): a pseudo-modality that
+# the gaze model's outputs (the sensor-value ladder's pose-only arm): a pseudo-modality that
 # ablate() removes inside body_gaze. Its values are the ones the gaze estimator made (the person's gaze
 # switches, gaze shares and readable share; the pair's gaze distance, joint attention and following) and
 # its masks the ones that cover nothing else. The pose values (seen_share, head yaw, the hands,
@@ -844,7 +844,7 @@ def fit_global_stats(tokens_list) -> Stats:
     """the [g] statistics from the given sessions' unscaled tokens (the caller passes the
     outer-training sessions only): per value, pooled over slots, the observed values of every
     non-empty window. Label-free; the empty windows are left out because they are trivially easy
-    and, 70 % of one session, would set the scale."""
+    and, most of a session at times, would set the scale."""
     tokens_list = list(tokens_list)
     center, spread = {}, {}
     for part, spec, _ in _PARTS:
@@ -1066,10 +1066,10 @@ def temporal_context(pooled: pd.DataFrame, mode: str = 'T0') -> pd.DataFrame:
     return pd.concat([out, pd.DataFrame(lags, index=pooled.index)], axis=1)
 
 
-# ---- the exploratory v5 columns (2026-09-29) ----
+# ---- the exploratory v5 columns ----
 
-# where joint attention met (per pair) and a body outside the group at the table (per window): fused since
-# 2026-09-29, after DEV labels were read, so exploratory. They are outside the pre-registered layout (no
+# where joint attention met (per pair) and a body outside the group at the table (per window): added to
+# the fusion after DEV labels were read, so exploratory. They are outside the pre-registered layout (no
 # token, no pooled column); extra_v5 pools them beside pooled() for the DEV checks only
 EXTRA_V5_PAIR = ('joint_member_ratio', 'joint_outsider_ratio', 'joint_member_excess')
 EXTRA_V5_GROUP = ('nm_at_table_ratio', 'nm_hands_in_table_ratio')
@@ -1083,7 +1083,7 @@ def extra_v5(table: pd.DataFrame, roster: Roster) -> pd.DataFrame:
     nm_hands_in_table_ratio. A pair value counts where the pair was seen together and neither is the
     duplicate gate's copy (as m_covis); member and outsider are observed together or not at all (they
     split one share). The group values need the cameras to have run. Unobserved is NaN, and a table
-    fused before 2026-09-29 gives NaN throughout. The fusion writes the pair values for pupil pairs
+    fused before these columns existed gives NaN throughout. The fusion writes the pair values for pupil pairs
     only, so a pair with a non-pupil is NaN."""
     T = len(table)
     kept = list(roster.kept)[:N_SLOTS]
@@ -1252,7 +1252,7 @@ def seat_check(table: pd.DataFrame, roster: Roster) -> dict:
 
 
 def fusion_check(table: pd.DataFrame, roster: Roster) -> dict:
-    """what the fusion of 2026-09-23 and 2026-09-24 gave the table: `split` (it has the other_face
+    """what the fusion of layout versions 3 and 4 gave the table: `split` (it has the other_face
     columns; a table fused before has not, and its partner gaze counts every other person), `hands`
     (it has the body-normalised hand columns of layout version 4), `pupils` (the tags the
     fusion took for pupils, p<t>_in_group = 1; None before the split), `roster_in_group` (every kept

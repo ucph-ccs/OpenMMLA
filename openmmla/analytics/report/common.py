@@ -311,7 +311,7 @@ _gzip_lock = threading.Lock()
 def _event_query_api(client):
     """a query API on the client's server that asks for gzip-compressed answers. Event rows are
     mostly JSON text: 5 min of video features are 7.7 MB as InfluxDB sends them and 1.5 MB
-    compressed, which over the tailnet is the difference between 6-28 s and 2.5 s. One per server
+    compressed, which over a slow remote link is the difference between 6-28 s and 2.5 s. One per server
     and token, kept for the process; the client's own API when it does not say where it points."""
     url, token, org = getattr(client, 'url', None), getattr(client, 'token', None), getattr(client, 'org', None)
     if not isinstance(url, str) or not isinstance(token, str):

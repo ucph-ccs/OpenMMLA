@@ -1085,7 +1085,7 @@ class _ServerCopy:
 
 
 def _window_text(start: datetime, end: datetime) -> str:
-    """'2026-10-04 13:57:12 to 13:59:49': one stretch of a session, its end's
+    """'2025-01-01 10:00:00 to 10:02:37': one stretch of a session, its end's
     date only when it is another day."""
     until = f"{end:%H:%M:%S}" if end.date() == start.date() else f"{end:%Y-%m-%d %H:%M:%S}"
     return f"{start:%Y-%m-%d %H:%M:%S} to {until}"

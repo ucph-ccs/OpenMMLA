@@ -16,10 +16,9 @@ its own area.
 Only the pupils' hands teach it, by the tag the server gave (read, or kept on its track), never a
 tag the fusion carried along a track, so a track carried to the wrong person cannot stretch it. It
 learns from the hand circles the gaze targets were made with (features.hand_regions, `nudge`): the
-version 2 circle of 2026-09-24 sits 0.19 shoulder widths further along the forearm than version 1,
-which grew the area of the 38 cameras of the 20 replayed sessions by a median 2.6 % (p10 -3 %, p90
-+7 %); with the gazes the larger reach of the circle now gives to hands, a pupil's work-area share of
-a window fell by 0.06 on average.
+version 2 circle sits 0.19 shoulder widths further along the forearm than version 1, which grows
+the area a little; with the gazes the larger reach of the circle now gives to hands, a pupil's
+work-area share of a window falls a little too.
 
 In 2D the area is not free of faces (a partner's face often lies inside it, above the table); the
 relabel works because faces and hands are scored first. Pure functions on plain dicts, like

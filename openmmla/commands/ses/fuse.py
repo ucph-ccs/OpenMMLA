@@ -30,29 +30,28 @@ def get_parser():
     add_arg('hand_relabel', bool, True,
             "make every stored frame's gaze targets and pair hand distances again with the current hand circle "
             '(features.HAND_NUDGE); false keeps what the server stored, and the work area and hand columns then use '
-            'the circle the frames say they were made with (version 1 for a frame that says none, as every replay so '
-            'far), for comparison', shortname='-hr')
+            'the circle the frames say they were made with (version 1 for a frame that says none), for comparison',
+            shortname='-hr')
     add_arg('joint_split', bool, False,
             "split each pupil pair's joint attention by where it met (the group's own faces, hands or work area, or "
-            'someone outside the group) and add the non-member columns (nm_at_table_ratio ...); false gives the table '
-            'fused before 2026-09-29 byte for byte, for comparison', shortname='-js')
+            'someone outside the group) and add the non-member columns (nm_at_table_ratio ...); false leaves them '
+            'out', shortname='-js')
     add_arg('tag_memory', float, 60.0,
             'seconds after a track last read a tag that the tag stays on the track: a tag the server kept on it '
             'longer is taken off, and a read is carried along its track no further; 0 keeps every kept tag and '
-            'carries the reads without a limit, as every table fused before 2026-10-02', shortname='-tm')
+            'carries the reads without a limit', shortname='-tm')
     add_arg('face_refusal', int, 60,
             "how many face checks in a row must call a tracked person someone else than the tag their track "
-            "remembers (the reid.tag verdicts the VFA server records since 2026-10-02) before the fusion takes "
+            "remembers (the reid.tag verdicts the VFA server records) before the fusion takes "
             "that tag off the track from the first such verdict to the last, frames without a face between "
             "included, and does not carry it back there; a read of the tag or a 'same' verdict on it ends a run, "
-            "a frame without a check or an 'unknown' verdict does not; 0 leaves the checks unread, as every "
-            "table fused before 2026-10-02 (window_features.FACE_REFUSAL_FRAMES)", shortname='-fr')
+            "a frame without a check or an 'unknown' verdict does not; 0 leaves the checks unread "
+            "(window_features.FACE_REFUSAL_FRAMES)", shortname='-fr')
     add_arg('path_rule', bool, True,
             "count each badge's path over the whole session on the floor plan's plane: positions smoothed by a "
             "median of 3 within runs of reads at most 10 s apart, a step counted from 0.05 m up to 1.0 m for each "
             "second between its positions (at a run's first and last step its raw step too), in the window of its "
-            "later position; false sums every raw step between the window's own positions in 3D, as every table "
-            "fused before 2026-10-03", shortname='-pr')
+            "later position; false sums every raw step between the window's own positions in 3D", shortname='-pr')
     add_arg('cameras', str, None,
             "comma-separated camera ids (the camera each VFA frame carries, else its window_features.camera_keys "
             "key): keep only those cameras' frames of every VFA frame set before the fusion and drop a set left "
@@ -204,7 +203,7 @@ def main():
                        # the server's thresholds for a frame that does not state its own (its `scoring`)
                        'min_confidence': fusion.VFA_KEYPOINT_CONFIDENCE, 'inout_threshold': fusion.VFA_INOUT_THRESHOLD}
         # the wrist moves are the wrist's displacement in the image over the shoulder width ('image'), not
-        # against the shoulder midpoint as before the review of 2026-09-24
+        # against the shoulder midpoint
         hands = {'moves': 'image', 'body_confidence': fusion.BODY_CONFIDENCE,
                  'min_step_seconds': fusion.MIN_STEP_SECONDS, 'max_step_seconds': fusion.MAX_STEP_SECONDS,
                  'still_sw': fusion.HAND_STILL_SW, 'active_sw': fusion.HAND_ACTIVE_SW, 'hand_length_sw': fusion.HAND_LENGTH_SW,

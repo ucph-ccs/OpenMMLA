@@ -1,15 +1,14 @@
 """Which sessions train and which score the interaction classifier.
 
-Four sessions are the TEST set, touched once after every choice is frozen: they never reach a
-global scaler, the Jev bins, pretraining or prompt work, and no dev split here ever contains them.
-The other sessions are DEV.
+The sessions of TEST_SESSIONS are the TEST set, touched once after every choice is frozen: they
+never reach a global scaler, the Jev bins, pretraining or prompt work, and no dev split here ever
+contains them. The other sessions are DEV.
 
 The unit of every split is the date: the same group on the same date is never on both sides of a
-split. Sessions of one date share pupils or a class (a micro:bit and a WeGrow lesson of group_01 on
-one morning, two groups of one class, the two 2025-05-13 takes of one group), so all DEV sessions
-of a date are held out together and trained on together, in the outer folds, in the inner folds,
-in task transfer and in the bootstrap. With 2025-05-20 group_02 voided, the DEV set is 16 sessions
-in 15 lessons on 9 dates, so 9 leave-one-date-out folds.
+split. Sessions of one date can share pupils or a class (two lessons of one group on one morning,
+two groups of one class, two takes of one group), so all DEV sessions of a date are held out
+together and trained on together, in the outer folds, in the inner folds, in task transfer and in
+the bootstrap.
 
 Sessions of one school class on different dates are not independent either: a session manifest's
 `same_class_as` (a list of session ids, written by mmla ses-tidy --same-class-as) links them, and
@@ -22,20 +21,20 @@ is refused (SplitError) in every split: the one scoring of TEST would train on t
 A fold is (name, train, test), lists of session ids. Only units with coded windows are held out;
 a session without labels still trains, since the label-free fits (scalers) read every window.
 
-The session split (session_folds, session_inner_folds) is the all-sessions evaluation the user
-chose on 2026-10-03, when the TEST sessions' data quality turned out too poor to stand for the
-model: one session at a time is held out, DEV and TEST alike, and the inner folds leave one
+The session split (session_folds, session_inner_folds) is the all-sessions evaluation, for when
+the TEST sessions alone cannot stand for the model: one session at a time is held out, DEV and
+TEST alike, and the inner folds leave one
 training session out. Neither the date, nor same_class_as, nor TEST plays a part in it, so a
 group's other lesson of the same morning trains the model a session is scored with; its numbers
 are cross-validated estimates with no untouched hold-out, never the frozen TEST scoring.
 
-The unit split (unit_folds_all, unit_inner_folds, 2026-10-04) covers the same sessions as the
+The unit split (unit_folds_all, unit_inner_folds) covers the same sessions as the
 session split, DEV and TEST alike, but holds out a unit at a time: a date with every date its
 sessions' same_class_as links reach (class_units), so the same pupils are never on both sides.
 TEST plays no part in it (no SplitError): a TEST session is an ordinary session of its date. The
 inner folds leave one training unit out.
 
-The forward split (forward_folds, 2026-10-04) chains forward over the same sessions: each date with
+The forward split (forward_folds) chains forward over the same sessions: each date with
 at least MIN_EARLIER_DATES earlier dates with coded windows is held out in turn and the fold trains
 on the earlier dates only, never a later one; a training date whose unit reaches the held-out date
 stays out of that fold. Its inner folds leave one training unit (date) out, as in the unit split.
@@ -152,7 +151,7 @@ def check_links(sessions, same_class=None) -> None:
 def class_units(sessions, same_class=None) -> dict:
     """session -> the unit every split holds out whole: its date, merged with the dates its
     same_class_as links reach, named by the lessons of the given sessions in it joined with '+'
-    (exp_20241210_microbit_group_01+exp_20241210_microbit_group_02)."""
+    (exp_YYYYMMDD_microbit_group_01+exp_YYYYMMDD_microbit_group_02)."""
     sessions = list(sessions)
     root = _joined(sessions, same_class)
     members: dict = {}
@@ -276,8 +275,7 @@ def forward_folds(sessions, coded=None, same_class=None, min_earlier: int = MIN_
 def task_transfer(sessions, source: str = 'microbit', target: str = 'wegrow', same_class=None) -> list:
     """train on the DEV sessions of one task and score those of the other (exploratory): one fold.
     A source session whose unit holds a target session does not train, since the same group on the
-    same date would be on both sides; today every WeGrow date has a micro:bit lesson, so micro:bit
-    -> WeGrow trains on the micro:bit sessions of the other dates only."""
+    same date would be on both sides."""
     check_links(sessions, same_class)
     dev = dev_sessions(sessions)
     unit = class_units(dev, same_class)

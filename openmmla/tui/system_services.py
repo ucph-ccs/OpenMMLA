@@ -165,7 +165,7 @@ _STREAM_PATH_RE = re.compile(r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]*(?:/[A-Za-z0-9._~-
 def is_stream_path(value: object) -> bool:
     """a Streams target in its short form: the <app>/<name> path on the stream
     server, without scheme or host. A first segment with a dot is taken for a
-    host that lost its scheme (ericli.local/ips/cam-1), not for a path."""
+    host that lost its scheme (uber-server.local/ips/cam-1), not for a path."""
     text = str(value or "").strip().strip("/")
     if not text or "://" in text or not _STREAM_PATH_RE.match(text):
         return False

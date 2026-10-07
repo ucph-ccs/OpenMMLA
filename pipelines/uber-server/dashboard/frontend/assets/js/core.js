@@ -232,12 +232,12 @@ export const fmt = {
     const n = finite(epoch);
     return n == null ? NA : hmFmt.format(new Date(n * 1000));
   },
-  /** epoch -> "3 Jun 2026" (local). */
+  /** epoch -> "14 May 2026" (local). */
   date(epoch) {
     const n = finite(epoch);
     return n == null ? NA : dateFmt.format(new Date(n * 1000));
   },
-  /** epoch -> "3 Jun 2026, 08:26 CEST" (local, with the zone abbreviation). */
+  /** epoch -> "14 May 2026, 08:26 CEST" (local, with the zone abbreviation). */
   dateTime(epoch) {
     const n = finite(epoch);
     if (n == null) return NA;
@@ -959,7 +959,7 @@ function dateFromIso(d) {
   return dateFmt.format(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
 }
 
-/** {title: "microbit · group 01", date: "3 Jun 2026", id} from a session meta or index entry. */
+/** {title: "puzzle · group 01", date: "14 May 2026", id} from a session meta or index entry. */
 export function sessionTitle(meta) {
   const m = meta || {};
   const group = m.group ? String(m.group).replace(/_/g, ' ') : null;

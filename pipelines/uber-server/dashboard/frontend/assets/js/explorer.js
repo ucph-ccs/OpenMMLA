@@ -258,8 +258,8 @@ function searchWords(e) {
   return text.split(WORD_SPLIT).filter(Boolean);
 }
 
-/** every query word starts a word of the session ("group 02" does not match the 02 inside 20250520),
- * or the whole query is part of the id (a pasted fragment like "t0826"). */
+/** every query word starts a word of the session ("group 02" does not match the 02 inside 20240314),
+ * or the whole query is part of the id (a pasted fragment like "t0915"). */
 function matchesQuery(e, query, tokens) {
   if (!tokens.length) return true;
   if (String(e.id).toLowerCase().includes(query)) return true;

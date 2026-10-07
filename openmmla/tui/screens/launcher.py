@@ -5044,9 +5044,9 @@ _MAC_COMMAND_PREFIX = "openmmla-launch-"
 # seconds after which a launch's files are swept up, by the next launch
 _MAC_COMMAND_MAX_AGE = 24 * 3600.0
 # a component's window is named as soon as its shell runs it ("IPS Base ·
-# base 1 @ mac-01") and opens on a banner in its pipeline's colour: the program
+# base 1 @ base-01") and opens on a banner in its pipeline's colour: the program
 # names the window itself only once its imports and set-up are done, which on
-# mac-01 took 30 to 80 s, and the tabs of a window group show the running
+# a Mac base can take 30 to 80 s, and the tabs of a window group show the running
 # process ("… ▸ ssh"), not the name. Terminal has no colour for a title bar
 _MAC_BANNER_COLOURS = (("asr", "1;97;44"), ("ips", "1;97;42"), ("vfa", "1;97;45"),
                        ("mllm", "1;97;46"), ("collection", "1;30;43"))
@@ -6025,7 +6025,7 @@ class ServicePanel(Widget):
         return markers
 
     def _svc_host_label(self, svc: ServiceDef) -> str:
-        """" @ server-01": where a system service runs, as the status probe
+        """" @ uber-server": where a system service runs, as the status probe
         last resolved it (nothing before that, rather than a guess). It is
         the machine System Settings put it on, offline or not, else the host
         its card was last pointed at."""
@@ -10323,7 +10323,7 @@ class ServicePanel(Widget):
         # a pipeline config belongs to the host it was read on, which the Host
         # selector names; the picker below names the other machine: Sync to
         # Host copies the config from the host on screen there (what was
-        # edited on server-01 goes back to this machine, or on to another
+        # edited on uber-server goes back to this machine, or on to another
         # host), Sync from Host copies that machine's over it. A Connections
         # form, Experiments, Tasks and SSH Profiles belong to the host they
         # were read from, and the MLLM launch config to this machine whatever
@@ -10775,7 +10775,7 @@ class ServicePanel(Widget):
     # Every file the console edits — a pipeline config, the prompt templates,
     # the action schema, the transform matrices — belongs to the host the Host
     # selector names, and a Sync to Host copies it from there to another
-    # machine. Either end may be this one: what was edited on server-01 comes
+    # machine. Either end may be this one: what was edited on uber-server comes
     # back here, or goes on to another host (through this machine, the one
     # place both are reachable).
     #

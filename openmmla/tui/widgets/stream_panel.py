@@ -51,7 +51,7 @@ def _with_stream_path(command: str) -> str:
 
 def _stream_app(url: object, server: dict) -> str:
     """the app a stream URL names, the path segment before the stream's own
-    name (rtmp://server-01:1935/vfa/raspi5-05 -> vfa): which card a stream
+    name (rtmp://uber-server:1935/vfa/pi-05 -> vfa): which card a stream
     belongs with. Read as the Stream Server reads it when it speaks for the
     URL (rtmp, rtsp and srt alike), else off the URL's path."""
     path = stream_server_path(url, server)
@@ -312,7 +312,7 @@ def _stream_key(stream: StreamDef, server: dict) -> str:
     (an rtmp target and the rtsp read URL of the same path are one stream).
     While System Settings name no Stream Server, or another one, the URL's
     own host and path stand for it, so the rtmp publish and the rtsp read of
-    one path still meet (server-01/vfa/c920-05); a URL with no path (udp or
+    one path still meet (uber-server/vfa/c920-05); a URL with no path (udp or
     tcp to an ASR base) is its target, or the URL it is read from, as written."""
     path = _stream_path(stream, server)
     if path:
@@ -422,7 +422,7 @@ def _foreign_rival(stream: StreamDef, published: set[str] | None,
 
 def _rival_label(card: str, stream: StreamDef) -> str:
     """another card's entry as the log names it: ASR Base's c920-05
-    (rtmp://server-01:1935/asr/c920-05 on raspi5-05)."""
+    (rtmp://uber-server:1935/asr/c920-05 on pi-05)."""
     url = rich_escape(stream.target or stream.read_url or "no target")
     machine = (stream.ssh_profile or "").strip()
     if not machine:

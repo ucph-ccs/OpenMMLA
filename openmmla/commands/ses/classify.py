@@ -3,25 +3,25 @@
 It reads every session's fused table (mmla ses-fuse) and the coded labels (mmla ses-code), and
 scores each named model on windows it was not trained on. The unit of every split is the date,
 so the same group on the same date is never on both sides: --split date (the default) holds out
-one DEV date at a time, every session of it together (two groups of one class, a group's micro:bit
-and WeGrow lessons, the two 2025-05-13 takes), with every choice (grid point, epoch count,
+one DEV date at a time, every session of it together (two groups of one class, a group's two
+lessons of one morning, two takes of one group), with every choice (grid point, epoch count,
 calibrator, stacker, HMM gamma) made on inner folds over the other dates; --split test trains on
-every DEV session and scores the four TEST sessions, once, after every choice is frozen
+every DEV session and scores the TEST sessions, once, after every choice is frozen
 (--confirm-frozen and the truth --coder the date runs used; --test-coder scores TEST against
 another coder, e.g. a model's DEV labels train and a human coder's TEST labels score; the run is
 recorded in artifacts/_analysis/interaction/test_runs.jsonl). --split loso, leave one lesson out, is gone: it
 put a group's two lessons of one morning on both sides.
 
---split session (decided 2026-10-03, when the TEST sessions' data quality turned out too poor to stand
-for the model) pools DEV and TEST: every session the --coder labelled (their own labels/<coder>.jsonl,
-adjudicated.jsonl not read) that the inclusion rule S1 keeps is held out in turn, the models train on
-all the others, and every choice is made on leave-one-session-out inner folds within those. Each
-held-out session is scored on its own (per_session.csv, with flags for a session of one class or few
-windows) and every variant gets the mean and SD over the sessions beside the pooled value (results.csv,
-metrics.json across_sessions); config.json says all_sessions true. There is no headline and no
-contrast, and nothing is recorded in test_runs.jsonl: it is not the frozen TEST scoring.
+--split session (for when the TEST sessions alone cannot stand for the model) pools DEV and TEST:
+every session the --coder labelled (their own labels/<coder>.jsonl, adjudicated.jsonl not read) that
+the inclusion rule S1 keeps is held out in turn, the models train on all the others, and every choice
+is made on leave-one-session-out inner folds within those. Each held-out session is scored on its own
+(per_session.csv, with flags for a session of one class or few windows) and every variant gets the mean
+and SD over the sessions beside the pooled value (results.csv, metrics.json across_sessions);
+config.json says all_sessions true. There is no headline and no contrast, and nothing is recorded in
+test_runs.jsonl: it is not the frozen TEST scoring.
 
---split unit and --split forward (decided 2026-10-04) read the sessions --split session reads (DEV and
+--split unit and --split forward read the sessions --split session reads (DEV and
 TEST alike, the --coder's own labels file, the same sessions left out) but hold out a unit at a time: a
 recording date with every date its sessions' same_class_as links reach (mmla ses-tidy --same-class-as).
 unit leaves one unit out; forward holds out each date with at least 4 earlier dates with coded windows
@@ -33,7 +33,7 @@ made before that, as looked at, with --ledger-note kept on each line.
 
 -m rule22sep and -m select-all are pseudo-variants that choose inside each outer fold, from the
 calibrated inner out-of-fold answers, among the variants the run fits, and copy the chosen one's
-held-out answers: rule22sep by the rule declared on 22 Sep (late-lr or late-hgb, every temporal mode,
+held-out answers: rule22sep by the pre-declared headline rule (late-lr or late-hgb, every temporal mode,
 HMM none or fb, by binary macro-F1 under --target binary and macro-F1 under 3class), select-all by the
 class-weighted binary log-loss over every variant of the named models. Each fold's choice is in
 metrics.json. --net-oof common gives the networks' inner out-of-fold answers at the common E* of the
@@ -42,8 +42,8 @@ another folder (e.g. an ablation arm's re-fused tables), never artifacts/<sessio
 a session the run would read from artifacts/ but whose table that folder lacks refuses the run (one
 without the --coder's labels in a session, unit or forward run excepted, which those leave out anyway).
 
--m pmil-lr, -m lr-soft and -m net-attn are exploratory candidates of the architecture panel (WP9,
-2026-10-04), named only on purpose (never by -m all) and grouped 'exploratory' in the results:
+-m pmil-lr, -m lr-soft and -m net-attn are exploratory candidates of the architecture panel,
+named only on purpose (never by -m all) and grouped 'exploratory' in the results:
 pmil-lr, a noisy-OR over the pupil pairs of one shared linear scorer with a bias per group size,
 answers p(interaction) only and needs --target binary; lr-soft is lr fitted on two coders' soft
 labels (a window both gave a class counts half for each label, a window the --coder called unclear or
@@ -69,7 +69,7 @@ scored only on the windows it answered, and the coverage is printed when that is
 no_space, no_body_gaze, only_body_gaze, only_speech), each with its modalities not run in any
 session, train and test alike; the floors and Jev run in the full arm only, the headline and the
 contrasts are the full arm's, and ablation.csv sets the arms side by side. It is one run, so with
---split test one look at TEST. --ablate gaze_model (the sensor-value ladder, 2026-10-05) does the
+--split test one look at TEST. --ablate gaze_model (the sensor-value ladder) does the
 same with the arms only_body_gaze, only_pose and no_gaze_model: only_pose keeps the cameras' pose
 values (seen share, head yaw, hands, hand distances) and removes speech, space and the gaze model's
 values (gaze shares, known share, switch rate, gaze distance, joint attention, following) with
@@ -98,8 +98,8 @@ def get_parser():
     parser.add_argument('-a', '--artifacts', default=None, help="artifacts root (default <cwd>/artifacts)")
     parser.add_argument('-s', '--sessions', default=None, help="only sessions whose id contains this text")
     parser.add_argument('--coder', default=None,
-                        help="whose labels are the truth, by the labels file's exact name (Arthur reads "
-                             "labels/Arthur.jsonl; default: the coder with the most windows over the DEV sessions; "
+                        help="whose labels are the truth, by the labels file's exact name (alex reads "
+                             "labels/alex.jsonl; default: the coder with the most windows over the DEV sessions; "
                              "required with --split test, session, unit and forward)")
     parser.add_argument('--test-coder', default=None,
                         help="with --split test: whose labels score the TEST sessions, when not --coder's (e.g. "
@@ -110,10 +110,10 @@ def get_parser():
                              "(zero-shot, from mmla ses-jev's answers), "
                              "majority, stratified, r1 (fitted tree), jev-cal, lr, hgb, late-lr, late-hgb, pooled-net, "
                              f"net-notcn, net, net-pair (default {DEFAULT_MODELS}); the selectors rule22sep (the "
-                             "22 Sep rule over late-lr and late-hgb) and select-all (the lowest inner log-loss over the "
-                             "named models), chosen in each fold on the inner out-of-fold answers; and the exploratory "
-                             "candidates pmil-lr (pairs, noisy-OR; --target binary only), lr-soft (two coders' soft "
-                             "labels) and net-attn (attention over persons), never in all")
+                             "pre-declared headline rule over late-lr and late-hgb) and select-all (the lowest inner "
+                             "log-loss over the named models), chosen in each fold on the inner out-of-fold answers; "
+                             "and the exploratory candidates pmil-lr (pairs, noisy-OR; --target binary only), lr-soft "
+                             "(two coders' soft labels) and net-attn (attention over persons), never in all")
     parser.add_argument('--split', choices=('date', 'task', 'test', 'session', 'unit', 'forward'), default='date',
                         help="date: leave one DEV date out, all its sessions together (default); test: train on "
                              "DEV, score TEST once (needs --confirm-frozen and --coder); session: leave one session "
@@ -266,7 +266,7 @@ def _agreement(args) -> int:
     from openmmla.analytics.interaction.labels import LabelJoinError
     coders = [name.strip() for name in args.agreement.split(',') if name.strip()]
     if len(coders) != 2 or coders[0] == coders[1]:
-        print(f"--agreement takes two different coders, e.g. Arthur,zaibei, not {args.agreement!r}")
+        print(f"--agreement takes two different coders, e.g. alex,sam, not {args.agreement!r}")
         return 2
     try:
         run_dir = E.coder_agreement(args.artifacts or os.path.join(os.getcwd(), 'artifacts'), coders,
@@ -383,7 +383,7 @@ def main(argv=None):
                      "(their config.json 'coder')")
     if args.split in ('session', 'unit', 'forward') and not args.coder:
         parser.error(f"--split {args.split} reads one coder's labels at a time: add --coder (the labels file's name, "
-                     f"e.g. Arthur or zaibei)")
+                     f"e.g. alex or sam)")
     if args.test_coder and args.split != 'test':
         parser.error("--test-coder names the truth of the TEST sessions: it goes with --split test")
     binary_only = [model for model in models if model in E.BINARY_ONLY]

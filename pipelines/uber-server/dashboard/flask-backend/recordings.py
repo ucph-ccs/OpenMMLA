@@ -179,7 +179,7 @@ def unarchived_spans(server: list[dict], cuts: list[dict], tolerance: float = CU
 
 
 def label(record: dict) -> str:
-    """the line a person reads: Camera c920-05 on raspi5-01, Group mic jabra-0, Worn mic vimo-0,
+    """the line a person reads: Camera c920-05 on pi-01, Group mic jabra-0, Worn mic vimo-0,
     Tag 0, Worn mic badge-0, Microphone mic-9; Stream vfa/c920-05 for an archived stream cut."""
     if record.get("source") == "stream":
         return f"Stream {record.get('stream_path') or record.get('device') or ''}".rstrip()
@@ -387,7 +387,7 @@ def _record(path: str, host: str | None, modality: str, rec_id: str, row: dict) 
 
 def _lexically_inside(path: str, folders: tuple[str, ...]) -> bool:
     """whether a path names something inside one of the folders, by its spelling alone (a path
-    written on another machine, /home/server-01/... say, may sit on an automounted folder here
+    written on another machine, /home/uber-server/... say, may sit on an automounted folder here
     that takes a tenth of a second to ask)."""
     path = os.path.normpath(path)
     try:

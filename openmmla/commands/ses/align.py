@@ -134,11 +134,11 @@ def shift_plan(session_dir: Path, measured: dict[str, Any], reference: str | Non
     files sharing its start that stay and why). What moves is the recording itself and, when it is
     not a per-person microphone, every video that starts with it to the millisecond, on any host:
     the video of the camera it is the audio track of (a track filed under another machine than its
-    video: jabra-0 under ericli, c920-01 under raspi4-01), or the crops of the one recording they
-    were all cut from (2024-12-10 group_02: jabra-0, c920-01 and c920-04 out of one OBS mosaic), a
+    video: jabra-0 under base-01, c920-01 under pi-01), or the crops of the one recording they
+    were all cut from (jabra-0, c920-01 and c920-04 out of one OBS mosaic), a
     track never moving without its picture. Nothing else moves along: not the reference, not a
-    per-person microphone (a take split can give it the camera's start, as it did the 2025-05-13
-    vimos, which a shift for the camera then moved too), and not another audio recording (each is
+    per-person microphone (a take split can give it the camera's start, and a shift for the camera
+    would then move it too), and not another audio recording (each is
     measured on its own)."""
     from openmmla.collection.recording import default_audio_scope
     from openmmla.commands.ses.tidy import audio_scope_of, parse_recording_name
@@ -372,9 +372,9 @@ def end_session(session_dir: Path, seconds: float, dry_run: bool = False, log=pr
 # the edits of one device's audio file (--warp, --cut, --cut-zeros, --cut-head): samples are cut
 # or silence inserted where the timing changes, nothing is resampled (a stretch would change the
 # pitch of speech), the start stamp of the name stays, and the original is kept under raw/
-MIN_ZERO_RUN = 0.01          # seconds of digital zero a --cut-zeros run needs: 2025-06-16's clock steps left runs of 49 ms and 1.36 s in each vimo, whose ~550 other zero runs last 1-10 ms
+MIN_ZERO_RUN = 0.01          # seconds of digital zero a --cut-zeros run needs: a clock step leaves a longer run than the short zero runs ordinary audio has
 ZERO_RUN_SEARCH = 0.5        # seconds from the time given within which a --cut-zeros run must start
-NOTE_KNOTS = 12              # knots of a warp the manifest note lists; a measured lag track has hundreds (the 2025-10/11 vimo pairs 219-1052), which only the .edits.json keeps
+NOTE_KNOTS = 12              # knots of a warp the manifest note lists; a measured lag track can have hundreds, which only the .edits.json keeps
 
 
 def warp_pieces(frames: int, steps: list[tuple[int, int]]) -> list[tuple[int, int, int]]:
@@ -671,7 +671,7 @@ def get_parser():
         'edits of audio files', "re-time the audio of --devices by cutting samples or inserting silence (nothing is "
         "resampled); the start stamp in the name stays, the original moves under raw/, the manifest notes what was done")
     edits.add_argument('--devices', action='append', default=[], metavar='[HOST/]DEVICE[,...]',
-                       help="the audio recordings to edit (vimo-0-ch1, ericli/vimo-0; repeatable)")
+                       help="the audio recordings to edit (vimo-0-ch1, base-01/vimo-0; repeatable)")
     edits.add_argument('--warp', default=None, metavar='MAP',
                        help='a piecewise time map, a JSON file or inline JSON: {"lags": [[time, lag], ...]} (from time, '
                             'in s into the file as it is, on, its content sits lag s later; the first lag holds from the '

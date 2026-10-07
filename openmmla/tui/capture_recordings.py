@@ -394,7 +394,7 @@ def prune_report(results: list[Pruned], streams: list[CaptureStream]) -> list[st
 # ---- telling it ----
 
 def day_label(day: str) -> str:
-    """the day of a row: its folder's name, 2026-09-19."""
+    """the day of a row: its folder's name, a YYYY-MM-DD date."""
     return str(day or "-")
 
 

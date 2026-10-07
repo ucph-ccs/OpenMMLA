@@ -5,13 +5,13 @@ plain-text state per window (persons as A, B and C, rounded numbers with words, 
 said in words) and the coder's codebook. The tertile words are part of the template, so they are
 fitted once, on every dev session under artifacts/ (never a test session, whichever sessions -s
 picks), and frozen in artifacts/_analysis/interaction/jev/bins.json (bins_pilot.json for a pilot,
-whose tables predate the camera fix). Every later run reads them from there, or from --bins; only
---fit-bins fits them again, and then says so. Answers are cached by the sha256 of the request
-under artifacts/_analysis/interaction/jev/cache/, so a rerun costs nothing; each session gets
-artifacts/<session>/analysis/interaction/jev_<variant>.jsonl (window -> request hash, with the
-fused table's, the template's and the roster's digests; a --limit run adds to it, after dropping
-the answers asked about another roster than the session has now), and the run folder gets
-predictions.csv, bins.json and sanity.json.
+whose state leaves out what the two-camera interleave corrupts). Every later run reads them from
+there, or from --bins; only --fit-bins fits them again, and then says so. Answers are cached by
+the sha256 of the request under artifacts/_analysis/interaction/jev/cache/, so a rerun costs
+nothing; each session gets artifacts/<session>/analysis/interaction/jev_<variant>.jsonl (window ->
+request hash, with the fused table's, the template's and the roster's digests; a --limit run adds
+to it, after dropping the answers asked about another roster than the session has now), and the
+run folder gets predictions.csv, bins.json and sanity.json.
 
 The key is read from the provider's environment variable only (OPENROUTER_API_KEY by default), and the command refuses to call
 without it. It is never printed, logged, cached or put in a URL. --dry-run prints three sample

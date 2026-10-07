@@ -14,7 +14,7 @@ lessons: windows ten seconds apart are near copies, so a split that scatters the
 K-fold, CalibratedClassifierCV, early stopping's validation share) would score a model on windows
 it has as good as seen.
 
-lr-soft (exploratory, WP9) fits lr on several coders' labels of the same windows at once:
+lr-soft (exploratory) fits lr on several coders' labels of the same windows at once:
 soft_rows gives a window one row per coder who gave it a class, each weighing a share of one,
 balanced_weights balances the classes over those weights, and fit_soft and select_soft are fit_model
 and select on those rows, the inner choice still scored against the truth alone.
@@ -103,10 +103,9 @@ RULES = {
             'words': 5,
             'partner_face': 0.2,
             'joint_attention': 0.3,
-            # ... or two pairs of hands within one hand length ("handing over"), in shoulder widths: a hand
-            # is a median 0.46 shoulder widths long (window_features.HAND_LENGTH_SW), and version 2's 0.05
-            # frame widths was 0.50, 0.53 and 0.38 shoulder widths at the median seat of the 540p micro:bit,
-            # 1080p micro:bit and 1080p microscope cameras, the same bound in body units
+            # ... or two pairs of hands within one hand length ("handing over"), in shoulder widths
+            # (window_features.HAND_LENGTH_SW): about what version 2's 0.05 frame widths was at the
+            # recorded cameras' usual seat distance, the same bound in body units
             'hand_dist_min': 0.46,
             'task_gaze': 0.4,
             'watching': 0.5,
@@ -398,7 +397,7 @@ def select(make, grid, X, y, groups, inner=4, sample_weight=None) -> tuple[dict,
     return best[1], best[2]
 
 
-# ---- two coders' soft labels (lr-soft, exploratory, WP9 2026-10-04) ----
+# ---- two coders' soft labels (lr-soft, exploratory) ----
 
 def soft_rows(*labels, n_classes: int = N_CLASSES) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """the rows a fit on several coders' labels of the same windows reads, from one label array per

@@ -22,12 +22,12 @@ and template adds to it rather than replacing it, so a --limit run never cuts a 
 The input is a slot table (`slot_table`), built here from a fused table and the roster's kept tags
 in slot order, so this module needs nothing from the layout but those tags and its gaze shares.
 
-The fusion of 2026-09-23 (layout version 3) named a partner's gaze in-group, the work area and the
+The fusion of layout version 3 named a partner's gaze in-group, the work area and the
 joint-attention baseline, and the state says them: a re-fused table (another digest) and the new
 wording both miss the cache, so every Jev map must be asked again (ses-jev --dry-run estimates the
 cost). A table fused before says what it has and leaves the rest out.
 
-The fusion of 2026-09-24 (layout version 4) measures the hands in body units: how often each
+The fusion of layout version 4 measures the hands in body units: how often each
 person's hands moved (in the image, in their own shoulder widths) or stayed still from one second
 to the next,
 the hands of someone outside the group near theirs, and per pair how often one moved while the
@@ -38,7 +38,7 @@ note changes with it, so every map must be asked again. The criteria-order and
 rerun checks of the design are deferred: the criteria keep CODEBOOK's order, and a rerun is a run
 without the cache.
 
-The fusion of 2026-09-29 (exploratory: built after DEV labels were read) splits a pair's joint
+The v5 fusion (exploratory: built after DEV labels were read) splits a pair's joint
 attention by where the two gazes met, on the group's own faces, hands or work area or on someone
 outside the group, with the first part's own rate 20-40 s earlier, and says per window whether a
 body outside the group was at the table, and with its hands in the work area. A table with those
@@ -121,7 +121,7 @@ SENSOR_NOTE = (
 )
 # the sentence of SENSOR_NOTE the note of the joint split follows
 WORK_AREA_SENTENCE = "The work area is the table region around the members' hands."
-# said only to a table fused with the joint split and the non-member pass (2026-09-29)
+# said only to a table fused with the joint split and the non-member pass
 SPLIT_NOTE = (
     "Joint attention means two members' gaze points were close together; it is split by what they met on: the "
     "group's own faces, hands or work area, or someone outside the group (their face or hands, or right next to "
@@ -149,8 +149,8 @@ MIN_KNOWN_SHARE = 0.05
 DISTANCE_EDGES = (0.6, 1.0)
 DISTANCE_WORDS = ('close', 'normal', 'far')
 # quantity -> (slot-table column, level, whether 0 has its own words and stays out of the fit, tertile words).
-# speech, words and gaze switches are 0 in a quarter of the windows or more, which would pile the lower
-# edges on 0; those windows say "no speech detected", "no words transcribed", "gaze stayed on one target".
+# speech, words and gaze switches are often 0, which would pile the lower edges on 0; those windows say
+# "no speech detected", "no words transcribed", "gaze stayed on one target".
 # The hands' movement is said as shares of the seconds (active, still), which need no word
 TERTILES = {
     'speech': ('speech_ratio', 'group', True, ('low', 'medium', 'high')),
@@ -158,7 +158,7 @@ TERTILES = {
     'head_turn': ('yaw_abs_mean', 'person', False, ('low', 'medium', 'high')),
     'head_variability': ('yaw_std', 'person', False, ('steady', 'shifting', 'restless')),
     'gaze_switches': ('gaze_switches', 'person', True, ('few', 'some', 'many')),
-    # in hand lengths: a template frozen before 2026-09-24 has only 'hand_distance', in frame widths, and
+    # in hand lengths: a template frozen before layout version 4 has only 'hand_distance', in frame widths, and
     # so no edges for this one (ses-jev then asks for --fit-bins)
     'hand_distance_hl': ('hand_dist_min_hl', 'pair', False, ('close', 'medium', 'far')),
 }
@@ -218,8 +218,8 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
     XY_one_active_ratio, XY_both_active_ratio, XY_both_still_ratio, XY_follow_ratio (NaN unless both
     seen together).
 
-    Only for a table fused with the joint split and the non-member pass (2026-09-29; a table
-    without them gets none of these columns, so its slot table is as before): the group values
+    Only for a table fused with the joint split and the non-member pass (a table without them
+    gets none of these columns, so its slot table is as before): the group values
     nm_at_table_ratio and nm_hands_in_table_ratio (NaN when the cameras did not run), and per pair
     XY_joint_member_ratio, XY_joint_outsider_ratio and XY_joint_member_baseline (NaN unless both
     seen together)."""
@@ -296,8 +296,8 @@ def slot_table(table: pd.DataFrame, slots, group_size: int | None = None, vfa_ma
 
 
 def has_split(slots: pd.DataFrame) -> bool:
-    """whether a slot table comes from a table fused with the joint split or the non-member pass
-    (2026-09-29): its states may say them, and its question carries SPLIT_NOTE."""
+    """whether a slot table comes from a table fused with the joint split or the non-member pass:
+    its states may say them, and its question carries SPLIT_NOTE."""
     return any(c in NON_MEMBER_COLUMNS or c.endswith('_joint_member_ratio') for c in slots.columns)
 
 
@@ -720,7 +720,7 @@ def question(variant: str = 'j0', split: bool = False) -> dict:
     """the `questions` of a request, from the coder's codebook: its rule (without the note a coder
     adds for teacher talk, and without the sentence about preceding windows when the state has
     none), the sensor note (with SPLIT_NOTE when `split`), and each class's definition as its
-    criterion; j2 offers unclear as well. Without `split` the question is as before 2026-09-29."""
+    criterion; j2 offers unclear as well. Without `split` the question is as before the joint split."""
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}; one of {', '.join(VARIANTS)}")
     rule = CODEBOOK['rule'].replace(TEACHER_NOTE, '')

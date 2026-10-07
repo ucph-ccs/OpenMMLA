@@ -394,10 +394,10 @@ class IPSBase(Base):
         self.capture_turn = base_capture_turn(self.config, self._base_entry, self.source, self.selected_source,
                                               self.stream_name)
         if self.rotate:
-            # until 2026-10-02 a base turning its frames reported the poses on the turned frame
+            # an earlier version of the base turning its frames reported the poses on the turned frame
             self.logger.warning(f"Base.rotate {self.rotate}: the poses are reported in the camera's frame as the "
                                 f"sensor gives it, not on the turned frame. Camera Sync matrices fitted with "
-                                f"ips-ctag under this Base.rotate before 2026-10-02 are in the turned frame: fit "
+                                f"ips-ctag under this Base.rotate by an earlier version are in the turned frame: fit "
                                 f"them again (or with mmla ses-calibrate).")
         if self.capture_turn and self.rotate:
             self.logger.warning(f"The frames of {self.selected_source} are turned {self.capture_turn} degrees "

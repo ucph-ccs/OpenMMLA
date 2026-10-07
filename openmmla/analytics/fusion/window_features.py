@@ -19,8 +19,8 @@ take the tag of the track's nearest read when that read is at most TAG_MEMORY_SE
 (propagate_track_tags). Such a person counts like a tagged one everywhere but in learning the
 seats, and `n_vfa_propagated` says how many of the window's person frames were named that way; a
 session whose persons were not tracked has no such column. `window_features(..., tag_memory=None)`
-keeps every kept tag and carries the reads without a limit, as every table fused before
-2026-10-02. Right after the expiry, a kept tag the face kept refusing is taken off too: the
+keeps every kept tag and carries the reads without a limit. Right after the expiry, a kept tag
+the face kept refusing is taken off too: the
 features endpoint checks a person whose track remembers a tag against that tag's gallery and
 records the verdict (`reid.tag`), and a run of FACE_REFUSAL_FRAMES or more 'different' face
 verdicts on the tag, with no read of it and no 'same' verdict on it between, takes the tag off the
@@ -41,7 +41,7 @@ PATH_STEP_MIN metres long and at most PATH_STEP_MAX metres for each second betwe
 first and last step the raw step too, since a run's end position is the mean of two reads); a counted
 step belongs to the window of its later position (path_steps). The cell is empty when no step of a
 run ends in the window. `window_features(..., path_rule=False)` sums every raw step between the
-window's own positions in 3D instead, as every table fused before 2026-10-03.
+window's own positions in 3D instead.
 
 Body and gaze follow each camera on its own. Replayed cameras share one angle name, and the
 frames of one frame set share its moment, so a sequence keyed by the angle alternates between
@@ -65,7 +65,7 @@ bodies per frame set. A table of a session without VFA has neither.
 A session with personal microphones (transcripts that carry a `participant`) counts each
 wearer's words only in the 3 s buckets the synchronizer's energy vote gave them
 (`p<tag>_words`). When the worn microphones left level traces (`levels` in the buckets and their
-transcripts, since 2026-09-24) each word is decided on its own instead, from the levels of every
+transcripts) each word is decided on its own instead, from the levels of every
 worn microphone while it was said (attribution.attribute_word): it counts for the wearer when their
 microphone led every other by the margin, and not when another wearer's microphone led (cross-talk)
 or none did (the teacher, or wearers talking over each other), and a word two microphones
@@ -73,8 +73,8 @@ transcribed counts once (attribution.count_once). The bucket vote's counts stay 
 `p<tag>_vote_words` (and `vote_words`, their sum, without a group microphone), which the layout
 drops. Without a group microphone, `words` is then every word the worn microphones transcribed,
 each spoken word once whoever said it (attribution.once_across), as a group microphone counts every
-word it hears. Its spurts, words and turns stay the group microphone's, and so, since
-2026-09-24, do its speech_ratio, silence_ratio and n_speakers_named: they read only the group
+word it hears. Its spurts, words and turns stay the group microphone's, and so do its
+speech_ratio, silence_ratio and n_speakers_named: they read only the group
 microphone's entries of each bucket, as in a session with the group microphone alone (a bucket of
 wearers' entries is the group's silence only while the group microphone was naming speech around
 it, and a group microphone that names speech after a wearer leaves the speech pooled). A session
@@ -86,9 +86,8 @@ pupils the session's manifest declares, else the participants whose tags are at 
 track_<n> or unknown_<n>, or a tag outside the pupils: the teacher, another group, a misread
 badge) is `other_face` or `other_hands`, except an untagged body that stands at the seat (on that
 camera) of a pupil whose tag the frame does not hold: that is almost certainly the pupil with an
-unread badge, and a partner (`n_vfa_seat_partners` counts those gaze frames). The partner columns of
-a table fused before 2026-09-23 counted every other person: they equal partner_* + other_* of this
-table. `p<tag>_in_group` says whether the tag is one of the pupils.
+unread badge, and a partner (`n_vfa_seat_partners` counts those gaze frames). partner_* + other_*
+counts every other person. `p<tag>_in_group` says whether the tag is one of the pupils.
 
 The work area. Before any window is cut, every camera learns where the pupils' hands have been, up
 to and including each frame (openmmla.services.vfa.work_area), and a gaze the server called
@@ -110,8 +109,7 @@ session (a track takes the tag of its nearest read, which can come later, and th
 from the whole session). A later badge read can therefore change an earlier window's values, and a
 server with only forward track memory would not reproduce them exactly.
 
-Where joint attention met (2026-09-29, `window_features(..., joint_split=True)`; off by default, since
-its DEV validation did not pass the pre-registered criteria). A
+Where joint attention met (`window_features(..., joint_split=True)`; off by default). A
 pupil's gaze in a frame has a referent: `member` when it is on the group's own things (a partner's
 face or hands, the pupil's own hands, the work area), `outsider` when it is on the face or hands of
 a non-member of the frame or within reach of them (a hand circle grown by the gaze tolerance, or
@@ -140,18 +138,16 @@ A teacher the pose model did not see, or one the rules above take for a pupil, r
 
 The hand circle, remade. The features endpoint scores a gaze against a circle around each hand and
 measures a pair's hands between the circles' centres (features.hand_regions). Version 2 of the
-circle (2026-09-24) sits 0.33 shoulder widths past the wrist, where the hand is, rather than 0.14;
-every stored event was made with version 1 (its frames say nothing of the circle; a server with
+circle sits 0.33 shoulder widths past the wrist, where the hand is, rather than 0.14; an event
+stored by an older server was made with version 1 (its frames say nothing of the circle; a server with
 version 2 says so in each frame's `scoring`). So before anything else the fusion makes every frame's
 gaze targets and pair hand distances again from what the frame stores (relabel_hand_circles;
 `hand_relabel=False` keeps them as stored, and the work area and hand columns then read the circle
-the frames were made with, table_hand_circle). With the version 1 circle the remake gives back
-99.975 % of the stored targets of the 20 replayed sessions and 99.92 % of their hand distances
-within 0.5 px; every other one is reproduced by moving the stored numbers within their rounding.
-With version 2, 6.8 % of the targets change, most of them from `elsewhere` to a person's own or a
-partner's hands.
+the frames were made with, table_hand_circle). With the version 1 circle the remake gives back the
+stored targets and hand distances, up to the rounding of the stored numbers; with version 2 some
+targets change, most of them from `elsewhere` to a person's own or a partner's hands.
 
-The hands in body units (2026-09-24). Each pupil's wrists are followed in the image, in their own
+The hands in body units. Each pupil's wrists are followed in the image, in their own
 shoulder widths, over 1 s steps on one camera (wrist_moves, hand_status): whether the hands were
 active or still (a lean over resting hands leaves them still, hands carried along with the body
 move), the wrist speed in shoulder widths, the hands of a body outside the group near theirs, and
@@ -163,7 +159,7 @@ cancel out: a 540p and a 1080p camera from the same place give the same values).
 2D positions at one frame set a second: hands close together are not hands touching, and a handover
 of a second or less is seen once or not at all.
 
-Filtered frame sets (2026-10-05, for the sensor-value ladder's re-fused arms). keep_cameras keeps
+Filtered frame sets (for a table re-fused from fewer cameras or frame sets). keep_cameras keeps
 only the named cameras' frames of every VFA frame set (dropping a set left with none), and
 keep_frame_sets keeps the k-th set in time order when k mod PERIOD < KEEP; mmla ses-fuse applies them
 (-cams, -fs) to the VFA events alone, before the fusion, and passes the span of the events before
@@ -226,9 +222,8 @@ ASR_BUCKET = 3.0
 # in a session with a group microphone beside worn ones, a bucket holding only wearers' entries is read
 # as the group microphone's silence only when the group microphone named speech within this many seconds
 # before it and within this many after it. The merged bucket does not say which base reported, and a
-# group base that stopped, started late or dropped out leaves the worn ones reporting alone. On the
-# replayed sessions with both, every such bucket (72) had the group's speech within 15 s on both sides,
-# and the group's speech buckets were at most 18 s apart; this is twice the 15 s
+# group base that stopped, started late or dropped out leaves the worn ones reporting alone. Chosen on
+# recorded sessions with both kinds of microphone, with a margin
 GROUP_SILENCE_REACH = 30.0
 COCO_WRISTS = {'left': 9, 'right': 10}
 # the events that are instants (a frame set, a label), not spans: each belongs to one window
@@ -240,34 +235,25 @@ SEAT_RADIUS_WIDTHS = 0.5
 # one frame set a second), so a tag misread for a few frames makes no seat
 SEAT_MIN_BOXES = 10
 # a track id seen again after this long is another track: ByteTrack keeps a lost track for 30
-# frames (30 s at the bases' one frame set a second; no track of the 21 replayed sessions was
-# away longer than 32 s), so a longer absence means the server restarted or forgot the camera and
-# handed the id out again
+# frames (30 s at the bases' one frame set a second), so a longer absence means the server restarted
+# or forgot the camera and handed the id out again
 TRACK_GAP_SECONDS = 60.0
 # how long after a track last read a tag the fusion trusts the tag on that track: a tag the
 # features endpoint kept on the track without reading it (`tag_match: track`) is taken off after
-# this, and the fusion carries a read along its track no further. In five replayed sessions
-# (2026-10-01) the next read on the track confirmed a kept tag in 86 % of the frames within 5 s of
-# the last read, 69 % at 45 to 60 s and about half after a minute, and contradicted it in 2 % up to
-# two minutes and in 7 to 22 % beyond; at a minute the cleaner sessions keep 87 to 97 % of their
-# tagged frames
+# this, and the fusion carries a read along its track no further. Chosen on recorded classroom data:
+# the longer a kept tag goes unread, the less often the next read on the track confirms it, while a
+# short memory leaves many frames untagged
 TAG_MEMORY_SECONDS = 60.0
 # how many face checks in a row must call the person under a remembered tag someone else before the
 # fusion takes the tag off (refuse_track_tags): the features endpoint checks every person whose
-# track remembers a tag against that tag's gallery (`reid.tag`, since 2026-10-02) and, by default,
-# only records the verdict. A single 'different' verdict is usually wrong (70 of the 82 that a later
-# read on the track could check, in a pilot re-run), and so are runs of dozens: over the 20 replayed
-# sessions after the VFA and IPS re-runs (2026-10-03), six runs of 12 to 48 'different' verdicts in a
-# row were on the right pupil (clean torso reads of the tag and, independently, the pupil's learned
-# seat said so), while apart from one run of 271 (a pupil the tracker carried under another pupil's
-# tag, found in the pilot) no run confirmed to be on the wrong person was longer than 10. Every value
-# from 49 to 271 gives the 20 sessions the same tables, refusing only that run of 271; 60 leaves a
-# margin above the right pupils' 48
+# track remembers a tag against that tag's gallery (`reid.tag`) and, by default, only records the
+# verdict. A single 'different' verdict is usually wrong, and so are runs of dozens on the right
+# pupil, while a pupil the tracker carried under another pupil's tag gives a far longer run. Chosen
+# on recorded classroom data, with a margin above the longest run on the right pupil
 FACE_REFUSAL_FRAMES = 60
-# the path a badge walked (p<tag>_path_m, path_steps). Since the IPS bases store the raw fused pose of
-# every second (84d8758), the sum of every raw step grew 1.74 times over the 20 replayed sessions (2.47
-# times in the sessions a single camera saw), and 36 % of the new path was steps under 5 cm: the
-# badge's jitter, not a walk. So each tag's positions over the whole session are smoothed by a median of
+# the path a badge walked (p<tag>_path_m, path_steps). The IPS bases store the raw fused pose of every
+# second (84d8758), and the sum of every raw step then counts the badge's jitter, steps of a few
+# centimetres, as a walk. So each tag's positions over the whole session are smoothed by a median of
 # 3 within runs whose reads are at most PATH_RUN_GAP seconds apart (a longer gap starts a new run, and
 # no step crosses it), on the floor plan's plane, and a step between two smoothed positions counts only
 # from PATH_STEP_MIN metres up to PATH_STEP_MAX metres for each second between them (a longer one is a
@@ -283,67 +269,46 @@ PROPAGATED = 'propagated'
 # the field of a person whose remembered tag the fusion took off on the face's word: the tag (a list
 # when more than one), which the propagation never gives them back
 TAG_REFUSED = 'tag_refused'
-# the features endpoint's keypoint_confidence and inout_threshold, which every replay used (the
-# server's defaults): the hand relabel must score as the server did, and reads them from a frame that
+# the features endpoint's keypoint_confidence and inout_threshold (the server's defaults): the hand
+# relabel must score as the server did, and reads them from a frame that
 # states them (its `scoring`, every answer from version 2 of the hand circle on); these stand in for
 # a frame that does not
 VFA_KEYPOINT_CONFIDENCE = 0.3
 VFA_INOUT_THRESHOLD = 0.5
-# the wrists and shoulders the body-normalised hand columns read: at this confidence at least one
-# wrist is seen in 94-98 % of the pupils' frames and both shoulders in 94-96 %, by setup (the 20
-# replayed sessions)
+# the wrists and shoulders the body-normalised hand columns read: at this confidence most of the
+# pupils' frames in recorded classroom data show a wrist and both shoulders
 BODY_CONFIDENCE = 0.5
 # a step is two frame sets in a row, this far apart: the bounds below are displacements in a 1 s step
-# (the frame sets are 1.0 s apart in every replay, 56,270 gaps), so a session at another cadence
-# (keyframe_interval 0.5) has no hand steps rather than steps its bounds were not measured for
+# (the bases send one frame set a second), so a session at another cadence (keyframe_interval 0.5)
+# has no hand steps rather than steps its bounds were not measured for
 MIN_STEP_SECONDS = 0.75
 MAX_STEP_SECONDS = 1.5
 # a step is still when every wrist seen moved less than HAND_STILL_SW shoulder widths in the image, and
-# active when one moved at least HAND_ACTIVE_SW; between the two it is neither. Measured on the pupils'
-# steps of the 20 replayed sessions as the table takes them (the tags carried along the tracks), no
-# label read: a wrist whose arm stayed still in the image in that step (its own elbow and shoulder each
-# moved under 0.05 shoulder widths, nothing subtracted) moved a median 0.024-0.027, p90 0.078-0.084, p95
-# 0.109-0.118 and p99 0.22-0.24 shoulder widths in a 1 s step, by setup (100,487 wrists). Still is under
-# that p90 and active is twice it, the logic of the torso frame's bounds (one step). That p90 is a
-# convention of the definition, not the keypoints' noise alone. It follows the arm's bound (0.059 under
-# 0.03, 0.110 under 0.08), since a looser arm lets real movement in, and one still step takes in arms
-# that are just stopping or about to move: those whose previous or next step moved give a p90 of
-# 0.089-0.098, while arms still on the previous and next step as well give 0.055-0.061 (44,224 wrists;
-# 0.08 is about their p95, 0.16 above their p99 of 0.13-0.16). Bounds of 0.06 and 0.12 would read 8
-# points more steps active (46.5, 43.6 and 54.0 % against 38.4, 35.9 and 45.9 % at 540p micro:bit,
-# 1080p micro:bit and 1080p microscope) and 8 to 9 fewer still; two cameras agree a little less there
-# (three-way kappa 0.24, 0.33 and 0.30 against 0.26, 0.36 and 0.33), so reliability does not settle it,
-# and the definition fixed first is kept. The wrist is not in the definition, so its own spread is not
-# cut (a bound under 0.30 on it moves the p90 by 0.002, while one under 0.10 would pin its p99 at
-# 0.097). A step takes the largest of its wrists' moves, so a step whose both arms stayed still reads
-# still in 85-90 % of cases and active in 1.8-2.7 %, by setup. In hand lengths, still is under 0.17
-# and active from 0.35.
-# Over every pupil step, 36-46 % read active, 35-45 % still and 19-20 % between, by setup. The same
-# bounds held against the shoulder midpoint (the frame until 2026-09-24's review, where the arm-still
-# p90 was 0.077-0.081); in the image a lean over resting hands no longer counts: of the steps active
-# against the shoulders, 2.9-4.3 % are still in the image and 11-12 % between
+# active when one moved at least HAND_ACTIVE_SW; between the two it is neither. Still is about the 90th
+# percentile of how far a wrist moves in a 1 s step while its arm stays still in the image (its own
+# elbow and shoulder each moving under 0.05 shoulder widths), measured on recorded classroom data, and
+# active is twice it, the logic of the torso frame's bounds (one step). That bound is a convention of
+# the definition, not the keypoints' noise alone. A step takes the largest of its wrists' moves. In
+# hand lengths, still is under 0.17 and active from 0.35. In the image, not against the shoulders, a
+# lean over resting hands does not count as active
 HAND_STILL_SW = 0.08
 HAND_ACTIVE_SW = 0.16
-# a hand's length (wrist to the farthest fingertip) in shoulder widths: the whole-body hand model's
-# confident hands on 128 replayed frames (368 hands, mean score >= 0.7, plausible) are a median 0.46
-# shoulder widths long (IQR 0.37-0.55; 0.48, 0.47 and 0.40 at 540p micro:bit, 1080p micro:bit and
-# 1080p microscope)
+# a hand's length (wrist to the farthest fingertip) in shoulder widths: the median length of the
+# whole-body hand model's confident hands (mean score >= 0.7) on recorded classroom frames
 HAND_LENGTH_SW = 0.46
 # a body whose box overlaps a pupil's this much (IoU) is a second skeleton of that pupil, no one else
 DUPLICATE_BODY_IOU = 0.5
 # a body whose box lies this much inside a pupil's (the share of its own area) is part of that pupil:
-# an arm or a head the pose model saw apart. Of the bodies whose hands the first rule (the IoU alone)
-# counted near a pupil's on the 20 replayed sessions, 7 %, 13 % and 24 % lay so (540p micro:bit,
-# 1080p micro:bit, 1080p microscope)
+# an arm or a head the pose model saw apart, which the IoU alone misses
 CONTAINED_BODY_SHARE = 0.6
 # a body with a hand circle this close to one of a pupil's (its centre within this many of the pupil's
 # shoulder widths, a fifth of a hand's length) shares the pupil's wrist: a second skeleton of the
-# pupil; 9-15 % of those bodies had one, by setup
+# pupil
 DUPLICATE_HAND_SW = 0.1
 # a body outside the group is a non-member of the frame only when its shoulder width is at least this
 # share of the pupils' (its box width of the pupils' median box width when its shoulders are not seen):
 # a body at the group's depth reads about 1, and one about 1.7 times as far from the camera (the next
-# table) projects at 0.6 or less. Fixed from the geometry before any window was scored, no label read
+# table) projects at 0.6 or less. Fixed from the geometry, not from labels
 NON_MEMBER_SCALE = 0.6
 # a non-member is at the table when their box comes within this many pupil shoulder widths of the
 # table box: about two hand lengths (HAND_LENGTH_SW), an adult leaning in. Fixed like NON_MEMBER_SCALE
@@ -356,8 +321,7 @@ REFERENT_FACE_MARGIN = vfa_features.FACE_MARGIN
 MEMBER_LABELS = ('partner_face', 'partner_hands', 'own_hands', 'work_area')
 MEMBER, OUTSIDER = 'member', 'outsider'
 # a pair's follow_ratio needs at least this many steps with one active and the other still: a share of
-# one or two steps can only be 0, 0.5 or 1, and 37-48 % of the windows with such a step had no more
-# than two, by setup
+# one or two steps can only be 0, 0.5 or 1
 FOLLOW_MIN_STEPS = 3
 
 
@@ -776,8 +740,8 @@ class PersonalSpeech:
     # per participant: the level traces of their microphone, from the buckets and their transcripts
     traces: dict[str, LevelTraces] | None = None
     # whether the words are decided one by one: every wearer who left transcripts left level traces,
-    # and the buckets carry them wherever a synchronizer voted (a session transcribed before 2026-09-24
-    # has none, and one whose synchronizer kept no levels keeps the bucket vote)
+    # and the buckets carry them wherever a synchronizer voted (a session transcribed before the level
+    # traces has none, and one whose synchronizer kept no levels keeps the bucket vote)
     by_word: bool = False
     margin_db: float = ENERGY_MARGIN_DB
     # where the levels that decide the words come from: 'buckets' (the transcripts' fill the gaps) or
@@ -1037,16 +1001,15 @@ def group_speech_entries(entries: list[tuple[str, float, Any]], wearers: set[str
     session where it ran beside worn ones; None when the bucket cannot say. The bucket does not say
     which base an entry came from, but a worn microphone names its speech with its wearer's tag
     (`wearers`, personal_speech's participants) and the group microphone with the group's id
-    (`group_01` or `group_02` in the replays), so the group's are the entries not named after a
+    (`group_01`, say), so the group's are the entries not named after a
     wearer (personal_speech checks the group's own chunks are not named after one). The synchronizer
     keeps a silent entry only when no microphone heard speech, so a bucket with a wearer's speech and
     none of the group's is one the group microphone called silent, if it reported that bucket at all:
-    it becomes one silent entry of the bucket, as the group microphone's own report was (all 3,895
-    silent entries of the 20 replays cover their 3 s bucket), when the group microphone named speech
+    it becomes one silent entry covering the bucket, as a silent report of the group microphone does,
+    when the group microphone named speech
     near it (`group_near`, PersonalSpeech.group_near), and None otherwise, since a group base that
-    stopped or dropped out leaves the worn ones reporting alone. On the four replays with worn
-    microphones the group base logged every bucket, and said silent in each of the 72 buckets
-    holding only wearers' entries. A bucket without entries stays without."""
+    stopped or dropped out leaves the worn ones reporting alone. A bucket without entries stays
+    without."""
     kept = [entry for entry in entries if entry[0] not in wearers]
     if kept or not entries:
         return kept
@@ -1609,7 +1572,7 @@ def camera_keys(frames: list[dict], shared_angles: Iterable[str] = ()) -> list[s
     return keys
 
 
-# ---- frame-set filters for re-fused arms (the sensor-value ladder, 2026-10-05) ----
+# ---- frame-set filters for re-fused tables (fewer cameras or frame sets) ----
 
 def keep_cameras(records: Iterable[dict], cameras: Iterable[str],
                  layout: tuple[int | None, frozenset[str]] | None = None) -> tuple[list[dict], dict]:
@@ -1983,8 +1946,8 @@ def relabel_hand_circles(records: Iterable[dict], nudge: float | None = None,
     """the vfa_features records with every frame's gaze targets and pair hand distances made again
     from what the frame stores, with the hand circle placed by `nudge` (features.HAND_NUDGE when not
     given; features.relabel_answer), so a change of the hand circle needs no replay of the video.
-    With the circle the server used (features.HAND_NUDGE_V1 for every event stored before its image
-    was rebuilt) it gives back the server's targets and distances. Run it on the records as stored:
+    With the circle the server used (features.HAND_NUDGE_V1 for an event stored by an older server)
+    it gives back the server's targets and distances. Run it on the records as stored:
     the server's names (person_id, the pair keys) are what it rebuilds from, so it comes before
     propagate_track_tags, and before label_work_areas, since the circle decides which gazes are
     `elsewhere`. A frame the server already made with this circle (its `scoring` says so,
@@ -2425,7 +2388,7 @@ def body_gaze_features(features: EventIndex, ws: float, we: float, participants:
     frame to the next; the hand steps; the gaze switches; the yaw spread) is taken within one
     camera, and the cameras are then pooled, each frame (or step) counting once in the shares and
     the means. The older distances and speeds are in shares of the frame's width; the hand columns
-    added on 2026-09-24 are in shoulder widths, so neither the camera's distance nor its field of
+    are in shoulder widths, so neither the camera's distance nor its field of
     view moves them. `layout` is the session's frame_set_layout, worked out from the whole index when
     not given; `pupils` the session's pupils (default_pupils of the participants when not given),
     who alone are partners; `gaze_index` the session's gaze_points, worked out from the whole index
@@ -2871,8 +2834,8 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     targets and pair hand distances are first made again with the current hand circle
     (relabel_hand_circles, features.HAND_NUDGE); without it they stay as the server stored them,
     and the work area and the hand columns read the circle those were made with
-    (table_hand_circle: the version the frames state, version 1 for frames that state none, as every
-    frame stored before the server's image was rebuilt). With `work_area`
+    (table_hand_circle: the version the frames state, version 1 for frames that state none, as a
+    frame stored by an older server). With `work_area`
     (the default) a gaze the server called elsewhere that lands in its camera's work area is
     work_area (label_work_areas). A tag the features endpoint kept on a track more than
     `tag_memory` seconds after the track last read it is taken off first, before anything learns
@@ -2888,11 +2851,11 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     non-members and the pupils' gaze referents (mark_referents), the pupil pairs' joint attention is
     split by where it met (pair<a>_<b>_joint_member_ratio ..., body_gaze_features) and the group gets
     nm_at_table_ratio, nm_hands_in_table_ratio and n_vfa_non_members (non_member_features, before the
-    seat trace, which stays last); without it the table is the one fused before 2026-09-29, byte for
-    byte. With `path_rule` (the default) a person's path is counted over the whole session on the
+    seat trace, which stays last); without it the table has none of these marks and columns. With
+    `path_rule` (the default) a person's path is counted over the whole session on the
     floor, smoothed, without the jitter and the jumps, each step in the window of its later position
-    (path_steps); without it every raw step between the window's own positions is summed in 3D, as in
-    every table fused before 2026-10-03. `span` is the first and last moment the windows cover
+    (path_steps); without it every raw step between the window's own positions is summed in 3D.
+    `span` is the first and last moment the windows cover
     (session_span of `events` when not given): a re-fusion whose VFA frame sets were filtered
     (keep_cameras, keep_frame_sets) passes the span of the events before the filter, so its windows
     are the grid of the table fused without it."""
@@ -2915,7 +2878,7 @@ def window_features(events: dict[str, list[dict]], window: float = 10.0, step: f
     translations = EventIndex(events.get(EVENT_TYPE_IPS_TRANSLATION, []), 1.0)
     relations = EventIndex(events.get(EVENT_TYPE_IPS_RELATION, []), 1.0)
     # every badge's path over the whole session, on the floor plan's plane, smoothed and without the
-    # jitter and the jumps; None sums each window's raw steps in 3D, as before 2026-10-03
+    # jitter and the jumps; None sums each window's raw steps in 3D
     steps = path_steps(translations.records, path_floor(events.get(EVENT_TYPE_IPS_ROTATION, []))) if path_rule else None
     raw = events.get(EVENT_TYPE_VFA_FEATURES, [])
     layout = frame_set_layout(raw)

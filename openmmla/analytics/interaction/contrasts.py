@@ -1,5 +1,5 @@
 """Paired contrasts of two variants of the 10 s interaction classifier on the same windows, by unit
-(mmla ses-contrast, 2026-10-04).
+(mmla ses-contrast).
 
 A variant is read from a run's predictions.csv by its metrics key, model:temporal:hmm, with
 :arm for an ablated arm (the full arm by default); the two sides may come from one run or from two

@@ -1,4 +1,4 @@
-"""pmil-lr, an exploratory candidate of the architecture panel (WP9, 2026-10-04): a multiple-instance
+"""pmil-lr, an exploratory candidate of the architecture panel: a multiple-instance
 logistic model over the pupil pairs of a window. It is never in -m all and stays exploratory
 whatever it scores; the declared evaluation does not read it.
 

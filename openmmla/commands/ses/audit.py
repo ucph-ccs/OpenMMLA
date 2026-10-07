@@ -100,7 +100,7 @@ MEDIA_DIR = 'media'
 ANSWERS_DIR = 'answers'
 SCORES_DIR = 'scores'
 LETTERS = 'ABC'
-# the sizes a flag does not give: about 3 to 4 hours for the primary auditor over 16 lessons
+# the sizes a flag does not give, chosen so that the primary auditor's answers take a few hours
 DEFAULTS = {'person_frames': 50, 'speech': 10, 'roster': 4, 'reliability': 0.2, 'practice': 12, 'seed': 1,
             'margin': 10.0, 'tag_px': 2.0, 'min_tag_match': 0.95, 'min_tag_frames': 3, 'check_frames': 20,
             'boot': 2000, 'boot_seed': 0}

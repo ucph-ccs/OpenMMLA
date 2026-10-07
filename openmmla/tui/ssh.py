@@ -406,7 +406,7 @@ _RESOLVED_SSH_ENDPOINTS: dict[tuple[str, int], tuple[str, int]] = {}
 
 def resolve_ssh_endpoint(host: str, port: int) -> tuple[str, int]:
     """resolve the effective hostname/port via `ssh -G`, honoring ~/.ssh/config
-    aliases (Host server-01 -> HostName 192.168.x.x) that a plain socket
+    aliases (Host uber-server -> HostName 192.168.x.x) that a plain socket
     lookup cannot see. Results are cached."""
     key = (host, port)
     cached = _RESOLVED_SSH_ENDPOINTS.get(key)

@@ -2,7 +2,7 @@
 one session after another, the three pipelines of a session at once, and fuse what they wrote
 into the session's 10 s window table.
 
-Run on the machine that holds the artifacts and the pipeline environments (server-01), inside
+Run on the machine that holds the artifacts and the pipeline environments (gpu-server), inside
 tmux, from the repository root in the uber-base environment:
 
     python scripts/replay_sessions.py --dry-run           # the plan, nothing launched
@@ -12,7 +12,7 @@ tmux, from the repository root in the uber-base environment:
 
 For every session the runner reads `artifacts/<session>/manifest.json`, picks the group
 microphone (jabra-0, else vimo-0-ch0, vimo-0, badge-0) and every video, writes one config per
-pipeline from that pipeline's template config (`--asr-template` ...: the pilot configs, whose
+pipeline from that pipeline's template config (`--asr-template` ...: configs of an earlier run, whose
 system sections and camera intrinsics are kept), puts the session's transformation matrices in
 `<project_dir>/camera_sync/` (a multi-camera session calibrates itself first with `mmla
 ses-calibrate`: a camera's own fit is taken when it rests on enough paired sightings, else the
@@ -84,11 +84,10 @@ def log(message: str) -> None:
 
 def calibration_for(session_id: str, cameras: list[str]) -> tuple[str | None, str, list[str]]:
     """(calibration folder or None, main camera, the cameras the IPS run takes) of a session.
-    A single camera is its own main without matrices; the wegrow (microscope) rig is the
-    2025-06-16 calibration with raspi5-01 (c920-05) as main; the micro:bit rig from 2025-10-15 on
-    the calibration of that day, with the flipped-main variant for 2025-10-07, when camera 1
-    hung upside down and its video was flipped; an earlier micro:bit session (2024-12-10, two
-    cameras) takes the June 2025 calibration of that rig (a, b, c = c920-02/03/04)."""
+    A single camera is its own main without matrices; several cameras take the calibration of
+    their rig (the wegrow or the micro:bit one, by the session id) that holds for the session's
+    date, with its main camera, and the flipped-main variant for a session whose main camera hung
+    upside down and whose video was flipped."""
     date = session_id.split('_')[1]
     cameras = sorted(cameras)
     if len(cameras) == 1:

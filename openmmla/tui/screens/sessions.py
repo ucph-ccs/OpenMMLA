@@ -324,7 +324,7 @@ def _db_host_from_config(config: dict) -> str:
 
 
 def _db_endpoint_summary(config: dict) -> str:
-    """e.g. 'MongoDB@ericli.local:27017 · InfluxDB@server-01:8086'."""
+    """e.g. 'MongoDB@laptop.local:27017 · InfluxDB@uber-server:8086'."""
     parts = []
     for section, name in (("MongoDB", "MongoDB"), ("InfluxDB", "InfluxDB")):
         url = str((config.get(section) or {}).get("url") or "")

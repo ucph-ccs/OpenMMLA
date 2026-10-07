@@ -3,9 +3,9 @@ collection layout the pipelines replay with source: file.
 
 The collection layout is artifacts/<session>/collection/<host>/{audio,video}/<kind>_<host>_<device>_<unix start>.<ext>
 with a manifest per host and one for the session (openmmla.collection.recording). What earlier
-runs left instead: a video named by the local time it started (OBS, QuickTime: '2025-05-13 11-01-06.mov',
-'record_20250616_124506.mp4'), a video or audio file already named with its unix start
-('record_1759826194.755_raspi4-01.mp4', 'audio_1759832419.338_ch0.wav'), and an ASR base's
+runs left instead: a video named by the local time it started (OBS, QuickTime: '2025-01-01 10-00-00.mov',
+'record_20250101_100000.mp4'), a video or audio file already named with its unix start
+('record_1735725600.000_pi-01.mp4', 'audio_1735725600.000_ch0.wav'), and an ASR base's
 folder of three-second recordings ('badge_0/records/badge_0_record_<unix>.wav', or 'segments/'
 when the raw records were not kept), sometimes downloaded twice ('... (2).wav'). This command
 finds them, moves the continuous files under their new names, concatenates a base's segments into
@@ -38,9 +38,9 @@ MIN_SEGMENTS = 5
 SEGMENT_RATE = 16000
 # a gap between two records of a base that opens at the same moment in every base of the import is
 # a step of the recording machine's wall clock (the bases stamp their records with time.time()),
-# unless all of them stopped at once: 2025-06-16's three vimos got 1.361 s and 0.049 s of silence so
-CLOCK_STEP_MIN = 0.02        # seconds off the base's record spacing that make a gap: the 2025-06-16 vimos hold ~550 zero runs of 1-10 ms each that are not steps
-CLOCK_STEP_TOLERANCE = 0.1   # seconds within which the bases' gaps must open and agree in length: 2025-06-16's opened within 4 ms and differed by 4 ms at most
+# unless all of them stopped at once
+CLOCK_STEP_MIN = 0.02        # seconds off the base's record spacing that make a gap: longer than the short zero runs of a few ms a recording holds that are not steps
+CLOCK_STEP_TOLERANCE = 0.1   # seconds within which the bases' gaps must open and agree in length: the gaps of one step open together and last alike to a few ms
 DEFAULT_TZ = 'Europe/Copenhagen'
 DEFAULT_EXPERIMENT = 'exp_wegrow_life'
 DEFAULT_GROUP = 'group_01'
@@ -48,7 +48,7 @@ DEFAULT_GROUP = 'group_01'
 UNIX_RE = re.compile(r'(?<!\d)(\d{10}(?:\.\d+)?)(?!\d)')
 LOCAL_DASH_RE = re.compile(r'(\d{4})-(\d{2})-(\d{2})[ _T](\d{2})-(\d{2})-(\d{2})')
 LOCAL_COMPACT_RE = re.compile(r'(?<!\d)(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?!\d)')
-HOST_RE = re.compile(r'(?<![a-z0-9])([a-z]+[0-9]*-\d{1,3})(?![0-9])', re.I)  # a device or machine label: c920-01, raspi4-01, vimo-0
+HOST_RE = re.compile(r'(?<![a-z0-9])([a-z]+[0-9]*-\d{1,3})(?![0-9])', re.I)  # a device or machine label: c920-01, pi-01, vimo-0
 CHANNEL_RE = re.compile(r'_ch(\d+)(?=\.)', re.I)
 COPY_RE = re.compile(r' \(\d+\)(?=\.[A-Za-z0-9]+$)')
 SESSION_DIR_RE = re.compile(r'session_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})Z')
@@ -56,8 +56,8 @@ SESSION_DIR_RE = re.compile(r'session_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})Z')
 
 def host_and_device(name: str) -> tuple[str, str]:
     """the machine and the device a file name carries, as its <label>-<number>
-    parts in order: 'raspi4-01_c920-01_...' is the camera c920-01 on raspi4-01.
-    One part alone is the machine ('record_...-raspi4-01.mp4'), and the device
+    parts in order: 'pi-01_c920-01_...' is the camera c920-01 on pi-01.
+    One part alone is the machine ('record_...-pi-01.mp4'), and the device
     slot then keeps the placeholder its caller picks; none is neither."""
     labels = [_safe(label) for label in HOST_RE.findall(name)]
     labels = [label for label in labels if label]
@@ -71,13 +71,13 @@ def _safe(label: str) -> str:
 
 
 def unix_in_name(name: str) -> float | None:
-    """the unix start time a file name carries ('..._1759826194.755_raspi4-01.mp4'), else None"""
+    """the unix start time a file name carries ('..._1735725600.000_pi-01.mp4'), else None"""
     match = UNIX_RE.search(name)
     return float(match.group(1)) if match else None
 
 
 def local_time_in_name(name: str, tz: str) -> float | None:
-    """the local start time a file name carries ('2025-05-13 11-01-06.mov', 'record_20250616_124506.mp4'),
+    """the local start time a file name carries ('2025-01-01 10-00-00.mov', 'record_20250101_100000.mp4'),
     as unix time, else None"""
     match = LOCAL_DASH_RE.search(name) or LOCAL_COMPACT_RE.search(name)
     if not match:
@@ -601,7 +601,7 @@ def execute(plan: Plan, copy: bool = False, log=print) -> dict[str, Any]:
 
 def read_meta(plan: Plan) -> dict[str, Any]:
     """'settings' and 'participants' from a meta.txt in the session folder (an earlier run's note:
-    'participants: valdemer=0, thorbjorn=1'), {} when there is none"""
+    'participants: alice=0, bob=1'), {} when there is none"""
     root = _legacy_root(plan) or Path(plan.source)
     for candidate in sorted(root.glob('meta*.txt')) if root.exists() else []:
         meta: dict[str, Any] = {}

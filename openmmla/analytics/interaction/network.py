@@ -16,7 +16,7 @@ layout.py (a value whose mask is 0 is already 0 there):
 with a label per window: 0 individual, 1 social, 2 collaborative, anything else (uncoded, unclear,
 None, NaN) none. `session_tensors` turns a session into the dict every other function reads; the
 pooled control (PooledNet) reads the 118-column pooled view instead of the tokens. net-attn
-(AttentionNet, an exploratory candidate of the architecture panel, WP9) reads the same tokens
+(AttentionNet, an exploratory candidate of the architecture panel) reads the same tokens
 through self-attention over the persons and trains through the same functions.
 
 The training part follows the recipe fixed before any result: tempered class weights,
@@ -181,8 +181,8 @@ class GroupQueryPool(nn.Module):
 
 
 class AttentionNet(nn.Module):
-    """net-attn, an exploratory candidate of the architecture panel (WP9, 2026-10-04; never a rung
-    of the ladder and never in -m all): self-attention over the person slots with the pairs as its
+    """net-attn, an exploratory candidate of the architecture panel (never a rung of the ladder
+    and never in -m all): self-attention over the person slots with the pairs as its
     bias (PersonAttention), attention pooling queried by the group token and group size
     (GroupQueryPool), then the net family's window layer (the speech token, the pooled persons and
     the availability bits), temporal blocks (none with `dilations` ()) and head. The pairs reach the
@@ -238,7 +238,7 @@ KEEP_EVERY = 5
 SMALL = {'d_set': 16, 'd_speech': 12, 'd_window': 32}
 SMALL_BELOW = 3000
 VARIANTS = ('pooled-net', 'net-notcn', 'net', 'net-pair')  # ladder rungs a-d; rung e (pretraining) is deferred
-# the exploratory candidates of the architecture panel (WP9, 2026-10-04): no rung of the ladder
+# the exploratory candidates of the architecture panel: no rung of the ladder
 EXPLORATORY = ('net-attn',)
 # net-attn's two configurations, taken by the rungs' rule (use_small)
 ATTENTION = {'d_person': 24, 'heads': 2, 'd_speech': 16, 'd_window': 48}
@@ -749,7 +749,7 @@ def common_epoch(epochs, every=KEEP_EVERY) -> int:
 
 def oof_at(outer_train, kept, epochs, make=None, seed=0, weights=None, device=None, every=KEEP_EVERY):
     """the inner out-of-fold logits of every split at one common epoch (the equal treatment of the
-    networks, 2026-10-04), rather than at each split's own best epoch as select_epochs gives them:
+    networks), rather than at each split's own best epoch as select_epochs gives them:
     common_epoch(epochs), read from the held-out logits select_epochs kept (`kept`, its `keep`)
     where a split trained that long, and for a split that patience stopped before it from a replay
     of that split with the same seed and weights to that epoch, which repeats its first epochs

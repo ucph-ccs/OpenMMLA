@@ -202,7 +202,7 @@ def open_mongo(config: dict, timeout_ms: int = 1500):
     """the session database of a config (the merged dashboard config, or its MongoDB section),
     None when pymongo is missing, nothing is configured or the server does not answer within
     `timeout_ms` (1.5 s for a page; a report job, whose result is cached, waits longer, since a
-    first connection over the tailnet can take 1.7 s). Read-only by use: unlike
+    first connection over a remote link can take 1.7 s). Read-only by use: unlike
     MongoDBClientWrapper it creates no index."""
     section = (config or {}).get('MongoDB', config) if isinstance(config, dict) else None
     url = section.get('url') if isinstance(section, dict) else None

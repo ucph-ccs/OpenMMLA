@@ -6,8 +6,8 @@ without it (one written before the key, or saved by a form that does not carry i
 of its size, and the principal point stands in: cx and cy lie near the centre of the calibration
 images, so frames within 10% of (2cx, 2cy) are read with the intrinsics as they are, and others
 are scaled from the common frame size nearest (2cx, 2cy) (1920x1080 for the Logitech C920, MacBook
-Air and iPhone profiles). A frame of another size than the calibration's, such as the 960x540
-recordings of 2024-12-10, needs fx, fy, cx and cy scaled by the width and height ratios: read with
+Air and iPhone profiles). A frame of another size than the calibration's, such as a 960x540
+recording, needs fx, fy, cx and cy scaled by the width and height ratios: read with
 the full-size intrinsics, every tag comes out twice as far away and off to one side, and no
 position is in metres. The size compared is the frame's before `rotate` turns it; a fisheye
 camera's frames are remapped with its own K first and are not scaled."""

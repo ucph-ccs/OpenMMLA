@@ -4,7 +4,7 @@ one pose-to-pose transform (openmmla.bases.ips.transform.direct_transform_matric
 them. Offline, a whole session's paired sightings are at hand: the tag *positions* the two
 cameras report are fitted with one rigid transform (Kabsch), which holds steady where a small
 tag's orientation, and so a pose-to-pose transform, does not; the pose-to-pose average is kept
-next to it for comparison. Given matrices (Marie's, an earlier session's) are scored by their
+next to it for comparison. Given matrices (an earlier calibration's or session's) are scored by their
 residuals on the same pairs, and, for a camera with few pairs, on near-simultaneous sightings
 (`near_pairs`, the frames around them found by `near_stamps`) and on its sightings shared with a
 third camera already placed (`relayed_pairs`).

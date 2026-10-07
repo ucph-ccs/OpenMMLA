@@ -28,11 +28,10 @@ lost track whose tag has no gallery to compare puts its own looks in that galler
 distances are the nearest of the memory's looks, which keep the last few, a couple of seconds
 apart (TrackLooks, TagGallery).
 
-The defaults come from a calibration on the stored frames of four classroom sessions (14
-cameras, 2026-10-02), with galleries of 10 looks 2 s apart: a face cosine distance of 0.55 and a
-colour Hellinger distance of 0.12, with the nearest-tag rule, confirmed 90 % of same-person
-probes at 0.8 % false accepts. The face separates far better (an AUC of 0.98 to 0.99 against
-0.91 for the colour), but only 30 to 39 % of the torso reads show a usable face.
+The defaults were chosen on recorded classroom data, with galleries of 10 looks 2 s apart: a face
+cosine distance of 0.55 and a colour Hellinger distance of 0.12, with the nearest-tag rule. The
+face separates people far better than the colour, but only some of the torso reads show a usable
+face.
 
 The descriptors live in process memory only: a track's in TrackLooks, a session's tags' in
 TagGallery (the frames in which a tag was read on the torso). Nothing here writes a descriptor to
@@ -131,10 +130,9 @@ def _apply(params, config: dict | None):
 
 @dataclass
 class ColourParams:
-    """the clothing colour check, as calibrated on stored classroom frames (2026-10-02). Off by
-    default: in the pilot re-run of 2026-10-02 its 'different' verdicts on remembered tags were
-    right only 4 to 9 % of the time (lighting, posture and occlusion move the histogram as much as
-    a change of person), so the face alone checks identities."""
+    """the clothing colour check, chosen on recorded classroom data. Off by default: lighting,
+    posture and occlusion move the histogram as much as a change of person, so its 'different'
+    verdicts on remembered tags are seldom right, and the face alone checks identities."""
     enabled: bool = False
     same: float = 0.12  # a Hellinger distance at or below it confirms the person (a tag only when it is also the nearest)
     different: float = 0.35  # above it: someone else; in between, unknown
@@ -154,8 +152,7 @@ class ColourParams:
 
 @dataclass
 class FaceParams:
-    """the face check, as calibrated on stored classroom frames (2026-10-02); off unless
-    switched on."""
+    """the face check, chosen on recorded classroom data; off unless switched on."""
     enabled: bool = False
     same: float = 0.55  # a cosine distance at or below it confirms the person (a tag only when it is also the nearest)
     different: float = 0.65  # above it: someone else; in between, unknown
@@ -173,13 +170,11 @@ class AppearanceParams:
     """the appearance checks of the tracker: the colour, the face, their memories, and what the
     tracker does with their verdicts.
 
-    `split_on` and `tag_check_acts` come from the pilot re-run of three sessions (2026-10-02)
-    with the first rules (`unconfirmed`, and tag checks that act): 3,978 of its 4,013 splits had
-    no face to compare, 75 % of the 3 to 5 s splits that reads on both sides could judge were the
-    same person, and they cost the pupils 2.8 points of fused presence pooled (one pupil 12.7)
-    for 33 fewer wrong tags; a face 'different' against a remembered tag's gallery was wrong in
-    70 of 82 checkable cases, at every score. A face 'same' (right 99.6 % of the time on tags) and
-    a 'different' refusing a lost track a person (right in 4 of 4) act as before."""
+    `split_on` and `tag_check_acts` were chosen on recorded classroom data over the first rules
+    (`unconfirmed`, and tag checks that act): few re-found tracks show a face to compare, a split
+    on anything but 'same' mostly cut one person's track in two, and a face 'different' against a
+    remembered tag's gallery was too often wrong to act on. A face 'same' and a 'different'
+    refusing a lost track a person act as they did under the first rules."""
     colour: ColourParams = field(default_factory=ColourParams)
     face: FaceParams = field(default_factory=FaceParams)
     descriptor_frames: int = 10  # a track keeps its last this many looks
@@ -551,7 +546,7 @@ def align_face(image: np.ndarray, landmarks) -> np.ndarray | None:
 def landmark_yaw(landmarks) -> float | None:
     """how far a face is turned, in degrees, from where the nose sits between the eyes: its
     offset from their midpoint against half their distance, as an angle (0 facing the camera;
-    50 degrees is an offset of 0.6 eye distances, the calibration's limit for a usable face)."""
+    50 degrees is an offset of 0.6 eye distances, the default limit for a usable face)."""
     points = ordered_landmarks(landmarks)
     if points is None:
         return None
@@ -610,8 +605,8 @@ class FaceEmbedder:
 class ScrfdDetector:
     """InsightFace's SCRFD face detector (det_10g.onnx: three strides, two anchors per cell, five
     landmarks), run on a crop around a head box for a person the server's face detector missed
-    (only when `detection_model` names it: faces found in the pose's head boxes separated poorly
-    in the calibration, an AUC of 0.898 against 0.984 for the detector's faces):
+    (only when `detection_model` names it: faces found in the pose's head boxes tell people apart
+    less well than the detector's faces):
     `detect(image, box)` gives (score, face box, landmarks) of the best face whose centre lies in
     the box, in the image's pixels, or None."""
 
@@ -805,7 +800,7 @@ def _face_embedding(image, person, face, min_confidence, params: FaceParams, emb
     if landmarks is None or width is None or width < params.min_face_px:
         return None
     # the turn by the landmarks alone: the pose's head yaw is too coarse a gate (faces it puts
-    # past 60 degrees still separated with an AUC of 0.98 in the calibration)
+    # past 60 degrees can still tell people apart)
     yaw = landmark_yaw(landmarks)
     if yaw is None or abs(yaw) > params.max_face_yaw:
         return None

@@ -19,17 +19,15 @@ tag. The tracker here (a small subclass of Ultralytics' BYTETracker, below) adds
 - **freeze_lost** (off): a lost track stays where its person was last seen, with no velocity,
   and a track found again starts its motion afresh from where it is found.
 
-The cascade and freezing were weighed in a replay of the stored boxes of 20 sessions (36.9
-camera-hours, 2026-10-02), with the first split rule: a track found again after 3 to 4 s already
-holds someone else as often as after a longer gap (14 to 17 % of the reads across it disagree,
-against 4 to 5 % after 2 s and 0.1 % in view), and splitting every such track cut the fused
-frames whose tag a read on the same track contradicts from 2.84 % to 1.02 %. The cascade keeps a
-person whose box a lost track would take on their own track, but swaps more persons between
-tracks in view, which no split catches (1.52 % with the split); freezing adds errors in every
-pairing. Both stay as switches. A pilot re-run of three sessions then found that splitting every
-re-found track the face did not confirm cost more presence than it saved in wrong tags (the face
-had nothing to compare for 3,978 of 4,013 splits, and 84 % of the re-finds after 3 s were the
-same person), so by default only a 'different' verdict splits.
+The cascade and freezing were weighed on recorded classroom data, with the first split rule: a
+track found again after 3 to 4 s already holds someone else about as often as after a longer gap,
+far more often than after 2 s or in view, and splitting every such track cut the fused frames
+whose tag a read on the same track contradicts. The cascade keeps a person whose box a lost track
+would take on their own track, but swaps more persons between tracks in view, which no split
+catches; freezing adds errors in every pairing. Both stay as switches. Splitting every re-found
+track the face did not confirm then cost more presence than it saved in wrong tags (the face
+seldom has anything to compare, and most re-finds after 3 s are the same person), so by default
+only a 'different' verdict splits.
 
 The appearance (openmmla.services.vfa.appearance: the face when it is switched on, and the
 clothing colour, off by default) also blocks a lost track from a person it says is someone

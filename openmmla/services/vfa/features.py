@@ -27,11 +27,10 @@ GAZE_UNKNOWN = 'unknown'  # no face found for the person, or the gaze model gave
 # the forearm, so that it covers the fingers rather than the wrist bone
 HAND_RADIUS_SHOULDERS = 0.4
 # how far past the wrist the circle's centre sits, in radii, by version of the hand circle. A
-# whole-body hand model (DWPose-l on the YOLO boxes of 128 classroom frames, 334 confident hands)
-# puts the hand's centroid a median 0.33 shoulder widths past the YOLO wrist (IQR 0.25-0.40). Version
-# 1 (0.35 radii, 0.14 shoulder widths) held 72 % of that model's fingertips (77 % on the 42 hands
-# judged plausible); a circle of the same radius centred at 0.33 holds 94 % (96 %). Version 2 centres
-# it there: 0.825 radii of 0.4 shoulder widths is 0.33
+# whole-body hand model (DWPose-l on the YOLO boxes of recorded classroom frames) puts the hand's
+# centroid about 0.33 shoulder widths past the YOLO wrist, and a circle of the same radius centred
+# there holds more of that model's fingertips than version 1 (0.35 radii, 0.14 shoulder widths).
+# Version 2 centres it there: 0.825 radii of 0.4 shoulder widths is 0.33
 HAND_NUDGES = {1: 0.35, 2: 0.825}
 HAND_CIRCLE_VERSION = 2
 HAND_NUDGE = HAND_NUDGES[HAND_CIRCLE_VERSION]

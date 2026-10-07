@@ -1,5 +1,5 @@
 """The evaluation driver of the 10 s interaction classifier (Layer A): it reads every session's
-fused table and coded labels, holds out one date at a time (or, once, the four TEST sessions),
+fused table and coded labels, holds out one date at a time (or, once, the TEST sessions),
 fits everything a model needs on the training side only, and writes the run folder
 artifacts/_analysis/interaction/<run>/ the results table is made from.
 
@@ -47,8 +47,8 @@ score nothing, like unclear ones. The presence gate (presence.py), fixed before 
 is scored against them as a task of its own. Every variant is also scored per observed-person
 stratum and gaze readability, and the headline's decisions with the gate's absent windows give the
 end-to-end state shares per lesson (state_shares.csv). A bootstrap interval or contrast needs at
-least MIN_BOOTSTRAP_UNITS units; the TEST sessions fall on 2 dates, so a test run reports its
-estimates without intervals.
+least MIN_BOOTSTRAP_UNITS units, so a test run whose TEST sessions fall on fewer dates reports
+its estimates without intervals.
 
 The modality ablation of 4.6 (`ablate='modality'`) runs in the same run, on the same folds: every
 learned model and the rule are fitted and scored once per arm of MODALITY_ARMS, where an arm's
@@ -57,14 +57,14 @@ unobserved, masks and availability bit 0, as an outage writes them, the empty fl
 floors and Jev read no feature and run in the full arm only. The headline, the contrasts and the
 state shares are the full arm's, which is the run without the ablation; ablation.csv sets the arms
 side by side (exploratory, no Holm correction). An ablated arm's variant key ends in ':<arm>'.
-The gaze-model ablation (`ablate='gaze_model'`, 2026-10-05, for the sensor-value ladder) runs the
+The gaze-model ablation (`ablate='gaze_model'`, for the sensor-value ladder) runs the
 arms of GAZE_MODEL_ARMS the same way: only_body_gaze, only_pose (the cameras' pose values alone:
 layout's pseudo-modality gaze_model removed too) and no_gaze_model. The gaze model's values and
 masks are unobserved as an outage writes them; vfa_ran, the pose values and the body_gaze expert of
 late fusion stay.
 
-The session split (`split='session'`, decided 2026-10-03, when the TEST sessions' data quality
-turned out too poor to stand for the model) pools DEV and TEST: every session the named coder
+The session split (`split='session'`, for when the TEST sessions alone cannot stand for the
+model) pools DEV and TEST: every session the named coder
 labelled that S1 keeps is held out in turn and the models train on all the others
 (splits.session_folds), with leave-one-session-out inner folds within the training sessions
 (splits.session_inner_folds) and the session as the unit everywhere (the lesson column, the
@@ -78,7 +78,7 @@ value (session_summary). There is no headline and no contrast, since nothing her
 advance. coder_agreement scores two coders against each other on the same sessions after the
 same join, training nothing.
 
-The unit and forward splits (`split='unit'`, `'forward'`, 2026-10-04) read the sessions the
+The unit and forward splits (`split='unit'`, `'forward'`) read the sessions the
 session split reads, the same way (DEV and TEST alike, the coder's own labels file, the same
 sessions left out), but group them as the date split does: the unit is a date with the dates its
 sessions' same_class_as links reach (splits.class_units), held out whole, resampled whole and named
@@ -91,13 +91,13 @@ headline and no contrast in the run (contrasts.py compares variants on predictio
 
 Two pseudo-variants choose a model inside each outer fold from the calibrated inner out-of-fold
 answers of the variants the run fits, and copy the chosen variant's held-out answers (SELECTORS):
-`rule22sep` applies select_headline, the rule declared on 22 Sep, to them, and `select-all` takes
+`rule22sep` applies select_headline, the pre-declared headline rule, to them, and `select-all` takes
 the lowest class-weighted binary log-loss over every variant of the named models. Each fold's
 choice is in metrics.json. `net_oof='common'` gives the networks' inner out-of-fold answers at the
 common E* of the refit instead of at each inner split's own best epoch (network.oof_at), so they
 enter the calibrator, gamma and select-all as the tabular models' do.
 
-Three exploratory candidates of the architecture panel (WP9, 2026-10-04) are named only on purpose,
+Three exploratory candidates of the architecture panel are named only on purpose,
 never by -m all, and sit in the results table's group 'exploratory' (EXPLORATORY_NOTES): pmil-lr, a
 noisy-OR over the pupil pairs with a shared linear scorer and a bias per group size (pmil.py; binary
 target only), lr-soft, lr fitted on two coders' soft labels (the truth coder's and one other's, half
@@ -153,18 +153,18 @@ GROUPS = {
 MODELS = tuple(GROUPS)
 TABULAR = ('r1', 'lr', 'hgb', 'late-lr', 'late-hgb')
 NETWORKS = ('pooled-net', 'net-notcn', 'net', 'net-pair')
-# the exploratory candidates of the architecture panel (WP9, 2026-10-04): named only on purpose, never by -m all
+# the exploratory candidates of the architecture panel: named only on purpose, never by -m all
 # (MODELS), and grouped apart in the results table
 EXPLORATORY = ('pmil-lr', 'lr-soft', 'net-attn')
 EXPLORATORY_NOTES = {
-    'pmil-lr': "exploratory (WP9): noisy-OR over the window's pupil pairs of one shared linear scorer, an instance "
+    'pmil-lr': "exploratory: noisy-OR over the window's pupil pairs of one shared linear scorer, an instance "
                "being a pair's values and masks with the min and max of its two pupils' (78 columns), one bias per "
                "group size, lr's balanced weights and C grid; binary target only",
-    'lr-soft': "exploratory (WP9): lr fitted on two coders' soft labels, a window both gave a class two rows of "
+    'lr-soft': "exploratory: lr fitted on two coders' soft labels, a window both gave a class two rows of "
                "weight 0.5, one only one of them did one row of 1 (none where the truth coder said unclear or "
                "absent), classes balanced over those weights; chosen on the inner folds, calibrated and scored "
                "against the truth coder alone",
-    'net-attn': "exploratory (WP9): self-attention over the person slots with the pairs as an additive bias, "
+    'net-attn': "exploratory: self-attention over the person slots with the pairs as an additive bias, "
                 "attention pooling queried by the group token and group size, then the net family's window "
                 "layer, temporal blocks and training",
 }
@@ -199,12 +199,13 @@ GROUP_OF = dict(GROUPS, **{selector: 'selected' for selector in SELECTORS},
                 **{model: 'exploratory' for model in EXPLORATORY})
 # what metrics.json says of each selector (select_inner has the whole of it)
 SELECTOR_NOTES = {
-    'rule22sep': "the 22 Sep rule (select_headline: late-lr or late-hgb, every temporal mode run, HMM none or fb) "
-                 "applied in each outer fold to the candidates' calibrated inner out-of-fold answers pooled over the "
-                 "inner folds, by binary macro-F1 under the binary target and by three-class macro-F1 under the "
-                 "three-class one, even where the absent-class policy makes binary macro-F1 the date split's "
-                 "headline score; known optimism: grid points, calibrators, stackers and gamma were chosen on the same "
-                 "inner out-of-fold answers (12 grid points for HGB, 5 for LR), with no inner level below, for cost",
+    'rule22sep': "the pre-declared headline rule (select_headline: late-lr or late-hgb, every temporal mode run, "
+                 "HMM none or fb) applied in each outer fold to the candidates' calibrated inner out-of-fold "
+                 "answers pooled over the inner folds, by binary macro-F1 under the binary target and by "
+                 "three-class macro-F1 under the three-class one, even where the absent-class policy makes binary "
+                 "macro-F1 the date split's headline score; known optimism: grid points, calibrators, stackers and "
+                 "gamma were chosen on the same inner out-of-fold answers (12 grid points for HGB, 5 for LR), with no "
+                 "inner level below, for cost",
     'select-all': "in each outer fold, the variant of the named models (HMM none or fb) with the lowest class-weighted "
                   "binary log-loss of its calibrated inner out-of-fold answers, on the coded training windows every "
                   "candidate answered; the same optimism as rule22sep",
@@ -224,7 +225,7 @@ JEV_MODELS = ('jev', 'jev-cal')
 # test alike; the full arm first, and it is the run without the ablation
 MODALITY_ARMS = {'full': (), 'no_speech': ('speech',), 'no_space': ('space',), 'no_body_gaze': ('body_gaze',),
                  'only_body_gaze': ('speech', 'space'), 'only_speech': ('space', 'body_gaze')}
-# the gaze-model ablation (2026-10-05, the sensor-value ladder, PREREG_ladder_v1 C3): the cameras with the gaze
+# the gaze-model ablation (the sensor-value ladder): the cameras with the gaze
 # model's outputs and without them (layout's pseudo-modality gaze_model), the body_gaze block of late fusion kept
 GAZE_MODEL_ARMS = {'full': (), 'only_body_gaze': ('speech', 'space'), 'only_pose': ('speech', 'space', 'gaze_model'),
                    'no_gaze_model': ('gaze_model',)}
@@ -467,8 +468,8 @@ def label_names(directories) -> list:
 
 def require_coder(coder: str, directories) -> None:
     """raise FileNotFoundError when no given session has labels/<coder>.jsonl. A coder is the file
-    name, matched exactly, case included (labels.load_labels compares the stem), so 'arthur' never
-    reads Arthur.jsonl; the error names the files found and a name that differs only in case."""
+    name, matched exactly, case included (labels.load_labels compares the stem), so 'alex' never
+    reads Alex.jsonl; the error names the files found and a name that differs only in case."""
     names = label_names(directories)
     if coder in names:
         return
@@ -480,7 +481,7 @@ def require_coder(coder: str, directories) -> None:
 
 def case_hint(directory, coder: str) -> str | None:
     """what a session that holds no labels of `coder` holds instead: its labels files whose name
-    differs from the coder's only in case (labels/Zaibei.jsonl for coder zaibei), which are never
+    differs from the coder's only in case (labels/Alex.jsonl for coder alex), which are never
     read as that coder's, since ses-code keeps a name as the coder typed it; None when there is
     none. require_coder passes as soon as one session has the exact name, so a session coded under
     another case would otherwise be left out as if nobody had labelled it."""
@@ -1120,13 +1121,13 @@ def select_inner(selector: str, inner: dict, fd: _Fold, models) -> dict:
     the posteriors and the decisions under the outer-training prior), with each candidate's score.
     The caller copies the winner's held-out answers.
 
-    rule22sep, the rule declared on 22 Sep: select_headline itself, over the late-lr and late-hgb
+    rule22sep, the pre-declared headline rule: select_headline itself, over the late-lr and late-hgb
     variants (every temporal mode run, HMM none and fb), on their pooled inner out-of-fold binary
     macro-F1 under the binary target and three-class macro-F1 under the three-class one, the first
     in run order on a tie. Under the three-class target it may choose otherwise than the date
     split's headline: there the absent-class policy (too few social windows, or lessons with them)
     makes select_headline rank by binary macro-F1, while rule22sep keeps the target's own score, as
-    declared for it on 2026-10-04. Known optimism, to be disclosed: the grid points, the calibrator,
+    declared for it. Known optimism, to be disclosed: the grid points, the calibrator,
     the stacker and gamma were chosen on the same inner out-of-fold answers the rule then scores
     (twelve grid points for HGB against five for LR), with no inner level below them, for cost; and
     the fold's decisions use the outer-training prior.
@@ -1904,8 +1905,8 @@ def _session_split_record(coder: str, folds: list, excluded: dict, soft_coder: s
                  f"session's), and the other coders' files serve only the inter-coder ceiling")
     return {
         'split': 'session', 'all_sessions': True, 'held_out_test': False,
-        'note': "leave one session out over every session the coder labelled, DEV and TEST alike (decided "
-                "2026-10-03: the TEST sessions' data quality is too poor to stand for the model): cross-validated "
+        'note': "leave one session out over every session the coder labelled, DEV and TEST alike (for when the "
+                "TEST sessions alone cannot stand for the model): cross-validated "
                 "estimates with no untouched hold-out, not the frozen TEST evaluation (split test)",
         'coder': coder, 'truth': truth, 'sessions': sessions, 'tasks': {s: S.task_of(s) for s in sessions},
         'excluded': {s: record.get('reason') for s, record in excluded.items()},
@@ -1941,12 +1942,12 @@ def _unit_split_record(split: str, coder: str, folds: list, excluded: dict, data
     held = {data[s].lesson for fold in folds for s in fold.test}
     units = split_units(data)
     if split == 'unit':
-        note = ("leave one unit out over every session the coder labelled, DEV and TEST alike (decided 2026-10-04): "
+        note = ("leave one unit out over every session the coder labelled, DEV and TEST alike: "
                 "a unit is a recording date with every date its sessions' same_class_as links reach, so the same "
                 "pupils are never on both sides; cross-validated estimates with no untouched hold-out, not the frozen "
                 "TEST evaluation (split test)")
     else:
-        note = (f"forward chaining over every session the coder labelled, DEV and TEST alike (decided 2026-10-04): "
+        note = (f"forward chaining over every session the coder labelled, DEV and TEST alike: "
                 f"each date with at least {S.MIN_EARLIER_DATES} earlier dates with coded windows is held out and the "
                 f"models train on the earlier dates only (a training date of the held-out date's unit stays out); "
                 f"descriptive, not the frozen TEST evaluation (split test)")
@@ -2095,7 +2096,7 @@ def _append_ledger(artifacts, line: dict) -> None:
 
 
 def _record_session_run(artifacts: Path, run_dir: Path, cfg: Config, status: str, data: dict, coder: str) -> None:
-    """the run ledger of the session, unit and forward splits (2026-10-04), in _record_test_run's
+    """the run ledger of the session, unit and forward splits, in _record_test_run's
     way: artifacts/_analysis/interaction/session_runs.jsonl gets a line when a run starts and one
     when it finishes, with the code's commit (and the files under openmmla/ changed since), the
     run's settings, every fused table and labels file it read by sha256 and, when it finishes, every
@@ -2243,7 +2244,7 @@ def _check(cfg: Config):
                          "(their config.json 'coder')")
     if cfg.split in POOLED_SPLITS and not cfg.coder:
         raise ValueError(f"the {cfg.split} split reads one coder's labels at a time: name the coder (its labels file "
-                         f"name, e.g. 'Arthur' for labels/Arthur.jsonl)")
+                         f"name, e.g. 'alex' for labels/alex.jsonl)")
     if cfg.net_oof not in NET_OOF:
         raise ValueError(f"net_oof must be one of {', '.join(NET_OOF)}, not {cfg.net_oof!r}")
     if cfg.features_root is not None and not Path(cfg.features_root).is_dir():
@@ -2309,8 +2310,8 @@ def _run_folds(folds: list, data: dict, plan: dict, say) -> list:
     say(f"{len(folds)} folds on {plan['jobs']} workers" + (" sharing the GPU" if plan.get('device') == 'cuda' else ''))
     # each worker gets only the sessions its fold reads. loky starts every worker as a fresh
     # interpreter, never a fork of this one, so on cuda each worker opens its own CUDA context
-    # (about 500 MB of GPU memory each on server-01's RTX 4090, nearly all of it the context) and
-    # the folds share the GPU
+    # (several hundred MB of GPU memory each, nearly all of it the context) and the folds share
+    # the GPU
     return Parallel(n_jobs=plan['jobs'], backend='loky')(
         delayed(_fold_job)(fold, {s: data[s] for s in list(fold.train) + list(fold.test)}, plan) for fold in folds)
 

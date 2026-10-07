@@ -1,6 +1,6 @@
 """a picture turned on its way to a base, and what the turn does to the camera's geometry.
 
-A camera mounted upside down (all twelve C920s of the lab) or on its side is turned upright once,
+A camera mounted upside down or on its side is turned upright once,
 where it is captured, by the Streams entry's `rotate` (0, 90, 180 or 270, clockwise as cv2.rotate
 turns): the console's ffmpeg turns the picture on the capture host (stream_panel._build_ffmpeg_cmd)
 and the session notes it as the stream's `sources[].capture.rotate`. A base's own `Base.rotate`

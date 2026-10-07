@@ -119,9 +119,9 @@ class _FaceDetector:
     the tracker's face check aligns a face by the landmarks the answer also holds.
 
     The gaze code hands it the frame in RGB, while RetinaFace takes a numpy array as BGR (and
-    swaps the channels itself); with `bgr` the frame's channels are swapped back first. In an
-    A/B on 500 stored frames (2026-10-02) that found a face on 66.5 % of the pupils' heads
-    instead of 47.4 %, losing none found before, at the same 42 ms a frame."""
+    swaps the channels itself); with `bgr` the frame's channels are swapped back first. On
+    recorded classroom frames that finds a face on more of the pupils' heads, losing none found
+    with RGB, at the same speed."""
 
     def __init__(self, detect, bgr: bool = False):
         self.detect = detect
@@ -196,7 +196,7 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         # a person the face detector missed gets a head box from the pose's nose, eyes and ears (/features)
         self.gaze_head_box_fallback = _head_box_fallback(analyzer_config)
         # RetinaFace takes BGR but has always been handed the RGB frame: true hands it BGR (more
-        # faces found; the gazes and the face check then differ from sessions analysed before)
+        # faces found; the gazes and the face check then differ from those of an RGB run)
         self.gaze_face_detector_bgr = _as_bool(analyzer_config.get('gaze_face_detector_bgr'), True)
 
         # Only load families if AprilTag detection is enabled
@@ -312,8 +312,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         # a lost track found again after split_gap_seconds (0: never) is checked by the appearance
         # and continues under a new id by appearance.split_on (by default only on a 'different'
         # verdict); with the cascade the tracks in view take the frame's persons first, and frozen
-        # lost tracks stay where they were last seen (both off: they added errors in the replay of
-        # 20 sessions)
+        # lost tracks stay where they were last seen (both off: they added errors on recorded
+        # classroom data)
         self.tracking_cascade = _as_bool(tracking_config.get('cascade'), False)
         self.tracking_freeze_lost = _as_bool(tracking_config.get('freeze_lost'), False)
         split_gap = _number(tracking_config.get('split_gap_seconds'), DEFAULT_SPLIT_GAP_SECONDS)

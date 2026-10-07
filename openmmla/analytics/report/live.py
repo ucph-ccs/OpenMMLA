@@ -3,7 +3,7 @@
 A browser following a session gets every record its pipelines write, about one IPS window and
 one VFA frame set a second and a recognition bucket every 3 s, for as long as it watches. Sent
 as stored, a frame set alone is about 24 KB (every body's skeleton with its scores, every pair of
-14 bodies); slimmed it is a few KB: tagged persons keep their skeletons and gaze, untagged ones a
+bodies in a full room); slimmed it is a few KB: tagged persons keep their skeletons and gaze, untagged ones a
 box, their track and the keypoints the pose model is sure of (the rest null), pairs only among
 tagged persons with distances in frame widths. Recognition drops the level traces (about 5 MB a
 session), transcripts keep words, their times and voice keys.

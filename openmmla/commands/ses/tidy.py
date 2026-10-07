@@ -19,8 +19,8 @@ and 0, 1, 2 ... when the file does not list the group; a microphone already boun
 tags keeps it, and any beyond the list is left unbound.
 
 --same-class-as marks two sessions of different pupils from one school class: each manifest lists
-the other under `same_class_as`, which the interaction classifier's folds keep together (the
-2025-05-13 takes carry it too). The links survive every rebuild and follow a renamed session.
+the other under `same_class_as`, which the interaction classifier's folds keep together. The
+links survive every rebuild and follow a renamed session.
 
 --pupils declares who the pupils of a session were, as tag ids (`pupils` in the manifest, e.g.
 ["0", "1"]). The interaction classifier's roster takes them in place of its rules, so a spare badge

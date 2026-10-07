@@ -2,7 +2,7 @@
 from a session's IPS events (ips_translation, ips_rotation, ips_relation).
 
 Positions arrive in the main camera's OpenCV frame (x right, y down, z along the optical axis). That
-camera looks down at 23-47 degrees, so its x-z plane is not the floor: depth shrinks by the cosine of
+camera looks down at a slant, so its x-z plane is not the floor: depth shrinks by the cosine of
 the pitch and badge height leaks into it. A hanging badge's tag y axis points down, so the mean of the
 rotations' second column over a session is the room's gravity in camera coordinates, and the plane
 normal to it is the floor. `floor_basis` builds that basis and `project` maps a camera-frame point to
@@ -208,8 +208,8 @@ def main_camera_turn(doc: dict | None) -> int:
     """how far the main IPS camera's picture was turned to be upright, from a session document: its
     base's parameters (`capture_turn` and `rotate`, of a base that reports its poses in the sensor's
     frame, `pose_frame: sensor`), else the turn its stream was captured with
-    (`sources[].capture.rotate`), else 0. A base from before 2026-10-02 reported its poses on the
-    turned picture, which is upright already, so its `rotate` does not count."""
+    (`sources[].capture.rotate`), else 0. An older base, which does not say `pose_frame`, reported
+    its poses on the turned picture, which is upright already, so its `rotate` does not count."""
     from openmmla.analytics.report.sessions import _components, _ips_main, _newest_first
 
     main = _ips_main(doc)

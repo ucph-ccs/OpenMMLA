@@ -118,7 +118,7 @@ class VFABase(Base):
         self.fps = int(base_config.get('fps', 30))
         
         # frame processing configuration (unified for all sources)
-        # a frame set every second, the pace the pose and the gaze are read at (2026-10-07; was 30 s)
+        # a frame set every second, the pace the pose and the gaze are read at
         self.keyframe_interval = float(base_config.get('keyframe_interval', 1.0))
         self.processing_rate = float(base_config.get('processing_rate', 1.0))
         self.enable_timing_sync = base_config.get('enable_timing_sync', True)

@@ -74,7 +74,7 @@ def capture_day(moment: date | None = None) -> str:
 
 
 def is_capture_day(name: str | None) -> bool:
-    """True for a day folder of the capture side, 2026-09-19."""
+    """True for a day folder of the capture side, a YYYY-MM-DD date."""
     return bool(_CAPTURE_DAY.match(str(name or "")))
 
 
