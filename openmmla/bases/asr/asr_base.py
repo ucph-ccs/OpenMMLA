@@ -28,7 +28,9 @@ from openmmla.utils import session_provenance
 from openmmla.utils.asr_scope import LAUNCH_GROUP, LAUNCH_SPEAKERS, chunk_cap, launch_attribution, normalize_asr_scope, participant_of, resolve_speaker_verification as _resolve_speaker_verification
 from openmmla.bases.asr.attribution import LEVEL_HOP_SECONDS, SPEECH_GATE_SNR_DB, NoiseFloor, as_decibels, as_number, energy_record, level_trace, levels_record, relative_speech, segment_energy, snr_db, speech_gate_of, transcript_time
 from openmmla.bases.asr.chunking import QUIET_CUT_SECONDS, quiet_cut
-from openmmla.bases.asr.voices import VOICE_LINK_THRESHOLD, VOICE_MIN_SECONDS, VoiceRegistry, speaker_seconds, with_voices
+from openmmla.bases.asr.voices import (CENTROID_EMBEDDING, VOICE_EMBEDDING, VOICE_LINK_THRESHOLD, VOICE_MIN_SECONDS,
+                                      VoiceRegistry, embedding_kind, speaker_alone_seconds, speaker_seconds,
+                                      with_voices)
 from openmmla.utils.clean import clear_directory
 from openmmla.utils.client import InfluxDBClientWrapper, MongoDBClientWrapper, MQTTClientWrapper, RedisClientWrapper
 from openmmla.utils.input import select_or_create_session, get_id, get_interactive_files, get_stream_url, show_error_and_pause, pause_after_error
@@ -124,6 +126,7 @@ class ASRBase(Base):
     _voice_key = None
     _voice_lock = threading.Lock()  # a transcription thread that outlived its stop may link beside the final chunks
     _embeddings_told = False  # whether a transcriber that diarized without speaker embeddings was named
+    _centroids_told = False  # whether a transcriber that answered pyannote's centroids was named
     speech_gate = 'absolute'  # absolute: rms/peak thresholds after gain; relative: raw snr over the base's floor
     speech_gate_snr_db = SPEECH_GATE_SNR_DB  # the relative gate's dB over the floor
 
@@ -204,6 +207,7 @@ class ASRBase(Base):
         self._language_told = False  # whether a transcriber that did not take our language was named
         self._diarize_told = False  # whether a transcriber that did not diarize for us was named
         self._embeddings_told = False  # whether a transcriber that diarized without speaker embeddings was named
+        self._centroids_told = False  # whether a transcriber that answered pyannote's centroids was named
         self.url = None
         self._joined_session = None  # (session id, source key) this base noted itself in (session sources)
 
@@ -1239,6 +1243,9 @@ class ASRBase(Base):
                     # its transcripts say so by their voices)
                     'diarize': self.diarizes,
                     'voice_link_threshold': VOICE_LINK_THRESHOLD if self.diarizes else None,
+                    # the kind of speaker embedding the base expects, for which the threshold was chosen;
+                    # each linked transcript names the kind its own speakers were linked by (voice_embedding)
+                    'voice_embedding': VOICE_EMBEDDING if self.diarizes else None,
                     'voice_min_seconds': VOICE_MIN_SECONDS if self.diarizes else None,
                     'selected_speakers': list(self.selected_speakers or []),
                     'group_speaker_id': self.group_speaker_id, 'language': self.language,
@@ -2122,6 +2129,16 @@ class ASRBase(Base):
                 "linked into the voices of the session: its service runs code from before it returned them (or a "
                 "WhisperX whose pipeline cannot). Transcripts keep each chunk's own SPEAKER_NN until the speech "
                 "transcriber image is built anew and started again.")
+        embeddings = response.get("speaker_embeddings")
+        if isinstance(embeddings, dict) and embeddings and not self._centroids_told \
+                and embedding_kind(response.get("speaker_embedding_kind")) == CENTROID_EMBEDDING:
+            # pyannote's centroids: a service from before the speech embeddings, whose voices split by chunk length
+            self._centroids_told = True
+            self.logger.warning(
+                "The speech transcriber answered pyannote's centroids as speaker embeddings: its service runs code "
+                "from before it embedded each speaker's own speech. A centroid depends on the length of its chunk, "
+                "so one person's chunks under 10 s and over can become two voices. Build the speech transcriber "
+                "image anew and start it again.")
         if not self.diarizes or self._diarize_told:
             return
         if response.get("diarized"):
@@ -2187,9 +2204,11 @@ class ASRBase(Base):
             fields["diarization"] = json.dumps(turns)
         if voices is not None:
             # {SPEAKER_NN: {voice, similarity}}: which voice of the session each speaker of the chunk is,
-            # and the registry that numbered them (a base launched again into the session numbers anew)
+            # the registry that numbered them (a base launched again into the session numbers anew), and
+            # the kind of speaker embedding they were linked by
             fields["voices"] = json.dumps(voices)
             fields["voice_registry"] = self._voice_key
+            fields["voice_embedding"] = embedding_kind(transcribe_result.get("speaker_embedding_kind"))
         heard = f" ({len({turn.get('speaker') for turn in turns})} speakers, {len(turns)} turns)" if turns else ""
         if voices:
             heard += f" voices {', '.join(str(voice) for voice in sorted(link['voice'] for link in voices.values()))}"
@@ -2220,7 +2239,16 @@ class ASRBase(Base):
         (voice_registry: the base and the moment the registry began)."""
         self._voice_registry = VoiceRegistry()
         self._voice_session = self.session_id
-        self._voice_key = f"{str(getattr(self, 'base_type', 'base')).lower()}_{getattr(self, 'id', None)}@{time.time():.3f}"
+        prefix = f"{str(getattr(self, 'base_type', 'base')).lower()}_{getattr(self, 'id', None)}@"
+        began = time.time()
+        previous = self._voice_key or ''
+        if previous.startswith(prefix):
+            # a registry that follows another (the embeddings changed kind) never takes its key
+            try:
+                began = max(began, float(previous[len(prefix):]) + 0.001)
+            except ValueError:
+                pass
+        self._voice_key = f"{prefix}{began:.3f}"
 
     def _link_voices(self, transcribe_result: dict) -> dict | None:
         """the session voices of a diarized chunk's speakers, {SPEAKER_NN: {voice, similarity}}
@@ -2228,15 +2256,36 @@ class ASRBase(Base):
         replay alike, so each is linked only to the voices of the chunks before it (under a lock: a
         transcription thread that outlived its stop may still link while the final chunks are). None
         when the chunk has no turns or the speech transcriber returned no speaker embeddings (a
-        backend or a WhisperX that cannot, or a service from before it could)."""
+        backend or a WhisperX that cannot, or a service from before it could). The embeddings are
+        linked only to voices made of embeddings of their own kind (speaker_embedding_kind, pyannote's
+        centroids when the answer names none): when the kind changes in the middle of a session (the
+        speech transcriber was rebuilt), the base starts a new registry, whose key its transcripts
+        name, so the voices after the change are numbered apart from those before it."""
         embeddings = transcribe_result.get("speaker_embeddings")
         turns = transcribe_result.get("diarization")
         if not turns or not isinstance(embeddings, dict):
             return None
+        kind = embedding_kind(transcribe_result.get("speaker_embedding_kind"))
         with self._voice_lock:
             if self._voice_registry is None:
                 self._new_voice_registry()
-            return self._voice_registry.link(embeddings, speaker_seconds(turns))
+            registry = self._voice_registry
+            if len(registry) and registry.kind != kind and embeddings:
+                # the speech transcriber was rebuilt in the middle of the session: its embeddings cannot
+                # be compared with the voices heard so far, so the voices start again
+                previous = registry.kind
+                self._new_voice_registry()
+                registry = self._voice_registry
+                logger = getattr(self, 'logger', None)
+                if logger is not None:
+                    logger.warning(
+                        f"The speech transcriber's speaker embeddings changed from '{previous}' to '{kind}' in "
+                        f"this session: the two cannot be compared, so the voices are numbered anew from here "
+                        f"(voice registry {self._voice_key}).")
+            # the speech a speaker had alone decides whether it may start a voice: one heard only over
+            # another is embedded from a mix of the two
+            return registry.link(embeddings, speaker_seconds(turns), kind=kind,
+                                 start_seconds=speaker_alone_seconds(turns))
 
     def _publish_recognition(self, segment_start_time: float, recognize_start_time: float, speakers: list[str],
                              similarities: list[float], durations: list[float], energy: dict | None = None,

@@ -45,10 +45,12 @@ class SpeechTranscriber(Server):
     diarizes the file with pyannote and the answer carries `diarization`, [{start, end, speaker}]
     as SPEAKER_00, SPEAKER_01 ... in seconds from the start of the file, and `diarized`, which
     says whether it could (the other backends cannot). `diarize` in the local config does it for
-    every file. With the turns come `speaker_embeddings`, pyannote's embedding of each speaker of
-    the file ({speaker: [float]}, from a WhisperX whose pipeline returns them, as 3.8.6 does), from
-    which a base links the speakers of its chunks into the voices of its session
-    (openmmla.bases.asr.voices)."""
+    every file. With the turns come `speaker_embeddings`, one embedding per speaker of the file
+    ({speaker: [float]}), and `speaker_embedding_kind`, what they are: `speech`, the embedding of
+    each speaker's own speech in the file by the diarization pipeline's embedding model
+    (openmmla.utils.audio.transcriber.speaker_speech_embeddings). From them a base links the
+    speakers of its chunks into the voices of its session (openmmla.bases.asr.voices), comparing
+    embeddings of one kind only."""
 
     def __init__(self, project_dir: str | None, config_path: str):
         """Initialize the speech transcriber.
@@ -256,7 +258,10 @@ class SpeechTranscriber(Server):
                         diarize=bool(getattr(self, 'diarize', False)),
                         diarize_model=getattr(self, 'diarize_model', None),
                         compression_ratio_threshold=getattr(getattr(self, 'transcriber', None),
-                                                            'compression_ratio_threshold', None))
+                                                            'compression_ratio_threshold', None),
+                        # what the speaker embeddings of a diarized file are (a WhisperX transcriber's)
+                        speaker_embedding_kind=getattr(getattr(self, 'transcriber', None),
+                                                       'speaker_embedding_kind', None))
         return {name: value for name, value in info.items() if value is not None}
 
     def process_request(self):
@@ -344,7 +349,8 @@ class SpeechTranscriber(Server):
         Returns:
             Dict with the transcribed text, its words when word_level, and when diarized its
             speaker turns (`diarization`), `diarized: True` and, when the pipeline gives them, one
-            embedding per speaker of the turns (`speaker_embeddings`, {speaker: [float]})
+            embedding per speaker of the turns (`speaker_embeddings`, {speaker: [float]}) with what
+            they are (`speaker_embedding_kind`)
         """
         if isinstance(self.transcriber, WhisperXTranscriber):
             result = self.transcriber.transcribe(audio_file_path, language=language_code(language), diarize=diarize)
@@ -363,8 +369,12 @@ class SpeechTranscriber(Server):
             response["diarization"] = turns
             response["diarized"] = True
             if embeddings is not None:
-                # a base links the chunk's speakers to the voices of its session with them
+                # a base links the chunk's speakers to the voices of its session with them, and only
+                # to voices made from embeddings of the same kind
                 response["speaker_embeddings"] = embeddings
+                kind = getattr(self.transcriber, 'speaker_embedding_kind', None)
+                if kind:
+                    response["speaker_embedding_kind"] = kind
         return response
 
     def _transcribe_with_azure(self, audio_file_path, language=None):

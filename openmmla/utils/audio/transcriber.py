@@ -7,6 +7,7 @@ import zlib
 from abc import ABC, abstractmethod
 
 import librosa
+import numpy as np
 import torch
 import whisper
 import whisperx
@@ -107,20 +108,10 @@ def _terminal_diarize_error(error: Exception) -> bool:
     return False
 
 
-def _takes(function, name: str) -> bool:
-    """whether `function` (or a callable object) names the parameter `name` in its signature; one
-    that only takes **kwargs does not count, as it may pass the name on to what rejects it."""
-    try:
-        return name in inspect.signature(function).parameters
-    except (TypeError, ValueError):
-        return False
-
-
 def speaker_embeddings(embeddings) -> dict[str, list[float]] | None:
     """the speaker embeddings of a diarized file as {speaker: [float]}, rounded to 5 decimals, the
-    speakers whose vector is empty, not finite or all zero (pyannote pads a speaker it has no
-    centroid for with zeros, and has NaN for one it had no clean window of) left out; None when
-    the pipeline returned none."""
+    speakers whose vector is empty, not finite or all zero left out; None when there were none to
+    read (not a dict)."""
     if not isinstance(embeddings, dict):
         return None
     out = {}
@@ -132,6 +123,83 @@ def speaker_embeddings(embeddings) -> dict[str, list[float]] | None:
         if values and all(math.isfinite(value) for value in values) and any(values):
             out[str(speaker)] = [round(value, 5) for value in values]
     return out
+
+
+# what the speaker embeddings a WhisperX transcriber returns are, as the speech transcriber's answer
+# names them (speaker_embedding_kind): each speaker's own speech in the file, embedded whole
+# (speaker_speech_embeddings). A base links only embeddings of one kind into its session's voices.
+SPEAKER_EMBEDDING_KIND = "speech"
+SPEECH_EMBEDDING_MIN_SECONDS = 0.5  # the speech a speaker needs in a file to be given an embedding
+
+
+def _speaker_masks(turns, n_samples: int, sample_rate: int) -> dict[str, np.ndarray]:
+    """per speaker of `turns` ({start, end, speaker}, in seconds), the samples of an audio of
+    `n_samples` it talks in, as a boolean mask; turns outside the audio are cut to it, and a turn
+    that is not numbers, or is empty once cut, is skipped."""
+    masks: dict[str, np.ndarray] = {}
+    for turn in turns or []:
+        try:
+            start, end = float(turn['start']), float(turn['end'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(start) and math.isfinite(end)):
+            continue
+        first = min(max(int(round(start * sample_rate)), 0), n_samples)
+        last = min(max(int(round(end * sample_rate)), 0), n_samples)
+        if last <= first:
+            continue
+        label = str(turn.get('speaker'))
+        if label not in masks:
+            masks[label] = np.zeros(n_samples, dtype=bool)
+        masks[label][first:last] = True
+    return masks
+
+
+def speaker_speech_embeddings(embed, audio, turns, sample_rate=16000,
+                              min_seconds=SPEECH_EMBEDDING_MIN_SECONDS) -> dict[str, list[float]]:
+    """one embedding per speaker of a diarized file, made from that speaker's own speech alone:
+    {speaker: [float]}, rounded to 5 decimals.
+
+    `embed` takes a float32 torch tensor (1, 1, n_samples) and answers an array (1, D) (pyannote's
+    PretrainedSpeakerEmbedding, which a diarization pipeline holds as `_embedding`); `audio` is the
+    file the turns were found in, as float32 samples at `sample_rate`; `turns` its turns
+    [{start, end, speaker}] in seconds. A speaker's speech is its turns minus every moment another
+    speaker talks too, its pieces put one after the other and embedded whole: not padded to a
+    window, so that the model's mean normalisation of its features sees speech only. A speaker
+    with less than `min_seconds` of speech to itself is embedded from all of its turns instead;
+    one with less than that in all, or whose embedding comes back empty or not finite (a piece
+    shorter than the model takes), gets none."""
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    masks = _speaker_masks(turns, samples.shape[0], sample_rate)
+    if not masks:
+        return {}
+    talking = np.zeros(samples.shape[0], dtype=np.int32)  # how many speakers talk at each sample
+    for mask in masks.values():
+        talking += mask
+    needed = max(int(round(float(min_seconds) * sample_rate)), 1)
+    device = getattr(embed, 'device', None)
+    vectors = {}
+    for label, mask in masks.items():
+        alone = mask & (talking == 1)
+        chosen = alone if np.count_nonzero(alone) >= needed else mask
+        if np.count_nonzero(chosen) < needed:
+            continue
+        waveform = torch.from_numpy(np.ascontiguousarray(samples[chosen]))[None, None]
+        if isinstance(device, (torch.device, str)):
+            waveform = waveform.to(device)
+        try:
+            with torch.no_grad():
+                vector = embed(waveform)
+        except Exception as e:
+            print(f"The speaker embedding of {label} could not be made ({type(e).__name__}: {e}): it has none")
+            continue
+        if hasattr(vector, 'detach'):
+            vector = vector.detach().cpu().numpy()
+        try:
+            vectors[label] = np.asarray(vector, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            continue
+    return speaker_embeddings(vectors)
 
 
 @contextlib.contextmanager
@@ -174,6 +242,8 @@ class WhisperXTranscriber(Transcriber):
 
     # the compression ratio above which a segment is a hallucination (_degenerate_threshold)
     compression_ratio_threshold = DEFAULT_COMPRESSION_RATIO_THRESHOLD
+    # what the speaker embeddings of a diarized file are (speaker_speech_embeddings)
+    speaker_embedding_kind = SPEAKER_EMBEDDING_KIND
 
     def __init__(self, model_name, language, word_level=False, use_cuda=True, diarize=False,
                  diarize_model=None, hf_token=None, min_speakers=None, max_speakers=None,
@@ -307,21 +377,22 @@ class WhisperXTranscriber(Transcriber):
     def _diarize(self, audio, segments):
         """the speaker turns of `audio`, the segments with their speakers, and one embedding per
         speaker: (turns, segments, embeddings), the turns None when the pipeline could not be made,
-        [] when it heard no one; the embeddings {speaker: [float]} (speaker_embeddings) when this
-        WhisperX can return them, else None."""
+        [] when it heard no one; the embeddings {speaker: [float]} of each speaker's own speech
+        (speaker_speech_embeddings, of SPEAKER_EMBEDDING_KIND), None when the pipeline has no
+        embedding model to make them with."""
         pipeline = self._diarize_pipeline()
         if pipeline is None:
             return None, segments, None
         kwargs = {key: value for key, value in (('min_speakers', self.min_speakers),
                                                 ('max_speakers', self.max_speakers)) if value}
-        if _takes(pipeline, 'return_embeddings'):
-            # a WhisperX whose pipeline takes return_embeddings (3.8.6 does): pyannote's centroid of
-            # each speaker of the file comes along
-            kwargs['return_embeddings'] = True
         try:
             with _torch_load_full():
                 answer = pipeline(audio, **kwargs)
-            diarization, embeddings = answer if isinstance(answer, tuple) else (answer, None)
+            # pyannote's own centroids, which a pipeline may answer beside the turns, are not used:
+            # below its 10 s window it pads the file with zeros, and the embedding model's mean
+            # normalisation takes the padding in, so a short chunk's centroid and a long one's of
+            # the same voice are far apart (speaker_speech_embeddings)
+            diarization = answer[0] if isinstance(answer, tuple) else answer
             turns = [{'start': round(float(row.start), 3), 'end': round(float(row.end), 3),
                       'speaker': str(row.speaker)} for row in diarization.itertuples()]
             if segments:
@@ -336,7 +407,28 @@ class WhisperXTranscriber(Transcriber):
             print(f"WhisperX could not diarize this file ({self.diarize_failed}): its transcript comes "
                   f"without speaker turns.")
             return None, segments, None
-        return turns, segments, speaker_embeddings(embeddings)
+        return turns, segments, self._speech_embeddings(pipeline, audio, turns)
+
+    def _speech_embeddings(self, pipeline, audio, turns):
+        """the embedding of each speaker's own speech in `audio` (speaker_speech_embeddings), made
+        with the diarization pipeline's own embedding model (WhisperX's DiarizationPipeline holds
+        the pyannote pipeline as `model`, and that its PretrainedSpeakerEmbedding as `_embedding`);
+        None when it has none, never its centroids instead, as a base may only compare
+        embeddings of one kind, or when making them fails (the turns are kept)."""
+        embed = getattr(getattr(pipeline, 'model', None), '_embedding', None)
+        if not callable(embed):
+            if not getattr(self, '_embedding_missing_told', False):
+                self._embedding_missing_told = True
+                print("WhisperX's diarization pipeline has no speaker embedding model to reach (model._embedding): "
+                      "its transcripts come with speaker turns and without speaker embeddings, so a base cannot "
+                      "link their speakers into voices.")
+            return None
+        try:
+            return speaker_speech_embeddings(embed, audio, turns)
+        except Exception as e:
+            print(f"WhisperX could not make the speaker embeddings of this file ({type(e).__name__}: {e}): its "
+                  f"turns come without them.")
+            return None
 
     def transcribe(self, audio_path, language=None, diarize=None):
         """Transcribe audio with optional alignment for word-level timestamps.
@@ -350,8 +442,9 @@ class WhisperXTranscriber(Transcriber):
             (text, words, turns, segments, embeddings): the words empty unless self.word_level; the
             turns the speaker turns [{start, end, speaker}] in seconds from the start of the file,
             None when not diarized; the segments WhisperX's, each with its speaker when diarized; the
-            embeddings one vector per speaker of the turns ({speaker: [float]}), None when the file
-            was not diarized or this WhisperX returns none
+            embeddings one vector per speaker of the turns, of its own speech in the file
+            ({speaker: [float]}, speaker_speech_embeddings), None when the file was not diarized or
+            the pipeline has no embedding model
         """
         audio = whisperx.load_audio(audio_path)
         # the language is always named, as the pipeline keeps the one of its last call otherwise, and
