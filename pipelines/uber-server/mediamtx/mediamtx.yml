@@ -23,7 +23,7 @@ logLevel: info
 # closing its connection (a Pi that lost power or its network) keeps its path
 # listed as ready, with nothing arriving, until readTimeout runs out. MediaMTX
 # applies a change to either only by closing every connection, publishers and
-# readers alike, so change them between sessions (docs/rtmp_streaming.md)
+# readers alike, so change them between sessions (docs/streaming/index.md)
 readTimeout: 30s
 writeTimeout: 30s
 
@@ -89,7 +89,7 @@ pathDefaults:
   # (the log says "received RTP packet without absolute time, skipping it") and its recordings
   # are then filed by the publisher's clock, which Sessions -> Export Streams matches against
   # the session's window: only for a path whose publisher is NTP-synchronized, and per path
-  # (paths: <name>: useAbsoluteTimestamp: yes), see docs/rtmp_streaming.md#timestamps
+  # (paths: <name>: useAbsoluteTimestamp: yes), see docs/streaming/index.md#timestamps
   # no path is recorded by default. A camera may publish around the clock and
   # is shared by the sessions that pull it, so the server keeps only the time a
   # session ran: START (Session Control in the TUI, mmla ses-ctl)

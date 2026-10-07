@@ -7,7 +7,7 @@
 # The ports are not set here: `make flask` binds the Dashboard port of System Settings (DASHBOARD_PORT,
 # 5050) and, on the same addresses, the media ports (DASHBOARD_MEDIA_PORTS, the two above it: 5051
 # and 5052), from which the Live page loads the recorded videos and sound of a replay. See
-# docs/dashboard.md.
+# docs/dashboard/deploy.md.
 
 # Database settings
 InfluxDB:

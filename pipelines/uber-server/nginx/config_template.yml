@@ -22,7 +22,7 @@
 #   - Example: weight 3 vs 1 means 3x more requests to the higher weight server
 #
 # streams are not nginx's job any more: cameras and microphones publish to
-# MediaMTX (pipelines/uber-server/mediamtx/mediamtx.yml, see docs/rtmp_streaming.md)
+# MediaMTX (pipelines/uber-server/mediamtx/mediamtx.yml, see docs/streaming/index.md)
 
 # Upstream configurations for different services
 # Each service can have multiple servers with different weights for load balancing

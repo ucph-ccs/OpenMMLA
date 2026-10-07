@@ -34,8 +34,8 @@ Base:
       chunk_size:                 # Size of each audio chunk in frames (default to 512)
       buffer_duration:            # Buffer duration in seconds for audio stream
       resample_method:            # Resampling method for audio processing
-      timestamp_offset:           # seconds added to every chunk's stamp, for every base of this type: the measured delay of the stream as a negative number (e.g. -0.2); empty = 0, see docs/rtmp_streaming.md#timestamps
-      connect_wait:               # seconds a base waits for a stream source (or LSL) that is not up yet when its run starts (empty = 30); see docs/rtmp_streaming.md#bases-pulling-a-stream
+      timestamp_offset:           # seconds added to every chunk's stamp, for every base of this type: the measured delay of the stream as a negative number (e.g. -0.2); empty = 0, see docs/streaming/index.md#timestamps
+      connect_wait:               # seconds a base waits for a stream source (or LSL) that is not up yet when its run starts (empty = 30); see docs/streaming/index.md#bases-pulling-a-stream
       reconnect_wait:             # seconds a base keeps opening a stream source again after it dropped while running, before the run ends (empty = 3600, an hour: a stream that comes back within the session is taken up again)
   # example 1: external stream (already running; the base pulls read_target, else target)
   # mic-external:

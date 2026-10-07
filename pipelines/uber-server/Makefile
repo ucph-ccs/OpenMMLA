@@ -438,7 +438,7 @@ infra-after-boot:
 
 mediamtx:
 	@echo "🔁 Starting MediaMTX"
-	@command -v $(MEDIAMTX_BIN) >/dev/null 2>&1 || { echo "❌ $(MEDIAMTX_BIN) not found: brew install mediamtx, or unpack a release into /usr/local/bin (docs/rtmp_streaming.md)"; exit 1; }
+	@command -v $(MEDIAMTX_BIN) >/dev/null 2>&1 || { echo "❌ $(MEDIAMTX_BIN) not found: brew install mediamtx, or unpack a release into /usr/local/bin (docs/streaming/index.md)"; exit 1; }
 	@mkdir -p '$(abspath $(MEDIAMTX_RECORD_ROOT))/streams/server'
 	tmux new-session -d -s mediamtx -n mediamtx -c '$(abspath $(MEDIAMTX_RECORD_ROOT))' bash
 	tmux send-keys -t mediamtx '$(MEDIAMTX_BIN) $(abspath $(MEDIAMTX_CONFIG))' C-m

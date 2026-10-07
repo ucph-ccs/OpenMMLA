@@ -133,7 +133,7 @@ def render_nginx_template(config, template_path, output_path):
                 print(f"{s['host']} ({service}) → {status}")
 
     if config.get("rtmp_apps"):
-        print("ℹ️ rtmp_apps is ignored: streams go through MediaMTX now (docs/rtmp_streaming.md).")
+        print("ℹ️ rtmp_apps is ignored: streams go through MediaMTX now (docs/streaming/index.md).")
 
 
 # ========== 主入口 ==========

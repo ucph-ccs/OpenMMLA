@@ -39,7 +39,7 @@ Base:
     buffer_duration: 0.08                           # Buffer duration in seconds for video stream
     format: MJPG                                    # Source format (e.g., MJPG (live camera), H264 (file), JPEG (lsl), raw (lsl))
     resample_method: ResampleMethod.VIDEO_AVERAGE   # Resampling method for video processing
-    timestamp_offset: 0.0                           # seconds added to every frame's stamp, for every base of this config: the measured delay of the stream as a negative number (e.g. -0.35), see docs/rtmp_streaming.md#timestamps
+    timestamp_offset: 0.0                           # seconds added to every frame's stamp, for every base of this config: the measured delay of the stream as a negative number (e.g. -0.35), see docs/streaming/index.md#timestamps
     connect_wait: 30                                # seconds a base waits for a network stream (rtmp/rtsp/srt, LSL) that is not up yet when it starts; a camera index or a file fails at once
     reconnect_wait: 3600                            # seconds a base keeps opening a network stream again after it dropped while running (an hour, about a session: a stream that comes back within the session is taken up again); then it ends its run
   # example 1: external stream (already running; the base pulls read_target, else target)

@@ -17,14 +17,14 @@
 # unless MONGO_ROOT_USER and MONGO_ROOT_PASSWORD are both set on the very first start.
 #
 # Setup, backups, migrating off the bare-metal databases and known caveats:
-# docs/docker.md -> Database stack: InfluxDB and MongoDB
+# docs/docker.md -> Run the databases and the Stream Server
 #
 # Redis (6379) and Mosquitto (1883) would join this same file if they are ever
 # containerized too; today they stay bare-metal via pipelines/uber-server/Makefile.
 #
 # MediaMTX reads pipelines/uber-server/mediamtx/mediamtx.yml and records the
 # paths of a running session (START to STOP) under MEDIAMTX_STREAMS_DIR (default
-# artifacts/streams/server in the repository); see docs/rtmp_streaming.md#on-the-server.
+# artifacts/streams/server in the repository); see docs/streaming/recording.md#on-the-server.
 
 name: openmmla-infra
 
