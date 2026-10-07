@@ -16,6 +16,7 @@ VLLMFrameAnalyzer:
   end_to_end: false # whether to use end-to-end mode (true) or two-step mode (false)
   image_detail: "auto"  # Image detail for vision models: "low" (faster, less detail), "high" (slower, more detail), "auto" (model decides)
   prompt_profile: cot  # end-to-end prompt variant: cot (zero-shot CoT, paper default), baseline, baseline_no_pre
+  action_overlays: auto  # the marks drawn on the action labels' frames for the VLM: auto (what the prompt explains: cot, baseline and the two-step prompts get the AprilTags and gaze lines, baseline_no_pre clean frames), all, tags (AprilTags only), gaze (face boxes and gaze lines only) or none; april_tag and gaze_detect only load the detectors, which the features read either way
   # action_schema: collaboration_v1  # optional explicit override; otherwise use config/vfa/action_schemas.yml default_schema
 
   # POST /vllm/features: the persons of a frame as skeletons (a YOLO pose model), the AprilTag each wears, their head yaw and their gaze (the gaze model above), as geometry; no VLM

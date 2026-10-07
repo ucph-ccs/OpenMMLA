@@ -3235,6 +3235,17 @@ class CameraManagerPanel(Widget):
         self._refresh_cameras()
 
 
+def _vfa_marks_text(analyzer_config: dict, profile: str, end_to_end: bool) -> str:
+    """the marks the VFA server draws on the action labels' frames, in words, for the Prompts
+    tab; a word action_overlays does not know is shown as it is"""
+    from openmmla.services.vfa.prompt_profiles import action_overlays, overlay_marks_label
+    setting = analyzer_config.get("action_overlays")
+    try:
+        return overlay_marks_label(action_overlays(setting, profile, end_to_end))
+    except ValueError:
+        return f"unknown action_overlays '{setting}'"
+
+
 class PromptsPanel(Widget):
     """VFA prompt template browser and editor."""
 
@@ -3277,12 +3288,15 @@ class PromptsPanel(Widget):
         ssh_profile=None,
         remote_dir: str | None = None,
         files: list[str] | None = None,
+        marks: str | None = None,
     ) -> None:
         super().__init__()
         self.prompts_dir = prompts_dir
         self.active_files = set(active_files)
         self.profile = profile
         self.end_to_end = end_to_end
+        # the marks the server draws on the action labels' frames (action_overlays)
+        self.marks = marks
         self.target = target
         self.ssh_profiles = ssh_profiles or []
         # When ssh_profile is set, the panel reads/writes prompt files on the
@@ -3356,9 +3370,10 @@ class PromptsPanel(Widget):
 
     def _profile_line(self) -> str:
         mode = "end-to-end" if self.end_to_end else "two-step (VLM + LLM)"
+        marks = f"; marks on the frames: [b]{self.marks}[/b]" if self.marks else ""
         return (
-            f"Active profile: [b]{self.profile}[/b] ({mode}) — "
-            "change via Config > prompt_profile / end_to_end"
+            f"Active profile: [b]{self.profile}[/b] ({mode}){marks} — "
+            "change via Config > prompt_profile / end_to_end / action_overlays"
         )
 
     def _build_options(self) -> list[tuple[Text, str]]:
@@ -3371,11 +3386,13 @@ class PromptsPanel(Widget):
                 opts.append((Text(name), name))
         return opts
 
-    def refresh_active(self, active_files: list[str], profile: str, end_to_end: bool) -> None:
+    def refresh_active(self, active_files: list[str], profile: str, end_to_end: bool,
+                       marks: str | None = None) -> None:
         """recompute the active prompt set after a config change and re-render."""
         self.active_files = set(active_files)
         self.profile = profile
         self.end_to_end = end_to_end
+        self.marks = marks
         try:
             self.query_one("#pp-profile-line", Static).update(self._profile_line())
         except Exception:
@@ -8793,6 +8810,7 @@ class ServicePanel(Widget):
             prompts_dir = os.path.join(svc.config_dir, prompts_dir)
         profile = str(analyzer_config.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
         end_to_end = bool(analyzer_config.get("end_to_end", False))
+        marks = _vfa_marks_text(analyzer_config, profile, end_to_end)
         ssh_profile = None
         remote_dir = None
         if target != "local":
@@ -8808,6 +8826,7 @@ class ServicePanel(Widget):
             ssh_profiles=self._ssh_profile_names,
             ssh_profile=ssh_profile,
             remote_dir=remote_dir,
+            marks=marks,
         )
 
     def _vfa_action_schema_panel(self, svc: ServiceDef) -> ActionSchemaPanel:
@@ -10121,10 +10140,11 @@ class ServicePanel(Widget):
             profile = str(analyzer.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
             end_to_end = bool(analyzer.get("end_to_end", False))
             active = active_prompt_files(profile, end_to_end)
+            marks = _vfa_marks_text(analyzer, profile, end_to_end)
         except Exception:
             return
         for panel in self.query(PromptsPanel):
-            panel.refresh_active(active, profile, end_to_end)
+            panel.refresh_active(active, profile, end_to_end, marks)
 
     def _refresh_stream_panels(self, pipeline: PipelineDef, config: dict | None = None) -> None:
         """refresh stream tabs after a pipeline config save, from the config

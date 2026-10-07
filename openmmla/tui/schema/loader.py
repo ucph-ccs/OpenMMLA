@@ -9,7 +9,8 @@ import yaml
 
 from openmmla.utils.asr_scope import ASR_SCOPES
 from openmmla.utils.config_choices import (
-    DIARIZE_MODELS, GAZE_BACKENDS, GAZE_MODELS, IMAGE_DETAILS, POSE_MODELS, PROMPT_PROFILES, VFA_BACKENDS,
+    ACTION_OVERLAYS, DIARIZE_MODELS, GAZE_BACKENDS, GAZE_MODELS, IMAGE_DETAILS, POSE_MODELS, PROMPT_PROFILES,
+    VFA_BACKENDS,
 )
 
 
@@ -35,6 +36,7 @@ KEY_CHOICES = {
     "VLLMFrameAnalyzer.gaze_model": GAZE_MODELS,
     "VLLMFrameAnalyzer.features.pose_model": POSE_MODELS,
     "VLLMFrameAnalyzer.prompt_profile": PROMPT_PROFILES,
+    "VLLMFrameAnalyzer.action_overlays": ACTION_OVERLAYS,
     "VLLMFrameAnalyzer.image_detail": IMAGE_DETAILS,
     "SpeechTranscriber.local.diarize_model": DIARIZE_MODELS,
 }

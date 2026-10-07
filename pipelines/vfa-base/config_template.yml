@@ -91,7 +91,7 @@ Bases:
 Synchronizer:
   result_expiry_time: 30                            # cleanup timeout (seconds)
   match_tolerance: 0.5                              # matching tolerance (seconds) for incoming result to time buckets
-  actions: false                                    # send a frame set every action_interval for its action labels (the VLM, the vfa_action event; the server draws tags and gaze lines on the frames for the VLM by its own april_tag / gaze_detect settings, and returns neither as data); off by default, as the VLM is the costliest request and a cloud backend gets the frames; the card's Action Labels overrides
+  actions: false                                    # send a frame set every action_interval for its action labels (the VLM, the vfa_action event; the server draws tags and gaze lines on the frames for the VLM as its action_overlays setting says, and returns neither as data); off by default, as the VLM is the costliest request and a cloud backend gets the frames; the card's Action Labels overrides
   pose: true                                        # send every frame set for its skeletons, AprilTags and head yaws as data (the vfa_features event, one per frame set); on by default; the card's Pose overrides
   gaze: true                                        # and for where each person looks, as data (the gaze model's point and target); a gaze needs the pose, so this turns the pose on too; on by default; the card's Gaze overrides
   action_interval: 30                               # seconds between two action-label (VLM) requests, whatever the bases' keyframe_interval (30 when left out); 0 asks for every frame set

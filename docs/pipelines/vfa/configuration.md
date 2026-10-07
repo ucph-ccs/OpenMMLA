@@ -121,9 +121,9 @@ A fisheye camera's frames that were turned on capture are remapped as they arriv
 |---|---|---|
 | `port` | `5007` | the port the card finds the service by; the container listens on 5007 whatever it says |
 | `workers` | `1` | the container runs one gunicorn worker whatever it says, and one it must be: the pose's tracks live in the process |
-| `april_tag` | `true` | detect AprilTags: the action labels' marks draw them, and the pose's identity reads them; not in the template |
+| `april_tag` | `true` | load the AprilTag detector: the pose's identity reads the tags, and the action labels' marks draw them when `action_overlays` allows; not in the template |
 | `families` | `tag36h11` | the AprilTag families; required while `april_tag` is on |
-| `gaze_detect` | `true` | load the face detector and the gaze model; off, the action labels' frames get no gaze lines and the features no gaze; not in the template |
+| `gaze_detect` | `true` | load the face detector and the gaze model; off, the features get no gaze and the action labels' frames no gaze lines; not in the template |
 
 ### Keys for the action labels
 
@@ -132,6 +132,7 @@ A fisheye camera's frames that were turned on capture are remapped as they arriv
 | `backend` | `vllm` | the VLM ([Model backends](action-labels.md#model-backends)); `vllm` when left out; the server needs this backend's block to start ([Once per deployment](run.md#once-per-deployment)) |
 | `end_to_end` | `false` | `false`: a VLM describes and an LLM classifies; `true`: one VLM call ([How labelling works](action-labels.md#how-labelling-works)) |
 | `prompt_profile` | `cot` | the one-step templates, with `end_to_end: true` ([Prompt profiles](action-labels.md#prompt-profiles)) |
+| `action_overlays` | `auto` | the marks drawn on the frames the VLM sees: `auto`, `all`, `tags`, `gaze` or `none`; the features are not affected ([Marks on the frames](action-labels.md#marks-on-the-frames)) |
 | `image_detail` | `auto` | the image detail a vision model is asked for: `low` (faster), `high` (slower) or `auto` |
 | `action_schema` | the file's `default_schema` | a schema of `config/vfa/action_schemas.yml` |
 | `prompt_templates_dir` | `prompts` | the templates folder, relative to `pipelines/vfa-server` |
@@ -200,6 +201,7 @@ On the VFA Server card's **Config** tab, these keys are dropdowns:
 |---|---|
 | `backend` | `vllm`, `ollama`, `llamacpp`, `openai`, `gemini`, `qwen`, `deepseek`, `grok`, `zhipuai`, `intern` |
 | `prompt_profile` | `cot`, `baseline`, `baseline_no_pre` |
+| `action_overlays` | `auto`, `all`, `tags`, `gaze`, `none` |
 | `image_detail` | `auto`, `low`, `high` |
 | `gaze_backend` | `page`, `gazelle` |
 | `gaze_model` | the six checkpoints of [Gaze models](pose-and-gaze.md#gaze-models) |

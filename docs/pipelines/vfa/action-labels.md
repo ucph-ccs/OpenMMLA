@@ -6,7 +6,7 @@ The VFA server can label what each person in a frame set is doing with one of fi
 
 For every frame set it is asked about, the server does three things:
 
-1. **Marks the frames.** Each detected AprilTag is repainted as a black square with its id in white, each detected face gets a coloured box, and a gaze line points at the estimated gaze target. `in: 0.98` next to a face is the probability that its gaze target lies inside the frame.
+1. **Marks the frames**, as `action_overlays` says ([Marks on the frames](#marks-on-the-frames)). Each detected AprilTag is repainted as a black square with its id in white, each detected face gets a coloured box, and a gaze line points at the estimated gaze target. `in: 0.98` next to a face is the probability that its gaze target lies inside the frame.
 2. **Builds a structured prompt** from templates, with the camera angles, the participant descriptions and the [action coding scheme](#action-coding-scheme).
 3. **Asks a VLM**, local or in the cloud behind an OpenAI-compatible API, which identifies each person, describes them and classifies their action. It answers in JSON with `observations`, `classifications` and `justifications` per person id.
 
@@ -19,7 +19,22 @@ The server asks the model in one of two modes, set by `end_to_end` in the server
 | `false` (default) | two steps: a VLM describes each person (`observations`), then an LLM classifies them from that description | `multi_angle_vlm_*` and `multi_angle_llm_*` |
 | `true` | one step: the VLM describes and classifies in one answer | the `multi_angle_end_*` templates of the `prompt_profile` |
 
-The marks need the server's `april_tag` and `gaze_detect` settings on, which they are unless set otherwise ([Server config](configuration.md#server-config)).
+### Marks on the frames
+
+`action_overlays` in the server config picks the marks the VLM sees:
+
+| `action_overlays` | Marks |
+|---|---|
+| `auto` (default) | the marks the prompt explains: the AprilTags and gaze lines for `cot`, `baseline` and the two-step templates; none for `baseline_no_pre` |
+| `all` | the AprilTags and the face boxes, gaze lines and `in:` values |
+| `tags` | the AprilTags only |
+| `gaze` | the face boxes, gaze lines and `in:` values only |
+| `none` | none: the VLM gets the frames as captured |
+
+A mark is drawn only while its detector is loaded: `april_tag` for the tags and `gaze_detect` for the gaze ([Server config](configuration.md#server-config)). Those two settings also feed the [pose and gaze features](pose-and-gaze.md), so turn them off only when no features are wanted; `action_overlays` changes the action labels alone. The **Prompts** tab of the VFA Server card shows the marks the current settings draw.
+
+!!! warning "A prompt that does not explain the marks"
+    `baseline_no_pre` identifies people by appearance and says nothing about marks. With `action_overlays: all`, `tags` or `gaze` it gets marked frames all the same, and the server logs a warning at start.
 
 ## Action coding scheme
 
@@ -64,7 +79,7 @@ With `end_to_end: true`, `prompt_profile` picks the one-step templates:
 |---|---|
 | `cot` (default) | the chain-of-thought prompt above |
 | `baseline` | direct classification, without the reasoning steps; the answer holds `classifications` only |
-| `baseline_no_pre` | `baseline` without the legend of the marks: each person is identified by appearance alone, not by their AprilTag |
+| `baseline_no_pre` | `baseline` without the legend of the marks: each person is identified by appearance alone, not by their AprilTag; with `action_overlays: auto` its frames carry no marks |
 
 ### Templates and placeholders
 

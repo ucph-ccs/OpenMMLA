@@ -22,7 +22,10 @@ from openmmla.services.vfa.appearance import (AppearanceParams, FaceEmbedder, Sc
                                               describe_persons, ensure_face_models)
 from openmmla.services.vfa.tracking import (DEFAULT_BUFFER_FRAMES, DEFAULT_FRAME_SECONDS, DEFAULT_IDLE_SECONDS,
                                             DEFAULT_SPLIT_GAP_SECONDS, PersonTracker)
-from openmmla.services.vfa.prompt_profiles import DEFAULT_PROMPT_PROFILE, profile_template_files
+from openmmla.services.vfa.prompt_profiles import (
+    DEFAULT_ACTION_OVERLAYS, DEFAULT_PROMPT_PROFILE, PROFILE_EXPLAINS_MARKS, action_overlays,
+    overlay_marks_label, profile_template_files,
+)
 from openmmla.services.vfa.schema_loader import load_vfa_action_schema
 from openmmla.utils.video.apriltag import detect_apriltags
 from openmmla.utils.video.gaze import detect_gaze, gaze_backend_name, load_gaze_backend
@@ -234,6 +237,25 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.prompt_profile = str(analyzer_config.get('prompt_profile', DEFAULT_PROMPT_PROFILE))
         self.logger.info(f"Prompt profile: {self.prompt_profile}")
 
+        # the marks drawn on the action labels' frames for the VLM (auto | all | tags | gaze |
+        # none). april_tag and gaze_detect above only load the detectors, which /features reads
+        # whatever this says; auto draws what the prompt explains, so baseline_no_pre gets
+        # clean frames instead of marks its prompt never mentions
+        overlays_setting = analyzer_config.get('action_overlays', DEFAULT_ACTION_OVERLAYS)
+        marks = action_overlays(overlays_setting, self.prompt_profile, bool(self.end_to_end))
+        self.action_overlays_setting = (DEFAULT_ACTION_OVERLAYS if overlays_setting is None or _is_unfilled(overlays_setting)
+                                        else str(overlays_setting))
+        self.action_overlay_tags = marks['april_tag'] and bool(self.april_tag_enabled)
+        self.action_overlay_gaze = marks['gaze'] and bool(self.gaze_detect_enabled)
+        if marks['april_tag'] and not self.april_tag_enabled:
+            self.logger.info("action_overlays asks for AprilTags but april_tag is off: none drawn")
+        if marks['gaze'] and not self.gaze_detect_enabled:
+            self.logger.info("action_overlays asks for gaze lines but gaze_detect is off: none drawn")
+        if self.end_to_end and not PROFILE_EXPLAINS_MARKS.get(self.prompt_profile, True) and \
+                (self.action_overlay_tags or self.action_overlay_gaze):
+            self.logger.warning(f"prompt_profile {self.prompt_profile} does not explain the marks, "
+                                f"yet action_overlays {self.action_overlays_setting} draws them")
+
 
         if self.backend not in SUPPORTED_BACKENDS:
             raise ValueError(
@@ -285,6 +307,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
         self.logger.info(f"Action Schema: {self.action_schema_name} ({self.action_schema_path})")
         self.logger.info(f"AprilTag Detection: {self.april_tag_enabled}")
         self.logger.info(f"Gaze Detection: {self.gaze_detect_enabled}")
+        self.logger.info(f"Action label marks ({self.action_overlays_setting}): "
+                         f"{overlay_marks_label({'april_tag': self.action_overlay_tags, 'gaze': self.action_overlay_gaze})}")
         self.logger.info(f"Gaze head-box fallback: {self.gaze_head_box_fallback}")
 
         # /features: the persons of a frame as skeletons (a pose model), the AprilTag each
@@ -532,6 +556,10 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             'families': self.families,
             'april_tag': bool(self.april_tag_enabled),
             'gaze_detect': bool(self.gaze_detect_enabled),
+            # the marks the action labels' frames carry for the VLM (/features is unaffected)
+            'action_overlays': {'setting': getattr(self, 'action_overlays_setting', None),
+                                'april_tag': bool(getattr(self, 'action_overlay_tags', False)),
+                                'gaze': bool(getattr(self, 'action_overlay_gaze', False))},
             'gaze_backend': self.gaze_backend if self.gaze_detect_enabled else None,
             'gaze_model': self.gaze_model if self.gaze_detect_enabled else None,
             'gaze_loaded': self.gaze is not None,
@@ -865,10 +893,10 @@ class MultiAngleVLLMFrameAnalyzer(Server):
                 
                 self.logger.info(f"Processing image from {angle} perspective: {angle_description}")
                 
-                # Process the image with AprilTag detection and gaze detection
+                # draw the marks action_overlays allows (the detectors stay loaded for /features)
                 processed_image = self._process_single_image(
-                    image_bytes, angle, angle_description, original_filename, session_id, 
-                    april_tag=self.april_tag_enabled, gaze_detect=self.gaze_detect_enabled
+                    image_bytes, angle, angle_description, original_filename, session_id,
+                    april_tag=self.action_overlay_tags, gaze_detect=self.action_overlay_gaze
                 )
                 processed_images[angle] = processed_image
 
@@ -917,8 +945,8 @@ class MultiAngleVLLMFrameAnalyzer(Server):
             angle_description: Description of what this angle shows
             original_filename: Original filename from the request (optional)
             session_id: Session ID for organizing temp files (optional)
-            april_tag: Whether to perform AprilTag detection (default: True)
-            gaze_detect: Whether to perform gaze detection (default: True)
+            april_tag: Whether to detect and draw the AprilTags on the frame (default: True)
+            gaze_detect: Whether to detect and draw the face boxes and gaze lines (default: True)
             
         Returns:
             dict: Processed image information including base64 encoding and metadata

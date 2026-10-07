@@ -35,6 +35,8 @@ POSE_MODELS = tuple(f'{family}{size}-pose.pt' for family in ('yolo26', 'yolo11',
 # prompt_profiles.py, kept in step by a test) and the image detail a vision model is asked for
 PROMPT_PROFILES = ('cot', 'baseline', 'baseline_no_pre')
 IMAGE_DETAILS = ('auto', 'low', 'high')
+# the marks drawn on the action labels' frames (ACTION_OVERLAY_SETTINGS in prompt_profiles.py)
+ACTION_OVERLAYS = ('auto', 'all', 'tags', 'gaze', 'none')
 
 # the pyannote pipelines the speech transcriber's WhisperX diarizes with
 # (SpeechTranscriber.local.diarize_model); both gated on huggingface.co. community-1 needs

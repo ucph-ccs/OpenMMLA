@@ -98,7 +98,7 @@ With the shipped config, a card left on `as the config says` asks for the pose a
 !!! note "Why the action labels are off by default"
     The VLM is the costliest request, and a cloud backend receives the frames.
 
-The action labels and the features are two separate requests to the same server. The action labels run the VLM on frames the server first marks with AprilTags and gaze lines (by its own `april_tag` and `gaze_detect` settings), so they use the gaze model as a hint but return no gaze and run no pose model. The pose and the gaze return data and run no VLM. With **Action Labels** and **Gaze** both on, the gaze model runs twice per frame set.
+The action labels and the features are two separate requests to the same server. The action labels run the VLM on frames the server first marks with AprilTags and gaze lines (as its `action_overlays` setting says), so they use the gaze model as a hint but return no gaze and run no pose model. The pose and the gaze return data and run no VLM. With **Action Labels** and **Gaze** both on, the gaze model runs twice per frame set.
 
 !!! tip "Set the paces"
     The labels and the pose run at different paces. With the defaults, `Base.keyframe_interval` 1 and `Synchronizer.action_interval` 30, the frame sets come every second for the pose and the gaze, and the VLM is asked at most every 30 s. For a labels-only run, set `keyframe_interval` to 30 and `action_interval` to 0, so the bases capture a frame set every 30 s and each one is labelled, and turn **Pose** and **Gaze** off.
