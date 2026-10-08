@@ -58,6 +58,10 @@ sees holds per typed name; that the person typing a name is that auditor is not 
 may answer a frame's identity under a second name, see which boxes the frozen versions call pupils,
 then answer it under their own (the scorer lists the saves under other names from the primary's
 address and browser).
+
+A transcription audit (a plan whose task is 'transcript', drawn by audit_speech) is served by this
+command too, with links or open as above, but with the routes and the page of audit_transcript_page
+(TranscriptHandler, TRANSCRIPT_PAGE); --audit-sweeps says how many of its sweeps are served.
 """
 from __future__ import annotations
 
@@ -81,6 +85,10 @@ L.register_loaded(__name__, __file__)
 DEFAULT_PORT = L.DEFAULT_PORT
 AUDIT_MODULES = ('openmmla.commands.ses.code', 'openmmla.commands.ses.code_locked', 'openmmla.commands.ses.audit',
                  'openmmla.commands.ses.audit_page')
+# a transcription audit's server runs these as well: its page and routes, the grammar its transcripts are checked
+# with and the blind closes it reads (a sensing audit's start line names AUDIT_MODULES only, as before)
+TRANSCRIPT_MODULES = AUDIT_MODULES + ('openmmla.commands.ses.audit_text', 'openmmla.commands.ses.audit_speech',
+                                      'openmmla.commands.ses.audit_transcript_page')
 # where a gaze lands, in the order the pipeline breaks ties (features.gaze_target, window_features._gaze_label):
 # any face before any hands, among hands the nearest, then the work area or a zone, then elsewhere, then out of frame
 GAZE_CLASSES = [
@@ -676,7 +684,23 @@ def clean_answer(phase: str, raw, item: dict, view: dict, own: dict, asked) -> t
 def cmd_serve(args, argv) -> int:
     artifacts, audit_id = A._artifacts(args), args.audit
     folder = A.audit_dir(artifacts, audit_id)
-    audit = load_audit(artifacts, audit_id)
+    sweeps = getattr(args, 'audit_sweeps', None)
+    base, modules, task = AuditHandler, AUDIT_MODULES, {}
+    if A.load_plan(artifacts, audit_id).get('task') == 'transcript':
+        # a transcription audit (audit_speech) has routes and a page of its own, and serves the sweeps asked for
+        from openmmla.commands.ses import audit_speech as SP
+        from openmmla.commands.ses import audit_transcript_page as TP
+        audit = TP.load_transcript_audit(artifacts, audit_id, sweeps)
+        # the page acts on blind_closed.json: it must be the closes the operator's logged steps made
+        problems = SP.close_problems(SP.read_blind_closed(artifacts, audit_id), SP.logged_closes(artifacts, audit_id)[0])
+        if problems:
+            raise A.AuditError('; '.join(problems) + f' (--audit-close-blind {audit_id} --audit-auditor NAME logs a '
+                               'close the file holds unlogged; put back by hand what the log holds)')
+        base, modules, task = TP.TranscriptHandler, TRANSCRIPT_MODULES, {'task': audit['task'], 'sweeps': audit['sweeps']}
+    elif sweeps is not None:
+        raise A.AuditError(f'{audit_id} is a sensing audit: --audit-sweeps serves the sweeps of a transcription audit')
+    else:
+        audit = load_audit(artifacts, audit_id)
     # the links are the audit's own, issued in its folder: --campaign may name it, never another
     if args.campaign and Path(args.campaign).expanduser().resolve() != folder.resolve():
         raise A.AuditError(f"an audit's links are issued in its own folder: --campaign {folder}")
@@ -708,21 +732,22 @@ def cmd_serve(args, argv) -> int:
     if unrendered == len(audit['items']):
         raise A.AuditError(f'nothing of audit {audit_id} is rendered (--audit-render {audit_id})')
     log = L.RequestLog(folder / L.LOG_FILE)
-    handler = L.handler_class(AuditHandler, campaign=campaign, log=log, allow=allow, audit=audit, folder=folder,
+    handler = L.handler_class(base, campaign=campaign, log=log, allow=allow, audit=audit, folder=folder,
                               artifacts=artifacts, cache={}, cache_lock=threading.Lock(),
                               **({'open': True} if opened else {}))
     L.watch_campaign(campaign, log)
     extra = {'audit_id': audit_id, 'plan_sha256': L.file_sha256(folder / A.PLAN_FILE), 'mode': audit['mode'],
              'campaign_sha256': L.file_sha256(campaign.path), 'another_instances': others or None,
-             'allow_wide': bool(args.allow_wide)}
+             'allow_wide': bool(args.allow_wide), **task}
     if opened:
         # the scorer reads the audit as open from this line: names typed, not authenticated
         extra['open'] = True
+    served = '' if not task else ' (sweep 1)' if task['sweeps'] == 1 else f" (sweeps 1 to {task['sweeps']})"
     print(f"audit {audit_id} ({audit['mode']}{', open: the auditors type their names' if opened else ''}): "
-          f"{len(audit['sessions'])} recordings, {len(audit['items']) - unrendered} items served; "
+          f"{len(audit['sessions'])} recordings, {len(audit['items']) - unrendered} items served{served}; "
           f"http://{args.bind}:{port}/audit for {', '.join(str(n) for n in allow)} (Ctrl-C stops)")
     try:
-        return L.serve(handler, args.bind, port, argv, AUDIT_MODULES, extra)
+        return L.serve(handler, args.bind, port, argv, modules, extra)
     finally:
         campaign.watch = None
         log.close()

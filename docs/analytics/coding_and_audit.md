@@ -1,6 +1,6 @@
-# Coding campaigns and the sensing audit
+# Coding campaigns and the audits
 
-`mmla ses-code` serves the coding page to one coder at a time on the machine that holds the recordings. For codes that must be blind, such as a second coder, an independent reference sample or an adjudication, it also runs **locked coding campaigns**. A campaign server binds every request to one named coder, shows that coder only their own labels, logs every request in a hash chain, and keeps the labels apart until the campaign is closed and released. It also runs a **sensing audit**, in which a person checks what the camera and microphone pipelines said about a sample of frames and windows without being shown what they said.
+`mmla ses-code` serves the coding page to one coder at a time on the machine that holds the recordings. For codes that must be blind, such as a second coder, an independent reference sample or an adjudication, it also runs **locked coding campaigns**. A campaign server binds every request to one named coder, shows that coder only their own labels, logs every request in a hash chain, and keeps the labels apart until the campaign is closed and released. It also runs a **sensing audit**, in which a person checks what the camera and microphone pipelines said about a sample of frames and windows without being shown what they said, and a **transcription audit**, in which a listener writes down what is said in sampled windows before being shown the text the system made of them.
 
 The code is in `openmmla/commands/ses/`:
 
@@ -9,7 +9,11 @@ The code is in `openmmla/commands/ses/`:
 - `audit.py`: the audit's sample and frozen outputs;
 - `audit_render.py`: the audit's images and clips;
 - `audit_page.py`: the audit's page;
-- `audit_score.py`: the audit's scores.
+- `audit_score.py`: the audit's scores;
+- `audit_speech.py`: the transcription audit's sample, frozen texts, blind close and references;
+- `audit_text.py`: the transcription audit's grammar, normalisers and aligner;
+- `audit_transcript_page.py`: the transcription audit's page;
+- `audit_score_transcript.py`: the transcription audit's scores.
 
 Without any of the flags below, `mmla ses-code` serves the default page exactly as before: the page's bytes, its routes and its answers are unchanged, and a test checks the page's sha256.
 
@@ -17,7 +21,7 @@ Without any of the flags below, `mmla ses-code` serves the default page exactly 
 
 The tool limits who may connect to its own port. It cannot stop a coder's machine from reaching the server's other ports, and those show what a blind coder must not see:
 
-- the default coding page (port 8765) shows every coder's labels and the agreement page;
+- the default coding page (port 8765) shows every coder's labels, the agreement page and, with its Transcript button, the ASR text of every window;
 - the dashboard shows a model's interaction label per window, the raw recordings and `window_features.csv`;
 - the streaming server serves the cameras.
 
@@ -33,7 +37,7 @@ The servers enforce what they can:
 - **Bind.** `--locked` and `--audit` refuse `0.0.0.0` and LAN or public addresses, since plain HTTP would carry clips, frames and cookies across them. They bind the tailnet address or 127.0.0.1, the latter behind an SSH forward. An open audit (`--audit-open`, [below](#the-open-audit)) binds the same addresses.
 - **Allowed clients.** With the tailnet address, `--allow-from` is required and names hosts (single addresses). A network needs `--allow-wide`, which the start line records. Any other client gets 403 and a log line. With 127.0.0.1, only this machine may connect, unless `--allow-from` narrows it further. An open audit is the exception: there `--allow-from` is optional, and without it every tailnet address may connect, as anyone who reaches the default page may. The start line records the addresses allowed.
 - **Another instance.** Both servers refuse to start while another `ses-code` serves the same artifacts, unless `--i-know-another-instance-runs`, which the start line records. This check is a convenience: the control is the one-port rule above. The running default page never needs to stop.
-- **Their own checkout.** Run the campaign and audit servers from a separate checkout on port 8766 (the default for `--locked` and `--audit`). A campaign and an audit served at once need `-p` for one of them.
+- **Their own checkout.** Run the campaign and audit servers from a separate checkout on port 8766 (the default for `--locked` and `--audit`). A campaign and an audit served at once, or two audits (a sensing audit and a transcription audit), need `-p` for all but one of them; the one-port rule then names the port each coder or auditor reaches.
 
 ## Locked coding campaigns
 
@@ -210,12 +214,12 @@ The gaze classes follow the pipeline's tie-breaking (`features.gaze_target`, the
 
 `9` names two of these when the gaze lands between them, and `x` is cannot tell.
 
-The audit has no presence question, no speech-activity or overlap question, no word error rate and no position check.
+The sensing audit has no presence question, no speech-activity or overlap question, no word error rate and no position check. The [transcription audit](#the-transcription-audit) asks whether anyone speaks and whether voices overlap, and gives a word error rate.
 
 ### What an auditor never sees
 
 - **No pipeline conclusion.** In the default blind mode, nothing the pipeline concluded is drawn or sent: no badge ids, no tag sources, no gaze classes and no speech measures. The boxes are the pose model's own, and every person gets one.
-- **One fact, after the lock.** The page learns which boxes a frozen version calls pupils, and only after the frame's identity answers are locked.
+- **One fact, after the lock.** The page learns which boxes a frozen version calls pupils, and only after the frame's identity answers are locked. The transcription audit has one fact of this kind too: the text the content model read, shown only after the operator closes an auditor's blind pass ([Blindness and the reveal](#blindness-and-the-reveal)).
 - **No pipeline file.** The server reads the plan, the views and the answers files. It never opens a `pipeline*.json` file (a test checks this).
 - **Verify mode.** With `--audit-mode verify` at sampling, the renderer draws the display version's pupil and tag source beside the member boxes, and its gaze ray and class on the gaze pictures. A sample is in one mode for good.
 - **No identifying detail.** Session ids, dates, devices, file paths and absolute times never reach the page: recordings are `R01`, `R02` and so on, and cameras are numbered.
@@ -450,6 +454,268 @@ artifacts/<session>/audit/<ID>/
 
 Images and clips of children stay on the machine that holds the recordings. Exclude `runtime/audit/*/media/` from any copy of `artifacts/`, and purge it once the scores are final. The answers files, notes included, sit in the session folders, so a copy of a session folder carries them.
 
+## The transcription audit
+
+A transcription audit checks the text the speech pipeline gives a content model. A listener who knows the recordings' language writes down what is said in sampled 10 s windows and answers the content model's own questions about them, blind to every system output. Only once the operator closes their blind pass does the page show them, window by window, the text the content model reads, which they rate. The scores compare that text with the transcripts, and the content model's scores with what the listener heard.
+
+It is drawn with `--audit-sample ID --audit-task transcript` (the plan's `task` is `transcript`) and then runs through the same flags as the sensing audit, with its own folder, links, request log, frozen versions and scores. Every rule of the sensing audit holds unless this section says otherwise. The listeners' conventions are in the [Transcription guide](transcription_guide.md), in Danish with an English twin.
+
+### What the transcription audit checks
+
+The unit is one 10 s window `[ws, ws + 10)` of the display version's fused grid, the window a content model scores. The content model reads a window's ASR text, with the 10 s before it as context, and gives three letter probabilities: a teacher speaks (`teacher`), pupils talk with each other about the task (`peer_task`) or about something else (`peer_other`). A word belongs to the window in which it begins, as in the text the model reads.
+
+Each window's clip spans `[ws − 10, ws + 12)`, 22 s: the model's 10 s of context, the shaded window and a 2 s tail. It has the sensing audit's camera grid (up to four cameras in 640 × 360 tiles) and the session's sound as AAC-LC at 96 kb/s, mono, 16 kHz, with no filter and no change of loudness. Only the shaded window is transcribed.
+
+| Kind of sound | When | The clips |
+|---|---|---|
+| `group` | the session has a group microphone | the group microphone |
+| `dual` | the session has a group microphone, and its personal microphones' chunks hold at least 5 % of the version's words | the group microphone, and a second clip with the sum of the personal microphones (`amix`, not normalised) |
+| `mix` | the session has no group microphone | the mix of the worn microphones that replay wrote, `analysis/group_mix/audio_<device>_<start>.wav`; the sha256 of its note is recorded |
+
+Per window the auditor answers in two phases:
+
+| Phase | When | Answers |
+|---|---|---|
+| `transcribe` | until the operator closes the auditor's blind pass | whether anyone speaks (`speech`, `unintelligible`, `none`); the transcript, one tagged line per turn; whether voices overlap; who speaks (the sensing audit's question); whether an adult speaks; whether pupils of this group talk with each other, about the task or about something else; whether pupils of another group talk off the task; a flag and a note |
+| `reveal` | after the close, for the primary auditor only | whether the content model's text conveys what was said (`yes`, `partly`, `no`, `nothing_said`); whether it holds words nobody said (`none`, `some`, `most`, `cannot_tell`); a flag and a note |
+
+The questions about the adult and the pupils are the content model's own, with one change: the page asks about the pupils of *this* group, whom a listener can tell from another group's pupils and the model cannot.
+
+### Blindness and the reveal
+
+Until the operator closes an auditor's blind pass, no response of the server carries any system output: no text, word count, speech measure, score, stratum, rank, weight or session id. The server reads the plan, the views, the answers files and `blind_closed.json`, and never a `pipeline*.json` file.
+
+The only system output the page ever shows is the **reveal**: the display version's text of the window and of the 10 s before it, as the content model reads them. The render copies it into the view, and the server sends it with an item only when:
+
+- the auditor's name is in `blind_closed.json`;
+- the auditor saved a transcription of the item before the close;
+- the item is not practice;
+- the auditor answers the full audit, not the reliability subset.
+
+The reveal shows the auditor's own transcript, read-only, and the content model's text: the previous 10 s in grey, then the window, its lines joined by newlines with no speaker labels. An empty window says that the system wrote nothing and the content model was not asked. The stratum of an item is never shown.
+
+**The blind close.** `--audit-close-blind ID --audit-auditor NAME` closes one auditor's blind pass:
+
+1. It verifies the request log, unless `--despite-log-failure`.
+2. Under the log's lock, which every save of the server also holds, it adds NAME to `artifacts/runtime/audit/ID/blind_closed.json` with the sequence number of its own log line and the time. A save is therefore judged wholly before or wholly after the close.
+3. It logs `audit-close-blind` with the file's sha256.
+
+It refuses a closed audit, a name closed already, and a name that saved no transcription, which catches a typo. From then on the page refuses that name's transcriptions (409, "the blind pass is closed") and asks for a reveal rating of each item the name transcribed before the close. Practice items, and items with no transcription before the close, ask nothing more.
+
+The page acts on `blind_closed.json`, but the record of a close is its line in the request log. The server does not start, and a close of another name refuses, while the file names a close the log does not hold, lacks one it holds, or holds one at another sequence number. The scorer and the reference export count by the logged closes. If a close stopped between its two writes, the file holds a close the log does not: close that name again, which logs the close at the new step's own sequence number and records the old one as `unlogged_seq`. Any other difference is a hand edit: put the file back as the log has it.
+
+!!! warning "The declared order of the closes"
+    Close the primary auditor only once the reliability auditor has finished, or log a `--log-note` that says why not. Decide whether sweep 2 is served, and log it, before this close. The reliability auditor is never shown a reveal, closed or not.
+
+### The two texts
+
+As in the sensing audit, the answers do not depend on the version, since windows are drawn by their times. Each version's text is frozen apart, in `pipeline_rerun.json` and `pipeline_reported.json`.
+
+- **`rerun`** is the display version and the declared primary: the `asr_transcription` events as they are at the freeze, with each session's current fused table. The sample is drawn on its grid, `--audit-sample` freezes it, and the reveal shows its text.
+- **`reported`** is the secondary: the events and the tables that a content model's earlier scores were made from. It is frozen right after the sample with `--audit-freeze`, and only with `--audit-asr-reference` and a content arm whose file has a `cur_sha` column, so that it is always checked against the text the content model read. A window missing from its table's grid keeps its text and is listed in the file's `off_grid`.
+
+Per window, a frozen file holds:
+
+- `consumed`: the text of every source, as the content model reads it (the inside parts of `code_text.window_text`'s lines, joined by newlines), the 10 s before it, their word counts and the text's `sha` (the first 16 hex digits of its sha256);
+- `group`: the same of the group microphone alone;
+- `timed`: the words that start from 2 s before the window to 2 s after it, as offsets from its start, with their ends and microphones;
+- the table's speech measures, as the sensing audit freezes them;
+- with `--audit-content-scores ARM=FILE,...`, each arm's scores of that text.
+
+The file is readable by its owner only. `--audit-asr-events` names the version's events: `influx` (InfluxDB, through `--influx-config`) or a file pattern with `{sid}` that holds JSON lines (gzipped or not, as a backup writes them) or a JSON list. These checks run at every freeze:
+
+| Check | Fails when | Then |
+|---|---|---|
+| The count | the events are not as many as the version's table was fused from, or the table changed since it was fused | the session is not frozen, unless `--audit-allow-drift`, which records it |
+| The reference texts | with `--audit-asr-reference FILE` (JSON lines of session, window start, source, `cur` and `prev`), a window's text or the 10 s before it is not its row of source `all`, or has no row | the session is refused; no flag overrides it |
+| The content scores | in an arm whose file has a `cur_sha` (or `cur_sha256`) column, a row has none, or one that is not the frozen text's `sha` | the session is refused; no flag overrides it |
+| The timed words | the timed words that start inside the window are not the words of its stamped lines, so the reader has drifted from `code_text` | the session is refused; no flag overrides it |
+
+At sampling, a session that fails a check refuses the whole sample and nothing is written, except that, without a source audit, a session that fails the count is left out. At `--audit-freeze`, a session that fails is refused alone, in a file that says why. A refused session can be frozen again, and its refusal stays in the log; `reported` is frozen again only through the same checks, since `--audit-freeze` refuses it without `--audit-asr-reference` and an arm with `cur_sha`. An arm without a `cur_sha` column, such as a cloud model's, can be frozen beside that arm; its rows are matched by their window alone.
+
+### Transcription steps
+
+| Step | Command | What it does |
+|---|---|---|
+| 1 | `--audit-sample ID --audit-task transcript --audit-version rerun --audit-asr-events influx` | Chooses the sessions, draws the windows ([below](#the-transcription-sample)), writes the plan, the views and the designs, freezes `rerun` and writes `campaign.yml`. The plan records the normaliser (`audit_text`, its version and sha256) and the declared analyses. |
+| 2 | `--audit-freeze ID --audit-version reported --audit-asr-events PATTERN --audit-tables PATTERN --audit-asr-reference FILE --audit-content-scores ARM=FILE,...` | Freezes the other version for the same windows, checked against the texts the content model read and its scores' `cur_sha`. Both flags are required. |
+| 3 | `--audit-render ID` | Cuts every window's clips, of every sweep, with ffmpeg alone (no `cv2`, so any environment with ffmpeg works), and copies the reveal into the views. It refuses until each recording's two versions are frozen, or refused, by logged steps. |
+| 4 | `--campaign artifacts/runtime/audit/ID --log-note TEXT` | The notes below. |
+| 5 | `--campaign artifacts/runtime/audit/ID --issue-token NAME --token-scope audit` | A one-time link for an auditor; `--token-subset reliability` for the second auditor. An open audit skips this step. |
+| 6 | `--audit-estimate ID` | The hours, from 240 s per transcription and 45 s per reveal rating, or from the practice answers once there are some. The reveal's time stays assumed, since practice items are never revealed. |
+| 7 | `--audit ID --bind <tailnet address> --allow-from <auditor machines>` | Serves the page, sweep 1 only unless `--audit-sweeps 2`. With `--audit-open`, no link is needed. |
+| 8 | `--campaign artifacts/runtime/audit/ID --anchor` | Prints only hashes, as for the sensing audit. |
+| 9 | `--audit-close-blind ID --audit-auditor NAME` | Closes the primary auditor's blind pass ([above](#blindness-and-the-reveal)). The primary then rates the reveals. |
+| 10 | `--campaign artifacts/runtime/audit/ID --close-campaign` | Closes the audit to answers, once the reveal ratings are in. |
+| 11 | `--audit-export-references ID --audit-auditor NAME --audit-out FILE` | Writes the primary's transcripts for the content model to read again ([below](#references-for-the-content-model)). |
+| 12 | `--audit-score ID --audit-version rerun` | Scores `rerun` against the answers, and `reported` beside it ([below](#transcription-scores)). |
+| 13 | `--audit-purge ID` | Deletes every clip. |
+
+Step 1 refuses any version but `rerun`, since the declared analyses take it as the primary and the reveal shows it, and it refuses without `--audit-asr-events`. Without `--audit-tables`, a version's tables are each session's current fused table. A transcription audit is always blind: `--audit-mode` does not apply.
+
+The sessions are those of the source audit given by `--audit-windows-from` (or those of them `--audit-sessions` names), and every one of them must load, since the source's windows are never thinned. Without a source, they are those of `--audit-sessions`, else every session less `--hold` unless `--audit-include-held`, and a session without video, a fused table, the version's events, or a group microphone or a mix is left out with the reason.
+
+**Notes to log before the first answer** (`--log-note`):
+
+- the roles: the primary auditor and the reliability auditor. The scorer finds this note by the word "role", for example `--log-note "roles: primary NAME, reliability NAME"`, and every score's header warns when no such note precedes the first scored answer;
+- each auditor's first language, as they state it, whether they have seen the ASR text of these recordings before, on the coding page or elsewhere, and whether they answered the sensing audit the scores compare with, and under which name;
+- the sha256 of the [Transcription guide](transcription_guide.md) the auditors were given, and again if it changes after the practice;
+- the listening setup (headphones, a quiet room);
+- the instructions to the auditors: no automatic transcription or translation tool, no other page of the server during the audit, and no talk about scored items with each other.
+
+!!! warning "The ASR text on other ports"
+    The tool cannot stop an auditor from opening the default coding page or the dashboard, which show the ASR text. The one-port rule of [Network isolation](#network-isolation), or the instructions above when the operator does without it, keeps the blind pass blind. Record which in the log.
+
+**Practice.** Both auditors answer the practice items first. They then meet once to compare their practice transcripts with each other, never with the system's text, and settle questions about the conventions. The guide may be revised then; log its new sha256 before the first scored answer. The normaliser is never changed after the sample.
+
+### The transcription sample
+
+All draws are seeded (`--audit-seed`) and use window times only. A session's population is every window of the display grid inside its sound and every video, more than `--audit-margin` seconds (10) from either end, so a clip always lies inside the recordings. The lessons are those of `splits.lesson_key`.
+
+| Part | Default | Flag | How it is drawn |
+|---|---|---|---|
+| Random windows (R) | the source's who-speaks windows; 10 per lesson the source drew none of | `--audit-windows-from SOURCE`, `--audit-speech` | With a source, a sensing audit, its who-speaks windows, aliases and recording order. Each window must start on the display grid (within 0.5 s), the source's microphone must still be the session's group microphone, and the window must lie inside the population; otherwise the sample is refused, never thinned. A lesson the source drew none of, or every lesson without a source, gets a simple random sample, shared over its sessions in proportion to their populations. |
+| Sweep 1 | ranks 1 to 3 of each lesson | `--audit-first-ranks` | The other ranks are sweep 2. |
+| Social windows (S) | 28 | `--audit-social`, `--audit-social-coders A,B`, `--audit-social-both` (0.65), `--audit-gap` (20 s) | Windows the named coders labelled `social`, by each coder's last label; a labels file a model wrote is refused. A share `--audit-social-both` of them is labelled social by every named coder, the rest by exactly one. Each lies at least the gap from every R and practice window, and from the S windows drawn before it in its session. A pool that runs out moves its shortfall to the other, printed and recorded. All are in sweep 1. `--audit-social 0` draws none. |
+| Practice | the source's practice windows, and one window in the first session of each other kind of sound | `--audit-practice 0` turns it off | Without a source's, the first kind of sound (`group`, `dual`, then `mix`) gets 4 windows in its first session. Each lies at least the gap from every item. Practice comes first for every auditor and is never scored nor revealed. |
+| Reliability subset | rank 1 of each lesson, and 25 % of the S windows | `--audit-reliability-ranks`, `--audit-reliability` | The second auditor answers these after the practice. |
+
+**Ranks.** Within a lesson, the source's reliability windows (in a fresh lesson, two of its drawn windows) take the first ranks in a seeded order, and the rest follow in another. The source drew a simple random sample and flagged its reliability windows at random, so the ranks are a random order of a random sample: for every k, the windows of ranks 1 to k are a simple random sample of the lesson. An R window weighs its lesson's population over the lesson's R windows kept in the analysis. S windows carry no weight and enter only the analyses that are conditional on the coders' labels.
+
+**Sweeps.** Every rank is drawn, frozen and rendered at once, but the server serves only sweep 1 unless it is started with `--audit-sweeps 2`. The items of a sweep not served are not in the sequence, not counted in the progress, and their clips answer 404. Sweep 2 can therefore be served later without drawing, freezing or rendering after any answer. A sweep beyond the plan's is refused, and so is `--audit-sweeps` for a sensing audit.
+
+**Order.** The primary auditor gets the practice block, then sweep by sweep each recording's items of that sweep, R and S shuffled together, the recordings in the plan's order. The reliability subset gets the practice block, then its flagged items, the recordings in reverse order. The page starts at the first item not yet answered. Items are named `ID-<alias>-t-NNN`, practice items `ID-<alias>-pt-NN`. Each sweep's order is a seeded shuffle, so the R items an auditor answers in the page's order are a random sample of their lesson; an R item left unanswered before an answered one is a skip, which the scores count.
+
+### The transcription page
+
+The page has the player on the left and the form on the right. Under the video, a bar shows the context in grey, the shaded window and the tail, with the playhead; a click on the bar plays from that point to the end. The keys work outside the text fields.
+
+| Button | Key | What it does |
+|---|---|---|
+| **Play window** | `space` | plays the shaded window, 10 to 20 s of the clip |
+| **From 2 s before** | `a` | plays from 2 s before the window to the clip's end |
+| **With the previous 10 s** | `p` | plays the context and the window, 0 to 20 s |
+| **Back 2 s** | `b` | goes back 2 s and plays on to the end of the part playing |
+| **Loop window** | `l` | plays the window again and again, until pressed again |
+| **Speed** | `r` | 1, 0.75 or 0.5 times, the pitch kept |
+| **Gain** | `g` | +0, +6, +12 or +18 dB, raised in the browser; the file is unchanged |
+| **Microphone** | `c` | the table microphone or the personal microphones, at the same moment; `dual` sessions only |
+| **Stop** | `s` | stops |
+| | `t`, `n` | puts the caret in the transcript or in the note |
+| **← previous**, **next →** | `←`, `→` | moves between items; unsaved changes ask first; nothing while an item loads or a save is sent |
+| **Save** | `Ctrl/⌘ Enter` | saves, then opens the next item not yet answered, after the last back to the first one still open |
+
+In the transcript and the note every key types, except `Ctrl/⌘ Enter` (save), `Esc` (play the window) and `Alt ←` (back 2 s). The tag buttons **M:**, **T:**, **O:** and **?:** put the tag at the start of the caret's line, and the marker buttons **[x]**, **[bg]** and **{ }** insert at the caret (the braces round a selection). A key held down does not repeat. Choosing status `none` answers the other questions for no one and unticks overlap. An item is shown only once it has loaded: if it does not load, the page stays on the item before it and says so. Past the last item the page says how many items are not answered yet and offers the first of them; it thanks the auditor only when none is left. The help panel, "How to transcribe, and the keys", shows the guide's rules in English and the keys. The page keeps no draft in the browser.
+
+The server checks every save:
+
+- **The transcript** follows the grammar of `audit_text.parse_reference`: at most 12 lines of at most 300 characters, 2,000 in all; each line its tag (`M:`, `T:`, `O:` or `?:`), a space and its words; the words letters, spaces, `. , ? ! ' -`, the markers `[x]` and `[bg]` and guesses in braces. Digits, other brackets and punctuation, symbols, tabs and control or formatting characters are refused, with the line and the rule named. The transcript is kept as the grammar cleans it: NFC, each line trimmed and its runs of spaces made one, typographic apostrophes made `'`, empty lines dropped.
+- **The status** agrees with it: `none` with an empty transcript, `unintelligible` with only `[x]` and `[bg]`, `speech` with at least one word. Status `none` goes with who speaks `none`, and the other way round, and with no adult, no talk among the group's pupils, none of another group's and no overlap. Who speaks `adult` goes with an adult question that is not `no`.
+- **The listening record** (the parts of the clip played, the seconds played, the slowest speed, the highest gain and the microphones) covers at least 95 % of the shaded window, unless the item is flagged. A transcription saved before carries its record on, so a typo is fixed without listening again.
+- **The blind pass** is still open: after the close, a transcription gets 409.
+
+The listening record rests on what the browser reports. It keeps an auditor from saving a window unheard by accident; it is a convenience, not a control, and a paper should describe it so.
+
+### Links and open mode
+
+The transcription audit is served with links or open, exactly as the sensing audit ([The open audit](#the-open-audit)): the same name and scope rules, the same refusals and the same log. The blind close and the reveal are keyed by the name: the link's name, or in an open audit the name as typed, in NFC.
+
+In an open audit the server trusts the typed name for the reveal, as it trusts it for everything else. A person who types, with the full audit, a name whose blind pass is closed sees that name's reveals, and could then transcribe under another name; the log keeps only the address and browser of each request. Use links when the second auditor's independence matters, for example for an agreement a paper reports. The scores of an open audit say it was open.
+
+### Transcription answers
+
+The answers go to `artifacts/<session>/audit/<ID>/answers/<auditor>.jsonl`, one line per save, with the fields of the sensing audit's lines, the sweep and codebook version 2. The file is readable by its owner only, since it holds transcripts. Of an item's phase, the last line counts. A `transcribe` answer holds:
+
+```json
+{"status": "speech", "transcript": "M: ...\nT: ...", "overlap": false, "who": "member",
+ "adult": "no", "peer": "task", "other_offtask": "no", "flag": false, "note": "",
+ "listening": {"seen": [[8.0, 22.0]], "played_seconds": 14.0, "slowest_rate": 1.0,
+               "highest_gain_db": 0.0, "channels": ["main"], "target_cover": 1.0}}
+```
+
+A `reveal` answer holds `gist`, `invented`, `flag` and `note`.
+
+### References for the content model
+
+`--audit-export-references ID --audit-auditor NAME --audit-out FILE` writes one JSON line per scored item NAME transcribed. It holds the last transcription saved before NAME's close (every line when NAME is not closed, which the command says), its status and flag, the request's sequence number, each frozen version's text, the 10 s before it and its `sha`, and the transcript's LLM form: the lines' words without tags, markers or fragments, a guess without its braces, the auditor's casing and punctuation kept, one line per turn. Notes are left out. The file is written with mode 0600, never over an existing file, and its sha256 is logged.
+
+Run the frozen content scorer on these references, on the machine that holds them, to make the file of `--audit-content-scores-ref`.
+
+??? info "Details: the file of re-scored references"
+    `--audit-content-scores-ref ARM=FILE,...` reads per arm a CSV with the columns `item`, `version`, `variant`, `context`, `cur_sha`, `prev_sha`, `ref_sha`, `request_seq` and the content model's letter probabilities, and a `FILE.meta.json` beside it (`scorer`, `scorer_sha256`, `normaliser_sha256`, `model`, `revision`, `input_sha256`, `rows`). Every hash is the first 16 hex digits of a sha256.
+
+    | Variant | Text | Context before it | Context |
+    |---|---|---|---|
+    | `ref_ctx1` | the transcript's LLM form | the version's 10 s before | 1 |
+    | `ref_ctx0` | the transcript's LLM form | none | 0 |
+    | `asr_ctx1` | the version's text | the version's 10 s before | 1 |
+    | `ref_n1` | the transcript in N1's form | the version's 10 s before, in N1's form | 1 |
+    | `asr_n1` | the version's text in N1's form | the version's 10 s before, in N1's form | 1 |
+
+    A row counts only when its hashes are those of the counted transcript (and its request seq) and of the version's text. A variant with a row that fails, or with two rows of one item, is refused with the count, and the N1 variants are refused too when the meta names another normaliser than the plan's.
+
+### Transcription scores
+
+`--audit-score ID --audit-version rerun [--audit-auditor NAME] [--audit-boot 10000]` writes the scores to `artifacts/runtime/audit/ID/scores/rerun_<time>/`. `rerun` is the declared primary. The other version, when it is frozen and passes its checks, is scored in the same run beside it, with the paired differences. `--audit-version reported` puts `reported` first instead: the folder is named after it, and every header calls it the primary.
+
+Before scoring, the scorer checks the request log, the frozen files and the tables as for the sensing audit, and that `audit_text.py` is the file the plan froze; `--audit-allow-drift` scores with another, named in every header. `reported` counts only where its freeze checked every window against the reference texts and an arm's `cur_sha`: otherwise it is refused when scored and left out, named, when scored beside, and every header says what it was checked against. The blind closes are the logged ones; where `blind_closed.json` differs from them, every header names it. The scorer refuses before the primary auditor's blind close, unless `--audit-interim`, which is logged and named in every header.
+
+What counts:
+
+- **The primary auditor** is `--audit-auditor NAME`, else the plan's (`--audit-primary NAME` at sampling, optional), else the one auditor whose link has no subset or, in an open audit, the one name that chose the full audit. The names that chose the reliability subset give the agreement. Other names are counted and left out. Answers of two auditors are never averaged or merged.
+- **An item's transcription** is the last line saved before its auditor's blind close. Lines saved at or after it are left out and counted. **A reveal rating** counts only when saved after the close.
+- **Left out and counted:** practice items; items not rendered, not answered or flagged; items the version holds no text of; transcripts the grammar now refuses or their status disagrees with; and the skips, an R item left unanswered before an item answered after it in the order the page served its recording.
+
+Both texts are normalised by **N1** (`audit_text.normalise`) and aligned word by word, which gives the reference words N, the hits, and the substitutions S, deletions D and insertions I, per tag as well. The WER is Σ w·(S + D + I) / Σ w·N over the items with N ≥ 1, weighted by the R weights, with the unweighted value beside it. The CER is the same over characters.
+
+??? info "Details: N1, N0 and the aligner"
+    - **N1**, on both sides: fragments (`mi-`) out; NFKC and casefold, then ä→æ, ö→ø, é, è and ê→e, á and à→a, ü→u, with æ, ø and å kept; a thousands dot out and runs of digits up to 9999 spelled as Danish cardinals; punctuation and symbols a space, apostrophes deleted; the variant map (`hva` is `hvad`, `ok` is `okay`); the fillers deleted. On the reference, the tags, `[x]` and `[bg]` go first, and a guess counts as its words.
+    - **N0**, a sensitivity: the fragments, NFKC with casefold and the punctuation step only.
+    - **The aligner** is a Levenshtein alignment with unit costs that breaks its ties the same way every time: a hit or a substitution, then a deletion, then an insertion.
+    - The plan freezes the normaliser's version and sha256 at sampling, and the docstring of `audit_text.py` lists every step.
+
+**The content scores.** A content arm is a CSV of a content model's scores per window: session, window start, source, context, `no_text`, the letter probabilities and `cur_sha`. An arm frozen with a version (`--audit-content-scores` at sampling or at the freeze) is read from the frozen file. For the version scored, `--audit-content-scores ARM=FILE,...` at scoring adds arms. Each of their rows' `cur_sha` (or `cur_sha256`) must be the frozen text's `sha`: a file without that column, or with a row that differs, is refused with the count, and no flag overrides it. The arm named `qwen` gives the primary content analyses (P2 and P3), and the others are reported apart. A window the content model was not asked about (`no_text`) scores 0.
+
+| Check | Measures |
+|---|---|
+| Accuracy (P1, S6) | the WER of `consumed` on R items, with its substitution, deletion and insertion shares, the CER, the reference words and the hypothesis tokens; the content words both texts share (N1 less the Danish stopwords and the response words), as precision, recall and F1 |
+| Detection (S1) | the miss rate (no text where words were written), the phantom rate (text where no one spoke, and apart where speech was unintelligible), hypothesis tokens per minute of such audio, repeated 3-grams |
+| Sources (S4) | recall per tag (`M`, `T`, `O`, `?`), the share of the hits per tag, the WER by who speaks, teacher recall against member recall |
+| Group source (S2) | the WER of the `group` text; the WER by kind of sound; in `dual` sessions `consumed` against `group`, and the insertion shares |
+| Words feature (S5) | the table's `words` against the reference words (N0); `speech_ratio` against the status |
+| Content (P2, P3, S7, S12) | the within-lesson concordance C of each score with the blind answers (`peer_other`: peer other against task; `teacher`: adult yes against no; `peer_task`: peer task against none), with the pooled AUROC beside it; from the re-scored references, C_ref − C_ASR and the transfer ratio; the scores' agreement between the two texts (Lin's CCC, Spearman, MAE, κ) |
+| Who speaks (P4, S10) | the primary's shares of who speaks on R items with measured speech, in the sessions with a group microphone and in all; with `--audit-compare-with ID`, a sensing audit joined on the session and the window start (its log verified, read only), the paired difference from its primary, κ, confusion matrices and, for a name in both audits, test-retest; the transcript's main tag against who speaks, on the items whose transcript has a word |
+| Reveal (S11) | `gist` and `invented`, as ratings of the version the reveal showed (`rerun`), whichever version is scored |
+| Coders' labels (S8) | the heard topic (`peer`) against each social coder's labels, as shares, κ and C |
+| Social stratum (S13) | accuracy and detection on the S items alone |
+| Versions (S3) | the other version's accuracy, detection and group source, and the paired differences, each on the items its measure keeps in both versions |
+| Sensitivities | N0; a 0.5 s edge tolerance (timed words near an edge optional); split and merge; the best order of overlapping lines; without the items with `[x]` or overlap; with the insertions of empty windows; the lesson macro mean; sweep 1 alone; without the sessions `--audit-exclude-sessions` names (ids or aliases) |
+| Agreement (S9) | the reliability auditor against the primary on the items both answered: the WER and CER each way, the system's WER against each and its excess over that floor, κ for status, who, adult, peer, other_offtask and overlap |
+
+Every pooled value has a lesson-cluster bootstrap interval (10,000 draws unless `--audit-boot`), every difference paired draws, and each primary a leave-one-lesson-out range. Per-lesson rows give counts and point values only, and no p-value is given. The decision bands of the plan's declared analyses stand beside the rows they apply to.
+
+The outputs hold counts only, never a word of a transcript or of the system's text: `report.txt`, `summary.json`, `units_<version>.csv` per item and source, `pooled_<check>.csv` and `lesson_<check>.csv`, `interauditor.csv`, `compare_<audit>.csv` and `content_<arm>.csv`. Every file is headed by the plan's and the anchors' sha256, the version, the primary and reliability auditors, the roles note or a warning, the blind closes, the lines left out after a close, the log's check and the deviations, and it says when the audit was open or the score is interim.
+
+### Transcription audit files
+
+```
+artifacts/runtime/audit/<ID>/
+  plan.json           task transcript, sessions, aliases, lessons and their populations, sizes, the social draw, the normaliser, declared analyses
+  campaign.yml        the auditors' links (none in an open audit) and whether the audit is closed
+  requests.jsonl      the request log: every step, each blind close and export, and the sha256 of what it wrote
+  blind_closed.json   per auditor whose blind pass is closed, the close's sequence number and time (the page reads it; it must agree with the logged closes)
+  media/<alias>/      the clips, <item>.mp4 and <item>_worn.mp4 (--audit-purge deletes them)
+  render_index.json   per recording the clips cut and the errors, and the ffmpeg version
+  scores/             the scorer's outputs
+artifacts/<session>/audit/<ID>/
+  view.json           what the server serves, with the reveal text once rendered (owner only)
+  pipeline.json       the design: windows, strata, ranks, weights, sound and sources (never served)
+  pipeline_<v>.json   a version's text and measures per window (owner only, never served)
+  answers/<auditor>.jsonl
+```
+
+The rendered views, the frozen files, the answers and the exported references hold transcript text. Keep them, with the clips, on the machine that holds the recordings: a copy of a session folder carries its `audit/<ID>/` folder.
+
 ## A note on short flags
 
-The campaign and audit flags share prefixes with older flags. Abbreviations that used to select an older flag are now ambiguous, and argparse refuses them: `--pre`, `--prep` and `--pr` (`--prepare-text`), `--t` (`--threads`) and `--i` (`--influx-config`). Spell flags out in scripts. No script in the repository uses these abbreviations.
+The campaign and audit flags share prefixes with older flags. Abbreviations that used to select an older flag are now ambiguous, and argparse refuses them: `--pre`, `--prep` and `--pr` (`--prepare-text`), `--t` (`--threads`) and `--i` (`--influx-config`). The transcription audit's flags do the same to `--audit-c` (`--audit-check-frames`), `--audit-f` (`--audit-freeze`), `--audit-i` and `--audit-in` (`--audit-include-held`), `--audit-pr` (`--audit-practice`), and to every abbreviation of `--audit-reliability` from `--audit-rel` on. Spell flags out in scripts. No script in the repository uses these abbreviations.

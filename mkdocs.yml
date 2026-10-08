@@ -13,6 +13,7 @@ exclude_docs: |
   paper.md
   analytics/interaction_classifier.md
   analytics/coding_and_audit.md
+  analytics/transcription_guide.md
   img/interaction_*.svg
   STYLE.md
 

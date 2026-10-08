@@ -50,6 +50,11 @@ The steps, each a flag of mmla ses-code (docs/analytics/coding_and_audit.md):
   --audit-score ID      a version scored against the answers (audit_score)
   --audit-purge ID      the images and clips deleted
 
+A transcription audit (--audit-sample ID --audit-task transcript; its plan's task is 'transcript') is drawn,
+frozen and closed by audit_speech: listeners write down blind what is said in sampled windows, then rate the
+text the content model read once an operator closes their blind pass (--audit-close-blind ID --audit-auditor
+NAME; --audit-export-references ID writes their transcripts for the content model to read again).
+
 Files:
 
   artifacts/runtime/audit/<id>/
@@ -91,6 +96,8 @@ L.register_loaded(__name__, __file__)
 AUDIT_ID = re.compile(r'[A-Za-z0-9_-]{1,40}')
 VERSIONS = ('reported', 'rerun')
 MODES = ('blind', 'verify')
+# what --audit-task draws besides the sensing audit
+TASKS = ('transcript',)
 CODEBOOK_VERSION = 1
 PLAN_FILE = 'plan.json'
 VIEW_FILE = 'view.json'
@@ -120,7 +127,8 @@ LUMA_CUTS = (70.0, 130.0)
 # the keypoint confidence the features endpoint scores with by default: a head box is made from keypoints this sure
 KEYPOINT_CONFIDENCE = 0.3
 # the assumed seconds per judgement of the estimate, until practice answers measure them
-SECONDS = {'roster': 3.0, 'identity_frame': 5.0, 'identity_box': 3.0, 'gaze_box': 6.0, 'speech': 15.0, 'practice': 20.0}
+SECONDS = {'roster': 3.0, 'identity_frame': 5.0, 'identity_box': 3.0, 'gaze_box': 6.0, 'speech': 15.0, 'practice': 20.0,
+           'transcribe': 240.0, 'reveal': 45.0}
 # the analyses audit_score reports, fixed here before any answer is scored
 DECLARED = [
     'identity: precision of the pipeline member boxes (correct over correct, swapped, outside the group and not a '
@@ -1083,6 +1091,8 @@ def estimate(plan: dict, designs, measured: dict | None = None) -> dict:
     """the hours the answers take, by part, for the primary auditor and for the reliability subset, from
     the assumed seconds per judgement or from `measured` ones"""
     seconds = dict(SECONDS, **(measured or {}))
+    if plan.get('task') == 'transcript':
+        return _estimate_transcript(designs, seconds)
     hours = defaultdict(float)
     second = defaultdict(float)
     for design in designs:
@@ -1107,6 +1117,28 @@ def estimate(plan: dict, designs, measured: dict | None = None) -> dict:
     out = {part: round(value / 3600, 2) for part, value in hours.items()}
     out['total'] = round(sum(hours.values()) / 3600, 2)
     out['reliability_auditor'] = round(sum(second.values()) / 3600, 2)
+    return out
+
+
+def _estimate_transcript(designs, seconds: dict) -> dict:
+    """a transcription audit's hours: the practice block, then per sweep a blind transcription and a reveal rating
+    of each scored item, for the primary auditor; the practice and the flagged items' transcriptions for the
+    reliability subset"""
+    hours = defaultdict(float)
+    second = 0.0
+    for design in designs:
+        for it in design['speech']:
+            if it['practice']:
+                hours['practice'] += seconds['transcribe']
+                second += seconds['transcribe']
+                continue
+            hours[f"transcribe_{it.get('sweep', 1)}"] += seconds['transcribe']
+            hours[f"reveal_{it.get('sweep', 1)}"] += seconds['reveal']
+            second += seconds['transcribe'] if it['reliability'] else 0.0
+    out = {part: round(value / 3600, 2) for part, value in sorted(hours.items())}
+    out['sweep_1'] = round((hours['practice'] + hours['transcribe_1'] + hours['reveal_1']) / 3600, 2)
+    out['total'] = round(sum(hours.values()) / 3600, 2)
+    out['reliability_auditor'] = round(second / 3600, 2)
     return out
 
 
@@ -1197,9 +1229,9 @@ def add_arguments(parser) -> None:
     group.add_argument('--audit-include-held', action='store_true', default=None, help="also the sessions --hold names")
     group.add_argument('--audit-mode', default=None, choices=MODES, help="blind (default): no badge or pipeline answer drawn; verify draws them")
     group.add_argument('--audit-person-frames', type=int, default=None, help=f"member judgements per lesson (default {DEFAULTS['person_frames']})")
-    group.add_argument('--audit-speech', type=int, default=None, help=f"who-speaks windows per lesson with a group microphone (default {DEFAULTS['speech']})")
+    group.add_argument('--audit-speech', type=int, default=None, help=f"who-speaks windows per lesson with a group microphone (default {DEFAULTS['speech']}); transcript: the fresh windows of a lesson the source drew none of")
     group.add_argument('--audit-roster', type=int, default=None, help=f"roster crops per pupil (default {DEFAULTS['roster']})")
-    group.add_argument('--audit-reliability', type=float, default=None, help=f"the share of items in the second auditor's subset (default {DEFAULTS['reliability']})")
+    group.add_argument('--audit-reliability', type=float, default=None, help=f"the share of items in the second auditor's subset (default {DEFAULTS['reliability']}); transcript: of the social windows (default 0.25)")
     group.add_argument('--audit-practice', type=int, default=None, help=f"practice items (default {DEFAULTS['practice']})")
     group.add_argument('--audit-seed', type=int, default=None, help=f"the seed of every draw (default {DEFAULTS['seed']})")
     group.add_argument('--audit-margin', type=float, default=None, help=f"seconds left out at either end of a session (default {DEFAULTS['margin']:g})")
@@ -1213,10 +1245,31 @@ def add_arguments(parser) -> None:
     group.add_argument('--audit-auditor', default=None, help="the primary auditor of the scores (default the one whose audit link has no subset; open, the one name that chose the full audit)")
     group.add_argument('--audit-boot', type=int, default=None, help=f"bootstrap resamples (default {DEFAULTS['boot']})")
     group.add_argument('--audit-boot-seed', type=int, default=None, help=f"the bootstrap's seed (default {DEFAULTS['boot_seed']})")
-    group.add_argument('--audit-out', default=None, metavar='DIR', help="where the scores go (default <audit>/scores/<version>_<time>)")
+    group.add_argument('--audit-out', default=None, metavar='DIR', help="where the scores go (default <audit>/scores/<version>_<time>); with --audit-export-references the file")
+    # the transcription audit (audit_speech); its sizes default to audit_speech.TRANSCRIPT_DEFAULTS
+    group.add_argument('--audit-task', default=None, choices=TASKS, help="with --audit-sample: transcript draws a blind transcription audit (audit_speech); default the sensing audit")
+    group.add_argument('--audit-windows-from', default=None, metavar='ID', help="transcript: take this sensing audit's who-speaks windows, aliases and order")
+    group.add_argument('--audit-first-ranks', type=int, default=None, help="transcript: the ranks per lesson in sweep 1 (default 3)")
+    group.add_argument('--audit-sweeps', type=int, default=None, help="with --audit: the sweeps of a transcription audit served (default 1)")
+    group.add_argument('--audit-social', type=int, default=None, help="transcript: windows the named coders labelled social (default 28)")
+    group.add_argument('--audit-social-coders', default=None, metavar='NAMES', help="transcript: whose social labels draw those windows, comma-separated")
+    group.add_argument('--audit-social-both', type=float, default=None, help="transcript: the share of them every named coder labelled social (default 0.65)")
+    group.add_argument('--audit-gap', type=float, default=None, help="transcript: the seconds a social or practice window keeps from the other windows (default 20)")
+    group.add_argument('--audit-reliability-ranks', type=int, default=None, help="transcript: the ranks per lesson in the reliability subset (default 1)")
+    group.add_argument('--audit-asr-events', default=None, metavar='PATTERN', help="transcript: the version's asr_transcription events, a file pattern with {sid} (JSON lines, gzipped or not, or a JSON list) or influx")
+    group.add_argument('--audit-asr-reference', default=None, metavar='FILE', help="transcript: the texts a content model read (JSON lines); every frozen text must be its row's")
+    group.add_argument('--audit-content-scores', default=None, metavar='ARM=FILE,...', help="transcript: content scores of the version's text, frozen (or, scoring, read) per arm")
+    group.add_argument('--audit-content-scores-ref', default=None, metavar='ARM=FILE,...', help="transcript, scoring: the content scores of the primary auditor's references")
+    group.add_argument('--audit-primary', default=None, metavar='NAME', help="transcript, with --audit-sample: the primary auditor, written into the plan (optional)")
+    group.add_argument('--audit-close-blind', default=None, metavar='ID', help="close --audit-auditor's blind pass of a transcription audit (logged)")
+    group.add_argument('--audit-export-references', default=None, metavar='ID', help="write --audit-auditor's blind transcripts to --audit-out (mode 0600, logged)")
+    group.add_argument('--audit-compare-with', default=None, metavar='ID', help="transcript, scoring: the sensing audit whose who-speaks answers the scores join")
+    group.add_argument('--audit-exclude-sessions', default=None, metavar='IDS', help="transcript, scoring: a sensitivity without these sessions, comma-separated (named in the header)")
+    group.add_argument('--audit-interim', action='store_true', default=None, help="transcript: score before the primary's blind close (logged, named in every header)")
 
 
-ACTIONS = ('audit_sample', 'audit_freeze', 'audit_render', 'audit', 'audit_estimate', 'audit_score', 'audit_purge')
+ACTIONS = ('audit_sample', 'audit_freeze', 'audit_render', 'audit', 'audit_estimate', 'audit_score', 'audit_purge',
+           'audit_close_blind', 'audit_export_references')
 
 
 def requested(args) -> bool:
@@ -1265,6 +1318,9 @@ def load_session(artifacts: Path, sid: str, args, sources: dict) -> Session:
 
 
 def cmd_sample(args, argv) -> int:
+    if args.audit_task == 'transcript':
+        from openmmla.commands.ses import audit_speech
+        return audit_speech.cmd_sample(args, argv)
     artifacts, audit_id = _artifacts(args), args.audit_sample
     if not args.audit_version:
         raise AuditError('give --audit-version reported|rerun: the version whose stored frames give the boxes')
@@ -1333,6 +1389,11 @@ def after_answers(artifacts: Path, plan: dict, args, step: str) -> int:
 def cmd_freeze(args, argv) -> int:
     artifacts, audit_id = _artifacts(args), args.audit_freeze
     plan = load_plan(artifacts, audit_id)
+    if plan.get('task') == 'transcript':
+        from openmmla.commands.ses import audit_speech
+        return audit_speech.cmd_freeze(args, argv, plan)
+    if args.audit_task:
+        raise AuditError(f'{audit_id} is a sensing audit, not a {args.audit_task} audit')
     if not args.audit_version:
         raise AuditError('give --audit-version reported|rerun')
     answered = after_answers(artifacts, plan, args, 'freezing a version')
@@ -1423,8 +1484,8 @@ def measured_seconds(artifacts: Path, plan: dict) -> dict:
                     spent['identity_box'].append(record['seconds_spent'] / max(1, len(answer.get('boxes') or {})))
                 elif record.get('phase') == 'gaze':
                     spent['gaze_box'].append(record['seconds_spent'] / max(1, len(answer.get('boxes') or {})))
-                elif record.get('phase') == 'speech':
-                    spent['speech'].append(record['seconds_spent'])
+                elif record.get('phase') in ('speech', 'transcribe', 'reveal'):
+                    spent[record['phase']].append(record['seconds_spent'])
     out = {}
     for name, values in spent.items():
         values.sort()
@@ -1477,6 +1538,10 @@ def run(args, argv) -> int:
         if actions[0] == 'audit_score':
             from openmmla.commands.ses import audit_score
             return audit_score.cmd_score(args, argv)
+        if actions[0] in ('audit_close_blind', 'audit_export_references'):
+            from openmmla.commands.ses import audit_speech
+            return (audit_speech.cmd_close_blind if actions[0] == 'audit_close_blind'
+                    else audit_speech.cmd_export_references)(args, argv)
         return cmd_purge(args, argv)
     except (AuditError, L.CampaignError) as error:
         print(f'refused: {error}')

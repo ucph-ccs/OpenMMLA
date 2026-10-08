@@ -756,6 +756,11 @@ def report_text(context: dict, tables: dict, confusion: dict, agreement: list, l
 def score(artifacts: Path, audit_id: str, version: str, auditor: str | None = None, boot: int = 2000, seed: int = 0,
           allow_drift: bool = False, out: Path | None = None, despite_log_failure: bool = False) -> tuple[Path, dict]:
     plan = A.load_plan(artifacts, audit_id)
+    if plan.get('task') == 'transcript':
+        # a transcription audit has scores of its own
+        from openmmla.commands.ses import audit_score_transcript
+        return audit_score_transcript.score(artifacts, audit_id, version, auditor, boot, seed, allow_drift, out,
+                                            despite_log_failure)
     campaign = L.Campaign(A.audit_dir(artifacts, audit_id))
     if not campaign.exists():
         raise A.AuditError(f'no campaign.yml in {campaign.folder}: the answers are scored by their links')
@@ -843,6 +848,9 @@ def score(artifacts: Path, audit_id: str, version: str, auditor: str | None = No
 
 def cmd_score(args, argv) -> int:
     artifacts, audit_id = A._artifacts(args), args.audit_score
+    if A.load_plan(artifacts, audit_id).get('task') == 'transcript':
+        from openmmla.commands.ses import audit_score_transcript
+        return audit_score_transcript.cmd_score(args, argv)
     if not args.audit_version:
         raise A.AuditError('give --audit-version reported|rerun: the version to score')
     folder, summary = score(artifacts, audit_id, args.audit_version, args.audit_auditor, A._size(args, 'boot'),

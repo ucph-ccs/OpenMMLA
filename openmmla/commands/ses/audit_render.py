@@ -30,6 +30,16 @@ The images and clips go to artifacts/runtime/audit/<id>/media/<alias>/ (never in
 render_index.json beside it keeps the frame checks, each head's brightness and the errors, and each
 session's view.json gets its items' image names, render status and the boxes the gaze question asks
 about after identity (every box a frozen version calls a pupil). Rendering again overwrites.
+
+A transcription audit (audit_speech; its plan's task is 'transcript') is rendered by ffmpeg alone, with no
+cv2: per window a clip of [ws - 10, ws + 12) with the camera grid and the session's sound as AAC-LC at 96
+kb/s (the most AAC carries at 16 kHz), mono, 16 kHz, unfiltered (the group microphone, or the mix of the worn
+microphones), and in a session whose worn microphones fed the text a second clip with their sum (amix, not
+normalised). Every sweep is rendered, served or not. Each item's view gets the clip names and the span
+(offsets in the clip) and, for an item not practice, the reveal: the reveal version's frozen text of the
+window and of the 10 s before it, the only system output the page ever relays (after the auditor's blind
+close); the view is then readable by its owner only. It refuses to run until every session's versions are
+frozen (or refused) by logged steps.
 """
 from __future__ import annotations
 
@@ -52,6 +62,9 @@ HEAD_HEIGHT = 256
 ROSTER_HEIGHT = 320
 CROP_MARGIN = 0.3
 TILE = (640, 360)
+# a transcription clip's sound: AAC-LC, mono, 16 kHz (the recordings' own rate), nothing filtered, at 96 kb/s, the
+# most AAC carries at that rate (6144 bits a frame of 1024 samples): ffmpeg clamps a higher request to it
+TRANSCRIPT_AUDIO = ['-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '96k', '-ac', '1', '-ar', '16000']
 GREY = (200, 200, 200)
 DIMMED = (110, 110, 110)
 YELLOW = (0, 230, 255)
@@ -263,16 +276,9 @@ def _save(path: Path, image) -> None:
 
 # ---- clips ----
 
-def clip_command(videos: list[dict], mic: dict | None, start: float, window: float, out: Path) -> list[str]:
-    """the ffmpeg command of a who-speaks clip: up to four cameras in a grid of 640 x 360 tiles, the group
-    microphone as its sound, exact to the window, without the recordings' metadata, on two threads"""
-    videos = videos[:4]
-    command = ['ffmpeg', '-v', 'error', '-y']
-    for video in videos:
-        command += ['-ss', f"{start - video['start_time']:.3f}", '-t', f'{window:.3f}', '-i', video['path']]
-    if mic:
-        command += ['-ss', f"{start - mic['start_time']:.3f}", '-t', f'{window:.3f}', '-i', mic['path']]
-    n, (w, h) = len(videos), TILE
+def grid_graph(n: int, window: float) -> str:
+    """the filter graph of a clip's picture, ending in [out]: n (one to four) cameras in a grid of 640 x 360 tiles"""
+    w, h = TILE
     graph = ''.join(f'[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,'
                     f'setsar=1[v{i}];' for i in range(n))
     if n == 1:
@@ -283,6 +289,20 @@ def clip_command(videos: list[dict], mic: dict | None, start: float, window: flo
         if n == 3:
             graph += f'color=c=black:s={w}x{h}:d={window:.3f}[v3];'
         graph += '[v0][v1][v2][v3]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0[out]'
+    return graph
+
+
+def clip_command(videos: list[dict], mic: dict | None, start: float, window: float, out: Path) -> list[str]:
+    """the ffmpeg command of a who-speaks clip: up to four cameras in a grid of 640 x 360 tiles, the group
+    microphone as its sound, exact to the window, without the recordings' metadata, on two threads"""
+    videos = videos[:4]
+    command = ['ffmpeg', '-v', 'error', '-y']
+    for video in videos:
+        command += ['-ss', f"{start - video['start_time']:.3f}", '-t', f'{window:.3f}', '-i', video['path']]
+    if mic:
+        command += ['-ss', f"{start - mic['start_time']:.3f}", '-t', f'{window:.3f}', '-i', mic['path']]
+    n = len(videos)
+    graph = grid_graph(n, window)
     command += ['-filter_complex', graph, '-map', '[out]']
     if mic:
         command += ['-map', f'{n}:a', '-c:a', 'aac', '-b:a', '96k']
@@ -296,6 +316,39 @@ def audit_clip(videos: list[dict], mic: dict | None, start: float, window: float
     temp = out.with_name(f'.{out.stem}.{os.getpid()}.tmp.mp4')
     try:
         subprocess.run(clip_command(videos, mic, start, window, temp), check=True, timeout=300, capture_output=True)
+        temp.replace(out)
+    finally:
+        temp.unlink(missing_ok=True)
+    return out
+
+
+def transcript_clip_command(videos: list[dict], sounds: list[dict], start: float, length: float, out: Path) -> list[str]:
+    """the ffmpeg command of a transcription clip: the who-speaks clip's grid, and as its sound one recording or
+    the sum of several (amix, not normalised, each cut at its own offset), as AAC-LC (TRANSCRIPT_AUDIO), mono, 16 kHz,
+    without any filter or change of loudness"""
+    videos = videos[:4]
+    command = ['ffmpeg', '-v', 'error', '-y']
+    for recording in videos + sounds:
+        command += ['-ss', f"{start - recording['start_time']:.3f}", '-t', f'{length:.3f}', '-i', recording['path']]
+    n = len(videos)
+    graph = grid_graph(n, length)
+    if len(sounds) > 1:
+        inputs = ''.join(f'[{n + i}:a]' for i in range(len(sounds)))
+        graph += f';{inputs}amix=inputs={len(sounds)}:normalize=0[sound]'
+    command += ['-filter_complex', graph, '-map', '[out]']
+    if sounds:
+        command += ['-map', '[sound]' if len(sounds) > 1 else f'{n}:a', *TRANSCRIPT_AUDIO]
+    command += ['-t', f'{length:.3f}', '-map_metadata', '-1', '-threads', '2', '-c:v', 'libx264', '-preset', 'veryfast',
+                '-crf', '26', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(out)]
+    return command
+
+
+def transcript_clip(videos: list[dict], sounds: list[dict], start: float, length: float, out: Path) -> Path:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    temp = out.with_name(f'.{out.stem}.{os.getpid()}.tmp.mp4')
+    try:
+        subprocess.run(transcript_clip_command(videos, sounds, start, length, temp), check=True, timeout=300,
+                       capture_output=True)
         temp.replace(out)
     finally:
         temp.unlink(missing_ok=True)
@@ -510,6 +563,94 @@ def render_session(artifacts: Path, audit_id: str, plan: dict, entry: dict, chec
     return index
 
 
+def render_transcript_session(artifacts: Path, audit_id: str, plan: dict, entry: dict, cut_clip=transcript_clip) -> dict:
+    """render one session of a transcription audit: per item its clip (and the worn microphones' clip of a dual
+    session), the span and, for an item not practice, the reveal version's text; returns the session's part of
+    render_index.json"""
+    from openmmla.commands.ses import audit_speech as S
+    sid, alias = entry['id'], entry['alias']
+    folder = A.session_audit_dir(artifacts, sid, audit_id)
+    design, view = A.read_json(folder / A.DESIGN_FILE), A.read_json(folder / A.VIEW_FILE)
+    shown = _versions(artifacts, sid, audit_id).get(plan['reveal_version'])
+    media = A.audit_dir(artifacts, audit_id) / A.MEDIA_DIR / alias
+    by_item = {it['item']: it for it in view['items']}
+    errors: dict[str, str] = {}
+    for item in design['speech']:
+        name = item['item']
+        asr = ((shown or {}).get('speech', {}).get(name) or {}).get('asr')
+        if not item['practice'] and asr is None:
+            errors[name] = (f"the {plan['reveal_version']} version holds no text of this window" if shown else
+                            f"the {plan['reveal_version']} version is refused for this session: nothing to reveal")
+            continue
+        start = float(item['window_start']) - S.CLIP_BEFORE
+        clips = {'main': f'{name}.mp4'}
+        if design['audio_kind'] == 'dual':
+            clips['worn'] = f'{name}_worn.mp4'
+        try:
+            cut_clip(design['videos'], [design['sound']], start, S.CLIP_SPAN['length'], media / clips['main'])
+            if 'worn' in clips:
+                cut_clip(design['videos'], design['worn'], start, S.CLIP_SPAN['length'], media / clips['worn'])
+        except Exception as error:  # one clip that fails is its window's error; the others go on
+            errors[name] = f'the clip cannot be cut ({type(error).__name__})'
+            for clip in clips.values():
+                (media / clip).unlink(missing_ok=True)
+            continue
+        by_item[name].update(clips=clips, span=dict(S.CLIP_SPAN))
+        if not item['practice']:
+            by_item[name]['reveal'] = {'prev': asr['consumed']['prev'], 'cur': asr['consumed']['cur']}
+    for item in view['items']:
+        item['render'] = f"error: {errors[item['item']]}" if item['item'] in errors else 'ok'
+        if item['item'] in errors:
+            for key in ('clips', 'span', 'reveal'):
+                item.pop(key, None)
+    # the reveal is transcript text: the view is its owner's to read only
+    S.write_private_json(folder / A.VIEW_FILE, view)
+    return {'items': len(design['speech']), 'clips': sum(len(it.get('clips') or {}) for it in view['items']),
+            'audio_kind': design['audio_kind'], 'errors': errors}
+
+
+def _ffmpeg_version() -> str | None:
+    try:
+        out = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.splitlines()[0].strip() if out else None
+
+
+def cmd_render_transcript(args, argv, artifacts: Path, plan: dict) -> int:
+    """the render of a transcription audit: ffmpeg only, once both versions are frozen (or refused)"""
+    from openmmla.commands.ses import audit_speech as S
+    audit_id = plan['audit_id']
+    answered = A.after_answers(artifacts, plan, args, 'rendering again')
+    missing = S.unfrozen(artifacts, plan)
+    if missing:
+        raise A.AuditError(f"freeze both versions before the render ({', '.join(missing[:4])}"
+                           + (f' and {len(missing) - 4} more' if len(missing) > 4 else '') + ' not frozen): the reveal '
+                           'and the scores must rest on versions frozen before any clip is shown')
+    index = {'audit_id': audit_id, 'task': S.TASK, 'rendered_at': C.now_utc(), 'ffmpeg': _ffmpeg_version(),
+             'reveal_version': plan['reveal_version'], 'clip': S.CLIP_SPAN, 'after_answers': answered, 'sessions': {}}
+    failed, views = 0, []
+    for entry in plan['sessions']:
+        folder = A.session_audit_dir(artifacts, entry['id'], audit_id)
+        try:
+            part = render_transcript_session(artifacts, audit_id, plan, entry)
+        except Exception as error:  # one session that fails is reported; the others go on
+            index['sessions'][entry['alias']] = {'failed': f'{type(error).__name__}: {str(error)[:300]}'}
+            print(f"{entry['alias']}: not rendered ({type(error).__name__}: {error})")
+            failed += 1
+            continue
+        index['sessions'][entry['alias']] = part
+        views.append(folder / A.VIEW_FILE)
+        failed += len(part['errors'])
+        print(f"{entry['alias']}: {part['clips']} clips of {part['items']} windows ({part['audio_kind']}), "
+              f"{len(part['errors'])} errors")
+    A.write_json(A.audit_dir(artifacts, audit_id) / A.RENDER_INDEX, index)
+    A._event(artifacts, audit_id, 'audit-render', task=S.TASK, ffmpeg=index['ffmpeg'], errors=failed,
+             after_answers=answered, files=A.file_hashes(artifacts, views),
+             render_index_sha256=A.L.file_sha256(A.audit_dir(artifacts, audit_id) / A.RENDER_INDEX), argv=list(argv))
+    return 0
+
+
 def _ffmpeg_build() -> str | None:
     import cv2
     lines = [line.strip() for line in cv2.getBuildInformation().splitlines() if 'FFMPEG' in line.upper() or 'avcodec' in line]
@@ -529,9 +670,12 @@ def replay_state(design: dict) -> str:
 
 
 def cmd_render(args, argv) -> int:
-    import cv2
     artifacts, audit_id = A._artifacts(args), args.audit_render
     plan = A.load_plan(artifacts, audit_id)
+    if plan.get('task') == 'transcript':
+        # clips only: no frame is decoded, so neither cv2 nor the vfa-base environment is needed
+        return cmd_render_transcript(args, argv, artifacts, plan)
+    import cv2
     answered = A.after_answers(artifacts, plan, args, 'rendering again')
     # the frame check the plan declared, unless a flag says otherwise now (recorded)
     check = {'px': args.audit_tag_px if args.audit_tag_px is not None else plan['tag_check']['px'],
