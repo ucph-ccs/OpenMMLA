@@ -434,8 +434,11 @@ PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Session coding</title>
 <style>
  body{margin:0;font:15px/1.4 -apple-system,Helvetica,Arial,sans-serif;background:#111;color:#eee}
- header{display:flex;gap:16px;align-items:center;padding:10px 16px;background:#1b1b1b;flex-wrap:wrap}
+ /* the header of the audit pages: the title, "Coding as NAME" and change name, then the session and the toggles */
+ header{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid #333}
+ header b{font-size:15px}
  select,input,button{font:inherit;background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:6px 10px}
+ #rename{background:none;border-color:#333;color:#999;border-radius:4px;padding:1px 8px} #newname{padding:1px 8px}
  button{cursor:pointer} button.active{background:#2d6cdf;border-color:#2d6cdf}
  main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;padding:16px}
  video{width:100%;background:#000;border-radius:8px}
@@ -458,7 +461,6 @@ PAGE = r"""<!doctype html>
  .keys button.chev{flex:0 0 30px;width:30px;margin:6px 0;padding:6px 0;text-align:center;background:none;border:none;color:#aaa}
  .keys button.chev:hover{color:#fff}
  .fold{display:flex;align-items:center;justify-content:space-between;color:#aaa;font-size:13px}
- #visit{background:#7a4b00;color:#fff;border-radius:6px;padding:4px 10px;font-weight:600} #coder.visiting{border-color:#d9a441}
  textarea{width:100%;height:60px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:6px}
  #status{color:#8c8} #status.plain{color:#ccc} #status.fail{color:#f66;font-weight:600}
  #text{margin-top:12px;padding:10px 12px;background:#1b1b1b;border-radius:8px;font-size:14px}
@@ -468,8 +470,9 @@ PAGE = r"""<!doctype html>
 </style></head><body>
 <header>
  <div id="hidden" class="meta" style="flex-basis:100%;display:none"></div>
- <label>Coder <input id="coder" size="10"></label>
- <span id="visit" style="display:none"></span>
+ <b>Session coding</b>
+ <span id="named"><span id="codingas"></span><span id="visit" class="meta" style="display:none">, for this visit</span></span>
+ <label id="naming" style="display:none">Coding as <input id="newname" size="14" autocomplete="off" spellcheck="false" placeholder="your name"></label><button id="rename" type="button" style="display:none">change name</button><input id="coder" type="hidden">
  <label>Session <select id="session"></select></label>
  <button id="texttoggle" onclick="toggleText()">Transcript</button>
  <button id="advancetoggle" onclick="toggleAdvance()">Auto-advance</button>
@@ -502,8 +505,11 @@ let pendingAlso = null, jumpTo = null;
 // the window auto-advance last left, which a shift key within 2 s still reaches; a shift key pressed while
 // the main state of the window on screen was being saved, keyed once that save is confirmed
 let advanced = null, queuedAlso = null;
-// a name from the link (?coder=), coded under for this visit only: the remembered name stays
-let visitCoder = null;
+// a name from the link (?coder=), coded under for this visit only: the remembered name stays. The coder's own name,
+// as the browser remembers it; the number of the latest name check, which a later one or a cancel makes stale; that
+// number while the check is out (0: none), during which the page codes nothing; the number of the status line the
+// name field last said, which goes when the field closes while it is still on screen
+let visitCoder = null, ownName = '', naming = 0, checking = 0, nameSaid = 0;
 // the number of the last status said, and the last refusal ({n, text}), which a later answer never hides
 let told = 0, refusal = null;
 async function api(path, options) {
@@ -539,9 +545,64 @@ function alsoOf(l) { return l && l.secondary ? classOf({label: l.secondary, key:
 function alsoName(k) { const c = codebook.classes.find(x => x.key === k); return k === '0' || !c ? 'shift+0 (clear the also-state)' : `also-state ${c.key} ${c.title}`; }
 function pendingOn(w) { return !!(pendingAlso && w && session && pendingAlso.session === session.id && pendingAlso.k === key(w) && !labels[key(w)]); }
 function coderName() { return $('coder').value.trim() || 'anonymous'; }
-function showVisit() {
-  $('visit').textContent = visitCoder ? `coding as ${visitCoder} for this visit` : ''; $('visit').style.display = visitCoder ? '' : 'none';
-  $('coder').classList.toggle('visiting', !!visitCoder);
+// the header's name: "Coding as NAME", and ", for this visit" while the page codes under a link's name
+function showVisit() { $('codingas').textContent = `Coding as ${$('coder').value.trim()}`; $('visit').style.display = visitCoder ? '' : 'none'; }
+// the name, or the field that changes it in its place
+function nameField(open) {
+  $('naming').style.display = open ? '' : 'none';
+  $('named').style.display = $('rename').style.display = open ? 'none' : '';
+  if (!open && nameSaid && nameSaid === told) said('');
+}
+// change name: the name becomes a field in its place, prefilled and focused (during a visit with the coder's own name,
+// since a name taken ends the visit); the page's keys are off while the field has the focus
+function editName() {
+  naming++; checking = 0; $('newname').value = visitCoder ? ownName : $('coder').value;
+  nameField(true); $('newname').focus(); $('newname').select();
+}
+// Esc (`cancel`) or leaving the field: the name as it was, and true. Leaving it while a check is out keeps the field
+// for the check's answer, so only Esc drops a check. With no name yet the field stays: leaving it takes a name typed
+// there as Enter does, and Esc leaves it as it is
+function closeName(cancel) {
+  if (!$('coder').value.trim()) { if (!cancel && !checking && $('newname').value.trim()) takeName(); return false; }
+  if (checking && !cancel) return false;
+  naming++; checking = 0; nameField(false);
+  return true;
+}
+// a name check still out: what would be coded is not, and the page says so
+function nameWait() {
+  if (checking) said('NOT saved: the name typed is still being checked — try again', true);
+  return !!checking;
+}
+// why the server refuses a coder name, or null: the page's own request for a session's windows checks it (a name too
+// long for a file name, or one that holds a model's labels) before any labels file is read, so any listed session will do
+async function nameRefused(name) {
+  try { await api(`/api/windows?session=${encodeURIComponent(sessions[0].id)}&coder=${encodeURIComponent(name)}`); return null; }
+  catch (e) { return why(e); }
+}
+// a name the server takes is the coder's own from now on, remembered: a visit ends, and the undo history and an
+// also-state keyed under the previous name are dropped (a shift key held back by a save still out is said not saved
+// when that save answers)
+function ownCoder(name) {
+  $('coder').value = ownName = name; visitCoder = null;
+  remember('coder', name);
+  nameField(false); showVisit();
+  undoStack = []; advanced = null;
+  if (pendingAlso) { said(`also-state ${pendingAlso.cls.key} ${pendingAlso.cls.title} dropped: the coder changed`, 'plain'); pendingAlso = null; }
+}
+// Enter in the field: a name taken loads the page under it; a refused one stays in the field, said why (the field
+// has the focus again when there is a name to go back to)
+async function takeName() {
+  const name = $('newname').value.trim();
+  if (!name) { naming++; checking = 0; nameSaid = said('type your name as coder first', true); return; }
+  if (name === $('coder').value.trim() && !visitCoder) { closeName(true); $('newname').blur(); return; }
+  const asked = checking = ++naming;
+  nameSaid = said('checking the name…', 'plain');
+  const refused = await nameRefused(name);
+  if (asked !== naming) return;
+  checking = 0;
+  if (refused) { nameSaid = said(`name not changed: ${refused}`, true); if ($('coder').value.trim()) $('newname').focus(); return; }
+  ownCoder(name); $('newname').blur();
+  loadProgress(); loadSession($('session').value);
 }
 // a class's definition, the rule or the also-state sentence, shown or folded; the browser remembers each one's state
 function fold(id, open) {
@@ -671,6 +732,7 @@ async function label(cls) {
   if (saving) { if (savingWindow !== w) said('NOT saved: the previous save is still waiting for the server — try again', true); return; }
   // nor does a double press land on the window auto-advance has just opened
   if (Date.now() - advancedAt < 400) return;
+  if (nameWait()) return;
   const coder = $('coder').value.trim(); if (!coder) { said('type your name as coder first', true); return; }
   if (!visitCoder) remember('coder', coder);
   const record = {session: session.id, window_start: w.start, window_end: w.end, label: cls.label, key: cls.key,
@@ -766,6 +828,7 @@ async function saveNote() {
   const w = windows[index], current = w && labels[key(w)], note = $('note').value.trim();
   if (!current || note === (current.note || '')) return;
   if (saving) { said('NOT saved: the previous save is still waiting for the server — try again', true); return; }
+  if (nameWait()) return;
   const coder = $('coder').value.trim(); if (!coder) { said('type your name as coder first', true); return; }
   const record = {...current, note, coder, edited_at: new Date().toISOString()}, gen = generation;
   saving = true; const since = said('saving…');
@@ -816,9 +879,14 @@ async function loadSession(id) {
 }
 document.addEventListener('keydown', e => {
   if (e.target === $('note')) { if (e.key === 'Enter') { e.preventDefault(); $('note').blur(); saveNote(); } return; }
-  // Enter commits the name: the blur fires its change event, and the keys reach the page again
-  if (e.target === $('coder')) { if (e.key === 'Enter') { e.preventDefault(); $('coder').blur(); } return; }
-  if (!codebook || e.metaKey || e.ctrlKey || e.altKey) return;
+  // the name field: Enter takes the name, Esc keeps the one before; the page's keys are off while it has the focus,
+  // and while a name check is out
+  if (e.target === $('newname')) {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); takeName(); }
+    if (e.key === 'Escape') { e.preventDefault(); if (closeName(true)) $('newname').blur(); }
+    return;
+  }
+  if (!codebook || checking || e.metaKey || e.ctrlKey || e.altKey) return;
   // shift + a digit is the also-state, read from the physical key (row or numpad), since what shift+1 types depends on the layout
   const digit = e.shiftKey && /^(?:Digit|Numpad)([0-9])$/.exec(e.code || '');
   if (digit) { e.preventDefault(); if (!e.repeat) also(digit[1]); return; }
@@ -841,10 +909,20 @@ document.addEventListener('keydown', e => {
     `<button class="chev" id="chev-${c.key}" aria-expanded="false" aria-label="the definition of ${attr(c.title)}" onclick="this.blur(); toggleFold('${c.key}')">▸</button></div><div class="def" id="def-${c.key}" hidden>${c.definition}</div>`).join('');
   $('def-rule').textContent = codebook.rule;
   for (const id of [...codebook.classes.map(c => c.key), 'rule', 'also']) fold(id, recall(`open:${id}`) === '1');
-  // ?coder=<name> (the Agreement page's adjudicate links) codes under that name for this visit, and the header says so
+  // ?coder=<name> (the Agreement page's adjudicate links) codes under that name for this visit, and the header says so;
+  // ?name=<name> (the audit entry's link) is the coder's own name, taken as one typed in, then removed from the address
+  // so that a reload or a bookmark does not give it again (beside ?coder= it is not taken: the visit's name is coded under)
   const query = new URLSearchParams(location.search);
-  visitCoder = (query.get('coder') || '').trim() || null;
-  $('coder').value = visitCoder || recall('coder') || ''; showVisit();
+  visitCoder = (query.get('coder') || '').trim() || null; ownName = recall('coder') || '';
+  $('coder').value = visitCoder || ownName; showVisit();
+  $('rename').onclick = () => editName(); $('newname').onblur = () => closeName();
+  const given = visitCoder ? '' : (query.get('name') || '').trim();
+  if (query.has('name')) { query.delete('name'); const rest = query.toString(); history.replaceState(null, '', `${location.pathname}${rest ? `?${rest}` : ''}${location.hash}`); }
+  const refused = given && await nameRefused(given);
+  if (given && !refused) ownCoder(given);
+  // a refused name stays in the field, said why; with no name yet the field is open for one
+  if (refused) { editName(); $('newname').value = given; nameSaid = said(`name not changed: ${refused}`, true); }
+  else if (!$('coder').value) editName(); else nameField(false);
   showText = recall('showText') === '1'; $('texttoggle').classList.toggle('active', showText);
   autoAdvance = recall('autoAdvance') !== '0'; $('advancetoggle').classList.toggle('active', autoAdvance);
   $('session').innerHTML = sessions.map(s => `<option value="${attr(s.id)}" title="${attr(s.inclusion)}"></option>`).join(''); showProgress();
@@ -856,15 +934,6 @@ document.addEventListener('keydown', e => {
     $('hidden').style.display = '';
   }
   $('session').onchange = e => { e.target.blur(); loadSession(e.target.value); };
-  // a name typed in is the coder's own again, remembered; an also-state keyed under the previous name is dropped
-  $('coder').onchange = () => {
-    const coder = $('coder').value.trim(); visitCoder = null; showVisit();
-    if (coder) remember('coder', coder);
-    // a shift key held back by a save still out is said not saved when that save answers
-    undoStack = []; advanced = null;
-    if (pendingAlso) { said(`also-state ${pendingAlso.cls.key} ${pendingAlso.cls.title} dropped: the coder changed`, 'plain'); pendingAlso = null; }
-    loadProgress(); loadSession($('session').value);
-  };
   $('strip').onclick = e => { const i = e.target.dataset.i; if (i !== undefined && +i !== index) { index = +i; render(); } };
   // /?session=<id>&start=<window start> (the Agreement page's links) opens that window instead of the remembered session
   const linked = query.get('session'), start = Number(query.get('start')), last = recall('session');

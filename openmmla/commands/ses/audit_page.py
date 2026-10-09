@@ -40,52 +40,54 @@ The page's viewing gate (a who-speaks clip played before an answer) trusts what 
 it is a convenience for the auditor, not a control.
 
 The open audit (--audit ID --audit-open) is served as the default coding page is: no link, claim or
-cookie. The page (OPEN_AUDIT_PAGE) asks for the auditor's name (code.name_error checks it, as the
-default page checks a coder's; the browser remembers it) and whether they answer the full audit or the
-reliability subset, and every request but the page itself carries both (?auditor=NAME&scope=full|
-reliability; the server puts them into the picture and clip addresses it sends). A name is taken in
-NFC, without control, formatting or line-break characters. Answers go to answers/<the name's file
-form>.jsonl with `open`, the scope and no link; a default-page coder's name may be typed (the answers
-are a file of their own). A name's file belongs to that name: a name whose file (in any case or Unicode
-form) holds another name's answers or an answer saved through a link is refused, and so is a scope
-other than the one its answers were saved under, all checked again under the log's lock when an answer
-is saved; a refusal never says the other name. Once an answer is saved open, the audit is not served
-with links again. The request log keeps the typed name on every request and save (its `coder`, which
---verify-log checks against the `auditor` of each open line), so --verify-log still checks the answers
-files both ways; the start line records `open`. --allow-from is optional: a tailnet bind without it
-lets every tailnet address in (0.0.0.0 and LAN addresses stay refused). Every rule of what an auditor
-sees holds per typed name; that the person typing a name is that auditor is not checked, so one person
-may answer a frame's identity under a second name, see which boxes the frozen versions call pupils,
-then answer it under their own (the scorer lists the saves under other names from the primary's
-address and browser).
+cookie. The page (OPEN_AUDIT_PAGE) asks for the auditor's name (code.name_error checks it, as the default
+page checks a coder's; the browser remembers it) and whether they answer the full audit or the reliability
+subset, and every request but the page itself carries both (?auditor=NAME&scope=full|reliability; the
+server puts them into the picture and clip addresses it sends). Opened from the entry of two audits
+(below), or reloaded in a tab that started, it starts with the name and scope kept, through the boot
+request a Start sends; its header's change name starts under another name, typed in place, with the scope
+in use. The server sees only the requests a Start sends. A name is taken in NFC, without control,
+formatting or line-break characters. Answers go to answers/<the name's file form>.jsonl with `open`, the
+scope and no link; a default-page coder's name may be typed (the answers are a file of their own). A
+name's file belongs to that name: a name whose file (in any case or Unicode form) holds another name's
+answers or an answer saved through a link is refused, and so is a scope other than the one its answers
+were saved under, all checked again under the log's lock when an answer is saved; a refusal never says the
+other name. Once an answer is saved open, the audit is not served with links again. The request log keeps
+the typed name on every request and save (its `coder`, which --verify-log checks against the `auditor` of
+each open line), so --verify-log still checks the answers files both ways; the start line records `open`.
+--allow-from is optional: a tailnet bind without it lets every tailnet address in (0.0.0.0 and LAN
+addresses stay refused). Every rule of what an auditor sees holds per typed name; that the person typing a
+name is that auditor is not checked, so one person may answer a frame's identity under a second name, see
+which boxes the frozen versions call pupils, then answer it under their own (the scorer lists the saves
+under other names from the primary's address and browser).
 
 A transcription audit (a plan whose task is 'transcript', drawn by audit_speech) is served by this
 command too, with links or open as above, but with the routes and the page of audit_transcript_page
 (TranscriptHandler, TRANSCRIPT_PAGE); --audit-sweeps says how many of its sweeps are served.
 
-Two audits served together (--audit ID --audit-with ID2, a sensing audit and a transcription audit) share one
-server and one port: TogetherHandler hands each request to the handler class of its part. The --audit part keeps
-its routes and its pages' bytes. The --audit-with part, which must be a transcription audit (a sensing audit's page
-asks for /audit and /api/audit/ itself), is served under WITH_PREFIX (/t/audit, /t/api/audit/..., /t/audit/clip/...):
-its handler routes the path without the prefix, and its page and every address the server sends it carry the prefix
-(the handler's `base_path`). GET / is the entry (ENTRY_PAGE): a link to the default coding page, the address alone
-of port --audit-code-port (CODE_PORT unless given; 0 leaves it out) on the host the entry was opened at (a coding
+Two audits served together (--audit ID --audit-with ID2, a sensing audit and a transcription audit) share one server
+and one port: TogetherHandler hands each request to the handler class of its part. The --audit part keeps its routes
+and its pages' bytes. The --audit-with part, which must be a transcription audit (a sensing audit's page asks for
+/audit and /api/audit/ itself), is served under WITH_PREFIX (/t/audit, /t/api/audit/..., /t/audit/clip/...): its
+handler routes the path without the prefix, and its page and every address the server sends it carry the prefix (the
+handler's `base_path`). GET / is the entry (ENTRY_PAGE): a link to the default coding page, the address alone of
+port --audit-code-port (CODE_PORT unless given; 0 leaves it out) on the host the entry was opened at (a coding
 server of any version answers it with the page, at once or through its redirect to /code), then each part in the
 order of the flags. Served open, the entry asks the name (checked in the browser as typed_name checks it, and filled
-in with the name kept for a part) and offers each part's full audit and reliability subset: a choice writes
-the name and the scope into the browser's storage under the keys that part's open page reads at start, then opens
-that page, which shows them filled in (Start, or Enter, begins); a part last opened in this browser under another name
-is opened under the name typed only at a second press. With links, each part is a link to its page. The coding page
-is served by a server of its own, another origin, so the name typed on the entry goes along as ?coder=, under which
-that page codes for the visit. Each part keeps its own campaign folder, request log, answers files, links (their cookies named apart), names and scopes,
-locks, blind closes and refusals, and a request to one part opens no file of the other (a link's /c/<token>, of
-neither part until then, reads each part's campaign.yml to find which holds it, and writes nothing of either: a
-change it meets is logged by that part's own next request). --audit-open serves both open, and --audit-sweeps the
-sweeps of the
-transcription audit. Each part's log gets the start line its server alone writes, with `prefix` (its own),
-`together_with` (the other audit's id and prefix) and `code_port` (the coding page's port the entry links to, 0 for
-none), and a stop line, so --verify-log, the open serves the scorer finds
-and the scores read each audit as after a serve of its own.
+in with the name kept for a part) and offers each part's full audit and reliability subset: a choice writes the name
+and the scope into the browser's storage under the keys that part's open page reads, hands them to that page in the
+tab's own sessionStorage, then opens it at #start (a fragment: no server sees it), and the page starts under the
+name and scope handed over as Start would (a #start address without them shows the form); a part last opened in this
+browser under another name is opened under the name typed only at a second press. With links, each part is a link to its
+page. The coding page is served by a server of its own, another origin, so the name typed on the entry goes along as
+?name=, which that page takes as its coder name. Each part keeps its own campaign folder, request log, answers
+files, links (their cookies named apart), names and scopes, locks, blind closes and refusals, and a request to one
+part opens no file of the other (a link's /c/<token>, of neither part until then, reads each part's campaign.yml to
+find which holds it, and writes nothing of either: a change it meets is logged by that part's own next request).
+--audit-open serves both open, and --audit-sweeps the sweeps of the transcription audit. Each part's log gets the
+start line its server alone writes, with `prefix` (its own), `together_with` (the other audit's id and prefix) and
+`code_port` (the coding page's port the entry links to, 0 for none), and a stop line, so --verify-log, the open
+serves the scorer finds and the scores read each audit as after a serve of its own.
 """
 from __future__ import annotations
 
@@ -1298,18 +1300,129 @@ def _patched(page: str, patches: list[tuple[str, str]]) -> str:
     return page
 
 
-# the open audit's page: the link's page with a name form before it, every request naming the auditor and scope
+# what an audit's open page (OPEN_AUDIT_PAGE, audit_transcript_page.OPEN_TRANSCRIPT_PAGE) adds to its link page besides
+# its name form: the style of the form and of the header's change name
+OPEN_STYLE = (
+    '#named{max-width:560px;margin:32px auto;padding:0 16px}#named p{color:var(--dim)}#named label{display:block;margin:12px 0}\n'
+    '#named input,#named select{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line);'
+    'border-radius:4px;padding:6px 8px;min-width:260px}\n'
+    '#named button{font:inherit;background:#2d6cdf;color:#fff;border:0;border-radius:6px;padding:8px 18px;cursor:pointer}\n'
+    '#namestatus{min-height:20px;margin-top:8px;color:var(--bad)}'
+    '#rename{font:inherit;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;padding:1px 8px;cursor:pointer}\n'
+    '#newname{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:4px;'
+    'padding:1px 6px;width:11em}#renamestatus{color:var(--bad);margin-left:8px}\n')
+# what follows the header's "Auditing as NAME": the name as a field while it is changed, with the rest of the line and
+# what the server said of a name typed there, and the change name button
+OPEN_RENAMING = ('<span id="renaming" style="display:none">Auditing as <input id="newname" maxlength="100" '
+                 'autocomplete="off" spellcheck="false" aria-label="your name"><span id="whorest"></span>'
+                 '<span id="renamestatus"></span></span>'
+                 '<button id="rename" type="button" style="display:none">change name</button>')
+# how an open page starts and changes its name: it reads the keys of a name and scope through stored(), asks
+# mayLeave() before it leaves the item shown, and drops that item through forgetItem(); askName() shows the form
+OPEN_FLOW = (
+    "// the name and scope this tab last started with (sessionStorage: this tab's own, gone with it): a reload goes on\n"
+    "// with them, whatever another tab started with since\n"
+    "function tabKept() { try { const kept = JSON.parse(sessionStorage.getItem(stored('auditing'))); return Array.isArray(kept) ? kept : []; } catch (e) { return []; } }\n"
+    "function keepTab() { try { sessionStorage.setItem(stored('auditing'), JSON.stringify([auditor, scope])); } catch (e) {} }\n"
+    "function forgetTab() { try { sessionStorage.removeItem(stored('auditing')); } catch (e) {} }\n"
+    "// the name and scope the entry handed this tab as it opened the page (sessionStorage again), read once at each\n"
+    "// load: a #start address typed, bookmarked or opened in another tab finds none, whatever the browser remembers\n"
+    "function handed() {\n"
+    "  try {\n"
+    "    const key = stored('entered'), given = sessionStorage.getItem(key); sessionStorage.removeItem(key);\n"
+    "    const kept = JSON.parse(given); return Array.isArray(kept) ? kept : [];\n"
+    "  } catch (e) { return []; }\n"
+    "}\n"
+    "// the entry opens a part's page at #start, once it has handed over the name and scope chosen there; the mark never\n"
+    "// reaches the server, and it leaves the address at once, so a reload goes on through this tab's own start\n"
+    "function fromEntry() {\n"
+    "  let asked = false;\n"
+    "  try { asked = location.hash === '#start'; if (asked) history.replaceState(history.state, '', location.pathname + location.search); } catch (e) {}\n"
+    "  return asked;\n"
+    "}\n"
+    "// how the page was opened: a reload, or a step back or forward to it, goes on with this tab's start; a visit (an\n"
+    "// address typed, a link, a bookmark) shows the form, in this tab too\n"
+    "function reopened() {\n"
+    "  try {\n"
+    "    const how = performance.getEntriesByType('navigation')[0];\n"
+    "    return how ? how.type === 'reload' || how.type === 'back_forward' : [1, 2].includes(performance.navigation.type);\n"
+    "  } catch (e) { return false; }\n"
+    "}\n"
+    "// the page opened: from the entry with the name and scope it handed over, or reloaded in a tab that audits here\n"
+    "// with this tab's own, it starts at once as Start would (a refusal shows the form with them and why); else the form\n"
+    "async function arrive() {\n"
+    "  const given = handed(), kept = fromEntry() ? given : reopened() ? tabKept() : [];\n"
+    "  const name = typeof kept[0] === 'string' ? kept[0].trim() : '', chosen = kept[1];\n"
+    "  if (!name || (chosen !== 'full' && chosen !== 'reliability')) return askName();\n"
+    "  $('who').textContent = 'starting…';\n"
+    "  const refused = await start(name, chosen);\n"
+    "  if (refused) { forgetTab(); askName(refused, [name, chosen]); }\n"
+    "}\n"
+    "// the form sent: its name and scope, once both are there\n"
+    "async function submitted() {\n"
+    "  const name = $('auditor').value.trim(), chosen = $('scope').value;\n"
+    "  if (!name) { $('namestatus').textContent = 'type your name first'; return; }\n"
+    "  if (chosen !== 'full' && chosen !== 'reliability') { $('namestatus').textContent = 'choose the full audit or the reliability subset'; return; }\n"
+    "  $('namestatus').textContent = 'starting…';\n"
+    "  const refused = await start(name, chosen);\n"
+    "  if (refused) { forgetTab(); $('namestatus').textContent = refused; }\n"
+    "}\n"
+    "// change name: the name in the header becomes a field, filled in. Enter starts under the name typed with the scope\n"
+    "// in use (the boot request Start sends; a refusal is said beside the field, and the page goes on under the name it\n"
+    "// had); Esc or leaving the field goes back. The page's keys are off meanwhile\n"
+    "let renaming = null;\n"
+    "function editName() {\n"
+    "  if (!boot || saving || loading || renaming) return;\n"
+    "  renaming = 'editing'; $('renamestatus').textContent = '';\n"
+    "  show('who', false); show('rename', false); show('renaming', true);\n"
+    "  const field = $('newname'); field.value = auditor; field.focus(); if (field.select) field.select();\n"
+    "}\n"
+    "function keepName() {\n"
+    "  if (renaming !== 'editing') return;\n"
+    "  renaming = null; $('newname').blur(); show('renaming', false); show('who', true); show('rename', true);\n"
+    "}\n"
+    "async function rename() {\n"
+    "  if (renaming !== 'editing') return;\n"
+    "  const name = $('newname').value.trim();\n"
+    "  if (!name) { $('renamestatus').textContent = 'type your name first'; return; }\n"
+    "  if (name === auditor) return keepName();\n"
+    "  if (!mayLeave()) return;\n"
+    "  renaming = 'starting'; $('renamestatus').textContent = 'starting…';\n"
+    "  const refused = await start(name, scope);\n"
+    "  if (refused) { renaming = 'editing'; $('renamestatus').textContent = refused; $('newname').focus(); }\n"
+    "}\n"
+    "// a start under a name and scope (the form's, the entry's, this tab's, or a new name with the scope in use): the\n"
+    "// boot request Start sends, the name and scope the page's own only once the server takes them; its refusal, if any.\n"
+    "// The item of the name before is dropped then, so a first item that fails to load leaves nothing of it to answer\n"
+    "async function start(name, chosen) {\n"
+    "  try { boot = await api('/api/audit/boot', [name, chosen]); }\n"
+    "  catch (e) { return `cannot start: ${e.message}`; }\n"
+    "  auditor = name; scope = chosen; renaming = null; forgetItem();\n"
+    "  remember(stored('auditor'), auditor); remember(stored('auditScope'), scope); keepTab();\n"
+    "  $('namestatus').textContent = ''; $('auditor').blur(); $('newname').blur();\n"
+    "  show('named', false); show('renaming', false); show('work', true); show('who', true); show('rename', true);\n")
+# the requests of an open page name the auditor and the scope: `as` is a name and scope not yet the page's, at a start
+OPEN_NAMED = ("function named(path, as) { const [n, s] = as || [auditor, scope]; return `${path}${path.includes('?') ? '&' : '?'}"
+              "auditor=${encodeURIComponent(n)}&scope=${encodeURIComponent(s)}`; }\n")
+# the end of an open page's script: the form, change name and the keys (none while the name is changed), then the start
+OPEN_TAIL = (
+    "document.addEventListener('keydown', e => { if (!renaming && e.target !== $('newname')) onKey(e); });\n"
+    "$('named').addEventListener('submit', e => { e.preventDefault(); submitted(); });\n"
+    "$('rename').addEventListener('click', editName);\n"
+    "$('newname').addEventListener('keydown', e => {\n"
+    "  if (e.isComposing) return;\n"
+    "  if (e.key === 'Enter') { e.preventDefault(); rename(); } else if (e.key === 'Escape') { e.preventDefault(); keepName(); }\n"
+    "});\n"
+    "$('newname').addEventListener('blur', keepName);\n"
+    "arrive();\n")
+
+
+# the open audit's page: the link's page with a name form before it, every request naming the auditor and scope; opened
+# from the entry, or reloaded in a tab that audits, it starts without the form, and change name edits the name in place
 OPEN_AUDIT_PAGE = _patched(AUDIT_PAGE, [
-    ('</style>',
-     '#named{max-width:560px;margin:32px auto;padding:0 16px}#named p{color:var(--dim)}#named label{display:block;margin:12px 0}\n'
-     '#named input,#named select{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line);'
-     'border-radius:4px;padding:6px 8px;min-width:260px}\n'
-     '#named button{font:inherit;background:#2d6cdf;color:#fff;border:0;border-radius:6px;padding:8px 18px;cursor:pointer}\n'
-     '#namestatus{min-height:20px;margin-top:8px;color:var(--bad)}'
-     '#rename{font:inherit;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;padding:1px 8px;cursor:pointer}\n'
-     '</style>'),
+    ('</style>', OPEN_STYLE + '</style>'),
     ('<header><b>Sensing audit</b><span id="who"></span>',
-     '<header><b>Sensing audit</b><span id="who"></span><button id="rename" type="button" style="display:none">change name</button>'),
+     '<header><b>Sensing audit</b><span id="who"></span>' + OPEN_RENAMING),
     ('<main><section id="left">',
      '<form id="named" style="display:none" autocomplete="off"><p>Type your name and choose what you answer: the full '
      'audit, or the reliability subset of the second auditor. Your answers are kept under this name, so type it the same '
@@ -1326,36 +1439,33 @@ OPEN_AUDIT_PAGE = _patched(AUDIT_PAGE, [
      "let scope = null;\n"
      "function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }\n"
      "function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }\n"
-     "function named(path) { return `${path}${path.includes('?') ? '&' : '?'}auditor=${encodeURIComponent(auditor)}&scope=${encodeURIComponent(scope)}`; }\n"
-     "async function api(path) {\n  const r = await fetch(named(path));"),
+     "// the page is served at the root, and keeps the name and scope under these very keys\n"
+     "function stored(key) { return key; }\n"
+     "// nothing of an item is left unsaved by this page: it may always leave one\n"
+     "function mayLeave() { return true; }\n"
+     "// the item shown, dropped (its clip stopped) when the page starts under another name or asks for one\n"
+     "function forgetItem() { item = null; phase = null; st = null; const v = $('video'); if (v.pause) v.pause(); }\n"
+     + OPEN_NAMED +
+     "async function api(path, as) {\n  const r = await fetch(named(path, as));"),
     ("const r = await fetch('/api/audit/answer', {", "const r = await fetch(named('/api/audit/answer'), {"),
     ("async function start() {\n"
      "  try { boot = await api('/api/audit/boot'); }\n"
      "  catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }\n",
-     "// the name form, filled with what this browser remembers; Enter or Start begins\n"
-     "function askName(text) {\n"
+     "// the name form, filled with what this browser remembers (or `kept`, a name and scope just refused); Enter or Start\n"
+     "// begins\n"
+     "function askName(text, kept) {\n"
      "  if (saving) return;\n"
-     "  boot = null; item = null; phase = null; st = null;\n"
-     "  const v = $('video'); if (v.pause) v.pause();\n"
-     "  show('work', false); show('rename', false); show('named', true);\n"
-     "  $('auditor').value = auditor || recall('auditor') || ''; $('scope').value = scope || recall('auditScope') || '';\n"
+     "  boot = null; forgetItem();\n"
+     "  show('work', false); show('rename', false); show('named', true); $('who').textContent = '';\n"
+     "  const [name, chosen] = kept || [auditor || recall('auditor'), scope || recall('auditScope')];\n"
+     "  $('auditor').value = name || ''; $('scope').value = chosen || '';\n"
      "  $('namestatus').textContent = text || ''; $('auditor').focus();\n"
-     "}\n"
-     "async function start() {\n"
-     "  const name = $('auditor').value.trim(), chosen = $('scope').value;\n"
-     "  if (!name) { $('namestatus').textContent = 'type your name first'; return; }\n"
-     "  if (chosen !== 'full' && chosen !== 'reliability') { $('namestatus').textContent = 'choose the full audit or the reliability subset'; return; }\n"
-     "  auditor = name; scope = chosen; $('namestatus').textContent = 'starting…';\n"
-     "  try { boot = await api('/api/audit/boot'); }\n"
-     "  catch (e) { boot = null; $('namestatus').textContent = `cannot start: ${e.message}`; return; }\n"
-     "  remember('auditor', auditor); remember('auditScope', scope);\n"
-     "  $('namestatus').textContent = ''; $('auditor').blur();\n"
-     "  show('named', false); show('work', true); show('rename', true);\n"),
-    ("document.addEventListener('keydown', e => { onKey(e); });\nstart();\n",
-     "document.addEventListener('keydown', e => { onKey(e); });\n"
-     "$('named').addEventListener('submit', e => { e.preventDefault(); start(); });\n"
-     "$('rename').addEventListener('click', () => askName());\n"
-     "askName();\n"),
+     "}\n" + OPEN_FLOW),
+    ("  $('who').textContent = `Auditing as ${auditor}${boot.subset ? ` (${boot.subset} items)` : ''}"
+     "${boot.mode === 'verify' ? ' · verify mode' : ''}`;\n",
+     "  $('whorest').textContent = `${boot.subset ? ` (${boot.subset} items)` : ''}${boot.mode === 'verify' ? ' · verify mode' : ''}`;\n"
+     "  $('who').textContent = `Auditing as ${auditor}${$('whorest').textContent}`;\n"),
+    ("document.addEventListener('keydown', e => { onKey(e); });\nstart();\n", OPEN_TAIL),
 ])
 
 
@@ -1414,7 +1524,9 @@ function checked() {
 // a part this browser last opened under another name opens under the name typed only at a second press of the same
 // button: answers are kept by name, and a name typed otherwise than before starts a second set of them
 let pending = null;
-// a part chosen: the name and scope go where its page reads them at start, and the page opens with them filled in
+// a part chosen: the name and scope go where its page reads them, and the page opens at #start, which starts it under
+// them at once (a name or scope its server refuses shows its form, with why). The browser remembers them for the
+// page's form; this tab hands them to the page (sessionStorage: this tab's own), which starts only from that
 function choose(id, task) {
   const name = checked();
   if (name === null) { pending = null; return; }
@@ -1426,7 +1538,8 @@ function choose(id, task) {
   }
   pending = null;
   remember(stored(task.prefix, 'auditor'), name); remember(stored(task.prefix, 'auditScope'), task.scope);
-  location.assign(task.page);
+  try { sessionStorage.setItem(stored(task.prefix, 'entered'), JSON.stringify([name, task.scope])); } catch (e) {}
+  location.assign(`${task.page}#start`);
 }
 if ($('name')) {
   for (const [id, task] of Object.entries(TASKS)) $(id).addEventListener('click', () => choose(id, task));
@@ -1440,11 +1553,12 @@ if ($('name')) {
   $('name').focus();
 }
 // the coding server's address alone: a server of any version answers it with the page, at once or through /code; a
-// name typed here that the server would take goes along as ?coder=, under which that page codes for this visit
+// name typed here that the server would take goes along as ?name=, which that page takes as its coder name, as if typed
+// there
 const CODE_ADDRESS = `${location.protocol}//${location.hostname}:${CODE_PORT}/`;
 function codeHref() {
   const name = $('name') ? typedName($('name').value) : '';
-  return name && !nameError(name) ? `${CODE_ADDRESS}?coder=${encodeURIComponent(name)}` : CODE_ADDRESS;
+  return name && !nameError(name) ? `${CODE_ADDRESS}?name=${encodeURIComponent(name)}` : CODE_ADDRESS;
 }
 if (CODE_PORT) {
   $('code').href = codeHref();
@@ -1457,15 +1571,14 @@ if (CODE_PORT) {
 # what the page at / says of the coding page: its title and what is asked
 CODE_CHOICE = ('Code interaction windows',
                'Watch short windows of a recording and give each its interaction class. The coding page is served on a '
-               'port of its own and opens under the name typed here, for this visit; without a name it asks for one. '
+               'port of its own and opens under the name typed here; without a name it asks for one. '
                "Its Transcript button shows the system's transcripts: an auditor of the transcription opens it only "
                'once the operator has closed their blind pass.')
 # the buttons of a part served open, one per scope (SCOPES)
 SCOPE_BUTTONS = {'full': 'full audit', 'reliability': 'reliability subset'}
 ENTRY_OPEN = ('<form id="named"><p>Type your name, then choose what you do. In an audit, choose the full audit or the '
-              'reliability subset of the second auditor: its page opens with your name and choice filled in, and '
-              'Start begins. Your answers are kept under this name, so type it the same way each time; this browser '
-              'remembers it.</p>\n'
+              'reliability subset of the second auditor: its page opens and starts under your name and choice. Your '
+              'answers are kept under this name, so type it the same way each time; this browser remembers it.</p>\n'
               '<label>Name <input id="name" maxlength="100" autocomplete="off" spellcheck="false"></label>'
               '<div id="namestatus"></div></form>')
 ENTRY_LINKS = '<p>Choose what you do. Each audit keeps its own answers.</p>'
@@ -1474,8 +1587,9 @@ ENTRY_LINKS = '<p>Choose what you do. Each audit keeps its own answers.</p>'
 def entry_page(parts, code_port: int, opened: bool) -> str:
     """ENTRY_PAGE with its tasks, in order: the coding page, the address alone of port `code_port` on the host the page
     is opened at (left out at 0), then each part ((its prefix, (title, what it asks), audit id), ...): served open, a button per scope,
-    which writes the name and the scope where that part's page reads them (the script's TASKS), then opens it; with
-    links, a link to its page. Two parts of one title are told apart by their audit ids."""
+    which writes the name and the scope where that part's page reads them (the script's TASKS), hands them to it in the
+    tab, then opens it at #start, which starts it under them; with links, a link to its page. Two parts of one title are told apart by their audit
+    ids."""
     titles = [choice[0] for _, choice, _ in parts]
     blocks, tasks = [], {}
     if code_port:

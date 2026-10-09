@@ -6,7 +6,8 @@ closes their blind pass rates the text the content model read.
 The server is audit_page's (its guard and request log, links of scope audit, or with --audit-open the names
 typed with the full audit or the reliability subset, and the same rules of names and scopes); this module gives
 its routes for a transcription audit's items (TranscriptHandler) and its page (TRANSCRIPT_PAGE, OPEN_TRANSCRIPT_PAGE
-open). AUDIT_PAGE and OPEN_AUDIT_PAGE are left as they are. What the server reads: the plan, each session's view,
+open, which starts and changes its name as the sensing audit's open page does: audit_page.OPEN_FLOW). The sensing
+audit's pages are audit_page's alone. What the server reads: the plan, each session's view,
 the answers files and blind_closed.json; never a pipeline*.json. The only system output it relays is an item's
 reveal, the reveal version's text of the window and of the 10 s before it, which audit_render copied into the
 view. It is sent in the item's answer only, only to a name whose blind pass the operator closed
@@ -1028,18 +1029,13 @@ def _patched(page: str, patches: list[tuple[str, str]]) -> str:
     return page
 
 
-# the open audit's page: the link's page with a name form before it, every request naming the auditor and scope
+# the open audit's page: the link's page with a name form before it, every request naming the auditor and scope; opened
+# from the entry, or reloaded in a tab that audits, it starts without the form, and change name edits the name in place
+# (audit_page's OPEN_FLOW, as the sensing audit's open page)
 OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
-    ('</style>',
-     '#named{max-width:560px;margin:32px auto;padding:0 16px}#named p{color:var(--dim)}#named label{display:block;margin:12px 0}\n'
-     '#named input,#named select{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line);'
-     'border-radius:4px;padding:6px 8px;min-width:260px}\n'
-     '#named button{font:inherit;background:#2d6cdf;color:#fff;border:0;border-radius:6px;padding:8px 18px;cursor:pointer}\n'
-     '#namestatus{min-height:20px;margin-top:8px;color:var(--bad)}'
-     '#rename{font:inherit;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;padding:1px 8px;cursor:pointer}\n'
-     '</style>'),
+    ('</style>', P.OPEN_STYLE + '</style>'),
     ('<header><b>Transcription audit</b><span id="who"></span>',
-     '<header><b>Transcription audit</b><span id="who"></span><button id="rename" type="button" style="display:none">change name</button>'),
+     '<header><b>Transcription audit</b><span id="who"></span>' + P.OPEN_RENAMING),
     ('<main><section id="left">',
      '<form id="named" style="display:none" autocomplete="off"><p>Type your name and choose what you answer: the full '
      'audit, or the reliability subset of the second auditor. Your answers are kept under this name, so type it the same '
@@ -1057,36 +1053,31 @@ OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
      "function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }\n"
      "function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }\n"
      "function stored(key) { return BASE ? `${BASE}/${key}` : key; }\n"
-     "function named(path) { return `${path}${path.includes('?') ? '&' : '?'}auditor=${encodeURIComponent(auditor)}&scope=${encodeURIComponent(scope)}`; }\n"
-     "async function api(path) {\n  const r = await fetch(BASE + named(path));"),
+     "// an item with changes not saved is left only once the auditor agrees\n"
+     "function mayLeave() { return !dirty() || confirm(LEAVE); }\n"
+     "// the item shown, dropped (its player stopped) when the page starts under another name or asks for one\n"
+     "function forgetItem() { stopPlayer(); item = null; phase = null; savedForm = null; listen = null; }\n"
+     + P.OPEN_NAMED +
+     "async function api(path, as) {\n  const r = await fetch(BASE + named(path, as));"),
     ("const r = await fetch(BASE + '/api/audit/answer', {", "const r = await fetch(BASE + named('/api/audit/answer'), {"),
     ("async function start() {\n"
      "  try { boot = await api('/api/audit/boot'); }\n"
      "  catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }\n",
-     "// the name form, filled with what this browser remembers; Enter or Start begins\n"
-     "function askName(text) {\n"
-     "  if (saving || dirty() && !confirm(LEAVE)) return;\n"
-     "  boot = null; item = null; phase = null; savedForm = null; listen = null;\n"
-     "  stopPlayer();\n"
-     "  show('work', false); show('rename', false); show('named', true);\n"
-     "  $('auditor').value = auditor || recall(stored('auditor')) || ''; $('scope').value = scope || recall(stored('auditScope')) || '';\n"
+     "// the name form, filled with what this browser remembers (or `kept`, a name and scope just refused); Enter or Start\n"
+     "// begins\n"
+     "function askName(text, kept) {\n"
+     "  if (saving || !mayLeave()) return;\n"
+     "  boot = null; forgetItem();\n"
+     "  show('work', false); show('rename', false); show('named', true); $('who').textContent = '';\n"
+     "  const [name, chosen] = kept || [auditor || recall(stored('auditor')), scope || recall(stored('auditScope'))];\n"
+     "  $('auditor').value = name || ''; $('scope').value = chosen || '';\n"
      "  $('namestatus').textContent = text || ''; $('auditor').focus();\n"
-     "}\n"
-     "async function start() {\n"
-     "  const name = $('auditor').value.trim(), chosen = $('scope').value;\n"
-     "  if (!name) { $('namestatus').textContent = 'type your name first'; return; }\n"
-     "  if (chosen !== 'full' && chosen !== 'reliability') { $('namestatus').textContent = 'choose the full audit or the reliability subset'; return; }\n"
-     "  auditor = name; scope = chosen; $('namestatus').textContent = 'starting…';\n"
-     "  try { boot = await api('/api/audit/boot'); }\n"
-     "  catch (e) { boot = null; $('namestatus').textContent = `cannot start: ${e.message}`; return; }\n"
-     "  remember(stored('auditor'), auditor); remember(stored('auditScope'), scope);\n"
-     "  $('namestatus').textContent = ''; $('auditor').blur();\n"
-     "  show('named', false); show('work', true); show('rename', true);\n"),
-    ("document.addEventListener('keydown', e => { onKey(e); });\nstart();\n",
-     "document.addEventListener('keydown', e => { onKey(e); });\n"
-     "$('named').addEventListener('submit', e => { e.preventDefault(); start(); });\n"
-     "$('rename').addEventListener('click', () => askName());\n"
-     "askName();\n"),
+     "}\n" + P.OPEN_FLOW),
+    ("  $('who').textContent = `Auditing as ${auditor}${boot.subset ? ` (${boot.subset} items)` : ''}"
+     "${boot.blind_closed ? ' · your blind pass is closed' : ''}`;\n",
+     "  $('whorest').textContent = `${boot.subset ? ` (${boot.subset} items)` : ''}${boot.blind_closed ? ' · your blind pass is closed' : ''}`;\n"
+     "  $('who').textContent = `Auditing as ${auditor}${$('whorest').textContent}`;\n"),
+    ("document.addEventListener('keydown', e => { onKey(e); });\nstart();\n", P.OPEN_TAIL),
 ])
 
 

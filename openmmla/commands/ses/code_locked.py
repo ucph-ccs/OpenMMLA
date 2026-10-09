@@ -1714,13 +1714,26 @@ def _patched(page: str, patches: list[tuple[str, str]]) -> str:
 
 # the default page is left as it is: the locked one is derived from it, so the two share their code
 LOCKED_PAGE = _patched(C.PAGE, [
-    ('<label>Coder <input id="coder" size="10"></label>', '<span id="codingas"></span><input id="coder" type="hidden">'),
+    # the header says "Coding as NAME" with no field and no change name: the link binds the name
+    ('<label id="naming" style="display:none">Coding as <input id="newname" size="14" autocomplete="off" spellcheck="false" '
+     'placeholder="your name"></label><button id="rename" type="button" style="display:none">change name</button>'
+     '<input id="coder" type="hidden">', '<input id="coder" type="hidden">'),
     ('· <b>t</b> transcript</div>', '· <b>t</b> transcript · <b>p</b> preceding window</div>'),
     ("  if (!visitCoder) remember('coder', coder);\n", ''),
-    ("    if (coder) remember('coder', coder);\n", ''),
+    ("  remember('coder', name);\n", ''),
     ("${new Date(w.start * 1000).toISOString().replace('T', ' ').slice(0, 19)}Z · ${Math.round(w.start - session.start)} s into the session",
      '${mmss(w.start)} into the recording'),
-    ("  visitCoder = (query.get('coder') || '').trim() || null;\n  $('coder').value = visitCoder || recall('coder') || ''; showVisit();\n",
+    ("  visitCoder = (query.get('coder') || '').trim() || null; ownName = recall('coder') || '';\n"
+     "  $('coder').value = visitCoder || ownName; showVisit();\n"
+     "  $('rename').onclick = () => editName(); $('newname').onblur = () => closeName();\n"
+     "  const given = visitCoder ? '' : (query.get('name') || '').trim();\n"
+     "  if (query.has('name')) { query.delete('name'); const rest = query.toString(); history.replaceState(null, '', "
+     "`${location.pathname}${rest ? `?${rest}` : ''}${location.hash}`); }\n"
+     "  const refused = given && await nameRefused(given);\n"
+     "  if (given && !refused) ownCoder(given);\n"
+     "  // a refused name stays in the field, said why; with no name yet the field is open for one\n"
+     "  if (refused) { editName(); $('newname').value = given; nameSaid = said(`name not changed: ${refused}`, true); }\n"
+     "  else if (!$('coder').value) editName(); else nameField(false);\n",
      "  locked = boot.locked; visitCoder = null;\n"
      "  $('coder').value = locked.coder; $('codingas').textContent = `Coding as ${locked.coder}`; showVisit();\n"
      "  if (locked.closed) { $('hidden').textContent = 'This campaign is closed: codes are no longer saved.'; $('hidden').style.display = ''; }\n"
