@@ -1,7 +1,7 @@
 """The input layout of the 10 s interaction classifier: a fused table (mmla ses-fuse) becomes, per
-window, a group token, three availability bits and two small sets, one of at most three persons and
-one of at most three pairs. The 118-column pooled view every tabular model reads is made from those
-sets, so every model sees the same information.
+window, a group token, three availability bits, the transcript content and two small sets, one of at
+most three persons and one of at most three pairs. The 123-column pooled view every tabular model
+reads is made from those, so every model sees the same information.
 
 Tag ids only group a table's columns and run the roster. No feature name, value or slot carries a
 tag id, a session id or a column position, so a model cannot learn which badge, seat or session it
@@ -39,6 +39,19 @@ The frame-width wrist speed and hand distances are dropped: a pupil near the cam
 nearer the group or with a narrower field of view, moves them. A table fused before the hand
 columns has none of these: its masks are off.
 
+Layout version 5: a fourth block, the transcript content. A local language model reads each window's
+transcript (with the 10 s before it as context) and scores it: the probability that the teacher is
+speaking (content_teacher), that peers talk about the task (content_peer_task) or about something
+else (content_peer_other), and whether the window had any text at all (content_no_text, 0/1). A
+script outside ses-fuse appends these four columns to a copy of the fused table. A window is observed
+for the block (mask m_content) when it has a content_no_text: a score row existed; a window with no
+text was never read, so its empty probabilities are 0. The block is a group value of its own (Tokens.C),
+outside the group token and the person and pair sets, so the network's encoders do not see it; the
+pooled view adds it last, after the roster, and every other column keeps its place and its values. A
+table without the columns gives the block unobserved everywhere (values NaN, then 0 when scaled, mask 0).
+The exploratory joint-split columns that extra_v5 pools were never a layout version and stay outside
+this one.
+
 Tables fused before the camera fix have no frame-set or camera counts (p<t>_frame_sets,
 p<t>_cameras, pair<a>_<b>_frame_sets, n_vfa_cameras). Their frame counts stand in for them there,
 and a second camera inflates those: the seen share is clipped at 1 and the switch rate runs over
@@ -49,7 +62,8 @@ front when it is log-transformed (`p5_yaw_std` -> `yaw_std`, `p5_wrist_speed_sw`
 `log_wrist_speed_sw`); the values the layout derives have names of their own (seen_share,
 switch_rate, known_share, the gaze shares of readable gaze, face_any, co_seen_share). A pooled
 column is `<value>_<min|mean|max>` for a person or pair value and the value's own name for a group
-one; POOLED_COLUMNS lists all 118, and a lag column is `<pooled column>_<suffix>` (LAGS).
+one; POOLED_COLUMNS lists all 123, and a lag column is `<pooled column>_<suffix>` (LAGS). The content
+values keep the table's names.
 """
 from __future__ import annotations
 
@@ -66,12 +80,16 @@ import pandas as pd
 
 from openmmla.services.vfa.work_area import WORK_AREA_READY_MIN
 
-LAYOUT_VERSION = 4
+LAYOUT_VERSION = 5
 # the IPS trust bound: a higher tag id is a mis-decoded badge
 MAX_TAG = 12
 N_SLOTS = 3
 PAIR_INDEX = ((0, 1), (0, 2), (1, 2))
+# the sensing modalities, in the order of the availability bits
 MODALITIES = ('speech', 'space', 'body_gaze')
+# the blocks of the pooled view that late fusion gives an expert each and the modality ablation removes: the
+# three modalities and the transcript content (layout version 5), which has no availability bit of its own
+FUSION_BLOCKS = MODALITIES + ('content',)
 # a gaze share is read only where at least this much of the person's gaze could be placed
 MIN_KNOWN_SHARE = 0.05
 # two skeletons whose hands are this close (frame widths) on average are one person seen twice
@@ -148,6 +166,8 @@ USED = (
     # layout version 4 reads them; extra_v5 gives them for the DEV checks
     r'|joint_member_ratio|joint_outsider_ratio|joint_member_excess)$',
     r'^(nm_at_table_ratio|nm_hands_in_table_ratio)$',
+    # the transcript content (layout version 5), appended beside the fusion's columns
+    r'^content_(teacher|peer_task|peer_other|no_text)$',
 )
 
 # a token value: its name, what it is made from, the transform (before scaling), the scaling tag
@@ -207,32 +227,52 @@ PAIR_VALUES = (
     Value('both_still_ratio', 'pair<a>_<b>_both_still_ratio', 'none', 'g', 'm_steps', 'body_gaze'),
     Value('follow_ratio', 'pair<a>_<b>_follow_ratio', 'none', 'g', 'm_follow', 'body_gaze'),
 )
+# the transcript content (layout version 5): per window, what a local language model read in the window's
+# transcript, one score row per window, appended to the table by a script outside ses-fuse. The probabilities
+# of a window with no text are empty (it was not read) and count as 0
+CONTENT_VALUES = (
+    Value('content_teacher', 'content_teacher (0 where content_no_text is 1 and it is empty)', 'none', 'g',
+          'm_content', 'content'),
+    Value('content_peer_task', 'content_peer_task (0 where content_no_text is 1 and it is empty)', 'none', 'g',
+          'm_content', 'content'),
+    Value('content_peer_other', 'content_peer_other (0 where content_no_text is 1 and it is empty)', 'none', 'g',
+          'm_content', 'content'),
+    Value('content_no_text', 'content_no_text > 0', 'none', 'g', 'm_content', 'content'),
+)
+# the table columns the content block reads; a window has a score row where content_no_text holds a number
+CONTENT_COLUMNS = tuple(v.name for v in CONTENT_VALUES)
 GROUP_MASKS = ('m_asr', 'm_transcription', 'm_dia')
 PERSON_MASKS = ('m_ips', 'm_path', 'm_vfa', 'm_yaw', 'm_hands', 'm_ohands', 'm_gaze', 'm_other', 'm_wa')
 PAIR_MASKS = ('m_dist', 'm_face', 'm_covis', 'm_hand', 'm_gazepair', 'm_jexcess', 'm_steps', 'm_follow')
+CONTENT_MASKS = ('m_content',)
 MASK_MODALITY = {'m_asr': 'speech', 'm_transcription': 'speech', 'm_dia': 'speech',
                  'm_ips': 'space', 'm_path': 'space', 'm_dist': 'space', 'm_face': 'space',
                  'm_vfa': 'body_gaze', 'm_yaw': 'body_gaze', 'm_hands': 'body_gaze', 'm_ohands': 'body_gaze',
                  'm_gaze': 'body_gaze', 'm_other': 'body_gaze', 'm_wa': 'body_gaze',
                  'm_covis': 'body_gaze', 'm_hand': 'body_gaze', 'm_gazepair': 'body_gaze', 'm_jexcess': 'body_gaze',
-                 'm_steps': 'body_gaze', 'm_follow': 'body_gaze'}
-# the availability bits, one per modality in MODALITIES order
+                 'm_steps': 'body_gaze', 'm_follow': 'body_gaze', 'm_content': 'content'}
+# the availability bits, one per modality in MODALITIES order (the content block has none: its mask says it)
 AVAILABILITY = ('speech_ran', 'ips_ran', 'vfa_ran')
 
 # the token columns: values, then masks (then group_size / 3 in G)
 G_COLUMNS = tuple(v.name for v in GROUP_VALUES) + GROUP_MASKS + ('group_size',)
 P_COLUMNS = tuple(v.name for v in PERSON_VALUES) + PERSON_MASKS
 Q_COLUMNS = tuple(v.name for v in PAIR_VALUES) + PAIR_MASKS
+C_COLUMNS = CONTENT_COLUMNS + CONTENT_MASKS
+
+# the parts of the tokens that hold values: (name, values, masks)
+_PARTS = (('G', GROUP_VALUES, GROUP_MASKS), ('P', PERSON_VALUES, PERSON_MASKS), ('Q', PAIR_VALUES, PAIR_MASKS),
+          ('C', CONTENT_VALUES, CONTENT_MASKS))
 
 
 def _modality_index() -> dict:
-    """where each modality sits in the tokens: its value and mask columns in G, P and Q and its
-    availability bit (what modality dropout zeroes to fake an outage)."""
+    """where each block sits in the tokens: its value and mask columns in G, P, Q and C and its
+    availability bit (what modality dropout zeroes to fake an outage; None for the content block,
+    which has none)."""
     index = {}
-    for position, modality in enumerate(MODALITIES):
-        entry = {'avail': position}
-        for part, values, masks in (('G', GROUP_VALUES, GROUP_MASKS), ('P', PERSON_VALUES, PERSON_MASKS),
-                                    ('Q', PAIR_VALUES, PAIR_MASKS)):
+    for modality in FUSION_BLOCKS:
+        entry = {'avail': MODALITIES.index(modality) if modality in MODALITIES else None}
+        for part, values, masks in _PARTS:
             entry[part] = [i for i, v in enumerate(values) if v.modality == modality] + \
                 [len(values) + i for i, m in enumerate(masks) if MASK_MODALITY[m] == modality]
         index[modality] = entry
@@ -253,10 +293,9 @@ GAZE_MODEL_MASKS = ('m_gaze', 'm_other', 'm_wa', 'm_gazepair', 'm_jexcess', 'm_f
 
 
 def _pseudo_index(values: tuple, masks: tuple) -> dict:
-    """where a pseudo-modality's values and masks sit in G, P and Q; it has no availability bit."""
+    """where a pseudo-modality's values and masks sit in G, P, Q and C; it has no availability bit."""
     entry = {'avail': None}
-    for part, spec, mask_names in (('G', GROUP_VALUES, GROUP_MASKS), ('P', PERSON_VALUES, PERSON_MASKS),
-                                   ('Q', PAIR_VALUES, PAIR_MASKS)):
+    for part, spec, mask_names in _PARTS:
         entry[part] = [i for i, v in enumerate(spec) if v.name in values] + \
             [len(spec) + i for i, m in enumerate(mask_names) if m in masks]
     return entry
@@ -278,7 +317,8 @@ def _pooled_names(values, modality: str) -> tuple:
     return tuple(f'{v.name}_{stat}' for v in values if v.modality == modality for stat in _STATS)
 
 
-# the pooled view, block by block (10 + 18 + 89 + 1 = 118 columns)
+# the pooled view, block by block (10 + 18 + 89 + 1 + 5 = 123 columns); the content block (layout version 5)
+# comes last, so the first 118 columns are layout version 4's, in its order
 POOLED_BLOCKS = {
     'speech': tuple(v.name for v in GROUP_VALUES) + GROUP_MASKS,
     'space': _pooled_names(PERSON_VALUES, 'space') + _pooled_names(PAIR_VALUES, 'space')
@@ -286,14 +326,17 @@ POOLED_BLOCKS = {
     'body_gaze': _pooled_names(PERSON_VALUES, 'body_gaze') + _pooled_names(PAIR_VALUES, 'body_gaze')
     + ('vfa_ran', 'share_seen', 'share_gaze_known', 'share_pairs_covis', 'share_pairs_gaze'),
     'roster': ('group_size',),
+    'content': C_COLUMNS,
 }
 POOLED_COLUMNS = tuple(column for block in POOLED_BLOCKS.values() for column in block)
 
-# the pooled columns the tabular models also see at their neighbours' windows
+# the pooled columns the tabular models also see at their neighbours' windows: each block's key values (the
+# content block's three probabilities last, layout version 5)
 LAG_COLUMNS = ('speech_ratio', 'log_words', 'log_dia_switches', 'dia_overlap_ratio',
                'present_ratio_mean', 'dist_mean_m_min', 'face_any_max',
                'partner_face_mean', 'partner_hands_mean', 'own_hands_mean', 'joint_attention_excess_max',
-               'log_wrist_speed_sw_mean')
+               'log_wrist_speed_sw_mean',
+               'content_teacher', 'content_peer_task', 'content_peer_other')
 # per temporal mode, each derived column as (suffix, first offset, last offset): one offset is a
 # neighbour's value, a range the nanmean over the neighbours in it that exist
 LAGS = {
@@ -584,8 +627,10 @@ class Tokens:
     window_start (T,); empty (T,) no speech, nobody positioned, nobody seen. `positioned` (T, 3)
     keeps whether IPS placed each slot (share_present needs it after scaling), `ips_missed` (T, 3)
     where a slot's present_ratio 0 was left unobserved because a camera saw the person (the
-    modality ablation reads it), `window_index` (T,) the table's grid index. Unscaled, an
-    unobserved value is NaN; scaled, it is 0."""
+    modality ablation reads it), `window_index` (T,) the table's grid index. `C` (T, 5) is the
+    transcript content (C_COLUMNS: four values, then m_content), which the pooled view reads and no
+    network token does; None (tokens built by hand) is the block unobserved everywhere. The content
+    never changes `empty`. Unscaled, an unobserved value is NaN; scaled, it is 0."""
     G: np.ndarray
     avail: np.ndarray
     P: np.ndarray
@@ -599,6 +644,7 @@ class Tokens:
     window_index: np.ndarray = None
     scaled: bool = False
     ips_missed: np.ndarray = None
+    C: np.ndarray = None
 
     def __len__(self) -> int:
         return len(self.window_start)
@@ -687,6 +733,36 @@ def _pair(table, a, b, both_present, n_vfa, gated):
     return _settle(values, masks, PAIR_VALUES, PAIR_MASKS)
 
 
+def has_content(table: pd.DataFrame) -> bool:
+    """whether the table has the transcript content columns (layout version 5): the score rows'
+    content_no_text at least."""
+    return 'content_no_text' in table.columns
+
+
+def _content(table: pd.DataFrame) -> np.ndarray:
+    """(T, 5): the content values and m_content. A window is observed where content_no_text holds a
+    number (a score row existed); a window with no text was not read, so a probability left empty
+    there is 0. A table without the columns gives NaN values and a mask of 0 everywhere."""
+    no_text = _column(table, 'content_no_text')
+    observed = np.isfinite(no_text)
+    with np.errstate(invalid='ignore'):
+        silent = observed & (no_text > 0)
+        flag = np.where(observed, (no_text > 0).astype(float), np.nan)
+    probabilities = [_column(table, name) for name in CONTENT_COLUMNS[:3]]
+    probabilities = [np.where(silent & np.isnan(p), 0.0, p) for p in probabilities]
+    values = np.column_stack(probabilities + [flag])
+    # a score row with a probability missing where there was text claims nothing: _settle turns it off
+    values, masks = _settle(values, observed[:, None].copy(), CONTENT_VALUES, CONTENT_MASKS)
+    return np.column_stack([values, masks.astype(float)])
+
+
+def content_observed(tokens: Tokens) -> np.ndarray:
+    """per window, whether the content block was observed (m_content on); never on tokens without C."""
+    if tokens.C is None:
+        return np.zeros(len(tokens), dtype=bool)
+    return np.asarray(tokens.C[:, len(CONTENT_VALUES) + CONTENT_MASKS.index('m_content')]) > 0
+
+
 def window_tokens(table: pd.DataFrame, roster: Roster, speech_measured: bool = True) -> Tokens:
     """the session's tokens, unscaled (log transforms and ratios applied, NaN where unobserved).
     `speech_measured` False marks a session whose microphone missed talk the audio has (the
@@ -744,7 +820,8 @@ def window_tokens(table: pd.DataFrame, roster: Roster, speech_measured: bool = T
                   P=P, P_exists=P_exists, Q=Q, Q_exists=Q_exists, pair_index=np.array(PAIR_INDEX, dtype=int),
                   window_start=np.round(_column(table, 'window_start'), 3),
                   empty=~spoken & ~positioned.any(axis=1) & ~seen_anyone,
-                  positioned=positioned, window_index=window_index.astype(int), ips_missed=ips_missed)
+                  positioned=positioned, window_index=window_index.astype(int), ips_missed=ips_missed,
+                  C=_content(table))
 
 
 def ablate(tokens: Tokens, modalities) -> Tokens:
@@ -759,10 +836,12 @@ def ablate(tokens: Tokens, modalities) -> Tokens:
     outage would leave it: the space block then carries nothing the cameras saw. The pseudo-modality
     `gaze_model` (PSEUDO_MODALITY_INDEX) removes the gaze model's values and masks the same way and
     nothing else: no availability bit, nobody unpositioned, the pose values of body_gaze kept; `dia`
-    removes the diarization values and m_dia so, the other speech values kept. The
-    input is not changed; no modality gives the same tokens back."""
+    removes the diarization values and m_dia so, the other speech values kept. The block `content`
+    (FUSION_BLOCKS) removes the transcript content (C) the same way; it has no availability bit,
+    and removing speech leaves it as it is. The input is not changed; no modality gives the same
+    tokens back."""
     modalities = tuple(dict.fromkeys(modalities))
-    known = MODALITIES + tuple(PSEUDO_MODALITY_INDEX)
+    known = FUSION_BLOCKS + tuple(PSEUDO_MODALITY_INDEX)
     unknown = [m for m in modalities if m not in known]
     if unknown:
         raise ValueError(f"unknown modality {', '.join(map(str, unknown))}: one of {', '.join(known)}")
@@ -771,8 +850,10 @@ def ablate(tokens: Tokens, modalities) -> Tokens:
     if tokens.scaled:
         raise ValueError("ablate the unscaled tokens: scaling reads the masks this sets")
     arrays = {'G': tokens.G.copy(), 'P': tokens.P.copy(), 'Q': tokens.Q.copy()}
+    if tokens.C is not None:
+        arrays['C'] = tokens.C.copy()
     avail = tokens.avail.copy()
-    sizes = {'G': len(GROUP_VALUES), 'P': len(PERSON_VALUES), 'Q': len(PAIR_VALUES)}
+    sizes = {part: len(spec) for part, spec, _ in _PARTS}
     for modality in modalities:
         index = MODALITY_INDEX[modality] if modality in MODALITY_INDEX else PSEUDO_MODALITY_INDEX[modality]
         if index['avail'] is not None:
@@ -795,21 +876,29 @@ def ablate(tokens: Tokens, modalities) -> Tokens:
         where = tokens.ips_missed.astype(bool) & (tokens.P_exists > 0)
         arrays['P'][where, present] = 0.0
         arrays['P'][where, m_ips] = 1.0
-    return replace(tokens, G=arrays['G'], avail=avail, P=arrays['P'], Q=arrays['Q'], positioned=positioned)
+    return replace(tokens, G=arrays['G'], avail=avail, P=arrays['P'], Q=arrays['Q'], positioned=positioned,
+                   C=arrays.get('C'))
 
 
 # ---- scaling ----
 
-_PARTS = (('G', GROUP_VALUES, GROUP_MASKS), ('P', PERSON_VALUES, PERSON_MASKS), ('Q', PAIR_VALUES, PAIR_MASKS))
+def _unobserved_content(n: int) -> np.ndarray:
+    """the content block of tokens without one: values NaN, m_content 0."""
+    out = np.full((n, len(C_COLUMNS)), np.nan)
+    out[:, len(CONTENT_VALUES):] = 0.0
+    return out
 
 
 def _observed(tokens: Tokens, part: str) -> tuple[np.ndarray, np.ndarray]:
     """a part's values as (windows, slots, values) with NaN wherever the value was not observed
-    (no slot, mask off, not a number), and that observed mask. G is one slot."""
-    spec, masks = {'G': (GROUP_VALUES, GROUP_MASKS), 'P': (PERSON_VALUES, PERSON_MASKS),
-                   'Q': (PAIR_VALUES, PAIR_MASKS)}[part]
+    (no slot, mask off, not a number), and that observed mask. G and C are one slot; tokens without
+    C have the content unobserved."""
+    spec, masks = {part: (values, mask_names) for part, values, mask_names in _PARTS}[part]
     if part == 'G':
         array, exists = tokens.G[:, None, :], np.ones((len(tokens.G), 1))
+    elif part == 'C':
+        content = tokens.C if tokens.C is not None else _unobserved_content(len(tokens))
+        array, exists = content[:, None, :], np.ones((len(content), 1))
     else:
         array, exists = (tokens.P, tokens.P_exists) if part == 'P' else (tokens.Q, tokens.Q_exists)
     n = len(spec)
@@ -832,8 +921,8 @@ def _robust(x: np.ndarray) -> tuple[float, float]:
 
 @dataclass(eq=False)
 class Stats:
-    """the [g] statistics: per part ('G', 'P', 'Q') the median and spread of every value, fitted on
-    the outer-training sessions' non-empty windows."""
+    """the [g] statistics: per part ('G', 'P', 'Q', 'C') the median and spread of every value, fitted
+    on the outer-training sessions' non-empty windows."""
     center: dict
     spread: dict
     n_windows: int = 0
@@ -918,8 +1007,11 @@ def scale(tokens: Tokens, stats: Stats | None = None, mode: str = 'offline', sch
         raise ValueError(f"unknown scaling scheme {scheme!r}: {', '.join(repr(s) for s in SCHEMES)}")
     if tokens.scaled:
         raise ValueError("these tokens are scaled already")
-    arrays = {'G': tokens.G.copy(), 'P': tokens.P.copy(), 'Q': tokens.Q.copy()}
+    arrays = {'G': tokens.G.copy(), 'P': tokens.P.copy(), 'Q': tokens.Q.copy(),
+              'C': tokens.C.copy() if tokens.C is not None else None}
     for part, spec, _ in _PARTS:
+        if arrays[part] is None:
+            continue
         values, observed = _observed(tokens, part)
         z = np.zeros_like(values)
         for k, value in enumerate(spec):
@@ -941,13 +1033,13 @@ def scale(tokens: Tokens, stats: Stats | None = None, mode: str = 'offline', sch
                 z[..., k] = np.clip((x - center) / spread, -CLIP, CLIP)
         z[~observed] = 0.0
         n = len(spec)
-        if part == 'G':
-            arrays['G'][:, :n] = z[:, 0, :]
+        if part in ('G', 'C'):
+            arrays[part][:, :n] = z[:, 0, :]
         else:
             arrays[part][..., :n] = z
             # a slot nobody holds is all zeros
             arrays[part][(tokens.P_exists if part == 'P' else tokens.Q_exists) == 0] = 0.0
-    return replace(tokens, G=arrays['G'], P=arrays['P'], Q=arrays['Q'], scaled=True)
+    return replace(tokens, G=arrays['G'], P=arrays['P'], Q=arrays['Q'], C=arrays['C'], scaled=True)
 
 
 # ---- the pooled view ----
@@ -973,13 +1065,14 @@ def _share(hit: np.ndarray, exists: np.ndarray, ran: np.ndarray) -> np.ndarray:
 
 
 def pooled(tokens: Tokens) -> pd.DataFrame:
-    """the 118-column pooled view (POOLED_COLUMNS), indexed by window_index: the group values and
+    """the 123-column pooled view (POOLED_COLUMNS), indexed by window_index: the group values and
     masks, each person value's (min, mean, max) over the slots that observed it, each pair
     value's over the pairs, the availability bits, the shares of slots and pairs that observed a
-    modality, and the group size. For at most three slots (min, mean, max) gives back the sorted
-    values (the middle one is 3 mean - min - max), so only the binding of values to one person
-    is lost. Unscaled tokens give values in the units of the transforms (what the a-priori rule's
-    thresholds read); scaled tokens the scaled values. Unobserved is NaN either way."""
+    modality, the group size, and last the transcript content's four values and m_content. For at
+    most three slots (min, mean, max) gives back the sorted values (the middle one is 3 mean - min -
+    max), so only the binding of values to one person is lost. Unscaled tokens give values in the
+    units of the transforms (what the a-priori rule's thresholds read); scaled tokens the scaled
+    values. Unobserved is NaN either way."""
     columns = {}
     g_values, _ = _observed(tokens, 'G')
     for k, v in enumerate(GROUP_VALUES):
@@ -1017,6 +1110,12 @@ def pooled(tokens: Tokens) -> pd.DataFrame:
     columns['share_pairs_covis'] = _share(pair_mask('m_covis'), q_exists, vfa_ran)
     columns['share_pairs_gaze'] = _share(pair_mask('m_gazepair'), q_exists, vfa_ran)
     columns['group_size'] = np.round(tokens.G[:, -1] * N_SLOTS)
+    c_values, _ = _observed(tokens, 'C')
+    for k, v in enumerate(CONTENT_VALUES):
+        columns[v.name] = c_values[:, 0, k]
+    content = tokens.C if tokens.C is not None else _unobserved_content(len(tokens))
+    for k, name in enumerate(CONTENT_MASKS):
+        columns[name] = content[:, len(CONTENT_VALUES) + k]
     index = tokens.window_index if tokens.window_index is not None else np.arange(len(tokens))
     frame = pd.DataFrame(columns, index=pd.Index(index, name='window_index'))
     return frame[list(POOLED_COLUMNS)]
@@ -1031,15 +1130,15 @@ def _lag_base(column: str) -> str:
 
 
 def block_columns(pooled: pd.DataFrame, with_group_size: bool = True) -> dict:
-    """the columns of each modality's expert: its block of the pooled view and the lag columns of
-    its key columns, in the frame's order; with `with_group_size` each block also has
-    group_size (the roster block), which every expert sees."""
-    block_of = {column: modality for modality in MODALITIES for column in POOLED_BLOCKS[modality]}
-    blocks = {modality: [] for modality in MODALITIES}
+    """the columns of each block's expert (FUSION_BLOCKS: the three modalities and the content):
+    its block of the pooled view and the lag columns of its key columns, in the frame's order; with
+    `with_group_size` each block also has group_size (the roster block), which every expert sees."""
+    block_of = {column: modality for modality in FUSION_BLOCKS for column in POOLED_BLOCKS[modality]}
+    blocks = {modality: [] for modality in FUSION_BLOCKS}
     for column in pooled.columns:
         if column == 'group_size':
             if with_group_size:
-                for modality in MODALITIES:
+                for modality in FUSION_BLOCKS:
                     blocks[modality].append(column)
             continue
         modality = block_of.get(_lag_base(column))

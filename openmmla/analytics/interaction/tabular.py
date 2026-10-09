@@ -1,6 +1,7 @@
 """The tabular models of the 10 s interaction classifier (Layer A): the a-priori rule, the fitted
 two-level tree, logistic regression and gradient boosting on the pooled view, the late fusion of
-one expert per modality, the temperature-and-bias calibrator, and the balanced decision.
+one expert per block (speech, space, body and gaze, the transcript content), the temperature-and-bias
+calibrator, and the balanced decision.
 
 Every model here reads the pooled view as a DataFrame (NaN where a value could not be observed,
 the masks as columns of their own) and labels as ints: 0 individual, 1 social, 2 collaborative,
@@ -482,19 +483,21 @@ def presence(*columns):
     return flag
 
 
-# the experts' presence flags, by modality (2.6): speech = m_asr; space = IPS ran and someone was
-# present; body = VFA ran and someone was seen. The share columns must be unscaled.
+# the experts' presence flags, by block (2.6): speech = m_asr; space = IPS ran and someone was
+# present; body = VFA ran and someone was seen; content = a score row for the window's transcript
+# (m_content, layout version 5). The share columns must be unscaled.
 PRESENCE = {
     'speech': presence('m_asr'),
     'space': presence('ips_ran', 'share_present'),
     'body_gaze': presence('vfa_ran', 'share_seen'),
+    'content': presence('m_content'),
 }
 
 
 class Expert:
-    """one modality's model in the late fusion. It reads only its block's columns, learns only from
-    the windows where its modality was present, and answers the training log-prior where the
-    modality is absent, so an outage reads as 'no evidence' rather than as whatever the imputer
+    """one block's model in the late fusion. It reads only its block's columns, learns only from
+    the windows where its block was present, and answers the training log-prior where the
+    block is absent, so an outage reads as 'no evidence' rather than as whatever the imputer
     made of it."""
 
     def __init__(self, make, grid, columns, flag=None, name: str | None = None):
@@ -551,21 +554,27 @@ class Expert:
 
 
 class LateFusion:
-    """the headline: one expert per modality block, and a multinomial logistic stacker (C fixed at
-    1, no class weights) over their log-probabilities and presence flags, trained on the experts'
-    inner out-of-fold answers so it learns how far to trust each one on windows it did not fit.
-    Unweighted, its answers carry the training prior, so it is its own calibrator.
+    """the headline: one expert per block, and a multinomial logistic stacker (C fixed at 1, no
+    class weights) over their log-probabilities and presence flags, trained on the experts' inner
+    out-of-fold answers so it learns how far to trust each one on windows it did not fit: with the
+    four blocks of layout version 5, 12 log-probabilities and 4 flags. Unweighted, its answers
+    carry the training prior, so it is its own calibrator.
 
-    `blocks` maps a modality to its columns (its block, group_size and its lags); `flags` maps a
-    modality to its presence flag (a callable of the pooled frame, or a column name), PRESENCE by
+    `blocks` maps a block to its columns (its block, group_size and its lags); `flags` maps a
+    block to its presence flag (a callable of the pooled frame, or a column name), PRESENCE by
     default. `extra` (fit and predict) adds outside log-probabilities as further experts, e.g.
-    Jev's: a dict name -> (n, 3) array, NaN where there is none."""
+    Jev's: a dict name -> (n, 3) array, NaN where there is none. With no expert and no outside one
+    (an ablation arm with every block removed) the stacker reads one constant input and answers
+    the training prior."""
 
     def __init__(self, make, grid, blocks: dict, flags: dict | None = None, inner=4, C: float = 1.0):
         self.make, self.grid, self.blocks, self.inner, self.C = make, list(grid), dict(blocks), inner, C
         self.flags = dict(PRESENCE, **(flags or {}))
 
-    def _stack_inputs(self, logits: list[np.ndarray], present: list[np.ndarray]) -> np.ndarray:
+    def _stack_inputs(self, logits: list[np.ndarray], present: list[np.ndarray], n: int) -> np.ndarray:
+        if not logits:
+            # nothing to stack: an intercept-only stacker, the training prior
+            return np.zeros((n, 1))
         return np.column_stack(logits + [p.astype(float) for p in present])
 
     def _extra(self, extra: dict | None, n: int, prior: np.ndarray) -> tuple[list, list]:
@@ -608,7 +617,7 @@ class LateFusion:
                 values[~here] = fallback[~here]
                 logits.append(values)
                 present.append(here)
-        Z = self._stack_inputs(logits, present)
+        Z = self._stack_inputs(logits, present, len(y))
         answered = np.isfinite(Z).all(1)
         # the stacker's own out-of-fold answers (the same splits), for choosing the HMM's gamma
         oof = np.full((len(y), N_CLASSES), np.nan)
@@ -630,7 +639,7 @@ class LateFusion:
         logits = [expert.predict_log_proba(X) for expert in self.experts_.values()]
         present = [expert.present(X) for expert in self.experts_.values()]
         more, here = self._extra(extra, len(X), self.prior_)
-        return log_proba(self.stacker_, self._stack_inputs(logits + more, present + here))
+        return log_proba(self.stacker_, self._stack_inputs(logits + more, present + here, len(X)))
 
     def predict_proba(self, X, extra: dict | None = None) -> np.ndarray:
         return np.exp(self.predict_log_proba(X, extra))

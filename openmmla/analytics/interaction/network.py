@@ -15,7 +15,8 @@ layout.py (a value whose mask is 0 is already 0 there):
 
 with a label per window: 0 individual, 1 social, 2 collaborative, anything else (uncoded, unclear,
 None, NaN) none. `session_tensors` turns a session into the dict every other function reads; the
-pooled control (PooledNet) reads the 118-column pooled view instead of the tokens. net-attn
+pooled control (PooledNet) reads the 123-column pooled view instead of the tokens (the only rung
+that sees the transcript content, which no token holds). net-attn
 (AttentionNet, an exploratory candidate of the architecture panel) reads the same tokens
 through self-attention over the persons and trains through the same functions.
 
@@ -208,7 +209,7 @@ class AttentionNet(nn.Module):
 
 
 class PooledNet(nn.Module):
-    """the control: the 118-column pooled view through the same window, temporal and head layers."""
+    """the control: the 123-column pooled view through the same window, temporal and head layers."""
 
     def __init__(self, d_in=len(_layout.POOLED_COLUMNS), d_window=48, kernel=5, dilations=(1, 2), causal=False):
         super().__init__()
@@ -377,7 +378,7 @@ def _position(names, column):
 def session_tensors(tokens, y=None, pooled=None, blocks=None, session=None):
     """one session as tensors named after the model's arguments (g, avail, persons, person_exists,
     pairs, pair_exists, pair_index) plus y, the class index per window with -1 for no label.
-    `tokens` is layout's Tokens (or a dict with its field names); with `pooled` (the 118-column
+    `tokens` is layout's Tokens (or a dict with its field names); with `pooled` (the 123-column
     view, a DataFrame or array, NaN where no slot qualified) the dict also holds the PooledNet
     input, NaN as 0, and `blocks` (modality -> its pooled columns, names or positions, as
     layout.block_columns gives them) tells modality dropout where each modality sits in it."""
@@ -479,7 +480,8 @@ def modality_dropout(batch, p=0.15, run=(6, 24), rng=None, layout=None):
     """per crop and per modality, with probability p, a run of U[6, 24] consecutive windows loses
     that modality: its values and masks in G, the person and the pair slots, and its availability
     bit, are zeroed, which is what a real outage looks like in the tokens. For the pooled control
-    the modality's pooled block is zeroed instead."""
+    the modality's pooled block is zeroed instead. The transcript content's block (layout version 5)
+    is no modality here: it has no availability bit and is never dropped."""
     rng = rng if rng is not None else np.random.default_rng()
     layout = layout or LAYOUT
     out = _clone(batch)

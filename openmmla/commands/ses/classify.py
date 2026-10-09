@@ -66,14 +66,17 @@ when a session they need has no ses-jev map made from its current fused table; a
 scored only on the windows it answered, and the coverage is printed when that is not all of them.
 
 --ablate modality fits and scores every learned model and the rule once more per arm (no_speech,
-no_space, no_body_gaze, only_body_gaze, only_speech), each with its modalities not run in any
-session, train and test alike; the floors and Jev run in the full arm only, the headline and the
-contrasts are the full arm's, and ablation.csv sets the arms side by side. It is one run, so with
---split test one look at TEST. --ablate gaze_model (the sensor-value ladder) does the
+no_space, no_body_gaze, no_content, only_body_gaze, only_speech, only_content), each with its blocks
+not run in any session, train and test alike; the blocks are speech, space, body and gaze, and the
+transcript content (the content_* columns a local language model's scores add to a table; a table
+without them has the block unobserved). An only_* arm removes every other block, the content
+included; no_speech keeps the content. The floors and Jev run in the full arm only, the headline
+and the contrasts are the full arm's, and ablation.csv sets the arms side by side. It is one run,
+so with --split test one look at TEST. --ablate gaze_model (the sensor-value ladder) does the
 same with the arms only_body_gaze, only_pose and no_gaze_model: only_pose keeps the cameras' pose
-values (seen share, head yaw, hands, hand distances) and removes speech, space and the gaze model's
-values (gaze shares, known share, switch rate, gaze distance, joint attention, following) with
-their masks; no_gaze_model removes the gaze model's values alone.
+values (seen share, head yaw, hands, hand distances) and removes speech, space, the content and the
+gaze model's values (gaze shares, known share, switch rate, gaze distance, joint attention, following)
+with their masks; no_gaze_model removes the gaze model's values alone.
 
 --quick swaps in two-point grids, 30 training epochs and 200 bootstrap resamples: for checking
 the plumbing end to end, never for a reported number.
@@ -134,8 +137,9 @@ def get_parser():
                              "or all (default all)")
     parser.add_argument('--ablate', choices=ABLATIONS, default='none',
                         help="ablation grid: none (default), modality (every learned model and the rule once more "
-                             "without speech, space, body_gaze, speech+space and space+body_gaze, in every session; "
-                             "writes ablation.csv), or gaze_model (the same with the arms only_body_gaze, only_pose "
+                             "without speech, space, body_gaze or the transcript content, and with only body_gaze, "
+                             "only speech or only the content, in every session; writes ablation.csv), or gaze_model "
+                             "(the same with the arms only_body_gaze, only_pose "
                              "and no_gaze_model: the gaze model's values removed, the pose values kept), or dia (the "
                              "arm no_dia: the group microphone's dia_* values removed, the rest of speech kept); "
                              "temporal, fusion, ladder, weights and all are not built yet")

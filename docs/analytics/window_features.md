@@ -12,6 +12,7 @@
 | [Body and gaze](#body-and-gaze-columns) | head turn, where gazes landed, joint and mutual attention, hand distance, hand activity in body units | `vfa_features` |
 | [Actions](#action-columns) | the VLM's action label per person | `vfa_action` |
 | [Seats and non-members](#seat-and-non-member-columns) | untagged bodies at the persons' seats; someone outside the group at the group's table | `vfa_features` |
+| [Content](#content-columns) | a transcript reader's scores: teacher talk, peers on the task or on something else, no text; appended to a copy of the table, not written by `ses-fuse` | `asr_transcription`, through the reader |
 
 Persons are tag ids (`p<tag>_...`) and pairs are sorted tag pairs (`pair<a>_<b>_...`). Bodies the pose model saw without a tag count only in the seat trace. A cell is empty when its modality gave nothing to judge in the window.
 
@@ -425,6 +426,19 @@ The server's [gaze targets](../pipelines/vfa/pose-and-gaze.md#gaze-targets) say 
 | `n_untagged_at_seats` | the untagged bodies at any seat per frame set of the window, summed over the cameras |
 
 The `nm_*` columns are empty when no camera of the window could judge (no table box learned, no pupil scale). In the seat trace, a frame set that lost the camera counts as one without such a body, and the cell is empty when no camera with the seat gave a frame. A session without VFA has none of these columns.
+
+### Content columns
+
+`mmla ses-fuse` does not write these. They come from a transcript reader: a local language model reads each window's transcript, with the 10 s before it as context, and a separate script appends its scores to a copy of the table, one score row per window.
+
+| Column | What it holds |
+|---|---|
+| `content_teacher` | the probability that the teacher is speaking in the window |
+| `content_peer_task` | the probability that peers talk about the task |
+| `content_peer_other` | the probability that peers talk about something else |
+| `content_no_text` | 1 when the window had no text, else 0; empty when the window has no score row |
+
+A window with no text is not read, so its three probabilities are empty and count as 0. A table without these columns reads as one whose content was never scored.
 
 ## Analysis record
 

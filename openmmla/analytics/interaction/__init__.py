@@ -6,8 +6,8 @@ the 60 s role function of each person, builds on it and is not here.
 What reads and writes where:
 - in: artifacts/<session>/analysis/features/<session>_window_features.csv (mmla ses-fuse) and
   artifacts/<session>/labels/<coder>.jsonl (mmla ses-code);
-- layout: the roster, the tokens (group, persons, pairs), their scaling, the 118-column pooled view
-  and its lags; labels: reading and joining the coders' labels; splits: TEST and the
+- layout: the roster, the tokens (group, persons, pairs, transcript content), their scaling, the
+  123-column pooled view and its lags; labels: reading and joining the coders' labels; splits: TEST and the
   leave-one-date-out folds;
 - out, mmla ses-classify: artifacts/_analysis/interaction/<run>/ (predictions.csv, metrics.json,
   per_session.csv, confusion.csv, label_counts.csv, state_shares.csv, roster.json, data_checks.json,

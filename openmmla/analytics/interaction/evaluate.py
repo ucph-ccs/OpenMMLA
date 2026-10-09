@@ -52,11 +52,15 @@ its estimates without intervals.
 
 The modality ablation of 4.6 (`ablate='modality'`) runs in the same run, on the same folds: every
 learned model and the rule are fitted and scored once per arm of MODALITY_ARMS, where an arm's
-modalities did not run in any window of any session, train and test alike (layout.ablate: values
+blocks did not run in any window of any session, train and test alike (layout.ablate: values
 unobserved, masks and availability bit 0, as an outage writes them, the empty flag kept). The
+blocks are the three modalities and the transcript content of layout version 5 (no_content,
+only_content; an only_* arm removes every other block, the content included). The
 floors and Jev read no feature and run in the full arm only. The headline, the contrasts and the
 state shares are the full arm's, which is the run without the ablation; ablation.csv sets the arms
-side by side (exploratory, no Holm correction). An ablated arm's variant key ends in ':<arm>'.
+side by side (exploratory, no Holm correction). An ablated arm's variant key ends in ':<arm>'. Late
+fusion has no expert for a block an arm removed or one present in no coded training window (the
+content block of tables without its columns).
 The gaze-model ablation (`ablate='gaze_model'`, for the sensor-value ladder) runs the
 arms of GAZE_MODEL_ARMS the same way: only_body_gaze, only_pose (the cameras' pose values alone:
 layout's pseudo-modality gaze_model removed too) and no_gaze_model. The gaze model's values and
@@ -223,14 +227,17 @@ NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair'
 # answer, and for it the held-out session is scaled by the running normaliser
 CAUSAL_INPUTS = ('T0', 'T1c', 'j0', 'j1')
 JEV_MODELS = ('jev', 'jev-cal')
-# the modality ablation (4.6): per arm, the modalities that did not run in any window of any session, train and
-# test alike; the full arm first, and it is the run without the ablation
+# the modality ablation (4.6): per arm, the blocks (layout.FUSION_BLOCKS) that did not run in any window of any
+# session, train and test alike; the full arm first, and it is the run without the ablation. An only_* arm removes
+# every other block, the transcript content included; no_speech keeps the content block
 MODALITY_ARMS = {'full': (), 'no_speech': ('speech',), 'no_space': ('space',), 'no_body_gaze': ('body_gaze',),
-                 'only_body_gaze': ('speech', 'space'), 'only_speech': ('space', 'body_gaze')}
+                 'no_content': ('content',),
+                 'only_body_gaze': ('speech', 'space', 'content'), 'only_speech': ('space', 'body_gaze', 'content'),
+                 'only_content': ('speech', 'space', 'body_gaze')}
 # the gaze-model ablation (the sensor-value ladder): the cameras with the gaze
 # model's outputs and without them (layout's pseudo-modality gaze_model), the body_gaze block of late fusion kept
-GAZE_MODEL_ARMS = {'full': (), 'only_body_gaze': ('speech', 'space'), 'only_pose': ('speech', 'space', 'gaze_model'),
-                   'no_gaze_model': ('gaze_model',)}
+GAZE_MODEL_ARMS = {'full': (), 'only_body_gaze': ('speech', 'space', 'content'),
+                   'only_pose': ('speech', 'space', 'content', 'gaze_model'), 'no_gaze_model': ('gaze_model',)}
 # the diarization ablation: the group microphone's dia_* values (layout's pseudo-modality dia) with and
 # without, the rest of speech kept
 DIA_ARMS = {'full': (), 'no_dia': ('dia',)}
@@ -375,8 +382,9 @@ class SessionData:
 
     @property
     def flat(self) -> np.ndarray:
-        """the windows no modality ran in: the HMM gives them a flat emission."""
-        return self.tokens.avail.sum(axis=1) == 0
+        """the windows no modality ran in and with no transcript content: the HMM gives them a flat
+        emission."""
+        return (self.tokens.avail.sum(axis=1) == 0) & ~LY.content_observed(self.tokens)
 
     @property
     def blocks(self) -> np.ndarray:
@@ -954,10 +962,13 @@ def _tabular(fd: _Fold, plan: dict, model: str, temporal: str, details: dict, ex
     if model in ('late-lr', 'late-hgb'):
         make, grid = (TB.make_lr, plan['lr_grid']) if model == 'late-lr' else (TB.make_hgb, plan['hgb_grid'])
         blocks = LY.block_columns(X_train)
-        # an ablated modality has no expert: its block is all unobserved, and a prior-only expert would
+        # an ablated block has no expert, and neither has one present in no coded training window (the
+        # content block of tables without its columns): it is all unobserved, and a prior-only expert would
         # hand the stacker the inner folds' priors as a feature
         removed = plan.get('ablated') or ()
-        blocks = {modality: columns for modality, columns in blocks.items() if modality not in removed}
+        coded = TB._labels(fd.y) >= 0
+        blocks = {modality: columns for modality, columns in blocks.items()
+                  if modality not in removed and (TB.PRESENCE[modality](X_train) & coded).any()}
         fusion = TB.LateFusion(make, grid, blocks, inner=fd.pairs).fit(X_train, fd.y, fd.groups)
         details['params'] = {modality: expert.params_ for modality, expert in fusion.experts_.items()}
         stacker = getattr(fusion.stacker_, 'coef_', None)
@@ -1971,15 +1982,17 @@ def _unit_split_record(split: str, coder: str, folds: list, excluded: dict, data
 
 
 def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: Path, run_dir: Path,
-                   coder: str | None = None, session_record: dict | None = None, not_read: dict | None = None) -> dict:
+                   coder: str | None = None, session_record: dict | None = None, not_read: dict | None = None,
+                   content: dict | None = None) -> dict:
     """config.json: what the run read (every fused table and label file by sha256), whose labels
     were the truth and how that coder was chosen, with what (feature lists, grids, seeds, the
     layout version) and which software, secrets masked. A session split adds `session_record`
     (_session_split_record) at the top. A run with a features root adds `features_root`: the folder,
     and the sessions with a table under artifacts/ but none there, each with why (`not_read`,
-    features_root_gaps)."""
+    features_root_gaps). `content` gives, per session, whether its table has the content columns
+    and in how many of its windows the block was observed."""
     from openmmla.utils.session_provenance import git_commit, redact_secrets, software_info
-    values = LY.GROUP_VALUES + LY.PERSON_VALUES + LY.PAIR_VALUES
+    values = LY.GROUP_VALUES + LY.PERSON_VALUES + LY.PAIR_VALUES + LY.CONTENT_VALUES
     record = {
         'run': run_dir.name, 'created_at': datetime.now(timezone.utc).isoformat(), 'config': asdict(cfg),
         'coder': coder, 'coder_chosen_by': '--coder' if cfg.coder else 'the most windows over the DEV sessions',
@@ -1995,9 +2008,11 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
                      'lags': {mode: [suffix for suffix, _, _ in lags] for mode, lags in LY.LAGS.items()},
                      # not called 'tokens': redact_secrets masks any key that names a token
                      'window_layout': {'G': list(LY.G_COLUMNS), 'P': list(LY.P_COLUMNS), 'Q': list(LY.Q_COLUMNS),
-                                       'availability': list(LY.AVAILABILITY)},
+                                       'C': list(LY.C_COLUMNS), 'availability': list(LY.AVAILABILITY)},
                      'values': {v.name: {'source': v.source, 'transform': v.transform, 'scale': v.tag, 'mask': v.mask,
                                          'modality': v.modality} for v in values},
+                     'fusion_blocks': list(LY.FUSION_BLOCKS),
+                     'content': {'columns': list(LY.CONTENT_COLUMNS), 'sessions': dict(content or {})},
                      'dropped': dict(LY.DROPPED)},
         'rule': {'version': TB.RULE_VERSION, 'fixed': TB.RULES[TB.RULE_VERSION]['fixed'],
                  'columns': {role: list(names) for role, names in TB.RULES[TB.RULE_VERSION]['columns'].items()},
@@ -2416,6 +2431,13 @@ def run(config, log=None) -> Path:
         raise Refused("every session is left out by the inclusion rule S1: "
                       + '; '.join(f"{s} ({r['reason']})" for s, r in excluded.items()))
     link_lessons(data, by_session=by_session)
+    # the transcript content (layout version 5): a table without its columns reads the block as unobserved
+    content = {s: {'columns': LY.has_content(tables[s]), 'observed_windows': int(LY.content_observed(d.tokens).sum()),
+                   'windows': len(d)} for s, d in data.items()}
+    lacking = [s for s, c in content.items() if not c['columns']]
+    if lacking:
+        say(f"content block: {len(lacking)} of {len(data)} session table(s) have no content columns "
+            f"({', '.join(LY.CONTENT_COLUMNS)}); the block is unobserved there")
     if cfg.split in ('unit', 'forward'):
         for unit, sessions in split_units(data).items():
             say(f"unit {unit}: {', '.join(sessions)}")
@@ -2668,7 +2690,7 @@ def run(config, log=None) -> Path:
         metrics['units'] = session_record['units']
     write_json(run_dir / 'metrics.json', metrics)
     write_json(run_dir / 'config.json', _config_record(cfg, plan, data, folds, artifacts, run_dir, coder,
-                                                       session_record, not_read))
+                                                       session_record, not_read, content))
     if cfg.split == 'test':
         _record_test_run(artifacts, run_dir, cfg, 'finished')
     if pooled:
