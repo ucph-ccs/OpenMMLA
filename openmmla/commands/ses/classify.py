@@ -88,7 +88,13 @@ training units through the variant's HMM, as the highest social F1 of the same d
 tau on a tie); a fold whose inner answers hold fewer than 5 social windows keeps the balanced
 decision. rule22sep scores its candidates with the same decision; the rule, the floors and zero-shot
 Jev keep their own labels. Each fold's tau is in metrics.json (social_decision, and social_tau under
-each fold's models), the mode in config.json.
+each fold's models), the mode in config.json. infold-all (exploratory, --target 3class only) decides
+in one step: social when p_social reaches a threshold tau_all (0.02 to 0.90 in steps of 0.01), chosen
+the same way but as the highest social F1 over all coded inner windows; any other window gets the
+balanced decision between individual and collaborative (collaborative when p_c / pi_c >= p_i / pi_i).
+The binary label is read off the three-class one (interaction is social or collaborative), so unlike
+infold it can change, and the binary macro-F1 and kappa follow it; the probabilities, and so AUROC,
+do not change. The fallback, the selectors and the records are infold's.
 
 --quick swaps in two-point grids, 30 training epochs and 200 bootstrap resamples: for checking
 the plumbing end to end, never for a reported number.
@@ -163,12 +169,15 @@ def get_parser():
     parser.add_argument('--target', choices=('3class', 'binary'), default='3class',
                         help="3class, or binary (individual against interaction): the fallback when a fold lacks "
                              "a class")
-    parser.add_argument('--social-decision', choices=('balanced', 'infold'), default='balanced',
-                        help="the three-class hard label: balanced (default, the pre-declared argmax p / pi) or "
+    parser.add_argument('--social-decision', choices=('balanced', 'infold', 'infold-all'), default='balanced',
+                        help="the three-class hard label: balanced (default, the pre-declared argmax p / pi), "
                              "infold (--target 3class only, exploratory): interaction by the balanced binary rule, "
                              "then social where p_social / (p_social + p_collaborative) >= tau, with tau chosen in "
                              "each outer fold on the inner out-of-fold answers for the best social F1 (balanced where "
-                             "they hold fewer than 5 social windows); binary labels do not change")
+                             "they hold fewer than 5 social windows); binary labels do not change; or infold-all "
+                             "(--target 3class only, exploratory): social where p_social >= tau_all, chosen the same "
+                             "way over all coded inner windows, else the balanced choice between individual and "
+                             "collaborative; the binary label follows the three-class one")
     parser.add_argument('--join', choices=('exact', 'overlap'), default='exact',
                         help="how labels meet the table's windows: exact start (then nearest within 0.5 s), or by at "
                              "least 5 s of overlap when the coding grid moved")
@@ -348,16 +357,18 @@ def _ablation_summary(run_dir, grid: str = 'modality') -> str | None:
 
 
 def _tau_summary(record: dict) -> str:
-    """one line of an infold run (metrics.json social_decision): the range of the social thresholds
-    chosen over the variants and folds (a selector's, which copy its winners', left out), and how many
-    kept the balanced decision."""
+    """one line of an infold or infold-all run (metrics.json social_decision): the range of the
+    thresholds chosen over the variants and folds (a selector's, which copy its winners', left out),
+    and how many kept the balanced decision."""
     import statistics
     own = {key: folds for key, folds in (record.get('tau') or {}).items() if ':nested:nested' not in key}
     chosen = [tau for folds in own.values() for tau in folds.values() if tau is not None]
     kept = sum(1 for key, folds in (record.get('fallback') or {}).items() if key in own for _ in folds)
-    line = (f"in-fold social threshold: tau {min(chosen):.2f} to {max(chosen):.2f} (median "
+    what, name = (('in-fold threshold on p_social', 'tau_all') if record.get('mode') == 'infold-all'
+                  else ('in-fold social threshold', 'tau'))
+    line = (f"{what}: {name} {min(chosen):.2f} to {max(chosen):.2f} (median "
             f"{statistics.median(chosen):.2f}) over {len(chosen)} variant fold(s)") if chosen else \
-        "in-fold social threshold: no tau chosen"
+        f"{what}: no {name} chosen"
     if kept:
         line += (f"; {kept} variant fold(s) kept the balanced decision (fewer than "
                  f"{record.get('min_social_windows')} social windows in the inner answers)")
@@ -434,6 +445,9 @@ def main(argv=None):
         parser.error("--soft-coder names lr-soft's second coder: it goes with -m lr-soft")
     if args.social_decision == 'infold' and args.target != '3class':
         parser.error("--social-decision infold chooses social against collaborative inside each fold: it goes with "
+                     "--target 3class")
+    if args.social_decision == 'infold-all' and args.target != '3class':
+        parser.error("--social-decision infold-all chooses a threshold on p_social inside each fold: it goes with "
                      "--target 3class")
     if args.seeds < 1 or args.jobs < 1 or (args.epochs is not None and args.epochs < 1):
         parser.error("--seeds, --jobs and --epochs must be at least 1")

@@ -1,8 +1,9 @@
 """The tabular models of the 10 s interaction classifier (Layer A): the a-priori rule, the fitted
 two-level tree, logistic regression and gradient boosting on the pooled view, the late fusion of
 one expert per block (speech, space, body and gaze, the transcript content), the temperature-and-bias
-calibrator, the balanced decision, and the two-step decision with a social threshold chosen on the
-inner out-of-fold answers (evaluate's social_decision 'infold').
+calibrator, the balanced decision, the two-step decision with a social threshold chosen on the
+inner out-of-fold answers (evaluate's social_decision 'infold'), and the one-step decision with a
+threshold on p_social itself chosen the same way ('infold-all').
 
 Every model here reads the pooled view as a DataFrame (NaN where a value could not be observed,
 the masks as columns of their own) and labels as ints: 0 individual, 1 social, 2 collaborative,
@@ -772,12 +773,11 @@ def two_step_decision(p, prior, tau: float) -> np.ndarray:
     return np.where(binary == 1, np.where(social, 1, 2), binary).astype(int)
 
 
-def social_threshold(p, y, prior, taus=SOCIAL_TAUS, minimum: int = MIN_SOCIAL_WINDOWS) -> dict:
-    """the in-fold social threshold, chosen on the rows with a posterior and a class (the inner
+def _inner_rows(p, y, minimum: int) -> tuple[np.ndarray, np.ndarray, dict]:
+    """the rows an in-fold threshold is chosen on, those with a posterior and a class (the inner
     out-of-fold answers of an outer fold's training side, against their three-class truth `y`):
-    the tau of `taus` whose two_step_decision gives the highest social F1 there, the lower tau on a
-    tie. Returns tau, its social F1, the rows scored and their social windows; with fewer than
-    `minimum` social windows tau is None and `fallback` says why (the balanced decision stands)."""
+    their posteriors, whether each is social, and the record so far (the rows scored and their
+    social windows; with fewer than `minimum` social windows tau None and `fallback` saying why)."""
     p, y = np.asarray(p, dtype=float), _labels(y)
     keep = (y >= 0) & np.isfinite(p).all(1)
     truth = y[keep] == 1
@@ -786,15 +786,65 @@ def social_threshold(p, y, prior, taus=SOCIAL_TAUS, minimum: int = MIN_SOCIAL_WI
     if social < minimum:
         out['fallback'] = (f"{social} social window(s) in the inner out-of-fold answers, fewer than {minimum}: "
                            f"the balanced decision")
-        return out
-    interaction = balanced_decision(p[keep, 1] + p[keep, 2], prior) == 1
-    share = np.nan_to_num(social_share(p[keep]), nan=0.0)
+    return p[keep], truth, out
+
+
+def _best_tau(score, eligible, truth, taus) -> tuple[float, float]:
+    """(social F1, tau) of the tau of `taus` whose social call, eligible & (score >= tau), has the
+    highest social F1 against `truth`, the lower tau on a tie."""
+    social = int(truth.sum())
     best = None
     for tau in sorted(taus):
-        predicted = interaction & (share >= tau)
+        predicted = eligible & (score >= tau)
         # social F1 = 2 TP / (true social + predicted social), as metrics.f1_per_class counts it
         f1 = 2.0 * int((predicted & truth).sum()) / (social + int(predicted.sum()))
         if best is None or f1 > best[0]:
             best = (f1, float(tau))
-    out.update(tau=best[1], social_f1=best[0])
+    return best
+
+
+def social_threshold(p, y, prior, taus=SOCIAL_TAUS, minimum: int = MIN_SOCIAL_WINDOWS) -> dict:
+    """the in-fold social threshold, chosen on the rows with a posterior and a class (the inner
+    out-of-fold answers of an outer fold's training side, against their three-class truth `y`):
+    the tau of `taus` whose two_step_decision gives the highest social F1 there, the lower tau on a
+    tie. Returns tau, its social F1, the rows scored and their social windows; with fewer than
+    `minimum` social windows tau is None and `fallback` says why (the balanced decision stands)."""
+    rows, truth, out = _inner_rows(p, y, minimum)
+    if 'fallback' in out:
+        return out
+    interaction = balanced_decision(rows[:, 1] + rows[:, 2], prior) == 1
+    share = np.nan_to_num(social_share(rows), nan=0.0)
+    f1, tau = _best_tau(share, interaction, truth, taus)
+    out.update(tau=tau, social_f1=f1)
+    return out
+
+
+# the in-fold threshold on p_social itself (evaluate's social_decision 'infold-all'): the grid tau_all is
+# chosen from; it needs MIN_SOCIAL_WINDOWS social windows, as 'infold' does
+SOCIAL_ALL_TAUS = tuple(round(0.02 + 0.01 * step, 2) for step in range(89))
+
+
+def one_step_decision(p, prior, tau: float) -> np.ndarray:
+    """the hard label with an in-fold threshold on p_social itself: social where p_social >= tau;
+    any other window collaborative where p_collaborative / pi_collaborative >= p_individual /
+    pi_individual (the balanced decision between the two), individual otherwise. Unlike
+    two_step_decision, the binary label read off it (interaction is social or collaborative) can
+    differ from the balanced one. A row with no posterior gets -1."""
+    p, prior = np.asarray(p, dtype=float), np.asarray(prior, dtype=float)
+    keep = np.isfinite(p).all(1)
+    q = np.where(keep[:, None], p, 0.0)
+    out = np.where(q[:, 1] >= tau, 1, np.where(q[:, 2] / prior[2] >= q[:, 0] / prior[0], 2, 0))
+    return np.where(keep, out, -1).astype(int)
+
+
+def social_threshold_all(p, y, taus=SOCIAL_ALL_TAUS, minimum: int = MIN_SOCIAL_WINDOWS) -> dict:
+    """the in-fold threshold of one_step_decision, chosen on the same rows as social_threshold: the
+    tau of `taus` with the highest social F1 over all of them where social is p_social >= tau, the
+    lower tau on a tie. The choice between individual and collaborative moves no social F1, so the
+    prior plays no part. Returns what social_threshold returns."""
+    rows, truth, out = _inner_rows(p, y, minimum)
+    if 'fallback' in out:
+        return out
+    f1, tau = _best_tau(rows[:, 1], np.ones(len(rows), dtype=bool), truth, taus)
+    out.update(tau=tau, social_f1=f1)
     return out
