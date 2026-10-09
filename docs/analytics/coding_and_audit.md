@@ -27,7 +27,7 @@ The tool limits who may connect to its own port. It cannot stop a coder's machin
 
 The operator sets this up before the first link and records it in the log:
 
-1. **One port only.** A coder's or auditor's machine must reach exactly one port of the server: 8766, the campaign's or the audit's. Use a Tailscale ACL that lets the coding machines' tag reach only `uber-server:8766`, or an SSH account limited by `permitopen` to `127.0.0.1:8766` (then bind 127.0.0.1).
+1. **One port only.** A coder's or auditor's machine must reach exactly one port of the server: 8766, the campaign's or the audit's (both audits', when a sensing audit and a transcription audit are [served together](#serving-both-audits-at-one-address)). Use a Tailscale ACL that lets the coding machines' tag reach only `uber-server:8766`, or an SSH account limited by `permitopen` to `127.0.0.1:8766` (then bind 127.0.0.1).
 2. **A probe from each machine.** Run a port probe from each coding machine (for example `nc -zv uber-server 1-65535`) and record what it reached with `--log-note "port probe from <machine>: only 8766 open"`.
 3. **Kiosk machines.** Coders use the machines whose addresses `--allow-from` names, never their own devices.
 4. **Approvals.** Record the data protection approval of the processing, each coder's and auditor's signed data agreement, and the non-developer who confirmed the list of coders, each with `--log-note`.
@@ -37,7 +37,7 @@ The servers enforce what they can:
 - **Bind.** `--locked` and `--audit` refuse `0.0.0.0` and LAN or public addresses, since plain HTTP would carry clips, frames and cookies across them. They bind the tailnet address or 127.0.0.1, the latter behind an SSH forward. An open audit (`--audit-open`, [below](#the-open-audit)) binds the same addresses.
 - **Allowed clients.** With the tailnet address, `--allow-from` is required and names hosts (single addresses). A network needs `--allow-wide`, which the start line records. Any other client gets 403 and a log line. With 127.0.0.1, only this machine may connect, unless `--allow-from` narrows it further. An open audit is the exception: there `--allow-from` is optional, and without it every tailnet address may connect, as anyone who reaches the default page may. The start line records the addresses allowed.
 - **Another instance.** Both servers refuse to start while another `ses-code` serves the same artifacts, unless `--i-know-another-instance-runs`, which the start line records. This check is a convenience: the control is the one-port rule above. The running default page never needs to stop.
-- **Their own checkout.** Run the campaign and audit servers from a separate checkout on port 8766 (the default for `--locked` and `--audit`). A campaign and an audit served at once, or two audits (a sensing audit and a transcription audit), need `-p` for all but one of them; the one-port rule then names the port each coder or auditor reaches.
+- **Their own checkout.** Run the campaign and audit servers from a separate checkout on port 8766 (the default for `--locked` and `--audit`). A sensing audit and a transcription audit share that port when one server serves both (`--audit SENSING --audit-with TRANSCRIPTION`, [below](#serving-both-audits-at-one-address)). A campaign and an audit served at once, or two audits served by separate servers, need `-p` for all but one of them; the one-port rule then names the port each coder or auditor reaches.
 
 ## Locked coding campaigns
 
@@ -543,7 +543,7 @@ At sampling, a session that fails a check refuses the whole sample and nothing i
 | 4 | `--campaign artifacts/runtime/audit/ID --log-note TEXT` | The notes below. |
 | 5 | `--campaign artifacts/runtime/audit/ID --issue-token NAME --token-scope audit` | A one-time link for an auditor; `--token-subset reliability` for the second auditor. An open audit skips this step. |
 | 6 | `--audit-estimate ID` | The hours, from 240 s per transcription and 45 s per reveal rating, or from the practice answers once there are some. The reveal's time stays assumed, since practice items are never revealed. |
-| 7 | `--audit ID --bind <tailnet address> --allow-from <auditor machines>` | Serves the page, sweep 1 only unless `--audit-sweeps 2`. With `--audit-open`, no link is needed. |
+| 7 | `--audit ID --bind <tailnet address> --allow-from <auditor machines>` | Serves the page, sweep 1 only unless `--audit-sweeps 2`. With `--audit-open`, no link is needed. `--audit SENSING --audit-with ID` serves the sensing audit and this one together, at one address ([below](#serving-both-audits-at-one-address)). |
 | 8 | `--campaign artifacts/runtime/audit/ID --anchor` | Prints only hashes, as for the sensing audit. |
 | 9 | `--audit-close-blind ID --audit-auditor NAME` | Closes the primary auditor's blind pass ([above](#blindness-and-the-reveal)). The primary then rates the reveals. |
 | 10 | `--campaign artifacts/runtime/audit/ID --close-campaign` | Closes the audit to answers, once the reveal ratings are in. |
@@ -621,6 +621,24 @@ The listening record rests on what the browser reports. It keeps an auditor from
 The transcription audit is served with links or open, exactly as the sensing audit ([The open audit](#the-open-audit)): the same name and scope rules, the same refusals and the same log. The blind close and the reveal are keyed by the name: the link's name, or in an open audit the name as typed, in NFC.
 
 In an open audit the server trusts the typed name for the reveal, as it trusts it for everything else. A person who types, with the full audit, a name whose blind pass is closed sees that name's reveals, and could then transcribe under another name; the log keeps only the address and browser of each request. Use links when the second auditor's independence matters, for example for an agreement a paper reports. The scores of an open audit say it was open.
+
+### Serving both audits at one address
+
+`--audit SENSING --audit-with ID [--audit-open] --bind <tailnet address>` serves a sensing audit and a transcription audit from one server on one port (8766 unless `-p`). The sensing audit keeps the addresses and the page it has when it is served alone: `/audit`, `/api/audit/...`, `/audit/img/...` and `/audit/clip/...`, and the page's bytes are the same. The transcription audit is served under `/t`: its page is `/t/audit`, and its routes, its clips and its redirects begin with `/t`. The server takes `/t` off before the transcription audit's own routing, and puts it into the page and into every address it sends.
+
+The address alone (`/`) shows a page with a link to each part, in the order of the flags: "Identity, gaze and who speaks" (the sensing audit) and "Danish transcription". In an open audit, an auditor opens a part, types their name on its page and chooses the full audit or the reliability subset of that part; with links, each link opens its own audit's page. The start message prints each part with its address.
+
+Each part stays an audit of its own:
+
+- **Files.** Each part keeps its own folder, plan, `campaign.yml`, request log and answers files. A request to one part opens no file of the other (only a link at `/c/<token>` reads both audits' `campaign.yml`, to find its part; see Links), so serving the transcription audit beside the sensing audit leaves the sensing audit's frozen plan and its answers as they are. The transcription audit draws its own sample at `--audit-sample`.
+- **Names and scopes.** The rules of names and scopes hold in each part apart. A name may answer both parts, with the full audit in one and the reliability subset in the other. The browser remembers the name and scope of each part apart.
+- **Mode.** `--audit-open` serves both parts open; without it, both parts take links. Each part is refused as it is when served alone: a closed audit is not served, a part served with links needs a link issued in its own folder, a part with answers typed on the open page is served open only, and a name whose answers came through a link is refused on the open page.
+- **Links.** A link of either audit works at the same address (`/c/<token>`). Such a request belongs to neither part until the server has read both audits' `campaign.yml` to find the one that holds the token; it writes nothing of either, and the audit that holds the token claims and logs the link. A link under `/t/c/<token>` goes to the transcription audit without that search. The two parts' cookies have different names, so one browser may hold a link of each. In an open audit no link is served: `/c/<token>` shows a page that sends the auditor to `/`, and `/t/c/<token>` one that sends them to `/t/audit`.
+- **Sweeps and closes.** `--audit-sweeps` applies to the transcription audit, and it is refused when neither audit is one. `--audit-close-blind` closes a blind pass while the server runs, as it does for a transcription audit served alone.
+
+The `--audit-with` audit is a transcription audit. A sensing audit's page asks for `/audit` and `/api/audit/` itself, so a sensing audit is always the `--audit` part, and two sensing audits are served by separate servers. Two transcription audits may be served together; their links on the page at `/` then carry their audit ids. The same audit is refused as both parts, also under two ids that differ only in case where the file system opens them as one folder.
+
+Each part's request log gets its own start line and its own stop line. The start line is the one the audit's server writes when it serves it alone, with two fields more: `prefix`, the part's own (empty for the `--audit` part, `/t` for the other), and `together_with`, the other audit's id and prefix. It names the modules of both parts, since one server runs them. Each request is logged in the log of the part that answered it, with the path as that part routes it (without `/t`), and the page at `/` in the log of the `--audit` part. `--verify-log`, the scorer's check for an open serve and the scores therefore read each audit as after a serve of its own. Ctrl-C stops the one server and writes the stop line in both logs.
 
 ### Transcription answers
 

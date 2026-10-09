@@ -62,16 +62,34 @@ address and browser).
 A transcription audit (a plan whose task is 'transcript', drawn by audit_speech) is served by this
 command too, with links or open as above, but with the routes and the page of audit_transcript_page
 (TranscriptHandler, TRANSCRIPT_PAGE); --audit-sweeps says how many of its sweeps are served.
+
+Two audits served together (--audit ID --audit-with ID2, a sensing audit and a transcription audit) share one
+server and one port: TogetherHandler hands each request to the handler class of its part. The --audit part keeps
+its routes and its pages' bytes. The --audit-with part, which must be a transcription audit (a sensing audit's page
+asks for /audit and /api/audit/ itself), is served under WITH_PREFIX (/t/audit, /t/api/audit/..., /t/audit/clip/...):
+its handler routes the path without the prefix, and its page and every address the server sends it carry the prefix
+(the handler's `base_path`). GET / is a page that leads to both (CHOOSER_PAGE), in the order of the flags. Each part
+keeps its own campaign folder, request log, answers files, links (their cookies named apart), names and scopes,
+locks, blind closes and refusals, and a request to one part opens no file of the other (a link's /c/<token>, of
+neither part until then, reads each part's campaign.yml to find which holds it, and writes nothing of either: a
+change it meets is logged by that part's own next request). --audit-open serves both open, and --audit-sweeps the
+sweeps of the
+transcription audit. Each part's log gets the start line its server alone writes, with `prefix` (its own) and
+`together_with` (the other audit's id and prefix), and a stop line, so --verify-log, the open serves the scorer finds
+and the scores read each audit as after a serve of its own.
 """
 from __future__ import annotations
 
+import html
 import ipaddress
 import json
 import os
+import signal
+import socket
 import threading
 import unicodedata
 import urllib.parse
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -252,6 +270,9 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
               ('GET', '/api/audit/item'): '_item', ('GET', '/api/audit/progress'): '_progress',
               ('POST', '/api/audit/answer'): '_answer'}
     PREFIX_ROUTES = (('GET', '/audit/img/', '_image'), ('GET', '/audit/clip/', '_clip'))
+    # what the page of two audits served together (CHOOSER_PAGE) says of this one: its title and what is asked
+    CHOICE = ('Identity, gaze and who speaks', 'Who is in each box of a picture, where they look, and who speaks in a '
+                                               'short clip.')
     audit: dict = {}
     folder: Path | None = None
     artifacts: Path | None = None
@@ -259,12 +280,25 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     cache_lock = threading.Lock()
     # an open audit (--audit-open): no link, the auditor is the name each request carries
     open: bool = False
+    # served beside another audit (--audit-with): the base path of the --audit-with part, its prefix ('' for the --audit
+    # part, and alone), and the --audit part's page at / that leads to both (None alone and for the --audit-with part)
+    base_path: str = ''
+    chooser: str | None = None
+
+    @property
+    def cookie_name(self) -> str:
+        # the links of two audits served at one address keep their cookies apart: the prefixed part's is its own
+        name = super().cookie_name
+        return f"{name}_{self.base_path.strip('/')}" if self.base_path else name
 
     # who ----
 
     def _identity(self) -> L.Identity | None:
         """the link's auditor (GuardedHandler); open, the name and scope of the request's query, never None: the
-        page itself needs neither, and the routes that do refuse a request without them (_auditor)"""
+        page itself needs neither, and the routes that do refuse a request without them (_auditor). The page that
+        leads to two audits served together names no one, with links too."""
+        if self.chooser is not None and urllib.parse.urlsplit(self.path).path == '/':
+            return L.Identity(None, None, self.KIND, None, None)
         if not self.open:
             return super()._identity()
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -277,14 +311,19 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         return L.Identity(name, None, self.KIND, SCOPES.get(scope), None)
 
     def note_query(self, query: dict) -> None:
-        if self.open and self._fields.get('device', '') is None:
-            del self._fields['device']  # an open audit binds no device: its log lines name none
+        if (self.open or self.identity.name is None) and self._fields.get('device', '') is None:
+            del self._fields['device']  # no device: an open audit binds none, nor does the page leading to two audits
         super().note_query(query)
 
     def _claim(self, method: str, token: str) -> None:
         if not self.open:
             return super()._claim(method, token)
-        self.send_message('/c/', 'This audit takes no links: open /audit and type your name.', 404)
+        # beside another audit a bare /c/ may be a link of either: the page at / leads to both; under the prefix,
+        # the part's own page
+        if self.chooser is not None:
+            return self.send_message('/c/', 'These audits take no links: open / and choose one, then type your name.',
+                                     404)
+        self.send_message('/c/', f'This audit takes no links: open {self.base_path}/audit and type your name.', 404)
 
     def _auditor(self) -> tuple[str, str | None] | None:
         """(the auditor's name, their subset), or None after answering why not: the link's (GuardedHandler
@@ -420,7 +459,9 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     # routes ----
 
     def _home(self, request: L.Request) -> None:
-        self.send_body(303, 'text/plain', b'', (('location', '/audit'),))
+        if self.chooser is not None:
+            return self.send_html(self.chooser)
+        self.send_body(303, 'text/plain', b'', (('location', f'{self.base_path}/audit'),))
 
     def _page(self, request: L.Request) -> None:
         self.send_html(OPEN_AUDIT_PAGE if self.open else AUDIT_PAGE)
@@ -681,10 +722,11 @@ def clean_answer(phase: str, raw, item: dict, view: dict, own: dict, asked) -> t
     return {'boxes': out, **common}, None
 
 
-def cmd_serve(args, argv) -> int:
-    artifacts, audit_id = A._artifacts(args), args.audit
+def _part(args, artifacts: Path, audit_id: str, sweeps: int | None, opened: bool, folders: list[Path]) -> dict:
+    """one audit as its server serves it, after the refusals of its own: the audit served, the handler class it is
+    served with, its folder and campaign, the modules it runs and the task fields of its start line (--campaign may
+    name any of `folders`)"""
     folder = A.audit_dir(artifacts, audit_id)
-    sweeps = getattr(args, 'audit_sweeps', None)
     base, modules, task = AuditHandler, AUDIT_MODULES, {}
     if A.load_plan(artifacts, audit_id).get('task') == 'transcript':
         # a transcription audit (audit_speech) has routes and a page of its own, and serves the sweeps asked for
@@ -702,9 +744,9 @@ def cmd_serve(args, argv) -> int:
     else:
         audit = load_audit(artifacts, audit_id)
     # the links are the audit's own, issued in its folder: --campaign may name it, never another
-    if args.campaign and Path(args.campaign).expanduser().resolve() != folder.resolve():
-        raise A.AuditError(f"an audit's links are issued in its own folder: --campaign {folder}")
-    opened = bool(getattr(args, 'audit_open', None))
+    if args.campaign and Path(args.campaign).expanduser().resolve() not in [f.resolve() for f in folders]:
+        raise A.AuditError("an audit's links are issued in its own folder: "
+                           + ' or '.join(f'--campaign {f}' for f in folders))
     if not (folder / L.CAMPAIGN_FILE).exists():
         why = 'it holds whether the audit is closed (--audit-sample writes it)' if opened else 'the links are issued there'
         raise A.AuditError(f'no campaign.yml in {folder}: {why}')
@@ -721,36 +763,256 @@ def cmd_serve(args, argv) -> int:
     if typed:
         raise A.AuditError(f'{typed} answers of audit {audit_id} were typed on the open page: serve it with --audit-open '
                            '(a link would show the answers typed under its name as its own)')
-    allow = (open_bind if opened else L.check_bind)(args.bind, args.allow_from, args.allow_wide)
-    port = args.port if L._explicit_port(argv) else DEFAULT_PORT
+    return {'id': audit_id, 'audit': audit, 'cls': base, 'folder': folder, 'campaign': campaign, 'modules': modules,
+            'task': task}
+
+
+def _others(artifacts: Path, args) -> list:
     others = L.other_instances(artifacts)
     if others and not args.i_know_another_instance_runs:
         listed = '; '.join(f"pid {o['pid']}: {o['command'][:120]}" for o in others)
         raise A.AuditError(f'another ses-code may serve {artifacts} ({listed}): limit the auditors to this port, then '
                            'give --i-know-another-instance-runs')
+    return others
+
+
+def _unrendered(part: dict) -> int:
+    """how many items of the part are not rendered; none rendered is refused"""
+    audit = part['audit']
     unrendered = sum(1 for _, item in audit['items'].values() if item.get('render') != 'ok')
     if unrendered == len(audit['items']):
-        raise A.AuditError(f'nothing of audit {audit_id} is rendered (--audit-render {audit_id})')
-    log = L.RequestLog(folder / L.LOG_FILE)
-    handler = L.handler_class(base, campaign=campaign, log=log, allow=allow, audit=audit, folder=folder,
-                              artifacts=artifacts, cache={}, cache_lock=threading.Lock(),
-                              **({'open': True} if opened else {}))
-    L.watch_campaign(campaign, log)
-    extra = {'audit_id': audit_id, 'plan_sha256': L.file_sha256(folder / A.PLAN_FILE), 'mode': audit['mode'],
-             'campaign_sha256': L.file_sha256(campaign.path), 'another_instances': others or None,
-             'allow_wide': bool(args.allow_wide), **task}
+        raise A.AuditError(f"nothing of audit {part['id']} is rendered (--audit-render {part['id']})")
+    return unrendered
+
+
+def _handler(part: dict, artifacts: Path, log: L.RequestLog, allow: tuple, opened: bool, **fields) -> type:
+    return L.handler_class(part['cls'], campaign=part['campaign'], log=log, allow=allow, audit=part['audit'],
+                           folder=part['folder'], artifacts=artifacts, cache={}, cache_lock=threading.Lock(),
+                           **({'open': True} if opened else {}), **fields)
+
+
+def _start_fields(part: dict, args, others: list, opened: bool) -> dict:
+    """what a part's start line records besides code_locked.serve's own fields"""
+    extra = {'audit_id': part['id'], 'plan_sha256': L.file_sha256(part['folder'] / A.PLAN_FILE),
+             'mode': part['audit']['mode'], 'campaign_sha256': L.file_sha256(part['campaign'].path),
+             'another_instances': others or None, 'allow_wide': bool(args.allow_wide), **part['task']}
     if opened:
         # the scorer reads the audit as open from this line: names typed, not authenticated
         extra['open'] = True
+    return extra
+
+
+def _served(part: dict, unrendered: int, opened: bool) -> str:
+    """what the start message says of a part"""
+    audit, task = part['audit'], part['task']
     served = '' if not task else ' (sweep 1)' if task['sweeps'] == 1 else f" (sweeps 1 to {task['sweeps']})"
-    print(f"audit {audit_id} ({audit['mode']}{', open: the auditors type their names' if opened else ''}): "
-          f"{len(audit['sessions'])} recordings, {len(audit['items']) - unrendered} items served{served}; "
-          f"http://{args.bind}:{port}/audit for {', '.join(str(n) for n in allow)} (Ctrl-C stops)")
+    return (f"audit {part['id']} ({audit['mode']}{', open: the auditors type their names' if opened else ''}): "
+            f"{len(audit['sessions'])} recordings, {len(audit['items']) - unrendered} items served{served}")
+
+
+def cmd_serve(args, argv) -> int:
+    if getattr(args, 'audit_with', None):
+        return cmd_serve_together(args, argv)
+    artifacts, audit_id = A._artifacts(args), args.audit
+    opened = bool(getattr(args, 'audit_open', None))
+    part = _part(args, artifacts, audit_id, getattr(args, 'audit_sweeps', None), opened,
+                 [A.audit_dir(artifacts, audit_id)])
+    allow = (open_bind if opened else L.check_bind)(args.bind, args.allow_from, args.allow_wide)
+    port = args.port if L._explicit_port(argv) else DEFAULT_PORT
+    others = _others(artifacts, args)
+    unrendered = _unrendered(part)
+    log = L.RequestLog(part['folder'] / L.LOG_FILE)
+    handler = _handler(part, artifacts, log, allow, opened)
+    L.watch_campaign(part['campaign'], log)
+    extra = _start_fields(part, args, others, opened)
+    print(f"{_served(part, unrendered, opened)}; http://{args.bind}:{port}/audit for "
+          f"{', '.join(str(n) for n in allow)} (Ctrl-C stops)")
     try:
-        return L.serve(handler, args.bind, port, argv, modules, extra)
+        return L.serve(handler, args.bind, port, argv, part['modules'], extra)
     finally:
-        campaign.watch = None
+        part['campaign'].watch = None
         log.close()
+
+
+# ---- two audits at one address ----
+
+# the path prefix of the audit served beside another (--audit-with): its routes, its page and every address it is sent
+WITH_PREFIX = '/t'
+
+
+class TogetherHandler(BaseHTTPRequestHandler):
+    """two audits served at one address (--audit ID --audit-with ID2), each by its own handler class: a request whose
+    path is WITH_PREFIX or begins with it and a slash goes to the --audit-with part, the prefix taken off (/t/audit is
+    its /audit); a link's /c/<token> to the part whose campaign.yml holds the token; every other request, / among
+    them, to the --audit part as it came. The part answers and logs the request as its server alone would: this class
+    only hands it over, on the connection and with the headers already read."""
+    # ((prefix, the part's handler class), ...): the --audit part first, its prefix ''
+    parts: tuple = ()
+    server_version = 'mmla'
+    sys_version = ''
+
+    def log_message(self, format, *args):  # each part's request log replaces it
+        pass
+
+    def end_headers(self):
+        # the guard's headers (code_locked.GuardedHandler.end_headers), also on the errors answered before a request
+        # is handed over: a method, a request line or headers BaseHTTPRequestHandler refuses
+        self.send_header('cache-control', 'no-store')
+        self.send_header('x-content-type-options', 'nosniff')
+        self.send_header('x-frame-options', 'DENY')
+        self.send_header('referrer-policy', 'same-origin')
+        super().end_headers()
+
+    def _part(self) -> tuple[type, str]:
+        """the handler class of the part a request goes to, and the request's path as that part sees it"""
+        url = urllib.parse.urlsplit(self.path)
+        for prefix, handler in self.parts:
+            if prefix and (url.path == prefix or url.path.startswith(prefix + '/')):
+                rest = url.path[len(prefix):] or '/'
+                return handler, rest + (f'?{url.query}' if url.query else '')
+        if url.path.startswith('/c/'):
+            for _, handler in self.parts:
+                # an open audit serves no link; a token its campaign does not hold names nothing. Asked of a campaign
+                # read afresh, which no part's log watches: the part's own Campaign would log a change of its file in
+                # its log on behalf of a request the other part answers
+                try:
+                    if not handler.open and \
+                            L.Campaign(handler.campaign.folder).link_state(url.path[3:], handler.KIND)[2] is not None:
+                        return handler, self.path
+                except Exception:  # the part the request falls to answers and logs it
+                    continue
+        return self.parts[0][1], self.path
+
+    def _hand_over(self) -> None:
+        handler, path = self._part()
+        part = handler.__new__(handler)
+        # the part's handler takes the request as it was read: the connection, the request line and the headers
+        part.__dict__.update(self.__dict__)
+        part.path = path
+        try:
+            getattr(part, f'do_{self.command}')()
+        finally:
+            self.close_connection = part.close_connection
+
+    def do_GET(self):
+        self._hand_over()
+
+    def do_POST(self):
+        self._hand_over()
+
+    def do_HEAD(self):
+        self._hand_over()
+
+    def do_PUT(self):
+        self._hand_over()
+
+    def do_DELETE(self):
+        self._hand_over()
+
+    def do_PATCH(self):
+        self._hand_over()
+
+    def do_OPTIONS(self):
+        self._hand_over()
+
+
+def serve_together(handler: type, bind: str, port: int, argv: list[str], modules, starts: list[dict],
+                   ready=None) -> int:
+    """code_locked.serve for two audits at one address: `handler` (a TogetherHandler) served until Ctrl-C or SIGTERM,
+    each part's request log given the start line its server alone would write, with that part's fields (`starts`, in
+    the order of handler.parts), and a stop line. `ready(server)` is called once it listens."""
+    server_cls = ThreadingHTTPServer
+    if ':' in bind:
+        server_cls = type('ThreadingHTTPServer6', (ThreadingHTTPServer,), {'address_family': socket.AF_INET6})
+    server = server_cls((bind, port), handler)
+    software, states = L.software(), L.module_states(modules)
+    parts = [part for _, part in handler.parts]
+    for part, extra in zip(parts, starts):
+        part.log.event('start', argv=list(argv), pid=os.getpid(), kind=part.KIND, bind=bind,
+                       port=server.server_address[1], allow_from=[str(n) for n in part.allow], software=software,
+                       **states, **extra)
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        def stop(signum, frame):
+            raise L._Stop()
+        previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        if ready:
+            ready(server)
+        server.serve_forever()
+    except (KeyboardInterrupt, L._Stop):
+        pass
+    finally:
+        server.server_close()
+        for part in parts:
+            part.log.event('stop')
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+    return 0
+
+
+def cmd_serve_together(args, argv) -> int:
+    """--audit ID --audit-with ID2: both audits from one server at one address. The --audit part is served as it is
+    alone; the --audit-with part, a transcription audit, under WITH_PREFIX; / leads to both. Each part is refused as
+    it would be alone, --audit-open serves both open and --audit-sweeps the sweeps of the transcription audit(s)."""
+    artifacts, first, second = A._artifacts(args), args.audit, args.audit_with
+    if first == second:
+        raise A.AuditError(f'--audit-with names {second}, the audit --audit serves: give the other audit')
+    sweeps = getattr(args, 'audit_sweeps', None)
+    tasks = {audit_id: A.load_plan(artifacts, audit_id).get('task') for audit_id in (first, second)}
+    # ids apart in case only are one folder on a file system blind to case: one audit, served twice
+    if os.path.samefile(A.audit_dir(artifacts, first), A.audit_dir(artifacts, second)):
+        raise A.AuditError(f'--audit-with names {second}, whose folder is that of {first}, the audit --audit serves: '
+                           'give the other audit')
+    if sweeps is not None and 'transcript' not in tasks.values():
+        raise A.AuditError(f'neither {first} nor {second} is a transcription audit: --audit-sweeps serves the sweeps '
+                           'of a transcription audit')
+    # a sensing audit's page asks for /audit and /api/audit/ itself: under a prefix its requests would reach the other
+    if tasks[second] != 'transcript':
+        if tasks[first] == 'transcript':
+            raise A.AuditError(f'{second} is a sensing audit, whose page asks for /audit and /api/audit/ itself: '
+                               f'serve it as --audit (--audit {second} --audit-with {first})')
+        raise A.AuditError(f'{first} and {second} are both sensing audits, whose pages ask for /audit and /api/audit/ '
+                           'themselves: serve one of them alone, on a port of its own (-p)')
+    opened = bool(getattr(args, 'audit_open', None))
+    folders = [A.audit_dir(artifacts, audit_id) for audit_id in (first, second)]
+    parts = []
+    for audit_id, prefix in ((first, ''), (second, WITH_PREFIX)):
+        try:
+            part = _part(args, artifacts, audit_id, sweeps if tasks[audit_id] == 'transcript' else None, opened,
+                         folders)
+        except A.AuditError as error:
+            raise A.AuditError(f'audit {audit_id}: {error}') from None
+        parts.append({**part, 'prefix': prefix})
+    allow = (open_bind if opened else L.check_bind)(args.bind, args.allow_from, args.allow_wide)
+    port = args.port if L._explicit_port(argv) else DEFAULT_PORT
+    others = _others(artifacts, args)
+    unrendered = [_unrendered(part) for part in parts]
+    chooser = chooser_page([(f"{part['prefix']}/audit", part['cls'].CHOICE, part['id']) for part in parts])
+    logs = [L.RequestLog(part['folder'] / L.LOG_FILE) for part in parts]
+    try:
+        handlers = []
+        for part, log in zip(parts, logs):
+            # the --audit part serves / as the page that leads to both; the other has its prefix, its links its own home
+            fields = ({'base_path': part['prefix'], 'HOME': f"{part['prefix']}/audit"} if part['prefix']
+                      else {'chooser': chooser})
+            handlers.append(_handler(part, artifacts, log, allow, opened, **fields))
+            L.watch_campaign(part['campaign'], log)
+        handler = L.handler_class(TogetherHandler, parts=tuple((part['prefix'], h) for part, h in zip(parts, handlers)))
+        # the server runs the modules of both parts: each start line names them all
+        modules = tuple(dict.fromkeys(name for part in parts for name in part['modules']))
+        starts = [{**_start_fields(part, args, others, opened), 'prefix': part['prefix'],
+                   'together_with': {'audit_id': other['id'], 'prefix': other['prefix']}}
+                  for part, other in zip(parts, reversed(parts))]
+        for part, count in zip(parts, unrendered):
+            print(f"{_served(part, count, opened)}; http://{args.bind}:{port}{part['prefix']}/audit")
+        print(f"both at http://{args.bind}:{port}/, a page that leads to each, for {', '.join(str(n) for n in allow)} "
+              '(Ctrl-C stops)')
+        return serve_together(handler, args.bind, port, argv, modules, starts)
+    finally:
+        for part, log in zip(parts, logs):
+            part['campaign'].watch = None
+            log.close()
 
 
 AUDIT_PAGE = r"""<!doctype html>
@@ -1076,3 +1338,34 @@ OPEN_AUDIT_PAGE = _patched(AUDIT_PAGE, [
      "$('rename').addEventListener('click', () => askName());\n"
      "askName();\n"),
 ])
+
+
+# the page at / of two audits served together (--audit-with): a link to each part's page, in the order of the flags
+CHOOSER_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sensing audit</title>
+<style>
+:root{--bg:#111;--panel:#1b1b1b;--line:#333;--text:#eee;--dim:#999;--accent:#ffd400}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,Helvetica,Arial,sans-serif}
+header{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid var(--line)}
+header b{font-size:15px}main{max-width:560px;margin:32px auto;padding:0 16px}main p{color:var(--dim)}
+a.part{display:block;margin:12px 0;padding:10px 14px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;text-decoration:none}
+a.part:hover,a.part:focus{border-color:var(--accent)}a.part b{display:block;font-size:15px}a.part span{color:var(--dim)}
+</style></head><body>
+<header><b>Sensing audit</b></header>
+<main><p>Choose the part you answer. Each part keeps its own answers.</p>
+<!-- parts -->
+</main></body></html>
+"""
+
+
+def chooser_page(parts) -> str:
+    """CHOOSER_PAGE with a link to each part ((its page's address, (title, what it asks), audit id), ...), in order;
+    two parts of one title are told apart by their audit ids"""
+    titles = [choice[0] for _, choice, _ in parts]
+    links = []
+    for address, (title, what), audit_id in parts:
+        shown = f'{title} ({audit_id})' if titles.count(title) > 1 else title
+        links.append(f'<a class="part" href="{html.escape(address)}"><b>{html.escape(shown)}</b>'
+                     f'<span>{html.escape(what)}</span></a>')
+    return CHOOSER_PAGE.replace('<!-- parts -->', '\n'.join(links))

@@ -45,7 +45,8 @@ The steps, each a flag of mmla ses-code (docs/analytics/coding_and_audit.md):
                         the numbered boxes, head close-ups, roster crops and clips (vfa-base, cv2)
   --audit ID            the page (audit_page), on its own port and request log; with --audit-open no
                         links: each auditor types their name and chooses the full audit or the
-                        reliability subset
+                        reliability subset; with --audit-with ID2 a transcription audit served too,
+                        from the same server and port under /t, each with its own request log
   --audit-estimate ID   the hours the answers take
   --audit-score ID      a version scored against the answers (audit_score)
   --audit-purge ID      the images and clips deleted
@@ -1217,6 +1218,9 @@ def add_arguments(parser) -> None:
     group.add_argument('--audit-open', action='store_true', default=None,
                        help="with --audit: no links, each auditor types their name and chooses the full audit or the "
                             "reliability subset (--allow-from optional; recorded in the start line)")
+    group.add_argument('--audit-with', default=None, metavar='ID',
+                       help="with --audit: serve this transcription audit too, from the same server and port, under /t "
+                            "(/ then leads to both)")
     group.add_argument('--audit-estimate', default=None, metavar='ID', help="print the hours the answers take")
     group.add_argument('--audit-score', default=None, metavar='ID', help="score a version against the answers")
     group.add_argument('--audit-purge', default=None, metavar='ID', help="delete the audit's images and clips")
@@ -1518,8 +1522,12 @@ def run(args, argv) -> int:
     if getattr(args, 'audit_open', None) and actions[0] != 'audit':
         print('--audit-open goes with --audit ID (the scorer finds an open audit in its request log)')
         return 2
+    if getattr(args, 'audit_with', None) and actions[0] != 'audit':
+        print('--audit-with goes with --audit ID (both audits served at one address)')
+        return 2
     # the id names folders every step reads, writes or deletes: never a path
-    if not AUDIT_ID.fullmatch(str(getattr(args, actions[0]))):
+    ids = [getattr(args, actions[0])] + ([args.audit_with] if getattr(args, 'audit_with', None) else [])
+    if not all(AUDIT_ID.fullmatch(str(audit_id)) for audit_id in ids):
         print('refused: an audit id is letters, digits, - and _, at most 40')
         return 1
     try:

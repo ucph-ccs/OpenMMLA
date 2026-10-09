@@ -15,6 +15,12 @@ practice whose transcription that name saved before the close, and only to a nam
 (the reliability subset is never shown it). Until then no response carries any system output: no text, word
 count, score, stratum, rank, weight or session id.
 
+Served beside another audit at one address (audit_page: --audit ID --audit-with THIS), every route is under a path
+prefix (/t/audit, /t/api/audit/..., /t/audit/clip/...): the handler's `base_path`, which the server puts before
+every address it sends and writes into the page (based()), so the page sends its requests there and its browser
+keeps the name and scope under keys of their own. Served alone, the base path is '' and the pages are
+TRANSCRIPT_PAGE and OPEN_TRANSCRIPT_PAGE as they are.
+
 The sequence: the practice block (the practice windows of each recording, in the plan's order), then sweep by
 sweep each recording's windows of that sweep in its view's order, the recordings in the plan's order (reversed
 for the reliability subset, which gets only the flagged windows). Only the sweeps up to --audit-sweeps (default
@@ -55,6 +61,7 @@ The page keeps no draft: an unsaved transcription lives in the page only, and le
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import urllib.parse
@@ -418,6 +425,8 @@ class TranscriptHandler(P.AuditHandler):
     """audit_page's handler for a transcription audit's windows: its sequence by sweep, its two phases, the blind
     close and the reveal it releases"""
     TITLE = 'Transcription audit'
+    CHOICE = ('Danish transcription', 'What is said in a short clip, written down word for word, then a few questions '
+                                      'about it.')
 
     def _visible(self, subset) -> list[str]:
         return sequence(self.audit, subset)
@@ -440,7 +449,7 @@ class TranscriptHandler(P.AuditHandler):
     # routes ----
 
     def _page(self, request: L.Request) -> None:
-        self.send_html(OPEN_TRANSCRIPT_PAGE if self.open else TRANSCRIPT_PAGE)
+        self.send_html(based(OPEN_TRANSCRIPT_PAGE if self.open else TRANSCRIPT_PAGE, self.base_path))
 
     def _boot(self, request: L.Request) -> None:
         who = self._auditor()
@@ -480,10 +489,12 @@ class TranscriptHandler(P.AuditHandler):
         self.send_json({'progress': progress, 'phase': 'transcribe' if closed is None else 'reveal'})
 
     def _clip_url(self, item_id: str, channel: str) -> str:
+        # under the prefix the audit is served at (audit_page: --audit-with), as every address the page is sent
         query = self._media_query()
         if channel == 'main':
-            return f'/audit/clip/{item_id}{query}'
-        return f"/audit/clip/{item_id}{query}{'&' if query else '?'}{urllib.parse.urlencode({'channel': channel})}"
+            return f'{self.base_path}/audit/clip/{item_id}{query}'
+        return (f"{self.base_path}/audit/clip/{item_id}{query}{'&' if query else '?'}"
+                f"{urllib.parse.urlencode({'channel': channel})}")
 
     def _item(self, request: L.Request) -> None:
         who = self._auditor()
@@ -675,13 +686,15 @@ const NOBODY = [['who', 'none'], ['adult', 'no'], ['peer', 'none'], ['other_offt
 const LEAVE = 'This item has changes that are not saved. Leave it without saving them?';
 function said(text, mood) { $('status').textContent = text; $('status').className = mood || ''; }
 function show(id, on) { $(id).style.display = on ? '' : 'none'; }
+// where the server serves this page's routes: the path prefix of an audit served beside another, set by the server
+const BASE = '';
 // the auditor is the one the personal link named: the page sends no name, and keeps none
 async function api(path) {
-  const r = await fetch(path); const data = await r.json().catch(() => ({}));
+  const r = await fetch(BASE + path); const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `status ${r.status}`); return data;
 }
 async function post(body) {
-  const r = await fetch('/api/audit/answer', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+  const r = await fetch(BASE + '/api/audit/answer', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
   const data = await r.json().catch(() => ({}));
   if (!r.ok || !data.ok) throw new Error(data.error || `status ${r.status}`); return data;
 }
@@ -1037,15 +1050,16 @@ OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
      '<button type="submit">Start</button><div id="namestatus"></div></form>\n'
      '<main id="work" style="display:none"><section id="left">'),
     ("// the auditor is the one the personal link named: the page sends no name, and keeps none\n"
-     "async function api(path) {\n  const r = await fetch(path);",
+     "async function api(path) {\n  const r = await fetch(BASE + path);",
      "// the auditor is the name typed in (an open audit): every request carries it and the scope chosen, and the\n"
-     "// browser remembers both for the next visit\n"
+     "// browser remembers both for the next visit (an audit served beside another under keys of its own)\n"
      "let scope = null;\n"
      "function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }\n"
      "function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }\n"
+     "function stored(key) { return BASE ? `${BASE}/${key}` : key; }\n"
      "function named(path) { return `${path}${path.includes('?') ? '&' : '?'}auditor=${encodeURIComponent(auditor)}&scope=${encodeURIComponent(scope)}`; }\n"
-     "async function api(path) {\n  const r = await fetch(named(path));"),
-    ("const r = await fetch('/api/audit/answer', {", "const r = await fetch(named('/api/audit/answer'), {"),
+     "async function api(path) {\n  const r = await fetch(BASE + named(path));"),
+    ("const r = await fetch(BASE + '/api/audit/answer', {", "const r = await fetch(BASE + named('/api/audit/answer'), {"),
     ("async function start() {\n"
      "  try { boot = await api('/api/audit/boot'); }\n"
      "  catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }\n",
@@ -1055,7 +1069,7 @@ OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
      "  boot = null; item = null; phase = null; savedForm = null; listen = null;\n"
      "  stopPlayer();\n"
      "  show('work', false); show('rename', false); show('named', true);\n"
-     "  $('auditor').value = auditor || recall('auditor') || ''; $('scope').value = scope || recall('auditScope') || '';\n"
+     "  $('auditor').value = auditor || recall(stored('auditor')) || ''; $('scope').value = scope || recall(stored('auditScope')) || '';\n"
      "  $('namestatus').textContent = text || ''; $('auditor').focus();\n"
      "}\n"
      "async function start() {\n"
@@ -1065,7 +1079,7 @@ OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
      "  auditor = name; scope = chosen; $('namestatus').textContent = 'starting…';\n"
      "  try { boot = await api('/api/audit/boot'); }\n"
      "  catch (e) { boot = null; $('namestatus').textContent = `cannot start: ${e.message}`; return; }\n"
-     "  remember('auditor', auditor); remember('auditScope', scope);\n"
+     "  remember(stored('auditor'), auditor); remember(stored('auditScope'), scope);\n"
      "  $('namestatus').textContent = ''; $('auditor').blur();\n"
      "  show('named', false); show('work', true); show('rename', true);\n"),
     ("document.addEventListener('keydown', e => { onKey(e); });\nstart();\n",
@@ -1074,3 +1088,19 @@ OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
      "$('rename').addEventListener('click', () => askName());\n"
      "askName();\n"),
 ])
+
+
+# the line of the pages' script that says where their routes are: an audit served beside another (audit_page,
+# --audit-with) is served under a path prefix, which the server writes into it
+BASE_LINE = "const BASE = '';"
+
+
+def based(page: str, base: str) -> str:
+    """a transcription page as served under the path prefix `base`, its requests sent there; the page as it is when the
+    audit is served alone (base '')"""
+    if not base:
+        return page
+    if page.count(BASE_LINE) != 1:
+        raise RuntimeError(f'the transcription page changed: {BASE_LINE!r} is not in it once; update '
+                           'audit_transcript_page.based')
+    return page.replace(BASE_LINE, f'const BASE = {json.dumps(base)};')
