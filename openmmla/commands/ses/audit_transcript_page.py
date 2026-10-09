@@ -20,7 +20,10 @@ Served beside another audit at one address (audit_page: --audit ID --audit-with 
 prefix (/t/audit, /t/api/audit/..., /t/audit/clip/...): the handler's `base_path`, which the server puts before
 every address it sends and writes into the page (based()), so the page sends its requests there and its browser
 keeps the name and scope under keys of their own. Served alone, the base path is '' and the pages are
-TRANSCRIPT_PAGE and OPEN_TRANSCRIPT_PAGE as they are.
+TRANSCRIPT_PAGE and OPEN_TRANSCRIPT_PAGE as they are. Served beside another audit, the page also links back to the
+entry from its header (homed), and leaving through that link asks first when the item shown has changes not saved,
+and does nothing while a save is sent or an item loads, as a move to another item does; open, the page hands the
+name it audits under to the entry, which fills it in.
 
 The sequence: the practice block (the practice windows of each recording, in the plan's order), then sweep by
 sweep each recording's windows of that sweep in its view's order, the recordings in the plan's order (reversed
@@ -450,7 +453,8 @@ class TranscriptHandler(P.AuditHandler):
     # routes ----
 
     def _page(self, request: L.Request) -> None:
-        self.send_html(based(OPEN_TRANSCRIPT_PAGE if self.open else TRANSCRIPT_PAGE, self.base_path))
+        page = OPEN_TRANSCRIPT_PAGE if self.open else TRANSCRIPT_PAGE
+        self.send_html(based(homed(page, self.open) if self.together else page, self.base_path))
 
     def _boot(self, request: L.Request) -> None:
         who = self._auditor()
@@ -1020,11 +1024,11 @@ start();
 """
 
 
-def _patched(page: str, patches: list[tuple[str, str]]) -> str:
+def _patched(page: str, patches: list[tuple[str, str]],
+             where: str = 'audit_transcript_page.OPEN_TRANSCRIPT_PAGE') -> str:
     for old, new in patches:
         if page.count(old) != 1:
-            raise RuntimeError(f'the transcription page changed: {old[:60]!r} is not in it once; update '
-                               'audit_transcript_page.OPEN_TRANSCRIPT_PAGE')
+            raise RuntimeError(f'the transcription page changed: {old[:60]!r} is not in it once; update {where}')
         page = page.replace(old, new)
     return page
 
@@ -1095,3 +1099,35 @@ def based(page: str, base: str) -> str:
         raise RuntimeError(f'the transcription page changed: {BASE_LINE!r} is not in it once; update '
                            'audit_transcript_page.based')
     return page.replace(BASE_LINE, f'const BASE = {json.dumps(base)};')
+
+
+# what a transcription page served beside another audit adds to audit_page.homed's link back to the entry: leaving
+# through it leaves the item as a move to another item does, asking first when the item has changes not saved
+# (mayLeave(): the open page's own, the link's page's added here), and the browser does not ask a second time as the
+# page goes
+UNLOAD_LINE = "window.addEventListener('beforeunload', e => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } });\n"
+UNLOAD_LEAVING = (
+    "// leaving: the auditor agreed to leave the item through the link back to the entry, which the browser does not ask\n"
+    "// again\n"
+    "let leaving = false;\n"
+    "window.addEventListener('beforeunload', e => { if (!leaving && dirty()) { e.preventDefault(); e.returnValue = ''; } });\n")
+MAY_LEAVE = ("// an item with changes not saved is left only once the auditor agrees, as on the open page\n"
+             "function mayLeave() { return !dirty() || confirm(LEAVE); }\n")
+HOME_LEAVE = (
+    "// the link back to the entry leaves the item as a move to another item does: nothing while an item loads or a save\n"
+    "// is sent (the save not yet stored, nor yet refused), and with changes not saved, only once the auditor agrees. A\n"
+    "// click that opens it in a tab or window of its own leaves nothing, and a step back to this page asks again\n"
+    "$('home').addEventListener('click', e => {\n"
+    "  if (e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;\n"
+    "  e.preventDefault();\n"
+    "  if (loading || saving) return;\n"
+    "  if (mayLeave()) { leaving = true; location.assign($('home').href); }\n"
+    "});\n"
+    "window.addEventListener('pageshow', () => { leaving = false; });\n")
+
+
+def homed(page: str, opened: bool) -> str:
+    """TRANSCRIPT_PAGE, or OPEN_TRANSCRIPT_PAGE when `opened`, as served beside another audit: audit_page.homed's link
+    back to the entry, which leaves the item as a move to another item does (based() then puts in the base)"""
+    page = _patched(page, [(UNLOAD_LINE, UNLOAD_LEAVING)], 'audit_transcript_page.homed')
+    return P.homed(page, opened, ('' if opened else MAY_LEAVE) + HOME_LEAVE)

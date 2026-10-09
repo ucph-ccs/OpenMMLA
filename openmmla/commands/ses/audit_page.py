@@ -67,27 +67,33 @@ command too, with links or open as above, but with the routes and the page of au
 
 Two audits served together (--audit ID --audit-with ID2, a sensing audit and a transcription audit) share one server
 and one port: TogetherHandler hands each request to the handler class of its part. The --audit part keeps its routes
-and its pages' bytes. The --audit-with part, which must be a transcription audit (a sensing audit's page asks for
-/audit and /api/audit/ itself), is served under WITH_PREFIX (/t/audit, /t/api/audit/..., /t/audit/clip/...): its
-handler routes the path without the prefix, and its page and every address the server sends it carry the prefix (the
-handler's `base_path`). GET / is the entry (ENTRY_PAGE): a link to the default coding page, the address alone of
-port --audit-code-port (CODE_PORT unless given; 0 leaves it out) on the host the entry was opened at (a coding
-server of any version answers it with the page, at once or through its redirect to /code), then each part in the
-order of the flags. Served open, the entry asks the name (checked in the browser as typed_name checks it, and filled
-in with the name kept for a part) and offers each part's full audit and reliability subset: a choice writes the name
-and the scope into the browser's storage under the keys that part's open page reads, hands them to that page in the
-tab's own sessionStorage, then opens it at #start (a fragment: no server sees it), and the page starts under the
-name and scope handed over as Start would (a #start address without them shows the form); a part last opened in this
-browser under another name is opened under the name typed only at a second press. With links, each part is a link to its
-page. The coding page is served by a server of its own, another origin, so the name typed on the entry goes along as
-?name=, which that page takes as its coder name. Each part keeps its own campaign folder, request log, answers
-files, links (their cookies named apart), names and scopes, locks, blind closes and refusals, and a request to one
-part opens no file of the other (a link's /c/<token>, of neither part until then, reads each part's campaign.yml to
-find which holds it, and writes nothing of either: a change it meets is logged by that part's own next request).
---audit-open serves both open, and --audit-sweeps the sweeps of the transcription audit. Each part's log gets the
-start line its server alone writes, with `prefix` (its own), `together_with` (the other audit's id and prefix) and
-`code_port` (the coding page's port the entry links to, 0 for none), and a stop line, so --verify-log, the open
-serves the scorer finds and the scores read each audit as after a serve of its own.
+and its pages' bytes but for the link back to the entry (below). The --audit-with part, which must be a transcription
+audit (a sensing audit's page asks for /audit and /api/audit/ itself), is served under WITH_PREFIX (/t/audit,
+/t/api/audit/..., /t/audit/clip/...): its handler routes the path without the prefix, and its page and every address
+the server sends it carry the prefix (the handler's `base_path`). GET / is the entry (ENTRY_PAGE): a link to the
+default coding page, the address alone of port --audit-code-port (CODE_PORT unless given; 0 leaves it out) on the host
+the entry was opened at (a coding server of any version answers it with the page, at once or through its redirect to
+/code), then each part in the order of the flags. Served open, the entry asks the name (checked in the browser as
+typed_name checks it, and filled in with this tab's name, else the name kept for a part) and offers each part's full
+audit and reliability subset: a choice writes the name and the scope into the browser's storage under the keys that
+part's open page reads, hands them to that page in the tab's own sessionStorage (where the name is kept as this tab's,
+TAB_NAME_KEY), then opens it at #start (a fragment: no server sees it), and the page starts under the name and scope
+handed over as Start would (a #start address without them shows the form); a part last opened in this browser under
+another name is opened under the name typed only at a second press. With links, each part is a link to its page. The
+coding page is served by a server of its own, another origin, so the name typed on the entry goes along as ?name=,
+which that page takes as its coder name. Each part's page links back to the entry ("← All tasks", at the left of its
+header: homed); an open page hands the name it audits under to the entry as this tab's, so the entry fills in the name
+of whoever just left, not the one another part kept in this browser. A key pressed on the link reaches none of the
+page's keys, and leaving the transcription page through it asks first when the item shown has changes not saved, and
+does nothing while a save is sent or an item loads, as a move to another item does. A page served alone has no such
+link. Each part keeps its own campaign folder, request log, answers files, links (their cookies named apart), names
+and scopes, locks, blind closes and refusals, and a request to one part opens no file of the other (a link's
+/c/<token>, of neither part until then, reads each part's campaign.yml to find which holds it, and writes nothing of
+either: a change it meets is logged by that part's own next request). --audit-open serves both open, and --audit-sweeps the sweeps of the
+transcription audit. Each part's log gets the start line its server alone writes, with `prefix` (its own),
+`together_with` (the other audit's id and prefix) and `code_port` (the coding page's port the entry links to, 0 for
+none), and a stop line, so --verify-log, the open serves the scorer finds and the scores read each audit as after a
+serve of its own.
 """
 from __future__ import annotations
 
@@ -294,9 +300,11 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     # an open audit (--audit-open): no link, the auditor is the name each request carries
     open: bool = False
     # served beside another audit (--audit-with): the base path of the --audit-with part, its prefix ('' for the --audit
-    # part, and alone), and the --audit part's page at / that leads to both (None alone and for the --audit-with part)
+    # part, and alone), the --audit part's page at / that leads to both (None alone and for the --audit-with part), and
+    # whether the part is served so (its page's header then links back to that page: homed)
     base_path: str = ''
     entry: str | None = None
+    together: bool = False
 
     @property
     def cookie_name(self) -> str:
@@ -476,7 +484,8 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         self.send_body(303, 'text/plain', b'', (('location', f'{self.base_path}/audit'),))
 
     def _page(self, request: L.Request) -> None:
-        self.send_html(OPEN_AUDIT_PAGE if self.open else AUDIT_PAGE)
+        page = OPEN_AUDIT_PAGE if self.open else AUDIT_PAGE
+        self.send_html(homed(page, self.open) if self.together else page)
 
     def _boot(self, request: L.Request) -> None:
         who = self._auditor()
@@ -1015,7 +1024,7 @@ def cmd_serve_together(args, argv) -> int:
             # the --audit part serves / as the page that leads to both; the other has its prefix, its links its own home
             fields = ({'base_path': part['prefix'], 'HOME': f"{part['prefix']}/audit"} if part['prefix']
                       else {'entry': entry})
-            handlers.append(_handler(part, artifacts, log, allow, opened, **fields))
+            handlers.append(_handler(part, artifacts, log, allow, opened, together=True, **fields))
             L.watch_campaign(part['campaign'], log)
         handler = L.handler_class(TogetherHandler, parts=tuple((part['prefix'], h) for part, h in zip(parts, handlers)))
         # the server runs the modules of both parts: each start line names them all, and the coding page's port the
@@ -1292,10 +1301,10 @@ start();
 """
 
 
-def _patched(page: str, patches: list[tuple[str, str]]) -> str:
+def _patched(page: str, patches: list[tuple[str, str]], where: str = 'audit_page.OPEN_AUDIT_PAGE') -> str:
     for old, new in patches:
         if page.count(old) != 1:
-            raise RuntimeError(f'the audit page changed: {old[:60]!r} is not in it once; update audit_page.OPEN_AUDIT_PAGE')
+            raise RuntimeError(f'the audit page changed: {old[:60]!r} is not in it once; update {where}')
         page = page.replace(old, new)
     return page
 
@@ -1469,6 +1478,33 @@ OPEN_AUDIT_PAGE = _patched(AUDIT_PAGE, [
 ])
 
 
+# what an audit's page served beside another audit adds (homed): the link back to the entry at /, at the left of its
+# header in the look of the header's change name, and what code.HOME_KEYS does with it
+HOME_STYLE = ('#home{color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:1px 8px;text-decoration:none;'
+              'white-space:nowrap}#home:hover{color:var(--text)}\n')
+HOME_LINK = f'<a id="home" href="/">{C.HOME_TEXT}</a>'
+# the key of this tab's name in its sessionStorage, which the entry fills in before any name a part's page kept in the
+# browser: the entry writes it at a choice, and an open page served beside another audit as its link is followed
+TAB_NAME_KEY = 'tabAuditor'
+HOME_NAME = (
+    "// the name this page audits under goes back to the entry with the link, as this tab's: the entry fills it in, so\n"
+    "// the auditor who just left finds their own name there, not one another part's page kept in this browser\n"
+    "$('home').addEventListener('click', () => {\n"
+    f"  if (boot && auditor) {{ try {{ sessionStorage.setItem('{TAB_NAME_KEY}', auditor); }} catch (e) {{}} }}\n"
+    "});\n")
+
+
+def homed(page: str, opened: bool, script: str = '') -> str:
+    """an audit's page, with links or open (`opened`), as served beside another audit: the link back to the entry at the
+    left of its header; open, the name the page audits under handed to the entry as the link is followed (HOME_NAME);
+    and `script`, what else leaving through it does (audit_transcript_page.homed), at the end of the page's script. An
+    audit served alone is served its page as it is, without the link."""
+    script = (HOME_NAME if opened else '') + script
+    return _patched(page, [('</style>', HOME_STYLE + '</style>'), ('<header><b>', '<header>' + HOME_LINK + '<b>'),
+                           ('</script></body></html>', C.HOME_KEYS + script + '</script></body></html>')],
+                    'audit_page.homed')
+
+
 # the page at / of two audits served together (--audit-with): the coding page, then each part in the order of the flags;
 # served open, the name first, and each part's scopes (entry_page fills it in)
 ENTRY_PAGE = r"""<!doctype html>
@@ -1501,6 +1537,10 @@ function recall(key) { try { return localStorage.getItem(key); } catch (e) { ret
 function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
 // the keys an open audit page reads its name and scope from (its stored()): a part under a prefix has keys of its own
 function stored(prefix, key) { return prefix ? `${prefix}/${key}` : key; }
+// this tab's name (sessionStorage: this tab's own, under TAB_NAME_KEY): the one a choice here last opened a part under,
+// or the one a part's page last went back here with through its link
+const TAB_NAME = 'tabAuditor';
+function tabName() { try { return sessionStorage.getItem(TAB_NAME); } catch (e) { return null; } }
 // the name as the server takes it (audit_page.typed_name): in NFC, without the whitespace Python strips at either end
 function typedName(raw) {
   return raw.normalize('NFC').replace(/^[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, '');
@@ -1526,7 +1566,8 @@ function checked() {
 let pending = null;
 // a part chosen: the name and scope go where its page reads them, and the page opens at #start, which starts it under
 // them at once (a name or scope its server refuses shows its form, with why). The browser remembers them for the
-// page's form; this tab hands them to the page (sessionStorage: this tab's own), which starts only from that
+// page's form; this tab hands them to the page (sessionStorage: this tab's own), which starts only from that, and keeps
+// the name as this tab's
 function choose(id, task) {
   const name = checked();
   if (name === null) { pending = null; return; }
@@ -1538,7 +1579,10 @@ function choose(id, task) {
   }
   pending = null;
   remember(stored(task.prefix, 'auditor'), name); remember(stored(task.prefix, 'auditScope'), task.scope);
-  try { sessionStorage.setItem(stored(task.prefix, 'entered'), JSON.stringify([name, task.scope])); } catch (e) {}
+  try {
+    sessionStorage.setItem(stored(task.prefix, 'entered'), JSON.stringify([name, task.scope]));
+    sessionStorage.setItem(TAB_NAME, name);
+  } catch (e) {}
   location.assign(`${task.page}#start`);
 }
 if ($('name')) {
@@ -1548,8 +1592,9 @@ if ($('name')) {
     e.preventDefault(); pending = null;
     if (checked() !== null) $(Object.keys(TASKS)[0]).focus();
   });
-  // the name kept for a part: the one its page last started with, or the one last chosen for it here
-  $('name').value = Object.values(TASKS).map(t => stored(t.prefix, 'auditor')).map(recall).find(v => v) || '';
+  // this tab's name, so whoever comes back here from a part's page finds their own; else the name kept for a part, the
+  // first part's first: the one its page last started with, or the one last chosen for it here
+  $('name').value = tabName() || Object.values(TASKS).map(t => stored(t.prefix, 'auditor')).map(recall).find(v => v) || '';
   $('name').focus();
 }
 // the coding server's address alone: a server of any version answers it with the page, at once or through /code; a

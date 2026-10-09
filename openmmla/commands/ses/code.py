@@ -26,6 +26,11 @@ lines carry the model's `confidence` or class probabilities `p_<class>`, and non
 page) is no coder: it is left out of all of these, and its name is refused as a coder name, so a
 coder never sees those labels nor appends to them.
 
+--entry-port PORT puts a link back to the entry of two audits served together (audit_page: --audit ID
+--audit-with ID2), "← All tasks", at the left of the page's header: the address alone of PORT on the
+host the page was opened at. A key pressed on it reaches none of the page's keys. Without the flag the
+page is served as it is; a locked campaign's page never has the link.
+
 The Transcript button shows what was said in the window, in Danish and in a local English
 translation (openmmla.commands.ses.code_text): the session's asr_transcription events from InfluxDB
 (--influx-config), the words of the window with --context seconds around them, translated on the
@@ -943,6 +948,37 @@ document.addEventListener('keydown', e => {
 })();
 </script></body></html>"""
 
+# the link back to the page that leads to every task, the entry of two audits served together (audit_page.ENTRY_PAGE),
+# at the left of a page's header: the coding page's with --entry-port (entry_linked), each audit page's when two audits
+# are served together (audit_page.homed). Its words, and what every such page's script does with it: a key pressed on it
+# reaches none of the page's keys (Enter follows it, as on any link), and a click hands the keys back to the page, for
+# when the page stays (the entry opened in a tab of its own, or leaving declined)
+HOME_TEXT = '<span aria-hidden="true">←</span> All tasks'
+HOME_KEYS = ("// the link back to the entry: a key pressed on it reaches none of the page's keys (Enter follows it), and a click\n"
+             "// hands the keys back to the page\n"
+             "$('home').addEventListener('keydown', e => e.stopPropagation());\n"
+             "$('home').addEventListener('click', () => { if ($('home').blur) $('home').blur(); });\n")
+# what the coding page adds with --entry-port: the link's look, that of change name beside it
+ENTRY_STYLE = (' #home{color:#999;border:1px solid #333;border-radius:4px;padding:1px 8px;text-decoration:none;'
+               'white-space:nowrap} #home:hover{color:#eee}\n')
+
+
+def entry_linked(page: str, port: int) -> str:
+    """the coding page with the link back to the audits' entry at the left of its header (--entry-port): the address
+    alone of `port` on the host the page was opened at, with the protocol it was opened with. Without the flag the page
+    is served as it is, and a locked campaign's page (code_locked.LOCKED_PAGE) never has the link."""
+    script = ("// the entry's address: its port on the host this page was opened at\n"
+              f"const ENTRY_PORT = {int(port)};\n"
+              "$('home').href = `${location.protocol}//${location.hostname}:${ENTRY_PORT}/`;\n")
+    for old, new in ((' #rename{', ENTRY_STYLE + ' #rename{'),
+                     ('\n <b>Session coding</b>', f'\n <a id="home" href="#">{HOME_TEXT}</a>\n <b>Session coding</b>'),
+                     ('</script></body></html>', script + HOME_KEYS + '</script></body></html>')):
+        if page.count(old) != 1:
+            raise RuntimeError(f'the coding page changed: {old[:60]!r} is not in it once; update code.entry_linked')
+        page = page.replace(old, new)
+    return page
+
+
 AGREEMENT_PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Coder agreement</title>
 <style>
@@ -1106,6 +1142,7 @@ class Handler(BaseHTTPRequestHandler):
     lock = threading.Lock()  # one clip cut at a time
     write_lock = threading.Lock()  # label writes, apart from the clips so a save never waits for ffmpeg
     kinds: dict[str, tuple[int, int, str | None]] = {}  # labels file -> (mtime_ns, size, file_kind), reread on change
+    entry_port: int | None = None  # the audits' entry the page's header links back to (--entry-port); None: no link
 
     def log_message(self, format, *args):  # quiet
         pass
@@ -1133,7 +1170,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('content-length', '0')
             self.end_headers()
         elif url.path in ('/code', '/agreement'):
-            body = (PAGE if url.path == '/code' else AGREEMENT_PAGE).encode()
+            page = AGREEMENT_PAGE if url.path == '/agreement' else \
+                entry_linked(PAGE, self.entry_port) if self.entry_port else PAGE
+            body = page.encode()
             self.send_response(200)
             self.send_header('content-type', 'text/html; charset=utf-8')
             self.send_header('content-length', str(len(body)))
@@ -1439,6 +1478,9 @@ def get_parser():
     parser.add_argument('--threads', type=int, default=4, help="CPU threads of the translation model (default 4)")
     parser.add_argument('-p', '--port', type=int, default=8765)
     parser.add_argument('--bind', default='127.0.0.1', help="address to listen on (default 127.0.0.1: this machine only; a Tailscale address or 0.0.0.0 lets others in, mind who can reach it)")
+    parser.add_argument('--entry-port', type=int, default=None, metavar='PORT',
+                        help="the port of the entry of two audits served together (--audit ID --audit-with ID2, 8766 "
+                             "unless -p): the header links back to it on the host the page was opened at (default: no link)")
     from openmmla.commands.ses import audit, code_locked  # stdlib only at import: Jev imports this module, not this function
     code_locked.add_arguments(parser)
     audit.add_arguments(parser)
@@ -1448,6 +1490,17 @@ def get_parser():
 def main(argv=None):
     args = get_parser().parse_args(argv)
     from openmmla.commands.ses import audit, code_locked
+    if args.entry_port is not None:
+        # the link back to the audits' entry is the default page's: a campaign's page and an audit's have none of it
+        if code_locked.requested(args) or audit.requested(args):
+            print('--entry-port goes with the default coding page, not with a campaign or an audit command')
+            return 2
+        if not 0 < args.entry_port <= 65535:
+            print(f"--entry-port {args.entry_port} is no port: give the port the audits' entry is served on")
+            return 2
+        if args.entry_port == args.port:
+            print(f"--entry-port {args.entry_port} is the port of this page: give the port the audits' entry is served on")
+            return 2
     if code_locked.requested(args):  # a locked campaign's command; without its flags nothing below changes
         return code_locked.run(args, argv)
     if audit.requested(args):  # a sensing audit's step, likewise
@@ -1456,6 +1509,7 @@ def main(argv=None):
     hold = tuple(h.strip() for h in args.hold.split(',') if h.strip())
     Handler.sessions, Handler.hidden = load_sessions(artifacts, args.sessions, args.show_all, hold)
     Handler.settings = {'window': args.window, 'step': args.step, 'sample': args.sample, 'block': args.block, 'seed': args.seed}
+    Handler.entry_port = args.entry_port
     influx_config = args.influx_config or os.path.join(os.getcwd(), DEFAULT_INFLUX_CONFIG)
     Handler.text_source = TextSource(args.window, args.context, influx_config, Translator(threads=args.threads))
     for s in Handler.hidden:
@@ -1475,7 +1529,8 @@ def main(argv=None):
         return prepare_text(Handler.text_source, Handler.sessions, Handler.settings)
     total = sum(len(windows_of(s, args.window, args.step, args.sample, args.block, args.seed)) for s in Handler.sessions)
     by_rule = sum(1 for h in Handler.hidden if h.get('by') != 'hold')
-    print(f"{len(Handler.sessions)} sessions ({by_rule} hidden by S1, {len(Handler.hidden) - by_rule} held back), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/code  (Ctrl-C stops)")
+    entry = f", whose header links to the audits' entry on port {args.entry_port}" if args.entry_port else ''
+    print(f"{len(Handler.sessions)} sessions ({by_rule} hidden by S1, {len(Handler.hidden) - by_rule} held back), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/code{entry}  (Ctrl-C stops)")
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     try:
         server.serve_forever()
