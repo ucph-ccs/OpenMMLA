@@ -24,6 +24,19 @@ label by the balanced decision argmax p / pi under the outer-training prior (pre
 tuned), and the binary target derived as p_social + p_collaborative. The a-priori rule gives hard
 labels only, and zero-shot Jev its own probabilities (argmax, since it has no prior).
 
+`social_decision='infold'` (exploratory, three-class target only) replaces the three-class hard
+label of every model with inner out-of-fold answers by a two-step decision
+(tabular.two_step_decision): interaction against individual by the balanced binary rule, so every
+binary label stays the balanced decision's, then social where p_social / (p_social +
+p_collaborative) >= tau, else collaborative. tau is chosen per variant (model, temporal mode, HMM
+mode) and outer fold on the calibrated inner out-of-fold answers of the training side, smoothed by
+the variant's HMM with its gamma, as the highest social F1 of the same decision over the coded
+windows (tabular.social_threshold); a fold whose inner answers hold fewer than
+tabular.MIN_SOCIAL_WINDOWS social windows keeps the balanced decision. rule22sep scores its
+candidates' three-class macro-F1 with the same decision and taus. The rule, the floors and zero-shot
+Jev keep their own labels. Each fold's tau is in metrics.json (social_tau under the fold's models,
+and social_decision), the mode in config.json.
+
 The online rows (HMM mode 'filter') read no later window of the held-out session anywhere: their
 inputs are causal (T0, T1c, the network without its temporal blocks, Jev), the held-out session's
 [s] values are scaled by the running normaliser (layout.scale(mode='causal')), and the forward
@@ -219,6 +232,23 @@ SELECTOR_NOTES = {
 # the networks' inner out-of-fold answers: at each inner split's best epoch (best, as before) or at the
 # common E* of the refit (common, network.oof_at)
 NET_OOF = ('best', 'common')
+# the three-class hard label: the pre-declared balanced decision, or the two-step decision with a social
+# threshold chosen inside each outer fold on the inner out-of-fold answers (three-class target only)
+SOCIAL_DECISIONS = ('balanced', 'infold')
+SOCIAL_DECISION_NOTES = {
+    'balanced': "the pre-declared balanced decision, never tuned: argmax p(k) / pi_k under the outer-training "
+                "prior; the binary label is interaction when p_int / pi_int >= (1 - p_int) / (1 - pi_int)",
+    'infold': "exploratory, three-class target only: interaction against individual by the balanced binary rule "
+              "(every binary label is the balanced decision's), then social where p_social / (p_social + "
+              "p_collaborative) >= tau, else collaborative; tau from 0.05 to 0.95 in steps of 0.01, chosen per "
+              "variant (model, temporal mode, HMM mode) and outer fold as the highest social F1 of the same "
+              "two-step decision on the calibrated inner out-of-fold answers of the coded training windows (through "
+              "the variant's HMM with its gamma), the lower tau on a tie; a fold whose inner answers hold fewer than "
+              f"{TB.MIN_SOCIAL_WINDOWS} social windows keeps the balanced decision; rule22sep scores its candidates' "
+              "three-class macro-F1 with the same decision, and a selector's tau is its winner's; the rule, the "
+              "floors and zero-shot Jev keep their own labels. Known optimism: tau is chosen on the inner answers "
+              "the calibrator, stacker and gamma were fitted on",
+}
 SESSION_RUNS = 'session_runs.jsonl'
 TARGETS = ('3class', 'binary')
 # the network reads its sequence through its own temporal blocks, not through lag columns
@@ -308,7 +338,10 @@ class Config:
     epoch); `features_root` is a folder to read the fused tables from instead of
     artifacts/<session>/analysis/features/ (see session_tables). `models` may also name the
     EXPLORATORY candidates; `soft_coder` is lr-soft's second coder (its labels file name; default the
-    one human coder besides the truth whose labels the training sessions hold, see soft_coder)."""
+    one human coder besides the truth whose labels the training sessions hold, see soft_coder).
+    `social_decision` is the three-class hard label: 'balanced' (the default, the pre-declared
+    decision) or 'infold' (three-class target only: the two-step decision with a social threshold
+    chosen in each outer fold on the inner out-of-fold answers, SOCIAL_DECISION_NOTES)."""
     artifacts: str = 'artifacts'
     sessions: str | None = None
     coder: str | None = None
@@ -335,6 +368,7 @@ class Config:
     net_oof: str = 'best'
     features_root: str | None = None
     soft_coder: str | None = None
+    social_decision: str = 'balanced'
 
 
 # ---- sessions ----
@@ -887,25 +921,32 @@ def _normalised(logits) -> np.ndarray:
     return out
 
 
-def _decide(p, prior, k: int) -> tuple[np.ndarray, np.ndarray]:
+def _decide(p, prior, k: int, tau: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """the balanced decision on the posteriors, and the binary one on p_social + p_collaborative
-    under pi_social + pi_collaborative; -1 where there is no posterior."""
-    y_pred = TB.balanced_decision(p, prior)
+    under pi_social + pi_collaborative; -1 where there is no posterior. With `tau` (the three-class
+    target's in-fold social threshold) the three-class label is the two-step decision instead
+    (tabular.two_step_decision), whose binary label is the same."""
+    y_pred = TB.two_step_decision(p, prior, tau) if tau is not None and k == 3 else TB.balanced_decision(p, prior)
     if k == 2:
         return y_pred, y_pred.copy()
     return y_pred, TB.balanced_decision(p[:, 1] + p[:, 2], prior)
 
 
 def _finish(fd: _Fold, hmm_modes, model: str, temporal: str, oof, logits, calibrate: bool, details: dict,
-            results: dict, online=None, inner: dict | None = None):
+            results: dict, online=None, inner: dict | None = None, infold: bool = False):
     """one model's answers through calibration (fit on the inner out-of-fold logits), each HMM mode
     (gamma chosen on the same out-of-fold answers) and the decisions; one result per mode.
     `online` is the held-out logits from the online tokens (_Fold.online), which the forward
     filter reads; without them (Jev, whose answers do not depend on scaling) it reads `logits`.
     `inner` (when a selector runs) receives, per variant of SELECTED_HMM, the training side's
     calibrated out-of-fold posteriors through the same HMM (the same gamma) and their decisions
-    under the outer-training prior; nothing else changes with it."""
+    under the outer-training prior; nothing else changes with it. `infold` (social_decision
+    'infold', three-class target) decides each mode's held-out and inner answers by the two-step
+    decision with the social threshold chosen on those inner answers (tabular.social_threshold), or
+    by the balanced decision where they hold too few social windows, and keeps the choice in
+    details['social_tau'] by HMM mode."""
     k = fd.k
+    infold = infold and k == 3
     oof, logits = _collapse(oof, k), _collapse(logits, k)
     online = logits if online is None else _collapse(online, k)
     if calibrate:
@@ -919,6 +960,7 @@ def _finish(fd: _Fold, hmm_modes, model: str, temporal: str, oof, logits, calibr
             continue
         record = {'p': p_test, 'viterbi': None, 'binary_hmm': None}
         p_inner = p_oof
+        selected = inner is not None and mode in SELECTED_HMM
         if mode != 'none':
             gamma, scores = H.select_gamma(fd.by_session(p_oof, 'train'), fd.labels(), fd.prior, fd.A,
                                            fd.flat('train'), mode=mode)
@@ -928,14 +970,20 @@ def _finish(fd: _Fold, hmm_modes, model: str, temporal: str, oof, logits, calibr
                 record['viterbi'] = fd.smooth(p_test, fd.prior, fd.A, gamma, 'viterbi').argmax(axis=1)
                 if k == 3:
                     record['binary_hmm'] = _binary_hmm(fd, p_oof, p_test)
-            if inner is not None and mode in SELECTED_HMM:
+            if selected or infold:
                 # a window no inner fold held out keeps no answer, though the smoother would carry one to it
                 answered = np.isfinite(p_oof).all(axis=1)
                 p_inner = np.where(answered[:, None], fd.smooth(p_oof, fd.prior, fd.A, gamma, mode, 'train'), np.nan)
-        record['y_pred'], record['y_pred_binary'] = _decide(record['p'], fd.prior, k)
+        tau = None
+        if infold:
+            # the variant's own inner answers choose its social threshold (None: too few social windows)
+            chosen = TB.social_threshold(p_inner, fd.y, fd.prior)
+            details.setdefault('social_tau', {})[mode] = chosen
+            tau = chosen['tau']
+        record['y_pred'], record['y_pred_binary'] = _decide(record['p'], fd.prior, k, tau)
         results[_key(model, temporal, mode)] = record
-        if inner is not None and mode in SELECTED_HMM:
-            y_pred, y_binary = _decide(p_inner, fd.prior, k)
+        if selected:
+            y_pred, y_binary = _decide(p_inner, fd.prior, k, tau)
             inner[_key(model, temporal, mode)] = {'p': p_inner, 'y_pred': y_pred, 'y_pred_binary': y_binary}
 
 
@@ -1131,11 +1179,13 @@ def _binary_log_loss(p, truth, rows) -> float | None:
     return M._float(loss)
 
 
-def select_inner(selector: str, inner: dict, fd: _Fold, models) -> dict:
+def select_inner(selector: str, inner: dict, fd: _Fold, models, infold: bool = False) -> dict:
     """the variant a selector chooses in one outer fold from the calibrated inner out-of-fold
     answers of the training side (`inner`, from _finish: per variant of the HMM modes none and fb,
     the posteriors and the decisions under the outer-training prior), with each candidate's score.
-    The caller copies the winner's held-out answers.
+    The caller copies the winner's held-out answers. `infold` says that those decisions are the
+    two-step ones with each candidate's in-fold social threshold (social_decision 'infold'), which
+    selected_on then names.
 
     rule22sep, the pre-declared headline rule: select_headline itself, over the late-lr and late-hgb
     variants (every temporal mode run, HMM none and fb), on their pooled inner out-of-fold binary
@@ -1161,9 +1211,13 @@ def select_inner(selector: str, inner: dict, fd: _Fold, models) -> dict:
         reports = {key: {'macro_f1_ci': {'estimate': score['macro_f1']},
                          'binary_macro_f1_ci': {'estimate': score['binary_macro_f1']}} for key, score in scores.items()}
         winner = select_headline(variants, reports, binary=fd.k == 2)
+        how = 'binary macro-F1' if fd.k == 2 else f"macro-F1 over {', '.join(names)}"
+        if infold and fd.k == 3:
+            how += (", each candidate decided by the two-step decision with its in-fold social threshold, chosen on "
+                    "the same inner answers")
         return {'winner': winner, 'candidates': list(candidates), 'scores': scores,
                 'selected_on': 'select_headline on the calibrated inner out-of-fold answers pooled over the inner '
-                               'folds, ' + ('binary macro-F1' if fd.k == 2 else f"macro-F1 over {', '.join(names)}")}
+                               'folds, ' + how}
     panel = [model for model in models if model in INNER_MODELS]
     candidates = {key: record for key, record in inner.items() if key.split(':')[0] in panel}
     truth = _binary_truth(_labels_int(fd.y))
@@ -1191,6 +1245,8 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
     results, details, extras = {}, {}, {}
     # the selectors read the training side's out-of-fold answers, kept only when one runs
     inner = {} if any(model in SELECTORS for model in plan['models']) else None
+    # the in-fold social threshold (social_decision 'infold'), for the three-class target only
+    infold = plan.get('social_decision') == 'infold' and k == 3
     n_test = sum(len(d) for d in fd.test)
     for model in plan['models']:
         if model in SELECTORS:
@@ -1216,22 +1272,26 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
             for temporal in (('T0',) if model == 'r1' else plan['temporal']):
                 where = details.setdefault(f'{model}:{temporal}', {})
                 oof, logits, calibrate, online = _tabular(fd, plan, model, temporal, where, extras)
-                _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online, inner)
+                _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online, inner,
+                        infold=infold)
         elif model == 'lr-soft':
             for temporal in plan['temporal']:
                 where = details.setdefault(f'{model}:{temporal}', {})
                 oof, logits, calibrate, online = _soft(fd, plan, temporal, where)
-                _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online, inner)
+                _finish(fd, plan['hmm'], model, temporal, oof, logits, calibrate, where, results, online, inner,
+                        infold=infold)
         elif model == 'pmil-lr':
             # the pairs come from the tokens, with no lag columns: T0 only
             where = details.setdefault(f'{model}:T0', {})
             oof, logits, calibrate, online = _pmil(fd, plan, where)
-            _finish(fd, plan['hmm'], model, 'T0', oof, logits, calibrate, where, results, online, inner)
+            _finish(fd, plan['hmm'], model, 'T0', oof, logits, calibrate, where, results, online, inner,
+                    infold=infold)
         elif model in NEURAL:
             temporal = NET_TEMPORAL[model]
             where = details.setdefault(f'{model}:{temporal}', {})
             oof, logits, online = _network(fd, plan, model, where)
-            _finish(fd, plan['hmm'], model, temporal, oof, logits, True, where, results, online, inner)
+            _finish(fd, plan['hmm'], model, temporal, oof, logits, True, where, results, online, inner,
+                    infold=infold)
         elif model == 'jev':
             p = _normalised(_collapse(_jev_rows(fd.test), k))
             answered = np.isfinite(p).all(axis=1)
@@ -1243,11 +1303,11 @@ def run_fold(fold, data: dict, plan: dict) -> dict:
             where = details.setdefault(f"jev-cal:{plan['jev_variant']}", {})
             held = _jev_rows(fd.test)
             _finish(fd, plan['hmm'], 'jev-cal', plan['jev_variant'], _jev_rows(fd.train), held, True, where, results,
-                    inner=inner)
+                    inner=inner, infold=infold)
             for key in [key for key in results if key.startswith('jev-cal:')]:
                 _unanswered(results[key], ~np.isfinite(held).all(axis=1))
     for model in [model for model in plan['models'] if model in SELECTORS]:
-        choice = select_inner(model, inner, fd, plan['models'])
+        choice = select_inner(model, inner, fd, plan['models'], infold=infold)
         details[model] = choice
         if choice.get('winner') is not None:
             results[_key(model, NESTED, NESTED)] = dict(results[choice['winner']])
@@ -1990,7 +2050,8 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
     (_session_split_record) at the top. A run with a features root adds `features_root`: the folder,
     and the sessions with a table under artifacts/ but none there, each with why (`not_read`,
     features_root_gaps). `content` gives, per session, whether its table has the content columns
-    and in how many of its windows the block was observed."""
+    and in how many of its windows the block was observed. The decision mode is config.social_decision;
+    an infold run adds `social_decision` with what the mode does and its tau grid."""
     from openmmla.utils.session_provenance import git_commit, redact_secrets, software_info
     values = LY.GROUP_VALUES + LY.PERSON_VALUES + LY.PAIR_VALUES + LY.CONTENT_VALUES
     record = {
@@ -2001,6 +2062,10 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
         'ablation': {'grid': cfg.ablate,
                      'arms': {arm: list(removed) for arm, removed in ABLATIONS[cfg.ablate].items()}},
         'scaling': cfg.scaling,
+        # the decision mode is in 'config' in every run; an infold run also says what it does, while a balanced
+        # run's config.json keeps the keys it had before the option
+        **({'social_decision': _social_decision_setting(cfg.social_decision)}
+           if cfg.social_decision != 'balanced' else {}),
         'layout_version': LY.LAYOUT_VERSION,
         'features': {'pooled_columns': list(LY.POOLED_COLUMNS),
                      'pooled_blocks': {name: list(columns) for name, columns in LY.POOLED_BLOCKS.items()},
@@ -2043,6 +2108,44 @@ def _config_record(cfg: Config, plan: dict, data: dict, folds: list, artifacts: 
     if cfg.features_root is not None:
         record['features_root'] = {'folder': str(Path(cfg.features_root).resolve()), 'not_read': dict(not_read or {})}
     return redact_secrets(_jsonable(record))
+
+
+def _social_decision_setting(mode: str) -> dict:
+    """what config.json says of the three-class hard label: the mode, what it does and, for
+    'infold', the grid tau is chosen from and the fewest social windows it needs."""
+    out = {'mode': mode, 'note': SOCIAL_DECISION_NOTES[mode]}
+    if mode == 'infold':
+        out.update(taus=list(TB.SOCIAL_TAUS), min_social_windows=TB.MIN_SOCIAL_WINDOWS)
+    return out
+
+
+def social_decision_record(outputs: dict) -> dict:
+    """metrics.json's social_decision in an infold run, from every arm's fold outputs ({arm: fold
+    outputs}): per variant (an ablated arm's ending in ':<arm>') and outer fold, the social threshold
+    chosen (None where the fold kept the balanced decision, `fallback` saying why), a selector's
+    being its winner's. Each fold's full record (tau, its inner social F1, the windows and social
+    windows it was chosen on) is under the fold's models, `social_tau` by HMM mode."""
+    taus, fallbacks = {}, {}
+    for arm, folds in outputs.items():
+        suffix = '' if arm == 'full' else f':{arm}'
+        for out in folds:
+            for name, details in out['models'].items():
+                for mode, chosen in (details.get('social_tau') or {}).items():
+                    key = f'{name}:{mode}{suffix}'
+                    taus.setdefault(key, {})[out['name']] = chosen['tau']
+                    if chosen.get('fallback'):
+                        fallbacks.setdefault(key, {})[out['name']] = chosen['fallback']
+        for out in folds:
+            for selector in SELECTORS:
+                winner = (out['models'].get(selector) or {}).get('winner')
+                if winner is None:
+                    continue
+                key = _key(selector, NESTED, NESTED) + suffix
+                taus.setdefault(key, {})[out['name']] = taus.get(winner + suffix, {}).get(out['name'])
+                why = fallbacks.get(winner + suffix, {}).get(out['name'])
+                if why:
+                    fallbacks.setdefault(key, {})[out['name']] = why
+    return dict(_social_decision_setting('infold'), tau=taus, fallback=fallbacks)
 
 
 def _exploratory_record(models, plan: dict) -> dict:
@@ -2125,6 +2228,7 @@ def _record_session_run(artifacts: Path, run_dir: Path, cfg: Config, status: str
     line = {'run': run_dir.name, 'run_dir': str(Path(run_dir).resolve()), 'status': status,
             'at': datetime.now(timezone.utc).isoformat(), 'split': cfg.split, 'coder': coder, 'target': cfg.target,
             'models': list(cfg.models), 'ablate': cfg.ablate, 'scaling': cfg.scaling, 'net_oof': cfg.net_oof,
+            'social_decision': cfg.social_decision,
             'features_root': cfg.features_root, 'quick': bool(cfg.quick), 'git': _git_state(),
             'config': redact_secrets(_jsonable(asdict(cfg))),
             'tables': {s: d.table_sha256 for s, d in data.items()},
@@ -2267,6 +2371,11 @@ def _check(cfg: Config):
                          f"name, e.g. 'alex' for labels/alex.jsonl)")
     if cfg.net_oof not in NET_OOF:
         raise ValueError(f"net_oof must be one of {', '.join(NET_OOF)}, not {cfg.net_oof!r}")
+    if cfg.social_decision not in SOCIAL_DECISIONS:
+        raise ValueError(f"social_decision must be one of {', '.join(SOCIAL_DECISIONS)}, not {cfg.social_decision!r}")
+    if cfg.social_decision == 'infold' and cfg.target != '3class':
+        raise ValueError("social_decision 'infold' chooses social against collaborative inside each fold: it goes "
+                         "with the three-class target")
     if cfg.features_root is not None and not Path(cfg.features_root).is_dir():
         raise FileNotFoundError(f"the features root {cfg.features_root} is no folder")
     if cfg.test_coder and cfg.split != 'test':
@@ -2314,7 +2423,7 @@ def _plan(cfg: Config) -> dict:
             'max_epochs': quick.get('max_epochs', 300), 'patience': quick.get('patience', 25),
             'seeds': int(cfg.seeds), 'small': cfg.small, 'epochs': cfg.epochs, 'jev_variant': cfg.jev_variant,
             'bootstrap': cfg.bootstrap or quick.get('bootstrap', BOOTSTRAP), 'jobs': jobs, 'scaling': cfg.scaling,
-            'split': cfg.split, 'net_oof': cfg.net_oof,
+            'split': cfg.split, 'net_oof': cfg.net_oof, 'social_decision': cfg.social_decision,
             'threads': max(1, (os.cpu_count() or 1) // jobs) if jobs > 1 else None,
             'device': device, 'torch': build}
 
@@ -2673,6 +2782,8 @@ def run(config, log=None) -> Path:
             'winners': {out['name']: out['models'][selector]['winner'] for out in outputs['full']
                         if selector in out['models']},
             'note': SELECTOR_NOTES[selector]} for selector in selected}
+    if plan.get('social_decision') == 'infold':
+        metrics['social_decision'] = social_decision_record(outputs)
     exploratory = [m for m in plan['models'] if m in EXPLORATORY]
     if exploratory:
         metrics['exploratory'] = {'models': {model: EXPLORATORY_NOTES[model] for model in exploratory},

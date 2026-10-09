@@ -78,6 +78,18 @@ values (seen share, head yaw, hands, hand distances) and removes speech, space, 
 gaze model's values (gaze shares, known share, switch rate, gaze distance, joint attention, following)
 with their masks; no_gaze_model removes the gaze model's values alone.
 
+--social-decision sets the three-class hard label. balanced (the default) is the pre-declared
+decision, argmax p / pi under the outer-training prior. infold (exploratory, --target 3class only)
+decides interaction against individual by the same binary rule, so every binary label stays as it
+is, and then calls an interaction window social when p_social / (p_social + p_collaborative) reaches
+a threshold tau, collaborative otherwise. tau (0.05 to 0.95 in steps of 0.01) is chosen per variant
+(model, temporal mode, HMM mode) and outer fold, on the calibrated inner out-of-fold answers of the
+training units through the variant's HMM, as the highest social F1 of the same decision (the lower
+tau on a tie); a fold whose inner answers hold fewer than 5 social windows keeps the balanced
+decision. rule22sep scores its candidates with the same decision; the rule, the floors and zero-shot
+Jev keep their own labels. Each fold's tau is in metrics.json (social_decision, and social_tau under
+each fold's models), the mode in config.json.
+
 --quick swaps in two-point grids, 30 training epochs and 200 bootstrap resamples: for checking
 the plumbing end to end, never for a reported number.
 """
@@ -151,6 +163,12 @@ def get_parser():
     parser.add_argument('--target', choices=('3class', 'binary'), default='3class',
                         help="3class, or binary (individual against interaction): the fallback when a fold lacks "
                              "a class")
+    parser.add_argument('--social-decision', choices=('balanced', 'infold'), default='balanced',
+                        help="the three-class hard label: balanced (default, the pre-declared argmax p / pi) or "
+                             "infold (--target 3class only, exploratory): interaction by the balanced binary rule, "
+                             "then social where p_social / (p_social + p_collaborative) >= tau, with tau chosen in "
+                             "each outer fold on the inner out-of-fold answers for the best social F1 (balanced where "
+                             "they hold fewer than 5 social windows); binary labels do not change")
     parser.add_argument('--join', choices=('exact', 'overlap'), default='exact',
                         help="how labels meet the table's windows: exact start (then nearest within 0.5 s), or by at "
                              "least 5 s of overlap when the coding grid moved")
@@ -329,6 +347,23 @@ def _ablation_summary(run_dir, grid: str = 'modality') -> str | None:
             + wide.to_string(na_rep='-'))
 
 
+def _tau_summary(record: dict) -> str:
+    """one line of an infold run (metrics.json social_decision): the range of the social thresholds
+    chosen over the variants and folds (a selector's, which copy its winners', left out), and how many
+    kept the balanced decision."""
+    import statistics
+    own = {key: folds for key, folds in (record.get('tau') or {}).items() if ':nested:nested' not in key}
+    chosen = [tau for folds in own.values() for tau in folds.values() if tau is not None]
+    kept = sum(1 for key, folds in (record.get('fallback') or {}).items() if key in own for _ in folds)
+    line = (f"in-fold social threshold: tau {min(chosen):.2f} to {max(chosen):.2f} (median "
+            f"{statistics.median(chosen):.2f}) over {len(chosen)} variant fold(s)") if chosen else \
+        "in-fold social threshold: no tau chosen"
+    if kept:
+        line += (f"; {kept} variant fold(s) kept the balanced decision (fewer than "
+                 f"{record.get('min_social_windows')} social windows in the inner answers)")
+    return line + "; per variant and fold in metrics.json social_decision"
+
+
 def _metrics(run_dir) -> dict:
     import json
     path = run_dir / 'metrics.json'
@@ -397,6 +432,9 @@ def main(argv=None):
                      f"against collaborative): add --target binary")
     if args.soft_coder and 'lr-soft' not in models:
         parser.error("--soft-coder names lr-soft's second coder: it goes with -m lr-soft")
+    if args.social_decision == 'infold' and args.target != '3class':
+        parser.error("--social-decision infold chooses social against collaborative inside each fold: it goes with "
+                     "--target 3class")
     if args.seeds < 1 or args.jobs < 1 or (args.epochs is not None and args.epochs < 1):
         parser.error("--seeds, --jobs and --epochs must be at least 1")
     gap = E._selector_gap(E.Config(models=models, hmm=hmm))
@@ -429,7 +467,7 @@ def main(argv=None):
                       jobs=args.jobs, out=args.out, quick=args.quick, confirm_frozen=args.confirm_frozen,
                       jev_variant=args.jev_variant, device=args.device, ablate=args.ablate,
                       scaling=args.scaling, net_oof=args.net_oof, features_root=args.features_root,
-                      soft_coder=args.soft_coder)
+                      soft_coder=args.soft_coder, social_decision=args.social_decision)
     started = time.time()
     try:
         run_dir = E.run(config, log=print)
@@ -481,6 +519,8 @@ def main(argv=None):
     for selector, record in (metrics.get('selectors') or {}).items():
         chosen = ', '.join(f"{fold} {winner or 'none'}" for fold, winner in record['winners'].items())
         print(f"{selector} chose, per fold: {chosen}")
+    if metrics.get('social_decision'):
+        print(_tau_summary(metrics['social_decision']))
     for name, contrast in (metrics.get('contrasts') or {}).items():
         if 'left_out' in contrast:
             print(f"{name} {contrast['a']} - {contrast['b']}: left out, {contrast['left_out']}")
