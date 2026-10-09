@@ -68,14 +68,23 @@ server and one port: TogetherHandler hands each request to the handler class of 
 its routes and its pages' bytes. The --audit-with part, which must be a transcription audit (a sensing audit's page
 asks for /audit and /api/audit/ itself), is served under WITH_PREFIX (/t/audit, /t/api/audit/..., /t/audit/clip/...):
 its handler routes the path without the prefix, and its page and every address the server sends it carry the prefix
-(the handler's `base_path`). GET / is a page that leads to both (CHOOSER_PAGE), in the order of the flags. Each part
-keeps its own campaign folder, request log, answers files, links (their cookies named apart), names and scopes,
+(the handler's `base_path`). GET / is the entry (ENTRY_PAGE): a link to the default coding page, the address alone
+of port --audit-code-port (CODE_PORT unless given; 0 leaves it out) on the host the entry was opened at (a coding
+server of any version answers it with the page, at once or through its redirect to /code), then each part in the
+order of the flags. Served open, the entry asks the name (checked in the browser as typed_name checks it, and filled
+in with the name kept for a part) and offers each part's full audit and reliability subset: a choice writes
+the name and the scope into the browser's storage under the keys that part's open page reads at start, then opens
+that page, which shows them filled in (Start, or Enter, begins); a part last opened in this browser under another name
+is opened under the name typed only at a second press. With links, each part is a link to its page. The coding page
+is served by a server of its own, another origin, so the name typed on the entry goes along as ?coder=, under which
+that page codes for the visit. Each part keeps its own campaign folder, request log, answers files, links (their cookies named apart), names and scopes,
 locks, blind closes and refusals, and a request to one part opens no file of the other (a link's /c/<token>, of
 neither part until then, reads each part's campaign.yml to find which holds it, and writes nothing of either: a
 change it meets is logged by that part's own next request). --audit-open serves both open, and --audit-sweeps the
 sweeps of the
-transcription audit. Each part's log gets the start line its server alone writes, with `prefix` (its own) and
-`together_with` (the other audit's id and prefix), and a stop line, so --verify-log, the open serves the scorer finds
+transcription audit. Each part's log gets the start line its server alone writes, with `prefix` (its own),
+`together_with` (the other audit's id and prefix) and `code_port` (the coding page's port the entry links to, 0 for
+none), and a stop line, so --verify-log, the open serves the scorer finds
 and the scores read each audit as after a serve of its own.
 """
 from __future__ import annotations
@@ -101,6 +110,8 @@ L.register_loaded(__name__, __file__)
 
 # the campaign server's port: a campaign and an audit served at once need -p for one of them
 DEFAULT_PORT = L.DEFAULT_PORT
+# the default coding page's port (mmla ses-code without these flags), which the page at / of two audits leads to
+CODE_PORT = 8765
 AUDIT_MODULES = ('openmmla.commands.ses.code', 'openmmla.commands.ses.code_locked', 'openmmla.commands.ses.audit',
                  'openmmla.commands.ses.audit_page')
 # a transcription audit's server runs these as well: its page and routes, the grammar its transcripts are checked
@@ -270,7 +281,7 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
               ('GET', '/api/audit/item'): '_item', ('GET', '/api/audit/progress'): '_progress',
               ('POST', '/api/audit/answer'): '_answer'}
     PREFIX_ROUTES = (('GET', '/audit/img/', '_image'), ('GET', '/audit/clip/', '_clip'))
-    # what the page of two audits served together (CHOOSER_PAGE) says of this one: its title and what is asked
+    # what the page of two audits served together (ENTRY_PAGE) says of this one: its title and what is asked
     CHOICE = ('Identity, gaze and who speaks', 'Who is in each box of a picture, where they look, and who speaks in a '
                                                'short clip.')
     audit: dict = {}
@@ -283,7 +294,7 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     # served beside another audit (--audit-with): the base path of the --audit-with part, its prefix ('' for the --audit
     # part, and alone), and the --audit part's page at / that leads to both (None alone and for the --audit-with part)
     base_path: str = ''
-    chooser: str | None = None
+    entry: str | None = None
 
     @property
     def cookie_name(self) -> str:
@@ -297,7 +308,7 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         """the link's auditor (GuardedHandler); open, the name and scope of the request's query, never None: the
         page itself needs neither, and the routes that do refuse a request without them (_auditor). The page that
         leads to two audits served together names no one, with links too."""
-        if self.chooser is not None and urllib.parse.urlsplit(self.path).path == '/':
+        if self.entry is not None and urllib.parse.urlsplit(self.path).path == '/':
             return L.Identity(None, None, self.KIND, None, None)
         if not self.open:
             return super()._identity()
@@ -320,9 +331,8 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
             return super()._claim(method, token)
         # beside another audit a bare /c/ may be a link of either: the page at / leads to both; under the prefix,
         # the part's own page
-        if self.chooser is not None:
-            return self.send_message('/c/', 'These audits take no links: open / and choose one, then type your name.',
-                                     404)
+        if self.entry is not None:
+            return self.send_message('/c/', 'These audits take no links: open /, type your name and choose one.', 404)
         self.send_message('/c/', f'This audit takes no links: open {self.base_path}/audit and type your name.', 404)
 
     def _auditor(self) -> tuple[str, str | None] | None:
@@ -459,8 +469,8 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     # routes ----
 
     def _home(self, request: L.Request) -> None:
-        if self.chooser is not None:
-            return self.send_html(self.chooser)
+        if self.entry is not None:
+            return self.send_html(self.entry)
         self.send_body(303, 'text/plain', b'', (('location', f'{self.base_path}/audit'),))
 
     def _page(self, request: L.Request) -> None:
@@ -986,28 +996,37 @@ def cmd_serve_together(args, argv) -> int:
         parts.append({**part, 'prefix': prefix})
     allow = (open_bind if opened else L.check_bind)(args.bind, args.allow_from, args.allow_wide)
     port = args.port if L._explicit_port(argv) else DEFAULT_PORT
+    code_port = CODE_PORT if getattr(args, 'audit_code_port', None) is None else args.audit_code_port
+    if not 0 <= code_port <= 65535:
+        raise A.AuditError(f"--audit-code-port {code_port} is no port: give the coding page's port, or 0 to leave it "
+                           'out')
+    if code_port and code_port == port:
+        raise A.AuditError(f"--audit-code-port {code_port} is the port of these audits: give the coding page's port, "
+                           'or 0 to leave it out')
     others = _others(artifacts, args)
     unrendered = [_unrendered(part) for part in parts]
-    chooser = chooser_page([(f"{part['prefix']}/audit", part['cls'].CHOICE, part['id']) for part in parts])
+    entry = entry_page([(part['prefix'], part['cls'].CHOICE, part['id']) for part in parts], code_port, opened)
     logs = [L.RequestLog(part['folder'] / L.LOG_FILE) for part in parts]
     try:
         handlers = []
         for part, log in zip(parts, logs):
             # the --audit part serves / as the page that leads to both; the other has its prefix, its links its own home
             fields = ({'base_path': part['prefix'], 'HOME': f"{part['prefix']}/audit"} if part['prefix']
-                      else {'chooser': chooser})
+                      else {'entry': entry})
             handlers.append(_handler(part, artifacts, log, allow, opened, **fields))
             L.watch_campaign(part['campaign'], log)
         handler = L.handler_class(TogetherHandler, parts=tuple((part['prefix'], h) for part, h in zip(parts, handlers)))
-        # the server runs the modules of both parts: each start line names them all
+        # the server runs the modules of both parts: each start line names them all, and the coding page's port the
+        # entry links to (0: none), since that page shows the system's transcripts
         modules = tuple(dict.fromkeys(name for part in parts for name in part['modules']))
         starts = [{**_start_fields(part, args, others, opened), 'prefix': part['prefix'],
-                   'together_with': {'audit_id': other['id'], 'prefix': other['prefix']}}
+                   'together_with': {'audit_id': other['id'], 'prefix': other['prefix']}, 'code_port': code_port}
                   for part, other in zip(parts, reversed(parts))]
         for part, count in zip(parts, unrendered):
             print(f"{_served(part, count, opened)}; http://{args.bind}:{port}{part['prefix']}/audit")
-        print(f"both at http://{args.bind}:{port}/, a page that leads to each, for {', '.join(str(n) for n in allow)} "
-              '(Ctrl-C stops)')
+        coding = f' and to the coding page on port {code_port}' if code_port else ''
+        print(f"both at http://{args.bind}:{port}/, a page that leads to each{coding}, for "
+              f"{', '.join(str(n) for n in allow)} (Ctrl-C stops)")
         return serve_together(handler, args.bind, port, argv, modules, starts)
     finally:
         for part, log in zip(parts, logs):
@@ -1340,32 +1359,147 @@ OPEN_AUDIT_PAGE = _patched(AUDIT_PAGE, [
 ])
 
 
-# the page at / of two audits served together (--audit-with): a link to each part's page, in the order of the flags
-CHOOSER_PAGE = r"""<!doctype html>
+# the page at / of two audits served together (--audit-with): the coding page, then each part in the order of the flags;
+# served open, the name first, and each part's scopes (entry_page fills it in)
+ENTRY_PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sensing audit</title>
+<title><!-- title --></title>
 <style>
-:root{--bg:#111;--panel:#1b1b1b;--line:#333;--text:#eee;--dim:#999;--accent:#ffd400}
+:root{--bg:#111;--panel:#1b1b1b;--line:#333;--text:#eee;--dim:#999;--accent:#ffd400;--bad:#ff6b6b}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,Helvetica,Arial,sans-serif}
 header{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid var(--line)}
 header b{font-size:15px}main{max-width:560px;margin:32px auto;padding:0 16px}main p{color:var(--dim)}
-a.part{display:block;margin:12px 0;padding:10px 14px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;text-decoration:none}
-a.part:hover,a.part:focus{border-color:var(--accent)}a.part b{display:block;font-size:15px}a.part span{color:var(--dim)}
+#named label{display:block;margin:12px 0}
+#named input{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:6px 8px;min-width:260px}
+#namestatus{min-height:20px;margin-top:8px;color:var(--bad)}
+.part{display:block;margin:12px 0;padding:10px 14px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;text-decoration:none}
+a.part:hover,a.part:focus{border-color:var(--accent)}.part b{display:block;font-size:15px}.part span{display:block;color:var(--dim)}
+.part button{font:inherit;background:#2d6cdf;color:#fff;border:0;border-radius:6px;padding:6px 14px;margin:8px 8px 0 0;cursor:pointer}
 </style></head><body>
-<header><b>Sensing audit</b></header>
-<main><p>Choose the part you answer. Each part keeps its own answers.</p>
-<!-- parts -->
-</main></body></html>
+<header><b><!-- title --></b></header>
+<main><!-- intro -->
+<!-- tasks -->
+</main>
+<script>
+const $ = id => document.getElementById(id);
+// the coding page's port on the host this page was opened at (0: not offered), and what each button chooses: a part's
+// page, the prefix the browser keeps that page's name and scope under, and the scope
+const CODE_PORT = 0;
+const TASKS = {};
+const NAME_BYTES = 100;
+function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+// the keys an open audit page reads its name and scope from (its stored()): a part under a prefix has keys of its own
+function stored(prefix, key) { return prefix ? `${prefix}/${key}` : key; }
+// the name as the server takes it (audit_page.typed_name): in NFC, without the whitespace Python strips at either end
+function typedName(raw) {
+  return raw.normalize('NFC').replace(/^[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, '');
+}
+// why the server would refuse the name, or null: empty, a control, formatting or line-break character, or a file name
+// (code.safe_name: letters, digits, - and _ kept, any other character _) longer than NAME_BYTES bytes in UTF-8
+function nameError(name) {
+  if (!name) return 'type your name first';
+  if (/[\p{C}\p{Zl}\p{Zp}]/u.test(name)) return 'the name holds a control, formatting or line-break character: type it again';
+  let bytes = 0;
+  for (const c of name) { const p = c.codePointAt(0); bytes += !/^[-_\p{L}\p{N}]$/u.test(c) || p < 0x80 ? 1 : p < 0x800 ? 2 : p < 0x10000 ? 3 : 4; }
+  return bytes > NAME_BYTES ? `the name is too long for a file name (at most ${NAME_BYTES} bytes)` : null;
+}
+// the name typed, or null after saying why the server would refuse it
+function checked() {
+  const name = typedName($('name').value), error = nameError(name);
+  $('namestatus').textContent = error || '';
+  if (error) { $('name').focus(); return null; }
+  return name;
+}
+// a part this browser last opened under another name opens under the name typed only at a second press of the same
+// button: answers are kept by name, and a name typed otherwise than before starts a second set of them
+let pending = null;
+// a part chosen: the name and scope go where its page reads them at start, and the page opens with them filled in
+function choose(id, task) {
+  const name = checked();
+  if (name === null) { pending = null; return; }
+  const before = recall(stored(task.prefix, 'auditor')), again = `${id}\n${name}`;
+  if (before && typedName(before) !== name && pending !== again) {
+    pending = again;
+    $('namestatus').textContent = `this browser last opened this audit as ${before}, and answers are kept by name: press again to open it as ${name}`;
+    return;
+  }
+  pending = null;
+  remember(stored(task.prefix, 'auditor'), name); remember(stored(task.prefix, 'auditScope'), task.scope);
+  location.assign(task.page);
+}
+if ($('name')) {
+  for (const [id, task] of Object.entries(TASKS)) $(id).addEventListener('click', () => choose(id, task));
+  // Enter checks the name and goes on to the first task
+  $('named').addEventListener('submit', e => {
+    e.preventDefault(); pending = null;
+    if (checked() !== null) $(Object.keys(TASKS)[0]).focus();
+  });
+  // the name kept for a part: the one its page last started with, or the one last chosen for it here
+  $('name').value = Object.values(TASKS).map(t => stored(t.prefix, 'auditor')).map(recall).find(v => v) || '';
+  $('name').focus();
+}
+// the coding server's address alone: a server of any version answers it with the page, at once or through /code; a
+// name typed here that the server would take goes along as ?coder=, under which that page codes for this visit
+const CODE_ADDRESS = `${location.protocol}//${location.hostname}:${CODE_PORT}/`;
+function codeHref() {
+  const name = $('name') ? typedName($('name').value) : '';
+  return name && !nameError(name) ? `${CODE_ADDRESS}?coder=${encodeURIComponent(name)}` : CODE_ADDRESS;
+}
+if (CODE_PORT) {
+  $('code').href = codeHref();
+  // the name as it is when the link is followed, and while it is typed (a link hovered or copied)
+  $('code').addEventListener('click', () => { $('code').href = codeHref(); });
+  if ($('name')) $('name').addEventListener('input', () => { $('code').href = codeHref(); });
+}
+</script></body></html>
 """
+# what the page at / says of the coding page: its title and what is asked
+CODE_CHOICE = ('Code interaction windows',
+               'Watch short windows of a recording and give each its interaction class. The coding page is served on a '
+               'port of its own and opens under the name typed here, for this visit; without a name it asks for one. '
+               "Its Transcript button shows the system's transcripts: an auditor of the transcription opens it only "
+               'once the operator has closed their blind pass.')
+# the buttons of a part served open, one per scope (SCOPES)
+SCOPE_BUTTONS = {'full': 'full audit', 'reliability': 'reliability subset'}
+ENTRY_OPEN = ('<form id="named"><p>Type your name, then choose what you do. In an audit, choose the full audit or the '
+              'reliability subset of the second auditor: its page opens with your name and choice filled in, and '
+              'Start begins. Your answers are kept under this name, so type it the same way each time; this browser '
+              'remembers it.</p>\n'
+              '<label>Name <input id="name" maxlength="100" autocomplete="off" spellcheck="false"></label>'
+              '<div id="namestatus"></div></form>')
+ENTRY_LINKS = '<p>Choose what you do. Each audit keeps its own answers.</p>'
 
 
-def chooser_page(parts) -> str:
-    """CHOOSER_PAGE with a link to each part ((its page's address, (title, what it asks), audit id), ...), in order;
-    two parts of one title are told apart by their audit ids"""
+def entry_page(parts, code_port: int, opened: bool) -> str:
+    """ENTRY_PAGE with its tasks, in order: the coding page, the address alone of port `code_port` on the host the page
+    is opened at (left out at 0), then each part ((its prefix, (title, what it asks), audit id), ...): served open, a button per scope,
+    which writes the name and the scope where that part's page reads them (the script's TASKS), then opens it; with
+    links, a link to its page. Two parts of one title are told apart by their audit ids."""
     titles = [choice[0] for _, choice, _ in parts]
-    links = []
-    for address, (title, what), audit_id in parts:
-        shown = f'{title} ({audit_id})' if titles.count(title) > 1 else title
-        links.append(f'<a class="part" href="{html.escape(address)}"><b>{html.escape(shown)}</b>'
-                     f'<span>{html.escape(what)}</span></a>')
-    return CHOOSER_PAGE.replace('<!-- parts -->', '\n'.join(links))
+    blocks, tasks = [], {}
+    if code_port:
+        blocks.append(f'<a class="part" id="code" href="#"><b>{html.escape(CODE_CHOICE[0])}</b>'
+                      f'<span>{html.escape(CODE_CHOICE[1])}</span></a>')
+    for index, (prefix, (title, what), audit_id) in enumerate(parts):
+        shown, page = html.escape(f'{title} ({audit_id})' if titles.count(title) > 1 else title), f'{prefix}/audit'
+        if not opened:
+            blocks.append(f'<a class="part" href="{html.escape(page)}"><b>{shown}</b>'
+                          f'<span>{html.escape(what)}</span></a>')
+            continue
+        buttons = []
+        for scope, label in SCOPE_BUTTONS.items():
+            tasks[f'task_{index}_{scope}'] = {'page': page, 'prefix': prefix, 'scope': scope}
+            buttons.append(f'<button type="button" id="task_{index}_{scope}" aria-label="{shown}: {label}">'
+                           f'{label}</button>')
+        blocks.append(f'<div class="part"><b>{shown}</b><span>{html.escape(what)}</span>{"".join(buttons)}</div>')
+    fills = (('<!-- title -->', 'Coding and audits' if code_port else 'Audits'),
+             ('<!-- intro -->', ENTRY_OPEN if opened else ENTRY_LINKS), ('<!-- tasks -->', '\n'.join(blocks)),
+             ('const CODE_PORT = 0;', f'const CODE_PORT = {int(code_port)};'),
+             # no part's address holds a '<', but the script must never be ended by one
+             ('const TASKS = {};', 'const TASKS = ' + json.dumps(tasks).replace('<', '\\u003c') + ';'),
+             ('const NAME_BYTES = 100;', f'const NAME_BYTES = {C.NAME_BYTES};'))
+    page = ENTRY_PAGE
+    for old, new in fills:
+        page = page.replace(old, new)
+    return page

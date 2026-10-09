@@ -1220,7 +1220,10 @@ def add_arguments(parser) -> None:
                             "reliability subset (--allow-from optional; recorded in the start line)")
     group.add_argument('--audit-with', default=None, metavar='ID',
                        help="with --audit: serve this transcription audit too, from the same server and port, under /t "
-                            "(/ then leads to both)")
+                            "(the entry page at / then leads to both audits and to the coding page)")
+    group.add_argument('--audit-code-port', type=int, default=None, metavar='PORT',
+                       help="with --audit-with: the coding page's port; the entry page at / links to that port of the "
+                            "host it was opened at (default 8765; 0 leaves the link out)")
     group.add_argument('--audit-estimate', default=None, metavar='ID', help="print the hours the answers take")
     group.add_argument('--audit-score', default=None, metavar='ID', help="score a version against the answers")
     group.add_argument('--audit-purge', default=None, metavar='ID', help="delete the audit's images and clips")
@@ -1524,6 +1527,9 @@ def run(args, argv) -> int:
         return 2
     if getattr(args, 'audit_with', None) and actions[0] != 'audit':
         print('--audit-with goes with --audit ID (both audits served at one address)')
+        return 2
+    if getattr(args, 'audit_code_port', None) is not None and not getattr(args, 'audit_with', None):
+        print('--audit-code-port goes with --audit ID --audit-with ID2 (the page at / that leads to both)')
         return 2
     # the id names folders every step reads, writes or deletes: never a path
     ids = [getattr(args, actions[0])] + ([args.audit_with] if getattr(args, 'audit_with', None) else [])

@@ -13,8 +13,10 @@ are cached under artifacts/<session>/labels/clips/ and can be deleted at any tim
 
 A mixed window keeps its main state (the one that fills most of it) and may carry one also-state
 (Shift and a class key), saved as `secondary` and `secondary_key` in the same record; an unclear
-window carries none. Every line the server appends carries its own `saved_at`. The /agreement page,
-reached by its URL only, compares two coders on the listed windows both coded (/api/agreement:
+window carries none. Every line the server appends carries its own `saved_at`. The page is served
+at /code; the address alone (/) and /audit answer 303 to it with their query, so an older bookmark
+and the Agreement page's links (/?session=...) still open it. The /agreement page, reached by its URL only,
+compares two coders on the listed windows both coded (/api/agreement:
 percent agreement, Cohen's kappa over the five codes, the three classes and two binary splits, a
 lenient share that counts a match with the other's also-state, the confusion matrix and the
 disagreeing windows), and all coders at once with Krippendorff's alpha (/api/agreement?all=1), on
@@ -1054,8 +1056,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(url.query)
-        if url.path in ('/', '/agreement'):
-            body = (PAGE if url.path == '/' else AGREEMENT_PAGE).encode()
+        if url.path in ('/', '/audit'):
+            # the page's former address: a bookmark or an Agreement page link (/?session=...) opens it with its query;
+            # /audit, a second address coders may be given, leads there too
+            self.send_response(303)
+            self.send_header('location', '/code' + (f'?{url.query}' if url.query else ''))
+            self.send_header('content-length', '0')
+            self.end_headers()
+        elif url.path in ('/code', '/agreement'):
+            body = (PAGE if url.path == '/code' else AGREEMENT_PAGE).encode()
             self.send_response(200)
             self.send_header('content-type', 'text/html; charset=utf-8')
             self.send_header('content-length', str(len(body)))
@@ -1397,7 +1406,7 @@ def main(argv=None):
         return prepare_text(Handler.text_source, Handler.sessions, Handler.settings)
     total = sum(len(windows_of(s, args.window, args.step, args.sample, args.block, args.seed)) for s in Handler.sessions)
     by_rule = sum(1 for h in Handler.hidden if h.get('by') != 'hold')
-    print(f"{len(Handler.sessions)} sessions ({by_rule} hidden by S1, {len(Handler.hidden) - by_rule} held back), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/  (Ctrl-C stops)")
+    print(f"{len(Handler.sessions)} sessions ({by_rule} hidden by S1, {len(Handler.hidden) - by_rule} held back), {total} windows to code; open http://{args.bind if args.bind != '0.0.0.0' else '<this machine>'}:{args.port}/code  (Ctrl-C stops)")
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     try:
         server.serve_forever()
