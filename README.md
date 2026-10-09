@@ -33,11 +33,12 @@ A pipeline built with the toolkit follows a three-stage data flow:
 
 - **Sensors**: wearable devices and environmental sensors.
     + Wearables: *Regular-Badge* (an [AprilTag](https://april.eecs.umich.edu/software/apriltag) only), *Voice-Badge* (a [Nicla Vision](https://docs.arduino.cc/hardware/nicla-vision/) board with power supply, streaming audio), *Vision-Badge* (Nicla Vision plus AprilTag).
-    + Environmental sensors: USB microphones (Jabra Speak2 75, built-in mics, ...) and USB cameras (Logitech HD C920, ...), attached to base stations or streamed from Raspberry Pis.
-- **Base stations**: microprocessors or PCs that process the streams. Each runs one or more *Base* instances and a *Synchronizer* of the same pipeline.
-- **Servers**: PCs that provide centralized services.
-    + *Base server*: the AI services (speaker inference, transcription, VAD, frame analysis, ...) as Docker containers on a GPU machine.
-    + *Uber server*: the system services: InfluxDB and MongoDB (databases), Redis and Mosquitto (messaging), Nginx (load balancing), MediaMTX (streaming) and the dashboard.
+    + Environmental sensors: USB microphones (Jabra Speak2 75, built-in mics, ...) and USB cameras (Logitech HD C920, ...), attached to base stations or to capture devices.
+- **Capture devices**: Linux machines such as Raspberry Pis, or Macs, that run FFmpeg and push a camera or microphone to MediaMTX on the uber server, from which the bases pull it. A microphone can also go straight to an ASR base over UDP or TCP.
+- **Base stations**: single-board computers (Raspberry Pi) or PCs that process the streams. Each runs one or more *Base* instances (ASR, IPS or VFA); a session has one *Synchronizer* per pipeline, which runs on one of them and merges what all the session's bases send.
+- **Servers**: PCs that provide centralized services. These are roles, not machines: one machine can be both the uber server and the GPU server, and only the GPU server needs a GPU.
+    + *GPU server*: the AI services (speaker inference, transcription, VAD, frame analysis, ...) as Docker containers, and optionally an MLLM Server for a local vision-language model.
+    + *Uber server*: the system services: InfluxDB and MongoDB (databases), Redis and Mosquitto (messaging), Nginx (load balancing), MediaMTX (streaming) and the dashboard (Flask, with a Celery worker for the analysis reports).
 - **Dashboard**: web pages with a session explorer, a live view of a running session (with its camera video and microphone sound when the session streams through MediaMTX) or a replay of an ended one, an analysis report per session, and measurement downloads.
 
 </details>
